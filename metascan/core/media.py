@@ -2,13 +2,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from dataclasses_json import dataclass_json
+from dataclasses_json import dataclass_json, config
+from dataclasses_json.cfg import LetterCase
 
 
 @dataclass_json
 @dataclass
 class Media:
-    file_path: Path
+    file_path: Path = field(metadata=config(
+        encoder=str,
+        decoder=Path
+    ))
     file_size: int
     width: int
     height: int
@@ -33,7 +37,10 @@ class Media:
     tags: List[str] = field(default_factory=list)
     
     # Thumbnail cache path
-    thumbnail_path: Optional[Path] = None
+    thumbnail_path: Optional[Path] = field(default=None, metadata=config(
+        encoder=lambda x: str(x) if x else None,
+        decoder=lambda x: Path(x) if x else None
+    ))
     
     @property
     def file_name(self) -> str:
