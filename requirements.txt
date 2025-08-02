@@ -1,0 +1,21 @@
+# Core dependencies
+PyQt6==6.6.1
+PyQt6-Qt6==6.6.1
+PyQt6-sip==13.6.0
+
+# Database
+plyvel==1.5.0  # Python LevelDB interface
+
+# Image processing
+Pillow==10.2.0
+
+# File watching
+watchdog==3.0.0
+
+# Data handling
+dataclasses-json==0.6.3
+
+# Development dependencies
+pytest==7.4.4
+black==23.12.1
+mypy==1.8.0
