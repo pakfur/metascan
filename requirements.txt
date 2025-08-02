@@ -4,7 +4,7 @@ PyQt6-Qt6==6.6.1
 PyQt6-sip==13.6.0
 
 # Database
-plyvel==1.5.0  # Python LevelDB interface
+# plyvel==1.5.0  # Replaced with SQLite due to macOS ABI issues
 
 # Image processing
 Pillow==10.2.0
