@@ -11,15 +11,19 @@ logger = logging.getLogger(__name__)
 class ComfyUIExtractor(MetadataExtractor):
     """Extract metadata from ComfyUI generated images"""
     
-    def can_extract(self, image_path: Path) -> bool:
+    def can_extract(self, media_path: Path) -> bool:
         """Check if image contains ComfyUI metadata"""
-        metadata = self._get_exif_metadata(image_path)
+        # Skip video files - they should be handled by ComfyUIVideoExtractor
+        if media_path.suffix.lower() == '.mp4':
+            return False
+            
+        metadata = self._get_exif_metadata(media_path)
         return "prompt" in metadata or "workflow" in metadata
     
-    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
         """Extract ComfyUI metadata"""
         try:
-            metadata = self._get_exif_metadata(image_path)
+            metadata = self._get_exif_metadata(media_path)
             
             result = {
                 "source": "ComfyUI",
@@ -36,7 +40,7 @@ class ComfyUIExtractor(MetadataExtractor):
                     extracted = self._extract_parameters(prompt_data)
                     result.update(extracted)
                 except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse ComfyUI prompt JSON from {image_path}")
+                    logger.warning(f"Failed to parse ComfyUI prompt JSON from {media_path}")
             
             # Extract workflow if present
             if "workflow" in metadata:
@@ -44,12 +48,12 @@ class ComfyUIExtractor(MetadataExtractor):
                     workflow_data = json.loads(metadata["workflow"])
                     result["raw_metadata"]["workflow"] = workflow_data
                 except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse ComfyUI workflow JSON from {image_path}")
+                    logger.warning(f"Failed to parse ComfyUI workflow JSON from {media_path}")
             
             return result if result["raw_metadata"] else None
             
         except Exception as e:
-            logger.error(f"Failed to extract ComfyUI metadata from {image_path}: {e}")
+            logger.error(f"Failed to extract ComfyUI metadata from {media_path}: {e}")
             return None
     
     def _extract_parameters(self, prompt_data: Dict[str, Any]) -> Dict[str, Any]:

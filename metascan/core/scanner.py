@@ -7,6 +7,12 @@ from metascan.core.media import Media
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 
+try:
+    import ffmpeg
+    HAS_FFMPEG_PYTHON = True
+except ImportError:
+    HAS_FFMPEG_PYTHON = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,7 +139,50 @@ class Scanner:
             return None, None, None
     
     def _get_video_info(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get video dimensions and format using subprocess"""
+        """Get video dimensions and format"""
+        try:
+            # Try python-ffmpeg first
+            if HAS_FFMPEG_PYTHON:
+                result = self._get_video_info_python(file_path)
+                if result and result[0] and result[1]:  # Valid width and height
+                    return result
+            
+            # Fallback to subprocess ffprobe
+            return self._get_video_info_subprocess(file_path)
+            
+        except Exception as e:
+            logger.error(f"Failed to get video info for {file_path}: {e}")
+            return self._get_video_info_fallback(file_path)
+    
+    def _get_video_info_python(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """Get video info using python-ffmpeg bindings"""
+        try:
+            probe = ffmpeg.probe(str(file_path))
+            
+            # Find video stream
+            video_stream = None
+            for stream in probe['streams']:
+                if stream['codec_type'] == 'video':
+                    video_stream = stream
+                    break
+            
+            if video_stream:
+                width = video_stream.get('width')
+                height = video_stream.get('height')
+                if width and height:
+                    return width, height, 'MP4'
+            
+            return None, None, None
+            
+        except ffmpeg.Error as e:
+            logger.debug(f"python-ffmpeg probe failed for {file_path}: {e}")
+            return None, None, None
+        except Exception as e:
+            logger.debug(f"python-ffmpeg unexpected error for {file_path}: {e}")
+            return None, None, None
+    
+    def _get_video_info_subprocess(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """Get video dimensions using subprocess ffprobe"""
         try:
             import subprocess
             import json
@@ -159,7 +208,7 @@ class Scanner:
             return None, None, None
             
         except Exception as e:
-            logger.error(f"Failed to get video info for {file_path}: {e}")
+            logger.error(f"Subprocess video info failed for {file_path}: {e}")
             return self._get_video_info_fallback(file_path)
     
     def _get_video_info_fallback(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
