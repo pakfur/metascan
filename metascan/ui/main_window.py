@@ -10,8 +10,10 @@ from PyQt6.QtGui import QAction
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
+from metascan.ui.metadata_panel import MetadataPanel
 from metascan.core.scanner import Scanner
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.cache.thumbnail import ThumbnailCache
 import os
 import json
 from pathlib import Path
@@ -33,6 +35,10 @@ class MainWindow(QMainWindow):
         self.current_filters = {}
         self.filtered_media_paths = set()
         self.all_media = []  # Cache of all media for filtering
+        
+        # Initialize thumbnail cache for metadata panel
+        cache_dir = Path.home() / ".metascan" / "thumbnails"
+        self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -90,27 +96,13 @@ class MainWindow(QMainWindow):
         return self.thumbnail_view
     
     def _create_metadata_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.Box)
-        layout = QVBoxLayout(panel)
+        # Create the enhanced metadata panel
+        self.metadata_panel = MetadataPanel()
         
-        # Title
-        title = QLabel("Metadata")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        # Set the thumbnail cache for preview images
+        self.metadata_panel.set_thumbnail_cache(self.thumbnail_cache)
         
-        # Metadata display
-        self.metadata_text = QLabel("Select an image to view metadata")
-        self.metadata_text.setWordWrap(True)
-        self.metadata_text.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.metadata_text.setStyleSheet("padding: 10px; font-family: monospace; font-size: 11px;")
-        
-        scroll_area = QScrollArea()
-        scroll_area.setWidget(self.metadata_text)
-        scroll_area.setWidgetResizable(True)
-        layout.addWidget(scroll_area)
-        
-        return panel
+        return self.metadata_panel
     
     def _create_menu_bar(self):
         menubar = self.menuBar()
@@ -285,55 +277,10 @@ class MainWindow(QMainWindow):
         """Handle when a thumbnail is selected."""
         try:
             # Update metadata panel
-            self.display_metadata(media)
+            self.metadata_panel.display_metadata(media)
             print(f"Selected: {media.file_name}")
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
-    
-    def display_metadata(self, media):
-        """Display metadata for the selected media."""
-        metadata_lines = [
-            f"File: {media.file_name}",
-            f"Path: {media.file_path}",
-            f"Size: {media.file_size} bytes",
-            f"Dimensions: {media.width} x {media.height}",
-            f"Format: {media.format}",
-            f"Created: {media.created_at.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Modified: {media.modified_at.strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-            "Generation Data:",
-            f"Source: {media.metadata_source or 'Unknown'}",
-            f"Model: {media.model or 'Unknown'}",
-            f"Sampler: {media.sampler or 'Unknown'}",
-            f"Steps: {media.steps or 'Unknown'}",
-            f"CFG Scale: {media.cfg_scale or 'Unknown'}",
-            f"Seed: {media.seed or 'Unknown'}",
-            "",
-        ]
-        
-        if media.prompt:
-            metadata_lines.extend([
-                "Prompt:",
-                f"{media.prompt}",
-                ""
-            ])
-        
-        if media.negative_prompt:
-            metadata_lines.extend([
-                "Negative Prompt:",
-                f"{media.negative_prompt}",
-                ""
-            ])
-        
-        if media.tags:
-            metadata_lines.extend([
-                "Tags:",
-                ", ".join(media.tags),
-                ""
-            ])
-        
-        metadata_text = "\n".join(metadata_lines)
-        self.metadata_text.setText(metadata_text)
 
 
 def main():
