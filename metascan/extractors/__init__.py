@@ -15,9 +15,9 @@ class MetadataExtractorManager:
     
     def __init__(self):
         self.extractors: List[MetadataExtractor] = [
+            FooocusExtractor(),   # Check Fooocus first as it has more specific markers
             ComfyUIExtractor(),
-            SwarmUIExtractor(),
-            FooocusExtractor()
+            SwarmUIExtractor()    # SwarmUI last as it has more generic checks
         ]
     
     def extract_metadata(self, image_path: Path) -> Optional[Dict[str, Any]]:

@@ -13,13 +13,27 @@ class SwarmUIExtractor(MetadataExtractor):
     
     def can_extract(self, image_path: Path) -> bool:
         """Check if image contains SwarmUI metadata"""
-        metadata = self._get_png_metadata(image_path)
-        return "sui_image_params" in metadata or "parameters" in metadata
+        metadata = self._get_exif_metadata(image_path)
+        
+        # Check for SwarmUI metadata in various fields
+        if "sui_image_params" in metadata or "parameters" in metadata:
+            return True
+            
+        # Check UserComment field for SwarmUI data
+        if "UserComment" in metadata:
+            try:
+                comment = metadata["UserComment"]
+                if isinstance(comment, str) and "sui_image_params" in comment:
+                    return True
+            except:
+                pass
+                
+        return False
     
     def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
         """Extract SwarmUI metadata"""
         try:
-            metadata = self._get_png_metadata(image_path)
+            metadata = self._get_exif_metadata(image_path)
             
             result = {
                 "source": "SwarmUI",
@@ -37,6 +51,21 @@ class SwarmUIExtractor(MetadataExtractor):
                     result.update(extracted)
                 except json.JSONDecodeError:
                     logger.warning(f"Failed to parse SwarmUI params JSON from {image_path}")
+            
+            # Check UserComment field for SwarmUI data
+            elif "UserComment" in metadata:
+                try:
+                    comment = metadata["UserComment"]
+                    if isinstance(comment, str) and "sui_image_params" in comment:
+                        # Parse JSON from UserComment
+                        json_data = json.loads(comment)
+                        if "sui_image_params" in json_data:
+                            params = json_data["sui_image_params"]
+                            result["raw_metadata"]["sui_image_params"] = params
+                            extracted = self._extract_from_sui_params(params)
+                            result.update(extracted)
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed to parse SwarmUI data from UserComment in {image_path}: {e}")
             
             # Fallback to parameters field
             elif "parameters" in metadata:

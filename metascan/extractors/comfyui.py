@@ -13,13 +13,13 @@ class ComfyUIExtractor(MetadataExtractor):
     
     def can_extract(self, image_path: Path) -> bool:
         """Check if image contains ComfyUI metadata"""
-        metadata = self._get_png_metadata(image_path)
+        metadata = self._get_exif_metadata(image_path)
         return "prompt" in metadata or "workflow" in metadata
     
     def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
         """Extract ComfyUI metadata"""
         try:
-            metadata = self._get_png_metadata(image_path)
+            metadata = self._get_exif_metadata(image_path)
             
             result = {
                 "source": "ComfyUI",
