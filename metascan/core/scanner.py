@@ -100,6 +100,7 @@ class Scanner:
                 media.negative_prompt = metadata.get("negative_prompt")
                 media.model = metadata.get("model")
                 media.sampler = metadata.get("sampler")
+                media.scheduler = metadata.get("scheduler")
                 media.steps = metadata.get("steps")
                 media.cfg_scale = metadata.get("cfg_scale")
                 media.seed = metadata.get("seed")

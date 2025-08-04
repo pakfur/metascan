@@ -110,10 +110,12 @@ class FiltersPanel(QWidget):
     """Main filters panel with accordion-style sections."""
     
     filters_changed = pyqtSignal(dict)  # Emits current filter selections
+    sort_changed = pyqtSignal(str)  # Emits sort order: "count" or "alphabetical"
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.filter_sections = {}
+        self.sort_order = "count"  # Default sort by count
         self.setup_ui()
     
     def setup_ui(self):
@@ -163,6 +165,62 @@ class FiltersPanel(QWidget):
             }
         """)
         button_layout.addWidget(self.refresh_button)
+        
+        # Sort order controls
+        sort_separator = QLabel("|")
+        sort_separator.setStyleSheet("color: #ccc; font-weight: bold; padding: 0 5px;")
+        button_layout.addWidget(sort_separator)
+        
+        # Sort by count button
+        self.sort_count_button = QPushButton("🔢")
+        self.sort_count_button.setToolTip("Sort by count (most common first)")
+        self.sort_count_button.setFixedSize(30, 30)
+        self.sort_count_button.setCheckable(True)
+        self.sort_count_button.setChecked(True)  # Default active
+        self.sort_count_button.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: #e8f5e8;
+                font-size: 14px;
+                padding: 2px;
+            }
+            QPushButton:checked {
+                background-color: #4CAF50;
+                color: white;
+                border-color: #45a049;
+            }
+            QPushButton:hover {
+                border-color: #4CAF50;
+            }
+        """)
+        self.sort_count_button.clicked.connect(lambda: self.set_sort_order("count"))
+        button_layout.addWidget(self.sort_count_button)
+        
+        # Sort alphabetically button
+        self.sort_alpha_button = QPushButton("🔤")
+        self.sort_alpha_button.setToolTip("Sort alphabetically (A-Z)")
+        self.sort_alpha_button.setFixedSize(30, 30)
+        self.sort_alpha_button.setCheckable(True)
+        self.sort_alpha_button.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: #f0f0f0;
+                font-size: 14px;
+                padding: 2px;
+            }
+            QPushButton:checked {
+                background-color: #2196F3;
+                color: white;
+                border-color: #1976D2;
+            }
+            QPushButton:hover {
+                border-color: #2196F3;
+            }
+        """)
+        self.sort_alpha_button.clicked.connect(lambda: self.set_sort_order("alphabetical"))
+        button_layout.addWidget(self.sort_alpha_button)
         
         button_layout.addStretch()
         main_layout.addLayout(button_layout)
@@ -223,6 +281,28 @@ class FiltersPanel(QWidget):
         for section in self.filter_sections.values():
             section.clear_selection()
         self.on_filter_selection_changed()  # Emit the change
+    
+    def set_sort_order(self, sort_order: str):
+        """Set the sort order and update UI."""
+        if sort_order == self.sort_order:
+            return  # No change needed
+        
+        self.sort_order = sort_order
+        
+        # Update button states
+        if sort_order == "count":
+            self.sort_count_button.setChecked(True)
+            self.sort_alpha_button.setChecked(False)
+        else:  # alphabetical
+            self.sort_count_button.setChecked(False)
+            self.sort_alpha_button.setChecked(True)
+        
+        # Emit signal for parent to handle
+        self.sort_changed.emit(sort_order)
+    
+    def get_sort_order(self) -> str:
+        """Get the current sort order."""
+        return self.sort_order
     
     def set_refresh_callback(self, callback):
         """Set the callback function for the refresh button."""

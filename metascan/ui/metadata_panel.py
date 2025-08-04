@@ -435,6 +435,7 @@ class MetadataPanel(QWidget):
         section.add_field("source", "Source", media.metadata_source or "Unknown")
         section.add_field("model", "Model", media.model or "Unknown")
         section.add_field("sampler", "Sampler", media.sampler or "Unknown")
+        section.add_field("scheduler", "Scheduler", media.scheduler or "Unknown")
         section.add_field("steps", "Steps", str(media.steps) if media.steps else "Unknown")
         section.add_field("cfg_scale", "CFG Scale", str(media.cfg_scale) if media.cfg_scale else "Unknown")
         section.add_field("seed", "Seed", str(media.seed) if media.seed else "Unknown")
@@ -509,6 +510,7 @@ class MetadataPanel(QWidget):
                     "source": self.current_media.metadata_source,
                     "model": self.current_media.model,
                     "sampler": self.current_media.sampler,
+                    "scheduler": self.current_media.scheduler,
                     "steps": self.current_media.steps,
                     "cfg_scale": self.current_media.cfg_scale,
                     "seed": self.current_media.seed,

@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         
         # Connect signals
         self.filters_panel.filters_changed.connect(self.on_filters_changed)
+        self.filters_panel.sort_changed.connect(self.on_sort_order_changed)
         self.filters_panel.set_refresh_callback(self.refresh_filters)
         
         # Load initial filter data
@@ -250,11 +251,17 @@ class MainWindow(QMainWindow):
     def refresh_filters(self):
         """Refresh the filters panel with current database data."""
         try:
-            filter_data = self.db_manager.get_filter_data()
+            sort_order = self.filters_panel.get_sort_order()
+            filter_data = self.db_manager.get_filter_data(sort_order)
             self.filters_panel.update_filters(filter_data)
-            print(f"Filters refreshed. Found {len(filter_data)} filter types.")
+            print(f"Filters refreshed with {sort_order} sort. Found {len(filter_data)} filter types.")
         except Exception as e:
             print(f"Error refreshing filters: {e}")
+    
+    def on_sort_order_changed(self, sort_order: str):
+        """Handle when sort order is changed."""
+        print(f"Sort order changed to: {sort_order}")
+        self.refresh_filters()
     
     def on_filters_changed(self, filters: dict):
         """Handle when filter selections change."""

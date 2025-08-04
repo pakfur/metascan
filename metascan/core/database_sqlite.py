@@ -236,16 +236,28 @@ class DatabaseManager:
         
         return indices
     
-    def get_filter_data(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Get all index data organized by index_type with counts"""
+    def get_filter_data(self, sort_order: str = "count") -> Dict[str, List[Dict[str, Any]]]:
+        """Get all index data organized by index_type with counts
+        
+        Args:
+            sort_order: "count" (by count desc) or "alphabetical" (by key asc)
+        """
         try:
             with self._get_connection() as conn:
-                rows = conn.execute("""
+                # Choose sort order
+                if sort_order == "alphabetical":
+                    order_clause = "ORDER BY index_type, index_key ASC"
+                else:  # default to count
+                    order_clause = "ORDER BY index_type, count DESC, index_key"
+                
+                query = f"""
                     SELECT index_type, index_key, COUNT(*) as count
                     FROM indices
                     GROUP BY index_type, index_key
-                    ORDER BY index_type, count DESC, index_key
-                """)
+                    {order_clause}
+                """
+                
+                rows = conn.execute(query)
                 
                 filter_data = {}
                 for row in rows:

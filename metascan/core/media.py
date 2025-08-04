@@ -29,6 +29,7 @@ class Media:
     negative_prompt: Optional[str] = None
     model: Optional[str] = None
     sampler: Optional[str] = None
+    scheduler: Optional[str] = None
     steps: Optional[int] = None
     cfg_scale: Optional[float] = None
     seed: Optional[int] = None
