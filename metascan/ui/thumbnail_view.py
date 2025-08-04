@@ -87,18 +87,6 @@ class ThumbnailWidget(QLabel):
     
     def update_style(self):
         """Update the visual style based on state."""
-        base_style = """
-            QLabel {
-                border: 2px solid {};
-                background-color: {};
-                border-radius: 4px;
-            }
-            QLabel:hover {{
-                border-color: #4CAF50;
-                background-color: #f0f8f0;
-            }}
-        """
-        
         if self.is_selected:
             border_color = "#2196F3"
             bg_color = "#e3f2fd"
@@ -106,7 +94,19 @@ class ThumbnailWidget(QLabel):
             border_color = "#ddd"
             bg_color = "#f9f9f9"
         
-        self.setStyleSheet(base_style.format(border_color, bg_color))
+        style = f"""
+            QLabel {{
+                border: 2px solid {border_color};
+                background-color: {bg_color};
+                border-radius: 4px;
+            }}
+            QLabel:hover {{
+                border-color: #4CAF50;
+                background-color: #f0f8f0;
+            }}
+        """
+        
+        self.setStyleSheet(style)
     
     def mousePressEvent(self, event):
         """Handle mouse clicks."""
