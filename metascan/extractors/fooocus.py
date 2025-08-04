@@ -12,9 +12,13 @@ logger = logging.getLogger(__name__)
 class FooocusExtractor(MetadataExtractor):
     """Extract metadata from Fooocus generated images"""
     
-    def can_extract(self, image_path: Path) -> bool:
+    def can_extract(self, media_path: Path) -> bool:
         """Check if image contains Fooocus metadata"""
-        metadata = self._get_exif_metadata(image_path)
+        # Skip video files - they're not supported by Fooocus image extractor
+        if media_path.suffix.lower() == '.mp4':
+            return False
+            
+        metadata = self._get_exif_metadata(media_path)
         
         # Fooocus stores metadata in different ways
         # 1. In a "parameters" field (newer versions)

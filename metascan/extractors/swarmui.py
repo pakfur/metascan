@@ -11,9 +11,13 @@ logger = logging.getLogger(__name__)
 class SwarmUIExtractor(MetadataExtractor):
     """Extract metadata from SwarmUI generated images"""
     
-    def can_extract(self, image_path: Path) -> bool:
+    def can_extract(self, media_path: Path) -> bool:
         """Check if image contains SwarmUI metadata"""
-        metadata = self._get_exif_metadata(image_path)
+        # Skip video files - they're not supported by SwarmUI image extractor
+        if media_path.suffix.lower() == '.mp4':
+            return False
+            
+        metadata = self._get_exif_metadata(media_path)
         
         # Check for SwarmUI metadata in various fields
         if "sui_image_params" in metadata or "parameters" in metadata:

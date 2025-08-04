@@ -7,6 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import os
 
+try:
+    import ffmpeg
+    HAS_FFMPEG_PYTHON = True
+except ImportError:
+    HAS_FFMPEG_PYTHON = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,16 +95,56 @@ class ThumbnailCache:
     def _create_video_thumbnail(self, video_path: Path, thumbnail_path: Path) -> Optional[Path]:
         """Create a thumbnail for a video file"""
         try:
-            # First try ffmpeg for best quality
+            # Try python-ffmpeg bindings first
+            if HAS_FFMPEG_PYTHON and self._create_video_thumbnail_python(video_path, thumbnail_path):
+                return thumbnail_path
+            
+            # Fallback to subprocess calls
             if self._create_video_thumbnail_ffmpeg(video_path, thumbnail_path):
                 return thumbnail_path
             
-            # Fallback to ffprobe + ffmpeg
+            # Final fallback 
             return self._create_video_thumbnail_fallback(video_path, thumbnail_path)
             
         except Exception as e:
             logger.error(f"Failed to create video thumbnail for {video_path}: {e}")
             return None
+    
+    def _create_video_thumbnail_python(self, video_path: Path, thumbnail_path: Path) -> bool:
+        """Create video thumbnail using python-ffmpeg bindings"""
+        try:
+            # Use ffmpeg-python to extract a frame
+            stream = ffmpeg.input(str(video_path))
+            
+            # Seek to 1 second or 10% into the video, whichever is smaller
+            # Use thumbnail filter for best frame selection
+            stream = ffmpeg.filter(stream, 'thumbnail')
+            
+            # Scale to desired size while maintaining aspect ratio
+            stream = ffmpeg.filter(
+                stream, 'scale', 
+                self.thumbnail_size[0], self.thumbnail_size[1],
+                force_original_aspect_ratio='decrease'
+            )
+            
+            # Output to thumbnail file
+            stream = ffmpeg.output(stream, str(thumbnail_path), vframes=1, format='image2')
+            
+            # Run with overwrite and capture stderr
+            ffmpeg.run(stream, overwrite_output=True, capture_stderr=True, quiet=True)
+            
+            if thumbnail_path.exists():
+                logger.debug(f"Created video thumbnail using python-ffmpeg for {video_path}")
+                return True
+            
+            return False
+            
+        except ffmpeg.Error as e:
+            logger.debug(f"python-ffmpeg failed for {video_path}: {e.stderr.decode() if e.stderr else str(e)}")
+            return False
+        except Exception as e:
+            logger.debug(f"python-ffmpeg unexpected error for {video_path}: {e}")
+            return False
     
     def _create_video_thumbnail_ffmpeg(self, video_path: Path, thumbnail_path: Path) -> bool:
         """Create video thumbnail using ffmpeg"""
