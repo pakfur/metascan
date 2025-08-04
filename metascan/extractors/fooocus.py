@@ -14,14 +14,31 @@ class FooocusExtractor(MetadataExtractor):
     
     def can_extract(self, image_path: Path) -> bool:
         """Check if image contains Fooocus metadata"""
-        metadata = self._get_png_metadata(image_path)
+        metadata = self._get_exif_metadata(image_path)
         
-        # Fooocus uses "Comment" or "Description" fields
+        # Fooocus stores metadata in different ways
+        # 1. In a "parameters" field (newer versions)
+        if "parameters" in metadata:
+            try:
+                params = metadata["parameters"]
+                if isinstance(params, str):
+                    # Try to parse as JSON and check for Fooocus-specific fields
+                    data = json.loads(params)
+                    if isinstance(data, dict) and ("fooocus" in str(data).lower() or "metadata_scheme" in data):
+                        return True
+            except:
+                pass
+        
+        # 2. Check for fooocus_scheme field
+        if "fooocus_scheme" in metadata:
+            return True
+        
+        # 3. In Comment or Description fields (older versions)
         for field in ["Comment", "Description", "comment", "description"]:
             if field in metadata:
                 text = metadata[field]
                 # Check for Fooocus-specific patterns
-                if "Fooocus" in text or "Steps:" in text and "Sampler:" in text:
+                if "Fooocus" in text or ("Steps:" in text and "Sampler:" in text):
                     return True
         
         return False
@@ -29,14 +46,35 @@ class FooocusExtractor(MetadataExtractor):
     def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
         """Extract Fooocus metadata"""
         try:
-            metadata = self._get_png_metadata(image_path)
+            metadata = self._get_exif_metadata(image_path)
             
             result = {
                 "source": "Fooocus",
                 "raw_metadata": {}
             }
             
-            # Find the metadata field
+            # Check for JSON format in parameters field (newer Fooocus versions)
+            if "parameters" in metadata:
+                try:
+                    params = metadata["parameters"]
+                    if isinstance(params, str):
+                        data = json.loads(params)
+                        if isinstance(data, dict):
+                            result["raw_metadata"]["parameters"] = data
+                            
+                            # Extract from JSON format
+                            extracted = self._extract_from_json(data)
+                            result.update(extracted)
+                            
+                            # Also store fooocus_scheme if present
+                            if "fooocus_scheme" in metadata:
+                                result["raw_metadata"]["fooocus_scheme"] = metadata["fooocus_scheme"]
+                            
+                            return result
+                except json.JSONDecodeError:
+                    pass
+            
+            # Fallback to text format in Comment/Description fields
             metadata_text = None
             for field in ["Comment", "Description", "comment", "description"]:
                 if field in metadata:
@@ -136,3 +174,55 @@ class FooocusExtractor(MetadataExtractor):
                         extracted["height"] = self._safe_int(height)
                     except ValueError:
                         pass
+    
+    def _extract_from_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract parameters from Fooocus JSON format"""
+        extracted = {}
+        
+        # Direct field mappings
+        if "prompt" in data:
+            extracted["prompt"] = data["prompt"]
+        
+        if "negative_prompt" in data:
+            extracted["negative_prompt"] = data["negative_prompt"]
+        
+        if "base_model" in data:
+            extracted["model"] = data["base_model"]
+        
+        if "steps" in data:
+            extracted["steps"] = self._safe_int(data["steps"])
+        
+        if "guidance_scale" in data:
+            extracted["cfg_scale"] = self._safe_float(data["guidance_scale"])
+        
+        if "seed" in data:
+            extracted["seed"] = self._safe_int(data["seed"])
+        
+        if "sampler" in data:
+            extracted["sampler"] = data["sampler"]
+        
+        if "scheduler" in data:
+            extracted["scheduler"] = data["scheduler"]
+        
+        # Parse resolution
+        if "resolution" in data:
+            res = data["resolution"]
+            if isinstance(res, str):
+                # Format like "(1152, 896)"
+                res = res.strip("()")
+                if "," in res:
+                    try:
+                        width, height = res.split(",")
+                        extracted["width"] = self._safe_int(width.strip())
+                        extracted["height"] = self._safe_int(height.strip())
+                    except ValueError:
+                        pass
+        
+        # Additional Fooocus-specific fields
+        if "version" in data:
+            extracted["version"] = data["version"]
+        
+        if "styles" in data:
+            extracted["styles"] = data["styles"]
+        
+        return extracted
