@@ -128,23 +128,45 @@ class PromptTokenizer:
         else:
             return ("caption", 1.0 - tag_score)
     
-    def tokenize(self, prompt: str) -> Set[str]:
+    def _tokenize_tags(self, prompt: str) -> Set[str]:
         """
-        Tokenize and filter a prompt string.
+        Tokenize a tag-based prompt.
+        Each tag (text between commas) is normalized and kept as a unit.
+        """
+        tags = set()
         
-        Args:
-            prompt: The prompt string to tokenize
+        # Split by commas to get individual tags
+        raw_tags = [tag.strip() for tag in prompt.split(',')]
+        
+        for tag in raw_tags:
+            if not tag:
+                continue
             
-        Returns:
-            Set of filtered tokens suitable for indexing
+            # Normalize: lowercase and split into words
+            words = tag.lower().split()
+            
+            # Remove stop words and filler words from within the tag
+            filtered_words = []
+            for word in words:
+                # Remove punctuation
+                word = word.strip('.,!?;:()[]{}"\'-')
+                
+                # Keep the word if it's not a stop word or filler word
+                if word and word not in self.stop_words and word not in self.filler_words:
+                    filtered_words.append(word)
+            
+            # Join the filtered words back into a tag
+            if filtered_words:
+                normalized_tag = ' '.join(filtered_words)
+                tags.add(normalized_tag)
+        
+        return tags
+    
+    def _tokenize_caption(self, prompt: str) -> Set[str]:
         """
-        if not prompt:
-            return set()
-        
-        # Classify the prompt
-        prompt_type, confidence = self.classify_prompt(prompt)
-        logger.info(f"Prompt classified as '{prompt_type}' with confidence {confidence:.2f}")
-        
+        Tokenize a caption-based prompt.
+        Individual words are extracted after filtering.
+        """
         # Tokenize and convert to lowercase
         words = [word.lower() for word in prompt.split()]
         
@@ -161,3 +183,30 @@ class PromptTokenizer:
                 filtered_words.add(word)
         
         return filtered_words
+    
+    def tokenize(self, prompt: str) -> Set[str]:
+        """
+        Tokenize and filter a prompt string using appropriate strategy.
+        
+        Args:
+            prompt: The prompt string to tokenize
+            
+        Returns:
+            Set of filtered tokens suitable for indexing
+        """
+        if not prompt:
+            return set()
+        
+        # Classify the prompt
+        prompt_type, confidence = self.classify_prompt(prompt)
+        logger.info(f"Prompt classified as '{prompt_type}' with confidence {confidence:.2f}")
+        
+        # Use appropriate tokenization strategy
+        if prompt_type == "tags":
+            tokens = self._tokenize_tags(prompt)
+            logger.debug(f"Tag tokenization produced {len(tokens)} tags")
+        else:
+            tokens = self._tokenize_caption(prompt)
+            logger.debug(f"Caption tokenization produced {len(tokens)} words")
+        
+        return tokens

@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from metascan.ui.config_dialog import ConfigDialog
+from metascan.ui.filters_panel import FiltersPanel
 from metascan.core.scanner import Scanner
 from metascan.core.database_sqlite import DatabaseManager
 import os
@@ -26,6 +27,10 @@ class MainWindow(QMainWindow):
         db_path = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))) / 'data'
         self.db_manager = DatabaseManager(db_path)
         self.scanner = Scanner(self.db_manager)
+        
+        # Current filter state
+        self.current_filters = {}
+        self.filtered_media_paths = set()
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -58,28 +63,17 @@ class MainWindow(QMainWindow):
         self._create_toolbar()
         
     def _create_filter_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.Box)
-        layout = QVBoxLayout(panel)
+        # Create the filters panel
+        self.filters_panel = FiltersPanel()
         
-        # Title
-        title = QLabel("Filters")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        # Connect signals
+        self.filters_panel.filters_changed.connect(self.on_filters_changed)
+        self.filters_panel.set_refresh_callback(self.refresh_filters)
         
-        # Filter list (placeholder)
-        filter_list = QListWidget()
-        filter_list.addItems([
-            "All Images",
-            "ComfyUI",
-            "SwarmUI", 
-            "Fooocus",
-            "Recent",
-            "Favorites"
-        ])
-        layout.addWidget(filter_list)
+        # Load initial filter data
+        self.refresh_filters()
         
-        return panel
+        return self.filters_panel
     
     def _create_thumbnail_panel(self) -> QWidget:
         panel = QFrame()
@@ -178,11 +172,11 @@ class MainWindow(QMainWindow):
             background-color: #4CAF50;
             color: white;
             border: 2px solid #45a049;
-            padding: 8px 20px;
-            font-size: 14px;
+            padding: 4px 10px;
+            font-size: 10px;
             font-weight: bold;
-            min-width: 100px;
-            min-height: 30px;
+            min-width: 75px;
+            min-height: 20px;
         }
         QPushButton:hover {
             background-color: #45a049;
@@ -197,12 +191,12 @@ class MainWindow(QMainWindow):
         QPushButton {
             background-color: #2196F3;
             color: white;
-            border: 2px solid #1976D2;
-            padding: 8px 20px;
-            font-size: 14px;
+            border: 2px solid #45a049;
+            padding: 4px 10px;
+            font-size: 10px;
             font-weight: bold;
-            min-width: 100px;
-            min-height: 30px;
+            min-width: 75px;
+            min-height: 20px;
         }
         QPushButton:hover {
             background-color: #1976D2;
@@ -261,8 +255,45 @@ class MainWindow(QMainWindow):
                 
             print("Scanning completed.")
             
+            # Refresh filters after scanning
+            self.refresh_filters()
+            
         except Exception as e:
             print(f"Error during scanning: {e}")
+    
+    def refresh_filters(self):
+        """Refresh the filters panel with current database data."""
+        try:
+            filter_data = self.db_manager.get_filter_data()
+            self.filters_panel.update_filters(filter_data)
+            print(f"Filters refreshed. Found {len(filter_data)} filter types.")
+        except Exception as e:
+            print(f"Error refreshing filters: {e}")
+    
+    def on_filters_changed(self, filters: dict):
+        """Handle when filter selections change."""
+        self.current_filters = filters
+        
+        if filters:
+            # Get filtered media paths
+            self.filtered_media_paths = self.db_manager.get_filtered_media_paths(filters)
+            print(f"Filters applied: {filters}")
+            print(f"Found {len(self.filtered_media_paths)} matching media files")
+        else:
+            # No filters selected - show all
+            self.filtered_media_paths = set()
+            print("All filters cleared - showing all media")
+        
+        # TODO: Update thumbnail panel with filtered results
+        self.update_thumbnail_panel()
+    
+    def update_thumbnail_panel(self):
+        """Update the thumbnail panel based on current filters."""
+        # This is a placeholder - will be implemented when thumbnail view is ready
+        if self.filtered_media_paths:
+            print(f"Would display {len(self.filtered_media_paths)} filtered thumbnails")
+        else:
+            print("Would display all thumbnails")
 
 
 def main():
