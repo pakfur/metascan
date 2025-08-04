@@ -1,12 +1,15 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
-    QFrame, QGridLayout, QProgressBar, QPushButton, QSizeGrip
+    QFrame, QGridLayout, QProgressBar, QPushButton, QSizeGrip,
+    QMessageBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF
-from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QBrush, QPolygon, QPolygonF
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF, QUrl
+from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QBrush, QPolygon, QPolygonF, QDesktopServices
 from pathlib import Path
 from typing import List, Set, Optional, Dict
 import logging
+import platform
+import subprocess
 from metascan.core.media import Media
 from metascan.cache.thumbnail import ThumbnailCache
 
@@ -17,6 +20,7 @@ class ThumbnailWidget(QLabel):
     """Individual thumbnail widget with selection and hover states."""
     
     clicked = pyqtSignal(object)  # Emits the Media object
+    double_clicked = pyqtSignal(object)  # Emits the Media object for opening
     
     def __init__(self, media: Media, thumbnail_path: Optional[Path] = None, parent=None):
         super().__init__(parent)
@@ -37,8 +41,13 @@ class ThumbnailWidget(QLabel):
             QLabel:hover {
                 border-color: #4CAF50;
                 background-color: #f0f8f0;
+                cursor: pointer;
             }
         """)
+        
+        # Set tooltip to indicate double-click functionality
+        media_type = "video" if media.is_video else "image"
+        self.setToolTip(f"Click to select • Double-click to open {media_type}\n{media.file_name}")
         
         # Load thumbnail or show placeholder
         if thumbnail_path and thumbnail_path.exists():
@@ -173,10 +182,16 @@ class ThumbnailWidget(QLabel):
         self.setStyleSheet(style)
     
     def mousePressEvent(self, event):
-        """Handle mouse clicks."""
+        """Handle single mouse clicks."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.media)
         super().mousePressEvent(event)
+    
+    def mouseDoubleClickEvent(self, event):
+        """Handle double clicks to open media file."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self.media)
+        super().mouseDoubleClickEvent(event)
 
 
 class ThumbnailLoader(QThread):
@@ -349,6 +364,7 @@ class ThumbnailView(QWidget):
             # Create thumbnail widget with placeholder
             thumbnail_widget = ThumbnailWidget(media)
             thumbnail_widget.clicked.connect(self.on_thumbnail_clicked)
+            thumbnail_widget.double_clicked.connect(self.on_thumbnail_double_clicked)
             
             # Add to grid
             row = i // columns
@@ -396,6 +412,49 @@ class ThumbnailView(QWidget):
         
         # Emit selection change
         self.selection_changed.emit(media)
+    
+    def on_thumbnail_double_clicked(self, media: Media):
+        """Handle thumbnail double-clicks to open media file."""
+        try:
+            self.open_media_file(media.file_path)
+        except Exception as e:
+            logger.error(f"Failed to open media file {media.file_path}: {e}")
+            QMessageBox.warning(
+                self, 
+                "Error Opening File", 
+                f"Could not open {media.file_name}:\n{str(e)}"
+            )
+    
+    def open_media_file(self, file_path: Path):
+        """Open a media file with the system's default viewer."""
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        try:
+            # Try Qt's cross-platform approach first
+            url = QUrl.fromLocalFile(str(file_path))
+            if QDesktopServices.openUrl(url):
+                logger.info(f"Opened media file: {file_path}")
+                return
+            
+            # Fallback to platform-specific approaches
+            system = platform.system()
+            
+            if system == "Darwin":  # macOS
+                subprocess.run(["open", str(file_path)], check=True)
+            elif system == "Windows":
+                subprocess.run(["start", str(file_path)], shell=True, check=True)
+            elif system == "Linux":
+                subprocess.run(["xdg-open", str(file_path)], check=True)
+            else:
+                raise OSError(f"Unsupported platform: {system}")
+                
+            logger.info(f"Opened media file with system viewer: {file_path}")
+            
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to open file with system viewer: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error opening file: {e}")
     
     def apply_filters(self, filtered_paths: Set[str]):
         """Apply filters to show/hide thumbnails."""
