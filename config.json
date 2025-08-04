@@ -1,52 +1,8 @@
 {
   "directories": [
     {
-      "filepath": "/Users/jkline/Library/Application Support/StabilityMatrix/Images/Text2Img/local/raw/2025-08-01",
+      "filepath": "/Users/jkline/Library/Application Support/StabilityMatrix/Images/Text2Img",
       "search_subfolders": true
     }
-  ],
-  "filler_words": [
-    "background",
-    "soft",
-    "aesthetic",
-    "high",
-    "lighting",
-    "shot",
-    "",
-    "beautiful",
-    "lovely",
-    "nice",
-    "awesome",
-    "amazing",
-    "perfect",
-    "gorgeous",
-    "fantastic",
-    "cool",
-    "nice looking",
-    "superb",
-    "wonderful",
-    "pretty",
-    "great",
-    "incredible",
-    "stunning",
-    "epic",
-    "very",
-    "really",
-    "extremely",
-    "highly",
-    "best"
-  ],
-  "tokenization": {
-    "heuristics": {
-      "comma_density": {
-        "threshold": 0.2,
-        "weight": 0.6
-      },
-      "stopword_frequency": {
-        "threshold": 0.15,
-        "weight": 0.4
-      }
-    },
-    "classification_threshold": 0.5
-  }
+  ]
 }
