@@ -12,13 +12,13 @@ class MetadataExtractor(ABC):
     """Base class for metadata extractors"""
     
     @abstractmethod
-    def can_extract(self, image_path: Path) -> bool:
-        """Check if this extractor can handle the given image"""
+    def can_extract(self, media_path: Path) -> bool:
+        """Check if this extractor can handle the given media file"""
         pass
     
     @abstractmethod
-    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
-        """Extract metadata from the image"""
+    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
+        """Extract metadata from the media file"""
         pass
     
     def _get_png_metadata(self, image_path: Path) -> Dict[str, Any]:

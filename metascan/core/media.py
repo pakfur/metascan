@@ -34,6 +34,11 @@ class Media:
     cfg_scale: Optional[float] = None
     seed: Optional[int] = None
     
+    # Video-specific metadata
+    frame_rate: Optional[float] = None
+    duration: Optional[float] = None
+    video_length: Optional[int] = None  # Number of frames for ComfyUI videos
+    
     # Tags and organization
     tags: List[str] = field(default_factory=list)
     
@@ -50,6 +55,21 @@ class Media:
     @property
     def file_extension(self) -> str:
         return self.file_path.suffix.lower()
+    
+    @property
+    def is_video(self) -> bool:
+        """Check if this is a video file"""
+        return self.file_extension == '.mp4'
+    
+    @property
+    def is_image(self) -> bool:
+        """Check if this is an image file"""
+        return not self.is_video
+    
+    @property
+    def media_type(self) -> str:
+        """Get the media type string"""
+        return "video" if self.is_video else "image"
     
     def __hash__(self):
         return hash(str(self.file_path))
