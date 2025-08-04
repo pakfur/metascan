@@ -76,8 +76,8 @@ class Scanner:
             # Get file stats
             stat = file_path.stat()
             
-            # Get image info
-            width, height, format_name = self._get_image_info(file_path)
+            # Get media info (image or video)
+            width, height, format_name = self._get_media_info(file_path)
             if not width or not height:
                 return None
             
@@ -96,6 +96,7 @@ class Scanner:
             metadata = self.extractor_manager.extract_metadata(file_path)
             if metadata:
                 # Update media object with extracted metadata
+                media.metadata_source = metadata.get("source")
                 media.prompt = metadata.get("prompt")
                 media.negative_prompt = metadata.get("negative_prompt")
                 media.model = metadata.get("model")
@@ -104,8 +105,14 @@ class Scanner:
                 media.steps = metadata.get("steps")
                 media.cfg_scale = metadata.get("cfg_scale")
                 media.seed = metadata.get("seed")
-                media.loras = metadata.get("loras", [])
-                media.base_model = metadata.get("base_model")
+                
+                # Video-specific metadata
+                media.frame_rate = metadata.get("frame_rate")
+                media.duration = metadata.get("duration")
+                media.video_length = metadata.get("length")
+                
+                # Store raw metadata for advanced access
+                media.generation_data = metadata.get("raw_metadata", {})
                 
             return media
             
@@ -113,11 +120,71 @@ class Scanner:
             logger.error(f"Failed to process media file {file_path}: {e}")
             return None
             
-    def _get_image_info(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get image dimensions and format"""
+    def _get_media_info(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """Get media dimensions and format"""
         try:
-            with Image.open(file_path) as img:
-                return img.width, img.height, img.format
+            if file_path.suffix.lower() == '.mp4':
+                return self._get_video_info(file_path)
+            else:
+                with Image.open(file_path) as img:
+                    return img.width, img.height, img.format
         except Exception as e:
-            logger.error(f"Failed to get image info for {file_path}: {e}")
+            logger.error(f"Failed to get media info for {file_path}: {e}")
             return None, None, None
+    
+    def _get_video_info(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """Get video dimensions and format using subprocess"""
+        try:
+            import subprocess
+            import json
+            
+            # Use ffprobe to get video dimensions
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_streams', '-select_streams', 'v:0', str(file_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                # Fallback: try to extract basic info without ffprobe 
+                return self._get_video_info_fallback(file_path)
+            
+            data = json.loads(result.stdout)
+            if 'streams' in data and len(data['streams']) > 0:
+                stream = data['streams'][0]
+                width = stream.get('width')
+                height = stream.get('height')
+                return width, height, 'MP4'
+            
+            return None, None, None
+            
+        except Exception as e:
+            logger.error(f"Failed to get video info for {file_path}: {e}")
+            return self._get_video_info_fallback(file_path)
+    
+    def _get_video_info_fallback(self, file_path: Path) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """Fallback method to get basic video info without ffprobe"""
+        try:
+            # Try using exiftool if available
+            import subprocess
+            result = subprocess.run(
+                ['exiftool', '-ImageWidth', '-ImageHeight', '-json', str(file_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                import json
+                data = json.loads(result.stdout)
+                if data and len(data) > 0:
+                    item = data[0]
+                    width = item.get('ImageWidth')
+                    height = item.get('ImageHeight')
+                    if width and height:
+                        return width, height, 'MP4'
+            
+            # If all else fails, return reasonable defaults
+            logger.warning(f"Could not determine video dimensions for {file_path}, using defaults")
+            return 1920, 1080, 'MP4'
+            
+        except Exception as e:
+            logger.error(f"Fallback video info extraction failed for {file_path}: {e}")
+            return 1920, 1080, 'MP4'

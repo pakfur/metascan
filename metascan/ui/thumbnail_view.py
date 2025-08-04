@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
     QFrame, QGridLayout, QProgressBar, QPushButton, QSizeGrip
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF
+from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QBrush, QPolygon, QPolygonF
 from pathlib import Path
 from typing import List, Set, Optional, Dict
 import logging
@@ -57,6 +57,11 @@ class ThumbnailWidget(QLabel):
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
+                
+                # Add video overlay if this is a video file
+                if self.media.is_video:
+                    scaled_pixmap = self._add_video_overlay(scaled_pixmap)
+                
                 self.setPixmap(scaled_pixmap)
             else:
                 self.show_placeholder()
@@ -66,7 +71,11 @@ class ThumbnailWidget(QLabel):
     
     def show_placeholder(self):
         """Show placeholder text when thumbnail is not available."""
-        self.setText(f"Loading...\n{self.media.file_name}")
+        placeholder_text = f"Loading...\n{self.media.file_name}"
+        if self.media.is_video:
+            placeholder_text += "\n[VIDEO]"
+        
+        self.setText(placeholder_text)
         self.setWordWrap(True)
         self.setStyleSheet(self.styleSheet() + """
             QLabel {
@@ -74,6 +83,61 @@ class ThumbnailWidget(QLabel):
                 font-size: 11px;
             }
         """)
+    
+    def _add_video_overlay(self, pixmap: QPixmap) -> QPixmap:
+        """Add a play button overlay to video thumbnails."""
+        # Create a new pixmap to draw on
+        overlay_pixmap = QPixmap(pixmap.size())
+        overlay_pixmap.fill(Qt.GlobalColor.transparent)
+        
+        # Copy the original pixmap
+        painter = QPainter(overlay_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0, 0, pixmap)
+        
+        # Draw semi-transparent overlay
+        overlay_color = QColor(0, 0, 0, 80)  # Black with 30% opacity
+        painter.fillRect(overlay_pixmap.rect(), overlay_color)
+        
+        # Calculate play button position and size
+        center_x = pixmap.width() // 2
+        center_y = pixmap.height() // 2
+        button_size = min(pixmap.width(), pixmap.height()) // 4
+        
+        # Draw play button background (circle)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.drawEllipse(
+            center_x - button_size//2,
+            center_y - button_size//2,
+            button_size,
+            button_size
+        )
+        
+        # Draw play triangle
+        triangle_size = button_size // 3
+        triangle_offset = triangle_size // 6  # Slight right offset to center visually
+        
+        triangle = QPolygonF([
+            QPointF(center_x - triangle_size//2 + triangle_offset, center_y - triangle_size//2),
+            QPointF(center_x - triangle_size//2 + triangle_offset, center_y + triangle_size//2),
+            QPointF(center_x + triangle_size//2 + triangle_offset, center_y)
+        ])
+        
+        painter.setBrush(QBrush(QColor(0, 0, 0, 200)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPolygon(triangle)
+        
+        # Add "VIDEO" label at bottom
+        label_rect = QRect(0, pixmap.height() - 20, pixmap.width(), 20)
+        painter.fillRect(label_rect, QColor(0, 0, 0, 150))
+        
+        painter.setPen(QPen(QColor(255, 255, 255)))
+        painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+        painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, "VIDEO")
+        
+        painter.end()
+        return overlay_pixmap
     
     def set_selected(self, selected: bool):
         """Set the selection state of this thumbnail."""
