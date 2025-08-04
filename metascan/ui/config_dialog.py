@@ -129,15 +129,23 @@ class ConfigDialog(QDialog):
         self.accept()
     
     def _save_config(self):
-        config = {
-            'directories': self.directories
-        }
-        
         try:
+            # Load existing config to preserve other settings
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+            
+            # Update directories
+            config['directories'] = self.directories
+            
+            # Save back to file
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
+                
         except Exception as e:
             print(f"Error saving config: {e}")
-    
+
+
     def get_directories(self) -> List[Dict[str, any]]:
         return self.directories

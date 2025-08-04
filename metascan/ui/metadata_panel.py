@@ -308,7 +308,7 @@ class MetadataPanel(QWidget):
         self.content_layout.setSpacing(8)
 
         # No selection message
-        self.no_selection_label = QLabel("Select an image to view metadata")
+        self.no_selection_label = QLabel("Select a media file to view metadata")
         self.no_selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.no_selection_label.setStyleSheet("""
             QLabel {
@@ -398,9 +398,26 @@ class MetadataPanel(QWidget):
         size_label.setStyleSheet("color: #7f8c8d; font-size: 10px;")
         info_layout.addWidget(size_label)
 
-        format_label = QLabel(f"{media.format} • {self.format_file_size(media.file_size)}")
+        # Format label with media type
+        media_type = "VIDEO" if media.is_video else "IMAGE"
+        format_label = QLabel(f"{media.format} • {media_type} • {self.format_file_size(media.file_size)}")
         format_label.setStyleSheet("color: #7f8c8d; font-size: 10px;")
         info_layout.addWidget(format_label)
+        
+        # Add video-specific info in preview
+        if media.is_video:
+            video_info_parts = []
+            if media.duration:
+                video_info_parts.append(f"{media.duration:.1f}s")
+            if media.frame_rate:
+                video_info_parts.append(f"{media.frame_rate:.1f} fps")
+            if media.video_length:
+                video_info_parts.append(f"{media.video_length} frames")
+            
+            if video_info_parts:
+                video_info_label = QLabel(" • ".join(video_info_parts))
+                video_info_label.setStyleSheet("color: #e74c3c; font-size: 10px; font-weight: bold;")  # Red for video
+                info_layout.addWidget(video_info_label)
 
         info_layout.addStretch()
         preview_layout.addLayout(info_layout)
@@ -430,7 +447,8 @@ class MetadataPanel(QWidget):
 
     def create_generation_section(self, media: Media):
         """Create the AI generation parameters section."""
-        section = MetadataSection("🤖 Generation Parameters")
+        section_title = "🎥 Video Generation Parameters" if media.is_video else "🤖 Generation Parameters"
+        section = MetadataSection(section_title)
 
         section.add_field("source", "Source", media.metadata_source or "Unknown")
         section.add_field("model", "Model", media.model or "Unknown")
@@ -439,6 +457,15 @@ class MetadataPanel(QWidget):
         section.add_field("steps", "Steps", str(media.steps) if media.steps else "Unknown")
         section.add_field("cfg_scale", "CFG Scale", str(media.cfg_scale) if media.cfg_scale else "Unknown")
         section.add_field("seed", "Seed", str(media.seed) if media.seed else "Unknown")
+
+        # Add video-specific fields
+        if media.is_video:
+            if media.frame_rate:
+                section.add_field("frame_rate", "Frame Rate", f"{media.frame_rate:.1f} fps")
+            if media.duration:
+                section.add_field("duration", "Duration", f"{media.duration:.2f} seconds")
+            if media.video_length:
+                section.add_field("video_length", "Frame Count", str(media.video_length))
 
         self.sections["generation"] = section
         self.content_layout.insertWidget(-1, section)
@@ -515,7 +542,12 @@ class MetadataPanel(QWidget):
                     "cfg_scale": self.current_media.cfg_scale,
                     "seed": self.current_media.seed,
                     "prompt": self.current_media.prompt,
-                    "negative_prompt": self.current_media.negative_prompt
+                    "negative_prompt": self.current_media.negative_prompt,
+                    # Video-specific metadata
+                    "frame_rate": self.current_media.frame_rate,
+                    "duration": self.current_media.duration,
+                    "video_length": self.current_media.video_length,
+                    "media_type": self.current_media.media_type
                 },
                 "raw_generation_data": self.current_media.generation_data
             }
