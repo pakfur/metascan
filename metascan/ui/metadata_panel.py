@@ -93,7 +93,7 @@ class MetadataField(QFrame):
                     border: 1px solid #ddd;
                     border-radius: 3px;
                     background-color: #fff;
-                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
                     font-size: 10px;
                     padding: 4px;
                 }
@@ -107,7 +107,7 @@ class MetadataField(QFrame):
                     border: 1px solid #ddd;
                     border-radius: 3px;
                     background-color: #fff;
-                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
                     font-size: 10px;
                     padding: 4px;
                 }
