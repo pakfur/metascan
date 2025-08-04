@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
+from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.core.scanner import Scanner
 from metascan.core.database_sqlite import DatabaseManager
 import os
@@ -31,6 +32,7 @@ class MainWindow(QMainWindow):
         # Current filter state
         self.current_filters = {}
         self.filtered_media_paths = set()
+        self.all_media = []  # Cache of all media for filtering
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -76,37 +78,16 @@ class MainWindow(QMainWindow):
         return self.filters_panel
     
     def _create_thumbnail_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.Box)
-        layout = QVBoxLayout(panel)
+        # Create the thumbnail view
+        self.thumbnail_view = ThumbnailView()
         
-        # Title
-        title = QLabel("Media Gallery")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
-        layout.addWidget(title)
+        # Connect selection signal
+        self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         
-        # Scroll area for thumbnails
-        scroll_area = QScrollArea()
-        scroll_widget = QWidget()
-        grid_layout = QGridLayout(scroll_widget)
+        # Load initial media if any exists
+        self.load_all_media()
         
-        # Add placeholder thumbnails
-        for i in range(12):
-            placeholder = QLabel(f"Image {i+1}")
-            placeholder.setStyleSheet(
-                "border: 1px solid #ccc; "
-                "background-color: #f0f0f0; "
-                "min-height: 150px; "
-                "min-width: 150px;"
-            )
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            grid_layout.addWidget(placeholder, i // 4, i % 4)
-        
-        scroll_area.setWidget(scroll_widget)
-        scroll_area.setWidgetResizable(True)
-        layout.addWidget(scroll_area)
-        
-        return panel
+        return self.thumbnail_view
     
     def _create_metadata_panel(self) -> QWidget:
         panel = QFrame()
@@ -118,14 +99,14 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-weight: bold; font-size: 14px; padding: 5px;")
         layout.addWidget(title)
         
-        # Metadata display (placeholder)
-        metadata_text = QLabel("Select an image to view metadata")
-        metadata_text.setWordWrap(True)
-        metadata_text.setAlignment(Qt.AlignmentFlag.AlignTop)
-        metadata_text.setStyleSheet("padding: 10px;")
+        # Metadata display
+        self.metadata_text = QLabel("Select an image to view metadata")
+        self.metadata_text.setWordWrap(True)
+        self.metadata_text.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.metadata_text.setStyleSheet("padding: 10px; font-family: monospace; font-size: 11px;")
         
         scroll_area = QScrollArea()
-        scroll_area.setWidget(metadata_text)
+        scroll_area.setWidget(self.metadata_text)
         scroll_area.setWidgetResizable(True)
         layout.addWidget(scroll_area)
         
@@ -258,8 +239,21 @@ class MainWindow(QMainWindow):
             # Refresh filters after scanning
             self.refresh_filters()
             
+            # Reload media after scanning
+            self.load_all_media()
+            
         except Exception as e:
             print(f"Error during scanning: {e}")
+    
+    def load_all_media(self):
+        """Load all media from database."""
+        try:
+            self.all_media = self.db_manager.get_all_media()
+            self.thumbnail_view.set_media_list(self.all_media)
+            print(f"Loaded {len(self.all_media)} media items")
+        except Exception as e:
+            print(f"Error loading media: {e}")
+            self.all_media = []
     
     def refresh_filters(self):
         """Refresh the filters panel with current database data."""
@@ -284,16 +278,62 @@ class MainWindow(QMainWindow):
             self.filtered_media_paths = set()
             print("All filters cleared - showing all media")
         
-        # TODO: Update thumbnail panel with filtered results
-        self.update_thumbnail_panel()
+        # Update thumbnail view with filtered results
+        self.thumbnail_view.apply_filters(self.filtered_media_paths)
     
-    def update_thumbnail_panel(self):
-        """Update the thumbnail panel based on current filters."""
-        # This is a placeholder - will be implemented when thumbnail view is ready
-        if self.filtered_media_paths:
-            print(f"Would display {len(self.filtered_media_paths)} filtered thumbnails")
-        else:
-            print("Would display all thumbnails")
+    def on_thumbnail_selected(self, media):
+        """Handle when a thumbnail is selected."""
+        try:
+            # Update metadata panel
+            self.display_metadata(media)
+            print(f"Selected: {media.file_name}")
+        except Exception as e:
+            print(f"Error handling thumbnail selection: {e}")
+    
+    def display_metadata(self, media):
+        """Display metadata for the selected media."""
+        metadata_lines = [
+            f"File: {media.file_name}",
+            f"Path: {media.file_path}",
+            f"Size: {media.file_size} bytes",
+            f"Dimensions: {media.width} x {media.height}",
+            f"Format: {media.format}",
+            f"Created: {media.created_at.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Modified: {media.modified_at.strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "Generation Data:",
+            f"Source: {media.metadata_source or 'Unknown'}",
+            f"Model: {media.model or 'Unknown'}",
+            f"Sampler: {media.sampler or 'Unknown'}",
+            f"Steps: {media.steps or 'Unknown'}",
+            f"CFG Scale: {media.cfg_scale or 'Unknown'}",
+            f"Seed: {media.seed or 'Unknown'}",
+            "",
+        ]
+        
+        if media.prompt:
+            metadata_lines.extend([
+                "Prompt:",
+                f"{media.prompt}",
+                ""
+            ])
+        
+        if media.negative_prompt:
+            metadata_lines.extend([
+                "Negative Prompt:",
+                f"{media.negative_prompt}",
+                ""
+            ])
+        
+        if media.tags:
+            metadata_lines.extend([
+                "Tags:",
+                ", ".join(media.tags),
+                ""
+            ])
+        
+        metadata_text = "\n".join(metadata_lines)
+        self.metadata_text.setText(metadata_text)
 
 
 def main():
