@@ -236,6 +236,78 @@ class DatabaseManager:
         
         return indices
     
+    def get_filter_data(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Get all index data organized by index_type with counts"""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT index_type, index_key, COUNT(*) as count
+                    FROM indices
+                    GROUP BY index_type, index_key
+                    ORDER BY index_type, count DESC, index_key
+                """)
+                
+                filter_data = {}
+                for row in rows:
+                    index_type = row['index_type']
+                    if index_type not in filter_data:
+                        filter_data[index_type] = []
+                    
+                    filter_data[index_type].append({
+                        'key': row['index_key'],
+                        'count': row['count']
+                    })
+                
+                return filter_data
+        except Exception as e:
+            logger.error(f"Failed to get filter data: {e}")
+            return {}
+    
+    def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
+        """
+        Get file paths that match the provided filters.
+        
+        Args:
+            filters: Dict where keys are index_types and values are lists of index_keys
+                    e.g., {'prompt': ['portrait', 'landscape'], 'source': ['ComfyUI']}
+        
+        Returns:
+            Set of file paths that match the filters
+        """
+        if not filters:
+            return set()
+        
+        try:
+            with self._get_connection() as conn:
+                # Build query dynamically based on filters
+                conditions = []
+                params = []
+                
+                for index_type, index_keys in filters.items():
+                    if index_keys:  # Skip empty lists
+                        placeholders = ','.join(['?' for _ in index_keys])
+                        conditions.append(f"""
+                            file_path IN (
+                                SELECT DISTINCT file_path 
+                                FROM indices 
+                                WHERE index_type = ? AND index_key IN ({placeholders})
+                            )
+                        """)
+                        params.append(index_type)
+                        params.extend(index_keys)
+                
+                if not conditions:
+                    return set()
+                
+                # Join conditions with AND (intersection of all filter types)
+                query = f"SELECT DISTINCT file_path FROM indices WHERE {' AND '.join(conditions)}"
+                
+                rows = conn.execute(query, params)
+                return {row['file_path'] for row in rows}
+        except Exception as e:
+            logger.error(f"Failed to get filtered media paths: {e}")
+            return set()
+
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics"""
         try:
