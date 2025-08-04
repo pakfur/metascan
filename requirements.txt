@@ -1,4 +1,7 @@
-# Core dependencies
+# Metascan Dependencies
+# Frozen from virtual environment state
+
+# Core UI Framework
 PyQt6==6.6.1
 PyQt6-Qt6==6.6.1
 PyQt6-sip==13.6.0
@@ -6,16 +9,38 @@ PyQt6-sip==13.6.0
 # Database
 # plyvel==1.5.0  # Replaced with SQLite due to macOS ABI issues
 
-# Image processing
-Pillow==10.2.0
+# Image Processing
+pillow==10.2.0
 
-# File watching
+# Video Processing
+ffmpeg-python==0.2.0
+future==1.0.0  # Required by ffmpeg-python
+
+# Natural Language Processing (for prompt tokenization)
+nltk==3.9.1
+joblib==1.5.1  # Required by nltk
+regex==2025.7.34  # Required by nltk
+tqdm==4.67.1  # Progress bars, required by nltk
+
+# File Watching
 watchdog==3.0.0
 
-# Data handling
+# Data Handling
 dataclasses-json==0.6.3
+marshmallow==3.26.1  # Required by dataclasses-json
+typing-inspect==0.9.0  # Required by dataclasses-json
+typing_extensions==4.14.1  # Required by multiple packages
 
-# Development dependencies
+# Development Dependencies
 pytest==7.4.4
+iniconfig==2.1.0  # Required by pytest
+packaging==25.0  # Required by pytest
+pluggy==1.6.0  # Required by pytest
+
 black==23.12.1
+click==8.2.2  # Required by black
+pathspec==0.12.1  # Required by black
+platformdirs==4.3.8  # Required by black
+
 mypy==1.8.0
+mypy_extensions==1.1.0  # Required by mypy

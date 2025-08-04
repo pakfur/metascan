@@ -1,0 +1,18 @@
+# Development Dependencies
+# These are optional for running Metascan but needed for development
+
+# Testing
+pytest==7.4.4
+iniconfig==2.1.0
+packaging==25.0
+pluggy==1.6.0
+
+# Code Formatting
+black==23.12.1
+click==8.2.2
+pathspec==0.12.1
+platformdirs==4.3.8
+
+# Type Checking
+mypy==1.8.0
+mypy_extensions==1.1.0
