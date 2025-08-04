@@ -35,5 +35,18 @@
     "extremely",
     "highly",
     "best"
-  ]
+  ],
+  "tokenization": {
+    "heuristics": {
+      "comma_density": {
+        "threshold": 0.2,
+        "weight": 0.6
+      },
+      "stopword_frequency": {
+        "threshold": 0.15,
+        "weight": 0.4
+      }
+    },
+    "classification_threshold": 0.5
+  }
 }
