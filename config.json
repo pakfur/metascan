@@ -4,5 +4,36 @@
       "filepath": "/Users/jkline/Library/Application Support/StabilityMatrix/Images/Text2Img/local/raw/2025-08-01",
       "search_subfolders": true
     }
+  ],
+  "filler_words": [
+    "background",
+    "soft",
+    "aesthetic",
+    "high",
+    "lighting",
+    "shot",
+    "",
+    "beautiful",
+    "lovely",
+    "nice",
+    "awesome",
+    "amazing",
+    "perfect",
+    "gorgeous",
+    "fantastic",
+    "cool",
+    "nice looking",
+    "superb",
+    "wonderful",
+    "pretty",
+    "great",
+    "incredible",
+    "stunning",
+    "epic",
+    "very",
+    "really",
+    "extremely",
+    "highly",
+    "best"
   ]
 }
