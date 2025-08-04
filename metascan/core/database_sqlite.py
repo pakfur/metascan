@@ -6,10 +6,18 @@ from contextlib import contextmanager
 import logging
 from datetime import datetime
 from threading import Lock
+import nltk
+from nltk.corpus import stopwords
 
 from metascan.core.media import Media
 
 logger = logging.getLogger(__name__)
+
+# Download stopwords if not already available
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords', quiet=True)
 
 
 class DatabaseManager:
@@ -18,6 +26,20 @@ class DatabaseManager:
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.db_file = self.db_path / "metascan.db"
         self.lock = Lock()
+        
+        # Load stop words
+        self.stop_words = set(stopwords.words('english'))
+        
+        # Load filler words from config
+        self.filler_words = set()
+        config_path = Path(__file__).parent.parent.parent / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    self.filler_words = set(word.lower() for word in config.get('filler_words', []))
+            except Exception as e:
+                logger.warning(f"Failed to load filler words from config: {e}")
         
         self._init_database()
     
@@ -225,11 +247,25 @@ class DatabaseManager:
         date_key = media.created_at.strftime("%Y-%m")
         indices.append(("date", date_key))
         
-        # Index prompt words (simple tokenization)
+        # Index prompt words (tokenization with stop word and filler word filtering)
         if media.prompt:
-            words = set(word.lower() for word in media.prompt.split() 
-                       if len(word) > 2)
+            # Tokenize and convert to lowercase
+            words = [word.lower() for word in media.prompt.split()]
+            
+            # Filter out stop words, filler words, and short words
+            filtered_words = set()
             for word in words:
+                # Remove punctuation from word edges
+                word = word.strip('.,!?;:()[]{}"\'-')
+                
+                # Skip if word is too short, is a stop word, or is a filler word
+                if (len(word) > 2 and 
+                    word not in self.stop_words and 
+                    word not in self.filler_words):
+                    filtered_words.add(word)
+            
+            # Add filtered words to indices
+            for word in filtered_words:
                 indices.append(("prompt", word))
         
         return indices
