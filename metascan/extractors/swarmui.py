@@ -61,15 +61,26 @@ class SwarmUIExtractor(MetadataExtractor):
                 try:
                     comment = metadata["UserComment"]
                     if isinstance(comment, str) and "sui_image_params" in comment:
-                        # Parse JSON from UserComment
-                        json_data = json.loads(comment)
-                        if "sui_image_params" in json_data:
-                            params = json_data["sui_image_params"]
-                            result["raw_metadata"]["sui_image_params"] = params
-                            extracted = self._extract_from_sui_params(params)
-                            result.update(extracted)
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.warning(f"Failed to parse SwarmUI data from UserComment in {image_path}: {e}")
+                        # Try to parse JSON from UserComment
+                        try:
+                            json_data = json.loads(comment)
+                            if "sui_image_params" in json_data:
+                                params = json_data["sui_image_params"]
+                                result["raw_metadata"]["sui_image_params"] = params
+                                extracted = self._extract_from_sui_params(params)
+                                result.update(extracted)
+                        except json.JSONDecodeError as e:
+                            # Try to repair incomplete JSON by extracting what we can
+                            logger.debug(f"JSON parse error in {image_path}: {e}")
+                            repaired_data = self._repair_incomplete_json(comment)
+                            if repaired_data:
+                                result["raw_metadata"]["sui_image_params"] = repaired_data
+                                extracted = self._extract_from_sui_params(repaired_data)
+                                result.update(extracted)
+                            else:
+                                logger.warning(f"Failed to parse SwarmUI data from UserComment in {image_path}: {e}")
+                except (KeyError, TypeError) as e:
+                    logger.warning(f"Unexpected error parsing SwarmUI data from {image_path}: {e}")
             
             # Fallback to parameters field
             elif "parameters" in metadata:
@@ -158,3 +169,47 @@ class SwarmUIExtractor(MetadataExtractor):
             extracted["seed"] = self._safe_int(value)
         elif key == "sampler":
             extracted["sampler"] = value
+    
+    def _repair_incomplete_json(self, json_str: str) -> Optional[Dict[str, Any]]:
+        """Attempt to repair incomplete/truncated JSON by extracting available data"""
+        try:
+            # Try to extract just the prompt if the JSON is incomplete
+            import re
+            
+            # Look for prompt field in the JSON
+            prompt_match = re.search(r'"prompt"\s*:\s*"([^"]*)"', json_str)
+            negative_match = re.search(r'"(?:negative_?prompt|negativeprompt)"\s*:\s*"([^"]*)"', json_str)
+            model_match = re.search(r'"model"\s*:\s*"([^"]*)"', json_str)
+            steps_match = re.search(r'"steps"\s*:\s*(\d+)', json_str)
+            cfg_match = re.search(r'"(?:cfg_?scale|cfgscale)"\s*:\s*([\d.]+)', json_str)
+            seed_match = re.search(r'"seed"\s*:\s*(\d+)', json_str)
+            sampler_match = re.search(r'"sampler"\s*:\s*"([^"]*)"', json_str)
+            width_match = re.search(r'"width"\s*:\s*(\d+)', json_str)
+            height_match = re.search(r'"height"\s*:\s*(\d+)', json_str)
+            
+            # Build a repaired params dict with what we found
+            repaired = {}
+            if prompt_match:
+                repaired["prompt"] = prompt_match.group(1)
+            if negative_match:
+                repaired["negativeprompt"] = negative_match.group(1)
+            if model_match:
+                repaired["model"] = model_match.group(1)
+            if steps_match:
+                repaired["steps"] = int(steps_match.group(1))
+            if cfg_match:
+                repaired["cfgscale"] = float(cfg_match.group(1))
+            if seed_match:
+                repaired["seed"] = int(seed_match.group(1))
+            if sampler_match:
+                repaired["sampler"] = sampler_match.group(1)
+            if width_match:
+                repaired["width"] = int(width_match.group(1))
+            if height_match:
+                repaired["height"] = int(height_match.group(1))
+            
+            return repaired if repaired else None
+            
+        except Exception as e:
+            logger.debug(f"Failed to repair incomplete JSON: {e}")
+            return None
