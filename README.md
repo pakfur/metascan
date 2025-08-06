@@ -1,26 +1,307 @@
-# Metascan Project Brief
+# Metascan
+
+**AI-generated media browser with metadata extraction and intelligent indexing**
+
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
+[![PyQt6](https://img.shields.io/badge/PyQt6-GUI-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Overview
-AI image/video browser with metadata extraction and indexing
+
+Metascan is a powerful desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from popular AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an intuitive interface to browse your media collection with advanced filtering capabilities.
+
+## Features
+
+✨ **Comprehensive Media Support**
+- Image formats: PNG, JPG, WEBP with embedded metadata
+- Video formats: MP4, AVI, MOV with metadata extraction
+- Thumbnail generation with FFMPEG integration
+
+🤖 **AI Metadata Extraction**
+- ComfyUI workflow extraction
+- SwarmUI parameter parsing  
+- Fooocus metadata support
+- Custom prompt tokenization with NLTK
+
+🔍 **Advanced Filtering & Search**
+- Filter by prompts, models, LoRAs, and custom tags
+- Inverted index for fast search across large collections
+- Real-time filter updates
+- Favorites system for organizing preferred media
+
+🖼️ **Intuitive Interface**
+- Virtualized thumbnail grid for performance with large collections
+- Three-panel layout: filters, thumbnails, metadata
+- Resizable panels with persistent layout
+- Full-size media viewer with zoom capabilities
+
+📁 **Smart Organization**
+- Directory scanning with file watching
+- SQLite database for metadata storage
+- Configurable scan directories
+- Automatic thumbnail caching
 
 ## Tech Stack
-- Python 3.9+
-- PyQt6 for GUI
-- LevelDB for storage
-- Pillow for thumbnails
-- watchdog for file monitoring
 
-## Key Features
-1. Scan directories for AI-generated media
-2. Extract metadata from ComfyUI/SwarmUI/Fooocus
-3. Build inverted indices for filtering
-4. Thumbnail grid view with metadata panel
-5. Full-size image/video viewer
+**Core Technologies:**
+- **Python 3.8+** - Core application language
+- **PyQt6** - Modern cross-platform GUI framework
+- **SQLite** - Local database for metadata storage
+- **NLTK** - Natural language processing for prompt analysis
 
-## Data Model
-- Media objects with AI metadata
-- Inverted indices for prompts/models/LoRAs
-- Cached thumbnails
+**Media Processing:**
+- **Pillow** - Image processing and thumbnail generation
+- **FFMPEG-Python** - Video processing and thumbnail extraction
+- **Watchdog** - File system monitoring for real-time updates
 
-## Development Status
-Starting fresh - need initial project setup
+**Development Tools:**
+- **pytest** - Unit testing framework
+- **black** - Code formatting
+- **mypy** - Static type checking
+
+## Installation
+
+### Prerequisites
+
+- **Python 3.8 or higher**
+- **FFMPEG** - Required for video thumbnail generation
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt install ffmpeg`
+  - Windows: Download from [FFmpeg.org](https://ffmpeg.org/download.html)
+
+### Quick Start
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd metascan
+   ```
+
+2. **Set up virtual environment:**
+   ```bash
+   python -m venv venv
+   
+   # Activate virtual environment:
+   # On macOS/Linux:
+   source venv/bin/activate
+   # On Windows:
+   venv\Scripts\activate
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Set up NLTK data (first time only):**
+   ```bash
+   python setup_nltk.py
+   ```
+
+5. **Run the application:**
+   ```bash
+   python main.py
+   ```
+
+### Alternative Installation (Development)
+
+For development with editable installation:
+
+```bash
+pip install -e .
+metascan  # Run from anywhere after installation
+```
+
+## Usage
+
+### First Launch
+
+1. **Configure scan directories:**
+   - Click the "Configure" button in the toolbar
+   - Add directories containing your AI-generated media
+   - Click "Save" to apply settings
+
+2. **Scan your media:**
+   - Click "Scan" to index your media files
+   - The scanning process will extract metadata and generate thumbnails
+   - Progress is shown in the status bar
+
+3. **Browse and filter:**
+   - Use the left panel to filter by prompts, models, LoRAs, and tags
+   - View thumbnails in the center panel
+   - See detailed metadata in the right panel
+   - Double-click thumbnails to view full-size media
+
+### Key Features
+
+- **Filtering:** Click filter items in the left panel to refine your view
+- **Favorites:** Right-click thumbnails to mark as favorites
+- **Search:** Use text filters to search across prompts and metadata
+- **Viewer:** Double-click images/videos for full-size viewing with zoom controls
+
+## Configuration
+
+Configuration is stored in `config.json` in the application directory:
+
+```json
+{
+  "scan_directories": [
+    "/path/to/your/ai/images",
+    "/path/to/your/ai/videos"
+  ],
+  "watch_directories": true,
+  "thumbnail_size": [300, 300],
+  "cache_size_mb": 500
+}
+```
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=metascan
+
+# Run specific test file
+pytest tests/test_prompt_tokenizer.py
+```
+
+## Development
+
+### Code Style
+
+The project uses `black` for code formatting and `mypy` for type checking:
+
+```bash
+# Format code
+black metascan/ tests/
+
+# Type checking
+mypy metascan/
+
+# Run both
+black metascan/ tests/ && mypy metascan/
+```
+
+## Contributing
+
+We welcome contributions to Metascan! Here's how to get started:
+
+### Setting Up Development Environment
+
+1. **Fork and clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/metascan.git
+   cd metascan
+   ```
+
+2. **Set up development environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
+   python setup_nltk.py
+   ```
+
+3. **Install pre-commit hooks (optional but recommended):**
+   ```bash
+   pip install pre-commit
+   pre-commit install
+   ```
+
+### Development Guidelines
+
+**Code Standards:**
+- Follow PEP 8 style guidelines
+- Use `black` for code formatting
+- Add type hints where appropriate
+- Write docstrings for public functions and classes
+
+**Testing:**
+- Write tests for new features using `pytest`
+- Maintain or improve test coverage
+- Test UI changes manually across different screen sizes
+- Include tests for metadata extraction with sample files
+
+**Commit Guidelines:**
+- Use clear, descriptive commit messages
+- Reference issues in commits when applicable
+- Keep commits atomic and focused on single changes
+
+### Areas for Contribution
+
+**🐛 Bug Reports & Fixes**
+- Report bugs with detailed steps to reproduce
+- Include system information and error messages
+- Fix existing issues marked as "good first issue"
+
+**✨ Feature Requests & Implementation**
+- New metadata extractors for additional AI tools
+- Additional file format support
+- UI/UX improvements and accessibility features
+- Performance optimizations for large media collections
+
+**📚 Documentation**
+- Improve code documentation and docstrings
+- Create tutorials and usage examples
+- Translate documentation to other languages
+
+**🧪 Testing & Quality Assurance**
+- Add test coverage for untested code
+- Create integration tests
+- Test on different operating systems
+- Performance testing with large datasets
+
+### Submitting Changes
+
+1. **Create a feature branch:**
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+2. **Make your changes and test:**
+   ```bash
+   # Run tests
+   pytest
+   
+   # Check code style
+   black metascan/ tests/
+   mypy metascan/
+   ```
+
+3. **Commit and push:**
+   ```bash
+   git add .
+   git commit -m "Add your descriptive commit message"
+   git push origin feature/your-feature-name
+   ```
+
+4. **Create a pull request:**
+   - Describe your changes clearly
+   - Reference any related issues
+   - Include screenshots for UI changes
+   - Ensure all tests pass
+
+### Getting Help
+
+- **Issues:** Use GitHub Issues for bug reports and feature requests
+- **Discussions:** Use GitHub Discussions for general questions
+- **Code Review:** All contributions go through code review process
+
+Thank you for contributing to Metascan!
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Thanks to the creators of ComfyUI, SwarmUI, and Fooocus for their amazing AI generation tools
+- Built with PyQt6 for cross-platform desktop GUI
+- Powered by SQLite for efficient local data storage
+- Uses FFMPEG for robust video processing capabilities
