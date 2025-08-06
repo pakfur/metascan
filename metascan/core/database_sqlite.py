@@ -32,10 +32,18 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS media (
                     file_path TEXT PRIMARY KEY,
                     data TEXT NOT NULL,
+                    is_favorite INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Add favorite column to existing tables (migration)
+            cursor = conn.execute("PRAGMA table_info(media)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'is_favorite' not in columns:
+                conn.execute("ALTER TABLE media ADD COLUMN is_favorite INTEGER DEFAULT 0")
+                logger.info("Added is_favorite column to media table")
             
             # Index tables for fast searching
             conn.execute("""
@@ -88,11 +96,11 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
-                    # Save media
+                    # Save media with favorite status
                     conn.execute("""
-                        INSERT OR REPLACE INTO media (file_path, data, updated_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                    """, (str(media.file_path), media.to_json()))
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (str(media.file_path), media.to_json(), 1 if media.is_favorite else 0))
                     
                     # Update indices
                     self._update_indices(conn, media)
@@ -108,11 +116,11 @@ class DatabaseManager:
         with self.batch_writer() as conn:
             for media in media_list:
                 try:
-                    # Save media
+                    # Save media with favorite status
                     conn.execute("""
-                        INSERT OR REPLACE INTO media (file_path, data, updated_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                    """, (str(media.file_path), media.to_json()))
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (str(media.file_path), media.to_json(), 1 if media.is_favorite else 0))
                     
                     # Update indices
                     self._update_indices(conn, media)
@@ -320,6 +328,73 @@ class DatabaseManager:
             logger.error(f"Failed to get filtered media paths: {e}")
             return set()
 
+    def toggle_favorite(self, file_path: Path) -> bool:
+        """Toggle the favorite status of a media item"""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Get current favorite status
+                    row = conn.execute(
+                        "SELECT is_favorite FROM media WHERE file_path = ?",
+                        (str(file_path),)
+                    ).fetchone()
+                    
+                    if row is not None:
+                        new_status = 0 if row['is_favorite'] else 1
+                        conn.execute("""
+                            UPDATE media 
+                            SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE file_path = ?
+                        """, (new_status, str(file_path)))
+                        conn.commit()
+                        return bool(new_status)
+                    return False
+        except Exception as e:
+            logger.error(f"Failed to toggle favorite for {file_path}: {e}")
+            return False
+    
+    def set_favorite(self, file_path: Path, is_favorite: bool) -> bool:
+        """Set the favorite status of a media item"""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    cursor = conn.execute("""
+                        UPDATE media 
+                        SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE file_path = ?
+                    """, (1 if is_favorite else 0, str(file_path)))
+                    conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to set favorite for {file_path}: {e}")
+            return False
+    
+    def get_favorite_media_paths(self) -> Set[str]:
+        """Get all file paths of favorite media"""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT file_path FROM media WHERE is_favorite = 1"
+                )
+                return {row['file_path'] for row in rows}
+        except Exception as e:
+            logger.error(f"Failed to get favorite media paths: {e}")
+            return set()
+    
+    def load_favorite_status(self, media_list: List[Media]):
+        """Load favorite status from database for a list of media objects"""
+        try:
+            with self._get_connection() as conn:
+                for media in media_list:
+                    row = conn.execute(
+                        "SELECT is_favorite FROM media WHERE file_path = ?",
+                        (str(media.file_path),)
+                    ).fetchone()
+                    if row:
+                        media.is_favorite = bool(row['is_favorite'])
+        except Exception as e:
+            logger.error(f"Failed to load favorite status: {e}")
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics"""
         try:

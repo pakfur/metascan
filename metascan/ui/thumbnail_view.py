@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QMessageBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF, QUrl
-from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QBrush, QPolygon, QPolygonF, QDesktopServices
+from PyQt6.QtGui import QPixmap, QFont, QPainter, QPen, QColor, QBrush, QPolygon, QPolygonF, QDesktopServices, QKeySequence, QShortcut
 from pathlib import Path
 from typing import List, Set, Optional, Dict
 import logging
@@ -21,6 +21,7 @@ class ThumbnailWidget(QLabel):
     
     clicked = pyqtSignal(object)  # Emits the Media object
     double_clicked = pyqtSignal(object)  # Emits the Media object for opening
+    favorite_toggled = pyqtSignal(object)  # Emits the Media object when favorite is toggled
     
     def __init__(self, media: Media, thumbnail_path: Optional[Path] = None, parent=None):
         super().__init__(parent)
@@ -51,6 +52,17 @@ class ThumbnailWidget(QLabel):
         media_type = "video" if media.is_video else "image"
         self.setToolTip(f"Click to select • Double-click to open {media_type}\n{media.file_name}")
         
+        # Create favorite star button
+        self.star_button = QPushButton(self)
+        self.star_button.setFixedSize(24, 24)
+        self.star_button.setFlat(True)
+        self.star_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.star_button.clicked.connect(self.on_star_clicked)
+        self.update_star_icon()
+        
+        # Position star at bottom-right corner
+        self.star_button.move(self.width() - 30, self.height() - 30)
+        
         # Load thumbnail or show placeholder
         if thumbnail_path and thumbnail_path.exists():
             self.load_thumbnail(thumbnail_path)
@@ -79,6 +91,53 @@ class ThumbnailWidget(QLabel):
         except Exception as e:
             logger.error(f"Failed to load thumbnail {thumbnail_path}: {e}")
             self.show_placeholder()
+    
+    def update_star_icon(self):
+        """Update the star icon based on favorite status."""
+        if self.media.is_favorite:
+            # Filled yellow star
+            self.star_button.setText("★")
+            self.star_button.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(255, 255, 255, 200);
+                    border: 1px solid #ffc107;
+                    border-radius: 12px;
+                    color: #ffc107;
+                    font-size: 16px;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 255, 255, 255);
+                    border: 2px solid #ffc107;
+                }
+            """)
+            self.star_button.setToolTip("Remove from favorites")
+        else:
+            # Empty star
+            self.star_button.setText("☆")
+            self.star_button.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(255, 255, 255, 150);
+                    border: 1px solid #ccc;
+                    border-radius: 12px;
+                    color: #666;
+                    font-size: 16px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 255, 255, 255);
+                    border: 1px solid #ffc107;
+                    color: #ffc107;
+                }
+            """)
+            self.star_button.setToolTip("Add to favorites")
+    
+    def on_star_clicked(self):
+        """Handle star button click."""
+        self.media.is_favorite = not self.media.is_favorite
+        self.update_star_icon()
+        self.favorite_toggled.emit(self.media)
     
     def show_placeholder(self):
         """Show placeholder text when thumbnail is not available."""
@@ -154,6 +213,11 @@ class ThumbnailWidget(QLabel):
         """Set the selection state of this thumbnail."""
         self.is_selected = selected
         self.update_style()
+    
+    def set_favorite(self, is_favorite: bool):
+        """Update the favorite status."""
+        self.media.is_favorite = is_favorite
+        self.update_star_icon()
     
     def set_filtered(self, filtered: bool):
         """Set whether this thumbnail matches current filters."""
@@ -237,6 +301,7 @@ class ThumbnailView(QWidget):
     """Main thumbnail view widget with grid layout and filtering."""
     
     selection_changed = pyqtSignal(object)  # Emits selected Media object
+    favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -244,10 +309,12 @@ class ThumbnailView(QWidget):
         self.thumbnail_widgets: Dict[str, ThumbnailWidget] = {}  # file_path -> widget
         self.filtered_paths: Set[str] = set()
         self.selected_media: Optional[Media] = None
+        self.selected_index: int = -1  # Track selected index for keyboard navigation
         self.thumbnail_cache: Optional[ThumbnailCache] = None
         self.loader_thread: Optional[ThumbnailLoader] = None
         
         self.setup_ui()
+        self.setup_keyboard_shortcuts()
     
     def setup_ui(self):
         """Set up the user interface."""
@@ -307,6 +374,98 @@ class ThumbnailView(QWidget):
         # Initialize thumbnail cache
         cache_dir = Path.home() / ".metascan" / "thumbnails"
         self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
+        
+        # Set focus policy to enable keyboard navigation
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    
+    def setup_keyboard_shortcuts(self):
+        """Set up keyboard shortcuts for navigation and actions."""
+        # Arrow key navigation (handled in keyPressEvent)
+        
+        # F key to toggle favorite
+        favorite_shortcut = QShortcut(QKeySequence("F"), self)
+        favorite_shortcut.activated.connect(self.toggle_selected_favorite)
+        
+        # Enter/Return to open media
+        enter_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Return), self)
+        enter_shortcut.activated.connect(self.open_selected_media)
+        
+        space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        space_shortcut.activated.connect(self.open_selected_media)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation."""
+        if not self.media_list:
+            return super().keyPressEvent(event)
+        
+        visible_widgets = self.get_visible_widgets()
+        if not visible_widgets:
+            return super().keyPressEvent(event)
+        
+        columns = self.calculate_columns()
+        current_index = self.selected_index
+        
+        # Initialize selection if none exists
+        if current_index == -1 and visible_widgets:
+            self.select_by_index(0)
+            return
+        
+        key = event.key()
+        new_index = current_index
+        
+        if key == Qt.Key.Key_Left:
+            if current_index > 0:
+                new_index = current_index - 1
+        elif key == Qt.Key.Key_Right:
+            if current_index < len(visible_widgets) - 1:
+                new_index = current_index + 1
+        elif key == Qt.Key.Key_Up:
+            if current_index >= columns:
+                new_index = current_index - columns
+        elif key == Qt.Key.Key_Down:
+            if current_index + columns < len(visible_widgets):
+                new_index = current_index + columns
+        elif key == Qt.Key.Key_Home:
+            new_index = 0
+        elif key == Qt.Key.Key_End:
+            new_index = len(visible_widgets) - 1
+        else:
+            return super().keyPressEvent(event)
+        
+        if new_index != current_index and 0 <= new_index < len(visible_widgets):
+            self.select_by_index(new_index)
+    
+    def get_visible_widgets(self) -> List[ThumbnailWidget]:
+        """Get list of currently visible thumbnail widgets in order."""
+        visible = []
+        for media in self.media_list:
+            widget = self.thumbnail_widgets.get(str(media.file_path))
+            if widget and widget.isVisible():
+                visible.append(widget)
+        return visible
+    
+    def select_by_index(self, index: int):
+        """Select a thumbnail by its index in the visible widgets."""
+        visible_widgets = self.get_visible_widgets()
+        if 0 <= index < len(visible_widgets):
+            widget = visible_widgets[index]
+            self.selected_index = index
+            self.on_thumbnail_clicked(widget.media)
+            
+            # Ensure the selected widget is visible in scroll area
+            self.scroll_area.ensureWidgetVisible(widget)
+    
+    def toggle_selected_favorite(self):
+        """Toggle favorite status of the selected media."""
+        if self.selected_media:
+            widget = self.thumbnail_widgets.get(str(self.selected_media.file_path))
+            if widget:
+                widget.on_star_clicked()
+    
+    def open_selected_media(self):
+        """Open the currently selected media file."""
+        if self.selected_media:
+            self.on_thumbnail_double_clicked(self.selected_media)
     
     def set_media_list(self, media_list: List[Media]):
         """Set the list of media to display."""
@@ -325,18 +484,19 @@ class ThumbnailView(QWidget):
             self.loader_thread.stop()
             self.loader_thread.wait()
         
-        # Remove all widgets from grid
+        # Clear the grid layout first
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            # Just remove from layout, don't delete yet
+        
+        # Now properly delete all widgets
         for widget in self.thumbnail_widgets.values():
+            widget.setVisible(False)  # Hide before deletion
+            widget.setParent(None)    # Remove parent to ensure proper cleanup
             widget.deleteLater()
         
         self.thumbnail_widgets.clear()
         self.selected_media = None
-        
-        # Clear the grid layout
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
     
     def load_thumbnails(self):
         """Load thumbnails for current media list."""
@@ -367,6 +527,7 @@ class ThumbnailView(QWidget):
             thumbnail_widget = ThumbnailWidget(media)
             thumbnail_widget.clicked.connect(self.on_thumbnail_clicked)
             thumbnail_widget.double_clicked.connect(self.on_thumbnail_double_clicked)
+            thumbnail_widget.favorite_toggled.connect(self.on_favorite_toggled)
             
             # Add to grid
             row = i // columns
@@ -411,9 +572,20 @@ class ThumbnailView(QWidget):
         widget = self.thumbnail_widgets.get(str(media.file_path))
         if widget:
             widget.set_selected(True)
+            
+            # Update selected index for keyboard navigation
+            visible_widgets = self.get_visible_widgets()
+            try:
+                self.selected_index = visible_widgets.index(widget)
+            except ValueError:
+                self.selected_index = -1
         
         # Emit selection change
         self.selection_changed.emit(media)
+    
+    def on_favorite_toggled(self, media: Media):
+        """Handle favorite toggle from thumbnail widget."""
+        self.favorite_toggled.emit(media)
     
     def on_thumbnail_double_clicked(self, media: Media):
         """Handle thumbnail double-clicks to open media file."""
@@ -493,10 +665,17 @@ class ThumbnailView(QWidget):
     def compact_thumbnail_grid(self, visible_widgets: List):
         """Rearrange visible thumbnails into a compact grid without gaps."""
         if not visible_widgets:
+            # Hide all widgets if nothing is visible
+            for widget in self.thumbnail_widgets.values():
+                widget.setVisible(False)
             return
         
         # Calculate columns for current width
         columns = self.calculate_columns()
+        
+        # First, hide ALL thumbnail widgets to prevent overlays
+        for widget in self.thumbnail_widgets.values():
+            widget.setVisible(False)
         
         # Remove all widgets from the grid layout
         # Note: We don't delete the widgets, just remove them from layout
@@ -504,11 +683,12 @@ class ThumbnailView(QWidget):
             item = self.grid_layout.takeAt(0)
             # Don't delete the widget, just remove from layout
         
-        # Re-add only visible widgets in compact arrangement
+        # Re-add only visible widgets in compact arrangement and show them
         for i, widget in enumerate(visible_widgets):
             row = i // columns
             col = i % columns
             self.grid_layout.addWidget(widget, row, col)
+            widget.setVisible(True)
             
         logger.debug(f"Compacted grid: {len(visible_widgets)} visible thumbnails in {columns} columns")
     
@@ -520,13 +700,14 @@ class ThumbnailView(QWidget):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
         
-        # Re-add all widgets in their original order
+        # Re-add all widgets in their original order and ensure they're visible
         for i, media in enumerate(self.media_list):
             widget = self.thumbnail_widgets.get(str(media.file_path))
             if widget:
                 row = i // columns
                 col = i % columns
                 self.grid_layout.addWidget(widget, row, col)
+                widget.setVisible(True)
         
         logger.debug(f"Restored full grid: {len(self.media_list)} thumbnails in {columns} columns")
     
@@ -579,15 +760,8 @@ class ThumbnailView(QWidget):
                 if widget and widget.is_filtered and file_path_str in self.filtered_paths:
                     visible_widgets.append(widget)
             
-            # Remove all from layout
-            while self.grid_layout.count():
-                item = self.grid_layout.takeAt(0)
-            
-            # Re-add visible widgets in compact arrangement
-            for i, widget in enumerate(visible_widgets):
-                row = i // columns
-                col = i % columns
-                self.grid_layout.addWidget(widget, row, col)
+            # Use the proper compact_thumbnail_grid method which handles visibility
+            self.compact_thumbnail_grid(visible_widgets)
         else:
             # No filters - restore full grid
             self.restore_full_grid()
