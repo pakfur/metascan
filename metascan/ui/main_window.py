@@ -10,6 +10,7 @@ from PyQt6.QtGui import QAction
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
+from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
 from metascan.core.scanner import Scanner
 from metascan.core.database_sqlite import DatabaseManager
@@ -88,7 +89,7 @@ class MainWindow(QMainWindow):
     
     def _create_thumbnail_panel(self) -> QWidget:
         # Create the thumbnail view
-        self.thumbnail_view = ThumbnailView()
+        self.thumbnail_view = VirtualThumbnailView()
         
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
@@ -321,7 +322,7 @@ class MainWindow(QMainWindow):
                 self.filtered_media_paths = filtered_paths & favorite_paths
                 print(f"Favorites filter applied: {len(self.filtered_media_paths)} items after favorites filter")
             else:
-                self.filtered_media_paths = filtered_paths if self.current_filters else set()
+                self.filtered_media_paths = filtered_paths
             
             # Update thumbnail view
             self.thumbnail_view.apply_filters(self.filtered_media_paths)
