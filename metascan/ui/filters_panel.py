@@ -111,11 +111,13 @@ class FiltersPanel(QWidget):
     
     filters_changed = pyqtSignal(dict)  # Emits current filter selections
     sort_changed = pyqtSignal(str)  # Emits sort order: "count" or "alphabetical"
+    favorites_toggled = pyqtSignal(bool)  # Emits when favorites filter is toggled
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.filter_sections = {}
         self.sort_order = "count"  # Default sort by count
+        self.favorites_checkbox = None
         self.setup_ui()
     
     def setup_ui(self):
@@ -225,6 +227,40 @@ class FiltersPanel(QWidget):
         button_layout.addStretch()
         main_layout.addLayout(button_layout)
         
+        # Favorites filter checkbox (always visible at top)
+        self.favorites_checkbox = QCheckBox("★ Favorites")
+        self.favorites_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 13px;
+                font-weight: bold;
+                padding: 8px;
+                background-color: #fff9e6;
+                border: 1px solid #ffc107;
+                border-radius: 4px;
+                margin: 5px 0;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #ffc107;
+                background-color: white;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                border: 2px solid #ffc107;
+                background-color: #ffc107;
+                border-radius: 3px;
+            }
+            QCheckBox:hover {
+                background-color: #fff3cd;
+            }
+        """)
+        self.favorites_checkbox.setToolTip("Show only favorite items")
+        self.favorites_checkbox.stateChanged.connect(self.on_favorites_toggled)
+        main_layout.addWidget(self.favorites_checkbox)
+        
         # Scroll area for filter sections
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -307,3 +343,12 @@ class FiltersPanel(QWidget):
     def set_refresh_callback(self, callback):
         """Set the callback function for the refresh button."""
         self.refresh_button.clicked.connect(callback)
+    
+    def on_favorites_toggled(self):
+        """Handle favorites checkbox toggle."""
+        is_checked = self.favorites_checkbox.isChecked()
+        self.favorites_toggled.emit(is_checked)
+    
+    def is_favorites_active(self) -> bool:
+        """Check if favorites filter is active."""
+        return self.favorites_checkbox.isChecked() if self.favorites_checkbox else False

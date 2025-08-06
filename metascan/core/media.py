@@ -42,6 +42,9 @@ class Media:
     # Tags and organization
     tags: List[str] = field(default_factory=list)
     
+    # Favorite status
+    is_favorite: bool = False
+    
     # Thumbnail cache path
     thumbnail_path: Optional[Path] = field(default=None, metadata=config(
         encoder=lambda x: str(x) if x else None,

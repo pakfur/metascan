@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         # Current filter state
         self.current_filters = {}
         self.filtered_media_paths = set()
+        self.favorites_active = False  # Track if favorites filter is active
         self.all_media = []  # Cache of all media for filtering
         
         # Initialize thumbnail cache for metadata panel
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.filters_panel.filters_changed.connect(self.on_filters_changed)
         self.filters_panel.sort_changed.connect(self.on_sort_order_changed)
+        self.filters_panel.favorites_toggled.connect(self.on_favorites_toggled)
         self.filters_panel.set_refresh_callback(self.refresh_filters)
         
         # Load initial filter data
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
+        self.thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
         
         # Load initial media if any exists
         self.load_all_media()
@@ -242,6 +245,8 @@ class MainWindow(QMainWindow):
         """Load all media from database."""
         try:
             self.all_media = self.db_manager.get_all_media()
+            # Load favorite status from database
+            self.db_manager.load_favorite_status(self.all_media)
             self.thumbnail_view.set_media_list(self.all_media)
             print(f"Loaded {len(self.all_media)} media items")
         except Exception as e:
@@ -266,19 +271,62 @@ class MainWindow(QMainWindow):
     def on_filters_changed(self, filters: dict):
         """Handle when filter selections change."""
         self.current_filters = filters
-        
-        if filters:
-            # Get filtered media paths
-            self.filtered_media_paths = self.db_manager.get_filtered_media_paths(filters)
-            print(f"Filters applied: {filters}")
-            print(f"Found {len(self.filtered_media_paths)} matching media files")
-        else:
-            # No filters selected - show all
-            self.filtered_media_paths = set()
-            print("All filters cleared - showing all media")
-        
-        # Update thumbnail view with filtered results
-        self.thumbnail_view.apply_filters(self.filtered_media_paths)
+        self.apply_all_filters()
+    
+    def on_favorites_toggled(self, is_active: bool):
+        """Handle when favorites filter is toggled."""
+        self.favorites_active = is_active
+        print(f"Favorites filter {'activated' if is_active else 'deactivated'}")
+        self.apply_all_filters()
+    
+    def on_favorite_toggled(self, media):
+        """Handle when a media item's favorite status is toggled."""
+        try:
+            # Update database
+            success = self.db_manager.set_favorite(media.file_path, media.is_favorite)
+            if success:
+                print(f"{'Added to' if media.is_favorite else 'Removed from'} favorites: {media.file_name}")
+                
+                # If favorites filter is active, reapply filters
+                if self.favorites_active:
+                    self.apply_all_filters()
+            else:
+                print(f"Failed to update favorite status for {media.file_name}")
+                # Revert the change in the UI
+                media.is_favorite = not media.is_favorite
+                widget = self.thumbnail_view.thumbnail_widgets.get(str(media.file_path))
+                if widget:
+                    widget.set_favorite(media.is_favorite)
+        except Exception as e:
+            print(f"Error toggling favorite: {e}")
+    
+    def apply_all_filters(self):
+        """Apply both regular filters and favorites filter."""
+        try:
+            # Start with all media paths or filtered paths
+            if self.current_filters:
+                # Get media matching current filters
+                filtered_paths = self.db_manager.get_filtered_media_paths(self.current_filters)
+                print(f"Filters applied: {self.current_filters}")
+                print(f"Found {len(filtered_paths)} matching media files")
+            else:
+                # No filters - start with all media
+                filtered_paths = {str(media.file_path) for media in self.all_media}
+                print("No filters applied - starting with all media")
+            
+            # Apply favorites filter if active
+            if self.favorites_active:
+                favorite_paths = self.db_manager.get_favorite_media_paths()
+                # Intersect with current filtered paths
+                self.filtered_media_paths = filtered_paths & favorite_paths
+                print(f"Favorites filter applied: {len(self.filtered_media_paths)} items after favorites filter")
+            else:
+                self.filtered_media_paths = filtered_paths if self.current_filters else set()
+            
+            # Update thumbnail view
+            self.thumbnail_view.apply_filters(self.filtered_media_paths)
+        except Exception as e:
+            print(f"Error applying filters: {e}")
     
     def on_thumbnail_selected(self, media):
         """Handle when a thumbnail is selected."""
