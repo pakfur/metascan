@@ -62,6 +62,7 @@ class ThumbnailWidget(QLabel):
         
         # Position star at bottom-right corner
         self.star_button.move(self.width() - 30, self.height() - 30)
+        self.star_button.raise_()  # Ensure star button is above the thumbnail
         
         # Load thumbnail or show placeholder
         if thumbnail_path and thumbnail_path.exists():
@@ -86,6 +87,8 @@ class ThumbnailWidget(QLabel):
                     scaled_pixmap = self._add_video_overlay(scaled_pixmap)
                 
                 self.setPixmap(scaled_pixmap)
+                # Ensure star button stays on top after loading thumbnail
+                self.star_button.raise_()
             else:
                 self.show_placeholder()
         except Exception as e:
@@ -305,6 +308,7 @@ class ThumbnailView(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.container_widget = None
         self.media_list: List[Media] = []
         self.thumbnail_widgets: Dict[str, ThumbnailWidget] = {}  # file_path -> widget
         self.filtered_paths: Set[str] = set()
@@ -365,7 +369,7 @@ class ThumbnailView(QWidget):
         # Container widget for thumbnails
         self.container_widget = QWidget()
         self.grid_layout = QGridLayout(self.container_widget)
-        self.grid_layout.setSpacing(10)
+        self.grid_layout.setSpacing(25)  # Increased spacing to prevent overlap
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
         
         self.scroll_area.setWidget(self.container_widget)
@@ -522,25 +526,37 @@ class ThumbnailView(QWidget):
         """Create thumbnail widgets and arrange them in grid."""
         columns = self.calculate_columns()
         
-        for i, media in enumerate(self.media_list):
-            # Create thumbnail widget with placeholder
-            thumbnail_widget = ThumbnailWidget(media)
-            thumbnail_widget.clicked.connect(self.on_thumbnail_clicked)
-            thumbnail_widget.double_clicked.connect(self.on_thumbnail_double_clicked)
-            thumbnail_widget.favorite_toggled.connect(self.on_favorite_toggled)
+        # Suspend layout updates for better performance
+        self.container_widget.setUpdatesEnabled(False)
+        
+        try:
+            # Clear the grid layout first to prevent any overlapping
+            for i in reversed(range(self.grid_layout.count())):
+                self.grid_layout.takeAt(i)
             
-            # Add to grid
-            row = i // columns
-            col = i % columns
-            self.grid_layout.addWidget(thumbnail_widget, row, col)
-            
-            # Store reference
-            self.thumbnail_widgets[str(media.file_path)] = thumbnail_widget
+            for i, media in enumerate(self.media_list):
+                # Create thumbnail widget with placeholder
+                thumbnail_widget = ThumbnailWidget(media)
+                thumbnail_widget.clicked.connect(self.on_thumbnail_clicked)
+                thumbnail_widget.double_clicked.connect(self.on_thumbnail_double_clicked)
+                thumbnail_widget.favorite_toggled.connect(self.on_favorite_toggled)
+                
+                # Add to grid
+                row = i // columns
+                col = i % columns
+                self.grid_layout.addWidget(thumbnail_widget, row, col)
+                
+                # Store reference
+                self.thumbnail_widgets[str(media.file_path)] = thumbnail_widget
+        
+        finally:
+            # Re-enable updates
+            self.container_widget.setUpdatesEnabled(True)
     
     def calculate_columns(self) -> int:
         """Calculate optimal number of columns based on available width."""
         available_width = self.scroll_area.width() - 40  # Account for margins/scrollbar
-        thumbnail_width = 220  # 200px + margins
+        thumbnail_width = 225  # 200px widget + 15px spacing + border margins
         columns = max(1, available_width // thumbnail_width)
         return min(columns, 6)  # Cap at 6 columns max
     
@@ -631,83 +647,116 @@ class ThumbnailView(QWidget):
             raise RuntimeError(f"Unexpected error opening file: {e}")
     
     def apply_filters(self, filtered_paths: Set[str]):
-        """Apply filters and compact the thumbnail grid."""
+        """Apply filters and reorganize the thumbnail grid."""
         self.filtered_paths = filtered_paths
         
-        # Determine which thumbnails should be visible, preserving original order
+        # Determine which thumbnails should be visible
         visible_widgets = []
-        visible_count = 0
         
-        # Iterate through media_list to maintain original order
+        # If filtered_paths is empty, show all thumbnails
+        # If filtered_paths has items, only show those
         for media in self.media_list:
             file_path_str = str(media.file_path)
             widget = self.thumbnail_widgets.get(file_path_str)
             
             if widget:
-                # Show if no filters or path matches filters
-                is_visible = not filtered_paths or file_path_str in filtered_paths
-                widget.set_filtered(is_visible)
+                # Show widget if no filters (empty set) or if path is in filter set
+                should_show = not filtered_paths or file_path_str in filtered_paths
+                widget.set_filtered(should_show)
                 
-                if is_visible:
+                if should_show:
                     visible_widgets.append(widget)
-                    visible_count += 1
         
-        # Compact the grid by rearranging visible thumbnails
-        if visible_count == len(self.media_list):
-            # No filters applied - restore original layout
-            self.restore_full_grid()
-        else:
-            # Filters applied - use compact layout
-            self.compact_thumbnail_grid(visible_widgets)
+        # Reorganize the grid with visible widgets
+        self.reorganize_grid(visible_widgets)
         
-        self.update_info_label(visible_count)
+        # Update info label
+        self.update_info_label(len(visible_widgets))
     
-    def compact_thumbnail_grid(self, visible_widgets: List):
-        """Rearrange visible thumbnails into a compact grid without gaps."""
-        if not visible_widgets:
-            # Hide all widgets if nothing is visible
-            for widget in self.thumbnail_widgets.values():
-                widget.setVisible(False)
-            return
-        
-        # Calculate columns for current width
+    def reorganize_grid(self, visible_widgets: List[ThumbnailWidget]):
+        """Reorganize the grid to show only the specified widgets."""
         columns = self.calculate_columns()
         
-        # First, hide ALL thumbnail widgets to prevent overlays
-        for widget in self.thumbnail_widgets.values():
-            widget.setVisible(False)
+        # Suspend updates for performance
+        self.container_widget.setUpdatesEnabled(False)
         
-        # Remove all widgets from the grid layout
-        # Note: We don't delete the widgets, just remove them from layout
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            # Don't delete the widget, just remove from layout
-        
-        # Re-add only visible widgets in compact arrangement and show them
-        for i, widget in enumerate(visible_widgets):
-            row = i // columns
-            col = i % columns
-            self.grid_layout.addWidget(widget, row, col)
-            widget.setVisible(True)
+        try:
+            # Step 1: Hide ALL widgets first to prevent any overlaps
+            for widget in self.thumbnail_widgets.values():
+                widget.setVisible(False)
             
-        logger.debug(f"Compacted grid: {len(visible_widgets)} visible thumbnails in {columns} columns")
+            # Step 2: Clear the grid layout completely
+            while self.grid_layout.count() > 0:
+                item = self.grid_layout.takeAt(0)
+                # Don't delete widgets, just remove from layout
+            
+            # Step 3: If no visible widgets, we're done (but still need to update)
+            if not visible_widgets:
+                logger.debug("No visible widgets to display")
+            else:
+                # Step 4: Add only the visible widgets back to the grid
+                for i, widget in enumerate(visible_widgets):
+                    row = i // columns
+                    col = i % columns
+                    
+                    # Ensure proper parent
+                    if widget.parent() != self.container_widget:
+                        widget.setParent(self.container_widget)
+                    
+                    # Add to grid at specific position
+                    self.grid_layout.addWidget(widget, row, col)
+                    
+                    # Make visible after adding to layout
+                    widget.setVisible(True)
+                
+                logger.debug(f"Reorganized grid: {len(visible_widgets)} widgets in {columns} columns")
+            
+        finally:
+            # Re-enable updates
+            self.container_widget.setUpdatesEnabled(True)
+            # Force a repaint
+            self.container_widget.repaint()
+    
+    def compact_thumbnail_grid(self, visible_widgets: List):
+        """Legacy method - redirects to reorganize_grid."""
+        self.reorganize_grid(visible_widgets)
     
     def restore_full_grid(self):
+        logger.info(f"+++ called restore_full_grid")
         """Restore the full grid layout with all thumbnails in original positions."""
         columns = self.calculate_columns()
         
-        # Remove all widgets from the grid layout
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
+        # Suspend layout updates for better performance
+        self.container_widget.setUpdatesEnabled(False)
         
-        # Re-add all widgets in their original order and ensure they're visible
-        for i, media in enumerate(self.media_list):
-            widget = self.thumbnail_widgets.get(str(media.file_path))
-            if widget:
-                row = i // columns
-                col = i % columns
-                self.grid_layout.addWidget(widget, row, col)
-                widget.setVisible(True)
+        try:
+            # Remove all items from the grid layout completely
+            while self.grid_layout.count():
+                item = self.grid_layout.takeAt(0)
+                if item and item.widget():
+                    # Hide the widget but don't delete it
+                    item.widget().setVisible(False)
+            
+            # Clear any remaining layout information
+            self.grid_layout.invalidate()
+            
+            # Re-add all widgets in their original order
+            for i, media in enumerate(self.media_list):
+                widget = self.thumbnail_widgets.get(str(media.file_path))
+                if widget:
+                    row = i // columns
+                    col = i % columns
+                    # Ensure widget isn't already in the layout
+                    if widget.parent() != self.container_widget:
+                        widget.setParent(self.container_widget)
+                    self.grid_layout.addWidget(widget, row, col)
+                    widget.setVisible(True)
+                    widget.raise_()  # Ensure widget is on top
+        
+        finally:
+            # Re-enable updates and force refresh
+            self.container_widget.setUpdatesEnabled(True)
+            self.container_widget.update()  # Force immediate update
         
         logger.debug(f"Restored full grid: {len(self.media_list)} thumbnails in {columns} columns")
     
@@ -749,19 +798,10 @@ class ThumbnailView(QWidget):
             self.rearrange_thumbnails(new_columns)
     
     def rearrange_thumbnails(self, columns: int):
-        """Rearrange existing thumbnails into new grid layout."""
-        # Check if we currently have filters applied
-        if hasattr(self, 'filtered_paths') and self.filtered_paths:
-            # Filters are applied - maintain compact layout
-            visible_widgets = []
-            for media in self.media_list:
-                file_path_str = str(media.file_path)
-                widget = self.thumbnail_widgets.get(file_path_str)
-                if widget and widget.is_filtered and file_path_str in self.filtered_paths:
-                    visible_widgets.append(widget)
-            
-            # Use the proper compact_thumbnail_grid method which handles visibility
-            self.compact_thumbnail_grid(visible_widgets)
+        """Rearrange existing thumbnails when window is resized."""
+        # Re-apply current filters to trigger reorganization
+        if hasattr(self, 'filtered_paths'):
+            self.apply_filters(self.filtered_paths)
         else:
-            # No filters - restore full grid
-            self.restore_full_grid()
+            # No filters have been applied yet - show all
+            self.apply_filters(set())
