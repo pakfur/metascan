@@ -12,6 +12,7 @@ from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
+from metascan.ui.media_viewer import MediaViewer
 from metascan.core.scanner import Scanner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.cache.thumbnail import ThumbnailCache
@@ -41,6 +42,12 @@ class MainWindow(QMainWindow):
         # Initialize thumbnail cache for metadata panel
         cache_dir = Path.home() / ".metascan" / "thumbnails"
         self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
+        
+        # Create media viewer (initially hidden)
+        self.media_viewer = MediaViewer()  # Create without parent to control positioning
+        self.media_viewer.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.media_viewer.closed.connect(self.on_media_viewer_closed)
+        self.media_viewer.media_changed.connect(self.on_viewer_media_changed)
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -94,6 +101,9 @@ class MainWindow(QMainWindow):
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         self.thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
+        
+        # Connect double-click to open media viewer
+        self.thumbnail_view.scroll_area.item_double_clicked.connect(self.on_thumbnail_double_clicked)
         
         # Load initial media if any exists
         self.load_all_media()
@@ -337,6 +347,53 @@ class MainWindow(QMainWindow):
             print(f"Selected: {media.file_name}")
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
+    
+    def on_thumbnail_double_clicked(self, media):
+        """Handle when a thumbnail is double-clicked."""
+        try:
+            print(f"Opening media viewer for: {media.file_name}")
+            
+            # Get the currently filtered media list
+            if self.filtered_media_paths:
+                # Use filtered list
+                filtered_media = [m for m in self.all_media 
+                                if str(m.file_path) in self.filtered_media_paths]
+            else:
+                # Use all media
+                filtered_media = self.all_media
+            
+            # Set media list and show the viewer
+            self.media_viewer.set_media_list(filtered_media, media)
+            
+            # Position the viewer to exactly overlay the main window
+            main_geometry = self.geometry()
+            self.media_viewer.move(main_geometry.topLeft())
+            self.media_viewer.resize(main_geometry.size())
+            
+            # Show the media
+            self.media_viewer.show_media(media)
+            self.media_viewer.show()
+            self.media_viewer.raise_()
+            self.media_viewer.activateWindow()
+            
+        except Exception as e:
+            print(f"Error opening media viewer: {e}")
+    
+    def on_media_viewer_closed(self):
+        """Handle when media viewer is closed."""
+        print("Media viewer closed")
+        # Return focus to main window
+        self.activateWindow()
+        self.thumbnail_view.setFocus()
+    
+    def on_viewer_media_changed(self, media):
+        """Handle when media changes in the viewer."""
+        try:
+            # Update metadata panel to show current viewed media
+            self.metadata_panel.display_metadata(media)
+            print(f"Viewer showing: {media.file_name}")
+        except Exception as e:
+            print(f"Error updating metadata for viewer: {e}")
 
 
 def main():
