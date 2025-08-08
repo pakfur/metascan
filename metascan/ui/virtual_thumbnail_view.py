@@ -818,16 +818,8 @@ class VirtualThumbnailView(QWidget):
     
     def _on_item_double_clicked(self, media: Media) -> None:
         """Handle item double click to open file."""
-        logger.info(f"Opening media file: {media.file_name}")
-        try:
-            self._open_media_file(media.file_path)
-        except Exception as e:
-            logger.error(f"Failed to open media file {media.file_path}: {e}")
-            QMessageBox.warning(
-                self,
-                "Error Opening File",
-                f"Could not open {media.file_name}:\n{str(e)}"
-            )
+        # Just pass the signal through - the main window will handle opening the media viewer
+        logger.info(f"Double-clicked media file: {media.file_name}")
     
     def _on_favorite_toggled(self, media: Media) -> None:
         """Handle favorite toggle."""
@@ -848,7 +840,8 @@ class VirtualThumbnailView(QWidget):
     def _open_selected_media(self) -> None:
         """Open the currently selected media file."""
         if self.selected_media:
-            self._on_item_double_clicked(self.selected_media)
+            # Emit double-click signal for the selected media
+            self.scroll_area.item_double_clicked.emit(self.selected_media)
     
     def _open_media_file(self, file_path: Path) -> None:
         """Open a media file with the system's default viewer."""
