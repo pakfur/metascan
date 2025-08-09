@@ -3,10 +3,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, 
     QVBoxLayout, QListWidget, QLabel, QSplitter,
     QScrollArea, QGridLayout, QFrame, QPushButton,
-    QToolBar
+    QToolBar, QMessageBox
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
@@ -19,6 +19,8 @@ from metascan.cache.thumbnail import ThumbnailCache
 import os
 import json
 from pathlib import Path
+import shutil
+import platform
 
 
 class MainWindow(QMainWindow):
@@ -48,6 +50,7 @@ class MainWindow(QMainWindow):
         self.media_viewer.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.media_viewer.closed.connect(self.on_media_viewer_closed)
         self.media_viewer.media_changed.connect(self.on_viewer_media_changed)
+        self.media_viewer.delete_requested.connect(lambda media: self._confirm_and_delete_media(media, from_viewer=True))
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -78,6 +81,9 @@ class MainWindow(QMainWindow):
         
         # Create toolbar
         self._create_toolbar()
+        
+        # Setup keyboard shortcuts
+        self._setup_shortcuts()
         
     def _create_filter_panel(self) -> QWidget:
         # Create the filters panel
@@ -394,6 +400,164 @@ class MainWindow(QMainWindow):
             print(f"Viewer showing: {media.file_name}")
         except Exception as e:
             print(f"Error updating metadata for viewer: {e}")
+    
+    def _setup_shortcuts(self):
+        """Setup keyboard shortcuts for the main window."""
+        # Command-D (or Ctrl-D on non-Mac) for delete
+        delete_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        delete_shortcut.activated.connect(self._handle_delete_shortcut)
+    
+    def _handle_delete_shortcut(self):
+        """Handle the delete shortcut from the main window."""
+        # Check if media viewer is visible
+        if self.media_viewer.isVisible():
+            # Delete from media viewer
+            self._delete_from_viewer()
+        else:
+            # Delete from thumbnail view
+            selected_media = self.thumbnail_view.get_selected_media()
+            if selected_media:
+                self._confirm_and_delete_media(selected_media, from_viewer=False)
+    
+    def _delete_from_viewer(self):
+        """Handle delete from the media viewer."""
+        if self.media_viewer.current_media:
+            self._confirm_and_delete_media(self.media_viewer.current_media, from_viewer=True)
+    
+    def _confirm_and_delete_media(self, media, from_viewer=False):
+        """Show confirmation dialog and delete media if confirmed."""
+        # Create confirmation dialog
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Delete Media")
+        msg_box.setText("Delete this file?")
+        msg_box.setInformativeText(f"File: {media.file_name}")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        
+        # Focus on OK button
+        ok_button = msg_box.button(QMessageBox.StandardButton.Ok)
+        if ok_button:
+            ok_button.setFocus()
+        
+        # Show dialog and handle response
+        if msg_box.exec() == QMessageBox.StandardButton.Ok:
+            self._delete_media(media, from_viewer)
+    
+    def _delete_media(self, media, from_viewer=False):
+        """Delete media file and update all related components."""
+        try:
+            file_path = media.file_path
+            
+            # 1. Delete from database
+            db_success = self.db_manager.delete_media(file_path)
+            if not db_success:
+                print(f"Warning: Media not found in database: {file_path}")
+            
+            # 2. Move thumbnail to trash
+            if self.thumbnail_cache:
+                thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
+                if thumbnail_path and thumbnail_path.exists():
+                    try:
+                        self._move_to_trash(thumbnail_path)
+                        print(f"Moved thumbnail to trash: {thumbnail_path}")
+                    except Exception as e:
+                        print(f"Failed to move thumbnail to trash: {e}")
+            
+            # 3. Move media file to trash
+            if file_path.exists():
+                try:
+                    self._move_to_trash(file_path)
+                    print(f"Moved media file to trash: {file_path}")
+                except Exception as e:
+                    print(f"Failed to move media file to trash: {e}")
+                    # Show error message
+                    QMessageBox.critical(self, "Delete Error", f"Failed to move file to trash: {e}")
+                    return
+            
+            # 4. Remove from all_media list
+            self.all_media = [m for m in self.all_media if m.file_path != file_path]
+            
+            # 5. Update filters
+            self.refresh_filters()
+            
+            # 6. Handle view updates based on where delete came from
+            if from_viewer:
+                # Update media viewer to show next/previous file
+                current_index = self.media_viewer.current_index
+                media_list = self.media_viewer.media_list
+                
+                # Remove from viewer's media list
+                media_list = [m for m in media_list if m.file_path != file_path]
+                self.media_viewer.media_list = media_list
+                
+                if not media_list:
+                    # No more media, close viewer
+                    self.media_viewer.close_viewer()
+                elif current_index >= len(media_list):
+                    # Was at the end, show previous
+                    self.media_viewer.current_index = len(media_list) - 1
+                    self.media_viewer._display_current_media()
+                else:
+                    # Show next (same index)
+                    self.media_viewer.current_index = max(0, min(current_index, len(media_list) - 1))
+                    self.media_viewer._display_current_media()
+            
+            # 7. Update thumbnail view (remove from display)
+            self.apply_all_filters()
+            
+            print(f"Successfully deleted: {file_path.name}")
+            
+        except Exception as e:
+            print(f"Error deleting media: {e}")
+            QMessageBox.critical(self, "Delete Error", f"Failed to delete media: {e}")
+    
+    def _move_to_trash(self, file_path: Path):
+        """Move a file to the system trash/recycle bin."""
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            # Use macOS Trash
+            trash_dir = Path.home() / ".Trash"
+            trash_dir.mkdir(exist_ok=True)
+            
+            # Generate unique name if file already exists in trash
+            dest_path = trash_dir / file_path.name
+            counter = 1
+            while dest_path.exists():
+                stem = file_path.stem
+                suffix = file_path.suffix
+                dest_path = trash_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+            
+            shutil.move(str(file_path), str(dest_path))
+        
+        elif system == "Windows":
+            # Use Windows Recycle Bin via shell
+            import subprocess
+            # Use PowerShell to move to recycle bin
+            ps_command = f'Remove-Item -Path "{file_path}" -Recurse -Force'
+            subprocess.run(["powershell", "-Command", ps_command], check=True)
+        
+        elif system == "Linux":
+            # Use XDG trash
+            trash_dir = Path.home() / ".local" / "share" / "Trash" / "files"
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique name if file already exists in trash
+            dest_path = trash_dir / file_path.name
+            counter = 1
+            while dest_path.exists():
+                stem = file_path.stem
+                suffix = file_path.suffix
+                dest_path = trash_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+            
+            shutil.move(str(file_path), str(dest_path))
+        
+        else:
+            # Fallback: just delete the file
+            file_path.unlink()
 
 
 def main():
