@@ -264,6 +264,7 @@ class MediaViewer(QWidget):
     closed = pyqtSignal()
     media_changed = pyqtSignal(object)  # Emits current Media object
     delete_requested = pyqtSignal(object)  # Emits Media object to delete
+    favorite_toggled = pyqtSignal(object, bool)  # Emits Media object and new favorite status
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -290,6 +291,24 @@ class MediaViewer(QWidget):
         # Header with media info and close button
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Favorite button (star icon)
+        self.favorite_button = QPushButton("☆")
+        self.favorite_button.setFixedSize(30, 30)
+        self.favorite_button.setStyleSheet("""
+            QPushButton {
+                color: white;
+                background-color: transparent;
+                border: none;
+                font-size: 24px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 20);
+            }
+        """)
+        self.favorite_button.clicked.connect(self.toggle_favorite)
+        header_layout.addWidget(self.favorite_button)
         
         self.info_label = QLabel()
         self.info_label.setStyleSheet("color: white; font-size: 14px;")
@@ -404,6 +423,10 @@ class MediaViewer(QWidget):
         # Command-D (or Ctrl-D) to delete
         delete_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         delete_shortcut.activated.connect(self._request_delete)
+        
+        # F to toggle favorite
+        favorite_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F), self)
+        favorite_shortcut.activated.connect(self.toggle_favorite)
     
     def set_media_list(self, media_list: List[Media], initial_media: Optional[Media] = None):
         """
@@ -448,6 +471,9 @@ class MediaViewer(QWidget):
         
         # Update info label
         self.info_label.setText(self.current_media.file_name)
+        
+        # Update favorite button
+        self._update_favorite_button()
         
         # Update position label
         self.position_label.setText(f"{self.current_index + 1} / {len(self.media_list)}")
@@ -519,6 +545,50 @@ class MediaViewer(QWidget):
         """Request deletion of the current media."""
         if self.current_media:
             self.delete_requested.emit(self.current_media)
+    
+    def toggle_favorite(self):
+        """Toggle the favorite status of the current media."""
+        if self.current_media:
+            # Toggle the favorite status
+            new_status = not self.current_media.is_favorite
+            self.current_media.is_favorite = new_status
+            
+            # Update the UI
+            self._update_favorite_button()
+            
+            # Emit signal to update database
+            self.favorite_toggled.emit(self.current_media, new_status)
+    
+    def _update_favorite_button(self):
+        """Update the favorite button icon based on current media's favorite status."""
+        if self.current_media and self.current_media.is_favorite:
+            self.favorite_button.setText("★")
+            self.favorite_button.setStyleSheet("""
+                QPushButton {
+                    color: gold;
+                    background-color: transparent;
+                    border: none;
+                    font-size: 24px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 255, 255, 20);
+                }
+            """)
+        else:
+            self.favorite_button.setText("☆")
+            self.favorite_button.setStyleSheet("""
+                QPushButton {
+                    color: white;
+                    background-color: transparent;
+                    border: none;
+                    font-size: 24px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 255, 255, 20);
+                }
+            """)
     
     def keyPressEvent(self, event: QKeyEvent):
         """Handle key press events."""
