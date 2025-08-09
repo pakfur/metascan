@@ -232,10 +232,6 @@ class DatabaseManager:
         for tag in media.tags:
             indices.append(("tag", tag.lower()))
         
-        # Index by date (year-month)
-        date_key = media.created_at.strftime("%Y-%m")
-        indices.append(("date", date_key))
-        
         # Index prompt words using the tokenizer
         if media.prompt:
             filtered_words = self.prompt_tokenizer.tokenize(media.prompt)

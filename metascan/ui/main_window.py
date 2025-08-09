@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.media_viewer.closed.connect(self.on_media_viewer_closed)
         self.media_viewer.media_changed.connect(self.on_viewer_media_changed)
         self.media_viewer.delete_requested.connect(lambda media: self._confirm_and_delete_media(media, from_viewer=True))
+        self.media_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -391,6 +392,7 @@ class MainWindow(QMainWindow):
         # Return focus to main window
         self.activateWindow()
         self.thumbnail_view.setFocus()
+        # Do not refresh filters here - they should maintain their state
     
     def on_viewer_media_changed(self, media):
         """Handle when media changes in the viewer."""
@@ -400,6 +402,27 @@ class MainWindow(QMainWindow):
             print(f"Viewer showing: {media.file_name}")
         except Exception as e:
             print(f"Error updating metadata for viewer: {e}")
+    
+    def on_viewer_favorite_toggled(self, media, is_favorite):
+        """Handle favorite toggle from media viewer."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if self.db_manager:
+            success = self.db_manager.set_favorite(media.file_path, is_favorite)
+            if success:
+                logger.info(f"Updated favorite status for {media.file_name}: {is_favorite}")
+                # Update the media in all_media list
+                for m in self.all_media:
+                    if m.file_path == media.file_path:
+                        m.is_favorite = is_favorite
+                        break
+                # Refresh thumbnails to show updated favorite status if virtualization is enabled
+                if hasattr(self, 'virtual_view') and self.virtual_view:
+                    if hasattr(self.virtual_view, 'refresh_thumbnails'):
+                        self.virtual_view.refresh_thumbnails()
+            else:
+                logger.error(f"Failed to update favorite status for {media.file_name}")
     
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts for the main window."""
