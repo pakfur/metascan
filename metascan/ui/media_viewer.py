@@ -258,10 +258,12 @@ class MediaViewer(QWidget):
     - Play videos with controls
     - Navigate through filtered media with arrow keys
     - Close with Escape key
+    - Delete media with Command-D
     """
     
     closed = pyqtSignal()
     media_changed = pyqtSignal(object)  # Emits current Media object
+    delete_requested = pyqtSignal(object)  # Emits Media object to delete
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -398,6 +400,10 @@ class MediaViewer(QWidget):
         # Space to toggle video playback
         space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         space_shortcut.activated.connect(self._toggle_video_playback)
+        
+        # Command-D (or Ctrl-D) to delete
+        delete_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        delete_shortcut.activated.connect(self._request_delete)
     
     def set_media_list(self, media_list: List[Media], initial_media: Optional[Media] = None):
         """
@@ -508,6 +514,11 @@ class MediaViewer(QWidget):
         
         # Emit closed signal
         self.closed.emit()
+    
+    def _request_delete(self):
+        """Request deletion of the current media."""
+        if self.current_media:
+            self.delete_requested.emit(self.current_media)
     
     def keyPressEvent(self, event: QKeyEvent):
         """Handle key press events."""

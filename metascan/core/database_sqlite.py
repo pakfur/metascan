@@ -381,6 +381,43 @@ class DatabaseManager:
             logger.error(f"Failed to get favorite media paths: {e}")
             return set()
     
+    def delete_media(self, file_path: Path) -> bool:
+        """Delete a media item from the database completely
+        
+        Args:
+            file_path: Path to the media file to delete
+            
+        Returns:
+            True if deletion was successful, False otherwise
+        """
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Delete from indices table (will cascade due to foreign key)
+                    conn.execute(
+                        "DELETE FROM indices WHERE file_path = ?",
+                        (str(file_path),)
+                    )
+                    
+                    # Delete from media table
+                    cursor = conn.execute(
+                        "DELETE FROM media WHERE file_path = ?",
+                        (str(file_path),)
+                    )
+                    
+                    conn.commit()
+                    
+                    deleted = cursor.rowcount > 0
+                    if deleted:
+                        logger.info(f"Deleted media from database: {file_path}")
+                    else:
+                        logger.warning(f"Media not found in database: {file_path}")
+                    
+                    return deleted
+        except Exception as e:
+            logger.error(f"Failed to delete media {file_path}: {e}")
+            return False
+    
     def load_favorite_status(self, media_list: List[Media]):
         """Load favorite status from database for a list of media objects"""
         try:

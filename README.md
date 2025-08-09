@@ -34,6 +34,7 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
 - Three-panel layout: filters, thumbnails, metadata
 - Resizable panels with persistent layout
 - Full-size media viewer with zoom capabilities
+- Media deletion with keyboard shortcut (Cmd+D/Ctrl+D)
 
 📁 **Smart Organization**
 - Directory scanning with file watching
@@ -138,6 +139,12 @@ metascan  # Run from anywhere after installation
 - **Favorites:** Right-click thumbnails to mark as favorites
 - **Search:** Use text filters to search across prompts and metadata
 - **Viewer:** Double-click images/videos for full-size viewing with zoom controls
+- **Delete Media:** Press `Cmd+D` (macOS) or `Ctrl+D` (Windows/Linux) to delete selected media
+  - Works from both the thumbnail view and media viewer
+  - Shows confirmation dialog with OK button focused
+  - Moves files to system trash/recycle bin (recoverable)
+  - Automatically updates database and refreshes views
+  - In viewer: navigates to next media (or previous if at end)
 
 ## Configuration
 
