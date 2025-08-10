@@ -344,6 +344,37 @@ class MainWindow(QMainWindow):
                 print("No directories configured. Please configure directories first.")
                 self._open_config()
                 return
+            
+            # Count directories and estimate media files
+            total_dirs = len(directories)
+            total_files = 0
+            
+            # Count media files in each directory
+            for dir_info in directories:
+                dir_path = Path(dir_info['filepath'])
+                if dir_path.exists():
+                    recursive = dir_info.get('search_subfolders', True)
+                    media_files = self._count_media_files(dir_path, recursive)
+                    total_files += media_files
+            
+            # Show confirmation dialog
+            msg_text = f"Scan Configuration:\n\n"
+            msg_text += f"Directories to scan: {total_dirs}\n"
+            msg_text += f"Media files to process: {total_files:,}\n\n"
+            msg_text += "This operation may take several minutes depending on the number of files.\n"
+            msg_text += "Do you want to continue?"
+            
+            reply = QMessageBox.question(
+                self,
+                "Confirm Scan",
+                msg_text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                print("Scan cancelled by user")
+                return
                 
             # Create progress dialog
             self.progress_dialog = ScanProgressDialog(self)
@@ -363,6 +394,26 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error during scanning: {e}")
             QMessageBox.critical(self, "Scan Error", f"Failed to start scanning: {e}")
+    
+    def _count_media_files(self, directory: Path, recursive: bool) -> int:
+        """Count media files in a directory without processing them."""
+        # Use the same supported extensions as the Scanner class
+        SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4'}
+        
+        count = 0
+        try:
+            if recursive:
+                for ext in SUPPORTED_EXTENSIONS:
+                    count += len(list(directory.rglob(f"*{ext}")))
+                    count += len(list(directory.rglob(f"*{ext.upper()}")))
+            else:
+                for ext in SUPPORTED_EXTENSIONS:
+                    count += len(list(directory.glob(f"*{ext}")))
+                    count += len(list(directory.glob(f"*{ext.upper()}")))
+        except Exception as e:
+            print(f"Error counting files in {directory}: {e}")
+        
+        return count
     
     def _on_scan_progress(self, current, total, file_path):
         """Handle scan progress updates."""
