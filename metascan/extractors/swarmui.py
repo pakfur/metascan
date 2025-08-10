@@ -53,8 +53,17 @@ class SwarmUIExtractor(MetadataExtractor):
                     # Extract parameters
                     extracted = self._extract_from_sui_params(params)
                     result.update(extracted)
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse SwarmUI params JSON from {image_path}")
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON parse error in sui_image_params for {image_path}: {e}")
+                    # Try to repair the JSON
+                    repaired_data = self._repair_incomplete_json(metadata["sui_image_params"])
+                    if repaired_data:
+                        result["raw_metadata"]["sui_image_params"] = repaired_data
+                        extracted = self._extract_from_sui_params(repaired_data)
+                        result.update(extracted)
+                        logger.debug(f"Successfully recovered data from truncated sui_image_params in {image_path}")
+                    else:
+                        logger.warning(f"Failed to parse or repair SwarmUI params JSON from {image_path}: {e}")
             
             # Check UserComment field for SwarmUI data
             elif "UserComment" in metadata:
@@ -298,45 +307,115 @@ class SwarmUIExtractor(MetadataExtractor):
     def _repair_incomplete_json(self, json_str: str) -> Optional[Dict[str, Any]]:
         """Attempt to repair incomplete/truncated JSON by extracting available data"""
         try:
-            # Try to extract just the prompt if the JSON is incomplete
             import re
             
-            # Look for prompt field in the JSON
+            # Handle the most common case: truncated prompt string
+            # Look for prompt field that might be truncated without closing quote
+            prompt_match = None
+            
+            # First try to find complete prompt with closing quote
             prompt_match = re.search(r'"prompt"\s*:\s*"([^"]*)"', json_str)
+            
+            # If not found, look for truncated prompt without closing quote (common truncation pattern)
+            if not prompt_match:
+                # Handle case where the prompt starts but is cut off - more lenient pattern
+                truncated_prompt_match = re.search(r'"prompt"\s*:\s*"([^"]*?)(?:$|[^",]*$)', json_str, re.DOTALL)
+                if truncated_prompt_match:
+                    # Extract the truncated prompt
+                    prompt_text = truncated_prompt_match.group(1)
+                    # Clean up any partial words at the end
+                    prompt_text = re.sub(r'\s+\w*$', '', prompt_text).strip()
+                    if len(prompt_text) > 10:  # Only use if we have meaningful content (more than 10 chars)
+                        prompt_match = truncated_prompt_match
+            
+            # Look for other fields with both complete and truncated patterns
             negative_match = re.search(r'"(?:negative_?prompt|negativeprompt)"\s*:\s*"([^"]*)"', json_str)
+            if not negative_match:
+                negative_match = re.search(r'"(?:negative_?prompt|negativeprompt)"\s*:\s*"([^"]*?)(?:[^"]*)?(?:",|$)', json_str, re.DOTALL)
+            
             model_match = re.search(r'"model"\s*:\s*"([^"]*)"', json_str)
+            if not model_match:
+                model_match = re.search(r'"model"\s*:\s*"([^"]*?)(?:[^"]*)?(?:",|$)', json_str, re.DOTALL)
+            
             steps_match = re.search(r'"steps"\s*:\s*(\d+)', json_str)
             cfg_match = re.search(r'"(?:cfg_?scale|cfgscale)"\s*:\s*([\d.]+)', json_str)
             seed_match = re.search(r'"seed"\s*:\s*(\d+)', json_str)
+            
             sampler_match = re.search(r'"sampler"\s*:\s*"([^"]*)"', json_str)
+            if not sampler_match:
+                sampler_match = re.search(r'"sampler"\s*:\s*"([^"]*?)(?:[^"]*)?(?:",|$)', json_str, re.DOTALL)
+            
             width_match = re.search(r'"width"\s*:\s*(\d+)', json_str)
             height_match = re.search(r'"height"\s*:\s*(\d+)', json_str)
             
-            # Look for LoRA data
+            # Look for LoRA data (both complete and partial)
             loras_match = re.search(r'"loras"\s*:\s*\[([^\]]*)\]', json_str, re.DOTALL)
+            if not loras_match:
+                # Try to find partial LoRA array
+                loras_match = re.search(r'"loras"\s*:\s*\[([^"]*?)(?:\]|$)', json_str, re.DOTALL)
             
             # Build a repaired params dict with what we found
             repaired = {}
-            if prompt_match:
-                repaired["prompt"] = prompt_match.group(1)
-            if negative_match:
-                repaired["negativeprompt"] = negative_match.group(1)
-            if model_match:
-                repaired["model"] = model_match.group(1)
-            if steps_match:
-                repaired["steps"] = int(steps_match.group(1))
-            if cfg_match:
-                repaired["cfgscale"] = float(cfg_match.group(1))
-            if seed_match:
-                repaired["seed"] = int(seed_match.group(1))
-            if sampler_match:
-                repaired["sampler"] = sampler_match.group(1)
-            if width_match:
-                repaired["width"] = int(width_match.group(1))
-            if height_match:
-                repaired["height"] = int(height_match.group(1))
             
-            # Try to extract LoRA data
+            if prompt_match:
+                prompt_text = prompt_match.group(1)
+                # Clean up truncated prompt text - remove partial words at the end
+                # Handle cases like "...background" -> "backg" by removing incomplete words
+                prompt_text = re.sub(r'\s+\w*$', '', prompt_text).strip()
+                # Also handle cases where the prompt ends abruptly mid-word
+                prompt_text = re.sub(r'\w*$', lambda m: '' if len(m.group()) < 4 and not m.group().endswith(('.', ',', '!', '?')) else m.group(), prompt_text).strip()
+                if len(prompt_text) > 5:  # Only use if we have meaningful content
+                    repaired["prompt"] = prompt_text
+            
+            if negative_match:
+                negative_text = negative_match.group(1)
+                negative_text = re.sub(r'\s+\S*$', '', negative_text).strip()
+                if negative_text:
+                    repaired["negativeprompt"] = negative_text
+            
+            if model_match:
+                model_text = model_match.group(1)
+                model_text = re.sub(r'\s+\S*$', '', model_text).strip()
+                if model_text:
+                    repaired["model"] = model_text
+            
+            if steps_match:
+                try:
+                    repaired["steps"] = int(steps_match.group(1))
+                except ValueError:
+                    pass
+            
+            if cfg_match:
+                try:
+                    repaired["cfgscale"] = float(cfg_match.group(1))
+                except ValueError:
+                    pass
+            
+            if seed_match:
+                try:
+                    repaired["seed"] = int(seed_match.group(1))
+                except ValueError:
+                    pass
+            
+            if sampler_match:
+                sampler_text = sampler_match.group(1)
+                sampler_text = re.sub(r'\s+\S*$', '', sampler_text).strip()
+                if sampler_text:
+                    repaired["sampler"] = sampler_text
+            
+            if width_match:
+                try:
+                    repaired["width"] = int(width_match.group(1))
+                except ValueError:
+                    pass
+            
+            if height_match:
+                try:
+                    repaired["height"] = int(height_match.group(1))
+                except ValueError:
+                    pass
+            
+            # Try to extract LoRA data (handle both complete and partial)
             if loras_match:
                 loras_content = loras_match.group(1)
                 # Try to extract individual LoRA objects
@@ -344,11 +423,19 @@ class SwarmUIExtractor(MetadataExtractor):
                 if lora_objects:
                     loras = []
                     for lora_name, lora_weight in lora_objects:
-                        loras.append({
-                            "name": lora_name,
-                            "weight": float(lora_weight)
-                        })
-                    repaired["loras"] = loras
+                        try:
+                            loras.append({
+                                "name": lora_name,
+                                "weight": float(lora_weight)
+                            })
+                        except ValueError:
+                            pass
+                    if loras:
+                        repaired["loras"] = loras
+            
+            # Log successful repair for debugging
+            if repaired:
+                logger.debug(f"Successfully repaired truncated JSON, extracted {len(repaired)} fields")
             
             return repaired if repaired else None
             
