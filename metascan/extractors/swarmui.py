@@ -110,6 +110,47 @@ class SwarmUIExtractor(MetadataExtractor):
         extracted["seed"] = self._safe_int(params.get("seed"))
         extracted["sampler"] = params.get("sampler")
         
+        # Extract LoRAs from SwarmUI format
+        loras = []
+        
+        # SwarmUI can store LoRAs in different ways:
+        # 1. As a "loras" list with objects containing "name" and "weight"
+        if "loras" in params:
+            loras_data = params["loras"]
+            if isinstance(loras_data, list):
+                for lora_item in loras_data:
+                    if isinstance(lora_item, dict):
+                        lora_name = lora_item.get("name") or lora_item.get("lora_name", "")
+                        lora_weight = lora_item.get("weight") or lora_item.get("strength", 1.0)
+                        
+                        if lora_name:
+                            # Remove common extensions
+                            lora_name_clean = lora_name.replace(".safetensors", "").replace(".ckpt", "")
+                            loras.append({
+                                "lora_name": lora_name_clean,
+                                "lora_weight": self._safe_float(lora_weight) or 1.0
+                            })
+        
+        # 2. As individual parameters like "lora1", "lora2", etc.
+        lora_keys = [k for k in params.keys() if k.startswith("lora") and not k.endswith("_weight")]
+        for lora_key in lora_keys:
+            lora_name = params.get(lora_key)
+            if lora_name and isinstance(lora_name, str):
+                # Look for corresponding weight
+                weight_key = f"{lora_key}_weight"
+                lora_weight = params.get(weight_key, 1.0)
+                
+                # Remove common extensions
+                lora_name_clean = lora_name.replace(".safetensors", "").replace(".ckpt", "")
+                loras.append({
+                    "lora_name": lora_name_clean,
+                    "lora_weight": self._safe_float(lora_weight) or 1.0
+                })
+        
+        # Add LoRAs to extracted data
+        if loras:
+            extracted["loras"] = loras
+        
         # Additional SwarmUI specific parameters
         if "width" in params:
             extracted["width"] = self._safe_int(params["width"])
@@ -121,6 +162,7 @@ class SwarmUIExtractor(MetadataExtractor):
     def _extract_from_text_params(self, params_text: str) -> Dict[str, Any]:
         """Extract from text-based parameter format"""
         extracted = {}
+        loras = []
         
         # Split by newlines and parse key-value pairs
         lines = params_text.strip().split('\n')
@@ -133,7 +175,7 @@ class SwarmUIExtractor(MetadataExtractor):
                 # Save previous key-value if exists
                 if current_key and current_value:
                     value = '\n'.join(current_value).strip()
-                    self._parse_parameter(current_key, value, extracted)
+                    self._parse_parameter(current_key, value, extracted, loras)
                 
                 # Start new key-value
                 parts = line.split(':', 1)
@@ -146,12 +188,19 @@ class SwarmUIExtractor(MetadataExtractor):
         # Don't forget last parameter
         if current_key and current_value:
             value = '\n'.join(current_value).strip()
-            self._parse_parameter(current_key, value, extracted)
+            self._parse_parameter(current_key, value, extracted, loras)
+        
+        # Add LoRAs if found
+        if loras:
+            extracted["loras"] = loras
         
         return extracted
     
-    def _parse_parameter(self, key: str, value: str, extracted: Dict[str, Any]):
+    def _parse_parameter(self, key: str, value: str, extracted: Dict[str, Any], loras: list = None):
         """Parse individual parameter from text format"""
+        if loras is None:
+            loras = []
+            
         # Normalize key
         key = key.replace(' ', '_').replace('-', '_')
         
@@ -169,6 +218,65 @@ class SwarmUIExtractor(MetadataExtractor):
             extracted["seed"] = self._safe_int(value)
         elif key == "sampler":
             extracted["sampler"] = value
+        elif key in ["loras", "lora", "lora_list"]:
+            # Parse LoRA list from text format
+            # Format could be: "lora1:0.8, lora2:1.0" or "lora1 (0.8), lora2 (1.0)"
+            self._parse_loras_from_text(value, loras)
+        elif key.startswith("lora") and key[4:].isdigit():
+            # Individual LoRA entries like "lora1", "lora2"
+            # Look for weight in value or assume 1.0
+            if ":" in value:
+                parts = value.split(":", 1)
+                lora_name = parts[0].strip()
+                lora_weight = self._safe_float(parts[1].strip()) or 1.0
+            else:
+                lora_name = value.strip()
+                lora_weight = 1.0
+            
+            if lora_name:
+                lora_name_clean = lora_name.replace(".safetensors", "").replace(".ckpt", "")
+                loras.append({
+                    "lora_name": lora_name_clean,
+                    "lora_weight": lora_weight
+                })
+    
+    def _parse_loras_from_text(self, loras_text: str, loras: list):
+        """Parse LoRA list from text format"""
+        import re
+        
+        # Handle different text formats:
+        # Format 1: "lora1:0.8, lora2:1.0"
+        # Format 2: "lora1 (0.8), lora2 (1.0)"
+        # Format 3: "lora1, lora2" (assume weight 1.0)
+        
+        # Split by commas first
+        lora_entries = [entry.strip() for entry in loras_text.split(',')]
+        
+        for entry in lora_entries:
+            if not entry:
+                continue
+                
+            # Try format with parentheses: "lora_name (weight)"
+            paren_match = re.match(r'^(.+?)\s*\(([0-9.]+)\)$', entry)
+            if paren_match:
+                lora_name = paren_match.group(1).strip()
+                lora_weight = self._safe_float(paren_match.group(2)) or 1.0
+            # Try format with colon: "lora_name:weight"
+            elif ':' in entry:
+                parts = entry.split(':', 1)
+                lora_name = parts[0].strip()
+                lora_weight = self._safe_float(parts[1].strip()) or 1.0
+            # Just name, assume weight 1.0
+            else:
+                lora_name = entry.strip()
+                lora_weight = 1.0
+            
+            if lora_name:
+                lora_name_clean = lora_name.replace(".safetensors", "").replace(".ckpt", "")
+                loras.append({
+                    "lora_name": lora_name_clean,
+                    "lora_weight": lora_weight
+                })
     
     def _repair_incomplete_json(self, json_str: str) -> Optional[Dict[str, Any]]:
         """Attempt to repair incomplete/truncated JSON by extracting available data"""
@@ -186,6 +294,9 @@ class SwarmUIExtractor(MetadataExtractor):
             sampler_match = re.search(r'"sampler"\s*:\s*"([^"]*)"', json_str)
             width_match = re.search(r'"width"\s*:\s*(\d+)', json_str)
             height_match = re.search(r'"height"\s*:\s*(\d+)', json_str)
+            
+            # Look for LoRA data
+            loras_match = re.search(r'"loras"\s*:\s*\[([^\]]*)\]', json_str, re.DOTALL)
             
             # Build a repaired params dict with what we found
             repaired = {}
@@ -207,6 +318,20 @@ class SwarmUIExtractor(MetadataExtractor):
                 repaired["width"] = int(width_match.group(1))
             if height_match:
                 repaired["height"] = int(height_match.group(1))
+            
+            # Try to extract LoRA data
+            if loras_match:
+                loras_content = loras_match.group(1)
+                # Try to extract individual LoRA objects
+                lora_objects = re.findall(r'\{[^}]*"name"\s*:\s*"([^"]*)"[^}]*"weight"\s*:\s*([0-9.]+)[^}]*\}', loras_content)
+                if lora_objects:
+                    loras = []
+                    for lora_name, lora_weight in lora_objects:
+                        loras.append({
+                            "name": lora_name,
+                            "weight": float(lora_weight)
+                        })
+                    repaired["loras"] = loras
             
             return repaired if repaired else None
             
