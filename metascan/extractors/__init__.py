@@ -56,6 +56,34 @@ class MetadataExtractorManager:
                                 raw_data=raw_data
                             )
                         
+                        # Check for and log parsing errors that occurred during extraction
+                        if "parsing_errors" in metadata and self.parsing_logger:
+                            for parse_error in metadata["parsing_errors"]:
+                                # Create a custom exception for the parsing error
+                                error_msg = f"{parse_error['error_type']}: {parse_error['error_message']}"
+                                
+                                # Create a dynamic exception class with the right name
+                                error_type = parse_error['error_type']
+                                if error_type == 'JSONDecodeError':
+                                    import json
+                                    parse_exception = json.JSONDecodeError(parse_error['error_message'], '', 0)
+                                else:
+                                    # Create a generic exception with custom attributes
+                                    parse_exception = Exception(error_msg)
+                                    parse_exception.error_type = error_type
+                                
+                                self.parsing_logger.log_extraction_attempt(
+                                    file_path=media_path,
+                                    extractor_name=f"{extractor_name}_parsing",
+                                    success=False,
+                                    error=parse_exception,
+                                    raw_data=parse_error.get('raw_data', '')
+                                )
+                        
+                        # Remove parsing errors from metadata before returning
+                        if "parsing_errors" in metadata:
+                            del metadata["parsing_errors"]
+                        
                         return metadata
             except Exception as e:
                 logger.error(f"Extractor {extractor_name} failed for {media_path}: {e}")
