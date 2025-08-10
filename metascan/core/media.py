@@ -8,6 +8,14 @@ from dataclasses_json.cfg import LetterCase
 
 @dataclass_json
 @dataclass
+class LoRA:
+    """Represents a LoRA (Low-Rank Adaptation) with name and weight."""
+    lora_name: str
+    lora_weight: float
+
+
+@dataclass_json
+@dataclass
 class Media:
     file_path: Path = field(metadata=config(
         encoder=str,
@@ -41,6 +49,9 @@ class Media:
     
     # Tags and organization
     tags: List[str] = field(default_factory=list)
+    
+    # LoRAs (Low-Rank Adaptations)
+    loras: List[LoRA] = field(default_factory=list)
     
     # Favorite status
     is_favorite: bool = False

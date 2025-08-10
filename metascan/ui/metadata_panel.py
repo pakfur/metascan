@@ -344,6 +344,7 @@ class MetadataPanel(QWidget):
 
         # Create metadata sections
         self.create_prompt_section(media)
+        self.create_lora_section(media)
         self.create_generation_section(media)
         self.create_file_info_section(media)
         self.create_technical_section(media)
@@ -485,6 +486,27 @@ class MetadataPanel(QWidget):
             self.sections["prompts"] = section
             self.content_layout.insertWidget(-1, section)
 
+    def create_lora_section(self, media: Media):
+        """Create the LoRA section."""
+        if not media.loras:
+            return  # Only create section if there are LoRAs
+            
+        section = MetadataSection("🎯 LoRAs")
+
+        # Create a formatted list of LoRAs with weights and names
+        lora_lines = []
+        for lora in media.loras:
+            lora_line = f"{lora.lora_weight}: {lora.lora_name}"
+            lora_lines.append(lora_line)
+        
+        # Join all LoRAs with newlines for multiline display
+        loras_text = "\n".join(lora_lines)
+        
+        section.add_field("loras", "LoRAs", loras_text, is_multiline=True)
+
+        self.sections["loras"] = section
+        self.content_layout.insertWidget(-1, section)
+
     def create_technical_section(self, media: Media):
         """Create the technical/raw data section."""
         if not media.generation_data:
@@ -543,6 +565,9 @@ class MetadataPanel(QWidget):
                     "seed": self.current_media.seed,
                     "prompt": self.current_media.prompt,
                     "negative_prompt": self.current_media.negative_prompt,
+                    # LoRAs
+                    "loras": [{"lora_name": lora.lora_name, "lora_weight": lora.lora_weight} 
+                             for lora in self.current_media.loras],
                     # Video-specific metadata
                     "frame_rate": self.current_media.frame_rate,
                     "duration": self.current_media.duration,

@@ -59,6 +59,7 @@ class ComfyUIExtractor(MetadataExtractor):
     def _extract_parameters(self, prompt_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract common parameters from ComfyUI prompt data"""
         extracted = {}
+        loras = []
         
         # Look for KSampler node
         for node_id, node_data in prompt_data.items():
@@ -90,5 +91,22 @@ class ComfyUIExtractor(MetadataExtractor):
                         extracted["prompt"] = text
                 elif text and "negative_prompt" not in extracted:
                     extracted["negative_prompt"] = text
+                    
+            elif class_type == "LoraLoader":
+                # Extract LoRA information
+                lora_name = inputs.get("lora_name", "")
+                lora_weight = inputs.get("strength_model", 1.0)  # Default weight if not specified
+                
+                if lora_name:
+                    # Remove .safetensors extension if present
+                    lora_name_clean = lora_name.replace(".safetensors", "")
+                    loras.append({
+                        "lora_name": lora_name_clean,
+                        "lora_weight": self._safe_float(lora_weight) or 1.0
+                    })
+        
+        # Add LoRAs to extracted data
+        if loras:
+            extracted["loras"] = loras
         
         return extracted

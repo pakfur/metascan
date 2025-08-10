@@ -3,7 +3,7 @@ from typing import List, Optional, Callable
 import logging
 from PIL import Image
 from datetime import datetime
-from metascan.core.media import Media
+from metascan.core.media import Media, LoRA
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 
@@ -123,6 +123,17 @@ class Scanner:
                 
                 # Store raw metadata for advanced access
                 media.generation_data = metadata.get("raw_metadata", {})
+                
+                # Process LoRAs
+                if "loras" in metadata:
+                    loras_data = metadata["loras"]
+                    for lora_data in loras_data:
+                        if isinstance(lora_data, dict) and "lora_name" in lora_data:
+                            lora = LoRA(
+                                lora_name=lora_data["lora_name"],
+                                lora_weight=lora_data.get("lora_weight", 1.0)
+                            )
+                            media.loras.append(lora)
                 
             return media
             
