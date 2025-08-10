@@ -465,3 +465,33 @@ class DatabaseManager:
                 "by_source": {},
                 "db_size_bytes": 0
             }
+    
+    def truncate_all_data(self) -> bool:
+        """Truncate all media data and indices - full database cleanup"""
+        try:
+            with self.lock:
+                # First, delete data in a transaction
+                with self._get_connection() as conn:
+                    # Delete all data from both tables
+                    conn.execute("DELETE FROM indices")
+                    conn.execute("DELETE FROM media")
+                    
+                    # Reset auto-increment counters (SQLite specific) - only if table exists
+                    try:
+                        conn.execute("DELETE FROM sqlite_sequence WHERE name='media'")
+                        conn.execute("DELETE FROM sqlite_sequence WHERE name='indices'")
+                    except Exception:
+                        # sqlite_sequence doesn't exist if no auto-increment columns are used
+                        pass
+                    
+                    conn.commit()
+                
+                # Then vacuum in a separate connection (outside transaction)
+                with self._get_connection() as conn:
+                    conn.execute("VACUUM")
+                
+                logger.info("Successfully truncated all database data")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to truncate database: {e}")
+            return False
