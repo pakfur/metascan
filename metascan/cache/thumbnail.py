@@ -259,6 +259,78 @@ class ThumbnailCache:
         logger.info(f"Cleared {count} thumbnails from cache")
         return count
     
+    def move_cache_to_trash(self) -> bool:
+        """Move entire thumbnail cache directory to platform-appropriate trash"""
+        try:
+            if not self.cache_dir.exists():
+                logger.info("Cache directory doesn't exist, nothing to clean")
+                return True
+            
+            # Count files before moving
+            thumbnail_files = list(self.cache_dir.glob("*.jpg"))
+            if not thumbnail_files:
+                logger.info("No thumbnail files to move to trash")
+                return True
+            
+            # Move cache directory to trash using platform-specific method
+            self._move_cache_to_trash_platform()
+            
+            # Recreate cache directory
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            logger.info(f"Moved {len(thumbnail_files)} thumbnails to trash")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to move thumbnail cache to trash: {e}")
+            return False
+    
+    def _move_cache_to_trash_platform(self):
+        """Move cache directory to platform-specific trash location"""
+        import platform
+        import shutil
+        
+        system = platform.system()
+        
+        if system == "Darwin":  # macOS
+            # Use macOS Trash
+            trash_dir = Path.home() / ".Trash"
+            trash_dir.mkdir(exist_ok=True)
+            
+            # Generate unique name if directory already exists in trash
+            dest_path = trash_dir / self.cache_dir.name
+            counter = 1
+            while dest_path.exists():
+                dest_path = trash_dir / f"{self.cache_dir.name}_{counter}"
+                counter += 1
+            
+            shutil.move(str(self.cache_dir), str(dest_path))
+        
+        elif system == "Windows":
+            # Use Windows Recycle Bin via shell
+            import subprocess
+            # Use PowerShell to move to recycle bin
+            ps_command = f'Remove-Item -Path "{self.cache_dir}" -Recurse -Force'
+            subprocess.run(["powershell", "-Command", ps_command], check=True)
+        
+        elif system == "Linux":
+            # Use XDG trash
+            trash_dir = Path.home() / ".local" / "share" / "Trash" / "files"
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique name if directory already exists in trash
+            dest_path = trash_dir / self.cache_dir.name
+            counter = 1
+            while dest_path.exists():
+                dest_path = trash_dir / f"{self.cache_dir.name}_{counter}"
+                counter += 1
+            
+            shutil.move(str(self.cache_dir), str(dest_path))
+        
+        else:
+            # Fallback: just delete the directory
+            shutil.rmtree(self.cache_dir)
+    
     def get_cache_size(self) -> int:
         """Get total size of cache in bytes"""
         total = 0

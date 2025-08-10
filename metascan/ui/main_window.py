@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QListWidget, QLabel, QSplitter,
     QScrollArea, QGridLayout, QFrame, QPushButton,
     QToolBar, QMessageBox, QProgressBar, QDialog,
-    QDialogButtonBox
+    QDialogButtonBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
@@ -14,7 +14,7 @@ from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
 from metascan.ui.media_viewer import MediaViewer
-from metascan.core.scanner import Scanner
+from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.cache.thumbnail import ThumbnailCache
 import os
@@ -39,6 +39,9 @@ class ScannerThread(QThread):
     def cancel(self):
         """Request cancellation of the scan."""
         self._is_cancelled = True
+        # If using ThreadedScanner, signal it to stop
+        if hasattr(self.scanner, 'stop_scanning'):
+            self.scanner.stop_scanning()
         
     def run(self):
         """Run the scanning process."""
@@ -75,9 +78,9 @@ class ScanProgressDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Scanning Media Files")
+        self.setWindowTitle("Scanning Media Files (Threaded)")
         self.setModal(True)
-        self.setFixedSize(500, 150)
+        self.setFixedSize(550, 180)
         
         # Layout
         layout = QVBoxLayout(self)
@@ -94,6 +97,11 @@ class ScanProgressDialog(QDialog):
         # Progress text
         self.progress_label = QLabel("0 / 0 files")
         layout.addWidget(self.progress_label)
+        
+        # Threading info label
+        self.thread_info_label = QLabel("Multi-threaded scanning: 4 workers + batch database writes")
+        self.thread_info_label.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+        layout.addWidget(self.thread_info_label)
         
         # Cancel button
         cancel_button = QPushButton("Cancel")
@@ -128,6 +136,82 @@ class ScanProgressDialog(QDialog):
             self.file_label.setText("Cancelling...")
 
 
+class ScanConfirmationDialog(QDialog):
+    """Dialog for confirming scan with optional full clean."""
+    
+    def __init__(self, total_dirs: int, total_files: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Scan")
+        self.setModal(True)
+        self.setFixedSize(400, 200)
+        
+        # Layout
+        layout = QVBoxLayout(self)
+        
+        # Information text
+        info_text = f"Scan Configuration:\n\n"
+        info_text += f"Directories to scan: {total_dirs}\n"
+        info_text += f"Media files to process: {total_files:,}\n\n"
+        info_text += "This operation may take several minutes depending on the number of files."
+        
+        info_label = QLabel(info_text)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Full clean checkbox
+        self.full_clean_checkbox = QCheckBox("Full clean and scan")
+        self.full_clean_checkbox.setToolTip(
+            "Clear all existing data (media records, indices, and thumbnails) before scanning.\n"
+            "This ensures a completely fresh start but will remove all previously scanned data."
+        )
+        self.full_clean_checkbox.setChecked(False)
+        self.full_clean_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-weight: bold;
+                padding: 8px;
+                color: #d32f2f;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #ccc;
+                background-color: white;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                border: 2px solid #d32f2f;
+                background-color: #d32f2f;
+                border-radius: 3px;
+            }
+        """)
+        layout.addWidget(self.full_clean_checkbox)
+        
+        # Question
+        question_label = QLabel("Do you want to continue?")
+        question_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(question_label)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No,
+            Qt.Orientation.Horizontal
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+        
+        # Set focus on Yes button
+        yes_button = button_box.button(QDialogButtonBox.StandardButton.Yes)
+        if yes_button:
+            yes_button.setFocus()
+    
+    def is_full_clean_requested(self) -> bool:
+        """Check if full clean was requested."""
+        return self.full_clean_checkbox.isChecked()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -138,7 +222,7 @@ class MainWindow(QMainWindow):
         self.config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.json')
         db_path = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))) / 'data'
         self.db_manager = DatabaseManager(db_path)
-        self.scanner = Scanner(self.db_manager)
+        self.scanner = ThreadedScanner(self.db_manager, num_workers=4, batch_size=10)
         
         # Current filter state
         self.current_filters = {}
@@ -357,24 +441,19 @@ class MainWindow(QMainWindow):
                     media_files = self._count_media_files(dir_path, recursive)
                     total_files += media_files
             
-            # Show confirmation dialog
-            msg_text = f"Scan Configuration:\n\n"
-            msg_text += f"Directories to scan: {total_dirs}\n"
-            msg_text += f"Media files to process: {total_files:,}\n\n"
-            msg_text += "This operation may take several minutes depending on the number of files.\n"
-            msg_text += "Do you want to continue?"
-            
-            reply = QMessageBox.question(
-                self,
-                "Confirm Scan",
-                msg_text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            )
-            
-            if reply != QMessageBox.StandardButton.Yes:
+            # Show confirmation dialog with full clean option
+            confirmation_dialog = ScanConfirmationDialog(total_dirs, total_files, self)
+            if confirmation_dialog.exec() != QDialog.DialogCode.Accepted:
                 print("Scan cancelled by user")
                 return
+            
+            # Check if full clean was requested
+            full_clean_requested = confirmation_dialog.is_full_clean_requested()
+            
+            if full_clean_requested:
+                print("Full clean and scan requested")
+                # Perform cleanup before scanning
+                self._perform_full_cleanup()
                 
             # Create progress dialog
             self.progress_dialog = ScanProgressDialog(self)
@@ -782,6 +861,49 @@ class MainWindow(QMainWindow):
         else:
             # Fallback: just delete the file
             file_path.unlink()
+    
+    def _perform_full_cleanup(self):
+        """Perform full cleanup: truncate database and move thumbnail cache to trash"""
+        try:
+            print("Starting full cleanup...")
+            
+            # 1. Truncate database
+            print("Cleaning database...")
+            db_success = self.db_manager.truncate_all_data()
+            if not db_success:
+                print("Warning: Database cleanup failed")
+            else:
+                print("Database cleaned successfully")
+            
+            # 2. Move thumbnail cache to trash
+            print("Moving thumbnail cache to trash...")
+            cache_success = self.thumbnail_cache.move_cache_to_trash()
+            if not cache_success:
+                print("Warning: Thumbnail cache cleanup failed")
+            else:
+                print("Thumbnail cache moved to trash successfully")
+            
+            # 3. Clear in-memory data
+            print("Clearing in-memory data...")
+            self.all_media.clear()
+            self.filtered_media_paths.clear()
+            self.current_filters.clear()
+            self.favorites_active = False
+            
+            # 4. Update UI
+            self.thumbnail_view.set_media_list([])
+            self.metadata_panel.clear_content()
+            self.refresh_filters()  # Clear filters panel
+            
+            print("Full cleanup completed successfully")
+            
+        except Exception as e:
+            print(f"Error during full cleanup: {e}")
+            QMessageBox.warning(
+                self, 
+                "Cleanup Warning", 
+                f"Some cleanup operations failed: {e}\n\nScanning will continue, but some old data may remain."
+            )
 
 
 def main():

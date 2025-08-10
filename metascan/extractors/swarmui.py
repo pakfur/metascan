@@ -79,8 +79,22 @@ class SwarmUIExtractor(MetadataExtractor):
                                 result.update(extracted)
                             else:
                                 logger.warning(f"Failed to parse SwarmUI data from UserComment in {image_path}: {e}")
+                                # Add parsing error info to result for logging
+                                result["parsing_errors"] = result.get("parsing_errors", [])
+                                result["parsing_errors"].append({
+                                    "error_type": "JSONDecodeError",
+                                    "error_message": str(e),
+                                    "raw_data": comment[:500] if isinstance(comment, str) else str(comment)[:500]
+                                })
                 except (KeyError, TypeError) as e:
                     logger.warning(f"Unexpected error parsing SwarmUI data from {image_path}: {e}")
+                    # Add parsing error info to result for logging
+                    result["parsing_errors"] = result.get("parsing_errors", [])
+                    result["parsing_errors"].append({
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "raw_data": str(metadata)[:500] if metadata else ""
+                    })
             
             # Fallback to parameters field
             elif "parameters" in metadata:
@@ -91,7 +105,10 @@ class SwarmUIExtractor(MetadataExtractor):
                 extracted = self._extract_from_text_params(params_text)
                 result.update(extracted)
             
-            return result if result["raw_metadata"] else None
+            # Return result even if raw_metadata is empty but we have parsing errors to report
+            if result["raw_metadata"] or result.get("parsing_errors"):
+                return result
+            return None
             
         except Exception as e:
             logger.error(f"Failed to extract SwarmUI metadata from {image_path}: {e}")
