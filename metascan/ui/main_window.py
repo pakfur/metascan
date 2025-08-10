@@ -222,7 +222,6 @@ class MainWindow(QMainWindow):
         self.config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.json')
         db_path = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))) / 'data'
         self.db_manager = DatabaseManager(db_path)
-        self.scanner = ThreadedScanner(self.db_manager, num_workers=4, batch_size=10)
         
         # Current filter state
         self.current_filters = {}
@@ -233,6 +232,9 @@ class MainWindow(QMainWindow):
         # Initialize thumbnail cache for metadata panel
         cache_dir = Path.home() / ".metascan" / "thumbnails"
         self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
+        
+        # Initialize scanner with thumbnail cache
+        self.scanner = ThreadedScanner(self.db_manager, num_workers=4, batch_size=10, thumbnail_cache=self.thumbnail_cache)
         
         # Create media viewer (initially hidden)
         self.media_viewer = MediaViewer()  # Create without parent to control positioning
