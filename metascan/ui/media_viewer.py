@@ -96,6 +96,12 @@ class VideoPlayer(QWidget):
         self.audio_output = QAudioOutput()
         self.media_player.setAudioOutput(self.audio_output)
         
+        # Set looping to infinite by default
+        self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
+        
+        # Track last position for loop detection
+        self._last_position = 0
+        
         self.video_widget = QVideoWidget()
         self.video_widget.setStyleSheet("background-color: black;")
         self.video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -153,8 +159,9 @@ class VideoPlayer(QWidget):
             # Set the new source
             self.media_player.setSource(QUrl.fromLocalFile(str(file_path)))
             
-            # Reset position
+            # Reset position and tracking
             self.position_slider.setValue(0)
+            self._last_position = 0
             
             # Don't auto-play, let user control playback
             return True
@@ -189,7 +196,13 @@ class VideoPlayer(QWidget):
     def update_position(self, position):
         """Update position slider."""
         if not self.position_slider.isSliderDown():
-            self.position_slider.setValue(position)
+            # Check if video has looped (position jumps from near end to near start)
+            if hasattr(self, '_last_position') and self._last_position > self.media_player.duration() - 1000 and position < 1000:
+                # Video has looped, ensure slider resets to 0
+                self.position_slider.setValue(0)
+            else:
+                self.position_slider.setValue(position)
+            self._last_position = position
     
     def update_duration(self, duration):
         """Update duration when media is loaded."""

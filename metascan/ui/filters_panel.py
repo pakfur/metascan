@@ -17,7 +17,7 @@ class FilterSection(QFrame):
         self.section_name = section_name
         self.items_list = filter_items
         self.all_items = filter_items.copy()  # Keep original list for filtering
-        self.is_expanded = False
+        self.is_expanded = True
         self.checkboxes = {}
         
         self.setFrameStyle(QFrame.Shape.Box)
@@ -32,7 +32,7 @@ class FilterSection(QFrame):
         # Header button
         self.header_button = QPushButton()
         self.header_button.setCheckable(True)
-        self.header_button.setText(f"▶ {self.section_name.title()} ({len(self.items_list)})")
+        self.header_button.setText(f"▼ {self.section_name.title()} ({len(self.items_list)})")
         self.header_button.setStyleSheet("""
             QPushButton {
                 background-color: #e0e0e0;
@@ -81,8 +81,9 @@ class FilterSection(QFrame):
         else:
             layout.addWidget(self.content_widget)
         
-        # Initially hide content
-        self.content_widget.setVisible(False)
+        # Initially show content (expanded by default)
+        self.content_widget.setVisible(True)
+        self.header_button.setChecked(True)
     
     def toggle_section(self):
         """Toggle the expanded/collapsed state of the section."""
