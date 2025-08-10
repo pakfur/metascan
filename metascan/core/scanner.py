@@ -282,9 +282,9 @@ class ThreadedScanner:
         self.batch_size = batch_size
         self.thumbnail_cache = thumbnail_cache
         
-        # Thread-safe queues
-        self.file_queue = queue.Queue(maxsize=100)  # Bounded to prevent memory issues
-        self.result_queue = queue.Queue(maxsize=50)
+        # Thread-safe queues - increased sizes to prevent deadlocks
+        self.file_queue = queue.Queue(maxsize=500)  # Increased to prevent producer blocking
+        self.result_queue = queue.Queue(maxsize=500)  # Increased to prevent worker blocking
         
         # Threading control
         self.workers = []
@@ -328,10 +328,6 @@ class ThreadedScanner:
             
             # Wait for completion
             self._wait_for_completion()
-            
-            # Generate thumbnails for processed files if thumbnail cache is available
-            if self.thumbnail_cache and self.files_saved > 0:
-                self._generate_thumbnails_for_processed_files(media_files)
             
             logger.info(f"Successfully processed {self.files_saved} media files")
             return self.files_saved
@@ -396,57 +392,88 @@ class ThreadedScanner:
     
     def _producer_worker(self, media_files: List[Path]):
         """Producer thread: adds files to the work queue"""
+        files_added = 0
         try:
             for file_path in media_files:
                 if self.stop_event.is_set():
                     break
                 
                 # Add file to queue with retry logic for queue.Full exceptions
-                while not self.stop_event.is_set():
+                retry_count = 0
+                while not self.stop_event.is_set() and retry_count < 10:
                     try:
-                        self.file_queue.put(file_path, timeout=1.0)
+                        self.file_queue.put(file_path, timeout=2.0)
+                        files_added += 1
                         break  # Successfully added, move to next file
                     except queue.Full:
                         # Queue is full, wait a bit and retry
-                        logger.debug("File queue full, retrying...")
-                        continue
+                        retry_count += 1
+                        if retry_count >= 10:
+                            logger.error(f"Failed to add file to queue after 10 retries: {file_path}")
+                            break
+                        logger.debug(f"File queue full, retry {retry_count}/10...")
+                        time.sleep(0.5)  # Wait longer between retries
+            
+            logger.debug(f"Producer added {files_added}/{len(media_files)} files to queue")
             
             # Signal end of files by adding sentinel values
-            for _ in range(self.num_workers):
-                while not self.stop_event.is_set():
+            sentinels_added = 0
+            for i in range(self.num_workers):
+                retry_count = 0
+                while not self.stop_event.is_set() and retry_count < 20:
                     try:
-                        self.file_queue.put(None, timeout=1.0)
+                        self.file_queue.put(None, timeout=2.0)
+                        sentinels_added += 1
                         break  # Successfully added sentinel
                     except queue.Full:
                         # Queue is full, wait a bit and retry
-                        logger.debug("File queue full while adding sentinel, retrying...")
-                        continue
+                        retry_count += 1
+                        if retry_count >= 20:
+                            logger.error(f"Failed to add sentinel {i+1}/{self.num_workers} after 20 retries")
+                            break
+                        logger.debug(f"File queue full while adding sentinel {i+1}, retry {retry_count}/20...")
+                        time.sleep(1.0)  # Wait longer for queue to drain
+            
+            logger.debug(f"Producer added {sentinels_added}/{self.num_workers} sentinels")
                 
         except Exception as e:
             logger.error(f"Producer thread error: {e}")
             import traceback
             logger.error(f"Producer thread traceback: {traceback.format_exc()}")
             self.stop_event.set()
+        finally:
+            logger.debug("Producer thread exiting")
     
     def _file_worker(self):
         """Worker thread: processes files and adds results to result queue"""
         # Create scanner instance per thread (thread-local extractors)
-        scanner = Scanner(self.db_manager)
+        scanner = Scanner(self.db_manager, thumbnail_cache=self.thumbnail_cache)
+        worker_id = threading.current_thread().name
+        files_processed_by_worker = 0
         
         try:
             while not self.stop_event.is_set():
                 file_path = None
                 try:
-                    # Get file from queue
-                    file_path = self.file_queue.get(timeout=1.0)
+                    # Get file from queue with timeout
+                    file_path = self.file_queue.get(timeout=2.0)
                     
                     # Check for sentinel value (end of work)
                     if file_path is None:
+                        logger.debug(f"{worker_id} received sentinel, exiting")
                         self.file_queue.task_done()
                         break
                     
-                    # Process the file
-                    media = scanner._process_media_file(file_path)
+                    # Process the file - catch all exceptions to ensure we always send a result
+                    media = None
+                    try:
+                        media = scanner._process_media_file(file_path)
+                        if media:
+                            files_processed_by_worker += 1
+                    except Exception as e:
+                        # Log the error but continue processing
+                        logger.debug(f"{worker_id} failed to process {file_path}: {e}")
+                        media = None
                     
                     # Update progress
                     with self.stats_lock:
@@ -459,35 +486,44 @@ class ThreadedScanner:
                                     file_path
                                 )
                                 if should_continue is False:
+                                    logger.info(f"{worker_id} cancelled by progress callback")
                                     self.stop_event.set()
                                     # Still add result to queue even if cancelled
                                     self._put_result_with_timeout((file_path, media))
                                     self.file_queue.task_done()
                                     break
                             except Exception as e:
-                                logger.error(f"Progress callback error: {e}")
+                                logger.error(f"{worker_id} progress callback error: {e}")
                     
                     # Always add result to result queue (even if None)
-                    self._put_result_with_timeout((file_path, media))
+                    # This ensures the database writer knows about all files
+                    if not self._put_result_with_timeout((file_path, media)):
+                        logger.error(f"{worker_id} failed to add result for {file_path}")
                     
                     # Mark task as done
                     self.file_queue.task_done()
                     
                 except queue.Empty:
-                    continue  # Timeout, check stop event and try again
+                    # Timeout is normal, just check stop event and continue
+                    continue
                 except Exception as e:
-                    logger.error(f"Worker thread error processing file {file_path}: {e}")
-                    # Always add a result (even if failed) and mark task done
+                    # Unexpected error - log it but try to continue
+                    logger.error(f"{worker_id} unexpected error: {e}")
+                    # Try to mark task done and add failed result if we have a file_path
                     if file_path is not None:
-                        self._put_result_with_timeout((file_path, None))
                         try:
+                            self._put_result_with_timeout((file_path, None))
                             self.file_queue.task_done()
-                        except ValueError:
-                            pass  # Queue might already be empty
+                        except Exception as cleanup_error:
+                            logger.error(f"{worker_id} cleanup error: {cleanup_error}")
                     
         except Exception as e:
-            logger.error(f"Worker thread fatal error: {e}")
+            logger.error(f"{worker_id} fatal error: {e}")
+            import traceback
+            logger.error(f"{worker_id} traceback: {traceback.format_exc()}")
             self.stop_event.set()
+        finally:
+            logger.debug(f"{worker_id} exiting, processed {files_processed_by_worker} files successfully")
     
     def _database_writer(self):
         """Database writer thread: batches results and writes to database"""
@@ -495,6 +531,10 @@ class ThreadedScanner:
         last_write_time = time.time()
         batch_timeout = 2.0  # Write batch every 2 seconds even if not full
         results_processed = 0
+        files_written = 0
+        files_failed = 0
+        
+        logger.debug(f"Database writer starting, expecting up to {self.total_files} files")
         
         try:
             while not self.stop_event.is_set():
@@ -506,7 +546,9 @@ class ThreadedScanner:
                     # Add valid media to batch
                     if media is not None:
                         batch.append(media)
+                        files_written += 1
                     else:
+                        files_failed += 1
                         logger.debug(f"Skipped failed file: {file_path}")
                     
                     current_time = time.time()
@@ -518,6 +560,10 @@ class ThreadedScanner:
                         if batch:
                             saved_count = self.db_manager.save_media_batch(batch)
                             
+                            # Generate thumbnails for successfully saved media files
+                            if self.thumbnail_cache and saved_count > 0:
+                                self._generate_thumbnails_for_batch(batch[:saved_count])
+                            
                             with self.stats_lock:
                                 self.files_saved += saved_count
                             
@@ -528,16 +574,20 @@ class ThreadedScanner:
                     # Mark result as processed
                     self.result_queue.task_done()
                     
-                    # Check if we've processed all expected results
-                    if results_processed >= self.total_files:
-                        logger.debug(f"Database writer processed all {self.total_files} results")
-                        break
+                    # Don't use this as exit condition - it's unreliable
+                    # The exit condition should be based on workers finishing, not file count
+                    if results_processed % 100 == 0:
+                        logger.debug(f"Database writer processed {results_processed}/{self.total_files} results")
                     
                 except queue.Empty:
                     # Check if we have a partial batch to write on timeout
                     current_time = time.time()
                     if batch and current_time - last_write_time >= batch_timeout:
                         saved_count = self.db_manager.save_media_batch(batch)
+                        
+                        # Generate thumbnails for successfully saved media files
+                        if self.thumbnail_cache and saved_count > 0:
+                            self._generate_thumbnails_for_batch(batch[:saved_count])
                         
                         with self.stats_lock:
                             self.files_saved += saved_count
@@ -547,11 +597,15 @@ class ThreadedScanner:
                         last_write_time = current_time
                     
                     # Check if all workers are done and no more results expected
-                    if (all(not worker.is_alive() for worker in self.workers) and 
-                        self.result_queue.empty() and 
-                        (self.producer_thread is None or not self.producer_thread.is_alive())):
-                        logger.debug("All workers and producer finished, database writer exiting")
-                        break
+                    # Add a grace period to ensure no race conditions
+                    if all(not worker.is_alive() for worker in self.workers):
+                        # Workers are done, check if queue has been empty for a while
+                        if self.result_queue.empty():
+                            # Wait a bit to ensure no race condition
+                            time.sleep(2.0)
+                            if self.result_queue.empty():
+                                logger.debug(f"All workers finished and queue empty, database writer exiting (processed {results_processed} files)")
+                                break
                         
                 except Exception as e:
                     logger.error(f"Database writer error: {e}")
@@ -564,17 +618,26 @@ class ThreadedScanner:
             # Write any remaining items in batch
             if batch:
                 saved_count = self.db_manager.save_media_batch(batch)
+                
+                # Generate thumbnails for successfully saved media files
+                if self.thumbnail_cache and saved_count > 0:
+                    self._generate_thumbnails_for_batch(batch[:saved_count])
+                
                 with self.stats_lock:
                     self.files_saved += saved_count
                 logger.debug(f"Saved final batch of {saved_count} media files")
                 
         except Exception as e:
             logger.error(f"Database writer fatal error: {e}")
+            import traceback
+            logger.error(f"Database writer traceback: {traceback.format_exc()}")
             self.stop_event.set()
+        finally:
+            logger.info(f"Database writer exiting: processed={results_processed}, written={files_written}, failed={files_failed}, saved={self.files_saved}")
     
     def _wait_for_completion(self):
         """Wait for all threads to complete"""
-        timeout = 30.0  # 30 second timeout per thread
+        timeout = 300.0  # 5 minute timeout per thread for large directories
         
         # Wait for producer to finish
         if self.producer_thread and self.producer_thread.is_alive():
@@ -614,65 +677,59 @@ class ThreadedScanner:
             except queue.Empty:
                 break
     
-    def _generate_thumbnails_for_processed_files(self, media_files: List[Path]):
-        """Generate thumbnails for files that were successfully processed"""
-        if not self.thumbnail_cache:
+    def _generate_thumbnails_for_batch(self, media_batch: List[Media]):
+        """Generate thumbnails for a batch of successfully saved media files"""
+        if not self.thumbnail_cache or not media_batch:
             return
             
-        logger.info("Generating thumbnails for processed media files...")
+        logger.debug(f"Generating thumbnails for batch of {len(media_batch)} media files")
         
-        # Get list of files that were successfully processed from database
-        processed_files = []
-        for file_path in media_files:
-            # Check if file exists in database (was successfully processed)
-            if self.db_manager.get_media(file_path) is not None:
-                processed_files.append(file_path)
+        # Extract file paths from media objects
+        file_paths = [media.file_path for media in media_batch]
         
-        if not processed_files:
-            logger.info("No files to generate thumbnails for")
-            return
-            
-        logger.info(f"Generating thumbnails for {len(processed_files)} processed files")
+        # Generate thumbnails synchronously to avoid overloading the system
+        thumbnail_count = 0
+        failed_count = 0
         
-        # Use ThreadPoolExecutor to generate thumbnails in parallel
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ThumbnailGen") as executor:
-            # Submit thumbnail generation tasks
-            future_to_path = {
-                executor.submit(self.thumbnail_cache.get_or_create_thumbnail, file_path): file_path 
-                for file_path in processed_files
-            }
-            
-            thumbnail_count = 0
-            failed_count = 0
-            
-            # Process completed thumbnails
-            for future in as_completed(future_to_path):
-                file_path = future_to_path[future]
-                try:
-                    thumbnail_path = future.result(timeout=30)  # 30 second timeout per thumbnail
-                    if thumbnail_path:
-                        thumbnail_count += 1
-                        logger.debug(f"Generated thumbnail for {file_path}")
-                    else:
-                        failed_count += 1
-                        logger.debug(f"Failed to generate thumbnail for {file_path}")
-                        
-                except Exception as e:
+        for file_path in file_paths:
+            try:
+                thumbnail_path = self.thumbnail_cache.get_or_create_thumbnail(file_path)
+                if thumbnail_path:
+                    thumbnail_count += 1
+                    logger.debug(f"Generated thumbnail for {file_path}")
+                else:
                     failed_count += 1
-                    logger.warning(f"Thumbnail generation error for {file_path}: {e}")
+                    logger.debug(f"Failed to generate thumbnail for {file_path}")
+                    
+            except Exception as e:
+                failed_count += 1
+                logger.debug(f"Thumbnail generation error for {file_path}: {e}")
         
-        logger.info(f"Thumbnail generation complete: {thumbnail_count} created, {failed_count} failed")
+        if thumbnail_count > 0 or failed_count > 0:
+            logger.debug(f"Batch thumbnail generation: {thumbnail_count} created, {failed_count} failed")
     
     def _put_result_with_timeout(self, result):
-        """Put result in result queue with timeout and retry logic to prevent deadlocks"""
-        while not self.stop_event.is_set():
+        """Put result in result queue with timeout and retry logic to prevent deadlocks
+        
+        Returns:
+            bool: True if successfully added, False if failed
+        """
+        retry_count = 0
+        max_retries = 30  # Limit retries to prevent infinite loops
+        while not self.stop_event.is_set() and retry_count < max_retries:
             try:
-                self.result_queue.put(result, timeout=1.0)
-                break  # Successfully added
+                self.result_queue.put(result, timeout=2.0)
+                return True  # Successfully added
             except queue.Full:
                 # Result queue is full, wait a bit and retry
-                logger.debug("Result queue full, retrying...")
-                continue
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"Failed to add result to queue after {max_retries} retries: {result[0] if result else 'None'}")
+                    return False
+                if retry_count % 10 == 0:  # Only log every 10 retries to reduce spam
+                    logger.debug(f"Result queue full, retry {retry_count}/{max_retries}...")
+                time.sleep(0.5)  # Wait for queue to drain
+        return False  # Failed to add
     
     def _reset_scanner_state(self):
         """Reset scanner state for reuse across multiple scans"""
