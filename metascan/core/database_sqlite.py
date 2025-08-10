@@ -238,6 +238,10 @@ class DatabaseManager:
             for word in filtered_words:
                 indices.append(("prompt", word))
         
+        # Index LoRAs
+        for lora in media.loras:
+            indices.append(("lora", lora.lora_name.lower()))
+        
         return indices
     
     def get_filter_data(self, sort_order: str = "count") -> Dict[str, List[Dict[str, Any]]]:
