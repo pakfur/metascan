@@ -41,15 +41,19 @@ class Scanner:
         
         for i, file_path in enumerate(media_files):
             try:
+                # Progress callback and cancellation check
+                if progress_callback:
+                    should_continue = progress_callback(i + 1, total_files, file_path)
+                    if should_continue is False:
+                        logger.info("Scanning cancelled by user")
+                        break
+                
                 # Process the media file
                 media = self._process_media_file(file_path)
                 if media:
                     # Store in database
                     self.db_manager.save_media(media)
                     processed_count += 1
-                    
-                if progress_callback:
-                    progress_callback(i + 1, total_files, file_path)
                     
             except Exception as e:
                 logger.error(f"Failed to process {file_path}: {e}")

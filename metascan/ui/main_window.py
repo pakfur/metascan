@@ -3,9 +3,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, 
     QVBoxLayout, QListWidget, QLabel, QSplitter,
     QScrollArea, QGridLayout, QFrame, QPushButton,
-    QToolBar, QMessageBox
+    QToolBar, QMessageBox, QProgressBar, QDialog,
+    QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
@@ -21,6 +22,110 @@ import json
 from pathlib import Path
 import shutil
 import platform
+
+
+class ScannerThread(QThread):
+    """Thread for running the scanner with progress reporting."""
+    progress_updated = pyqtSignal(int, int, str)  # current, total, current_file
+    scan_complete = pyqtSignal(int)  # processed_count
+    scan_error = pyqtSignal(str)  # error message
+    
+    def __init__(self, scanner, directories):
+        super().__init__()
+        self.scanner = scanner
+        self.directories = directories
+        self._is_cancelled = False
+        
+    def cancel(self):
+        """Request cancellation of the scan."""
+        self._is_cancelled = True
+        
+    def run(self):
+        """Run the scanning process."""
+        total_processed = 0
+        
+        try:
+            for dir_info in self.directories:
+                if self._is_cancelled:
+                    break
+                    
+                # Define progress callback
+                def progress_callback(current, total, file_path):
+                    if self._is_cancelled:
+                        return False  # Return False to stop scanning
+                    self.progress_updated.emit(current, total, str(file_path))
+                    return True  # Continue scanning
+                
+                # Scan directory with progress callback
+                processed = self.scanner.scan_directory(
+                    dir_info['filepath'],
+                    recursive=dir_info['search_subfolders'],
+                    progress_callback=progress_callback
+                )
+                total_processed += processed
+                
+            if not self._is_cancelled:
+                self.scan_complete.emit(total_processed)
+        except Exception as e:
+            self.scan_error.emit(str(e))
+
+
+class ScanProgressDialog(QDialog):
+    """Dialog showing scan progress with cancel option."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Scanning Media Files")
+        self.setModal(True)
+        self.setFixedSize(500, 150)
+        
+        # Layout
+        layout = QVBoxLayout(self)
+        
+        # Current file label
+        self.file_label = QLabel("Preparing to scan...")
+        layout.addWidget(self.file_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)
+        
+        # Progress text
+        self.progress_label = QLabel("0 / 0 files")
+        layout.addWidget(self.progress_label)
+        
+        # Cancel button
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.on_cancel_clicked)
+        layout.addWidget(cancel_button)
+        
+        self.cancel_requested = False
+        
+    def update_progress(self, current, total, file_path):
+        """Update the progress display."""
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+        self.progress_label.setText(f"{current} / {total} files")
+        
+        # Show shortened file path
+        if isinstance(file_path, str):
+            file_name = Path(file_path).name
+            self.file_label.setText(f"Processing: {file_name}")
+        
+    def on_cancel_clicked(self):
+        """Handle cancel button click."""
+        reply = QMessageBox.question(
+            self,
+            "Cancel Scanning",
+            "Are you sure you want to cancel the scanning process?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.cancel_requested = True
+            self.file_label.setText("Cancelling...")
 
 
 class MainWindow(QMainWindow):
@@ -240,24 +345,69 @@ class MainWindow(QMainWindow):
                 self._open_config()
                 return
                 
-            # Scan each directory
-            for dir_info in directories:
-                print(f"Scanning {dir_info['filepath']}...")
-                self.scanner.scan_directory(
-                    dir_info['filepath'], 
-                    recursive=dir_info['search_subfolders']
-                )
-                
-            print("Scanning completed.")
+            # Create progress dialog
+            self.progress_dialog = ScanProgressDialog(self)
             
-            # Refresh filters after scanning
-            self.refresh_filters()
+            # Create and configure scanner thread
+            self.scanner_thread = ScannerThread(self.scanner, directories)
+            self.scanner_thread.progress_updated.connect(self._on_scan_progress)
+            self.scanner_thread.scan_complete.connect(self._on_scan_complete)
+            self.scanner_thread.scan_error.connect(self._on_scan_error)
             
-            # Reload media after scanning
-            self.load_all_media()
+            # Start scanning
+            self.scanner_thread.start()
+            
+            # Show progress dialog
+            self.progress_dialog.exec()
             
         except Exception as e:
             print(f"Error during scanning: {e}")
+            QMessageBox.critical(self, "Scan Error", f"Failed to start scanning: {e}")
+    
+    def _on_scan_progress(self, current, total, file_path):
+        """Handle scan progress updates."""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.update_progress(current, total, file_path)
+            
+            # Check if cancellation was requested
+            if self.progress_dialog.cancel_requested:
+                self.scanner_thread.cancel()
+    
+    def _on_scan_complete(self, processed_count):
+        """Handle scan completion."""
+        print(f"Scanning completed. Processed {processed_count} files.")
+        
+        # Close progress dialog
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.accept()
+        
+        # Refresh filters after scanning
+        self.refresh_filters()
+        
+        # Reload media after scanning
+        self.load_all_media()
+        
+        # Show completion message
+        QMessageBox.information(
+            self,
+            "Scan Complete",
+            f"Successfully processed {processed_count} media files."
+        )
+    
+    def _on_scan_error(self, error_message):
+        """Handle scan errors."""
+        print(f"Scan error: {error_message}")
+        
+        # Close progress dialog
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.reject()
+        
+        # Show error message
+        QMessageBox.critical(
+            self,
+            "Scan Error",
+            f"An error occurred during scanning:\n{error_message}"
+        )
     
     def load_all_media(self):
         """Load all media from database."""
