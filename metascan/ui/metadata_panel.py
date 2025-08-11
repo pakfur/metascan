@@ -24,17 +24,7 @@ class MetadataField(QFrame):
 
         self.setFrameStyle(QFrame.Shape.Box)
         self.setLineWidth(1)
-        self.setStyleSheet("""
-            MetadataField {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                background-color: #fafafa;
-                margin: 2px;
-            }
-            MetadataField:hover {
-                background-color: #f0f0f0;
-            }
-        """)
+        # Use theme styling
 
         self.setup_ui()
 
@@ -53,7 +43,7 @@ class MetadataField(QFrame):
         label_font.setBold(True)
         label_font.setPointSize(9)
         label.setFont(label_font)
-        label.setStyleSheet("color: #333; border: none; background: none;")
+        # Use theme styling for label
         header_layout.addWidget(label)
 
         header_layout.addStretch()
@@ -62,21 +52,7 @@ class MetadataField(QFrame):
         copy_button = QPushButton("📋")
         copy_button.setFixedSize(24, 24)
         copy_button.setToolTip(f"Copy {self.label_text} to clipboard")
-        copy_button.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background-color: #fff;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #e6f3ff;
-                border-color: #4CAF50;
-            }
-            QPushButton:pressed {
-                background-color: #cce7ff;
-            }
-        """)
+        # Use theme styling for copy button
         copy_button.clicked.connect(self.copy_to_clipboard)
         header_layout.addWidget(copy_button)
 
@@ -88,30 +64,30 @@ class MetadataField(QFrame):
             self.value_widget.setPlainText(self.value_text)
             self.value_widget.setReadOnly(True)
             self.value_widget.setMaximumHeight(100)
-            self.value_widget.setStyleSheet("""
-                QTextEdit {
-                    border: 1px solid #ddd;
-                    border-radius: 3px;
-                    background-color: #fff;
-                    font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
-                    font-size: 10px;
-                    padding: 4px;
-                }
-            """)
+            # self.value_widget.setStyleSheet("""
+            #     QTextEdit {
+            #         border: 1px solid #ddd;
+            #         border-radius: 3px;
+            #         background-color: #fff;
+            #         font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
+            #         font-size: 10px;
+            #         padding: 4px;
+            #     }
+            # """)
         else:
             self.value_widget = QLineEdit()
             self.value_widget.setText(self.value_text)
             self.value_widget.setReadOnly(True)
-            self.value_widget.setStyleSheet("""
-                QLineEdit {
-                    border: 1px solid #ddd;
-                    border-radius: 3px;
-                    background-color: #fff;
-                    font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
-                    font-size: 10px;
-                    padding: 4px;
-                }
-            """)
+            # self.value_widget.setStyleSheet("""
+            #     QLineEdit {
+            #         border: 1px solid #ddd;
+            #         border-radius: 3px;
+            #         background-color: #fff;
+            #         font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
+            #         font-size: 10px;
+            #         padding: 4px;
+            #     }
+            # """)
 
         layout.addWidget(self.value_widget)
 
@@ -153,28 +129,28 @@ class MetadataSection(QGroupBox):
         """Set up the section UI."""
         self.setCheckable(True)
         self.setChecked(True)  # Start expanded
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 1ex;
-                padding: 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-                color: #2c3e50;
-            }
-            QGroupBox::indicator {
-                width: 13px;
-                height: 13px;
-            }
-            QGroupBox::indicator:checked {
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTMiIGhlaWdodD0iMTMiIHZpZXdCb3g9IjAgMCAxMyAxMyI+PHBhdGggZD0ibTMgNiA0IDQgNC04IiBzdHJva2U9IiM0Q0FGNTAB);
-            }
-        """)
+        # self.setStyleSheet("""
+        #     QGroupBox {
+        #         font-weight: bold;
+        #         border: 2px solid #cccccc;
+        #         border-radius: 5px;
+        #         margin-top: 1ex;
+        #         padding: 8px;
+        #     }
+        #     QGroupBox::title {
+        #         subcontrol-origin: margin;
+        #         left: 10px;
+        #         padding: 0 5px 0 5px;
+        #         color: #2c3e50;
+        #     }
+        #     QGroupBox::indicator {
+        #         width: 13px;
+        #         height: 13px;
+        #     }
+        #     QGroupBox::indicator:checked {
+        #         image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTMiIGhlaWdodD0iMTMiIHZpZXdCb3g9IjAgMCAxMyAxMyI+PHBhdGggZD0ibTMgNiA0IDQgNC04IiBzdHJva2U9IiM0Q0FGNTAB);
+        #     }
+        # """)
 
         # Layout for fields
         self.layout = QVBoxLayout(self)
@@ -266,7 +242,7 @@ class MetadataPanel(QWidget):
         title_font.setBold(True)
         title_font.setPointSize(14)
         title.setFont(title_font)
-        title.setStyleSheet("color: #2c3e50; padding: 5px;")
+        # Use theme styling for title
         header_layout.addWidget(title)
 
         header_layout.addStretch()
@@ -274,22 +250,7 @@ class MetadataPanel(QWidget):
         # Copy all button
         self.copy_all_button = QPushButton("📋 Copy All")
         self.copy_all_button.setToolTip("Copy all metadata to clipboard as JSON")
-        self.copy_all_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #21618c;
-            }
-        """)
+        # Use theme styling for Copy All button
         self.copy_all_button.clicked.connect(self.copy_all_metadata)
         self.copy_all_button.setEnabled(False)
         header_layout.addWidget(self.copy_all_button)
@@ -310,15 +271,7 @@ class MetadataPanel(QWidget):
         # No selection message
         self.no_selection_label = QLabel("Select a media file to view metadata")
         self.no_selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.no_selection_label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
-                font-size: 12px;
-                padding: 20px;
-                border: 2px dashed #bdc3c7;
-                border-radius: 8px;
-            }
-        """)
+        # Use theme styling for no selection label
         self.content_layout.addWidget(self.no_selection_label)
 
         # Add stretch to push content to top
@@ -396,13 +349,13 @@ class MetadataPanel(QWidget):
         info_layout.addWidget(filename_label)
 
         size_label = QLabel(f"{media.width} × {media.height} pixels")
-        size_label.setStyleSheet("color: #7f8c8d; font-size: 10px;")
+        # Use theme styling for size label
         info_layout.addWidget(size_label)
 
         # Format label with media type
         media_type = "VIDEO" if media.is_video else "IMAGE"
         format_label = QLabel(f"{media.format} • {media_type} • {self.format_file_size(media.file_size)}")
-        format_label.setStyleSheet("color: #7f8c8d; font-size: 10px;")
+        # Use theme styling for format label
         info_layout.addWidget(format_label)
         
         # Add video-specific info in preview
@@ -417,7 +370,7 @@ class MetadataPanel(QWidget):
             
             if video_info_parts:
                 video_info_label = QLabel(" • ".join(video_info_parts))
-                video_info_label.setStyleSheet("color: #e74c3c; font-size: 10px; font-weight: bold;")  # Red for video
+                # Use theme styling for video info label
                 info_layout.addWidget(video_info_label)
 
         info_layout.addStretch()
@@ -592,17 +545,8 @@ class MetadataPanel(QWidget):
         """Show brief feedback when copying."""
         # Change button appearance briefly
         original_text = self.copy_all_button.text()
-        original_style = self.copy_all_button.styleSheet()
 
         self.copy_all_button.setText("✓ Copied!")
-        self.copy_all_button.setStyleSheet(original_style + """
-            QPushButton {
-                background-color: #27ae60;
-            }
-        """)
 
         # Reset after delay
-        QTimer.singleShot(1500, lambda: (
-            self.copy_all_button.setText(original_text),
-            self.copy_all_button.setStyleSheet(original_style)
-        ))
+        QTimer.singleShot(1500, lambda: self.copy_all_button.setText(original_text))

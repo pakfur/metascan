@@ -4,10 +4,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QListWidget, QLabel, QSplitter,
     QScrollArea, QGridLayout, QFrame, QPushButton,
     QToolBar, QMessageBox, QProgressBar, QDialog,
-    QDialogButtonBox, QCheckBox
+    QDialogButtonBox, QCheckBox, QComboBox
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
@@ -99,9 +100,8 @@ class ScanProgressDialog(QDialog):
         self.progress_label = QLabel("0 / 0 files")
         layout.addWidget(self.progress_label)
         
-        # Threading info label
+        # Threading info label - no custom styling, use theme
         self.thread_info_label = QLabel("Multi-threaded scanning: 4 workers + batch database writes")
-        self.thread_info_label.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
         layout.addWidget(self.thread_info_label)
         
         # Cancel button
@@ -159,39 +159,17 @@ class ScanConfirmationDialog(QDialog):
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
         
-        # Full clean checkbox
+        # Full clean checkbox - no custom styling, use theme
         self.full_clean_checkbox = QCheckBox("Full clean and scan")
         self.full_clean_checkbox.setToolTip(
             "Clear all existing data (media records, indices, and thumbnails) before scanning.\n"
             "This ensures a completely fresh start but will remove all previously scanned data."
         )
         self.full_clean_checkbox.setChecked(False)
-        self.full_clean_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-weight: bold;
-                padding: 8px;
-                color: #d32f2f;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:unchecked {
-                border: 2px solid #ccc;
-                background-color: white;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                border: 2px solid #d32f2f;
-                background-color: #d32f2f;
-                border-radius: 3px;
-            }
-        """)
         layout.addWidget(self.full_clean_checkbox)
         
-        # Question
+        # Question - no custom styling, use theme
         question_label = QLabel("Do you want to continue?")
-        question_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         layout.addWidget(question_label)
         
         # Buttons
@@ -219,8 +197,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Metascan - AI Media Browser")
         self.setGeometry(100, 100, 1200, 800)
         
+        # Initialize theme before other components
+        self.available_themes = list_themes()
+        self.current_theme = None
+        
         # Initialize components
         self.config_file = str(get_config_path())
+        self.load_and_apply_theme()
         db_path = get_data_dir()
         self.db_manager = DatabaseManager(db_path)
         
@@ -353,61 +336,109 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
-        # Define button style
-        button_style = """
-        QPushButton {
-            background-color: #4CAF50;
-            color: white;
-            border: 2px solid #45a049;
-            padding: 4px 10px;
-            font-size: 10px;
-            font-weight: bold;
-            min-width: 75px;
-            min-height: 20px;
-        }
-        QPushButton:hover {
-            background-color: #45a049;
-            border-color: #3d8b40;
-        }
-        QPushButton:pressed {
-            background-color: #3d8b40;
-        }
-        """
+        # Create theme selector and add to right side of toolbar
+        self._add_theme_selector(toolbar)
         
-        config_button_style = """
-        QPushButton {
-            background-color: #2196F3;
-            color: white;
-            border: 2px solid #45a049;
-            padding: 4px 10px;
-            font-size: 10px;
-            font-weight: bold;
-            min-width: 75px;
-            min-height: 20px;
-        }
-        QPushButton:hover {
-            background-color: #1976D2;
-            border-color: #1565C0;
-        }
-        QPushButton:pressed {
-            background-color: #1565C0;
-        }
-        """
-        
-        # Scan button
+        # Scan button - no custom styling, use theme
         scan_button = QPushButton("Scan")
-        scan_button.setStyleSheet(button_style)
         scan_button.clicked.connect(self._scan_directories)
         toolbar.addWidget(scan_button)
         
         # Add some spacing
         toolbar.addSeparator()
         
-        # Config button
+        # Config button - no custom styling, use theme
         config_button = QPushButton("Config")
-        config_button.setStyleSheet(config_button_style)
         config_button.clicked.connect(self._open_config)
         toolbar.addWidget(config_button)
+    
+    def _add_theme_selector(self, toolbar):
+        """Add theme selector dropdown to the toolbar."""
+        # Add spacer to push theme selector to the right
+        spacer = QWidget()
+        spacer.setSizePolicy(
+            spacer.sizePolicy().horizontalPolicy().Expanding,
+            spacer.sizePolicy().verticalPolicy().Preferred
+        )
+        toolbar.addWidget(spacer)
+        
+        # Theme label - no custom styling, use theme
+        theme_label = QLabel("Theme:")
+        toolbar.addWidget(theme_label)
+        
+        # Theme selector dropdown
+        self.theme_selector = QComboBox()
+        self.theme_selector.setMinimumWidth(200)
+        self.theme_selector.addItems(self.available_themes)
+        
+        # Set current theme in dropdown
+        if self.current_theme and self.current_theme in self.available_themes:
+            self.theme_selector.setCurrentText(self.current_theme)
+        
+        # Connect change signal
+        self.theme_selector.currentTextChanged.connect(self.on_theme_changed)
+        toolbar.addWidget(self.theme_selector)
+        
+        # Add some padding on the right
+        padding = QWidget()
+        padding.setFixedWidth(10)
+        toolbar.addWidget(padding)
+    
+    def load_and_apply_theme(self):
+        """Load theme from config and apply it."""
+        try:
+            # Try to load config
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    self.current_theme = config.get('theme', 'dark_teal.xml')
+            else:
+                # Default theme
+                self.current_theme = 'dark_teal.xml'
+            
+            # Apply the theme
+            if self.current_theme in self.available_themes:
+                app = QApplication.instance()
+                if app:
+                    apply_stylesheet(app, theme=self.current_theme)
+        except Exception as e:
+            print(f"Error loading theme: {e}")
+            # Fall back to default theme
+            self.current_theme = 'dark_teal.xml'
+            app = QApplication.instance()
+            if app:
+                apply_stylesheet(app, theme=self.current_theme)
+    
+    def on_theme_changed(self, theme_name):
+        """Handle theme selection change."""
+        if theme_name and theme_name != self.current_theme:
+            self.current_theme = theme_name
+            
+            # Apply the new theme
+            app = QApplication.instance()
+            if app:
+                apply_stylesheet(app, theme=theme_name)
+            
+            # Save to config
+            self.save_theme_to_config()
+    
+    def save_theme_to_config(self):
+        """Save current theme selection to config file."""
+        try:
+            # Load existing config or create new one
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+            
+            # Update theme
+            config['theme'] = self.current_theme
+            
+            # Save config
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Error saving theme to config: {e}")
     
     def _open_config(self):
         dialog = ConfigDialog(self)
