@@ -1,6 +1,6 @@
 # Metascan
 
-**AI-generated media browser with metadata extraction and intelligent indexing**
+**Media browser with metadata extraction and intelligent indexing**
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
