@@ -5,15 +5,15 @@
       "search_subfolders": true
     },
     {
-      "filepath": "/Volumes/Backup/downloads",
-      "search_subfolders": true
-    },
-    {
       "filepath": "/Volumes/Backup/linked/video_staging",
       "search_subfolders": true
     },
     {
       "filepath": "/Volumes/Backup/linked/StabilityMatrix/Images",
+      "search_subfolders": true
+    },
+    {
+      "filepath": "/Volumes/Backup/downloads",
       "search_subfolders": true
     }
   ],
@@ -62,5 +62,8 @@
     },
     "classification_threshold": 0.5
   },
-  "theme": "dark_blue.xml"
+  "theme": "dark_blue.xml",
+  "watch_directories": true,
+  "thumbnail_size": [512, 512],
+  "cache_size_mb": 500
 }

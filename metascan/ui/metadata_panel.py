@@ -1,13 +1,22 @@
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QPixmap
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QTextEdit, QMessageBox,
-    QGroupBox, QLineEdit, QApplication
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QFrame,
+    QTextEdit,
+    QMessageBox,
+    QGroupBox,
+    QLineEdit,
+    QApplication,
 )
 
 from metascan.core.media import Media
@@ -98,12 +107,15 @@ class MetadataField(QFrame):
 
         # Show brief visual feedback
         original_style = self.styleSheet()
-        self.setStyleSheet(original_style + """
+        self.setStyleSheet(
+            original_style
+            + """
             MetadataField {
                 background-color: #d4edda;
                 border-color: #28a745;
             }
-        """)
+        """
+        )
 
         # Reset style after brief delay
         QTimer.singleShot(300, lambda: self.setStyleSheet(original_style))
@@ -122,7 +134,7 @@ class MetadataSection(QGroupBox):
 
     def __init__(self, title: str, parent=None):
         super().__init__(title, parent)
-        self.fields = {}
+        self.fields: Dict[str, MetadataField] = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -153,7 +165,7 @@ class MetadataSection(QGroupBox):
         # """)
 
         # Layout for fields
-        self.layout = QVBoxLayout(self)
+        self.layout: QVBoxLayout = QVBoxLayout(self)
         self.layout.setContentsMargins(8, 15, 8, 8)
         self.layout.setSpacing(4)
 
@@ -188,13 +200,15 @@ class ThumbnailPreview(QLabel):
         super().__init__(parent)
         self.setFixedSize(120, 120)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QLabel {
                 border: 2px solid #ddd;
                 border-radius: 8px;
                 background-color: #f9f9f9;
             }
-        """)
+        """
+        )
         self.setText("No Image")
 
     def set_thumbnail(self, thumbnail_path: Optional[Path]):
@@ -204,9 +218,10 @@ class ThumbnailPreview(QLabel):
                 pixmap = QPixmap(str(thumbnail_path))
                 if not pixmap.isNull():
                     scaled_pixmap = pixmap.scaled(
-                        116, 116,  # Account for border
+                        116,
+                        116,  # Account for border
                         Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
+                        Qt.TransformationMode.SmoothTransformation,
                     )
                     self.setPixmap(scaled_pixmap)
                 else:
@@ -354,10 +369,12 @@ class MetadataPanel(QWidget):
 
         # Format label with media type
         media_type = "VIDEO" if media.is_video else "IMAGE"
-        format_label = QLabel(f"{media.format} • {media_type} • {self.format_file_size(media.file_size)}")
+        format_label = QLabel(
+            f"{media.format} • {media_type} • {self.format_file_size(media.file_size)}"
+        )
         # Use theme styling for format label
         info_layout.addWidget(format_label)
-        
+
         # Add video-specific info in preview
         if media.is_video:
             video_info_parts = []
@@ -367,7 +384,7 @@ class MetadataPanel(QWidget):
                 video_info_parts.append(f"{media.frame_rate:.1f} fps")
             if media.video_length:
                 video_info_parts.append(f"{media.video_length} frames")
-            
+
             if video_info_parts:
                 video_info_label = QLabel(" • ".join(video_info_parts))
                 # Use theme styling for video info label
@@ -386,12 +403,20 @@ class MetadataPanel(QWidget):
         section = MetadataSection("📁 File Information")
 
         section.add_field("filename", "Filename", media.file_name)
-        section.add_field("filepath", "File Path", str(media.file_path), is_multiline=True)
-        section.add_field("filesize", "File Size", self.format_file_size(media.file_size))
+        section.add_field(
+            "filepath", "File Path", str(media.file_path), is_multiline=True
+        )
+        section.add_field(
+            "filesize", "File Size", self.format_file_size(media.file_size)
+        )
         section.add_field("dimensions", "Dimensions", f"{media.width} × {media.height}")
         section.add_field("format", "Format", media.format)
-        section.add_field("created", "Created", media.created_at.strftime("%Y-%m-%d %H:%M:%S"))
-        section.add_field("modified", "Modified", media.modified_at.strftime("%Y-%m-%d %H:%M:%S"))
+        section.add_field(
+            "created", "Created", media.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        )
+        section.add_field(
+            "modified", "Modified", media.modified_at.strftime("%Y-%m-%d %H:%M:%S")
+        )
 
         if media.tags:
             section.add_field("tags", "Tags", ", ".join(media.tags))
@@ -401,25 +426,41 @@ class MetadataPanel(QWidget):
 
     def create_generation_section(self, media: Media):
         """Create the AI generation parameters section."""
-        section_title = "🎥 Video Generation Parameters" if media.is_video else "🤖 Generation Parameters"
+        section_title = (
+            "🎥 Video Generation Parameters"
+            if media.is_video
+            else "🤖 Generation Parameters"
+        )
         section = MetadataSection(section_title)
 
         section.add_field("source", "Source", media.metadata_source or "Unknown")
         section.add_field("model", "Model", media.model or "Unknown")
         section.add_field("sampler", "Sampler", media.sampler or "Unknown")
         section.add_field("scheduler", "Scheduler", media.scheduler or "Unknown")
-        section.add_field("steps", "Steps", str(media.steps) if media.steps else "Unknown")
-        section.add_field("cfg_scale", "CFG Scale", str(media.cfg_scale) if media.cfg_scale else "Unknown")
+        section.add_field(
+            "steps", "Steps", str(media.steps) if media.steps else "Unknown"
+        )
+        section.add_field(
+            "cfg_scale",
+            "CFG Scale",
+            str(media.cfg_scale) if media.cfg_scale else "Unknown",
+        )
         section.add_field("seed", "Seed", str(media.seed) if media.seed else "Unknown")
 
         # Add video-specific fields
         if media.is_video:
             if media.frame_rate:
-                section.add_field("frame_rate", "Frame Rate", f"{media.frame_rate:.1f} fps")
+                section.add_field(
+                    "frame_rate", "Frame Rate", f"{media.frame_rate:.1f} fps"
+                )
             if media.duration:
-                section.add_field("duration", "Duration", f"{media.duration:.2f} seconds")
+                section.add_field(
+                    "duration", "Duration", f"{media.duration:.2f} seconds"
+                )
             if media.video_length:
-                section.add_field("video_length", "Frame Count", str(media.video_length))
+                section.add_field(
+                    "video_length", "Frame Count", str(media.video_length)
+                )
 
         self.sections["generation"] = section
         self.content_layout.insertWidget(-1, section)
@@ -429,10 +470,17 @@ class MetadataPanel(QWidget):
         section = MetadataSection("✨ Prompts")
 
         if media.prompt:
-            section.add_field("prompt", "Positive Prompt", media.prompt, is_multiline=True)
+            section.add_field(
+                "prompt", "Positive Prompt", media.prompt, is_multiline=True
+            )
 
         if media.negative_prompt:
-            section.add_field("negative_prompt", "Negative Prompt", media.negative_prompt, is_multiline=True)
+            section.add_field(
+                "negative_prompt",
+                "Negative Prompt",
+                media.negative_prompt,
+                is_multiline=True,
+            )
 
         # Only add section if there are prompts
         if media.prompt or media.negative_prompt:
@@ -443,7 +491,7 @@ class MetadataPanel(QWidget):
         """Create the LoRA section."""
         if not media.loras:
             return  # Only create section if there are LoRAs
-            
+
         section = MetadataSection("🎯 LoRAs")
 
         # Create a formatted list of LoRAs with weights and names
@@ -451,10 +499,10 @@ class MetadataPanel(QWidget):
         for lora in media.loras:
             lora_line = f"{lora.lora_weight}: {lora.lora_name}"
             lora_lines.append(lora_line)
-        
+
         # Join all LoRAs with newlines for multiline display
         loras_text = "\n".join(lora_lines)
-        
+
         section.add_field("loras", "LoRAs", loras_text, is_multiline=True)
 
         self.sections["loras"] = section
@@ -471,19 +519,26 @@ class MetadataPanel(QWidget):
         # Format generation data as JSON
         try:
             formatted_data = json.dumps(media.generation_data, indent=2, sort_keys=True)
-            section.add_field("raw_data", "Raw Generation Data", formatted_data, is_multiline=True)
+            section.add_field(
+                "raw_data", "Raw Generation Data", formatted_data, is_multiline=True
+            )
         except Exception:
-            section.add_field("raw_data", "Raw Generation Data", str(media.generation_data), is_multiline=True)
+            section.add_field(
+                "raw_data",
+                "Raw Generation Data",
+                str(media.generation_data),
+                is_multiline=True,
+            )
 
         self.sections["technical"] = section
         self.content_layout.insertWidget(-1, section)
 
     def format_file_size(self, size_bytes: int) -> str:
         """Format file size in human readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB']:
+        for unit in ["B", "KB", "MB", "GB"]:
             if size_bytes < 1024:
                 return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024
+            size_bytes = int(size_bytes / 1024)
         return f"{size_bytes:.1f} TB"
 
     def copy_all_metadata(self):
@@ -498,15 +553,17 @@ class MetadataPanel(QWidget):
                     "name": self.current_media.file_name,
                     "path": str(self.current_media.file_path),
                     "size_bytes": self.current_media.file_size,
-                    "size_formatted": self.format_file_size(self.current_media.file_size),
+                    "size_formatted": self.format_file_size(
+                        self.current_media.file_size
+                    ),
                     "dimensions": {
                         "width": self.current_media.width,
-                        "height": self.current_media.height
+                        "height": self.current_media.height,
                     },
                     "format": self.current_media.format,
                     "created": self.current_media.created_at.isoformat(),
                     "modified": self.current_media.modified_at.isoformat(),
-                    "tags": self.current_media.tags
+                    "tags": self.current_media.tags,
                 },
                 "generation": {
                     "source": self.current_media.metadata_source,
@@ -519,15 +576,17 @@ class MetadataPanel(QWidget):
                     "prompt": self.current_media.prompt,
                     "negative_prompt": self.current_media.negative_prompt,
                     # LoRAs
-                    "loras": [{"lora_name": lora.lora_name, "lora_weight": lora.lora_weight} 
-                             for lora in self.current_media.loras],
+                    "loras": [
+                        {"lora_name": lora.lora_name, "lora_weight": lora.lora_weight}
+                        for lora in self.current_media.loras
+                    ],
                     # Video-specific metadata
                     "frame_rate": self.current_media.frame_rate,
                     "duration": self.current_media.duration,
                     "video_length": self.current_media.video_length,
-                    "media_type": self.current_media.media_type
+                    "media_type": self.current_media.media_type,
                 },
-                "raw_generation_data": self.current_media.generation_data
+                "raw_generation_data": self.current_media.generation_data,
             }
 
             # Copy to clipboard
@@ -539,7 +598,9 @@ class MetadataPanel(QWidget):
             self.show_copy_feedback("All metadata copied to clipboard!")
 
         except Exception as e:
-            QMessageBox.warning(self, "Copy Error", f"Failed to copy metadata: {str(e)}")
+            QMessageBox.warning(
+                self, "Copy Error", f"Failed to copy metadata: {str(e)}"
+            )
 
     def show_copy_feedback(self, message: str):
         """Show brief feedback when copying."""
