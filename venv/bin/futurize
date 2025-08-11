@@ -1,4 +1,4 @@
-#!/Users/jkline/gws/jkline/metascan/venv/bin/python3.11
+#!/Users/jk/gws/metascan/venv/bin/python3
 import sys
 from libfuturize.main import main
 if __name__ == '__main__':

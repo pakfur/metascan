@@ -12,7 +12,15 @@ black==23.12.1
 click==8.2.2
 pathspec==0.12.1
 platformdirs==4.3.8
+yapf==0.43.0
 
 # Type Checking
 mypy==1.8.0
 mypy_extensions==1.1.0
+
+# Build Tools
+build==1.2.2.post1
+pyproject_hooks==1.2.0
+
+# Additional development utilities
+typing-inspection==0.4.1
