@@ -12,24 +12,24 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
 
 ## Features
 
-✨ **Comprehensive Media Support**
+### Media Support
 - Image formats: PNG, JPG, WEBP with embedded metadata
 - Video formats: MP4, AVI, MOV with metadata extraction
 - Thumbnail generation with FFMPEG integration
 
-🤖 **AI Metadata Extraction**
+### Metadata Extraction
 - ComfyUI workflow extraction
 - SwarmUI parameter parsing  
 - Fooocus metadata support
 - Custom prompt tokenization with NLTK
 
-🔍 **Advanced Filtering & Search**
+### Filtering & Search
 - Filter by prompts, models, LoRAs, and custom tags
 - Inverted index for fast search across large collections
 - Real-time filter updates
 - Favorites system for organizing preferred media
 
-🖼️ **Intuitive Interface**
+### GUI Interface
 - Virtualized thumbnail grid for performance with large collections
 - Three-panel layout: filters, thumbnails, metadata
 - Resizable panels with persistent layout
@@ -37,17 +37,12 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
 - Media deletion with keyboard shortcut (Cmd+D/Ctrl+D)
 - Favorites system with star icon in media viewer
 
-📁 **Smart Organization**
-- Directory scanning with file watching
-- SQLite database for metadata storage
-- Configurable scan directories
-- Automatic thumbnail caching
 
 ## Tech Stack
 
 **Core Technologies:**
 - **Python 3.8+** - Core application language
-- **PyQt6** - Modern cross-platform GUI framework
+- **PyQt6** - Cross-platform GUI framework
 - **SQLite** - Local database for metadata storage
 - **NLTK** - Natural language processing for prompt analysis
 
@@ -71,7 +66,22 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
   - Ubuntu/Debian: `sudo apt install ffmpeg`
   - Windows: Download from [FFmpeg.org](https://ffmpeg.org/download.html)
 
-### Quick Start
+### Dependency Structure
+
+Metascan uses a minimal dependency structure:
+
+- **`requirements.txt`** - Production dependencies only (21 packages)
+  - Core UI, media processing, and metadata extraction
+  - Lightweight and focused on essential functionality
+
+- **`requirements-dev.txt`** - Development tools (optional)
+  - Testing framework (pytest)
+  - Code formatting (black, yapf)
+  - Type checking (mypy)
+  - Build tools
+
+
+### Quick Start (End Users)
 
 1. **Clone the repository:**
    ```bash
@@ -90,7 +100,7 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
    venv\Scripts\activate
    ```
 
-3. **Install dependencies:**
+3. **Install production dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
@@ -105,7 +115,35 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
    python main.py
    ```
 
-### Alternative Installation (Development)
+### Development Setup (Contributors)
+
+For local development with all dev tools:
+
+1. **Follow steps 1-2 above, then:**
+   ```bash
+   # Install production dependencies
+   pip install -r requirements.txt
+   
+   # Install development dependencies (testing, formatting, type checking)
+   pip install -r requirements-dev.txt
+   
+   # Set up NLTK data
+   python setup_nltk.py
+   ```
+
+2. **Verify development setup:**
+   ```bash
+   # Run tests
+   pytest
+   
+   # Check code formatting
+   black --check metascan/ tests/
+   
+   # Run type checking
+   mypy metascan/
+   ```
+
+### Alternative Installation (Editable)
 
 For development with editable installation:
 
