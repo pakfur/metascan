@@ -56,7 +56,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
 )
 from pathlib import Path
-from typing import List, Set, Optional, Dict, Tuple, Union
+from typing import List, Set, Optional, Dict, Tuple, Union, Deque
 import logging
 import platform
 import subprocess
@@ -120,7 +120,7 @@ class WidgetPool:
             initial_size: Initial number of widgets to create in the pool
         """
         self.parent = parent
-        self._available: deque[ThumbnailWidget] = deque()
+        self._available: Deque[ThumbnailWidget] = deque()
         self._in_use: Dict[str, ThumbnailWidget] = {}  # media file_path -> widget
 
         # Pre-create initial widgets
@@ -259,7 +259,11 @@ class VirtualScrollArea(QScrollArea):
         self.viewport_info = ViewportInfo()
 
         # Widget management
-        self.widget_pool = WidgetPool(self.viewport())
+        viewport = self.viewport()
+        if viewport is None:
+            # Fallback - should not happen in normal operation
+            viewport = QWidget()
+        self.widget_pool = WidgetPool(viewport)
         self.visible_widgets: Dict[int, ThumbnailWidget] = {}  # item_index -> widget
 
         # Thumbnail loading
@@ -289,10 +293,14 @@ class VirtualScrollArea(QScrollArea):
         self.setWidgetResizable(True)
 
         # Enable mouse tracking for hover effects
-        self.viewport().setMouseTracking(True)
+        viewport = self.viewport()
+        if viewport:
+            viewport.setMouseTracking(True)
 
         # Connect scroll bar signals
-        self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        vscroll = self.verticalScrollBar()
+        if vscroll:
+            vscroll.valueChanged.connect(self._on_scroll)
 
         # Initialize thumbnail cache
         cache_dir = Path.home() / ".metascan" / "thumbnails"
@@ -358,7 +366,8 @@ class VirtualScrollArea(QScrollArea):
 
     def _calculate_layout(self) -> None:
         """Calculate grid layout metrics based on current size and media count."""
-        viewport_width = self.viewport().width()
+        viewport = self.viewport()
+        viewport_width = viewport.width() if viewport else 800  # fallback
 
         # Calculate optimal columns
         available_width = (
@@ -393,18 +402,22 @@ class VirtualScrollArea(QScrollArea):
             )
 
         # Set container widget size - this enables scrolling in QScrollArea
-        viewport_width = self.viewport().width()
+        viewport = self.viewport()
+        viewport_width = viewport.width() if viewport else 800  # fallback
+        viewport_height = viewport.height() if viewport else 600  # fallback
         self.container_widget.setFixedSize(viewport_width, total_height)
 
         # Update viewport info
         self.viewport_info.total_height = total_height
-        self.viewport_info.visible_height = self.viewport().height()
+        self.viewport_info.visible_height = viewport_height
 
         logger.debug(f"Container size updated: {viewport_width}x{total_height}")
 
     def _on_scroll(self, value: int) -> None:
         """Handle scroll bar value changes."""
-        self.viewport_info.scroll_y = self.verticalScrollBar().value()
+        vscroll = self.verticalScrollBar()
+        if vscroll:
+            self.viewport_info.scroll_y = vscroll.value()
         # Throttle viewport updates for performance
         if not self.update_timer.isActive():
             self.update_timer.start(16)  # ~60 FPS
@@ -567,10 +580,11 @@ class VirtualScrollArea(QScrollArea):
         if self.loader_thread and self.loader_thread.isRunning():
             return  # Already loading
 
-        self.loader_thread = ThumbnailLoader(media_list, self.thumbnail_cache)
-        self.loader_thread.thumbnail_ready.connect(self._on_thumbnail_ready)
-        self.loader_thread.finished.connect(self._on_loading_finished)
-        self.loader_thread.start()
+        if self.thumbnail_cache:
+            self.loader_thread = ThumbnailLoader(media_list, self.thumbnail_cache)
+            self.loader_thread.thumbnail_ready.connect(self._on_thumbnail_ready)
+            self.loader_thread.finished.connect(self._on_loading_finished)
+            self.loader_thread.start()
 
     def _on_thumbnail_ready(self, media: Media, thumbnail_path: Optional[Path]) -> None:
         """Handle thumbnail ready from loader."""
@@ -661,8 +675,10 @@ class VirtualScrollArea(QScrollArea):
             self._smooth_scroll_to(target_scroll)
         elif item_y + self.layout_metrics.cell_height > scroll_y + visible_height:
             # Scroll down to show item
+            vscroll = self.verticalScrollBar()
+            max_scroll = vscroll.maximum() if vscroll else 0
             target_scroll = min(
-                self.verticalScrollBar().maximum(),
+                max_scroll,
                 item_y + self.layout_metrics.cell_height - visible_height,
             )
             self._smooth_scroll_to(target_scroll)
@@ -672,13 +688,16 @@ class VirtualScrollArea(QScrollArea):
         if self.scroll_animation.state() == QPropertyAnimation.State.Running:
             self.scroll_animation.stop()
 
-        current_y = self.verticalScrollBar().value()
+        vscroll = self.verticalScrollBar()
+        if not vscroll:
+            return
+        current_y = vscroll.value()
         if abs(target_y - current_y) > 5:  # Only animate if significant difference
             self.scroll_animation.setStartValue(current_y)
             self.scroll_animation.setEndValue(target_y)
             self.scroll_animation.start()
         else:
-            self.verticalScrollBar().setValue(target_y)
+            vscroll.setValue(target_y)
 
     def get_visible_media_count(self) -> int:
         """Get the count of currently visible (filtered) media."""
@@ -688,7 +707,7 @@ class VirtualScrollArea(QScrollArea):
         """Get the total count of all media."""
         return len(self.media_list)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
+    def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
 
@@ -704,14 +723,19 @@ class VirtualScrollArea(QScrollArea):
             self._clear_viewport()
             self.update_timer.start(50)  # Slight delay to avoid rapid updates
 
-    def wheelEvent(self, event: QWheelEvent) -> None:
+    def wheelEvent(self, event: Optional[QWheelEvent]) -> None:
         """Handle wheel scrolling with smooth animation."""
+        if event is None:
+            return
         # Calculate scroll delta
         delta = -event.angleDelta().y() // 8  # Convert from degrees to pixels
         scroll_speed = 3  # Multiplier for scroll speed
 
-        current_scroll = self.verticalScrollBar().value()
-        max_scroll = self.verticalScrollBar().maximum()
+        vscroll = self.verticalScrollBar()
+        if not vscroll:
+            return
+        current_scroll = vscroll.value()
+        max_scroll = vscroll.maximum()
 
         # Calculate target scroll position
         target_scroll = max(0, min(max_scroll, current_scroll + delta * scroll_speed))
@@ -720,7 +744,7 @@ class VirtualScrollArea(QScrollArea):
         if abs(target_scroll - current_scroll) > 10:
             self._smooth_scroll_to(target_scroll)
         else:
-            self.verticalScrollBar().setValue(target_scroll)
+            vscroll.setValue(target_scroll)
 
         event.accept()
 
