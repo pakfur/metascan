@@ -1,0 +1,82 @@
+"""Application path utilities for handling bundled and development environments."""
+import os
+import sys
+from pathlib import Path
+
+
+def is_bundled():
+    """Check if we're running in a PyInstaller bundle."""
+    return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+
+
+def get_base_path():
+    """Get the base path of the application.
+    
+    Returns the bundled app path when frozen, otherwise the project root.
+    """
+    if is_bundled():
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        return Path(sys._MEIPASS)
+    else:
+        # Development mode - return project root (3 levels up from this file)
+        return Path(__file__).parent.parent.parent
+
+
+def get_data_dir():
+    """Get the data directory for the application.
+    
+    In bundled mode: Uses user's home directory under .metascan/data
+    In development mode: Uses project_root/data
+    """
+    if is_bundled():
+        # Use user's home directory for persistent data
+        data_dir = Path.home() / '.metascan' / 'data'
+    else:
+        # Development mode - use project root
+        data_dir = get_base_path() / 'data'
+    
+    # Ensure directory exists
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def get_config_path():
+    """Get the path to the config file.
+    
+    In bundled mode: First checks user's config, then falls back to bundled
+    In development mode: Uses project_root/config.json
+    """
+    if is_bundled():
+        # Check for user config first
+        user_config = Path.home() / '.metascan' / 'config.json'
+        if user_config.exists():
+            return user_config
+        
+        # Fall back to bundled config (distribution version)
+        bundled_config = get_base_path() / 'config_dist.json'
+        if bundled_config.exists():
+            # Copy bundled config to user directory on first run
+            user_config.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(bundled_config, user_config)
+            return user_config
+        
+        return bundled_config
+    else:
+        # Development mode
+        return get_base_path() / 'config.json'
+
+
+def get_icon_path():
+    """Get the path to the application icon."""
+    return get_base_path() / 'icon.png'
+
+
+def get_thumbnail_cache_dir():
+    """Get the thumbnail cache directory.
+    
+    Always uses user's home directory for cache.
+    """
+    cache_dir = Path.home() / '.metascan' / 'thumbnails'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir

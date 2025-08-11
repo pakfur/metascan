@@ -4,14 +4,26 @@ from pathlib import Path
 import json
 import nltk
 from nltk.corpus import stopwords
+import sys
 
 logger = logging.getLogger(__name__)
+
+# Setup NLTK data path for bundled application
+if getattr(sys, 'frozen', False):
+    # In bundled app, use user directory for NLTK data
+    nltk_data_dir = Path.home() / '.metascan' / 'nltk_data'
+    nltk_data_dir.mkdir(parents=True, exist_ok=True)
+    nltk.data.path.insert(0, str(nltk_data_dir))
 
 # Download stopwords if not already available
 try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
-    nltk.download('stopwords', quiet=True)
+    try:
+        nltk.download('stopwords', quiet=True)
+    except:
+        # If download fails in bundled app, use empty set
+        logger.warning("Could not download NLTK stopwords, using empty set")
 
 
 class PromptTokenizer:
@@ -27,7 +39,15 @@ class PromptTokenizer:
             config: Configuration dict. If None, loads from config.json.
         """
         # Load stop words
-        self.stop_words = stop_words if stop_words is not None else set(stopwords.words('english'))
+        if stop_words is not None:
+            self.stop_words = stop_words
+        else:
+            try:
+                self.stop_words = set(stopwords.words('english'))
+            except LookupError:
+                # Fallback to empty set if stopwords not available
+                logger.warning("NLTK stopwords not available, using empty set")
+                self.stop_words = set()
         
         # Load configuration
         if config is not None:
@@ -60,8 +80,9 @@ class PromptTokenizer:
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from config file."""
+        from metascan.utils.app_paths import get_config_path
         config = {}
-        config_path = Path(__file__).parent.parent.parent / "config.json"
+        config_path = get_config_path()
         if config_path.exists():
             try:
                 with open(config_path, 'r') as f:
