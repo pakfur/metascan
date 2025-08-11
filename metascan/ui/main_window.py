@@ -17,6 +17,7 @@ from metascan.ui.media_viewer import MediaViewer
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.cache.thumbnail import ThumbnailCache
+from metascan.utils.app_paths import get_data_dir, get_config_path, get_thumbnail_cache_dir
 import os
 import json
 from pathlib import Path
@@ -219,8 +220,8 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         
         # Initialize components
-        self.config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.json')
-        db_path = Path(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))) / 'data'
+        self.config_file = str(get_config_path())
+        db_path = get_data_dir()
         self.db_manager = DatabaseManager(db_path)
         
         # Current filter state
@@ -230,7 +231,7 @@ class MainWindow(QMainWindow):
         self.all_media = []  # Cache of all media for filtering
         
         # Initialize thumbnail cache for metadata panel
-        cache_dir = Path.home() / ".metascan" / "thumbnails"
+        cache_dir = get_thumbnail_cache_dir()
         self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
         
         # Initialize scanner with thumbnail cache

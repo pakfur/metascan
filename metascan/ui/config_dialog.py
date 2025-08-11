@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
+from metascan.utils.app_paths import get_config_path
 import os
 import json
 from typing import List, Dict
@@ -17,7 +18,7 @@ class ConfigDialog(QDialog):
         self.setModal(True)
         self.setFixedSize(600, 400)
         
-        self.config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config.json')
+        self.config_file = str(get_config_path())
         self.directories = []
         
         self._setup_ui()
