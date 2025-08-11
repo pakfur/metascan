@@ -33,17 +33,9 @@ class ThumbnailWidget(QLabel):
         # Set fixed size
         self.setFixedSize(200, 200)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("""
-            QLabel {
-                border: 2px solid #ddd;
-                background-color: #f9f9f9;
-                border-radius: 4px;
-            }
-            QLabel:hover {
-                border-color: #4CAF50;
-                background-color: #f0f8f0;
-            }
-        """)
+        # Let theme handle styling
+        self.setFrameStyle(QLabel.Shape.Box)
+        self.setLineWidth(2)
         
         # Set cursor to indicate clickability
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -100,40 +92,14 @@ class ThumbnailWidget(QLabel):
         if self.media.is_favorite:
             # Filled yellow star
             self.star_button.setText("★")
-            self.star_button.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(255, 255, 255, 200);
-                    border: 1px solid #ffc107;
-                    border-radius: 12px;
-                    color: #ffc107;
-                    font-size: 16px;
-                    font-weight: bold;
-                    padding: 0px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 255);
-                    border: 2px solid #ffc107;
-                }
-            """)
+            # Use theme styling for favorite button
+            pass
             self.star_button.setToolTip("Remove from favorites")
         else:
             # Empty star
             self.star_button.setText("☆")
-            self.star_button.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(255, 255, 255, 150);
-                    border: 1px solid #ccc;
-                    border-radius: 12px;
-                    color: #666;
-                    font-size: 16px;
-                    padding: 0px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 255);
-                    border: 1px solid #ffc107;
-                    color: #ffc107;
-                }
-            """)
+            # Use theme styling for favorite button
+            pass
             self.star_button.setToolTip("Add to favorites")
     
     def on_star_clicked(self):

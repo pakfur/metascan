@@ -33,21 +33,7 @@ class FilterSection(QFrame):
         self.header_button = QPushButton()
         self.header_button.setCheckable(True)
         self.header_button.setText(f"▼ {self.section_name.title()} ({len(self.items_list)})")
-        self.header_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e0e0e0;
-                border: none;
-                padding: 8px;
-                text-align: left;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #d0d0d0;
-            }
-            QPushButton:checked {
-                background-color: #c0c0c0;
-            }
-        """)
+        # Use theme styling for header button
         self.header_button.clicked.connect(self.toggle_section)
         layout.addWidget(self.header_button)
         
@@ -65,7 +51,7 @@ class FilterSection(QFrame):
             
             # Ensure proper minimum height for checkbox to prevent text compression
             checkbox.setMinimumHeight(20)
-            checkbox.setStyleSheet("QCheckBox { padding: 2px; }")
+            # Use theme styling for checkbox
             
             self.checkboxes[item['key']] = checkbox
             self.content_layout.addWidget(checkbox)
@@ -151,7 +137,7 @@ class FilterSection(QFrame):
             
             # Ensure proper minimum height for checkbox to prevent text compression
             checkbox.setMinimumHeight(20)
-            checkbox.setStyleSheet("QCheckBox { padding: 2px; }")
+            # Use theme styling for checkbox
             
             # Restore selection if it was selected before
             if item['key'] in current_selections:
@@ -197,46 +183,24 @@ class FiltersPanel(QWidget):
         title_font.setBold(True)
         title_font.setPointSize(14)
         title.setFont(title_font)
-        title.setStyleSheet("padding: 5px; background-color: #f0f0f0; border: 1px solid #ccc;")
+        # title.setStyleSheet("padding: 5px; background-color: #f0f0f0; border: 1px solid #ccc;")
         main_layout.addWidget(title)
         
         # Control buttons
         button_layout = QHBoxLayout()
         
         self.clear_all_button = QPushButton("Clear All")
-        self.clear_all_button.setStyleSheet("""
-            QPushButton {
-                background-color: #ff6b6b;
-                color: white;
-                border: none;
-                padding: 5px 10px;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #ff5252;
-            }
-        """)
+        # Use theme styling for Clear All button
         self.clear_all_button.clicked.connect(self.clear_all_filters)
         button_layout.addWidget(self.clear_all_button)
         
         self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 5px 10px;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
+        # Use theme styling for Refresh button
         button_layout.addWidget(self.refresh_button)
         
         # Sort order controls
         sort_separator = QLabel("|")
-        sort_separator.setStyleSheet("color: #ccc; font-weight: bold; padding: 0 5px;")
+        # Use theme styling for separator
         button_layout.addWidget(sort_separator)
         
         # Sort by count button
@@ -245,23 +209,7 @@ class FiltersPanel(QWidget):
         self.sort_count_button.setFixedSize(30, 30)
         self.sort_count_button.setCheckable(True)
         self.sort_count_button.setChecked(True)  # Default active
-        self.sort_count_button.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: #e8f5e8;
-                font-size: 14px;
-                padding: 2px;
-            }
-            QPushButton:checked {
-                background-color: #4CAF50;
-                color: white;
-                border-color: #45a049;
-            }
-            QPushButton:hover {
-                border-color: #4CAF50;
-            }
-        """)
+        # Use theme styling for sort count button
         self.sort_count_button.clicked.connect(lambda: self.set_sort_order("count"))
         button_layout.addWidget(self.sort_count_button)
         
@@ -270,23 +218,7 @@ class FiltersPanel(QWidget):
         self.sort_alpha_button.setToolTip("Sort alphabetically (A-Z)")
         self.sort_alpha_button.setFixedSize(30, 30)
         self.sort_alpha_button.setCheckable(True)
-        self.sort_alpha_button.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: #f0f0f0;
-                font-size: 14px;
-                padding: 2px;
-            }
-            QPushButton:checked {
-                background-color: #2196F3;
-                color: white;
-                border-color: #1976D2;
-            }
-            QPushButton:hover {
-                border-color: #2196F3;
-            }
-        """)
+        # Use theme styling for sort alpha button
         self.sort_alpha_button.clicked.connect(lambda: self.set_sort_order("alphabetical"))
         button_layout.addWidget(self.sort_alpha_button)
         
@@ -295,34 +227,7 @@ class FiltersPanel(QWidget):
         
         # Favorites filter checkbox (always visible at top)
         self.favorites_checkbox = QCheckBox("★ Favorites")
-        self.favorites_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 13px;
-                font-weight: bold;
-                padding: 8px;
-                background-color: #fff9e6;
-                border: 1px solid #ffc107;
-                border-radius: 4px;
-                margin: 5px 0;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:unchecked {
-                border: 2px solid #ffc107;
-                background-color: white;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:checked {
-                border: 2px solid #ffc107;
-                background-color: #ffc107;
-                border-radius: 3px;
-            }
-            QCheckBox:hover {
-                background-color: #fff3cd;
-            }
-        """)
+        # Use theme styling for Favorites checkbox
         self.favorites_checkbox.setToolTip("Show only favorite items")
         self.favorites_checkbox.stateChanged.connect(self.on_favorites_toggled)
         main_layout.addWidget(self.favorites_checkbox)
@@ -334,22 +239,22 @@ class FiltersPanel(QWidget):
         prompt_filter_layout.setSpacing(2)
         
         prompt_filter_label = QLabel("Filter Prompts:")
-        prompt_filter_label.setStyleSheet("font-size: 11px; color: #666;")
+        # Use theme styling for prompt filter label
         prompt_filter_layout.addWidget(prompt_filter_label)
         
         self.prompt_filter_edit = QLineEdit()
         self.prompt_filter_edit.setPlaceholderText("Type to filter prompt values...")
-        self.prompt_filter_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 6px;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                font-size: 12px;
-            }
-            QLineEdit:focus {
-                border-color: #4CAF50;
-            }
-        """)
+        # self.prompt_filter_edit.setStyleSheet("""
+        #     QLineEdit {
+        #         padding: 6px;
+        #         border: 1px solid #ccc;
+        #         border-radius: 4px;
+        #         font-size: 12px;
+        #     }
+        #     QLineEdit:focus {
+        #         border-color: #4CAF50;
+        #     }
+        # """)
         self.prompt_filter_edit.textChanged.connect(self.on_prompt_filter_changed)
         self.prompt_filter_edit.setClearButtonEnabled(True)
         prompt_filter_layout.addWidget(self.prompt_filter_edit)

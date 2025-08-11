@@ -88,7 +88,7 @@ class ConfigDialog(QDialog):
         
         # Remove button
         remove_btn = QPushButton("X")
-        remove_btn.setStyleSheet("QPushButton { background-color: #ff4444; color: white; font-weight: bold; }")
+        # Use theme styling for remove button
         remove_btn.setFixedSize(30, 30)
         remove_btn.clicked.connect(lambda checked, r=row: self._remove_directory(r))
         self.table.setCellWidget(row, 2, remove_btn)
