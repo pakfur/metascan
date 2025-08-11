@@ -19,6 +19,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.utils.app_paths import get_data_dir
 
 
 class ScanValidator:
@@ -31,7 +32,7 @@ class ScanValidator:
         self.verbose = verbose
         
         # Initialize database manager
-        db_path = Path(project_root) / 'data'
+        db_path = get_data_dir()
         self.db_manager = DatabaseManager(db_path)
         
         # Load configuration
