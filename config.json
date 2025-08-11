@@ -61,5 +61,6 @@
       }
     },
     "classification_threshold": 0.5
-  }
+  },
+  "theme": "dark_blue.xml"
 }
