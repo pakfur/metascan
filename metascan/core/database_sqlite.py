@@ -205,6 +205,20 @@ class DatabaseManager:
             logger.error(f"Failed to delete media {file_path}: {e}")
             return False
 
+    def get_existing_file_paths(self) -> Set[str]:
+        """Get all existing file paths from the database as a set for fast lookup.
+        
+        This is optimized for memory efficiency by only loading the file paths,
+        not the full media objects.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute("SELECT file_path FROM media")
+                return {row["file_path"] for row in cursor}
+        except Exception as e:
+            logger.error(f"Failed to get existing file paths: {e}")
+            return set()
+
     def search_by_index(self, index_type: str, term: str) -> Set[str]:
         """Search using inverted index"""
         try:
@@ -300,6 +314,7 @@ class DatabaseManager:
                     index_type = row["index_type"]
                     if index_type not in filter_data:
                         filter_data[index_type] = []
+                        print(f"+++ found index_type {index_type}")
 
                     filter_data[index_type].append(
                         {"key": row["index_key"], "count": row["count"]}
@@ -413,7 +428,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get favorite media paths: {e}")
             return set()
-
 
     def load_favorite_status(self, media_list: List[Media]) -> None:
         """Load favorite status from database for a list of media objects"""

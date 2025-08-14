@@ -15,6 +15,10 @@
     {
       "filepath": "/Volumes/Backup/downloads",
       "search_subfolders": true
+    },
+    {
+      "filepath": "/Volumes/Backup/linked/images",
+      "search_subfolders": true
     }
   ],
   "filler_words": [
@@ -62,8 +66,11 @@
     },
     "classification_threshold": 0.5
   },
-  "theme": "dark_blue.xml",
+  "theme": "light_blue.xml",
   "watch_directories": true,
-  "thumbnail_size": [512, 512],
+  "thumbnail_size": [
+    128,
+    128
+  ],
   "cache_size_mb": 500
 }
