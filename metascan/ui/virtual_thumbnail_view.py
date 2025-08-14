@@ -91,8 +91,8 @@ class LayoutMetrics:
     rows: int = 0
     item_width: int = 200
     item_height: int = 200
-    horizontal_spacing: int = 25
-    vertical_spacing: int = 25
+    horizontal_spacing: int = 10
+    vertical_spacing: int = 10
     margins: Tuple[int, int, int, int] = field(
         default_factory=lambda: (10, 10, 10, 10)
     )  # left, top, right, bottom
@@ -111,15 +111,17 @@ class LayoutMetrics:
 class WidgetPool:
     """Object pool for reusing ThumbnailWidget instances efficiently."""
 
-    def __init__(self, parent: QWidget, initial_size: int = 20):
+    def __init__(self, parent: QWidget, initial_size: int = 20, thumbnail_size: Tuple[int, int] = (200, 200)):
         """
         Initialize the widget pool.
 
         Args:
             parent: Parent widget for the pooled widgets
             initial_size: Initial number of widgets to create in the pool
+            thumbnail_size: Size of thumbnails (width, height)
         """
         self.parent = parent
+        self.thumbnail_size = thumbnail_size
         self._available: Deque[ThumbnailWidget] = deque()
         self._in_use: Dict[str, ThumbnailWidget] = {}  # media file_path -> widget
 
@@ -143,7 +145,7 @@ class WidgetPool:
                 modified_at=datetime.now(),
             )
 
-            widget = ThumbnailWidget(dummy_media, parent=self.parent)
+            widget = ThumbnailWidget(dummy_media, parent=self.parent, size=self.thumbnail_size)
             widget.setVisible(False)
             self._available.append(widget)
 
@@ -245,7 +247,7 @@ class VirtualScrollArea(QScrollArea):
     favorite_toggled = pyqtSignal(object)  # Emits Media object
     selection_changed = pyqtSignal(object)  # Emits Media object
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
         super().__init__(parent)
 
         # Data
@@ -256,6 +258,12 @@ class VirtualScrollArea(QScrollArea):
 
         # Layout and viewport
         self.layout_metrics = LayoutMetrics()
+        if thumbnail_size:
+            self.layout_metrics.item_width = thumbnail_size[0]
+            self.layout_metrics.item_height = thumbnail_size[1]
+            # Keep spacing consistent regardless of thumbnail size for a tight grid
+            self.layout_metrics.horizontal_spacing = 10
+            self.layout_metrics.vertical_spacing = 10
         self.viewport_info = ViewportInfo()
 
         # Widget management
@@ -263,7 +271,8 @@ class VirtualScrollArea(QScrollArea):
         if viewport is None:
             # Fallback - should not happen in normal operation
             viewport = QWidget()
-        self.widget_pool = WidgetPool(viewport)
+        thumb_size = (self.layout_metrics.item_width, self.layout_metrics.item_height)
+        self.widget_pool = WidgetPool(viewport, thumbnail_size=thumb_size)
         self.visible_widgets: Dict[int, ThumbnailWidget] = {}  # item_index -> widget
 
         # Thumbnail loading
@@ -290,7 +299,7 @@ class VirtualScrollArea(QScrollArea):
 
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setWidgetResizable(True)
+        self.setWidgetResizable(False)
 
         # Enable mouse tracking for hover effects
         viewport = self.viewport()
@@ -302,9 +311,10 @@ class VirtualScrollArea(QScrollArea):
         if vscroll:
             vscroll.valueChanged.connect(self._on_scroll)
 
-        # Initialize thumbnail cache
+        # Initialize thumbnail cache with correct size
         cache_dir = Path.home() / ".metascan" / "thumbnails"
-        self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
+        thumb_size = (self.layout_metrics.item_width, self.layout_metrics.item_height)
+        self.thumbnail_cache = ThumbnailCache(cache_dir, thumb_size)
 
     def set_media_list(self, media_list: List[Media]) -> None:
         """
@@ -366,17 +376,24 @@ class VirtualScrollArea(QScrollArea):
 
     def _calculate_layout(self) -> None:
         """Calculate grid layout metrics based on current size and media count."""
-        viewport = self.viewport()
-        viewport_width = viewport.width() if viewport else 800  # fallback
-
+        # For a QScrollArea, we want the width of the scroll area itself, not the viewport
+        # The viewport is the visible area, but we want to layout based on the full width
+        scroll_area_width = self.width()
+        
+        # Account for vertical scrollbar width if it's shown
+        vscrollbar = self.verticalScrollBar()
+        scrollbar_width = vscrollbar.width() if vscrollbar and vscrollbar.isVisible() else 0
+        
+        usable_width = scroll_area_width - scrollbar_width
+        
         # Calculate optimal columns
         available_width = (
-            viewport_width
+            usable_width
             - self.layout_metrics.margins[0]
             - self.layout_metrics.margins[2]
         )
         columns = max(1, available_width // self.layout_metrics.cell_width)
-        columns = min(columns, 6)  # Cap at 6 columns
+        
 
         # Calculate rows needed
         item_count = len(self.filtered_media)
@@ -386,7 +403,7 @@ class VirtualScrollArea(QScrollArea):
         self.layout_metrics.columns = columns
         self.layout_metrics.rows = rows
 
-        logger.debug(f"Layout calculated: {columns}x{rows} grid for {item_count} items")
+        logger.debug(f"Layout calculated: {columns}x{rows} grid for {item_count} items, width={scroll_area_width}, cell_width={self.layout_metrics.cell_width}")
 
     def _update_scroll_range(self) -> None:
         """Update the container widget size to enable scrolling."""
@@ -710,6 +727,7 @@ class VirtualScrollArea(QScrollArea):
     def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
+        
 
         # Recalculate layout
         old_columns = self.layout_metrics.columns
@@ -770,13 +788,14 @@ class VirtualThumbnailView(QWidget):
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
         super().__init__(parent)
 
         # Data
         self.media_list: List[Media] = []
         self.filtered_paths: Set[str] = set()
         self.selected_media: Optional[Media] = None
+        self.thumbnail_size = thumbnail_size or (200, 200)
 
         # UI setup
         self._setup_ui()
@@ -810,7 +829,7 @@ class VirtualThumbnailView(QWidget):
         main_layout.addLayout(header_layout)
 
         # Virtual scroll area
-        self.scroll_area = VirtualScrollArea()
+        self.scroll_area = VirtualScrollArea(parent=self, thumbnail_size=self.thumbnail_size)
         main_layout.addWidget(self.scroll_area)
 
         # Set focus policy for keyboard navigation

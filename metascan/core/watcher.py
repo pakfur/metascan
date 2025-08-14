@@ -29,11 +29,15 @@ class MediaFileHandler(FileSystemEventHandler):
 
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
-            self._handle_file_event(event.src_path, self._on_created_callback, "created")
+            self._handle_file_event(
+                event.src_path, self._on_created_callback, "created"
+            )
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
-            self._handle_file_event(event.src_path, self._on_modified_callback, "modified")
+            self._handle_file_event(
+                event.src_path, self._on_modified_callback, "modified"
+            )
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
@@ -55,7 +59,9 @@ class MediaFileHandler(FileSystemEventHandler):
                     self._on_deleted_callback(old_path)
 
             if self._is_media_file(new_path):
-                self._handle_file_event(event.dest_path, self._on_created_callback, "moved")
+                self._handle_file_event(
+                    event.dest_path, self._on_created_callback, "moved"
+                )
 
     def _handle_file_event(
         self, file_path: str, callback: Optional[Callable[..., Any]], event_type: str

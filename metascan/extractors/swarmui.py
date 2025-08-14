@@ -104,7 +104,9 @@ class SwarmUIExtractor(MetadataExtractor):
                     logger.warning(
                         f"Unexpected error parsing SwarmUI data from {image_path}: {e}"
                     )
-                    general_parsing_errors: List[Dict[str, Any]] = result.get("parsing_errors", [])
+                    general_parsing_errors: List[Dict[str, Any]] = result.get(
+                        "parsing_errors", []
+                    )
                     general_parsing_errors.append(
                         {
                             "error_type": type(e).__name__,
@@ -257,7 +259,11 @@ class SwarmUIExtractor(MetadataExtractor):
         return extracted
 
     def _parse_parameter(
-        self, key: str, value: str, extracted: Dict[str, Any], loras: Optional[List[Dict[str, Any]]] = None
+        self,
+        key: str,
+        value: str,
+        extracted: Dict[str, Any],
+        loras: Optional[List[Dict[str, Any]]] = None,
     ):
         if loras is None:
             loras = []
