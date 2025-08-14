@@ -77,7 +77,7 @@ class MetadataExtractorManager:
                                     # Create a generic exception with custom attributes
                                     parse_exception = Exception(error_msg)
                                     # Add error_type as a dynamic attribute for logging
-                                    setattr(parse_exception, 'error_type', error_type)
+                                    setattr(parse_exception, "error_type", error_type)
 
                                 self.parsing_logger.log_extraction_attempt(
                                     file_path=media_path,

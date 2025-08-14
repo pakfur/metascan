@@ -204,7 +204,6 @@ class FiltersPanel(QWidget):
         title_font.setBold(True)
         title_font.setPointSize(14)
         title.setFont(title_font)
-        # title.setStyleSheet("padding: 5px; background-color: #f0f0f0; border: 1px solid #ccc;")
         main_layout.addWidget(title)
 
         # Control buttons
@@ -225,9 +224,8 @@ class FiltersPanel(QWidget):
         button_layout.addWidget(sort_separator)
 
         # Sort by count button
-        self.sort_count_button = QPushButton("🔢")
-        self.sort_count_button.setToolTip("Sort by count (most common first)")
-        self.sort_count_button.setFixedSize(30, 30)
+        self.sort_count_button = QPushButton("321 ▼")
+        self.sort_count_button.setToolTip("Sort by count")
         self.sort_count_button.setCheckable(True)
         self.sort_count_button.setChecked(True)  # Default active
         # Use theme styling for sort count button
@@ -235,9 +233,8 @@ class FiltersPanel(QWidget):
         button_layout.addWidget(self.sort_count_button)
 
         # Sort alphabetically button
-        self.sort_alpha_button = QPushButton("🔤")
+        self.sort_alpha_button = QPushButton("ABC ▲")
         self.sort_alpha_button.setToolTip("Sort alphabetically (A-Z)")
-        self.sort_alpha_button.setFixedSize(30, 30)
         self.sort_alpha_button.setCheckable(True)
         # Use theme styling for sort alpha button
         self.sort_alpha_button.clicked.connect(
@@ -267,17 +264,6 @@ class FiltersPanel(QWidget):
 
         self.prompt_filter_edit = QLineEdit()
         self.prompt_filter_edit.setPlaceholderText("Type to filter prompt values...")
-        # self.prompt_filter_edit.setStyleSheet("""
-        #     QLineEdit {
-        #         padding: 6px;
-        #         border: 1px solid #ccc;
-        #         border-radius: 4px;
-        #         font-size: 12px;
-        #     }
-        #     QLineEdit:focus {
-        #         border-color: #4CAF50;
-        #     }
-        # """)
         self.prompt_filter_edit.textChanged.connect(self.on_prompt_filter_changed)
         self.prompt_filter_edit.setClearButtonEnabled(True)
         prompt_filter_layout.addWidget(self.prompt_filter_edit)
@@ -309,16 +295,18 @@ class FiltersPanel(QWidget):
             self.prompt_filter_edit.text() if self.prompt_filter_edit else ""
         )
 
-        # Save expansion states of existing sections
+        # Save expansion states AND selected items of existing sections
         expansion_states = {}
+        selected_states = {}
         for section_name, section in self.filter_sections.items():
             expansion_states[section_name] = section.is_expanded
+            selected_states[section_name] = section.get_selected_items()
 
         # Clear existing sections
         self.clear_sections()
 
         # Define the order of sections (prompt first, exclude date)
-        section_order = ["prompt", "model", "source", "tag", "ext"]
+        section_order = ["prompt", "model", "source", "ext", "lora"]
 
         # Create sections in the specified order
         for section_name in section_order:
@@ -332,16 +320,22 @@ class FiltersPanel(QWidget):
                 self.filter_sections[section_name] = section
 
                 # Restore expansion state if section existed before
-                if section_name in expansion_states and expansion_states[section_name]:
-                    section.toggle_section()
+                #if section_name in expansion_states and expansion_states[section_name]:
+                #    section.toggle_section()
+
+                # Restore selected items if section existed before
+                if section_name in selected_states:
+                    for item_key in selected_states[section_name]:
+                        if item_key in section.checkboxes:
+                            section.checkboxes[item_key].setChecked(True)
 
                 # Apply prompt filter if it's the prompt section and there's filter text
                 if section_name == "prompt" and current_prompt_filter:
                     section.filter_items(current_prompt_filter)
 
-        # Add any remaining sections not in the predefined order (except date)
+        # Add any remaining sections not in the predefined order 
         for section_name, items in filter_data.items():
-            if section_name not in section_order and section_name != "date" and items:
+            if section_name not in section_order and items:
                 section = FilterSection(section_name, items, self)
                 section.selection_changed.connect(self.on_filter_selection_changed)
 
@@ -352,6 +346,17 @@ class FiltersPanel(QWidget):
                 # Restore expansion state if section existed before
                 if section_name in expansion_states and expansion_states[section_name]:
                     section.toggle_section()
+
+                # Restore selected items if section existed before
+                if section_name in selected_states:
+                    for item_key in selected_states[section_name]:
+                        if item_key in section.checkboxes:
+                            section.checkboxes[item_key].setChecked(True)
+
+        # If there were any selected filters previously, re-emit the filters changed signal
+        # to ensure the UI stays in sync
+        if any(selected_states.values()):
+            self.on_filter_selection_changed()
 
     def clear_sections(self):
         """Remove all filter sections."""
@@ -415,7 +420,11 @@ class FiltersPanel(QWidget):
 
     def is_favorites_active(self) -> bool:
         """Check if favorites filter is active."""
-        return bool(self.favorites_checkbox.isChecked()) if self.favorites_checkbox else False
+        return (
+            bool(self.favorites_checkbox.isChecked())
+            if self.favorites_checkbox
+            else False
+        )
 
     def on_prompt_filter_changed(self, text: str):
         """Handle prompt filter text changes."""

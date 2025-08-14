@@ -43,18 +43,38 @@ class Scanner:
         directory: str,
         recursive: bool = True,
         progress_callback: Optional[Callable] = None,
+        full_scan: bool = False,
     ) -> int:
-        """Scan a directory and store results in database"""
+        """Scan a directory and store results in database
+        
+        Args:
+            directory: Directory path to scan
+            recursive: Whether to scan subdirectories
+            progress_callback: Callback for progress updates
+            full_scan: If True, process all files. If False, skip existing files.
+        """
         dir_path = Path(directory)
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
 
+        # Get existing file paths from database for optimization
+        existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
+        
         # Find all media files
         media_files = self._find_media_files(dir_path, recursive)
+        
+        # Filter out existing files if not doing a full scan
+        if not full_scan and existing_paths:
+            original_count = len(media_files)
+            media_files = [f for f in media_files if str(f) not in existing_paths]
+            skipped_count = original_count - len(media_files)
+            if skipped_count > 0:
+                logger.info(f"Skipping {skipped_count} files that already exist in database")
+        
         total_files = len(media_files)
         processed_count = 0
 
-        logger.info(f"Found {total_files} media files in {directory}")
+        logger.info(f"Processing {total_files} new/updated media files in {directory}")
 
         for i, file_path in enumerate(media_files):
             try:
@@ -132,7 +152,7 @@ class Scanner:
                 file_size=stat.st_size,
                 width=width,
                 height=height,
-        format=format_name or "UNKNOWN",
+                format=format_name or "UNKNOWN",
                 created_at=datetime.fromtimestamp(stat.st_ctime),
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
             )
@@ -354,8 +374,16 @@ class ThreadedScanner:
         directory: str,
         recursive: bool = True,
         progress_callback: Optional[Callable] = None,
+        full_scan: bool = False,
     ) -> int:
-        """Scan a directory using multi-threaded approach"""
+        """Scan a directory using multi-threaded approach
+        
+        Args:
+            directory: Directory path to scan
+            recursive: Whether to scan subdirectories
+            progress_callback: Callback for progress updates
+            full_scan: If True, process all files. If False, skip existing files.
+        """
         dir_path = Path(directory)
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
@@ -365,17 +393,29 @@ class ThreadedScanner:
         self.progress_callback = progress_callback
 
         try:
+            # Get existing file paths from database for optimization
+            existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
+            
             # Find all media files first to get total count
             media_files = self._find_media_files(dir_path, recursive)
+            
+            # Filter out existing files if not doing a full scan
+            if not full_scan and existing_paths:
+                original_count = len(media_files)
+                media_files = [f for f in media_files if str(f) not in existing_paths]
+                skipped_count = original_count - len(media_files)
+                if skipped_count > 0:
+                    logger.info(f"Skipping {skipped_count} files that already exist in database")
+            
             self.total_files = len(media_files)
             self.files_processed = 0
             self.files_saved = 0
 
             if self.total_files == 0:
-                logger.info(f"No media files found in {directory}")
+                logger.info(f"No new media files found in {directory}")
                 return 0
 
-            logger.info(f"Found {self.total_files} media files in {directory}")
+            logger.info(f"Processing {self.total_files} new/updated media files in {directory}")
 
             # Start threads
             self._start_threads(media_files)

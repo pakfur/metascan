@@ -51,10 +51,11 @@ class ScannerThread(QThread):
     scan_complete = pyqtSignal(int)  # processed_count
     scan_error = pyqtSignal(str)  # error message
 
-    def __init__(self, scanner, directories):
+    def __init__(self, scanner, directories, full_scan=False):
         super().__init__()
         self.scanner = scanner
         self.directories = directories
+        self.full_scan = full_scan
         self._is_cancelled = False
 
     def cancel(self):
@@ -85,6 +86,7 @@ class ScannerThread(QThread):
                     dir_info["filepath"],
                     recursive=dir_info["search_subfolders"],
                     progress_callback=progress_callback,
+                    full_scan=self.full_scan,
                 )
                 total_processed += processed
 
@@ -218,7 +220,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Metascan - AI Media Browser")
-        self.setGeometry(100, 100, 1200, 800)
 
         # Initialize theme before other components
         self.available_themes = list_themes()
@@ -226,6 +227,13 @@ class MainWindow(QMainWindow):
 
         # Initialize components
         self.config_file = str(get_config_path())
+        self.config = self.load_config()
+        
+        # Set window size based on thumbnail size from config
+        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+        # Window needs to fit: filter panel (250) + thumbnails (2 cols minimum) + metadata (350)
+        min_window_width = 250 + ((thumbnail_size[0] + 10) * 2 + 40) + 350
+        self.setGeometry(100, 100, max(1200, min_window_width), 800)
         self.load_and_apply_theme()
         db_path = get_data_dir()
         self.db_manager = DatabaseManager(db_path)
@@ -238,7 +246,9 @@ class MainWindow(QMainWindow):
 
         # Initialize thumbnail cache for metadata panel
         cache_dir = get_thumbnail_cache_dir()
-        self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
+        # Get thumbnail size from config, default to (200, 200)
+        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+        self.thumbnail_cache = ThumbnailCache(cache_dir, thumbnail_size)
 
         # Initialize scanner with thumbnail cache
         self.scanner = ThreadedScanner(
@@ -284,7 +294,15 @@ class MainWindow(QMainWindow):
         splitter.addWidget(metadata_panel)
 
         # Set initial splitter sizes (proportional)
-        splitter.setSizes([250, 600, 350])
+        # Adjust middle panel size based on thumbnail size
+        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+        # Calculate width needed for at least 2 columns of thumbnails + some extra
+        min_thumbnail_panel_width = (thumbnail_size[0] + 10) * 2 + 60  # 2 thumbnails + spacing + margins + scrollbar
+        # Force the splitter to honor our sizes by setting stretch factors
+        splitter.setStretchFactor(0, 0)  # Filter panel - don't stretch
+        splitter.setStretchFactor(1, 1)  # Thumbnail panel - can stretch
+        splitter.setStretchFactor(2, 0)  # Metadata panel - don't stretch
+        splitter.setSizes([250, min_thumbnail_panel_width, 350])
 
         # Create menu bar
         self._create_menu_bar()
@@ -311,8 +329,9 @@ class MainWindow(QMainWindow):
         return self.filters_panel
 
     def _create_thumbnail_panel(self) -> QWidget:
-        # Create the thumbnail view
-        self.thumbnail_view = VirtualThumbnailView()
+        # Create the thumbnail view with thumbnail size from config
+        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+        self.thumbnail_view = VirtualThumbnailView(thumbnail_size=thumbnail_size)
 
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
@@ -420,17 +439,21 @@ class MainWindow(QMainWindow):
         padding.setFixedWidth(10)
         toolbar.addWidget(padding)
 
+    def load_config(self):
+        """Load configuration from file."""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+        return {}  # Return empty config if file doesn't exist or error occurs
+
     def load_and_apply_theme(self):
         """Load theme from config and apply it."""
         try:
-            # Try to load config
-            if os.path.exists(self.config_file):
-                with open(self.config_file, "r") as f:
-                    config = json.load(f)
-                    self.current_theme = config.get("theme", "dark_teal.xml")
-            else:
-                # Default theme
-                self.current_theme = "dark_teal.xml"
+            # Get theme from already loaded config
+            self.current_theme = self.config.get("theme", "dark_teal.xml")
 
             # Apply the theme
             if self.current_theme in self.available_themes:
@@ -529,7 +552,7 @@ class MainWindow(QMainWindow):
             self.progress_dialog = ScanProgressDialog(self)
 
             # Create and configure scanner thread
-            self.scanner_thread = ScannerThread(self.scanner, directories)
+            self.scanner_thread = ScannerThread(self.scanner, directories, full_scan=full_clean_requested)
             self.scanner_thread.progress_updated.connect(self._on_scan_progress)
             self.scanner_thread.scan_complete.connect(self._on_scan_complete)
             self.scanner_thread.scan_error.connect(self._on_scan_error)
@@ -625,15 +648,11 @@ class MainWindow(QMainWindow):
             sort_order = self.filters_panel.get_sort_order()
             filter_data = self.db_manager.get_filter_data(sort_order)
             self.filters_panel.update_filters(filter_data)
-            print(
-                f"Filters refreshed with {sort_order} sort. Found {len(filter_data)} filter types."
-            )
         except Exception as e:
             print(f"Error refreshing filters: {e}")
 
     def on_sort_order_changed(self, sort_order: str):
         """Handle when sort order is changed."""
-        print(f"Sort order changed to: {sort_order}")
         self.refresh_filters()
 
     def on_filters_changed(self, filters: dict):
@@ -644,7 +663,6 @@ class MainWindow(QMainWindow):
     def on_favorites_toggled(self, is_active: bool):
         """Handle when favorites filter is toggled."""
         self.favorites_active = is_active
-        print(f"Favorites filter {'activated' if is_active else 'deactivated'}")
         self.apply_all_filters()
 
     def on_favorite_toggled(self, media):
@@ -653,15 +671,11 @@ class MainWindow(QMainWindow):
             # Update database
             success = self.db_manager.set_favorite(media.file_path, media.is_favorite)
             if success:
-                print(
-                    f"{'Added to' if media.is_favorite else 'Removed from'} favorites: {media.file_name}"
-                )
 
                 # If favorites filter is active, reapply filters
                 if self.favorites_active:
                     self.apply_all_filters()
             else:
-                print(f"Failed to update favorite status for {media.file_name}")
                 # Revert the change in the UI
                 media.is_favorite = not media.is_favorite
                 widget = self.thumbnail_view.thumbnail_widgets.get(str(media.file_path))
@@ -707,14 +721,12 @@ class MainWindow(QMainWindow):
         try:
             # Update metadata panel
             self.metadata_panel.display_metadata(media)
-            print(f"Selected: {media.file_name}")
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
 
     def on_thumbnail_double_clicked(self, media):
         """Handle when a thumbnail is double-clicked."""
         try:
-            print(f"Opening media viewer for: {media.file_name}")
 
             # Get the currently filtered media list
             if self.filtered_media_paths:
@@ -747,7 +759,6 @@ class MainWindow(QMainWindow):
 
     def on_media_viewer_closed(self):
         """Handle when media viewer is closed."""
-        print("Media viewer closed")
         # Return focus to main window
         self.activateWindow()
         self.thumbnail_view.setFocus()
@@ -758,7 +769,6 @@ class MainWindow(QMainWindow):
         try:
             # Update metadata panel to show current viewed media
             self.metadata_panel.display_metadata(media)
-            print(f"Viewer showing: {media.file_name}")
         except Exception as e:
             print(f"Error updating metadata for viewer: {e}")
 

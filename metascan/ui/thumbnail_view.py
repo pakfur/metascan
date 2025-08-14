@@ -26,7 +26,7 @@ from PyQt6.QtGui import (
     QShortcut,
 )
 from pathlib import Path
-from typing import List, Set, Optional, Dict
+from typing import List, Set, Optional, Dict, Tuple
 import logging
 import platform
 import subprocess
@@ -46,16 +46,17 @@ class ThumbnailWidget(QLabel):
     )  # Emits the Media object when favorite is toggled
 
     def __init__(
-        self, media: Media, thumbnail_path: Optional[Path] = None, parent=None
+        self, media: Media, thumbnail_path: Optional[Path] = None, parent=None, size: Tuple[int, int] = (200, 200)
     ):
         super().__init__(parent)
         self.media = media
         self.thumbnail_path = thumbnail_path
         self.is_selected = False
         self.is_filtered = True  # Whether this thumbnail matches current filters
+        self.widget_size = size
 
         # Set fixed size
-        self.setFixedSize(200, 200)
+        self.setFixedSize(size[0], size[1])
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Let theme handle styling
         self.setFrameStyle(QLabel.Shape.Box)
@@ -94,9 +95,11 @@ class ThumbnailWidget(QLabel):
             pixmap = QPixmap(str(thumbnail_path))
             if not pixmap.isNull():
                 # Scale to fit within widget while maintaining aspect ratio
+                # Leave 10px margin for border
+                scale_size = min(self.widget_size[0] - 10, self.widget_size[1] - 10)
                 scaled_pixmap = pixmap.scaled(
-                    190,
-                    190,  # Leave margin for border
+                    scale_size,
+                    scale_size,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -569,7 +572,9 @@ class ThumbnailView(QWidget):
 
     def calculate_columns(self) -> int:
         """Calculate optimal number of columns based on available width."""
-        available_width = int(self.scroll_area.width()) - 40  # Account for margins/scrollbar
+        available_width = (
+            int(self.scroll_area.width()) - 40
+        )  # Account for margins/scrollbar
         thumbnail_width = 225  # 200px widget + 15px spacing + border margins
         columns = max(1, available_width // thumbnail_width)
         return min(columns, 6)  # Cap at 6 columns max
@@ -666,6 +671,13 @@ class ThumbnailView(QWidget):
 
         # Determine which thumbnails should be visible
         visible_widgets = []
+
+        # If media_list is empty, there are no thumbnails to show
+        if not self.media_list:
+            # Clear the grid and update info label
+            self.reorganize_grid([])
+            self.update_info_label(0)
+            return
 
         # If filtered_paths is empty, show all thumbnails
         # If filtered_paths has items, only show those

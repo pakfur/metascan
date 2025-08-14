@@ -159,7 +159,10 @@ class FooocusExtractor(MetadataExtractor):
         )
 
     def _parse_parameter_line(
-        self, line: str, extracted: Dict[str, Any], loras: Optional[List[Dict[str, Any]]] = None
+        self,
+        line: str,
+        extracted: Dict[str, Any],
+        loras: Optional[List[Dict[str, Any]]] = None,
     ):
         """Parse parameter line with format: Key: value, Key: value, ..."""
         if loras is None:
