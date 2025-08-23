@@ -1,0 +1,6 @@
+# CODEOWNERS file
+# This file defines who owns the code in this repository
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Global owner for all files in the repository
+* @pakfur
