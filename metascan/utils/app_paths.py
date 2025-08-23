@@ -44,7 +44,7 @@ def get_config_path() -> Path:
     """Get the path to the config file.
 
     In bundled mode: First checks user's config, then falls back to bundled
-    In development mode: Uses project_root/config.json
+    In development mode: Uses project_root/config.json, creating from config_example.json if needed
     """
     if is_bundled():
         # Check for user config first
@@ -65,7 +65,17 @@ def get_config_path() -> Path:
         return bundled_config
     else:
         # Development mode
-        return get_base_path() / "config.json"
+        config_path = get_base_path() / "config.json"
+        
+        # If config.json doesn't exist but config_example.json does, copy it
+        if not config_path.exists():
+            example_config = get_base_path() / "config_example.json"
+            if example_config.exists():
+                import shutil
+                shutil.copy2(example_config, config_path)
+                print(f"Created config.json from config_example.json")
+        
+        return config_path
 
 
 def get_icon_path() -> Path:

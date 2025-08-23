@@ -25,7 +25,7 @@ class MetadataExtractor(ABC):
         """Extract metadata from PNG info"""
         try:
             with Image.open(image_path) as img:
-                return img.info
+                return dict(img.info)  # Explicitly convert to dict to satisfy mypy
         except Exception as e:
             logger.error(f"Failed to read PNG metadata from {image_path}: {e}")
             return {}

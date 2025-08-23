@@ -29,8 +29,13 @@ class ThumbnailCache:
         self.thumbnail_size = thumbnail_size
         self._executor = ThreadPoolExecutor(max_workers=4)
 
-    def get_thumbnail_path(self, media_path: Path) -> Path:
+    def get_thumbnail_path(self, media_path: Path) -> Optional[Path]:
         """Get the cache path for a thumbnail"""
+        # Check if media file exists first
+        if not media_path.exists():
+            logger.warning(f"Media file not found: {media_path}")
+            return None
+        
         # Create a unique filename based on original path and modification time
         stat = media_path.stat()
         unique_string = f"{media_path}_{stat.st_mtime}_{stat.st_size}"
@@ -45,6 +50,9 @@ class ThumbnailCache:
             return None
 
         thumbnail_path = self.get_thumbnail_path(media_path)
+        if thumbnail_path is None:
+            # Media file doesn't exist
+            return None
 
         # Check if thumbnail exists and is newer than source
         if thumbnail_path.exists():
@@ -388,8 +396,12 @@ class ThumbnailCache:
 
     def cleanup_orphaned(self, valid_paths: Set[Path]) -> int:
         """Remove thumbnails for images that no longer exist"""
-        # Create a set of valid thumbnail names
-        valid_thumbnails = {self.get_thumbnail_path(path).name for path in valid_paths}
+        # Create a set of valid thumbnail names, filtering out None results
+        valid_thumbnails = set()
+        for path in valid_paths:
+            thumbnail_path = self.get_thumbnail_path(path)
+            if thumbnail_path is not None:
+                valid_thumbnails.add(thumbnail_path.name)
 
         removed = 0
         for thumbnail in self.cache_dir.glob("*.jpg"):

@@ -20,7 +20,8 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
 )
-from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
+from typing import Tuple, Dict
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
@@ -45,9 +46,9 @@ import platform
 
 
 class ScannerThread(QThread):
-    """Thread for running the scanner with progress reporting."""
 
     progress_updated = pyqtSignal(int, int, str)  # current, total, current_file
+    directory_progress_updated = pyqtSignal(int, int, str)  # current_dir, total_dirs, dir_path
     scan_complete = pyqtSignal(int)  # processed_count
     scan_error = pyqtSignal(str)  # error message
 
@@ -59,31 +60,32 @@ class ScannerThread(QThread):
         self._is_cancelled = False
 
     def cancel(self):
-        """Request cancellation of the scan."""
         self._is_cancelled = True
         # If using ThreadedScanner, signal it to stop
         if hasattr(self.scanner, "stop_scanning"):
             self.scanner.stop_scanning()
 
     def run(self):
-        """Run the scanning process."""
         total_processed = 0
+        total_dirs = len(self.directories)
 
         try:
-            for dir_info in self.directories:
+            for dir_index, dir_info in enumerate(self.directories, 1):
                 if self._is_cancelled:
                     break
 
-                # Define progress callback
+                # Emit directory progress
+                dir_path = dir_info["filepath"]
+                self.directory_progress_updated.emit(dir_index, total_dirs, dir_path)
+
                 def progress_callback(current, total, file_path):
                     if self._is_cancelled:
                         return False  # Return False to stop scanning
                     self.progress_updated.emit(current, total, str(file_path))
                     return True  # Continue scanning
 
-                # Scan directory with progress callback
                 processed = self.scanner.scan_directory(
-                    dir_info["filepath"],
+                    dir_path,
                     recursive=dir_info["search_subfolders"],
                     progress_callback=progress_callback,
                     full_scan=self.full_scan,
@@ -97,35 +99,55 @@ class ScannerThread(QThread):
 
 
 class ScanProgressDialog(QDialog):
-    """Dialog showing scan progress with cancel option."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Scanning Media Files (Threaded)")
         self.setModal(True)
-        self.setFixedSize(550, 180)
+        self.setFixedSize(550, 250)
 
         # Layout
         layout = QVBoxLayout(self)
+        layout.setSpacing(5)  # Default spacing between widgets
+
+        # Container for stacked progress bars with no gap
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(0)  # No gap between progress bars
+
+        # Directory progress bar
+        self.dir_progress_bar = QProgressBar()
+        self.dir_progress_bar.setTextVisible(True)
+        self.dir_progress_bar.setFormat("Directory %v of %m")
+        progress_layout.addWidget(self.dir_progress_bar)
+
+        # File progress bar (stacked directly below with no gap)
+        self.file_progress_bar = QProgressBar()
+        self.file_progress_bar.setTextVisible(True)
+        self.file_progress_bar.setFormat("File %v of %m")
+        progress_layout.addWidget(self.file_progress_bar)
+        
+        # Add the progress container to main layout
+        layout.addWidget(progress_container)
+        
+        # Add small spacing after progress bars
+        layout.addSpacing(10)
+
+        # Current directory label
+        self.dir_label = QLabel("Preparing to scan...")
+        layout.addWidget(self.dir_label)
 
         # Current file label
-        self.file_label = QLabel("Preparing to scan...")
+        self.file_label = QLabel("")
         layout.addWidget(self.file_label)
 
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(True)
-        layout.addWidget(self.progress_bar)
-
-        # Progress text
+        # Progress text summary
         self.progress_label = QLabel("0 / 0 files")
         layout.addWidget(self.progress_label)
-
-        # Threading info label - no custom styling, use theme
-        self.thread_info_label = QLabel(
-            "Multi-threaded scanning: 4 workers + batch database writes"
-        )
-        layout.addWidget(self.thread_info_label)
+        
+        # Add stretch to push cancel button to bottom
+        layout.addStretch()
 
         # Cancel button
         cancel_button = QPushButton("Cancel")
@@ -134,10 +156,23 @@ class ScanProgressDialog(QDialog):
 
         self.cancel_requested = False
 
-    def update_progress(self, current, total, file_path):
-        """Update the progress display."""
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
+    def update_directory_progress(self, current_dir, total_dirs, dir_path):
+        """Update the directory progress display."""
+        self.dir_progress_bar.setMaximum(total_dirs)
+        self.dir_progress_bar.setValue(current_dir)
+        
+        # Show shortened directory path
+        if isinstance(dir_path, str):
+            dir_name = Path(dir_path).name
+            parent_name = Path(dir_path).parent.name
+            # Show parent/directory for better context
+            display_path = f"{parent_name}/{dir_name}" if parent_name else dir_name
+            self.dir_label.setText(f"Directory: {display_path}")
+
+    def update_file_progress(self, current, total, file_path):
+        """Update the file progress display."""
+        self.file_progress_bar.setMaximum(total)
+        self.file_progress_bar.setValue(current)
         self.progress_label.setText(f"{current} / {total} files")
 
         # Show shortened file path
@@ -161,7 +196,6 @@ class ScanProgressDialog(QDialog):
 
 
 class ScanConfirmationDialog(QDialog):
-    """Dialog for confirming scan with optional full clean."""
 
     def __init__(self, total_dirs: int, total_files: int, parent=None):
         super().__init__(parent)
@@ -229,11 +263,26 @@ class MainWindow(QMainWindow):
         self.config_file = str(get_config_path())
         self.config = self.load_config()
         
-        # Set window size based on thumbnail size from config
-        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
-        # Window needs to fit: filter panel (250) + thumbnails (2 cols minimum) + metadata (350)
-        min_window_width = 250 + ((thumbnail_size[0] + 10) * 2 + 40) + 350
-        self.setGeometry(100, 100, max(1200, min_window_width), 800)
+        # Initialize save timer for debouncing geometry saves
+        self.geometry_save_timer = QTimer()
+        self.geometry_save_timer.setSingleShot(True)
+        self.geometry_save_timer.timeout.connect(self.save_window_geometry)
+        
+        # Restore window geometry from config or use defaults
+        window_geometry = self.config.get("window_geometry", {})
+        if window_geometry:
+            self.setGeometry(
+                window_geometry.get("x", 100),
+                window_geometry.get("y", 100),
+                window_geometry.get("width", 1200),
+                window_geometry.get("height", 800)
+            )
+        else:
+            # Set window size based on thumbnail size from config
+            thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+            # Window needs to fit: filter panel (250) + thumbnails (2 cols minimum) + metadata (350)
+            min_window_width = 250 + ((thumbnail_size[0] + 10) * 2 + 40) + 350
+            self.setGeometry(100, 100, max(1200, min_window_width), 800)
         self.load_and_apply_theme()
         db_path = get_data_dir()
         self.db_manager = DatabaseManager(db_path)
@@ -278,31 +327,40 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
 
         # Create splitter for three panels
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(self.main_splitter)
 
         # Left panel - Filters
         filter_panel = self._create_filter_panel()
-        splitter.addWidget(filter_panel)
+        self.main_splitter.addWidget(filter_panel)
 
         # Middle panel - Thumbnails
         thumbnail_panel = self._create_thumbnail_panel()
-        splitter.addWidget(thumbnail_panel)
+        self.main_splitter.addWidget(thumbnail_panel)
 
         # Right panel - Metadata
         metadata_panel = self._create_metadata_panel()
-        splitter.addWidget(metadata_panel)
+        self.main_splitter.addWidget(metadata_panel)
 
-        # Set initial splitter sizes (proportional)
-        # Adjust middle panel size based on thumbnail size
-        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
-        # Calculate width needed for at least 2 columns of thumbnails + some extra
-        min_thumbnail_panel_width = (thumbnail_size[0] + 10) * 2 + 60  # 2 thumbnails + spacing + margins + scrollbar
+        # Restore splitter sizes from config or use defaults
+        splitter_sizes = self.config.get("splitter_sizes", [])
+        if splitter_sizes and len(splitter_sizes) == 3:
+            self.main_splitter.setSizes(splitter_sizes)
+        else:
+            # Set initial splitter sizes (proportional)
+            # Adjust middle panel size based on thumbnail size
+            thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+            # Calculate width needed for at least 2 columns of thumbnails + some extra
+            min_thumbnail_panel_width = (thumbnail_size[0] + 10) * 2 + 60  # 2 thumbnails + spacing + margins + scrollbar
+            self.main_splitter.setSizes([250, min_thumbnail_panel_width, 350])
+        
         # Force the splitter to honor our sizes by setting stretch factors
-        splitter.setStretchFactor(0, 0)  # Filter panel - don't stretch
-        splitter.setStretchFactor(1, 1)  # Thumbnail panel - can stretch
-        splitter.setStretchFactor(2, 0)  # Metadata panel - don't stretch
-        splitter.setSizes([250, min_thumbnail_panel_width, 350])
+        self.main_splitter.setStretchFactor(0, 0)  # Filter panel - don't stretch
+        self.main_splitter.setStretchFactor(1, 1)  # Thumbnail panel - can stretch
+        self.main_splitter.setStretchFactor(2, 0)  # Metadata panel - don't stretch
+        
+        # Connect signal to save splitter sizes when moved
+        self.main_splitter.splitterMoved.connect(self.on_splitter_moved)
 
         # Create menu bar
         self._create_menu_bar()
@@ -314,8 +372,10 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
 
     def _create_filter_panel(self) -> QWidget:
-        # Create the filters panel
         self.filters_panel = FiltersPanel()
+        
+        # Set maximum width constraint
+        self.filters_panel.setMaximumWidth(395)
 
         # Connect signals
         self.filters_panel.filters_changed.connect(self.on_filters_changed)
@@ -328,6 +388,11 @@ class MainWindow(QMainWindow):
 
         return self.filters_panel
 
+    def on_splitter_moved(self):
+        """Handle splitter movement and save the new sizes."""
+        self.save_splitter_sizes()
+
+
     def _create_thumbnail_panel(self) -> QWidget:
         # Create the thumbnail view with thumbnail size from config
         thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
@@ -336,6 +401,9 @@ class MainWindow(QMainWindow):
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         self.thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
+        
+        # Connect thumbnail size change signal
+        self.thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
 
         # Connect double-click to open media viewer
         self.thumbnail_view.scroll_area.item_double_clicked.connect(
@@ -350,6 +418,9 @@ class MainWindow(QMainWindow):
     def _create_metadata_panel(self) -> QWidget:
         # Create the enhanced metadata panel
         self.metadata_panel = MetadataPanel()
+        
+        # Set maximum width constraint
+        self.metadata_panel.setMaximumWidth(430)
 
         # Set the thumbnail cache for preview images
         self.metadata_panel.set_thumbnail_cache(self.thumbnail_cache)
@@ -442,9 +513,19 @@ class MainWindow(QMainWindow):
     def load_config(self):
         """Load configuration from file."""
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, "r") as f:
-                    return json.load(f)
+            # If config.json doesn't exist, copy from config_example.json
+            if not os.path.exists(self.config_file):
+                config_example_file = Path(self.config_file).parent / "config_example.json"
+                if config_example_file.exists():
+                    print(f"Creating config.json from config_example.json")
+                    shutil.copy(str(config_example_file), self.config_file)
+                else:
+                    print(f"Warning: Neither config.json nor config_example.json found")
+                    return {}
+            
+            # Load the config file
+            with open(self.config_file, "r") as f:
+                return json.load(f)
         except Exception as e:
             print(f"Error loading config: {e}")
         return {}  # Return empty config if file doesn't exist or error occurs
@@ -499,6 +580,62 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error saving theme to config: {e}")
 
+    def save_window_geometry(self):
+        """Save window geometry to config file."""
+        try:
+            # Load existing config or create new one
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r") as f:
+                    config = json.load(f)
+
+            # Update window geometry
+            geometry = self.geometry()
+            config["window_geometry"] = {
+                "x": geometry.x(),
+                "y": geometry.y(),
+                "width": geometry.width(),
+                "height": geometry.height()
+            }
+
+            # Save config
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Error saving window geometry to config: {e}")
+
+    def save_splitter_sizes(self):
+        """Save splitter sizes to config file."""
+        try:
+            # Load existing config or create new one
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r") as f:
+                    config = json.load(f)
+
+            # Update splitter sizes
+            config["splitter_sizes"] = self.main_splitter.sizes()
+
+            # Save config
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Error saving splitter sizes to config: {e}")
+
+    def resizeEvent(self, event):
+        """Handle window resize events."""
+        super().resizeEvent(event)
+        # Start/restart the timer to debounce saves
+        self.geometry_save_timer.stop()
+        self.geometry_save_timer.start(500)  # Save after 500ms of no resize activity
+
+    def moveEvent(self, event):
+        """Handle window move events."""
+        super().moveEvent(event)
+        # Start/restart the timer to debounce saves
+        self.geometry_save_timer.stop()
+        self.geometry_save_timer.start(500)  # Save after 500ms of no move activity
+
     def _open_config(self):
         dialog = ConfigDialog(self)
         if dialog.exec():
@@ -545,15 +682,22 @@ class MainWindow(QMainWindow):
 
             if full_clean_requested:
                 print("Full clean and scan requested")
+                # Save favorites before cleanup
+                saved_favorites = self._save_favorites_before_cleanup()
                 # Perform cleanup before scanning
                 self._perform_full_cleanup()
+                # Store favorites to restore after scan
+                self._favorites_to_restore = saved_favorites
+            else:
+                self._favorites_to_restore = {}
 
             # Create progress dialog
             self.progress_dialog = ScanProgressDialog(self)
 
             # Create and configure scanner thread
             self.scanner_thread = ScannerThread(self.scanner, directories, full_scan=full_clean_requested)
-            self.scanner_thread.progress_updated.connect(self._on_scan_progress)
+            self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
+            self.scanner_thread.directory_progress_updated.connect(self._on_scan_directory_progress)
             self.scanner_thread.scan_complete.connect(self._on_scan_complete)
             self.scanner_thread.scan_error.connect(self._on_scan_error)
 
@@ -587,14 +731,19 @@ class MainWindow(QMainWindow):
 
         return count
 
-    def _on_scan_progress(self, current, total, file_path):
-        """Handle scan progress updates."""
+    def _on_scan_file_progress(self, current, total, file_path):
+        """Handle file scan progress updates."""
         if hasattr(self, "progress_dialog"):
-            self.progress_dialog.update_progress(current, total, file_path)
+            self.progress_dialog.update_file_progress(current, total, file_path)
 
             # Check if cancellation was requested
             if self.progress_dialog.cancel_requested:
                 self.scanner_thread.cancel()
+
+    def _on_scan_directory_progress(self, current_dir, total_dirs, dir_path):
+        """Handle directory scan progress updates."""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.update_directory_progress(current_dir, total_dirs, dir_path)
 
     def _on_scan_complete(self, processed_count):
         """Handle scan completion."""
@@ -603,6 +752,11 @@ class MainWindow(QMainWindow):
         # Close progress dialog
         if hasattr(self, "progress_dialog"):
             self.progress_dialog.accept()
+
+        # Restore favorites if we had saved them before a full clean
+        if hasattr(self, "_favorites_to_restore") and self._favorites_to_restore:
+            self._restore_favorites_after_scan()
+            self._favorites_to_restore = {}
 
         # Refresh filters after scanning
         self.refresh_filters()
@@ -771,6 +925,69 @@ class MainWindow(QMainWindow):
             self.metadata_panel.display_metadata(media)
         except Exception as e:
             print(f"Error updating metadata for viewer: {e}")
+
+    def on_thumbnail_size_changed(self, new_size: Tuple[int, int]) -> None:
+        """Handle thumbnail size change from the thumbnail view."""
+        try:
+            # Update config
+            self.config["thumbnail_size"] = list(new_size)
+            
+            # Save to file
+            with open(self.config_file, "w") as f:
+                import json
+                json.dump(self.config, f, indent=2)
+            
+            # Update thumbnail cache to new size
+            cache_dir = get_thumbnail_cache_dir()
+            self.thumbnail_cache = ThumbnailCache(cache_dir, new_size)
+            
+            # Update metadata panel's thumbnail cache
+            self.metadata_panel.set_thumbnail_cache(self.thumbnail_cache)
+            
+            # Recreate the thumbnail view with new size
+            self._recreate_thumbnail_view(new_size)
+            
+            print(f"Thumbnail size changed to: {new_size}")
+            
+        except Exception as e:
+            print(f"Error changing thumbnail size: {e}")
+    
+    def _recreate_thumbnail_view(self, new_size: Tuple[int, int]) -> None:
+        """Recreate the thumbnail view with new size."""
+        # Get current media list and filters
+        current_media = self.all_media
+        current_filters = self.current_filters
+        current_filtered_paths = self.filtered_media_paths
+        
+        # Disconnect old signals
+        self.thumbnail_view.selection_changed.disconnect()
+        self.thumbnail_view.favorite_toggled.disconnect()
+        self.thumbnail_view.thumbnail_size_changed.disconnect()
+        self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
+        
+        # Create new thumbnail view
+        new_thumbnail_view = VirtualThumbnailView(thumbnail_size=new_size)
+        
+        # Connect signals
+        new_thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
+        new_thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
+        new_thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
+        new_thumbnail_view.scroll_area.item_double_clicked.connect(self.on_thumbnail_double_clicked)
+        
+        # Replace in splitter using saved reference
+        old_widget = self.main_splitter.widget(1)  # Middle widget (thumbnail panel)
+        if old_widget is not None:
+            self.main_splitter.replaceWidget(1, new_thumbnail_view)
+            old_widget.deleteLater()
+        
+        # Update reference
+        self.thumbnail_view = new_thumbnail_view
+        
+        # Restore media and filters
+        if current_media:
+            self.thumbnail_view.set_media_list(current_media)
+            if current_filtered_paths:
+                self.thumbnail_view.apply_filters(current_filtered_paths)
 
     def on_viewer_favorite_toggled(self, media, is_favorite):
         """Handle favorite toggle from media viewer."""
@@ -1005,6 +1222,41 @@ class MainWindow(QMainWindow):
                 "Cleanup Warning",
                 f"Some cleanup operations failed: {e}\n\nScanning will continue, but some old data may remain.",
             )
+
+    def _save_favorites_before_cleanup(self) -> Dict[str, bool]:
+        """Save favorites from database before cleanup. Returns dict of file_path -> is_favorite"""
+        saved_favorites = {}
+        try:
+            # Get all favorite media paths from database
+            favorite_paths = self.db_manager.get_favorite_media_paths()
+            # Store them in a dict (all favorites have value True)
+            for path in favorite_paths:
+                saved_favorites[path] = True
+            if saved_favorites:
+                print(f"Saved {len(saved_favorites)} favorite(s) before cleanup")
+        except Exception as e:
+            print(f"Error saving favorites before cleanup: {e}")
+        return saved_favorites
+
+    def _restore_favorites_after_scan(self):
+        """Restore favorites after scan completion"""
+        if not hasattr(self, "_favorites_to_restore") or not self._favorites_to_restore:
+            return
+        
+        restored_count = 0
+        try:
+            # Iterate through saved favorites and restore them if the media still exists
+            for file_path, was_favorite in self._favorites_to_restore.items():
+                if was_favorite:
+                    # Try to set the favorite status in the database
+                    success = self.db_manager.set_favorite(Path(file_path), True)
+                    if success:
+                        restored_count += 1
+            
+            if restored_count > 0:
+                print(f"Restored {restored_count} favorite(s) after scan")
+        except Exception as e:
+            print(f"Error restoring favorites after scan: {e}")
 
 
 def main():

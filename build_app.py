@@ -13,41 +13,50 @@ from pathlib import Path
 
 
 def create_distribution_config():
-    """Create a distribution-specific config.json file."""
-    dist_config = {
-        "directories": [],
-        "filler_words": [
-            "<break>",
-            "BREAK",
-            "background",
-            "soft",
-            "aesthetic",
-            "high",
-            "lighting",
-            "shot",
-            "beautiful",
-            "lovely",
-            "nice",
-            "awesome",
-            "amazing",
-            "perfect",
-            "gorgeous",
-            "fantastic",
-            "cool",
-            "nice looking",
-            "superb",
-            "wonderful",
-            "pretty",
-            "great",
-            "incredible",
-            "stunning",
-            "epic",
-            "very",
-            "really",
-            "extremely",
-            "highly",
-            "best"
-        ],
+    """Create a distribution-specific config file from config_example.json."""
+    # Use config_example.json as the source
+    config_example_path = Path("config_example.json")
+    
+    if config_example_path.exists():
+        # Just copy config_example.json as config_dist.json
+        with open(config_example_path, 'r') as f:
+            dist_config = json.load(f)
+    else:
+        # Fallback to hardcoded config if config_example.json doesn't exist
+        dist_config = {
+            "directories": [],
+            "filler_words": [
+                "<break>",
+                "BREAK",
+                "background",
+                "soft",
+                "aesthetic",
+                "high",
+                "lighting",
+                "shot",
+                "beautiful",
+                "lovely",
+                "nice",
+                "awesome",
+                "amazing",
+                "perfect",
+                "gorgeous",
+                "fantastic",
+                "cool",
+                "nice looking",
+                "superb",
+                "wonderful",
+                "pretty",
+                "great",
+                "incredible",
+                "stunning",
+                "epic",
+                "very",
+                "really",
+                "extremely",
+                "highly",
+                "best"
+            ],
         "tokenization": {
             "heuristics": {
                 "comma_density": {
