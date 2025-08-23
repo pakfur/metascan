@@ -20,19 +20,19 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
 
 **First-time setup in 4 easy steps:**
 
-1. ** Add Directories**: Click the **Config** button in the toolbar to add folders containing your AI-generated images and videos
+1. **Add Directories**: Click the **Config** button in the toolbar to add folders containing your AI-generated images and videos
 
-2. ** Scan Media**: Click the **Scan** button to index your media files and extract metadata (this may take a few minutes for large collections)
+2. **Scan Media**: Click the **Scan** button to index your media files and extract metadata (this may take a few minutes for large collections)
 
-3. **👁 Browse Images**: Use the **S/M/L** thumbnail size buttons in the toolbar to adjust thumbnail size for comfortable browsing
+3. **Browse Images**: Use the **S/M/L** thumbnail size buttons in the toolbar to adjust thumbnail size for comfortable browsing
 
-4. ** Filter Content**: Use the left panel to filter by:
+4. **Filter Content**: Use the left panel to filter by:
    - **Prompts** - Search text prompts used in generation
    - **Models** - Filter by AI models used
    - **LoRAs** - Filter by specific LoRA models
    - **Custom Tags** - User-defined tags for organization
 
-**💡 Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon (⭐) in the media viewer or pressing "F".
+**Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon (⭐) in the media viewer or pressing "F".
 
 ## Features
 
