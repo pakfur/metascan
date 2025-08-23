@@ -68,7 +68,12 @@ class ConfigDialog(QDialog):
         layout.addWidget(button_box)
 
     def _add_directory(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Directory")
+        folder = QFileDialog.getExistingDirectory(
+            self, 
+            "Select Directory",
+            "",  # start directory
+            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog
+        )
         if folder:
             # Check if directory already exists
             for dir_info in self.directories:
