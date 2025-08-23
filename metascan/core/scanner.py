@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class Scanner:
-    """Main scanner that integrates MediaScanner with database operations"""
 
     SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
 
@@ -45,25 +44,14 @@ class Scanner:
         progress_callback: Optional[Callable] = None,
         full_scan: bool = False,
     ) -> int:
-        """Scan a directory and store results in database
-        
-        Args:
-            directory: Directory path to scan
-            recursive: Whether to scan subdirectories
-            progress_callback: Callback for progress updates
-            full_scan: If True, process all files. If False, skip existing files.
-        """
         dir_path = Path(directory)
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
 
-        # Get existing file paths from database for optimization
         existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
         
-        # Find all media files
         media_files = self._find_media_files(dir_path, recursive)
         
-        # Filter out existing files if not doing a full scan
         if not full_scan and existing_paths:
             original_count = len(media_files)
             media_files = [f for f in media_files if str(f) not in existing_paths]
@@ -85,13 +73,10 @@ class Scanner:
                         logger.info("Scanning cancelled by user")
                         break
 
-                # Process the media file
                 media = self._process_media_file(file_path)
                 if media:
-                    # Store in database
                     self.db_manager.save_media(media)
 
-                    # Generate thumbnail if thumbnail cache is available
                     if self.thumbnail_cache:
                         try:
                             thumbnail_path = (
@@ -117,7 +102,6 @@ class Scanner:
         return processed_count
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
-        """Find all supported media files in directory"""
         media_files: List[Path] = []
 
         if recursive:
@@ -129,7 +113,6 @@ class Scanner:
                 media_files.extend(directory.glob(f"*{ext}"))
                 media_files.extend(directory.glob(f"*{ext.upper()}"))
 
-        # Remove duplicates and sort
         media_files = list(set(media_files))
         media_files.sort()
 
@@ -138,10 +121,8 @@ class Scanner:
     def _process_media_file(self, file_path: Path) -> Optional[Media]:
         """Process a single media file and extract metadata"""
         try:
-            # Get file stats
             stat = file_path.stat()
 
-            # Get media info (image or video)
             width, height, format_name = self._get_media_info(file_path)
             if not width or not height:
                 return None
@@ -157,7 +138,6 @@ class Scanner:
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
             )
 
-            # Extract metadata
             metadata = self.extractor_manager.extract_metadata(file_path)
             if metadata:
                 # Update media object with extracted metadata
@@ -171,15 +151,12 @@ class Scanner:
                 media.cfg_scale = metadata.get("cfg_scale")
                 media.seed = metadata.get("seed")
 
-                # Video-specific metadata
                 media.frame_rate = metadata.get("frame_rate")
                 media.duration = metadata.get("duration")
                 media.video_length = metadata.get("length")
 
-                # Store raw metadata for advanced access
                 media.generation_data = metadata.get("raw_metadata", {})
 
-                # Process LoRAs
                 if "loras" in metadata:
                     loras_data = metadata["loras"]
                     for lora_data in loras_data:
@@ -199,7 +176,6 @@ class Scanner:
     def _get_media_info(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get media dimensions and format"""
         try:
             if file_path.suffix.lower() == ".mp4":
                 return self._get_video_info(file_path)
@@ -213,15 +189,12 @@ class Scanner:
     def _get_video_info(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get video dimensions and format"""
         try:
-            # Try python-ffmpeg first
             if HAS_FFMPEG_PYTHON:
                 result = self._get_video_info_python(file_path)
                 if result and result[0] and result[1]:  # Valid width and height
                     return result
 
-            # Fallback to subprocess ffprobe
             return self._get_video_info_subprocess(file_path)
 
         except Exception as e:
@@ -231,11 +204,9 @@ class Scanner:
     def _get_video_info_python(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get video info using python-ffmpeg bindings"""
         try:
             probe = ffmpeg.probe(str(file_path))
 
-            # Find video stream
             video_stream = None
             for stream in probe["streams"]:
                 if stream["codec_type"] == "video":
@@ -260,7 +231,6 @@ class Scanner:
     def _get_video_info_subprocess(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        """Get video dimensions using subprocess ffprobe"""
         try:
             import subprocess
             import json
@@ -280,7 +250,6 @@ class Scanner:
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
-                # Fallback: try to extract basic info without ffprobe
                 return self._get_video_info_fallback(file_path)
 
             data = json.loads(result.stdout)
@@ -299,7 +268,6 @@ class Scanner:
     def _get_video_info_fallback(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        """Fallback method to get basic video info without ffprobe"""
         try:
             # Try using exiftool if available
             import subprocess
@@ -321,7 +289,6 @@ class Scanner:
                     if width and height:
                         return width, height, "MP4"
 
-            # If all else fails, return reasonable defaults
             logger.warning(
                 f"Could not determine video dimensions for {file_path}, using defaults"
             )
@@ -333,7 +300,6 @@ class Scanner:
 
 
 class ThreadedScanner:
-    """Multi-threaded scanner using producer-consumer pattern for improved throughput"""
 
     def __init__(
         self,
@@ -348,22 +314,19 @@ class ThreadedScanner:
         self.batch_size = batch_size
         self.thumbnail_cache = thumbnail_cache
 
-        # Thread-safe queues - increased sizes to prevent deadlocks
         self.file_queue: Queue[Optional[Path]] = queue.Queue(
             maxsize=500
-        )  # Increased to prevent producer blocking
+        )  
         self.result_queue: Queue[Tuple[Path, Optional[Media]]] = queue.Queue(
             maxsize=500
-        )  # Increased to prevent worker blocking
+        )  
 
-        # Threading control
         self.workers: List[Thread] = []
         self.producer_thread: Optional[Thread] = None
         self.writer_thread: Optional[Thread] = None
         self.stop_event = threading.Event()
         self.stats_lock = threading.Lock()
 
-        # Progress tracking
         self.total_files = 0
         self.files_processed = 0
         self.files_saved = 0
@@ -376,30 +339,18 @@ class ThreadedScanner:
         progress_callback: Optional[Callable] = None,
         full_scan: bool = False,
     ) -> int:
-        """Scan a directory using multi-threaded approach
-        
-        Args:
-            directory: Directory path to scan
-            recursive: Whether to scan subdirectories
-            progress_callback: Callback for progress updates
-            full_scan: If True, process all files. If False, skip existing files.
-        """
         dir_path = Path(directory)
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
 
-        # Reset state for this scan
         self._reset_scanner_state()
         self.progress_callback = progress_callback
 
         try:
-            # Get existing file paths from database for optimization
             existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
             
-            # Find all media files first to get total count
             media_files = self._find_media_files(dir_path, recursive)
             
-            # Filter out existing files if not doing a full scan
             if not full_scan and existing_paths:
                 original_count = len(media_files)
                 media_files = [f for f in media_files if str(f) not in existing_paths]
@@ -434,12 +385,10 @@ class ThreadedScanner:
             self._cleanup_threads()
 
     def stop_scanning(self) -> None:
-        """Signal all threads to stop"""
         logger.info("Stopping threaded scanner...")
         self.stop_event.set()
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
-        """Find all supported media files in directory"""
         media_files: List[Path] = []
         supported_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
 
@@ -452,20 +401,16 @@ class ThreadedScanner:
                 media_files.extend(directory.glob(f"*{ext}"))
                 media_files.extend(directory.glob(f"*{ext.upper()}"))
 
-        # Remove duplicates and sort
         media_files = list(set(media_files))
         media_files.sort()
         return media_files
 
     def _start_threads(self, media_files: List[Path]) -> None:
-        """Start producer, worker, and writer threads"""
-        # Start producer thread
         self.producer_thread = threading.Thread(
             target=self._producer_worker, args=(media_files,), name="FileProducer"
         )
         self.producer_thread.start()
 
-        # Start worker threads
         self.workers = []
         for i in range(self.num_workers):
             worker = threading.Thread(
@@ -474,21 +419,18 @@ class ThreadedScanner:
             worker.start()
             self.workers.append(worker)
 
-        # Start database writer thread
         self.writer_thread = threading.Thread(
             target=self._database_writer, name="DatabaseWriter"
         )
         self.writer_thread.start()
 
     def _producer_worker(self, media_files: List[Path]) -> None:
-        """Producer thread: adds files to the work queue"""
         files_added = 0
         try:
             for file_path in media_files:
                 if self.stop_event.is_set():
                     break
 
-                # Add file to queue with retry logic for queue.Full exceptions
                 retry_count = 0
                 while not self.stop_event.is_set() and retry_count < 10:
                     try:
@@ -510,7 +452,6 @@ class ThreadedScanner:
                 f"Producer added {files_added}/{len(media_files)} files to queue"
             )
 
-            # Signal end of files by adding sentinel values
             sentinels_added = 0
             for i in range(self.num_workers):
                 retry_count = 0
@@ -546,8 +487,6 @@ class ThreadedScanner:
             logger.debug("Producer thread exiting")
 
     def _file_worker(self) -> None:
-        """Worker thread: processes files and adds results to result queue"""
-        # Create scanner instance per thread (thread-local extractors)
         scanner = Scanner(self.db_manager, thumbnail_cache=self.thumbnail_cache)
         worker_id = threading.current_thread().name
         files_processed_by_worker = 0
@@ -634,7 +573,6 @@ class ThreadedScanner:
             )
 
     def _database_writer(self) -> None:
-        """Database writer thread: batches results and writes to database"""
         batch = []
         last_write_time = time.time()
         batch_timeout = 2.0  # Write batch every 2 seconds even if not full
@@ -649,7 +587,6 @@ class ThreadedScanner:
         try:
             while not self.stop_event.is_set():
                 try:
-                    # Get result from queue
                     result_tuple = self.result_queue.get(timeout=1.0)
                     file_path, media = result_tuple
                     results_processed += 1
@@ -682,18 +619,14 @@ class ThreadedScanner:
                             batch.clear()
                             last_write_time = current_time
 
-                    # Mark result as processed
                     self.result_queue.task_done()
 
-                    # Don't use this as exit condition - it's unreliable
-                    # The exit condition should be based on workers finishing, not file count
                     if results_processed % 100 == 0:
                         logger.debug(
                             f"Database writer processed {results_processed}/{self.total_files} results"
                         )
 
                 except queue.Empty:
-                    # Check if we have a partial batch to write on timeout
                     current_time = time.time()
                     if batch and current_time - last_write_time >= batch_timeout:
                         saved_count = self.db_manager.save_media_batch(batch)
@@ -711,8 +644,6 @@ class ThreadedScanner:
                         batch.clear()
                         last_write_time = current_time
 
-                    # Check if all workers are done and no more results expected
-                    # Add a grace period to ensure no race conditions
                     if all(not worker.is_alive() for worker in self.workers):
                         # Workers are done, check if queue has been empty for a while
                         if self.result_queue.empty():
@@ -732,7 +663,6 @@ class ThreadedScanner:
                     except ValueError:
                         pass
 
-            # Write any remaining items in batch
             if batch:
                 saved_count = self.db_manager.save_media_batch(batch)
 
@@ -798,7 +728,6 @@ class ThreadedScanner:
                 break
 
     def _generate_thumbnails_for_batch(self, media_batch: List[Media]) -> None:
-        """Generate thumbnails for a batch of successfully saved media files"""
         if not self.thumbnail_cache or not media_batch:
             return
 
@@ -806,7 +735,6 @@ class ThreadedScanner:
             f"Generating thumbnails for batch of {len(media_batch)} media files"
         )
 
-        # Extract file paths from media objects
         file_paths = [media.file_path for media in media_batch]
 
         # Generate thumbnails synchronously to avoid overloading the system
@@ -833,11 +761,6 @@ class ThreadedScanner:
             )
 
     def _put_result_with_timeout(self, result: Any) -> bool:
-        """Put result in result queue with timeout and retry logic to prevent deadlocks
-
-        Returns:
-            bool: True if successfully added, False if failed
-        """
         retry_count = 0
         max_retries = 30  # Limit retries to prevent infinite loops
         while not self.stop_event.is_set() and retry_count < max_retries:
@@ -860,22 +783,17 @@ class ThreadedScanner:
         return False  # Failed to add
 
     def _reset_scanner_state(self) -> None:
-        """Reset scanner state for reuse across multiple scans"""
-        # Clear stop event
         self.stop_event.clear()
 
-        # Reset progress tracking
         self.total_files = 0
         self.files_processed = 0
         self.files_saved = 0
         self.progress_callback = None
 
-        # Clear thread references (they should be None after cleanup, but ensure it)
         self.workers = []
         self.producer_thread = None
         self.writer_thread = None
 
-        # Create fresh queues to avoid any leftover state
         self.file_queue = queue.Queue(maxsize=100)
         self.result_queue = queue.Queue(maxsize=50)
 

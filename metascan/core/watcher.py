@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class MediaFileHandler(FileSystemEventHandler):
-    """Handles file system events for media files"""
 
     def __init__(
         self,
@@ -24,7 +23,6 @@ class MediaFileHandler(FileSystemEventHandler):
         self._on_modified_callback = on_modified
         self._on_deleted_callback = on_deleted
 
-        # Track processing to avoid duplicates
         self._processing: Set[Path] = set()
 
     def on_created(self, event: FileSystemEvent) -> None:
@@ -66,13 +64,11 @@ class MediaFileHandler(FileSystemEventHandler):
     def _handle_file_event(
         self, file_path: str, callback: Optional[Callable[..., Any]], event_type: str
     ) -> None:
-        """Handle a file event with deduplication"""
         path = Path(file_path)
 
         if not self._is_media_file(path):
             return
 
-        # Avoid processing the same file multiple times
         if path in self._processing:
             return
 
@@ -97,7 +93,6 @@ class MediaFileHandler(FileSystemEventHandler):
 
 
 class DirectoryWatcher:
-    """Watches directories for media file changes"""
 
     def __init__(self, scanner: Scanner):
         self.scanner = scanner
@@ -113,7 +108,6 @@ class DirectoryWatcher:
         on_modified: Optional[Callable[..., Any]] = None,
         on_deleted: Optional[Callable[..., Any]] = None,
     ) -> None:
-        """Start watching a directory"""
         if not directory.exists():
             raise ValueError(f"Directory does not exist: {directory}")
 
@@ -134,14 +128,12 @@ class DirectoryWatcher:
         logger.info(f"Started watching directory: {directory} (recursive={recursive})")
 
     def start(self) -> None:
-        """Start the file system observer"""
         if not self._running:
             self.observer.start()
             self._running = True
             logger.info("Directory watcher started")
 
     def stop(self) -> None:
-        """Stop the file system observer"""
         if self._running:
             self.observer.stop()
             self.observer.join()
@@ -149,10 +141,8 @@ class DirectoryWatcher:
             logger.info("Directory watcher stopped")
 
     def is_running(self) -> bool:
-        """Check if watcher is running"""
         return self._running
 
     def __del__(self) -> None:
-        """Ensure observer is stopped on deletion"""
         if hasattr(self, "observer") and self._running:
             self.stop()

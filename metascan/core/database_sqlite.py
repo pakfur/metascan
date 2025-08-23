@@ -25,7 +25,6 @@ class DatabaseManager:
         self._init_database()
 
     def _init_database(self) -> None:
-        """Initialize database schema"""
         with self._get_connection() as conn:
             # Main media table
             conn.execute(
@@ -40,7 +39,6 @@ class DatabaseManager:
             """
             )
 
-            # Add favorite column to existing tables (migration)
             cursor = conn.execute("PRAGMA table_info(media)")
             columns = [column[1] for column in cursor.fetchall()]
             if "is_favorite" not in columns:
@@ -49,7 +47,6 @@ class DatabaseManager:
                 )
                 logger.info("Added is_favorite column to media table")
 
-            # Index tables for fast searching
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS indices (
@@ -62,7 +59,6 @@ class DatabaseManager:
             """
             )
 
-            # Create indices for performance
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_indices_lookup ON indices(index_type, index_key)"
             )
@@ -74,8 +70,6 @@ class DatabaseManager:
 
     @contextmanager
     def _get_connection(self):  # type: ignore[no-untyped-def]
-        """Get a database connection with proper settings"""
-        # Note: mypy can't infer the return type of contextmanager generators
         conn = sqlite3.connect(str(self.db_file))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -86,13 +80,10 @@ class DatabaseManager:
             conn.close()
 
     def close(self) -> None:
-        """Close database connections (compatibility method)"""
-        pass  # SQLite connections are closed per-operation
+        pass 
 
     @contextmanager
     def batch_writer(self):  # type: ignore[no-untyped-def]
-        """Context manager for batch operations"""
-        # Note: mypy can't infer the return type of contextmanager generators
         with self.lock:
             with self._get_connection() as conn:
                 try:
@@ -104,11 +95,9 @@ class DatabaseManager:
                     raise
 
     def save_media(self, media: Media) -> bool:
-        """Save a single media object"""
         try:
             with self.lock:
                 with self._get_connection() as conn:
-                    # Save media with favorite status
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
@@ -121,7 +110,6 @@ class DatabaseManager:
                         ),
                     )
 
-                    # Update indices
                     self._update_indices(conn, media)
                     conn.commit()
                     return True
@@ -130,7 +118,6 @@ class DatabaseManager:
             return False
 
     def save_media_batch(self, media_list: List[Media]) -> int:
-        """Save multiple media objects efficiently"""
         saved_count = 0
         with self.batch_writer() as conn:
             for media in media_list:
@@ -148,7 +135,6 @@ class DatabaseManager:
                         ),
                     )
 
-                    # Update indices
                     self._update_indices(conn, media)
                     saved_count += 1
                 except Exception as e:
@@ -159,7 +145,6 @@ class DatabaseManager:
         return saved_count
 
     def get_media(self, file_path: Path) -> Optional[Media]:
-        """Retrieve a media object by file path"""
         try:
             with self._get_connection() as conn:
                 row = conn.execute(
@@ -174,7 +159,6 @@ class DatabaseManager:
             return None
 
     def get_all_media(self) -> List[Media]:
-        """Get all media objects from database"""
         media_list = []
         try:
             with self._get_connection() as conn:
@@ -191,7 +175,6 @@ class DatabaseManager:
         return media_list
 
     def delete_media(self, file_path: Path) -> bool:
-        """Delete a media object"""
         try:
             with self.lock:
                 with self._get_connection() as conn:
@@ -206,11 +189,6 @@ class DatabaseManager:
             return False
 
     def get_existing_file_paths(self) -> Set[str]:
-        """Get all existing file paths from the database as a set for fast lookup.
-        
-        This is optimized for memory efficiency by only loading the file paths,
-        not the full media objects.
-        """
         try:
             with self._get_connection() as conn:
                 cursor = conn.execute("SELECT file_path FROM media")
@@ -220,7 +198,6 @@ class DatabaseManager:
             return set()
 
     def search_by_index(self, index_type: str, term: str) -> Set[str]:
-        """Search using inverted index"""
         try:
             with self._get_connection() as conn:
                 rows = conn.execute(
@@ -238,11 +215,8 @@ class DatabaseManager:
             return set()
 
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
-        """Update inverted indices for a media object"""
-        # First, remove all existing indices for this file
         conn.execute("DELETE FROM indices WHERE file_path = ?", (str(media.file_path),))
 
-        # Generate and insert new indices
         indices_to_insert = []
         for index_type, index_key in self._generate_indices(media):
             indices_to_insert.append((index_type, index_key, str(media.file_path)))
@@ -254,31 +228,24 @@ class DatabaseManager:
             )
 
     def _generate_indices(self, media: Media) -> List[tuple]:
-        """Generate index entries for a media object"""
         indices = []
 
-        # Index by source
         if media.metadata_source:
             indices.append(("source", media.metadata_source.lower()))
 
-        # Index by model
         if media.model:
             indices.append(("model", media.model.lower()))
 
-        # Index by extension
         indices.append(("ext", media.file_extension))
 
-        # Index by tags
         for tag in media.tags:
             indices.append(("tag", tag.lower()))
 
-        # Index prompt words using the tokenizer
         if media.prompt:
             filtered_words = self.prompt_tokenizer.tokenize(media.prompt)
             for word in filtered_words:
                 indices.append(("prompt", word))
 
-        # Index LoRAs
         for lora in media.loras:
             indices.append(("lora", lora.lora_name.lower()))
 
@@ -287,11 +254,6 @@ class DatabaseManager:
     def get_filter_data(
         self, sort_order: str = "count"
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Get all index data organized by index_type with counts
-
-        Args:
-            sort_order: "count" (by count desc) or "alphabetical" (by key asc)
-        """
         try:
             with self._get_connection() as conn:
                 # Choose sort order
@@ -325,22 +287,11 @@ class DatabaseManager:
             return {}
 
     def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
-        """
-        Get file paths that match the provided filters.
-
-        Args:
-            filters: Dict where keys are index_types and values are lists of index_keys
-                    e.g., {'prompt': ['portrait', 'landscape'], 'source': ['ComfyUI']}
-
-        Returns:
-            Set of file paths that match the filters
-        """
         if not filters:
             return set()
 
         try:
             with self._get_connection() as conn:
-                # Build query dynamically based on filters
                 conditions = []
                 params = []
 
@@ -362,7 +313,6 @@ class DatabaseManager:
                 if not conditions:
                     return set()
 
-                # Join conditions with AND (intersection of all filter types)
                 query = f"SELECT DISTINCT file_path FROM indices WHERE {' AND '.join(conditions)}"
 
                 rows = conn.execute(query, params)
@@ -372,7 +322,6 @@ class DatabaseManager:
             return set()
 
     def toggle_favorite(self, file_path: Path) -> bool:
-        """Toggle the favorite status of a media item"""
         try:
             with self.lock:
                 with self._get_connection() as conn:
@@ -400,7 +349,6 @@ class DatabaseManager:
             return False
 
     def set_favorite(self, file_path: Path, is_favorite: bool) -> bool:
-        """Set the favorite status of a media item"""
         try:
             with self.lock:
                 with self._get_connection() as conn:
@@ -419,7 +367,6 @@ class DatabaseManager:
             return False
 
     def get_favorite_media_paths(self) -> Set[str]:
-        """Get all file paths of favorite media"""
         try:
             with self._get_connection() as conn:
                 rows = conn.execute("SELECT file_path FROM media WHERE is_favorite = 1")
@@ -429,7 +376,6 @@ class DatabaseManager:
             return set()
 
     def load_favorite_status(self, media_list: List[Media]) -> None:
-        """Load favorite status from database for a list of media objects"""
         try:
             with self._get_connection() as conn:
                 for media in media_list:
@@ -443,15 +389,12 @@ class DatabaseManager:
             logger.error(f"Failed to load favorite status: {e}")
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics"""
         try:
             with self._get_connection() as conn:
-                # Total media count
                 total_media = conn.execute(
                     "SELECT COUNT(*) as count FROM media"
                 ).fetchone()["count"]
 
-                # Count by source
                 sources = {}
                 rows = conn.execute(
                     """
@@ -464,7 +407,6 @@ class DatabaseManager:
                     source = row["source"] or "unknown"
                     sources[source] = row["count"]
 
-                # Database file size
                 db_size = self.db_file.stat().st_size if self.db_file.exists() else 0
 
                 return {
@@ -477,7 +419,6 @@ class DatabaseManager:
             return {"total_media": 0, "by_source": {}, "db_size_bytes": 0}
 
     def truncate_all_data(self) -> bool:
-        """Truncate all media data and indices - full database cleanup"""
         try:
             with self.lock:
                 # First, delete data in a transaction
@@ -486,7 +427,6 @@ class DatabaseManager:
                     conn.execute("DELETE FROM indices")
                     conn.execute("DELETE FROM media")
 
-                    # Reset auto-increment counters (SQLite specific) - only if table exists
                     try:
                         conn.execute("DELETE FROM sqlite_sequence WHERE name='media'")
                         conn.execute("DELETE FROM sqlite_sequence WHERE name='indices'")
@@ -496,7 +436,6 @@ class DatabaseManager:
 
                     conn.commit()
 
-                # Then vacuum in a separate connection (outside transaction)
                 with self._get_connection() as conn:
                     conn.execute("VACUUM")
 

@@ -10,11 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class FooocusExtractor(MetadataExtractor):
-    """Extract metadata from Fooocus generated images"""
 
     def can_extract(self, media_path: Path) -> bool:
         """Check if image contains Fooocus metadata"""
-        # Skip video files - they're not supported by Fooocus image extractor
         if media_path.suffix.lower() == ".mp4":
             return False
 
@@ -50,7 +48,6 @@ class FooocusExtractor(MetadataExtractor):
         return False
 
     def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
-        """Extract Fooocus metadata"""
         try:
             metadata = self._get_exif_metadata(image_path)
 
@@ -79,7 +76,6 @@ class FooocusExtractor(MetadataExtractor):
                 except json.JSONDecodeError:
                     pass
 
-            # Fallback to text format in Comment/Description fields
             metadata_text = None
             for field in ["Comment", "Description", "comment", "description"]:
                 if field in metadata:
@@ -90,7 +86,6 @@ class FooocusExtractor(MetadataExtractor):
             if not metadata_text:
                 return None
 
-            # Extract parameters from text
             extracted = self._extract_from_text(metadata_text)
             result.update(extracted)
 
@@ -101,7 +96,6 @@ class FooocusExtractor(MetadataExtractor):
             return None
 
     def _extract_from_text(self, text: str) -> Dict[str, Any]:
-        """Extract parameters from Fooocus text format"""
         extracted: Dict[str, Any] = {}
         loras: List[Dict[str, Any]] = []
 
@@ -111,10 +105,8 @@ class FooocusExtractor(MetadataExtractor):
         # Steps: 20, Sampler: DPM++ 2M Karras, CFG scale: 7, Seed: 12345, Size: 512x512, Model: model_name
         # LoRAs: lora1:0.8, lora2:1.0
 
-        # Split into sections
         lines = text.strip().split("\n")
 
-        # First part before "Negative prompt:" is the main prompt
         prompt_lines = []
         negative_section = False
         parameters_section = False
@@ -142,18 +134,15 @@ class FooocusExtractor(MetadataExtractor):
             elif not negative_section and not parameters_section:
                 prompt_lines.append(line)
 
-        # Set main prompt
         if prompt_lines:
             extracted["prompt"] = "\n".join(prompt_lines).strip()
 
-        # Add LoRAs if found
         if loras:
             extracted["loras"] = loras
 
         return extracted
 
     def _is_parameter_line(self, line: str) -> bool:
-        """Check if line contains parameters"""
         return bool(
             re.search(r"(Steps|Sampler|CFG scale|Seed|Size|Model|LoRAs?):", line)
         )
@@ -164,11 +153,9 @@ class FooocusExtractor(MetadataExtractor):
         extracted: Dict[str, Any],
         loras: Optional[List[Dict[str, Any]]] = None,
     ):
-        """Parse parameter line with format: Key: value, Key: value, ..."""
         if loras is None:
             loras = []
 
-        # Split by commas but be careful with model names that might contain commas
         parts = re.split(
             r",(?=\s*(?:Steps|Sampler|CFG scale|Seed|Size|Model|Width|Height|LoRAs?):)",
             line,
@@ -207,7 +194,6 @@ class FooocusExtractor(MetadataExtractor):
                         pass
 
     def _parse_loras_from_text(self, loras_text: str, loras: List[Dict[str, Any]]):
-        """Parse LoRA list from text format"""
         # Handle different text formats:
         # Format 1: "lora1:0.8, lora2:1.0"
         # Format 2: "lora1 (0.8), lora2 (1.0)"
@@ -220,7 +206,6 @@ class FooocusExtractor(MetadataExtractor):
             if not entry:
                 continue
 
-            # Try format with parentheses: "lora_name (weight)"
             paren_match = re.match(r"^(.+?)\s*\(([0-9.]+)\)$", entry)
             if paren_match:
                 lora_name = paren_match.group(1).strip()
@@ -230,13 +215,11 @@ class FooocusExtractor(MetadataExtractor):
                 parts = entry.split(":", 1)
                 lora_name = parts[0].strip()
                 lora_weight = self._safe_float(parts[1].strip()) or 1.0
-            # Just name, assume weight 1.0
             else:
                 lora_name = entry.strip()
                 lora_weight = 1.0
 
             if lora_name:
-                # Clean the name
                 lora_name_clean = lora_name.replace(".safetensors", "").replace(
                     ".ckpt", ""
                 )
@@ -249,7 +232,6 @@ class FooocusExtractor(MetadataExtractor):
                 loras.append({"lora_name": lora_name_clean, "lora_weight": lora_weight})
 
     def _extract_from_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract parameters from Fooocus JSON format"""
         extracted: Dict[str, Any] = {}
 
         # Direct field mappings
@@ -291,18 +273,14 @@ class FooocusExtractor(MetadataExtractor):
                     except ValueError:
                         pass
 
-        # Additional Fooocus-specific fields
         if "version" in data:
             extracted["version"] = data["version"]
 
         if "styles" in data:
             extracted["styles"] = data["styles"]
 
-        # Extract LoRAs from Fooocus JSON format
         loras: List[Dict[str, Any]] = []
 
-        # Fooocus can store LoRAs in various ways:
-        # 1. As "loras" array with objects containing "name" and "weight"
         if "loras" in data:
             loras_data = data["loras"]
             if isinstance(loras_data, list):
@@ -335,7 +313,6 @@ class FooocusExtractor(MetadataExtractor):
                                 }
                             )
 
-        # 2. Check for individual lora fields
         lora_keys = [
             k
             for k in data.keys()
@@ -353,7 +330,6 @@ class FooocusExtractor(MetadataExtractor):
                 else:
                     lora_weight = 1.0
 
-                # Clean the name
                 lora_name_clean = lora_name.replace(".safetensors", "").replace(
                     ".ckpt", ""
                 )
@@ -369,7 +345,6 @@ class FooocusExtractor(MetadataExtractor):
                     }
                 )
 
-        # Add LoRAs to extracted data
         if loras:
             extracted["loras"] = loras
 

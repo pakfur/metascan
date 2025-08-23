@@ -13,7 +13,6 @@ class ComfyUIExtractor(MetadataExtractor):
 
     def can_extract(self, media_path: Path) -> bool:
         """Check if image contains ComfyUI metadata"""
-        # Skip video files - they should be handled by ComfyUIVideoExtractor
         if media_path.suffix.lower() == ".mp4":
             return False
 
@@ -21,13 +20,11 @@ class ComfyUIExtractor(MetadataExtractor):
         return "prompt" in metadata or "workflow" in metadata
 
     def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
-        """Extract ComfyUI metadata"""
         try:
             metadata = self._get_exif_metadata(media_path)
 
             result: Dict[str, Any] = {"source": "ComfyUI", "raw_metadata": {}}
 
-            # Extract prompt data
             if "prompt" in metadata:
                 try:
                     prompt_data = json.loads(metadata["prompt"])
@@ -41,7 +38,6 @@ class ComfyUIExtractor(MetadataExtractor):
                         f"Failed to parse ComfyUI prompt JSON from {media_path}"
                     )
 
-            # Extract workflow if present
             if "workflow" in metadata:
                 try:
                     workflow_data = json.loads(metadata["workflow"])
@@ -58,11 +54,9 @@ class ComfyUIExtractor(MetadataExtractor):
             return None
 
     def _extract_parameters(self, prompt_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract common parameters from ComfyUI prompt data"""
         extracted: Dict[str, Any] = {}
         loras: List[Dict[str, Any]] = []
 
-        # Look for KSampler node
         for node_id, node_data in prompt_data.items():
             if not isinstance(node_data, dict):
                 continue
@@ -113,7 +107,6 @@ class ComfyUIExtractor(MetadataExtractor):
                         }
                     )
 
-        # Add LoRAs to extracted data
         if loras:
             extracted["loras"] = loras
 

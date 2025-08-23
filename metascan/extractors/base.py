@@ -13,16 +13,13 @@ class MetadataExtractor(ABC):
 
     @abstractmethod
     def can_extract(self, media_path: Path) -> bool:
-        """Check if this extractor can handle the given media file"""
         pass
 
     @abstractmethod
     def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
-        """Extract metadata from the media file"""
         pass
 
     def _get_png_metadata(self, image_path: Path) -> Dict[str, Any]:
-        """Extract metadata from PNG info"""
         try:
             with Image.open(image_path) as img:
                 return dict(img.info)  # Explicitly convert to dict to satisfy mypy
@@ -31,7 +28,6 @@ class MetadataExtractor(ABC):
             return {}
 
     def _get_exif_metadata(self, image_path: Path) -> Dict[str, Any]:
-        """Extract EXIF metadata and embedded text data"""
         try:
             with Image.open(image_path) as img:
                 metadata = {}
@@ -57,7 +53,6 @@ class MetadataExtractor(ABC):
                             for tag_id, value in exif_ifd.items():
                                 tag_name = TAGS.get(tag_id, str(tag_id))
 
-                                # Handle UserComment specially - it's often Unicode encoded
                                 if tag_name == "UserComment" and isinstance(
                                     value, bytes
                                 ):
@@ -81,7 +76,6 @@ class MetadataExtractor(ABC):
                                 else:
                                     metadata[tag_name] = value
                     except:
-                        # If IFD access fails, continue with what we have
                         pass
 
                 return metadata
