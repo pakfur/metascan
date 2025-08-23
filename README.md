@@ -8,7 +8,7 @@
 
 ## Overview
 
-Metascan is a desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an UI to browse your media collection with filtering capabilities.
+Metascan is a Open Source, free to use desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an UI to browse your media collection with filtering capabilities.
 
 <figure>
     <img src="/assets/screenshot.png"
