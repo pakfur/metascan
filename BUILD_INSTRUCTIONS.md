@@ -1,6 +1,6 @@
 # MetaScan Build Instructions
 
-This document describes how to create a distributable version of MetaScan using PyInstaller.
+How to create a distributable version of MetaScan using PyInstaller.
 
 ## Prerequisites
 

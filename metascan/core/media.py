@@ -9,8 +9,6 @@ from dataclasses_json.cfg import LetterCase
 @dataclass_json
 @dataclass
 class LoRA:
-    """Represents a LoRA (Low-Rank Adaptation) with name and weight."""
-
     lora_name: str
     lora_weight: float
 
@@ -26,11 +24,9 @@ class Media:
     created_at: datetime
     modified_at: datetime
 
-    # Metadata fields
     metadata_source: Optional[str] = None  # ComfyUI, SwarmUI, Fooocus
     generation_data: Dict[str, Any] = field(default_factory=dict)
 
-    # Extracted parameters
     prompt: Optional[str] = None
     negative_prompt: Optional[str] = None
     model: Optional[str] = None
@@ -40,21 +36,16 @@ class Media:
     cfg_scale: Optional[float] = None
     seed: Optional[int] = None
 
-    # Video-specific metadata
     frame_rate: Optional[float] = None
     duration: Optional[float] = None
     video_length: Optional[int] = None  # Number of frames for ComfyUI videos
 
-    # Tags and organization
     tags: List[str] = field(default_factory=list)
 
-    # LoRAs (Low-Rank Adaptations)
     loras: List[LoRA] = field(default_factory=list)
 
-    # Favorite status
     is_favorite: bool = False
 
-    # Thumbnail cache path
     thumbnail_path: Optional[Path] = field(
         default=None,
         metadata=config(
@@ -73,7 +64,6 @@ class Media:
 
     @property
     def is_video(self) -> bool:
-        """Check if this is a video file"""
         return self.file_extension == ".mp4"
 
     @property
@@ -83,7 +73,6 @@ class Media:
 
     @property
     def media_type(self) -> str:
-        """Get the media type string"""
         return "video" if self.is_video else "image"
 
     def __hash__(self) -> int:
