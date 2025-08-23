@@ -166,3 +166,8 @@ temp/
 *.dmg
 *.exe
 *.app/
+
+
+# AI Agents
+CLAUDE.md
+WARP.md
