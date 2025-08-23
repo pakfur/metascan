@@ -8,7 +8,13 @@
 
 ## Overview
 
-Metascan is a powerful desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from popular AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an intuitive interface to browse your media collection with advanced filtering capabilities.
+Metascan is a desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an UI to browse your media collection with filtering capabilities.
+
+<figure>
+    <img src="/assets/screenshot.png"
+         alt="Metascan Screenshot">
+    <figcaption>Screenshot of Metascan showing filters, images and metadata</figcaption>
+</figure>
 
 ## Features
 
@@ -27,7 +33,7 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
 - Filter by prompts, models, LoRAs, and custom tags
 - Inverted index for fast search across large collections
 - Real-time filter updates
-- Favorites system for organizing preferred media
+- Favorites for tagging favorite media.
 
 ### GUI Interface
 - Virtualized thumbnail grid for performance with large collections
@@ -65,20 +71,6 @@ Metascan is a powerful desktop application for browsing, organizing, and analyzi
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
   - Windows: Download from [FFmpeg.org](https://ffmpeg.org/download.html)
-
-### Dependency Structure
-
-Metascan uses a minimal dependency structure:
-
-- **`requirements.txt`** - Production dependencies only (21 packages)
-  - Core UI, media processing, and metadata extraction
-  - Lightweight and focused on essential functionality
-
-- **`requirements-dev.txt`** - Development tools (optional)
-  - Testing framework (pytest)
-  - Code formatting (black, yapf)
-  - Type checking (mypy)
-  - Build tools
 
 
 ### Quick Start (End Users)
