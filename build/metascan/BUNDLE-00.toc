@@ -1,3 +1,0 @@
-([('MetaScan',
-   '/Users/jkline/gws/jkline/metascan/dist/MetaScan',
-   'EXECUTABLE')],)
