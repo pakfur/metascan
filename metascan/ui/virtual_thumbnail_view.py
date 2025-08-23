@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QMessageBox,
     QFrame,
+    QButtonGroup,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -787,6 +788,7 @@ class VirtualThumbnailView(QWidget):
     # Signals
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
+    thumbnail_size_changed = pyqtSignal(tuple)  # Emits new thumbnail size (width, height)
 
     def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
         super().__init__(parent)
@@ -821,6 +823,12 @@ class VirtualThumbnailView(QWidget):
         header_layout.addWidget(self.title_label)
 
         header_layout.addStretch()
+        
+        # Add thumbnail size selector buttons
+        self._create_size_selector(header_layout)
+        
+        # Add some spacing between size selector and info label
+        header_layout.addSpacing(20)
 
         self.info_label = QLabel("0 items")
         self.info_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -849,6 +857,87 @@ class VirtualThumbnailView(QWidget):
         space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         space_shortcut.activated.connect(self._open_selected_media)
 
+    def _create_size_selector(self, parent_layout: QHBoxLayout) -> None:
+        """Create thumbnail size selector buttons."""
+        # Create button group for exclusive selection
+        self.size_button_group = QButtonGroup(self)
+        
+        # Define size options
+        self.size_options = {
+            "small": (128, 128),
+            "medium": (256, 256),
+            "large": (512, 512)
+        }
+        
+        # Create frame for buttons
+        button_frame = QFrame()
+        button_frame.setStyleSheet("""
+            QFrame {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 2px;
+            }
+        """)
+        button_layout = QHBoxLayout(button_frame)
+        button_layout.setContentsMargins(2, 2, 2, 2)
+        button_layout.setSpacing(2)
+        
+        # Create buttons for each size
+        self.size_buttons = {}
+        for size_name, (width, height) in self.size_options.items():
+            btn = QPushButton()
+            btn.setCheckable(True)
+            btn.setFixedSize(28, 28)
+            
+            # Set icon-like text (you could use actual icons here)
+            if size_name == "small":
+                btn.setText("S")
+                btn.setToolTip("Small thumbnails (128x128)")
+            elif size_name == "medium":
+                btn.setText("M")
+                btn.setToolTip("Medium thumbnails (256x256)")
+            else:  # large
+                btn.setText("L")
+                btn.setToolTip("Large thumbnails (512x512)")
+            
+            btn.setStyleSheet("""
+                QPushButton {
+                    font-weight: bold;
+                    border: 1px solid transparent;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(0, 0, 0, 0.05);
+                }
+                QPushButton:checked {
+                    background-color: rgba(0, 120, 215, 0.2);
+                    border: 1px solid rgba(0, 120, 215, 0.5);
+                }
+            """)
+            
+            # Check if this is the current size
+            if (width, height) == self.thumbnail_size:
+                btn.setChecked(True)
+            
+            # Connect to size change handler
+            btn.clicked.connect(lambda checked, s=size_name: self._on_size_changed(s))
+            
+            self.size_button_group.addButton(btn)
+            self.size_buttons[size_name] = btn
+            button_layout.addWidget(btn)
+        
+        parent_layout.addWidget(button_frame)
+    
+    def _on_size_changed(self, size_name: str) -> None:
+        """Handle thumbnail size change."""
+        new_size = self.size_options[size_name]
+        if new_size != self.thumbnail_size:
+            # Update internal size
+            self.thumbnail_size = new_size
+            
+            # Emit signal for main window to handle
+            self.thumbnail_size_changed.emit(new_size)
+    
     def _connect_signals(self) -> None:
         """Connect internal signals."""
         self.scroll_area.item_clicked.connect(self._on_item_clicked)

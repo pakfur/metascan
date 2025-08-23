@@ -1,5 +1,8 @@
 # Database files and data directory
 data/
 
+# Configuration file (use config_example.json as template)
+config.json
+config_dist.json
 
 logs/

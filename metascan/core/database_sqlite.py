@@ -314,7 +314,6 @@ class DatabaseManager:
                     index_type = row["index_type"]
                     if index_type not in filter_data:
                         filter_data[index_type] = []
-                        print(f"+++ found index_type {index_type}")
 
                     filter_data[index_type].append(
                         {"key": row["index_key"], "count": row["count"]}
