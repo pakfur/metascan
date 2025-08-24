@@ -256,6 +256,10 @@ class VirtualScrollArea(QScrollArea):
         self.filtered_media: List[Media] = []  # Current filtered subset
         self.selected_media: Optional[Media] = None
         self.selected_index: int = -1
+        
+        # Multi-selection support
+        self.multi_select_mode: bool = False
+        self.selected_media_set: Set[str] = set()  # Set of file paths for multi-selection
 
         # Layout and viewport
         self.layout_metrics = LayoutMetrics()
@@ -342,12 +346,13 @@ class VirtualScrollArea(QScrollArea):
         # Update viewport
         self._update_viewport()
 
-    def apply_filters(self, filtered_paths: Set[str]) -> None:
+    def apply_filters(self, filtered_paths: Set[str], preserve_selection: bool = False) -> None:
         """
         Apply filters to the media list.
 
         Args:
             filtered_paths: Set of file paths to show (empty set shows all)
+            preserve_selection: If True, don't clear selections (used during view recreation)
         """
         logger.debug(f"Applying filters: {len(filtered_paths)} paths")
 
@@ -362,12 +367,9 @@ class VirtualScrollArea(QScrollArea):
                 if str(media.file_path) in filtered_paths
             ]
 
-        # Clear selection if the selected item is no longer visible
-        if self.selected_media and str(self.selected_media.file_path) not in {
-            str(m.file_path) for m in self.filtered_media
-        }:
-            self.selected_media = None
-            self.selected_index = -1
+        # Clear all selections when filters change (unless preserving)
+        if not preserve_selection:
+            self.clear_all_selections()
 
         # Recalculate layout and update
         self._calculate_layout()
@@ -512,8 +514,11 @@ class VirtualScrollArea(QScrollArea):
         widget.double_clicked.connect(self._on_widget_double_clicked)
         widget.favorite_toggled.connect(self._on_favorite_toggled)
 
-        # Set selection state
-        widget.set_selected(media == self.selected_media)
+        # Set selection state based on mode
+        if self.multi_select_mode:
+            widget.set_selected(str(media.file_path) in self.selected_media_set)
+        else:
+            widget.set_selected(media == self.selected_media)
 
         # Position widget
         self._position_widget(widget, index)
@@ -631,29 +636,62 @@ class VirtualScrollArea(QScrollArea):
 
     def _on_widget_clicked(self, media: Media) -> None:
         """Handle widget click."""
-        # Update selection
-        old_selected = self.selected_media
-        self.selected_media = media
-
-        # Find index in filtered media
-        try:
-            self.selected_index = next(
-                i
-                for i, m in enumerate(self.filtered_media)
-                if m.file_path == media.file_path
-            )
-        except StopIteration:
-            self.selected_index = -1
-
-        # Update widget selection states
-        for widget in self.visible_widgets.values():
-            is_selected = widget.media.file_path == media.file_path
-            widget.set_selected(is_selected)
-
-        # Emit signals
-        self.item_clicked.emit(media)
-        if media != old_selected:
+        media_path = str(media.file_path)
+        
+        if self.multi_select_mode:
+            # Multi-select mode: toggle selection
+            if media_path in self.selected_media_set:
+                self.selected_media_set.remove(media_path)
+            else:
+                self.selected_media_set.add(media_path)
+            
+            # Update widget selection states for visible widgets
+            for widget in self.visible_widgets.values():
+                widget_path = str(widget.media.file_path)
+                widget.set_selected(widget_path in self.selected_media_set)
+            
+            # Update selected_media to be the last clicked item
+            self.selected_media = media if media_path in self.selected_media_set else None
+            
+            # Find index in filtered media
+            try:
+                self.selected_index = next(
+                    i
+                    for i, m in enumerate(self.filtered_media)
+                    if m.file_path == media.file_path
+                )
+            except StopIteration:
+                self.selected_index = -1
+            
+            # Emit signals
+            self.item_clicked.emit(media)
             self.selection_changed.emit(media)
+        else:
+            # Single-select mode: clear previous selections
+            old_selected = self.selected_media
+            self.selected_media = media
+            self.selected_media_set.clear()
+            self.selected_media_set.add(media_path)
+
+            # Find index in filtered media
+            try:
+                self.selected_index = next(
+                    i
+                    for i, m in enumerate(self.filtered_media)
+                    if m.file_path == media.file_path
+                )
+            except StopIteration:
+                self.selected_index = -1
+
+            # Update widget selection states
+            for widget in self.visible_widgets.values():
+                is_selected = widget.media.file_path == media.file_path
+                widget.set_selected(is_selected)
+
+            # Emit signals
+            self.item_clicked.emit(media)
+            if media != old_selected:
+                self.selection_changed.emit(media)
 
     def _on_widget_double_clicked(self, media: Media) -> None:
         """Handle widget double click."""
@@ -724,6 +762,60 @@ class VirtualScrollArea(QScrollArea):
     def get_total_media_count(self) -> int:
         """Get the total count of all media."""
         return len(self.media_list)
+    
+    def set_multi_select_mode(self, enabled: bool) -> None:
+        """Enable or disable multi-select mode."""
+        self.multi_select_mode = enabled
+        if not enabled:
+            # Clear all selections when disabling multi-select
+            self.clear_all_selections()
+    
+    def clear_all_selections(self) -> None:
+        """Clear all selected items."""
+        self.selected_media_set.clear()
+        self.selected_media = None
+        self.selected_index = -1
+        
+        # Update visible widgets
+        for widget in self.visible_widgets.values():
+            widget.set_selected(False)
+    
+    def get_selected_count(self) -> int:
+        """Get the number of selected items."""
+        return len(self.selected_media_set)
+    
+    def get_selected_media_list(self) -> List[Media]:
+        """Get list of all selected media items."""
+        selected_list = []
+        for media in self.filtered_media:
+            if str(media.file_path) in self.selected_media_set:
+                selected_list.append(media)
+        return selected_list
+    
+    def restore_selections(self, selected_paths: Set[str]) -> None:
+        """Restore selections and update visible widgets."""
+        self.selected_media_set = selected_paths
+        
+        # Find the first selected media to set as the current selection
+        for media in self.filtered_media:
+            if str(media.file_path) in selected_paths:
+                self.selected_media = media
+                # Find its index
+                try:
+                    self.selected_index = next(
+                        i for i, m in enumerate(self.filtered_media)
+                        if m.file_path == media.file_path
+                    )
+                except StopIteration:
+                    self.selected_index = -1
+                break
+        
+        # Clear and recreate all visible widgets to ensure proper selection state
+        # This forces all widgets to be recreated with the correct selection border
+        indices_to_refresh = list(self.visible_widgets.keys())
+        for index in indices_to_refresh:
+            self._hide_widget_at_index(index)
+            self._show_widget_at_index(index)
 
     def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
         """Handle resize events."""
@@ -789,6 +881,7 @@ class VirtualThumbnailView(QWidget):
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
     thumbnail_size_changed = pyqtSignal(tuple)  # Emits new thumbnail size (width, height)
+    multi_selection_changed = pyqtSignal(int)  # Emits number of selected items
 
     def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
         super().__init__(parent)
@@ -815,20 +908,22 @@ class VirtualThumbnailView(QWidget):
         # Header with title and info
         header_layout = QHBoxLayout()
 
-        self.title_label = QLabel("Media Gallery (Virtual)")
-        title_font = QFont()
-        title_font.setBold(True)
-        title_font.setPointSize(14)
-        self.title_label.setFont(title_font)
-        header_layout.addWidget(self.title_label)
+        # Add Select button for multi-selection mode
+        header_layout.addSpacing(15)
+        self.select_button = QPushButton("Select...")
+        self.select_button.setCheckable(True)
+        self.select_button.setChecked(False)
+        self.select_button.setFixedWidth(100)
+        self.select_button.setToolTip("Enable multi-selection mode")
+        self.select_button.toggled.connect(self._on_select_mode_toggled)
+        header_layout.addWidget(self.select_button)
 
         header_layout.addStretch()
         
-        # Add thumbnail size selector buttons
         self._create_size_selector(header_layout)
         
         # Add some spacing between size selector and info label
-        header_layout.addSpacing(20)
+        header_layout.addSpacing(15)
 
         self.info_label = QLabel("0 items")
         self.info_label.setStyleSheet("color: #666; font-size: 11px;")
@@ -887,17 +982,17 @@ class VirtualThumbnailView(QWidget):
         for size_name, (width, height) in self.size_options.items():
             btn = QPushButton()
             btn.setCheckable(True)
-            btn.setFixedSize(28, 28)
+            btn.setFixedSize(24, 24)
             
             # Set icon-like text (you could use actual icons here)
             if size_name == "small":
-                btn.setText("S")
+                btn.setText("▫️")
                 btn.setToolTip("Small thumbnails (128x128)")
             elif size_name == "medium":
-                btn.setText("M")
+                btn.setText("◻️")
                 btn.setToolTip("Medium thumbnails (256x256)")
             else:  # large
-                btn.setText("L")
+                btn.setText("⬜️")
                 btn.setToolTip("Large thumbnails (512x512)")
             
             btn.setStyleSheet("""
@@ -905,6 +1000,10 @@ class VirtualThumbnailView(QWidget):
                     font-weight: bold;
                     border: 1px solid transparent;
                     border-radius: 3px;
+                    font-size: 14px;
+                    line-height: 24px;
+                    padding: 0px;
+                    text-align: center;
                 }
                 QPushButton:hover {
                     background-color: rgba(0, 0, 0, 0.05);
@@ -960,19 +1059,24 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.set_media_list(media_list)
         self._update_info_label()
 
-    def apply_filters(self, filtered_paths: Set[str]) -> None:
+    def apply_filters(self, filtered_paths: Set[str], preserve_selection: bool = False) -> None:
         """
         Apply filters and update the display.
 
         Args:
             filtered_paths: Set of file paths to show (empty set shows all)
+            preserve_selection: If True, don't clear selections (used during view recreation)
         """
         logger.debug(
             f"VirtualThumbnailView: Applying filters to {len(filtered_paths)} paths"
         )
 
         self.filtered_paths = filtered_paths
-        self.scroll_area.apply_filters(filtered_paths)
+        self.scroll_area.apply_filters(filtered_paths, preserve_selection)
+        
+        # Reset multi-select mode when filters change (unless preserving)
+        if not preserve_selection and self.select_button.isChecked():
+            self.select_button.setChecked(False)
 
         # Update info label
         visible_count = self.scroll_area.get_visible_media_count()
@@ -998,7 +1102,19 @@ class VirtualThumbnailView(QWidget):
     def _on_selection_changed(self, media: Media) -> None:
         """Handle selection change."""
         self.selected_media = media
-        self.selection_changed.emit(media)
+        
+        # Emit multi-selection signal if in multi-select mode
+        if self.scroll_area.multi_select_mode:
+            selected_count = self.scroll_area.get_selected_count()
+            self.multi_selection_changed.emit(selected_count)
+            
+            # Only emit selection_changed if exactly one item is selected
+            if selected_count == 1:
+                self.selection_changed.emit(media)
+            else:
+                self.selection_changed.emit(None)  # Clear metadata panel
+        else:
+            self.selection_changed.emit(media)
 
     def _on_item_double_clicked(self, media: Media) -> None:
         """Handle item double click to open file."""
@@ -1010,6 +1126,21 @@ class VirtualThumbnailView(QWidget):
         logger.debug(f"Favorite toggled for: {media.file_name}")
         self.favorite_toggled.emit(media)
 
+    def _on_select_mode_toggled(self, checked: bool) -> None:
+        """Handle Select button toggle."""
+        self.scroll_area.set_multi_select_mode(checked)
+        
+        # Update button text to indicate state
+        if checked:
+            self.select_button.setText("Select ✓")
+        else:
+            self.select_button.setText("Select...")
+        
+        # Emit signal if selections were cleared
+        if not checked:
+            self.multi_selection_changed.emit(0)
+            self.selection_changed.emit(None)
+    
     def _toggle_selected_favorite(self) -> None:
         """Toggle favorite status of the selected media."""
         if self.selected_media:
@@ -1115,6 +1246,14 @@ class VirtualThumbnailView(QWidget):
     def get_selected_media(self) -> Optional[Media]:
         """Get the currently selected media object."""
         return self.selected_media
+    
+    def get_all_selected_media(self) -> List[Media]:
+        """Get all selected media items in multi-select mode."""
+        return self.scroll_area.get_selected_media_list()
+    
+    def is_multi_select_mode(self) -> bool:
+        """Check if multi-select mode is enabled."""
+        return self.scroll_area.multi_select_mode
 
     def clear(self) -> None:
         """Clear all thumbnails and reset the view."""
