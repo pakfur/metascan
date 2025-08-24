@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         self.thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
+        self.thumbnail_view.multi_selection_changed.connect(self.on_multi_selection_changed)
         
         # Connect thumbnail size change signal
         self.thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
@@ -420,7 +421,7 @@ class MainWindow(QMainWindow):
         self.metadata_panel = MetadataPanel()
         
         # Set maximum width constraint
-        self.metadata_panel.setMaximumWidth(430)
+        self.metadata_panel.setMaximumWidth(380)
 
         # Set the thumbnail cache for preview images
         self.metadata_panel.set_thumbnail_cache(self.thumbnail_cache)
@@ -436,6 +437,13 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open Folder", self)
         open_action.setShortcut("Ctrl+O")
         file_menu.addAction(open_action)
+
+        file_menu.addSeparator()
+
+        self.delete_action = QAction("Delete file...", self)
+        self.delete_action.setShortcut("Ctrl+D")
+        self.delete_action.triggered.connect(self._handle_delete_shortcut)
+        file_menu.addAction(self.delete_action)
 
         file_menu.addSeparator()
 
@@ -873,10 +881,21 @@ class MainWindow(QMainWindow):
     def on_thumbnail_selected(self, media):
         """Handle when a thumbnail is selected."""
         try:
-            # Update metadata panel
-            self.metadata_panel.display_metadata(media)
+            # Update metadata panel - None will clear it
+            if media:
+                self.metadata_panel.display_metadata(media)
+            else:
+                self.metadata_panel.clear_content()
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
+    
+    def on_multi_selection_changed(self, count: int):
+        """Handle when the number of selected items changes in multi-select mode."""
+        # Update delete menu item text based on selection count
+        if count > 1:
+            self.delete_action.setText("Delete files...")
+        else:
+            self.delete_action.setText("Delete file...")
 
     def on_thumbnail_double_clicked(self, media):
         """Handle when a thumbnail is double-clicked."""
@@ -959,9 +978,23 @@ class MainWindow(QMainWindow):
         current_filters = self.current_filters
         current_filtered_paths = self.filtered_media_paths
         
+        # Preserve selection state
+        is_multi_select = self.thumbnail_view.is_multi_select_mode()
+        selected_media_paths = set()
+        if is_multi_select:
+            # Get all selected media paths
+            selected_media_list = self.thumbnail_view.get_all_selected_media()
+            selected_media_paths = {str(m.file_path) for m in selected_media_list}
+        else:
+            # Get single selected media
+            selected_media = self.thumbnail_view.get_selected_media()
+            if selected_media:
+                selected_media_paths.add(str(selected_media.file_path))
+        
         # Disconnect old signals
         self.thumbnail_view.selection_changed.disconnect()
         self.thumbnail_view.favorite_toggled.disconnect()
+        self.thumbnail_view.multi_selection_changed.disconnect()
         self.thumbnail_view.thumbnail_size_changed.disconnect()
         self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
         
@@ -971,6 +1004,7 @@ class MainWindow(QMainWindow):
         # Connect signals
         new_thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         new_thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
+        new_thumbnail_view.multi_selection_changed.connect(self.on_multi_selection_changed)
         new_thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
         new_thumbnail_view.scroll_area.item_double_clicked.connect(self.on_thumbnail_double_clicked)
         
@@ -987,7 +1021,17 @@ class MainWindow(QMainWindow):
         if current_media:
             self.thumbnail_view.set_media_list(current_media)
             if current_filtered_paths:
-                self.thumbnail_view.apply_filters(current_filtered_paths)
+                self.thumbnail_view.apply_filters(current_filtered_paths, preserve_selection=True)
+        
+        # Restore selection state
+        if selected_media_paths:
+            # Restore multi-select mode if it was active
+            if is_multi_select:
+                self.thumbnail_view.select_button.setChecked(True)
+                self.thumbnail_view.scroll_area.set_multi_select_mode(True)
+            
+            # Restore selections using the new method that properly updates widgets
+            self.thumbnail_view.scroll_area.restore_selections(selected_media_paths)
 
     def on_viewer_favorite_toggled(self, media, is_favorite):
         """Handle favorite toggle from media viewer."""
@@ -1026,10 +1070,18 @@ class MainWindow(QMainWindow):
             # Delete from media viewer
             self._delete_from_viewer()
         else:
-            # Delete from thumbnail view
-            selected_media = self.thumbnail_view.get_selected_media()
-            if selected_media:
-                self._confirm_and_delete_media(selected_media, from_viewer=False)
+            # Check if in multi-select mode and multiple items are selected
+            if self.thumbnail_view.is_multi_select_mode():
+                selected_media_list = self.thumbnail_view.get_all_selected_media()
+                if len(selected_media_list) > 1:
+                    self._confirm_and_delete_multiple_media(selected_media_list)
+                elif len(selected_media_list) == 1:
+                    self._confirm_and_delete_media(selected_media_list[0], from_viewer=False)
+            else:
+                # Single selection mode
+                selected_media = self.thumbnail_view.get_selected_media()
+                if selected_media:
+                    self._confirm_and_delete_media(selected_media, from_viewer=False)
 
     def _delete_from_viewer(self):
         """Handle delete from the media viewer."""
@@ -1059,6 +1111,31 @@ class MainWindow(QMainWindow):
         # Show dialog and handle response
         if msg_box.exec() == QMessageBox.StandardButton.Ok:
             self._delete_media(media, from_viewer)
+    
+    def _confirm_and_delete_multiple_media(self, media_list):
+        """Show confirmation dialog and delete multiple media files if confirmed."""
+        count = len(media_list)
+        
+        # Create confirmation dialog
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Delete Multiple Files")
+        msg_box.setText(f"Delete {count} selected files?")
+        msg_box.setInformativeText("This action cannot be undone.")
+        
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+
+        # Focus on OK button
+        ok_button = msg_box.button(QMessageBox.StandardButton.Ok)
+        if ok_button:
+            ok_button.setFocus()
+
+        # Show dialog and handle response
+        if msg_box.exec() == QMessageBox.StandardButton.Ok:
+            self._delete_multiple_media(media_list)
 
     def _delete_media(self, media, from_viewer=False):
         """Delete media file and update all related components."""
@@ -1131,6 +1208,74 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error deleting media: {e}")
             QMessageBox.critical(self, "Delete Error", f"Failed to delete media: {e}")
+    
+    def _delete_multiple_media(self, media_list):
+        """Delete multiple media files and update all related components."""
+        deleted_count = 0
+        failed_files = []
+        
+        try:
+            for media in media_list:
+                try:
+                    file_path = media.file_path
+                    
+                    # 1. Delete from database
+                    db_success = self.db_manager.delete_media(file_path)
+                    if not db_success:
+                        print(f"Warning: Media not found in database: {file_path}")
+                    
+                    # 2. Move thumbnail to trash
+                    if self.thumbnail_cache:
+                        thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
+                        if thumbnail_path and thumbnail_path.exists():
+                            try:
+                                self._move_to_trash(thumbnail_path)
+                                print(f"Moved thumbnail to trash: {thumbnail_path}")
+                            except Exception as e:
+                                print(f"Failed to move thumbnail to trash: {e}")
+                    
+                    # 3. Move media file to trash
+                    if file_path.exists():
+                        try:
+                            self._move_to_trash(file_path)
+                            print(f"Moved media file to trash: {file_path}")
+                            deleted_count += 1
+                        except Exception as e:
+                            print(f"Failed to move media file to trash: {e}")
+                            failed_files.append(file_path.name)
+                            continue
+                    
+                    # 4. Remove from all_media list
+                    self.all_media = [m for m in self.all_media if m.file_path != file_path]
+                    
+                except Exception as e:
+                    print(f"Error deleting {media.file_name}: {e}")
+                    failed_files.append(media.file_name)
+            
+            # 5. Update filters and view once after all deletions
+            self.refresh_filters()
+            self.apply_all_filters()
+            
+            # 6. Clear multi-selection after deletion
+            if self.thumbnail_view.is_multi_select_mode():
+                self.thumbnail_view.scroll_area.clear_all_selections()
+            
+            # Show summary message
+            if failed_files:
+                QMessageBox.warning(
+                    self, 
+                    "Partial Deletion", 
+                    f"Successfully deleted {deleted_count} file(s).\n\n"
+                    f"Failed to delete {len(failed_files)} file(s):\n" + 
+                    "\n".join(failed_files[:5]) + 
+                    (f"\n... and {len(failed_files) - 5} more" if len(failed_files) > 5 else "")
+                )
+            else:
+                print(f"Successfully deleted {deleted_count} files")
+            
+        except Exception as e:
+            print(f"Error during batch deletion: {e}")
+            QMessageBox.critical(self, "Delete Error", f"Failed to delete files: {e}")
 
     def _move_to_trash(self, file_path: Path):
         """Move a file to the system trash/recycle bin."""
