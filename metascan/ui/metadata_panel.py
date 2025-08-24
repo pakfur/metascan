@@ -23,8 +23,6 @@ from metascan.core.media import Media
 
 
 class MetadataField(QFrame):
-    """Individual metadata field with label, value, and copy button."""
-
     def __init__(self, label: str, value: str, is_multiline: bool = False, parent=None):
         super().__init__(parent)
         self.label_text = label
@@ -38,30 +36,25 @@ class MetadataField(QFrame):
         self.setup_ui()
 
     def setup_ui(self):
-        """Set up the field UI."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
 
-        # Header with label and copy button
         header_layout = QHBoxLayout()
 
         # Label
         label = QLabel(self.label_text)
         label_font = QFont()
         label_font.setBold(True)
-        label_font.setPointSize(9)
+        label_font.setPointSize(8)
         label.setFont(label_font)
-        # Use theme styling for label
         header_layout.addWidget(label)
 
         header_layout.addStretch()
 
-        # Copy button
         copy_button = QPushButton("📋")
-        copy_button.setFixedSize(24, 24)
+        copy_button.setFixedSize(20, 20)
         copy_button.setToolTip(f"Copy {self.label_text} to clipboard")
-        # Use theme styling for copy button
         copy_button.clicked.connect(self.copy_to_clipboard)
         header_layout.addWidget(copy_button)
 
@@ -72,40 +65,17 @@ class MetadataField(QFrame):
             self.value_widget = QTextEdit()
             self.value_widget.setPlainText(self.value_text)
             self.value_widget.setReadOnly(True)
-            self.value_widget.setMaximumHeight(100)
-            # self.value_widget.setStyleSheet("""
-            #     QTextEdit {
-            #         border: 1px solid #ddd;
-            #         border-radius: 3px;
-            #         background-color: #fff;
-            #         font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
-            #         font-size: 10px;
-            #         padding: 4px;
-            #     }
-            # """)
+            self.value_widget.setMaximumHeight(80)
         else:
             self.value_widget = QLineEdit()
             self.value_widget.setText(self.value_text)
             self.value_widget.setReadOnly(True)
-            # self.value_widget.setStyleSheet("""
-            #     QLineEdit {
-            #         border: 1px solid #ddd;
-            #         border-radius: 3px;
-            #         background-color: #fff;
-            #         font-family: 'Courier New', 'Monaco', 'DejaVu Sans Mono', 'Cascadia Code', monospace;
-            #         font-size: 10px;
-            #         padding: 4px;
-            #     }
-            # """)
-
         layout.addWidget(self.value_widget)
 
     def copy_to_clipboard(self):
-        """Copy the field value to clipboard."""
         clipboard = QApplication.clipboard()
         clipboard.setText(self.value_text)
 
-        # Show brief visual feedback
         original_style = self.styleSheet()
         self.setStyleSheet(
             original_style
@@ -117,11 +87,9 @@ class MetadataField(QFrame):
         """
         )
 
-        # Reset style after brief delay
         QTimer.singleShot(300, lambda: self.setStyleSheet(original_style))
 
     def update_value(self, new_value: str):
-        """Update the field value."""
         self.value_text = new_value
         if self.is_multiline:
             self.value_widget.setPlainText(new_value)
@@ -130,50 +98,22 @@ class MetadataField(QFrame):
 
 
 class MetadataSection(QGroupBox):
-    """Expandable section for organizing related metadata fields."""
-
     def __init__(self, title: str, parent=None):
         super().__init__(title, parent)
         self.fields: Dict[str, MetadataField] = {}
         self.setup_ui()
 
     def setup_ui(self):
-        """Set up the section UI."""
         self.setCheckable(True)
         self.setChecked(True)  # Start expanded
-        # self.setStyleSheet("""
-        #     QGroupBox {
-        #         font-weight: bold;
-        #         border: 2px solid #cccccc;
-        #         border-radius: 5px;
-        #         margin-top: 1ex;
-        #         padding: 8px;
-        #     }
-        #     QGroupBox::title {
-        #         subcontrol-origin: margin;
-        #         left: 10px;
-        #         padding: 0 5px 0 5px;
-        #         color: #2c3e50;
-        #     }
-        #     QGroupBox::indicator {
-        #         width: 13px;
-        #         height: 13px;
-        #     }
-        #     QGroupBox::indicator:checked {
-        #         image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTMiIGhlaWdodD0iMTMiIHZpZXdCb3g9IjAgMCAxMyAxMyI+PHBhdGggZD0ibTMgNiA0IDQgNC04IiBzdHJva2U9IiM0Q0FGNTAB);
-        #     }
-        # """)
-
-        # Layout for fields
+        
         self.layout: QVBoxLayout = QVBoxLayout(self)
-        self.layout.setContentsMargins(8, 15, 8, 8)
-        self.layout.setSpacing(4)
+        self.layout.setContentsMargins(6, 12, 6, 6)
+        self.layout.setSpacing(3)
 
-        # Connect collapse/expand
         self.toggled.connect(self.on_toggled)
 
     def add_field(self, key: str, label: str, value: str, is_multiline: bool = False):
-        """Add a metadata field to this section."""
         if value is None:
             value = "N/A"
 
@@ -183,22 +123,18 @@ class MetadataSection(QGroupBox):
         return field
 
     def update_field(self, key: str, value: str):
-        """Update a field value."""
         if key in self.fields:
             self.fields[key].update_value(str(value) if value is not None else "N/A")
 
     def on_toggled(self, checked: bool):
-        """Handle section expand/collapse."""
         for field in self.fields.values():
             field.setVisible(checked)
 
 
 class ThumbnailPreview(QLabel):
-    """Small thumbnail preview in metadata panel."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(120, 120)
+        self.setFixedSize(100, 100)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(
             """
@@ -233,7 +169,6 @@ class ThumbnailPreview(QLabel):
 
 
 class MetadataPanel(QWidget):
-    """Enhanced metadata panel with organized, copyable fields."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -244,121 +179,90 @@ class MetadataPanel(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        """Set up the metadata panel UI."""
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
 
-        # Header
         header_layout = QHBoxLayout()
-
-        title = QLabel("Metadata")
-        title_font = QFont()
-        title_font.setBold(True)
-        title_font.setPointSize(14)
-        title.setFont(title_font)
-        # Use theme styling for title
-        header_layout.addWidget(title)
 
         header_layout.addStretch()
 
-        # Copy all button
-        self.copy_all_button = QPushButton("📋 Copy All")
+        self.copy_all_button = QPushButton("Copy All")
         self.copy_all_button.setToolTip("Copy all metadata to clipboard as JSON")
-        # Use theme styling for Copy All button
         self.copy_all_button.clicked.connect(self.copy_all_metadata)
         self.copy_all_button.setEnabled(False)
         header_layout.addWidget(self.copy_all_button)
 
         main_layout.addLayout(header_layout)
 
-        # Scroll area for metadata content
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        # Content widget
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(4, 4, 4, 4)
-        self.content_layout.setSpacing(8)
+        self.content_layout.setContentsMargins(3, 3, 3, 3)
+        self.content_layout.setSpacing(6)
 
-        # No selection message
         self.no_selection_label = QLabel("Select a media file to view metadata")
         self.no_selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Use theme styling for no selection label
         self.content_layout.addWidget(self.no_selection_label)
 
-        # Add stretch to push content to top
         self.content_layout.addStretch()
 
         scroll_area.setWidget(self.content_widget)
         main_layout.addWidget(scroll_area)
 
     def set_thumbnail_cache(self, thumbnail_cache):
-        """Set the thumbnail cache for preview images."""
         self.thumbnail_cache = thumbnail_cache
 
     def display_metadata(self, media: Media):
-        """Display metadata for the given media object."""
         self.current_media = media
         self.clear_content()
 
-        # Hide no selection message
         self.no_selection_label.setVisible(False)
 
-        # Create preview section
         self.create_preview_section(media)
 
-        # Create metadata sections
         self.create_prompt_section(media)
         self.create_lora_section(media)
         self.create_generation_section(media)
         self.create_file_info_section(media)
         self.create_technical_section(media)
 
-        # Enable copy all button
         self.copy_all_button.setEnabled(True)
 
     def clear_content(self):
-        """Clear all metadata content."""
-        # Remove all dynamically created widgets from the layout
         while self.content_layout.count() > 0:
             item = self.content_layout.takeAt(0)
             if item.widget() and item.widget() != self.no_selection_label:
                 item.widget().deleteLater()
 
-        # Clear sections dictionary
         self.sections.clear()
 
-        # Re-add the no selection label and stretch
         self.content_layout.addWidget(self.no_selection_label)
         self.content_layout.addStretch()
 
-        # Show no selection message
         self.no_selection_label.setVisible(True)
         self.copy_all_button.setEnabled(False)
 
     def create_preview_section(self, media: Media):
-        """Create the thumbnail preview section."""
         preview_widget = QWidget()
         preview_layout = QHBoxLayout(preview_widget)
-        preview_layout.setContentsMargins(8, 8, 8, 8)
+        preview_layout.setContentsMargins(6, 6, 6, 6)
 
-        # Thumbnail preview
         thumbnail = ThumbnailPreview()
         if self.thumbnail_cache:
             thumbnail_path = self.thumbnail_cache.get_thumbnail_path(media.file_path)
             thumbnail.set_thumbnail(thumbnail_path)
         preview_layout.addWidget(thumbnail)
 
-        # Basic info
         info_layout = QVBoxLayout()
 
         filename_label = QLabel(media.file_name)
         filename_font = QFont()
         filename_font.setBold(True)
-        filename_font.setPointSize(11)
+        filename_font.setPointSize(10)
         filename_label.setFont(filename_font)
         filename_label.setWordWrap(True)
         info_layout.addWidget(filename_label)
@@ -387,7 +291,6 @@ class MetadataPanel(QWidget):
 
             if video_info_parts:
                 video_info_label = QLabel(" • ".join(video_info_parts))
-                # Use theme styling for video info label
                 info_layout.addWidget(video_info_label)
 
         info_layout.addStretch()
@@ -399,8 +302,7 @@ class MetadataPanel(QWidget):
         self.content_layout.insertWidget(0, preview_widget)
 
     def create_file_info_section(self, media: Media):
-        """Create the file information section."""
-        section = MetadataSection("📁 File Information")
+        section = MetadataSection("File Information")
 
         section.add_field("filename", "Filename", media.file_name)
         section.add_field(
@@ -425,11 +327,10 @@ class MetadataPanel(QWidget):
         self.content_layout.insertWidget(-1, section)  # Before stretch
 
     def create_generation_section(self, media: Media):
-        """Create the AI generation parameters section."""
         section_title = (
             "🎥 Video Generation Parameters"
             if media.is_video
-            else "🤖 Generation Parameters"
+            else "Generation Parameters"
         )
         section = MetadataSection(section_title)
 
@@ -447,7 +348,6 @@ class MetadataPanel(QWidget):
         )
         section.add_field("seed", "Seed", str(media.seed) if media.seed else "Unknown")
 
-        # Add video-specific fields
         if media.is_video:
             if media.frame_rate:
                 section.add_field(
@@ -466,8 +366,7 @@ class MetadataPanel(QWidget):
         self.content_layout.insertWidget(-1, section)
 
     def create_prompt_section(self, media: Media):
-        """Create the prompt section."""
-        section = MetadataSection("✨ Prompts")
+        section = MetadataSection("Prompts")
 
         if media.prompt:
             section.add_field(
@@ -482,25 +381,21 @@ class MetadataPanel(QWidget):
                 is_multiline=True,
             )
 
-        # Only add section if there are prompts
         if media.prompt or media.negative_prompt:
             self.sections["prompts"] = section
             self.content_layout.insertWidget(-1, section)
 
     def create_lora_section(self, media: Media):
-        """Create the LoRA section."""
         if not media.loras:
-            return  # Only create section if there are LoRAs
+            return 
 
-        section = MetadataSection("🎯 LoRAs")
+        section = MetadataSection("LoRAs")
 
-        # Create a formatted list of LoRAs with weights and names
         lora_lines = []
         for lora in media.loras:
             lora_line = f"{lora.lora_weight}: {lora.lora_name}"
             lora_lines.append(lora_line)
 
-        # Join all LoRAs with newlines for multiline display
         loras_text = "\n".join(lora_lines)
 
         section.add_field("loras", "LoRAs", loras_text, is_multiline=True)
@@ -509,14 +404,12 @@ class MetadataPanel(QWidget):
         self.content_layout.insertWidget(-1, section)
 
     def create_technical_section(self, media: Media):
-        """Create the technical/raw data section."""
         if not media.generation_data:
             return
 
-        section = MetadataSection("⚙️ Technical Data")
+        section = MetadataSection("Technical Data")
         section.setChecked(False)  # Start collapsed
 
-        # Format generation data as JSON
         try:
             formatted_data = json.dumps(media.generation_data, indent=2, sort_keys=True)
             section.add_field(
@@ -534,7 +427,6 @@ class MetadataPanel(QWidget):
         self.content_layout.insertWidget(-1, section)
 
     def format_file_size(self, size_bytes: int) -> str:
-        """Format file size in human readable format."""
         for unit in ["B", "KB", "MB", "GB"]:
             if size_bytes < 1024:
                 return f"{size_bytes:.1f} {unit}"
@@ -542,12 +434,10 @@ class MetadataPanel(QWidget):
         return f"{size_bytes:.1f} TB"
 
     def copy_all_metadata(self):
-        """Copy all metadata to clipboard as structured JSON."""
         if not self.current_media:
             return
 
         try:
-            # Create comprehensive metadata dict
             metadata = {
                 "file": {
                     "name": self.current_media.file_name,
@@ -589,12 +479,10 @@ class MetadataPanel(QWidget):
                 "raw_generation_data": self.current_media.generation_data,
             }
 
-            # Copy to clipboard
             formatted_json = json.dumps(metadata, indent=2, ensure_ascii=False)
             clipboard = QApplication.clipboard()
             clipboard.setText(formatted_json)
 
-            # Show success message
             self.show_copy_feedback("All metadata copied to clipboard!")
 
         except Exception as e:
@@ -603,8 +491,6 @@ class MetadataPanel(QWidget):
             )
 
     def show_copy_feedback(self, message: str):
-        """Show brief feedback when copying."""
-        # Change button appearance briefly
         original_text = self.copy_all_button.text()
 
         self.copy_all_button.setText("✓ Copied!")

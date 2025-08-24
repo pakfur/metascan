@@ -198,15 +198,6 @@ class FiltersPanel(QWidget):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
 
-        # Title
-        title = QLabel("Filters")
-        title_font = QFont()
-        title_font.setBold(True)
-        title_font.setPointSize(14)
-        title.setFont(title_font)
-        main_layout.addWidget(title)
-
-        # Control buttons
         button_layout = QHBoxLayout()
 
         self.clear_all_button = QPushButton("Clear All")
