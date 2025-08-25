@@ -57,6 +57,7 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
 ### GUI Interface
 - Virtualized thumbnail grid for performance with large collections
 - Three-panel layout: filters, thumbnails, metadata
+- Flexible thumbnail sorting (File Name, Date Added, Date Modified)
 - Resizable panels with persistent layout
 - Full-size media viewer with zoom capabilities
 - Media deletion with keyboard shortcut (Cmd+D/Ctrl+D)
@@ -185,6 +186,13 @@ metascan  # Run from anywhere after installation
 
 ### Key Features
 
+- **Sorting:** Organize your media collection with flexible sorting options
+  - Access via **View > Sort by** menu with three options:
+    - **File Name** - Alphabetical sorting (default)
+    - **Date Added** - Sort by creation/scan date
+    - **Date Modified** - Sort by file modification date
+  - Sort order persists across all operations (filtering, scanning, app restart)
+  - Current sort selection shown with checkmark (✓) in menu
 - **Filtering:** Click filter items in the left panel to refine your view
 - **Favorites:** Mark media as favorites for quick access
   - In media viewer: Click the star icon in the title bar or press `F` key
@@ -211,9 +219,20 @@ Configuration is stored in `config.json` in the application directory:
   ],
   "watch_directories": true,
   "thumbnail_size": [300, 300],
-  "cache_size_mb": 500
+  "cache_size_mb": 500,
+  "sort_order": "file_name"
 }
 ```
+
+### Configuration Options
+
+- **`sort_order`**: Default thumbnail sorting method
+  - `"file_name"` - Alphabetical by filename (default)
+  - `"date_added"` - Sort by creation/scan date
+  - `"date_modified"` - Sort by file modification date
+- **`thumbnail_size`**: Thumbnail dimensions `[width, height]` in pixels
+- **`cache_size_mb`**: Maximum thumbnail cache size in megabytes
+- **`watch_directories`**: Enable real-time directory monitoring
 
 ## Testing
 

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
 from typing import Tuple, Dict, List
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup
 from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
@@ -46,9 +46,10 @@ import platform
 
 
 class ScannerThread(QThread):
-
     progress_updated = pyqtSignal(int, int, str)  # current, total, current_file
-    directory_progress_updated = pyqtSignal(int, int, str)  # current_dir, total_dirs, dir_path
+    directory_progress_updated = pyqtSignal(
+        int, int, str
+    )  # current_dir, total_dirs, dir_path
     scan_complete = pyqtSignal(int)  # processed_count
     scan_error = pyqtSignal(str)  # error message
 
@@ -99,7 +100,6 @@ class ScannerThread(QThread):
 
 
 class ScanProgressDialog(QDialog):
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Scanning Media Files (Threaded)")
@@ -127,10 +127,10 @@ class ScanProgressDialog(QDialog):
         self.file_progress_bar.setTextVisible(True)
         self.file_progress_bar.setFormat("File %v of %m")
         progress_layout.addWidget(self.file_progress_bar)
-        
+
         # Add the progress container to main layout
         layout.addWidget(progress_container)
-        
+
         # Add small spacing after progress bars
         layout.addSpacing(10)
 
@@ -145,7 +145,7 @@ class ScanProgressDialog(QDialog):
         # Progress text summary
         self.progress_label = QLabel("0 / 0 files")
         layout.addWidget(self.progress_label)
-        
+
         # Add stretch to push cancel button to bottom
         layout.addStretch()
 
@@ -160,7 +160,7 @@ class ScanProgressDialog(QDialog):
         """Update the directory progress display."""
         self.dir_progress_bar.setMaximum(total_dirs)
         self.dir_progress_bar.setValue(current_dir)
-        
+
         # Show shortened directory path
         if isinstance(dir_path, str):
             dir_name = Path(dir_path).name
@@ -196,7 +196,6 @@ class ScanProgressDialog(QDialog):
 
 
 class ScanConfirmationDialog(QDialog):
-
     def __init__(self, total_dirs: int, total_files: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Confirm Scan")
@@ -262,12 +261,15 @@ class MainWindow(QMainWindow):
         # Initialize components
         self.config_file = str(get_config_path())
         self.config = self.load_config()
-        
+
+        # Sort order state
+        self.current_sort_order = self.config.get("sort_order", "file_name")
+
         # Initialize save timer for debouncing geometry saves
         self.geometry_save_timer = QTimer()
         self.geometry_save_timer.setSingleShot(True)
         self.geometry_save_timer.timeout.connect(self.save_window_geometry)
-        
+
         # Restore window geometry from config or use defaults
         window_geometry = self.config.get("window_geometry", {})
         if window_geometry:
@@ -275,7 +277,7 @@ class MainWindow(QMainWindow):
                 window_geometry.get("x", 100),
                 window_geometry.get("y", 100),
                 window_geometry.get("width", 1200),
-                window_geometry.get("height", 800)
+                window_geometry.get("height", 800),
             )
         else:
             # Set window size based on thumbnail size from config
@@ -351,14 +353,16 @@ class MainWindow(QMainWindow):
             # Adjust middle panel size based on thumbnail size
             thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
             # Calculate width needed for at least 2 columns of thumbnails + some extra
-            min_thumbnail_panel_width = (thumbnail_size[0] + 10) * 2 + 60  # 2 thumbnails + spacing + margins + scrollbar
+            min_thumbnail_panel_width = (
+                thumbnail_size[0] + 10
+            ) * 2 + 60  # 2 thumbnails + spacing + margins + scrollbar
             self.main_splitter.setSizes([250, min_thumbnail_panel_width, 350])
-        
+
         # Force the splitter to honor our sizes by setting stretch factors
         self.main_splitter.setStretchFactor(0, 0)  # Filter panel - don't stretch
         self.main_splitter.setStretchFactor(1, 1)  # Thumbnail panel - can stretch
         self.main_splitter.setStretchFactor(2, 0)  # Metadata panel - don't stretch
-        
+
         # Connect signal to save splitter sizes when moved
         self.main_splitter.splitterMoved.connect(self.on_splitter_moved)
 
@@ -373,7 +377,7 @@ class MainWindow(QMainWindow):
 
     def _create_filter_panel(self) -> QWidget:
         self.filters_panel = FiltersPanel()
-        
+
         # Set maximum width constraint
         self.filters_panel.setMaximumWidth(395)
 
@@ -392,7 +396,6 @@ class MainWindow(QMainWindow):
         """Handle splitter movement and save the new sizes."""
         self.save_splitter_sizes()
 
-
     def _create_thumbnail_panel(self) -> QWidget:
         # Create the thumbnail view with thumbnail size from config
         thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
@@ -401,10 +404,14 @@ class MainWindow(QMainWindow):
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         self.thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
-        self.thumbnail_view.multi_selection_changed.connect(self.on_multi_selection_changed)
-        
+        self.thumbnail_view.multi_selection_changed.connect(
+            self.on_multi_selection_changed
+        )
+
         # Connect thumbnail size change signal
-        self.thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
+        self.thumbnail_view.thumbnail_size_changed.connect(
+            self.on_thumbnail_size_changed
+        )
 
         # Connect double-click to open media viewer
         self.thumbnail_view.scroll_area.item_double_clicked.connect(
@@ -419,7 +426,7 @@ class MainWindow(QMainWindow):
     def _create_metadata_panel(self) -> QWidget:
         # Create the enhanced metadata panel
         self.metadata_panel = MetadataPanel()
-        
+
         # Set maximum width constraint
         self.metadata_panel.setMaximumWidth(380)
 
@@ -464,6 +471,53 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("Refresh", self)
         refresh_action.setShortcut("F5")
         view_menu.addAction(refresh_action)
+
+        view_menu.addSeparator()
+
+        # Sort by submenu
+        sort_menu = view_menu.addMenu("Sort by")
+
+        # Create action group for exclusive selection
+        self.sort_action_group = QActionGroup(self)
+
+        # File Name sort
+        self.sort_filename_action = QAction("File Name", self)
+        self.sort_filename_action.setCheckable(True)
+        self.sort_filename_action.setActionGroup(self.sort_action_group)
+        self.sort_filename_action.triggered.connect(
+            lambda: self._on_sort_changed("file_name")
+        )
+        sort_menu.addAction(self.sort_filename_action)
+
+        # Date Added sort
+        self.sort_date_added_action = QAction("Date Added", self)
+        self.sort_date_added_action.setCheckable(True)
+        self.sort_date_added_action.setActionGroup(self.sort_action_group)
+        self.sort_date_added_action.triggered.connect(
+            lambda: self._on_sort_changed("date_added")
+        )
+        sort_menu.addAction(self.sort_date_added_action)
+
+        # Date Modified sort
+        self.sort_date_modified_action = QAction("Date Modified", self)
+        self.sort_date_modified_action.setCheckable(True)
+        self.sort_date_modified_action.setActionGroup(self.sort_action_group)
+        self.sort_date_modified_action.triggered.connect(
+            lambda: self._on_sort_changed("date_modified")
+        )
+        sort_menu.addAction(self.sort_date_modified_action)
+
+        # Set initial checked state based on config
+        if self.current_sort_order == "file_name":
+            self.sort_filename_action.setChecked(True)
+        elif self.current_sort_order == "date_added":
+            self.sort_date_added_action.setChecked(True)
+        elif self.current_sort_order == "date_modified":
+            self.sort_date_modified_action.setChecked(True)
+        else:
+            # Default to file name if unknown sort order
+            self.sort_filename_action.setChecked(True)
+            self.current_sort_order = "file_name"
 
     def _create_toolbar(self):
         toolbar = QToolBar()
@@ -523,14 +577,16 @@ class MainWindow(QMainWindow):
         try:
             # If config.json doesn't exist, copy from config_example.json
             if not os.path.exists(self.config_file):
-                config_example_file = Path(self.config_file).parent / "config_example.json"
+                config_example_file = (
+                    Path(self.config_file).parent / "config_example.json"
+                )
                 if config_example_file.exists():
                     print(f"Creating config.json from config_example.json")
                     shutil.copy(str(config_example_file), self.config_file)
                 else:
                     print(f"Warning: Neither config.json nor config_example.json found")
                     return {}
-            
+
             # Load the config file
             with open(self.config_file, "r") as f:
                 return json.load(f)
@@ -603,7 +659,7 @@ class MainWindow(QMainWindow):
                 "x": geometry.x(),
                 "y": geometry.y(),
                 "width": geometry.width(),
-                "height": geometry.height()
+                "height": geometry.height(),
             }
 
             # Save config
@@ -629,6 +685,51 @@ class MainWindow(QMainWindow):
                 json.dump(config, f, indent=2)
         except Exception as e:
             print(f"Error saving splitter sizes to config: {e}")
+
+    def _on_sort_changed(self, sort_order: str):
+        """Handle sort order change from menu."""
+        if sort_order != self.current_sort_order:
+            self.current_sort_order = sort_order
+            self._save_sort_order_to_config()
+            self._apply_sorting()
+
+    def _save_sort_order_to_config(self):
+        """Save sort order to config file."""
+        try:
+            # Load existing config or create new one
+            config = {}
+            if os.path.exists(self.config_file):
+                with open(self.config_file, "r") as f:
+                    config = json.load(f)
+
+            # Update sort order
+            config["sort_order"] = self.current_sort_order
+
+            # Save config
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Error saving sort order to config: {e}")
+
+    def _apply_sorting(self):
+        """Apply current sorting to media list and refresh view."""
+        if not self.all_media:
+            return
+
+        # Sort the media list based on current sort order
+        if self.current_sort_order == "file_name":
+            self.all_media.sort(key=lambda m: m.file_name.lower())
+        elif self.current_sort_order == "date_added":
+            # Use created_at for date added
+            self.all_media.sort(key=lambda m: m.created_at)
+        elif self.current_sort_order == "date_modified":
+            self.all_media.sort(key=lambda m: m.modified_at)
+
+        # Update the thumbnail view with sorted media
+        self.thumbnail_view.set_media_list(self.all_media)
+
+        # Reapply current filters to maintain filtered state
+        self.apply_all_filters()
 
     def resizeEvent(self, event):
         """Handle window resize events."""
@@ -703,9 +804,13 @@ class MainWindow(QMainWindow):
             self.progress_dialog = ScanProgressDialog(self)
 
             # Create and configure scanner thread
-            self.scanner_thread = ScannerThread(self.scanner, directories, full_scan=full_clean_requested)
+            self.scanner_thread = ScannerThread(
+                self.scanner, directories, full_scan=full_clean_requested
+            )
             self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
-            self.scanner_thread.directory_progress_updated.connect(self._on_scan_directory_progress)
+            self.scanner_thread.directory_progress_updated.connect(
+                self._on_scan_directory_progress
+            )
             self.scanner_thread.scan_complete.connect(self._on_scan_complete)
             self.scanner_thread.scan_error.connect(self._on_scan_error)
 
@@ -751,7 +856,9 @@ class MainWindow(QMainWindow):
     def _on_scan_directory_progress(self, current_dir, total_dirs, dir_path):
         """Handle directory scan progress updates."""
         if hasattr(self, "progress_dialog"):
-            self.progress_dialog.update_directory_progress(current_dir, total_dirs, dir_path)
+            self.progress_dialog.update_directory_progress(
+                current_dir, total_dirs, dir_path
+            )
 
     def _on_scan_complete(self, processed_count):
         """Handle scan completion."""
@@ -798,7 +905,8 @@ class MainWindow(QMainWindow):
             self.all_media = self.db_manager.get_all_media()
             # Load favorite status from database
             self.db_manager.load_favorite_status(self.all_media)
-            self.thumbnail_view.set_media_list(self.all_media)
+            # Apply current sorting
+            self._apply_sorting()
             print(f"Loaded {len(self.all_media)} media items")
         except Exception as e:
             print(f"Error loading media: {e}")
@@ -814,7 +922,7 @@ class MainWindow(QMainWindow):
             print(f"Error refreshing filters: {e}")
 
     def on_sort_order_changed(self, sort_order: str):
-        """Handle when sort order is changed."""
+        """Handle when filter sort order is changed (for filter panel sorting)."""
         self.refresh_filters()
 
     def on_filters_changed(self, filters: dict):
@@ -833,7 +941,6 @@ class MainWindow(QMainWindow):
             # Update database
             success = self.db_manager.set_favorite(media.file_path, media.is_favorite)
             if success:
-
                 # If favorites filter is active, reapply filters
                 if self.favorites_active:
                     self.apply_all_filters()
@@ -888,7 +995,7 @@ class MainWindow(QMainWindow):
                 self.metadata_panel.clear_content()
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
-    
+
     def on_multi_selection_changed(self, count: int):
         """Handle when the number of selected items changes in multi-select mode."""
         # Update delete menu item text based on selection count
@@ -900,7 +1007,6 @@ class MainWindow(QMainWindow):
     def on_thumbnail_double_clicked(self, media):
         """Handle when a thumbnail is double-clicked."""
         try:
-
             # Get the currently filtered media list
             if self.filtered_media_paths:
                 # Use filtered list
@@ -950,34 +1056,35 @@ class MainWindow(QMainWindow):
         try:
             # Update config
             self.config["thumbnail_size"] = list(new_size)
-            
+
             # Save to file
             with open(self.config_file, "w") as f:
                 import json
+
                 json.dump(self.config, f, indent=2)
-            
+
             # Update thumbnail cache to new size
             cache_dir = get_thumbnail_cache_dir()
             self.thumbnail_cache = ThumbnailCache(cache_dir, new_size)
-            
+
             # Update metadata panel's thumbnail cache
             self.metadata_panel.set_thumbnail_cache(self.thumbnail_cache)
-            
+
             # Recreate the thumbnail view with new size
             self._recreate_thumbnail_view(new_size)
-            
+
             print(f"Thumbnail size changed to: {new_size}")
-            
+
         except Exception as e:
             print(f"Error changing thumbnail size: {e}")
-    
+
     def _recreate_thumbnail_view(self, new_size: Tuple[int, int]) -> None:
         """Recreate the thumbnail view with new size."""
         # Get current media list and filters
         current_media = self.all_media
         current_filters = self.current_filters
         current_filtered_paths = self.filtered_media_paths
-        
+
         # Preserve selection state
         is_multi_select = self.thumbnail_view.is_multi_select_mode()
         selected_media_paths = set()
@@ -990,46 +1097,54 @@ class MainWindow(QMainWindow):
             selected_media = self.thumbnail_view.get_selected_media()
             if selected_media:
                 selected_media_paths.add(str(selected_media.file_path))
-        
+
         # Disconnect old signals
         self.thumbnail_view.selection_changed.disconnect()
         self.thumbnail_view.favorite_toggled.disconnect()
         self.thumbnail_view.multi_selection_changed.disconnect()
         self.thumbnail_view.thumbnail_size_changed.disconnect()
         self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
-        
+
         # Create new thumbnail view
         new_thumbnail_view = VirtualThumbnailView(thumbnail_size=new_size)
-        
+
         # Connect signals
         new_thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
         new_thumbnail_view.favorite_toggled.connect(self.on_favorite_toggled)
-        new_thumbnail_view.multi_selection_changed.connect(self.on_multi_selection_changed)
-        new_thumbnail_view.thumbnail_size_changed.connect(self.on_thumbnail_size_changed)
-        new_thumbnail_view.scroll_area.item_double_clicked.connect(self.on_thumbnail_double_clicked)
-        
+        new_thumbnail_view.multi_selection_changed.connect(
+            self.on_multi_selection_changed
+        )
+        new_thumbnail_view.thumbnail_size_changed.connect(
+            self.on_thumbnail_size_changed
+        )
+        new_thumbnail_view.scroll_area.item_double_clicked.connect(
+            self.on_thumbnail_double_clicked
+        )
+
         # Replace in splitter using saved reference
         old_widget = self.main_splitter.widget(1)  # Middle widget (thumbnail panel)
         if old_widget is not None:
             self.main_splitter.replaceWidget(1, new_thumbnail_view)
             old_widget.deleteLater()
-        
+
         # Update reference
         self.thumbnail_view = new_thumbnail_view
-        
+
         # Restore media and filters
         if current_media:
             self.thumbnail_view.set_media_list(current_media)
             if current_filtered_paths:
-                self.thumbnail_view.apply_filters(current_filtered_paths, preserve_selection=True)
-        
+                self.thumbnail_view.apply_filters(
+                    current_filtered_paths, preserve_selection=True
+                )
+
         # Restore selection state
         if selected_media_paths:
             # Restore multi-select mode if it was active
             if is_multi_select:
                 self.thumbnail_view.select_button.setChecked(True)
                 self.thumbnail_view.scroll_area.set_multi_select_mode(True)
-            
+
             # Restore selections using the new method that properly updates widgets
             self.thumbnail_view.scroll_area.restore_selections(selected_media_paths)
 
@@ -1076,7 +1191,9 @@ class MainWindow(QMainWindow):
                 if len(selected_media_list) > 1:
                     self._confirm_and_delete_multiple_media(selected_media_list)
                 elif len(selected_media_list) == 1:
-                    self._confirm_and_delete_media(selected_media_list[0], from_viewer=False)
+                    self._confirm_and_delete_media(
+                        selected_media_list[0], from_viewer=False
+                    )
             else:
                 # Single selection mode
                 selected_media = self.thumbnail_view.get_selected_media()
@@ -1111,17 +1228,17 @@ class MainWindow(QMainWindow):
         # Show dialog and handle response
         if msg_box.exec() == QMessageBox.StandardButton.Ok:
             self._delete_media(media, from_viewer)
-    
+
     def _confirm_and_delete_multiple_media(self, media_list):
         """Show confirmation dialog and delete multiple media files if confirmed."""
         count = len(media_list)
-        
+
         # Create confirmation dialog
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Delete Multiple Files")
         msg_box.setText(f"Delete {count} selected files?")
         msg_box.setInformativeText("This action cannot be undone.")
-        
+
         msg_box.setStandardButtons(
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
@@ -1208,32 +1325,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error deleting media: {e}")
             QMessageBox.critical(self, "Delete Error", f"Failed to delete media: {e}")
-    
+
     def _delete_multiple_media(self, media_list):
         """Delete multiple media files and update all related components."""
         deleted_count = 0
         failed_files = []
-        
+
         try:
             for media in media_list:
                 try:
                     file_path = media.file_path
-                    
+
                     # 1. Delete from database
                     db_success = self.db_manager.delete_media(file_path)
                     if not db_success:
                         print(f"Warning: Media not found in database: {file_path}")
-                    
+
                     # 2. Move thumbnail to trash
                     if self.thumbnail_cache:
-                        thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
+                        thumbnail_path = self.thumbnail_cache.get_thumbnail_path(
+                            file_path
+                        )
                         if thumbnail_path and thumbnail_path.exists():
                             try:
                                 self._move_to_trash(thumbnail_path)
                                 print(f"Moved thumbnail to trash: {thumbnail_path}")
                             except Exception as e:
                                 print(f"Failed to move thumbnail to trash: {e}")
-                    
+
                     # 3. Move media file to trash
                     if file_path.exists():
                         try:
@@ -1244,35 +1363,41 @@ class MainWindow(QMainWindow):
                             print(f"Failed to move media file to trash: {e}")
                             failed_files.append(file_path.name)
                             continue
-                    
+
                     # 4. Remove from all_media list
-                    self.all_media = [m for m in self.all_media if m.file_path != file_path]
-                    
+                    self.all_media = [
+                        m for m in self.all_media if m.file_path != file_path
+                    ]
+
                 except Exception as e:
                     print(f"Error deleting {media.file_name}: {e}")
                     failed_files.append(media.file_name)
-            
+
             # 5. Update filters and view once after all deletions
             self.refresh_filters()
             self.apply_all_filters()
-            
+
             # 6. Clear multi-selection after deletion
             if self.thumbnail_view.is_multi_select_mode():
                 self.thumbnail_view.scroll_area.clear_all_selections()
-            
+
             # Show summary message
             if failed_files:
                 QMessageBox.warning(
-                    self, 
-                    "Partial Deletion", 
+                    self,
+                    "Partial Deletion",
                     f"Successfully deleted {deleted_count} file(s).\n\n"
-                    f"Failed to delete {len(failed_files)} file(s):\n" + 
-                    "\n".join(failed_files[:5]) + 
-                    (f"\n... and {len(failed_files) - 5} more" if len(failed_files) > 5 else "")
+                    f"Failed to delete {len(failed_files)} file(s):\n"
+                    + "\n".join(failed_files[:5])
+                    + (
+                        f"\n... and {len(failed_files) - 5} more"
+                        if len(failed_files) > 5
+                        else ""
+                    ),
                 )
             else:
                 print(f"Successfully deleted {deleted_count} files")
-            
+
         except Exception as e:
             print(f"Error during batch deletion: {e}")
             QMessageBox.critical(self, "Delete Error", f"Failed to delete files: {e}")
@@ -1387,7 +1512,7 @@ class MainWindow(QMainWindow):
         """Restore favorites after scan completion"""
         if not hasattr(self, "_favorites_to_restore") or not self._favorites_to_restore:
             return
-        
+
         restored_count = 0
         try:
             # Iterate through saved favorites and restore them if the media still exists
@@ -1397,7 +1522,7 @@ class MainWindow(QMainWindow):
                     success = self.db_manager.set_favorite(Path(file_path), True)
                     if success:
                         restored_count += 1
-            
+
             if restored_count > 0:
                 print(f"Restored {restored_count} favorite(s) after scan")
         except Exception as e:
