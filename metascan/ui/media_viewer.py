@@ -34,8 +34,10 @@ from PyQt6.QtMultimediaWidgets import QVideoWidget
 from pathlib import Path
 from typing import List, Optional
 import logging
+import json
 
 from metascan.core.media import Media
+from metascan.utils.app_paths import get_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,9 @@ class VideoPlayer(QWidget):
 
         # Set looping to infinite by default
         self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
+        
+        # Load playback speed from config
+        self.playback_speed = self._load_playback_speed()
 
         # Track last position for loop detection
         self._last_position = 0
@@ -173,6 +178,10 @@ class VideoPlayer(QWidget):
 
             # Set the new source
             self.media_player.setSource(QUrl.fromLocalFile(str(file_path)))
+            
+            # Apply playback speed from config (reload in case config changed)
+            self.playback_speed = self._load_playback_speed()
+            self.media_player.setPlaybackRate(self.playback_speed)
 
             # Reset position and tracking
             self.position_slider.setValue(0)
@@ -187,6 +196,9 @@ class VideoPlayer(QWidget):
 
     def play(self):
         """Start video playback."""
+        # Apply playback speed before playing (in case config changed)
+        self.playback_speed = self._load_playback_speed()
+        self.media_player.setPlaybackRate(self.playback_speed)
         self.media_player.play()
 
     def pause(self):
@@ -276,6 +288,19 @@ class VideoPlayer(QWidget):
         elif status == QMediaPlayer.MediaStatus.NoMedia:
             logger.info("No media")
 
+    def _load_playback_speed(self) -> float:
+        """Load playback speed from config file."""
+        try:
+            config_path = get_config_path()
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    # Return configured speed, default to 1.0 if not set
+                    return config.get('video_playback_speed', 1.0)
+        except Exception as e:
+            logger.warning(f"Failed to load playback speed from config: {e}")
+        return 1.0  # Default to normal speed
+    
     def clear_video(self):
         """Clear the current video."""
         self.stop()
