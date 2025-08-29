@@ -112,7 +112,12 @@ class LayoutMetrics:
 class WidgetPool:
     """Object pool for reusing ThumbnailWidget instances efficiently."""
 
-    def __init__(self, parent: QWidget, initial_size: int = 20, thumbnail_size: Tuple[int, int] = (200, 200)):
+    def __init__(
+        self,
+        parent: QWidget,
+        initial_size: int = 20,
+        thumbnail_size: Tuple[int, int] = (200, 200),
+    ):
         """
         Initialize the widget pool.
 
@@ -146,7 +151,9 @@ class WidgetPool:
                 modified_at=datetime.now(),
             )
 
-            widget = ThumbnailWidget(dummy_media, parent=self.parent, size=self.thumbnail_size)
+            widget = ThumbnailWidget(
+                dummy_media, parent=self.parent, size=self.thumbnail_size
+            )
             widget.setVisible(False)
             self._available.append(widget)
 
@@ -248,7 +255,11 @@ class VirtualScrollArea(QScrollArea):
     favorite_toggled = pyqtSignal(object)  # Emits Media object
     selection_changed = pyqtSignal(object)  # Emits Media object
 
-    def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        thumbnail_size: Optional[Tuple[int, int]] = None,
+    ):
         super().__init__(parent)
 
         # Data
@@ -256,10 +267,12 @@ class VirtualScrollArea(QScrollArea):
         self.filtered_media: List[Media] = []  # Current filtered subset
         self.selected_media: Optional[Media] = None
         self.selected_index: int = -1
-        
+
         # Multi-selection support
         self.multi_select_mode: bool = False
-        self.selected_media_set: Set[str] = set()  # Set of file paths for multi-selection
+        self.selected_media_set: Set[
+            str
+        ] = set()  # Set of file paths for multi-selection
 
         # Layout and viewport
         self.layout_metrics = LayoutMetrics()
@@ -346,7 +359,9 @@ class VirtualScrollArea(QScrollArea):
         # Update viewport
         self._update_viewport()
 
-    def apply_filters(self, filtered_paths: Set[str], preserve_selection: bool = False) -> None:
+    def apply_filters(
+        self, filtered_paths: Set[str], preserve_selection: bool = False
+    ) -> None:
         """
         Apply filters to the media list.
 
@@ -382,13 +397,15 @@ class VirtualScrollArea(QScrollArea):
         # For a QScrollArea, we want the width of the scroll area itself, not the viewport
         # The viewport is the visible area, but we want to layout based on the full width
         scroll_area_width = self.width()
-        
+
         # Account for vertical scrollbar width if it's shown
         vscrollbar = self.verticalScrollBar()
-        scrollbar_width = vscrollbar.width() if vscrollbar and vscrollbar.isVisible() else 0
-        
+        scrollbar_width = (
+            vscrollbar.width() if vscrollbar and vscrollbar.isVisible() else 0
+        )
+
         usable_width = scroll_area_width - scrollbar_width
-        
+
         # Calculate optimal columns
         available_width = (
             usable_width
@@ -396,7 +413,6 @@ class VirtualScrollArea(QScrollArea):
             - self.layout_metrics.margins[2]
         )
         columns = max(1, available_width // self.layout_metrics.cell_width)
-        
 
         # Calculate rows needed
         item_count = len(self.filtered_media)
@@ -406,7 +422,9 @@ class VirtualScrollArea(QScrollArea):
         self.layout_metrics.columns = columns
         self.layout_metrics.rows = rows
 
-        logger.debug(f"Layout calculated: {columns}x{rows} grid for {item_count} items, width={scroll_area_width}, cell_width={self.layout_metrics.cell_width}")
+        logger.debug(
+            f"Layout calculated: {columns}x{rows} grid for {item_count} items, width={scroll_area_width}, cell_width={self.layout_metrics.cell_width}"
+        )
 
     def _update_scroll_range(self) -> None:
         """Update the container widget size to enable scrolling."""
@@ -637,22 +655,24 @@ class VirtualScrollArea(QScrollArea):
     def _on_widget_clicked(self, media: Media) -> None:
         """Handle widget click."""
         media_path = str(media.file_path)
-        
+
         if self.multi_select_mode:
             # Multi-select mode: toggle selection
             if media_path in self.selected_media_set:
                 self.selected_media_set.remove(media_path)
             else:
                 self.selected_media_set.add(media_path)
-            
+
             # Update widget selection states for visible widgets
             for widget in self.visible_widgets.values():
                 widget_path = str(widget.media.file_path)
                 widget.set_selected(widget_path in self.selected_media_set)
-            
+
             # Update selected_media to be the last clicked item
-            self.selected_media = media if media_path in self.selected_media_set else None
-            
+            self.selected_media = (
+                media if media_path in self.selected_media_set else None
+            )
+
             # Find index in filtered media
             try:
                 self.selected_index = next(
@@ -662,7 +682,7 @@ class VirtualScrollArea(QScrollArea):
                 )
             except StopIteration:
                 self.selected_index = -1
-            
+
             # Emit signals
             self.item_clicked.emit(media)
             self.selection_changed.emit(media)
@@ -762,28 +782,28 @@ class VirtualScrollArea(QScrollArea):
     def get_total_media_count(self) -> int:
         """Get the total count of all media."""
         return len(self.media_list)
-    
+
     def set_multi_select_mode(self, enabled: bool) -> None:
         """Enable or disable multi-select mode."""
         self.multi_select_mode = enabled
         if not enabled:
             # Clear all selections when disabling multi-select
             self.clear_all_selections()
-    
+
     def clear_all_selections(self) -> None:
         """Clear all selected items."""
         self.selected_media_set.clear()
         self.selected_media = None
         self.selected_index = -1
-        
+
         # Update visible widgets
         for widget in self.visible_widgets.values():
             widget.set_selected(False)
-    
+
     def get_selected_count(self) -> int:
         """Get the number of selected items."""
         return len(self.selected_media_set)
-    
+
     def get_selected_media_list(self) -> List[Media]:
         """Get list of all selected media items."""
         selected_list = []
@@ -791,11 +811,11 @@ class VirtualScrollArea(QScrollArea):
             if str(media.file_path) in self.selected_media_set:
                 selected_list.append(media)
         return selected_list
-    
+
     def restore_selections(self, selected_paths: Set[str]) -> None:
         """Restore selections and update visible widgets."""
         self.selected_media_set = selected_paths
-        
+
         # Find the first selected media to set as the current selection
         for media in self.filtered_media:
             if str(media.file_path) in selected_paths:
@@ -803,13 +823,14 @@ class VirtualScrollArea(QScrollArea):
                 # Find its index
                 try:
                     self.selected_index = next(
-                        i for i, m in enumerate(self.filtered_media)
+                        i
+                        for i, m in enumerate(self.filtered_media)
                         if m.file_path == media.file_path
                     )
                 except StopIteration:
                     self.selected_index = -1
                 break
-        
+
         # Clear and recreate all visible widgets to ensure proper selection state
         # This forces all widgets to be recreated with the correct selection border
         indices_to_refresh = list(self.visible_widgets.keys())
@@ -820,7 +841,6 @@ class VirtualScrollArea(QScrollArea):
     def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
-        
 
         # Recalculate layout
         old_columns = self.layout_metrics.columns
@@ -880,10 +900,16 @@ class VirtualThumbnailView(QWidget):
     # Signals
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
-    thumbnail_size_changed = pyqtSignal(tuple)  # Emits new thumbnail size (width, height)
+    thumbnail_size_changed = pyqtSignal(
+        tuple
+    )  # Emits new thumbnail size (width, height)
     multi_selection_changed = pyqtSignal(int)  # Emits number of selected items
 
-    def __init__(self, parent: Optional[QWidget] = None, thumbnail_size: Optional[Tuple[int, int]] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        thumbnail_size: Optional[Tuple[int, int]] = None,
+    ):
         super().__init__(parent)
 
         # Data
@@ -919,9 +945,9 @@ class VirtualThumbnailView(QWidget):
         header_layout.addWidget(self.select_button)
 
         header_layout.addStretch()
-        
+
         self._create_size_selector(header_layout)
-        
+
         # Add some spacing between size selector and info label
         header_layout.addSpacing(15)
 
@@ -932,7 +958,9 @@ class VirtualThumbnailView(QWidget):
         main_layout.addLayout(header_layout)
 
         # Virtual scroll area
-        self.scroll_area = VirtualScrollArea(parent=self, thumbnail_size=self.thumbnail_size)
+        self.scroll_area = VirtualScrollArea(
+            parent=self, thumbnail_size=self.thumbnail_size
+        )
         main_layout.addWidget(self.scroll_area)
 
         # Set focus policy for keyboard navigation
@@ -956,34 +984,36 @@ class VirtualThumbnailView(QWidget):
         """Create thumbnail size selector buttons."""
         # Create button group for exclusive selection
         self.size_button_group = QButtonGroup(self)
-        
+
         # Define size options
         self.size_options = {
             "small": (128, 128),
             "medium": (256, 256),
-            "large": (512, 512)
+            "large": (512, 512),
         }
-        
+
         # Create frame for buttons
         button_frame = QFrame()
-        button_frame.setStyleSheet("""
+        button_frame.setStyleSheet(
+            """
             QFrame {
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 padding: 2px;
             }
-        """)
+        """
+        )
         button_layout = QHBoxLayout(button_frame)
         button_layout.setContentsMargins(2, 2, 2, 2)
         button_layout.setSpacing(2)
-        
+
         # Create buttons for each size
         self.size_buttons = {}
         for size_name, (width, height) in self.size_options.items():
             btn = QPushButton()
             btn.setCheckable(True)
             btn.setFixedSize(24, 24)
-            
+
             # Set icon-like text (you could use actual icons here)
             if size_name == "small":
                 btn.setText("▫️")
@@ -994,8 +1024,9 @@ class VirtualThumbnailView(QWidget):
             else:  # large
                 btn.setText("⬜️")
                 btn.setToolTip("Large thumbnails (512x512)")
-            
-            btn.setStyleSheet("""
+
+            btn.setStyleSheet(
+                """
                 QPushButton {
                     font-weight: bold;
                     border: 1px solid transparent;
@@ -1012,31 +1043,32 @@ class VirtualThumbnailView(QWidget):
                     background-color: rgba(0, 120, 215, 0.2);
                     border: 1px solid rgba(0, 120, 215, 0.5);
                 }
-            """)
-            
+            """
+            )
+
             # Check if this is the current size
             if (width, height) == self.thumbnail_size:
                 btn.setChecked(True)
-            
+
             # Connect to size change handler
             btn.clicked.connect(lambda checked, s=size_name: self._on_size_changed(s))
-            
+
             self.size_button_group.addButton(btn)
             self.size_buttons[size_name] = btn
             button_layout.addWidget(btn)
-        
+
         parent_layout.addWidget(button_frame)
-    
+
     def _on_size_changed(self, size_name: str) -> None:
         """Handle thumbnail size change."""
         new_size = self.size_options[size_name]
         if new_size != self.thumbnail_size:
             # Update internal size
             self.thumbnail_size = new_size
-            
+
             # Emit signal for main window to handle
             self.thumbnail_size_changed.emit(new_size)
-    
+
     def _connect_signals(self) -> None:
         """Connect internal signals."""
         self.scroll_area.item_clicked.connect(self._on_item_clicked)
@@ -1059,7 +1091,9 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.set_media_list(media_list)
         self._update_info_label()
 
-    def apply_filters(self, filtered_paths: Set[str], preserve_selection: bool = False) -> None:
+    def apply_filters(
+        self, filtered_paths: Set[str], preserve_selection: bool = False
+    ) -> None:
         """
         Apply filters and update the display.
 
@@ -1073,7 +1107,7 @@ class VirtualThumbnailView(QWidget):
 
         self.filtered_paths = filtered_paths
         self.scroll_area.apply_filters(filtered_paths, preserve_selection)
-        
+
         # Reset multi-select mode when filters change (unless preserving)
         if not preserve_selection and self.select_button.isChecked():
             self.select_button.setChecked(False)
@@ -1102,12 +1136,12 @@ class VirtualThumbnailView(QWidget):
     def _on_selection_changed(self, media: Media) -> None:
         """Handle selection change."""
         self.selected_media = media
-        
+
         # Emit multi-selection signal if in multi-select mode
         if self.scroll_area.multi_select_mode:
             selected_count = self.scroll_area.get_selected_count()
             self.multi_selection_changed.emit(selected_count)
-            
+
             # Only emit selection_changed if exactly one item is selected
             if selected_count == 1:
                 self.selection_changed.emit(media)
@@ -1129,18 +1163,18 @@ class VirtualThumbnailView(QWidget):
     def _on_select_mode_toggled(self, checked: bool) -> None:
         """Handle Select button toggle."""
         self.scroll_area.set_multi_select_mode(checked)
-        
+
         # Update button text to indicate state
         if checked:
             self.select_button.setText("Select ✓")
         else:
             self.select_button.setText("Select...")
-        
+
         # Emit signal if selections were cleared
         if not checked:
             self.multi_selection_changed.emit(0)
             self.selection_changed.emit(None)
-    
+
     def _toggle_selected_favorite(self) -> None:
         """Toggle favorite status of the selected media."""
         if self.selected_media:
@@ -1246,11 +1280,11 @@ class VirtualThumbnailView(QWidget):
     def get_selected_media(self) -> Optional[Media]:
         """Get the currently selected media object."""
         return self.selected_media
-    
+
     def get_all_selected_media(self) -> List[Media]:
         """Get all selected media items in multi-select mode."""
         return self.scroll_area.get_selected_media_list()
-    
+
     def is_multi_select_mode(self) -> bool:
         """Check if multi-select mode is enabled."""
         return self.scroll_area.multi_select_mode

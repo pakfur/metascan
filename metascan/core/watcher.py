@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class MediaFileHandler(FileSystemEventHandler):
-
     def __init__(
         self,
         scanner: Scanner,
@@ -93,7 +92,6 @@ class MediaFileHandler(FileSystemEventHandler):
 
 
 class DirectoryWatcher:
-
     def __init__(self, scanner: Scanner):
         self.scanner = scanner
         self.observer = Observer()

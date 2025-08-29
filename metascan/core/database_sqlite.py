@@ -80,7 +80,7 @@ class DatabaseManager:
             conn.close()
 
     def close(self) -> None:
-        pass 
+        pass
 
     @contextmanager
     def batch_writer(self):  # type: ignore[no-untyped-def]

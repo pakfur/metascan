@@ -69,10 +69,10 @@ class ConfigDialog(QDialog):
 
     def _add_directory(self):
         folder = QFileDialog.getExistingDirectory(
-            self, 
+            self,
             "Select Directory",
             "",  # start directory
-            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog
+            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
         )
         if folder:
             # Check if directory already exists

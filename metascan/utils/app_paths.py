@@ -66,15 +66,16 @@ def get_config_path() -> Path:
     else:
         # Development mode
         config_path = get_base_path() / "config.json"
-        
+
         # If config.json doesn't exist but config_example.json does, copy it
         if not config_path.exists():
             example_config = get_base_path() / "config_example.json"
             if example_config.exists():
                 import shutil
+
                 shutil.copy2(example_config, config_path)
                 print(f"Created config.json from config_example.json")
-        
+
         return config_path
 
 
