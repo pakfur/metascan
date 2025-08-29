@@ -35,7 +35,7 @@ class ThumbnailCache:
         if not media_path.exists():
             logger.warning(f"Media file not found: {media_path}")
             return None
-        
+
         # Create a unique filename based on original path and modification time
         stat = media_path.stat()
         unique_string = f"{media_path}_{stat.st_mtime}_{stat.st_size}"

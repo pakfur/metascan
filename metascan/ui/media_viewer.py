@@ -113,7 +113,7 @@ class VideoPlayer(QWidget):
 
         # Set looping to infinite by default
         self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
-        
+
         # Load playback speed from config
         self.playback_speed = self._load_playback_speed()
 
@@ -178,7 +178,7 @@ class VideoPlayer(QWidget):
 
             # Set the new source
             self.media_player.setSource(QUrl.fromLocalFile(str(file_path)))
-            
+
             # Apply playback speed from config (reload in case config changed)
             self.playback_speed = self._load_playback_speed()
             self.media_player.setPlaybackRate(self.playback_speed)
@@ -293,14 +293,15 @@ class VideoPlayer(QWidget):
         try:
             config_path = get_config_path()
             if config_path.exists():
-                with open(config_path, 'r') as f:
+                with open(config_path, "r") as f:
                     config = json.load(f)
                     # Return configured speed, default to 1.0 if not set
-                    return config.get('video_playback_speed', 1.0)
+                    speed = config.get("video_playback_speed", 1.0)
+                    return float(speed) if isinstance(speed, (int, float)) else 1.0
         except Exception as e:
             logger.warning(f"Failed to load playback speed from config: {e}")
         return 1.0  # Default to normal speed
-    
+
     def clear_video(self):
         """Clear the current video."""
         self.stop()

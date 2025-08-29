@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class FooocusExtractor(MetadataExtractor):
-
     def can_extract(self, media_path: Path) -> bool:
         """Check if image contains Fooocus metadata"""
         if media_path.suffix.lower() == ".mp4":
