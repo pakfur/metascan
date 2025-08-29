@@ -26,7 +26,6 @@ except LookupError:
 
 
 class PromptTokenizer:
-
     def __init__(
         self,
         stop_words: Optional[Set[str]] = None,

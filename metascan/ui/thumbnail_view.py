@@ -46,7 +46,11 @@ class ThumbnailWidget(QLabel):
     )  # Emits the Media object when favorite is toggled
 
     def __init__(
-        self, media: Media, thumbnail_path: Optional[Path] = None, parent=None, size: Tuple[int, int] = (200, 200)
+        self,
+        media: Media,
+        thumbnail_path: Optional[Path] = None,
+        parent=None,
+        size: Tuple[int, int] = (200, 200),
     ):
         super().__init__(parent)
         self.media = media
