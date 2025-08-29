@@ -106,7 +106,7 @@ class MetadataSection(QGroupBox):
     def setup_ui(self):
         self.setCheckable(True)
         self.setChecked(True)  # Start expanded
-        
+
         self.layout: QVBoxLayout = QVBoxLayout(self)
         self.layout.setContentsMargins(6, 12, 6, 6)
         self.layout.setSpacing(3)
@@ -169,7 +169,6 @@ class ThumbnailPreview(QLabel):
 
 
 class MetadataPanel(QWidget):
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_media: Optional[Media] = None
@@ -387,7 +386,7 @@ class MetadataPanel(QWidget):
 
     def create_lora_section(self, media: Media):
         if not media.loras:
-            return 
+            return
 
         section = MetadataSection("LoRAs")
 
