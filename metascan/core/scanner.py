@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class Scanner:
-
     SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
 
     def __init__(
@@ -48,17 +47,21 @@ class Scanner:
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
 
-        existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
-        
+        existing_paths = (
+            set() if full_scan else self.db_manager.get_existing_file_paths()
+        )
+
         media_files = self._find_media_files(dir_path, recursive)
-        
+
         if not full_scan and existing_paths:
             original_count = len(media_files)
             media_files = [f for f in media_files if str(f) not in existing_paths]
             skipped_count = original_count - len(media_files)
             if skipped_count > 0:
-                logger.info(f"Skipping {skipped_count} files that already exist in database")
-        
+                logger.info(
+                    f"Skipping {skipped_count} files that already exist in database"
+                )
+
         total_files = len(media_files)
         processed_count = 0
 
@@ -300,7 +303,6 @@ class Scanner:
 
 
 class ThreadedScanner:
-
     def __init__(
         self,
         db_manager: DatabaseManager,
@@ -314,12 +316,10 @@ class ThreadedScanner:
         self.batch_size = batch_size
         self.thumbnail_cache = thumbnail_cache
 
-        self.file_queue: Queue[Optional[Path]] = queue.Queue(
-            maxsize=500
-        )  
+        self.file_queue: Queue[Optional[Path]] = queue.Queue(maxsize=500)
         self.result_queue: Queue[Tuple[Path, Optional[Media]]] = queue.Queue(
             maxsize=500
-        )  
+        )
 
         self.workers: List[Thread] = []
         self.producer_thread: Optional[Thread] = None
@@ -347,17 +347,21 @@ class ThreadedScanner:
         self.progress_callback = progress_callback
 
         try:
-            existing_paths = set() if full_scan else self.db_manager.get_existing_file_paths()
-            
+            existing_paths = (
+                set() if full_scan else self.db_manager.get_existing_file_paths()
+            )
+
             media_files = self._find_media_files(dir_path, recursive)
-            
+
             if not full_scan and existing_paths:
                 original_count = len(media_files)
                 media_files = [f for f in media_files if str(f) not in existing_paths]
                 skipped_count = original_count - len(media_files)
                 if skipped_count > 0:
-                    logger.info(f"Skipping {skipped_count} files that already exist in database")
-            
+                    logger.info(
+                        f"Skipping {skipped_count} files that already exist in database"
+                    )
+
             self.total_files = len(media_files)
             self.files_processed = 0
             self.files_saved = 0
@@ -366,7 +370,9 @@ class ThreadedScanner:
                 logger.info(f"No new media files found in {directory}")
                 return 0
 
-            logger.info(f"Processing {self.total_files} new/updated media files in {directory}")
+            logger.info(
+                f"Processing {self.total_files} new/updated media files in {directory}"
+            )
 
             # Start threads
             self._start_threads(media_files)

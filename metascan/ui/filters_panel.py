@@ -311,7 +311,7 @@ class FiltersPanel(QWidget):
                 self.filter_sections[section_name] = section
 
                 # Restore expansion state if section existed before
-                #if section_name in expansion_states and expansion_states[section_name]:
+                # if section_name in expansion_states and expansion_states[section_name]:
                 #    section.toggle_section()
 
                 # Restore selected items if section existed before
@@ -324,7 +324,7 @@ class FiltersPanel(QWidget):
                 if section_name == "prompt" and current_prompt_filter:
                     section.filter_items(current_prompt_filter)
 
-        # Add any remaining sections not in the predefined order 
+        # Add any remaining sections not in the predefined order
         for section_name, items in filter_data.items():
             if section_name not in section_order and items:
                 section = FilterSection(section_name, items, self)
