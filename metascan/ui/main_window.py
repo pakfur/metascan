@@ -43,6 +43,7 @@ import json
 from pathlib import Path
 import shutil
 import platform
+import subprocess
 
 
 class ScannerThread(QThread):
@@ -375,6 +376,9 @@ class MainWindow(QMainWindow):
         # Setup keyboard shortcuts
         self._setup_shortcuts()
 
+        # Initialize Open action states
+        self._update_open_actions_state()
+
     def _create_filter_panel(self) -> QWidget:
         self.filters_panel = FiltersPanel()
 
@@ -441,9 +445,17 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("File")
 
-        open_action = QAction("Open Folder", self)
-        open_action.setShortcut("Ctrl+O")
-        file_menu.addAction(open_action)
+        # Open action - opens the selected media file
+        self.open_action = QAction("Open", self)
+        self.open_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.open_action.triggered.connect(self._open_selected_media)
+        file_menu.addAction(self.open_action)
+
+        # Open Folder action - opens the folder containing the selected media
+        self.open_folder_action = QAction("Open Folder...", self)
+        self.open_folder_action.setShortcut(QKeySequence("Ctrl+Alt+O"))
+        self.open_folder_action.triggered.connect(self._open_selected_folder)
+        file_menu.addAction(self.open_folder_action)
 
         file_menu.addSeparator()
 
@@ -982,6 +994,9 @@ class MainWindow(QMainWindow):
 
             # Update thumbnail view
             self.thumbnail_view.apply_filters(self.filtered_media_paths)
+
+            # Update Open action states after filter changes
+            self._update_open_actions_state()
         except Exception as e:
             print(f"Error applying filters: {e}")
 
@@ -993,6 +1008,9 @@ class MainWindow(QMainWindow):
                 self.metadata_panel.display_metadata(media)
             else:
                 self.metadata_panel.clear_content()
+
+            # Update Open action states
+            self._update_open_actions_state()
         except Exception as e:
             print(f"Error handling thumbnail selection: {e}")
 
@@ -1003,6 +1021,9 @@ class MainWindow(QMainWindow):
             self.delete_action.setText("Delete files...")
         else:
             self.delete_action.setText("Delete file...")
+
+        # Update Open action states (disabled in multi-select mode)
+        self._update_open_actions_state()
 
     def on_thumbnail_double_clicked(self, media):
         """Handle when a thumbnail is double-clicked."""
@@ -1147,6 +1168,9 @@ class MainWindow(QMainWindow):
 
             # Restore selections using the new method that properly updates widgets
             self.thumbnail_view.scroll_area.restore_selections(selected_media_paths)
+
+        # Update Open action states after view recreation
+        self._update_open_actions_state()
 
     def on_viewer_favorite_toggled(self, media, is_favorite):
         """Handle favorite toggle from media viewer."""
@@ -1527,6 +1551,137 @@ class MainWindow(QMainWindow):
                 print(f"Restored {restored_count} favorite(s) after scan")
         except Exception as e:
             print(f"Error restoring favorites after scan: {e}")
+
+    def _open_selected_media(self):
+        """Open the currently selected media file in the platform's default media viewer."""
+        try:
+            selected_media = self.thumbnail_view.get_selected_media()
+            if not selected_media:
+                return
+
+            file_path = selected_media.file_path
+            if not file_path.exists():
+                QMessageBox.warning(
+                    self, "File Not Found", f"The file no longer exists:\n{file_path}"
+                )
+                return
+
+            # Open the media file in the platform's default viewer
+            self._open_media_file_in_default_viewer(file_path)
+
+        except Exception as e:
+            print(f"Error opening selected media: {e}")
+            QMessageBox.critical(
+                self, "Open Media Error", f"Failed to open media file: {e}"
+            )
+
+    def _open_media_file_in_default_viewer(self, file_path: Path):
+        """Open a media file in the platform's default media viewer."""
+        try:
+            system = platform.system()
+
+            if system == "Darwin":  # macOS
+                subprocess.run(["open", str(file_path)], check=True)
+            elif system == "Windows":
+                # Use start command to open with default application
+                subprocess.run(["start", str(file_path)], shell=True, check=True)
+            elif system == "Linux":
+                # Use xdg-open to open with default application
+                subprocess.run(["xdg-open", str(file_path)], check=True)
+            else:
+                raise OSError(f"Unsupported platform: {system}")
+
+            print(f"Opened media file in default viewer: {file_path}")
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to open media file with default viewer: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error opening media file: {e}")
+
+    def _open_selected_folder(self):
+        """Open the folder containing the currently selected media file."""
+        try:
+            selected_media = self.thumbnail_view.get_selected_media()
+            if not selected_media:
+                return
+
+            file_path = selected_media.file_path
+            if not file_path.exists():
+                QMessageBox.warning(
+                    self, "File Not Found", f"The file no longer exists:\n{file_path}"
+                )
+                return
+
+            # Get the directory containing the file
+            directory = file_path.parent
+            self._open_directory_in_file_manager(directory)
+
+        except Exception as e:
+            print(f"Error opening selected folder: {e}")
+            QMessageBox.critical(
+                self, "Open Folder Error", f"Failed to open folder: {e}"
+            )
+
+    def _open_directory_in_file_manager(self, directory_path: Path):
+        """Open a directory in the platform's default file manager."""
+        try:
+            system = platform.system()
+
+            if system == "Darwin":  # macOS
+                subprocess.run(["open", str(directory_path)], check=True)
+            elif system == "Windows":
+                # Use explorer to open the folder
+                subprocess.run(["explorer", str(directory_path)], check=True)
+            elif system == "Linux":
+                # Try common Linux file managers
+                try:
+                    subprocess.run(["xdg-open", str(directory_path)], check=True)
+                except subprocess.CalledProcessError:
+                    # Fallback to common file managers
+                    for fm in ["nautilus", "dolphin", "thunar", "pcmanfm"]:
+                        try:
+                            subprocess.run([fm, str(directory_path)], check=True)
+                            break
+                        except (subprocess.CalledProcessError, FileNotFoundError):
+                            continue
+                    else:
+                        raise RuntimeError("No suitable file manager found on Linux")
+            else:
+                raise OSError(f"Unsupported platform: {system}")
+
+            print(f"Opened directory in file manager: {directory_path}")
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to open directory with file manager: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error opening directory: {e}")
+
+    def _update_open_actions_state(self):
+        """Update the Open and Open Folder action enabled/disabled states."""
+        try:
+            # Disable both if in multi-select mode
+            if self.thumbnail_view.is_multi_select_mode():
+                if hasattr(self, "open_action"):
+                    self.open_action.setEnabled(False)
+                if hasattr(self, "open_folder_action"):
+                    self.open_folder_action.setEnabled(False)
+                return
+
+            # Enable both only if there's a selected media item
+            selected_media = self.thumbnail_view.get_selected_media()
+            has_selection = selected_media is not None
+
+            if hasattr(self, "open_action"):
+                self.open_action.setEnabled(has_selection)
+            if hasattr(self, "open_folder_action"):
+                self.open_folder_action.setEnabled(has_selection)
+
+        except Exception as e:
+            print(f"Error updating open action states: {e}")
+            if hasattr(self, "open_action"):
+                self.open_action.setEnabled(False)
+            if hasattr(self, "open_folder_action"):
+                self.open_folder_action.setEnabled(False)
 
 
 def main():
