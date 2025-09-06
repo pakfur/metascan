@@ -259,6 +259,7 @@ class VirtualScrollArea(QScrollArea):
         self,
         parent: Optional[QWidget] = None,
         thumbnail_size: Optional[Tuple[int, int]] = None,
+        scroll_step: int = 120,
     ):
         super().__init__(parent)
 
@@ -267,6 +268,7 @@ class VirtualScrollArea(QScrollArea):
         self.filtered_media: List[Media] = []  # Current filtered subset
         self.selected_media: Optional[Media] = None
         self.selected_index: int = -1
+        self.scroll_step = scroll_step  # Store scroll step setting
 
         # Multi-selection support
         self.multi_select_mode: bool = False
@@ -858,9 +860,8 @@ class VirtualScrollArea(QScrollArea):
         """Handle wheel scrolling with smooth animation."""
         if event is None:
             return
-        # Calculate scroll delta
-        delta = -event.angleDelta().y() // 8  # Convert from degrees to pixels
-        scroll_speed = 3  # Multiplier for scroll speed
+        # Calculate scroll delta using the scroll_step setting
+        delta = -event.angleDelta().y()
 
         vscroll = self.verticalScrollBar()
         if not vscroll:
@@ -868,8 +869,10 @@ class VirtualScrollArea(QScrollArea):
         current_scroll = vscroll.value()
         max_scroll = vscroll.maximum()
 
-        # Calculate target scroll position
-        target_scroll = max(0, min(max_scroll, current_scroll + delta * scroll_speed))
+        # Calculate target scroll position using scroll_step
+        # The scroll_step determines how many pixels to scroll per wheel notch
+        # Standard wheel delta is 120 for one notch, so we scale accordingly
+        target_scroll = max(0, min(max_scroll, current_scroll + (delta * self.scroll_step) // 120))
 
         # Use smooth scrolling for wheel events
         if abs(target_scroll - current_scroll) > 10:
@@ -909,6 +912,7 @@ class VirtualThumbnailView(QWidget):
         self,
         parent: Optional[QWidget] = None,
         thumbnail_size: Optional[Tuple[int, int]] = None,
+        scroll_step: int = 120,
     ):
         super().__init__(parent)
 
@@ -917,6 +921,7 @@ class VirtualThumbnailView(QWidget):
         self.filtered_paths: Set[str] = set()
         self.selected_media: Optional[Media] = None
         self.thumbnail_size = thumbnail_size or (200, 200)
+        self.scroll_step = scroll_step
 
         # UI setup
         self._setup_ui()
@@ -959,9 +964,14 @@ class VirtualThumbnailView(QWidget):
 
         # Virtual scroll area
         self.scroll_area = VirtualScrollArea(
-            parent=self, thumbnail_size=self.thumbnail_size
+            parent=self, thumbnail_size=self.thumbnail_size, scroll_step=self.scroll_step
         )
         main_layout.addWidget(self.scroll_area)
+
+        # Set scroll wheel sensitivity
+        v_scrollbar = self.scroll_area.verticalScrollBar()
+        if v_scrollbar:
+            v_scrollbar.setSingleStep(self.scroll_step)
 
         # Set focus policy for keyboard navigation
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
