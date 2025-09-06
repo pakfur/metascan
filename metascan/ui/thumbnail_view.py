@@ -295,7 +295,7 @@ class ThumbnailView(QWidget):
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, scroll_step: int = 120):
         super().__init__(parent)
         self.container_widget = None
         self.media_list: List[Media] = []
@@ -305,6 +305,7 @@ class ThumbnailView(QWidget):
         self.selected_index: int = -1  # Track selected index for keyboard navigation
         self.thumbnail_cache: Optional[ThumbnailCache] = None
         self.loader_thread: Optional[ThumbnailLoader] = None
+        self.scroll_step = scroll_step
 
         self.setup_ui()
         self.setup_keyboard_shortcuts()
@@ -365,6 +366,11 @@ class ThumbnailView(QWidget):
 
         self.scroll_area.setWidget(self.container_widget)
         main_layout.addWidget(self.scroll_area)
+
+        # Set scroll wheel sensitivity
+        v_scrollbar = self.scroll_area.verticalScrollBar()
+        if v_scrollbar:
+            v_scrollbar.setSingleStep(self.scroll_step)
 
         cache_dir = Path.home() / ".metascan" / "thumbnails"
         self.thumbnail_cache = ThumbnailCache(cache_dir, (200, 200))
@@ -630,7 +636,8 @@ class ThumbnailView(QWidget):
     def reorganize_grid(self, visible_widgets: List[ThumbnailWidget]):
         columns = self.calculate_columns()
 
-        self.container_widget.setUpdatesEnabled(False)
+        if self.container_widget:
+            self.container_widget.setUpdatesEnabled(False)
 
         try:
             for widget in self.thumbnail_widgets.values():
@@ -659,8 +666,9 @@ class ThumbnailView(QWidget):
                 )
 
         finally:
-            self.container_widget.setUpdatesEnabled(True)
-            self.container_widget.repaint()
+            if self.container_widget:
+                self.container_widget.setUpdatesEnabled(True)
+                self.container_widget.repaint()
 
     def compact_thumbnail_grid(self, visible_widgets: List):
         self.reorganize_grid(visible_widgets)
@@ -668,7 +676,8 @@ class ThumbnailView(QWidget):
     def restore_full_grid(self):
         columns = self.calculate_columns()
 
-        self.container_widget.setUpdatesEnabled(False)
+        if self.container_widget:
+            self.container_widget.setUpdatesEnabled(False)
 
         try:
             while self.grid_layout.count():
@@ -692,8 +701,9 @@ class ThumbnailView(QWidget):
                     widget.raise_()  # Ensure widget is on top
 
         finally:
-            self.container_widget.setUpdatesEnabled(True)
-            self.container_widget.update()  # Force immediate update
+            if self.container_widget:
+                self.container_widget.setUpdatesEnabled(True)
+                self.container_widget.update()  # Force immediate update
 
         logger.debug(
             f"Restored full grid: {len(self.media_list)} thumbnails in {columns} columns"
