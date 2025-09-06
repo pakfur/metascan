@@ -53,5 +53,6 @@
   ],
   "cache_size_mb": 500,
   "video_playback_speed": 0.8,
-  "sort_order": "file_name"
+  "sort_order": "file_name",
+  "scroll_wheel_step": 120
 }

@@ -401,9 +401,12 @@ class MainWindow(QMainWindow):
         self.save_splitter_sizes()
 
     def _create_thumbnail_panel(self) -> QWidget:
-        # Create the thumbnail view with thumbnail size from config
+        # Create the thumbnail view with thumbnail size and scroll step from config
         thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
-        self.thumbnail_view = VirtualThumbnailView(thumbnail_size=thumbnail_size)
+        scroll_step = self.config.get("scroll_wheel_step", 120)
+        self.thumbnail_view = VirtualThumbnailView(
+            thumbnail_size=thumbnail_size, scroll_step=scroll_step
+        )
 
         # Connect selection signal
         self.thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
@@ -1127,7 +1130,10 @@ class MainWindow(QMainWindow):
         self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
 
         # Create new thumbnail view
-        new_thumbnail_view = VirtualThumbnailView(thumbnail_size=new_size)
+        scroll_step = self.config.get("scroll_wheel_step", 120)
+        new_thumbnail_view = VirtualThumbnailView(
+            thumbnail_size=new_size, scroll_step=scroll_step
+        )
 
         # Connect signals
         new_thumbnail_view.selection_changed.connect(self.on_thumbnail_selected)
