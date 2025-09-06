@@ -1078,9 +1078,10 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
                     vstreams = [s for s in container.streams if s.type == "video"]
                     if vstreams:
                         vs = vstreams[0]
-                        if getattr(vs, "average_rate", None):
+                        avg_rate = getattr(vs, "average_rate", None)
+                        if avg_rate is not None:
                             try:
-                                out["fps"] = float(vs.average_rate)
+                                out["fps"] = float(avg_rate)
                             except Exception:
                                 pass
                         if getattr(vs, "frames", None):
@@ -1089,11 +1090,11 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
                                     out["frames"] = int(vs.frames)
                             except Exception:
                                 pass
-                        if getattr(vs, "duration", None) and getattr(
-                            vs, "time_base", None
-                        ):
+                        duration = getattr(vs, "duration", None)
+                        time_base = getattr(vs, "time_base", None)
+                        if duration is not None and time_base is not None:
                             try:
-                                out["duration"] = float(vs.duration * vs.time_base)
+                                out["duration"] = float(duration * time_base)
                             except Exception:
                                 pass
                         if out:
