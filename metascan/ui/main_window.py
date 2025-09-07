@@ -30,8 +30,12 @@ from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
 from metascan.ui.media_viewer import MediaViewer
+from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
+from metascan.ui.upscale_queue_window import UpscaleQueueWindow
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.video_refiner import VideoRefiner
+from metascan.core.upscale_queue import UpscaleQueue, UpscaleWorker
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.utils.app_paths import (
     get_data_dir,
@@ -44,6 +48,7 @@ from pathlib import Path
 import shutil
 import platform
 import subprocess
+import logging
 
 
 class ScannerThread(QThread):
@@ -255,6 +260,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Metascan - AI Media Browser")
 
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+
         # Initialize theme before other components
         self.available_themes = list_themes()
         self.current_theme = None
@@ -309,6 +317,34 @@ class MainWindow(QMainWindow):
             batch_size=10,
             thumbnail_cache=self.thumbnail_cache,
         )
+
+        # Initialize upscale components
+        models_dir = get_data_dir() / "models"
+        self.video_refiner = VideoRefiner(
+            models_dir=models_dir, device="auto", tile_size=512, debug=False
+        )
+
+        # Initialize upscale queue
+        queue_file = get_data_dir() / "upscale_queue.json"
+        self.upscale_queue = UpscaleQueue(queue_file)
+
+        # Initialize upscale worker thread
+        self.upscale_worker = UpscaleWorker(
+            self.upscale_queue, self.video_refiner, self.db_manager
+        )
+
+        # Reset any processing tasks from previous session
+        self.upscale_queue.reset_processing_tasks()
+
+        # Connect upscale worker signals
+        self.upscale_worker.database_updated.connect(self.on_media_database_updated)
+
+        # Start worker if there are pending tasks
+        if self.upscale_queue.get_next_pending():
+            self.upscale_worker.start()
+
+        # Initialize upscale queue window (hidden initially)
+        self.upscale_queue_window = None
 
         # Create media viewer (initially hidden)
         self.media_viewer = (
@@ -469,6 +505,14 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        # Upscale action
+        self.upscale_action = QAction("Upscale...", self)
+        self.upscale_action.setShortcut("Ctrl+U")
+        self.upscale_action.triggered.connect(self._handle_upscale)
+        file_menu.addAction(self.upscale_action)
+
+        file_menu.addSeparator()
+
         config_action = QAction("Configuration...", self)
         config_action.triggered.connect(self._open_config)
         file_menu.addAction(config_action)
@@ -554,6 +598,19 @@ class MainWindow(QMainWindow):
         config_button = QPushButton("Config")
         config_button.clicked.connect(self._open_config)
         toolbar.addWidget(config_button)
+
+        # Add separator
+        toolbar.addSeparator()
+
+        # Upscale button
+        upscale_button = QPushButton("Upscale")
+        upscale_button.clicked.connect(self._handle_upscale)
+        toolbar.addWidget(upscale_button)
+
+        # Queue button
+        queue_button = QPushButton("Queue")
+        queue_button.clicked.connect(self._show_upscale_queue)
+        toolbar.addWidget(queue_button)
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
@@ -1688,6 +1745,183 @@ class MainWindow(QMainWindow):
                 self.open_action.setEnabled(False)
             if hasattr(self, "open_folder_action"):
                 self.open_folder_action.setEnabled(False)
+
+    def _handle_upscale(self):
+        """Handle upscale action for selected media."""
+        try:
+            # Get selected media
+            selected_media_list = []
+
+            if self.thumbnail_view.is_multi_select_mode():
+                selected_media_list = self.thumbnail_view.get_all_selected_media()
+            else:
+                selected_media = self.thumbnail_view.get_selected_media()
+                if selected_media:
+                    selected_media_list = [selected_media]
+
+            if not selected_media_list:
+                QMessageBox.information(
+                    self,
+                    "No Selection",
+                    "Please select one or more media files to upscale.",
+                )
+                return
+
+            # Check if models are available
+            if not self.video_refiner.models_available:
+                # Show setup dialog
+                setup_dialog = ModelSetupDialog(self)
+                setup_dialog.setup_completed.connect(self._setup_models)
+
+                if setup_dialog.exec() == QDialog.DialogCode.Accepted:
+                    # Models were set up, continue with upscaling
+                    self._show_upscale_dialog(selected_media_list)
+                return
+
+            # Show upscale dialog
+            self._show_upscale_dialog(selected_media_list)
+
+        except Exception as e:
+            print(f"Error handling upscale: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to start upscaling: {str(e)}")
+
+    def _show_upscale_dialog(self, selected_media_list):
+        """Show the upscale configuration dialog."""
+        # Prepare media info for dialog
+        media_files = []
+        for media in selected_media_list:
+            # Determine file type
+            file_ext = Path(media.file_path).suffix.lower()
+            if file_ext in [
+                ".mp4",
+                ".avi",
+                ".mov",
+                ".mkv",
+                ".webm",
+                ".flv",
+                ".wmv",
+                ".m4v",
+            ]:
+                file_type = "video"
+            else:
+                file_type = "image"
+
+            media_info = {
+                "filepath": str(media.file_path),
+                "filename": media.file_name,
+                "type": file_type,
+                "width": media.width or 0,
+                "height": media.height or 0,
+                "file_size": media.file_size,
+            }
+            media_files.append(media_info)
+
+        # Show dialog
+        dialog = UpscaleDialog(media_files, self)
+        dialog.upscale_requested.connect(self._add_upscale_tasks)
+        dialog.exec()
+
+    def _add_upscale_tasks(self, task_configs):
+        """Add upscale tasks to the queue."""
+        try:
+            for config in task_configs:
+                self.upscale_queue.add_task(
+                    file_path=config["file_path"],
+                    file_type=config["file_type"],
+                    scale=config["scale"],
+                    replace_original=config["replace_original"],
+                )
+
+            # Start worker if not already running
+            if not self.upscale_worker.isRunning():
+                self.upscale_worker.start()
+
+            # Show queue window
+            self._show_upscale_queue()
+
+            # Show notification
+            count = len(task_configs)
+            QMessageBox.information(
+                self, "Tasks Added", f"Added {count} file(s) to the upscale queue."
+            )
+
+        except Exception as e:
+            print(f"Error adding upscale tasks: {e}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to add tasks to queue: {str(e)}"
+            )
+
+    def _show_upscale_queue(self):
+        """Show the upscale queue window."""
+        if self.upscale_queue_window is None:
+            self.upscale_queue_window = UpscaleQueueWindow(self.upscale_queue, self)
+
+        self.upscale_queue_window.show()
+        self.upscale_queue_window.raise_()
+        self.upscale_queue_window.activateWindow()
+
+    def _setup_models(self):
+        """Setup AI models for upscaling."""
+        setup_dialog = self.sender()
+
+        def progress_callback(message, progress):
+            setup_dialog.update_progress(message, progress)
+            QApplication.processEvents()
+
+        # Run setup in background
+        success = self.video_refiner.setup_models(progress_callback)
+
+        if not success:
+            QMessageBox.critical(
+                self,
+                "Setup Failed",
+                "Failed to setup AI models. Please check your internet connection and try again.",
+            )
+
+    def closeEvent(self, event):
+        """Handle application close event."""
+        # Stop the upscale worker
+        if hasattr(self, "upscale_worker") and self.upscale_worker.isRunning():
+            self.upscale_worker.stop()
+            self.upscale_worker.wait(5000)  # Wait up to 5 seconds
+
+        # Close queue window if open
+        if hasattr(self, "upscale_queue_window") and self.upscale_queue_window:
+            self.upscale_queue_window.close()
+
+        # Continue with normal close
+        event.accept()
+
+    def on_media_database_updated(self, file_path: str, width: int, height: int):
+        """Handle when media dimensions are updated in the database."""
+        try:
+            # Find and update the media in our cache
+            for media in self.all_media:
+                if str(media.file_path) == file_path:
+                    media.width = width
+                    media.height = height
+                    break
+
+            # If this media is currently selected, refresh the metadata panel
+            selected_media = self.thumbnail_view.get_selected_media()
+            if selected_media and str(selected_media.file_path) == file_path:
+                self.metadata_panel.display_metadata(selected_media)
+
+            # If this media is currently in the viewer, update it
+            if self.media_viewer.isVisible() and hasattr(
+                self.media_viewer, "current_media"
+            ):
+                if (
+                    self.media_viewer.current_media
+                    and str(self.media_viewer.current_media.file_path) == file_path
+                ):
+                    self.media_viewer.current_media.width = width
+                    self.media_viewer.current_media.height = height
+
+            self.logger.info(f"Updated UI for media {file_path}: {width}x{height}")
+
+        except Exception as e:
+            self.logger.error(f"Error updating UI after database update: {e}")
 
 
 def main():

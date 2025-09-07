@@ -872,7 +872,9 @@ class VirtualScrollArea(QScrollArea):
         # Calculate target scroll position using scroll_step
         # The scroll_step determines how many pixels to scroll per wheel notch
         # Standard wheel delta is 120 for one notch, so we scale accordingly
-        target_scroll = max(0, min(max_scroll, current_scroll + (delta * self.scroll_step) // 120))
+        target_scroll = max(
+            0, min(max_scroll, current_scroll + (delta * self.scroll_step) // 120)
+        )
 
         # Use smooth scrolling for wheel events
         if abs(target_scroll - current_scroll) > 10:
@@ -964,7 +966,9 @@ class VirtualThumbnailView(QWidget):
 
         # Virtual scroll area
         self.scroll_area = VirtualScrollArea(
-            parent=self, thumbnail_size=self.thumbnail_size, scroll_step=self.scroll_step
+            parent=self,
+            thumbnail_size=self.thumbnail_size,
+            scroll_step=self.scroll_step,
         )
         main_layout.addWidget(self.scroll_area)
 
