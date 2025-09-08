@@ -849,7 +849,9 @@ class VideoRefiner:
             # Handle output - always replace original
             # Preserve metadata if requested (copy from original to upscaled)
             if preserve_metadata:
-                self.logger.info(f"Preserving metadata from '{str(input_path)}' to '{str(output_path)}'")
+                self.logger.info(
+                    f"Preserving metadata from '{str(input_path)}' to '{str(output_path)}'"
+                )
                 self._preserve_metadata(input_path, output_path)
 
             # Save the target path (where original was) before moving to trash
@@ -915,8 +917,22 @@ class VideoRefiner:
         self.logger.info(
             f"Starting frame interpolation: {input_path.name} - {interpolation_factor}x interpolation using RIFE"
         )
-        
+
         # Check if RIFE binary is available, try to download if not
+        # Re-scan for RIFE binary if not currently set (handles case where RIFE was downloaded by another instance)
+        if self.rife_bin is None:
+            rife_bin_path = (
+                self.models_dir
+                / "rife"
+                / "rife-ncnn-vulkan-20221029-macos"
+                / "rife-ncnn-vulkan"
+            )
+            if rife_bin_path.exists():
+                self.rife_bin = rife_bin_path
+                self.logger.debug(
+                    f"RIFE binary found during re-scan at: {rife_bin_path}"
+                )
+
         if self.rife_bin is None or not self.rife_bin.exists():
             self.logger.debug(
                 f"RIFE binary status: rife_bin={self.rife_bin}, exists={self.rife_bin.exists() if self.rife_bin else False}"
@@ -937,22 +953,22 @@ class VideoRefiner:
                         self.logger.warning(
                             "RIFE download succeeded but binary still not found"
                         )
-                        self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
-                        return self._interpolate_frames_basic(
-                            input_path, output_path, interpolation_factor, replace_original, progress_callback
+                        self.logger.warning(
+                            "RIFE binary not available. Interpolation not possible."
                         )
+                        return False
                 else:
                     self.logger.warning("Failed to download RIFE binary")
-                    self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
-                    return self._interpolate_frames_basic(
-                        input_path, output_path, interpolation_factor, replace_original, progress_callback
+                    self.logger.warning(
+                        "RIFE binary not available. Interpolation not possible."
                     )
+                    return False
             else:
                 self.logger.warning("RIFE binary not found at expected location")
-                self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
-                return self._interpolate_frames_basic(
-                    input_path, output_path, interpolation_factor, replace_original, progress_callback
+                self.logger.warning(
+                    "RIFE binary not available. Interpolation not possible."
                 )
+                return False
 
         temp_dir = None
         try:
@@ -994,7 +1010,6 @@ class VideoRefiner:
                 self.logger.error("Need at least 2 frames for interpolation")
                 return False
 
-
             if progress_callback:
                 progress_callback(30)
 
@@ -1021,7 +1036,7 @@ class VideoRefiner:
                 "-n",
                 str(target_frame_count),
                 "-f",
-                "%08d.png",
+                "frame_%08d.png",
             ]
 
             self.logger.info(f"Running RIFE interpolation: {' '.join(cmd)}")
@@ -1317,7 +1332,8 @@ class VideoRefiner:
                     from PIL import Image
 
                     with Image.open(file_path) as img:
-                        return img.size  # PIL returns (width, height)
+                        width, height = img.size  # PIL returns (width, height)
+                        return (int(width), int(height))
                 except ImportError:
                     # Fallback to cv2
                     import cv2
