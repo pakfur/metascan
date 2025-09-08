@@ -31,14 +31,20 @@ class UpscaleTask:
     file_path: str
     file_type: str  # "image" or "video"
     scale: int
-    replace_original: bool
-    status: UpscaleStatus
-    progress: float
     created_at: str
+    replace_original: bool = True  # Always replace original now
+    status: UpscaleStatus = UpscaleStatus.PENDING
+    progress: float = 0.0
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     error_message: Optional[str] = None
     output_path: Optional[str] = None
+    enhance_faces: bool = False
+    interpolate_frames: bool = False
+    interpolation_factor: int = 2
+    model_type: str = "general"
+    fps_override: Optional[float] = None
+    preserve_metadata: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -105,7 +111,17 @@ class UpscaleQueue(QObject):
             logging.error(f"Failed to save queue: {e}")
 
     def add_task(
-        self, file_path: str, file_type: str, scale: int, replace_original: bool
+        self,
+        file_path: str,
+        file_type: str,
+        scale: int,
+        replace_original: bool,
+        enhance_faces: bool = False,
+        interpolate_frames: bool = False,
+        interpolation_factor: int = 2,
+        model_type: str = "general",
+        fps_override: Optional[float] = None,
+        preserve_metadata: bool = True,
     ) -> UpscaleTask:
         """
         Add a new task to the queue.
@@ -115,6 +131,12 @@ class UpscaleQueue(QObject):
             file_type: Type of file ("image" or "video")
             scale: Upscaling factor
             replace_original: Whether to replace the original file
+            enhance_faces: Whether to enhance faces using GFPGAN
+            interpolate_frames: Whether to interpolate frames (video only)
+            interpolation_factor: Frame interpolation factor (2, 4, 8)
+            model_type: Type of model to use ('general' or 'anime')
+            fps_override: Custom FPS for video output (None to keep original)
+            preserve_metadata: Whether to preserve original file metadata
 
         Returns:
             The created task
@@ -132,6 +154,12 @@ class UpscaleQueue(QObject):
                 status=UpscaleStatus.PENDING,
                 progress=0.0,
                 created_at=datetime.now().isoformat(),
+                enhance_faces=enhance_faces,
+                interpolate_frames=interpolate_frames,
+                interpolation_factor=interpolation_factor,
+                model_type=model_type,
+                fps_override=fps_override,
+                preserve_metadata=preserve_metadata,
             )
 
             self.tasks[task_id] = task
@@ -326,21 +354,11 @@ class UpscaleWorker(QThread):
                                     new_height,
                                 ) = self.refiner.get_media_dimensions(output_file_path)
                                 if new_width > 0 and new_height > 0:
-                                    # Update the database
-                                    updated_path = None
-                                    if task.replace_original:
-                                        # File was replaced, update original path
-                                        if self.db_manager.update_media_dimensions(
-                                            input_path, new_width, new_height
-                                        ):
-                                            updated_path = str(input_path)
-                                    else:
-                                        # New file created, update if it exists in database
-                                        if self.db_manager.get_media(output_file_path):
-                                            if self.db_manager.update_media_dimensions(
-                                                output_file_path, new_width, new_height
-                                            ):
-                                                updated_path = str(output_file_path)
+                                    # Update the database - file was replaced at original path
+                                    if self.db_manager.update_media_dimensions(
+                                        input_path, new_width, new_height
+                                    ):
+                                        updated_path = str(input_path)
 
                                     if updated_path:
                                         self.logger.info(
@@ -381,13 +399,11 @@ class UpscaleWorker(QThread):
         if not input_path.exists():
             raise FileNotFoundError(f"File not found: {task.file_path}")
 
-        # Determine output path
-        if task.replace_original:
-            output_path = input_path
-        else:
-            output_path = input_path.with_name(
-                f"{input_path.stem}_x{task.scale}{input_path.suffix}"
-            )
+        # Determine output path - always use a suffix initially
+        # The processing function will handle moving to original location if replace_original=True
+        output_path = input_path.with_name(
+            f"{input_path.stem}_x{task.scale}{input_path.suffix}"
+        )
 
         # Progress callback
         def progress_callback(progress: float) -> bool:
@@ -403,18 +419,72 @@ class UpscaleWorker(QThread):
                 input_path,
                 output_path,
                 scale=task.scale,
-                replace_original=task.replace_original,
+                enhance_faces=task.enhance_faces,
+                model_type=task.model_type,
+                preserve_metadata=task.preserve_metadata,
                 progress_callback=progress_callback,
             )
             return bool(result)
         elif task.file_type == "video":
-            result = self.refiner.process_video(
-                input_path,
-                output_path,
-                scale=task.scale,
-                replace_original=task.replace_original,
-                progress_callback=progress_callback,
-            )
-            return bool(result)
+            if task.interpolate_frames:
+                # For interpolation, we'll do it in stages: interpolate first, then upscale if needed
+                if task.scale > 1:
+                    # First interpolate, then upscale
+                    temp_interpolated = input_path.with_name(
+                        f"{input_path.stem}_temp_interp{input_path.suffix}"
+                    )
+
+                    # Interpolate frames
+                    interp_result = self.refiner.interpolate_frames_rife(
+                        input_path,
+                        temp_interpolated,
+                        interpolation_factor=task.interpolation_factor,
+                        replace_original=False,
+                        progress_callback=lambda p: progress_callback(p * 0.5),
+                    )
+
+                    if not interp_result:
+                        return False
+
+                    # Then upscale the interpolated video
+                    result = self.refiner.process_video(
+                        temp_interpolated,
+                        output_path,
+                        scale=task.scale,
+                        fps=task.fps_override,
+                        enhance_faces=task.enhance_faces,
+                        model_type=task.model_type,
+                        preserve_metadata=task.preserve_metadata,
+                        progress_callback=lambda p: progress_callback(50 + p * 0.5),
+                    )
+
+                    # Clean up temp file
+                    if temp_interpolated.exists():
+                        temp_interpolated.unlink()
+
+                    return bool(result)
+                else:
+                    # Just interpolate
+                    result = self.refiner.interpolate_frames_rife(
+                        input_path,
+                        output_path,
+                        interpolation_factor=task.interpolation_factor,
+                        replace_original=task.replace_original,
+                        progress_callback=progress_callback,
+                    )
+                    return bool(result)
+            else:
+                # Regular video upscaling
+                result = self.refiner.process_video(
+                    input_path,
+                    output_path,
+                    scale=task.scale,
+                    fps=task.fps_override,
+                    enhance_faces=task.enhance_faces,
+                    model_type=task.model_type,
+                    preserve_metadata=task.preserve_metadata,
+                    progress_callback=progress_callback,
+                )
+                return bool(result)
         else:
             raise ValueError(f"Unknown file type: {task.file_type}")

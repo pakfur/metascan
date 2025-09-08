@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QDialogButtonBox,
     QMessageBox,
+    QCheckBox,
+    QSpinBox,
+    QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from pathlib import Path
@@ -131,38 +134,99 @@ class UpscaleDialog(QDialog):
 
         options_layout.addLayout(scale_layout)
 
-        # Output options
-        output_label = QLabel("Output Location:")
+        # Model type selection
+        model_layout = QHBoxLayout()
+        model_label = QLabel("Model Type:")
+        model_layout.addWidget(model_label)
+
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["General (photo-realistic)", "Anime/Illustration"])
+        self.model_combo.setCurrentIndex(0)  # Default to general
+        self.model_combo.setToolTip(
+            "General: Best for photographs and realistic images\n"
+            "Anime: Optimized for anime, illustrations, and drawn content"
+        )
+        model_layout.addWidget(self.model_combo)
+        model_layout.addStretch()
+
+        options_layout.addLayout(model_layout)
+
+        # Face enhancement option
+        self.face_enhancement_checkbox = QCheckBox("Enhance faces (GFPGAN)")
+        self.face_enhancement_checkbox.setToolTip(
+            "Uses GFPGAN to enhance and restore faces in images/videos.\n"
+            "Best for photos with people, may increase processing time."
+        )
+        options_layout.addWidget(self.face_enhancement_checkbox)
+
+        # Frame interpolation options (for videos)
+        has_videos = any(f.get("type") == "video" for f in self.media_files)
+        if has_videos:
+            self.interpolate_frames_checkbox = QCheckBox(
+                "Interpolate frames (increase FPS)"
+            )
+            self.interpolate_frames_checkbox.setToolTip(
+                "Uses RIFE to interpolate frames and increase video FPS.\n"
+                "Results in smoother video motion but significantly increases processing time."
+            )
+            options_layout.addWidget(self.interpolate_frames_checkbox)
+
+            # Interpolation factor
+            interp_layout = QHBoxLayout()
+            interp_label = QLabel("FPS Multiplier:")
+            interp_layout.addWidget(interp_label)
+
+            self.interpolation_combo = QComboBox()
+            self.interpolation_combo.addItems(["2x", "4x", "8x"])
+            self.interpolation_combo.setCurrentIndex(0)  # Default to 2x
+            self.interpolation_combo.setEnabled(
+                False
+            )  # Enabled when checkbox is checked
+            interp_layout.addWidget(self.interpolation_combo)
+            interp_layout.addStretch()
+
+            options_layout.addLayout(interp_layout)
+
+            # Connect checkbox to enable/disable combo
+            self.interpolate_frames_checkbox.toggled.connect(
+                self.interpolation_combo.setEnabled
+            )
+
+            # FPS override (for videos)
+            fps_layout = QHBoxLayout()
+            self.fps_override_checkbox = QCheckBox("Custom FPS:")
+            fps_layout.addWidget(self.fps_override_checkbox)
+
+            self.fps_spinbox = QDoubleSpinBox()
+            self.fps_spinbox.setRange(1.0, 120.0)
+            self.fps_spinbox.setValue(30.0)
+            self.fps_spinbox.setSuffix(" fps")
+            self.fps_spinbox.setEnabled(False)  # Enabled when checkbox is checked
+            fps_layout.addWidget(self.fps_spinbox)
+            fps_layout.addStretch()
+
+            options_layout.addLayout(fps_layout)
+
+            # Connect checkbox to enable/disable spinbox
+            self.fps_override_checkbox.toggled.connect(self.fps_spinbox.setEnabled)
+
+        # Metadata preservation option
+        self.preserve_metadata_checkbox = QCheckBox("Preserve original metadata")
+        self.preserve_metadata_checkbox.setChecked(True)  # Default to True
+        self.preserve_metadata_checkbox.setToolTip(
+            "Preserves EXIF data for images and metadata for videos.\n"
+            "Includes creation date, camera settings, and other original file information."
+        )
+        options_layout.addWidget(self.preserve_metadata_checkbox)
+
+        # Output note
+        output_label = QLabel(
+            "Note: Original files will be moved to trash after upscaling"
+        )
+        output_label.setStyleSheet("QLabel { color: gray; font-style: italic; }")
         options_layout.addWidget(output_label)
 
-        self.output_group = QButtonGroup(self)
-
-        self.suffix_radio = QRadioButton("Save with suffix (original_x2.ext)")
-        self.suffix_radio.setChecked(True)
-        self.output_group.addButton(self.suffix_radio, 0)
-        options_layout.addWidget(self.suffix_radio)
-
-        self.replace_radio = QRadioButton("Replace original (original moved to backup)")
-        self.output_group.addButton(self.replace_radio, 1)
-        options_layout.addWidget(self.replace_radio)
-
         layout.addWidget(options_group)
-
-        # Info section
-        info_group = QGroupBox("Information")
-        info_layout = QVBoxLayout(info_group)
-
-        info_text = (
-            "• Upscaling uses AI models to enhance image/video quality\n"
-            "• Processing time depends on file size and resolution\n"
-            "• Videos may take significantly longer than images\n"
-            "• Files will be added to the processing queue"
-        )
-        info_label = QLabel(info_text)
-        info_label.setWordWrap(True)
-        info_layout.addWidget(info_label)
-
-        layout.addWidget(info_group)
 
         # Buttons
         button_box = QDialogButtonBox(
@@ -182,7 +246,32 @@ class UpscaleDialog(QDialog):
         """Handle accept button click."""
         # Get selected options
         scale = int(self.scale_combo.currentText().replace("x", ""))
-        replace_original = self.replace_radio.isChecked()
+        replace_original = True  # Always replace original now
+        enhance_faces = self.face_enhancement_checkbox.isChecked()
+
+        # Model type
+        model_type = "anime" if self.model_combo.currentIndex() == 1 else "general"
+
+        # Frame interpolation options
+        interpolate_frames = False
+        interpolation_factor = 2
+        if hasattr(self, "interpolate_frames_checkbox"):
+            interpolate_frames = self.interpolate_frames_checkbox.isChecked()
+            if interpolate_frames:
+                interpolation_factor = int(
+                    self.interpolation_combo.currentText().replace("x", "")
+                )
+
+        # FPS override
+        fps_override = None
+        if (
+            hasattr(self, "fps_override_checkbox")
+            and self.fps_override_checkbox.isChecked()
+        ):
+            fps_override = self.fps_spinbox.value()
+
+        # Metadata preservation
+        preserve_metadata = self.preserve_metadata_checkbox.isChecked()
 
         # Prepare task configurations
         tasks = []
@@ -192,6 +281,16 @@ class UpscaleDialog(QDialog):
                 "file_type": file_info.get("type", "image"),
                 "scale": scale,
                 "replace_original": replace_original,
+                "enhance_faces": enhance_faces,
+                "interpolate_frames": interpolate_frames
+                if file_info.get("type") == "video"
+                else False,
+                "interpolation_factor": interpolation_factor,
+                "model_type": model_type,
+                "fps_override": fps_override
+                if file_info.get("type") == "video"
+                else None,
+                "preserve_metadata": preserve_metadata,
             }
             tasks.append(task_config)
 
@@ -223,7 +322,10 @@ class ModelSetupDialog(QDialog):
             "AI models are required for upscaling functionality.\n\n"
             "The following models will be downloaded:\n"
             "• RealESRGAN x2 model (~60 MB)\n"
-            "• RealESRGAN x4 model (~65 MB)\n\n"
+            "• RealESRGAN x4 model (~65 MB)\n"
+            "• RealESRGAN x4 anime model (~18 MB)\n"
+            "• GFPGAN model for face enhancement (~350 MB)\n"
+            "• RIFE binary and model for frame interpolation (~15 MB)\n\n"
             "This is a one-time setup that may take a few minutes."
         )
         info_label = QLabel(info_text)
