@@ -1,5 +1,7 @@
 # metascan-dev specific 
 assets/
+gfpgan/
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
