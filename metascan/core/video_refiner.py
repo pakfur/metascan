@@ -86,11 +86,28 @@ class VideoRefiner:
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(log_level)
 
+        # Add console handler if not already present
+        if not self.logger.handlers:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(log_level)
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            )
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+
         # Model URLs
         self.model_urls = {
             "RealESRGAN_x2plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
             "RealESRGAN_x4plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+            "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+            "GFPGANv1.4.pth": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
+            "rife_binary": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
+            "rife_model": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-v4.6.tar.gz",
         }
+
+        # RIFE binary path
+        self.rife_bin: Optional[Path] = None
 
         # Track if models are available
         self.models_available = False
@@ -98,10 +115,33 @@ class VideoRefiner:
 
     def _check_models(self) -> bool:
         """Check if required models are available."""
-        required_models = ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"]
+        required_models = [
+            "RealESRGAN_x2plus.pth",
+            "RealESRGAN_x4plus.pth",
+            "RealESRGAN_x4plus_anime_6B.pth",
+            "GFPGANv1.4.pth",
+        ]
         self.models_available = all(
             (self.models_dir / model).exists() for model in required_models
         )
+
+        # Check RIFE binary (optional for frame interpolation)
+        rife_bin_path = (
+            self.models_dir
+            / "rife"
+            / "rife-ncnn-vulkan-20221029-macos"
+            / "rife-ncnn-vulkan"
+        )
+        if rife_bin_path.exists():
+            self.rife_bin = rife_bin_path
+            self.logger.debug(f"RIFE binary found at: {rife_bin_path}")
+        else:
+            self.logger.debug(f"RIFE binary not found at: {rife_bin_path}")
+            self.logger.debug(f"RIFE directory exists: {rife_bin_path.parent.exists()}")
+            if rife_bin_path.parent.exists():
+                rife_files = list(rife_bin_path.parent.iterdir())
+                self.logger.debug(f"Files in RIFE directory: {rife_files}")
+
         return self.models_available
 
     def setup_models(
@@ -147,13 +187,23 @@ class VideoRefiner:
             import realesrgan
             import basicsr
             import cv2
+            import gfpgan
+            from PIL import Image
+            import piexif
 
             self.logger.info("Dependencies already installed")
             return True
         except ImportError:
             self.logger.info("Installing dependencies...")
             try:
-                packages = ["realesrgan", "basicsr", "opencv-python"]
+                packages = [
+                    "realesrgan",
+                    "basicsr",
+                    "opencv-python",
+                    "gfpgan",
+                    "Pillow",
+                    "piexif",
+                ]
                 for package in packages:
                     result = subprocess.run(
                         [sys.executable, "-m", "pip", "install", package],
@@ -200,6 +250,18 @@ class VideoRefiner:
                 progress = 20 + ((idx + 1) * 40 / total_models)
                 progress_callback(f"Downloaded {model_name}", progress)
 
+        # Download RIFE (optional for frame interpolation)
+        if progress_callback:
+            progress_callback("Setting up RIFE for frame interpolation...", 70.0)
+
+        if not self._download_rife():
+            self.logger.warning(
+                "Failed to download RIFE - frame interpolation will use basic blending"
+            )
+
+        if progress_callback:
+            progress_callback("Setup complete!", 100.0)
+
         return True
 
     def _download_file(self, url: str, dest: Path, desc: str) -> bool:
@@ -223,28 +285,98 @@ class VideoRefiner:
             self.logger.error(f"Failed to download {desc}: {e}")
             return False
 
-    def process_image(
+    def _download_rife(self) -> bool:
+        """Download RIFE binary and models."""
+        import zipfile
+        import tarfile
+
+        bin_dir = self.models_dir / "rife"
+        # The actual binary is in the extracted subdirectory
+        bin_path = bin_dir / "rife-ncnn-vulkan-20221029-macos" / "rife-ncnn-vulkan"
+
+        if bin_path.exists():
+            self.rife_bin = bin_path
+            self.logger.info("RIFE already installed")
+            return True
+
+        self.logger.info("Downloading RIFE...")
+        self.logger.debug(f"RIFE binary target path: {bin_path}")
+        self.logger.debug(f"RIFE bin directory: {bin_dir}")
+
+        try:
+            # Download binary
+            zip_path = self.models_dir / "rife.zip"
+            if not self._download_file(
+                self.model_urls["rife_binary"], zip_path, "RIFE binary"
+            ):
+                return False
+
+            # Extract
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(bin_dir)
+
+            # Make executable
+            bin_path.chmod(0o755)
+            self.rife_bin = bin_path
+
+            # Clean up
+            zip_path.unlink()
+
+            # Check if rife-v4.6 model already exists (included in binary download)
+            model_path = bin_dir / "rife-ncnn-vulkan-20221029-macos" / "rife-v4.6"
+            if not model_path.exists():
+                self.logger.warning(
+                    "RIFE v4.6 model not found in binary package, trying to download separately..."
+                )
+                # Try to download model separately
+                model_archive = self.models_dir / "rife-v4.6.tar.gz"
+                if self._download_file(
+                    self.model_urls["rife_model"], model_archive, "RIFE model"
+                ):
+                    # Extract model to the correct subdirectory
+                    extract_path = bin_dir / "rife-ncnn-vulkan-20221029-macos"
+                    with tarfile.open(model_archive, "r:gz") as tar:
+                        tar.extractall(extract_path)
+                    model_archive.unlink()
+                else:
+                    self.logger.info(
+                        "RIFE model download failed, but other models are available in the binary package"
+                    )
+            else:
+                self.logger.info("RIFE v4.6 model already available in binary package")
+
+            self.logger.info("RIFE setup complete")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to download RIFE: {e}")
+            return False
+
+    def enhance_faces_gfpgan(
         self,
         input_path: Path,
         output_path: Path,
-        scale: int = 2,
-        replace_original: bool = False,
+        bg_upsampler: Optional[str] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> bool:
         """
-        Upscale a single image.
+        Enhance faces in an image using GFPGAN.
 
         Args:
             input_path: Path to input image
-            output_path: Path to save upscaled image
-            scale: Upscaling factor (2 or 4)
-            replace_original: If True, replace original file
+            output_path: Path to save enhanced image
+            bg_upsampler: Background upsampler ('realesrgan' or None)
             progress_callback: Callback for progress updates (0-100)
 
         Returns:
             True if successful, False otherwise
         """
+        import time
+
+        start_time = time.time()
+
         try:
+            from gfpgan import GFPGANer  # type: ignore
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
             import cv2
@@ -252,8 +384,15 @@ class VideoRefiner:
             if progress_callback:
                 progress_callback(10)
 
-            # Select model based on scale
-            if scale == 2:
+            # Setup GFPGAN model
+            gfpgan_model_path = self.models_dir / "GFPGANv1.4.pth"
+            if not gfpgan_model_path.exists():
+                self.logger.error(f"GFPGAN model not found: {gfpgan_model_path}")
+                return False
+
+            # Setup background upsampler if requested
+            bg_upsampler_instance = None
+            if bg_upsampler == "realesrgan":
                 model = RRDBNet(
                     num_in_ch=3,
                     num_out_ch=3,
@@ -263,75 +402,262 @@ class VideoRefiner:
                     scale=2,
                 )
                 model_path = self.models_dir / "RealESRGAN_x2plus.pth"
-            else:
-                model = RRDBNet(
-                    num_in_ch=3,
-                    num_out_ch=3,
-                    num_feat=64,
-                    num_block=23,
-                    num_grow_ch=32,
-                    scale=4,
-                )
-                model_path = self.models_dir / "RealESRGAN_x4plus.pth"
-
-            if not model_path.exists():
-                self.logger.error(f"Model not found: {model_path}")
-                return False
-
-            if progress_callback:
-                progress_callback(20)
-
-            # Initialize upsampler
-            upsampler = RealESRGANer(
-                scale=scale,
-                model_path=str(model_path),
-                model=model,
-                tile=self.tile_size,
-                tile_pad=10,
-                pre_pad=0,
-                half=False,
-                device=self.device if self.device != "auto" else None,
-            )
+                if model_path.exists():
+                    bg_upsampler_instance = RealESRGANer(
+                        scale=2,
+                        model_path=str(model_path),
+                        model=model,
+                        tile=self.tile_size,
+                        tile_pad=10,
+                        pre_pad=0,
+                        half=False,
+                        device=self.device if self.device != "auto" else None,
+                    )
 
             if progress_callback:
                 progress_callback(30)
 
+            # Initialize GFPGAN
+            restorer = GFPGANer(
+                model_path=str(gfpgan_model_path),
+                upscale=2,
+                arch="clean",
+                channel_multiplier=2,
+                bg_upsampler=bg_upsampler_instance,
+                device=self.device if self.device != "auto" else None,
+            )
+
+            if progress_callback:
+                progress_callback(50)
+
             # Read image
-            img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
-            if img is None:
+            input_img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+            if input_img is None:
                 self.logger.error(f"Failed to read image: {input_path}")
                 return False
 
             if progress_callback:
-                progress_callback(40)
+                progress_callback(60)
 
-            # Upscale
-            output, _ = upsampler.enhance(img, outscale=scale)
+            # Enhance faces
+            _, _, output = restorer.enhance(
+                input_img, has_aligned=False, only_center_face=False, paste_back=True
+            )
 
             if progress_callback:
-                progress_callback(80)
+                progress_callback(90)
 
-            # Handle output
-            if replace_original:
-                # Save to temp file first
-                temp_path = output_path.with_suffix(".tmp" + output_path.suffix)
-                cv2.imwrite(str(temp_path), output)
-
-                # Move original to trash (or backup)
-                backup_path = input_path.with_name(
-                    input_path.stem + "_original" + input_path.suffix
-                )
-                shutil.move(str(input_path), str(backup_path))
-
-                # Move temp to original location
-                shutil.move(str(temp_path), str(input_path))
-            else:
-                # Save with suffix
-                cv2.imwrite(str(output_path), output)
+            # Save result
+            cv2.imwrite(str(output_path), output)
 
             if progress_callback:
                 progress_callback(100)
 
+            # Log completion with elapsed time
+            elapsed_time = time.time() - start_time
+            self.logger.info(
+                f"Completed frame interpolation: {input_path.name} in {elapsed_time:.1f}s"
+            )
+            return True
+
+        except ImportError as e:
+            self.logger.error(f"Missing required libraries for face enhancement: {e}")
+            self.logger.error("Please install: pip install gfpgan")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to enhance faces in {input_path.name}: {e}")
+            import traceback
+
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+            return False
+
+    def process_image(
+        self,
+        input_path: Path,
+        output_path: Path,
+        scale: int = 2,
+        enhance_faces: bool = False,
+        model_type: str = "general",
+        preserve_metadata: bool = True,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """
+        Upscale a single image with optional face enhancement.
+        Original file will be moved to trash after successful upscaling.
+
+        Args:
+            input_path: Path to input image
+            output_path: Path to save upscaled image (temporary, will be moved to input_path)
+            scale: Upscaling factor (2 or 4)
+            enhance_faces: If True, enhance faces using GFPGAN
+            model_type: Type of model to use ('general' or 'anime')
+            preserve_metadata: If True, preserve original metadata
+            progress_callback: Callback for progress updates (0-100)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        import time
+
+        start_time = time.time()
+
+        # Log upscale operation details
+        operation_details = []
+        operation_details.append(f"{scale}x upscale")
+        if enhance_faces:
+            operation_details.append("face enhancement")
+        operation_details.append(f"{model_type} model")
+        if preserve_metadata:
+            operation_details.append("metadata preservation")
+
+        operation_str = ", ".join(operation_details)
+        self.logger.info(f"Starting image upscale: {input_path.name} - {operation_str}")
+
+        try:
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+            import cv2
+
+            if progress_callback:
+                progress_callback(10)
+
+            # If face enhancement is requested, use GFPGAN with background upscaling
+            if enhance_faces:
+                from gfpgan import GFPGANer  # type: ignore
+
+                # Setup background upsampler for GFPGAN
+                model, model_path = self._get_upscale_model_info(scale, model_type)
+
+                if not model_path.exists():
+                    self.logger.error(f"Model not found: {model_path}")
+                    return False
+
+                bg_upsampler = RealESRGANer(
+                    scale=scale,
+                    model_path=str(model_path),
+                    model=model,
+                    tile=self.tile_size,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=False,
+                    device=self.device if self.device != "auto" else None,
+                )
+
+                if progress_callback:
+                    progress_callback(30)
+
+                # Setup GFPGAN
+                gfpgan_model_path = self.models_dir / "GFPGANv1.4.pth"
+                if not gfpgan_model_path.exists():
+                    self.logger.error(f"GFPGAN model not found: {gfpgan_model_path}")
+                    return False
+
+                restorer = GFPGANer(
+                    model_path=str(gfpgan_model_path),
+                    upscale=scale,
+                    arch="clean",
+                    channel_multiplier=2,
+                    bg_upsampler=bg_upsampler,
+                    device=self.device if self.device != "auto" else None,
+                )
+
+                if progress_callback:
+                    progress_callback(50)
+
+                # Read image
+                img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+                if img is None:
+                    self.logger.error(f"Failed to read image: {input_path}")
+                    return False
+
+                if progress_callback:
+                    progress_callback(60)
+
+                # Enhance with GFPGAN (includes background upscaling)
+                _, _, output = restorer.enhance(
+                    img, has_aligned=False, only_center_face=False, paste_back=True
+                )
+
+                if progress_callback:
+                    progress_callback(80)
+            else:
+                # Standard upscaling without face enhancement
+                # Select model based on scale and type
+                model, model_path = self._get_upscale_model_info(scale, model_type)
+
+                if not model_path.exists():
+                    self.logger.error(f"Model not found: {model_path}")
+                    return False
+
+                if progress_callback:
+                    progress_callback(20)
+
+                # Initialize upsampler
+                upsampler = RealESRGANer(
+                    scale=scale,
+                    model_path=str(model_path),
+                    model=model,
+                    tile=self.tile_size,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=False,
+                    device=self.device if self.device != "auto" else None,
+                )
+
+                if progress_callback:
+                    progress_callback(30)
+
+                # Read image
+                img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+                if img is None:
+                    self.logger.error(f"Failed to read image: {input_path}")
+                    return False
+
+                if progress_callback:
+                    progress_callback(40)
+
+                # Upscale
+                output, _ = upsampler.enhance(img, outscale=scale)
+
+                if progress_callback:
+                    progress_callback(80)
+
+            # Handle output - always replace original
+            # Save to the provided output_path first (which has suffix)
+            cv2.imwrite(str(output_path), output)
+
+            # Preserve metadata if requested (copy from original to upscaled)
+            if preserve_metadata:
+                self._preserve_metadata(input_path, output_path)
+
+            # Save the target path (where original was) before moving to trash
+            final_path = input_path
+
+            # Move original to trash
+            if self._move_to_trash(input_path):
+                # Move upscaled (with metadata) from output_path to original location
+                # Note: input_path no longer exists as a file, but we can use it as the destination
+                self.logger.debug(
+                    f"Moving upscaled file from {output_path} to {final_path}"
+                )
+                shutil.move(str(output_path), str(final_path))
+                # Update output_path to reflect the final location
+                output_path = final_path
+                self.logger.info(f"Upscaled file with metadata now at: {final_path}")
+            else:
+                self.logger.error(
+                    "Failed to move original to trash, keeping both files"
+                )
+                # Keep the upscaled file at output_path (with suffix)
+
+            if progress_callback:
+                progress_callback(100)
+
+            # Log completion with elapsed time
+            elapsed_time = time.time() - start_time
+            self.logger.info(
+                f"Completed image upscale: {input_path.name} in {elapsed_time:.1f}s"
+            )
             return True
 
         except ImportError as e:
@@ -353,23 +679,46 @@ class VideoRefiner:
         output_path: Path,
         scale: int = 2,
         fps: Optional[float] = None,
-        replace_original: bool = False,
+        enhance_faces: bool = False,
+        model_type: str = "general",
+        preserve_metadata: bool = True,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> bool:
         """
-        Upscale a video.
+        Upscale a video with optional face enhancement.
+        Original file will be moved to trash after successful upscaling.
 
         Args:
             input_path: Path to input video
-            output_path: Path to save upscaled video
+            output_path: Path to save upscaled video (temporary, will be moved to input_path)
             scale: Upscaling factor (2 or 4)
             fps: Override FPS (None to keep original)
-            replace_original: If True, replace original file
+            enhance_faces: If True, enhance faces using GFPGAN
+            model_type: Type of model to use ('general' or 'anime')
+            preserve_metadata: If True, preserve original metadata
             progress_callback: Callback for progress updates (0-100)
 
         Returns:
             True if successful, False otherwise
         """
+        import time
+
+        start_time = time.time()
+
+        # Log upscale operation details
+        operation_details = []
+        operation_details.append(f"{scale}x upscale")
+        if enhance_faces:
+            operation_details.append("face enhancement")
+        operation_details.append(f"{model_type} model")
+        if fps is not None:
+            operation_details.append(f"custom FPS: {fps}")
+        if preserve_metadata:
+            operation_details.append("metadata preservation")
+
+        operation_str = ", ".join(operation_details)
+        self.logger.info(f"Starting video upscale: {input_path.name} - {operation_str}")
+
         temp_dir = None
         try:
             from realesrgan import RealESRGANer
@@ -379,6 +728,7 @@ class VideoRefiner:
             # Create temp directory
             temp_dir = tempfile.mkdtemp(prefix="metascan_upscale_")
             temp_path = Path(temp_dir)
+            self.logger.info(f"Using temporary directory: {str(temp_path)}")
 
             if progress_callback:
                 progress_callback(5)
@@ -403,49 +753,63 @@ class VideoRefiner:
                 return False
 
             # Setup model
-            if scale == 2:
-                model = RRDBNet(
-                    num_in_ch=3,
-                    num_out_ch=3,
-                    num_feat=64,
-                    num_block=23,
-                    num_grow_ch=32,
-                    scale=2,
-                )
-                model_path = self.models_dir / "RealESRGAN_x2plus.pth"
-            else:
-                model = RRDBNet(
-                    num_in_ch=3,
-                    num_out_ch=3,
-                    num_feat=64,
-                    num_block=23,
-                    num_grow_ch=32,
-                    scale=4,
-                )
-                model_path = self.models_dir / "RealESRGAN_x4plus.pth"
+            model, model_path = self._get_upscale_model_info(scale, model_type)
 
             if not model_path.exists():
                 self.logger.error(f"Model not found: {model_path}")
                 return False
 
-            # Initialize upsampler
-            upsampler = RealESRGANer(
-                scale=scale,
-                model_path=str(model_path),
-                model=model,
-                tile=self.tile_size,
-                tile_pad=10,
-                pre_pad=0,
-                half=False,
-                device=self.device if self.device != "auto" else None,
-            )
+            # Setup processing pipeline
+            if enhance_faces:
+                from gfpgan import GFPGANer  # type: ignore
 
-            # Upscale frames
+                # Background upsampler for GFPGAN
+                bg_upsampler = RealESRGANer(
+                    scale=scale,
+                    model_path=str(model_path),
+                    model=model,
+                    tile=self.tile_size,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=False,
+                    device=self.device if self.device != "auto" else None,
+                )
+
+                # GFPGAN model
+                gfpgan_model_path = self.models_dir / "GFPGANv1.4.pth"
+                if not gfpgan_model_path.exists():
+                    self.logger.error(f"GFPGAN model not found: {gfpgan_model_path}")
+                    return False
+
+                restorer = GFPGANer(
+                    model_path=str(gfpgan_model_path),
+                    upscale=scale,
+                    arch="clean",
+                    channel_multiplier=2,
+                    bg_upsampler=bg_upsampler,
+                    device=self.device if self.device != "auto" else None,
+                )
+            else:
+                # Standard upsampler
+                upsampler = RealESRGANer(
+                    scale=scale,
+                    model_path=str(model_path),
+                    model=model,
+                    tile=self.tile_size,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=False,
+                    device=self.device if self.device != "auto" else None,
+                )
+
+            # Process frames
             upscaled_dir = temp_path / "upscaled"
             upscaled_dir.mkdir()
 
             total_frames = len(input_frames)
             for idx, frame_path in enumerate(input_frames):
+                self.logger.info(f"Upscaling frame {idx} of {total_frames}")
+
                 if progress_callback:
                     progress = 20 + (idx * 60 / total_frames)
                     progress_callback(progress)
@@ -455,15 +819,235 @@ class VideoRefiner:
                     self.logger.error(f"Failed to read frame: {frame_path}")
                     continue
 
-                output, _ = upsampler.enhance(img, outscale=scale)
+                # Process frame based on mode
+                if enhance_faces:
+                    _, _, output = restorer.enhance(
+                        img, has_aligned=False, only_center_face=False, paste_back=True
+                    )
+                else:
+                    output, _ = upsampler.enhance(img, outscale=scale)
+
                 output_frame_path = upscaled_dir / frame_path.name
                 cv2.imwrite(str(output_frame_path), output)
 
             if progress_callback:
                 progress_callback(85)
 
+            # Override FPS if specified
+            if fps is not None:
+                video_info["fps"] = fps
+
             # Compile video
+            self.logger.info(f"Compiling video to {str(output_path)}")
+
             if not self._compile_video(upscaled_dir, output_path, video_info):
+                return False
+
+            if progress_callback:
+                progress_callback(95)
+
+            # Handle output - always replace original
+            # Preserve metadata if requested (copy from original to upscaled)
+            if preserve_metadata:
+                self.logger.info(f"Preserving metadata from '{str(input_path)}' to '{str(output_path)}'")
+                self._preserve_metadata(input_path, output_path)
+
+            # Save the target path (where original was) before moving to trash
+            final_path = input_path
+
+            # Move original to trash
+            if self._move_to_trash(input_path):
+                self.logger.info(f"Move '{str(input_path)}' to trash")
+                # Move upscaled (with metadata) from output_path to original location
+                # Note: input_path no longer exists as a file, but we can use it as the destination
+                shutil.move(str(output_path), str(final_path))
+                # Update output_path to reflect the final location
+                output_path = final_path
+            else:
+                self.logger.error(
+                    "Failed to move original to trash, keeping both files"
+                )
+                # Keep the upscaled file at output_path (with suffix)
+
+            if progress_callback:
+                progress_callback(100)
+
+            # Log completion with elapsed time
+            elapsed_time = time.time() - start_time
+            self.logger.info(
+                f"Completed video upscale: {input_path.name} in {elapsed_time:.1f}s"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to process video: {e}")
+            return False
+        finally:
+            # Cleanup temp directory
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def interpolate_frames_rife(
+        self,
+        input_path: Path,
+        output_path: Path,
+        interpolation_factor: int = 2,
+        replace_original: bool = False,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """
+        Interpolate video frames using RIFE for smoother motion.
+
+        Args:
+            input_path: Path to input video
+            output_path: Path to save interpolated video
+            interpolation_factor: Factor to multiply FPS by (2, 4, 8)
+            replace_original: If True, replace original file
+            progress_callback: Callback for progress updates (0-100)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        import time
+
+        start_time = time.time()
+
+        self.logger.info(
+            f"Starting frame interpolation: {input_path.name} - {interpolation_factor}x interpolation using RIFE"
+        )
+        
+        # Check if RIFE binary is available, try to download if not
+        if self.rife_bin is None or not self.rife_bin.exists():
+            self.logger.debug(
+                f"RIFE binary status: rife_bin={self.rife_bin}, exists={self.rife_bin.exists() if self.rife_bin else False}"
+            )
+            # Try to download RIFE if it's not available
+            if self.rife_bin is None:
+                self.logger.info("RIFE binary not found, attempting to download...")
+                if progress_callback:
+                    progress_callback(10)  # Show some progress
+                if self._download_rife():
+                    self.logger.info("RIFE binary downloaded successfully")
+                    # Re-check RIFE after download
+                    if self.rife_bin and self.rife_bin.exists():
+                        self.logger.info(
+                            "RIFE binary now available, proceeding with RIFE interpolation"
+                        )
+                    else:
+                        self.logger.warning(
+                            "RIFE download succeeded but binary still not found"
+                        )
+                        self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
+                        return self._interpolate_frames_basic(
+                            input_path, output_path, interpolation_factor, replace_original, progress_callback
+                        )
+                else:
+                    self.logger.warning("Failed to download RIFE binary")
+                    self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
+                    return self._interpolate_frames_basic(
+                        input_path, output_path, interpolation_factor, replace_original, progress_callback
+                    )
+            else:
+                self.logger.warning("RIFE binary not found at expected location")
+                self.logger.warning("RIFE binary not available. Using basic frame blending fallback.")
+                return self._interpolate_frames_basic(
+                    input_path, output_path, interpolation_factor, replace_original, progress_callback
+                )
+
+        temp_dir = None
+        try:
+            import torch
+            import torch.nn.functional as F
+            import numpy as np
+            import cv2
+            from pathlib import Path
+            import sys
+            import os
+
+            # Create temp directory
+            temp_dir = tempfile.mkdtemp(prefix="metascan_rife_")
+            temp_path = Path(temp_dir)
+
+            if progress_callback:
+                progress_callback(5)
+
+            # Extract original frames
+            frames_dir = temp_path / "frames"
+            frames_dir.mkdir()
+
+            if not self._extract_frames(input_path, frames_dir):
+                return False
+
+            if progress_callback:
+                progress_callback(20)
+
+            # Get video info
+            video_info = self._get_video_info(input_path)
+
+            # Calculate new FPS
+            original_fps = video_info["fps"]
+            new_fps = original_fps * interpolation_factor
+
+            # Load frames
+            frame_files = sorted(list(frames_dir.glob("*.png")))
+            if len(frame_files) < 2:
+                self.logger.error("Need at least 2 frames for interpolation")
+                return False
+
+
+            if progress_callback:
+                progress_callback(30)
+
+            # Use RIFE for proper frame interpolation
+            interp_dir = temp_path / "interpolated"
+            interp_dir.mkdir()
+
+            # Count input frames to calculate target frame count
+            target_frame_count = len(frame_files) * interpolation_factor
+
+            cmd = [
+                str(self.rife_bin),
+                "-i",
+                str(frames_dir),
+                "-o",
+                str(interp_dir),
+                "-m",
+                str(
+                    self.models_dir
+                    / "rife"
+                    / "rife-ncnn-vulkan-20221029-macos"
+                    / "rife-v4.6"
+                ),
+                "-n",
+                str(target_frame_count),
+                "-f",
+                "%08d.png",
+            ]
+
+            self.logger.info(f"Running RIFE interpolation: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                self.logger.error(f"RIFE failed: {result.stderr}")
+                self.logger.warning("Falling back to basic frame blending")
+                return self._interpolate_frames_basic(
+                    frames_dir,
+                    temp_path,
+                    interpolation_factor,
+                    new_fps,
+                    output_path,
+                    replace_original,
+                    progress_callback,
+                )
+
+            if progress_callback:
+                progress_callback(85)
+
+            # Update video info with new FPS
+            video_info["fps"] = new_fps
+
+            # Compile video
+            if not self._compile_video(interp_dir, output_path, video_info):
                 return False
 
             if progress_callback:
@@ -477,21 +1061,119 @@ class VideoRefiner:
                 )
                 shutil.move(str(input_path), str(backup_path))
 
-                # Move upscaled to original location
+                # Move interpolated to original location
                 shutil.move(str(output_path), str(input_path))
 
             if progress_callback:
                 progress_callback(100)
 
+            # Log completion with elapsed time
+            elapsed_time = time.time() - start_time
+            self.logger.info(
+                f"Completed frame interpolation: {input_path.name} in {elapsed_time:.1f}s"
+            )
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to process video: {e}")
+            self.logger.error(f"Failed to interpolate frames: {e}")
+            import traceback
+
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
             return False
         finally:
             # Cleanup temp directory
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _interpolate_frames_basic(
+        self,
+        frames_dir: Path,
+        temp_path: Path,
+        interpolation_factor: int,
+        new_fps: float,
+        output_path: Path,
+        replace_original: bool,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> bool:
+        """Basic frame interpolation using blending (fallback method)."""
+        import time
+
+        start_time = time.time()
+
+        try:
+            import cv2
+
+            # Load frames
+            frame_files = sorted(list(frames_dir.glob("*.png")))
+
+            # Create interpolated frames directory
+            interp_dir = temp_path / "interpolated"
+            interp_dir.mkdir()
+
+            # Process frame pairs
+            total_pairs = len(frame_files) - 1
+            output_frame_count = 0
+
+            for i in range(total_pairs):
+                if progress_callback:
+                    progress = 30 + (i * 50 / total_pairs)
+                    progress_callback(progress)
+
+                # Load consecutive frames
+                frame1 = cv2.imread(str(frame_files[i]))
+                frame2 = cv2.imread(str(frame_files[i + 1]))
+
+                if frame1 is None or frame2 is None:
+                    continue
+
+                # Save first frame
+                output_frame_path = interp_dir / f"frame_{output_frame_count:08d}.png"
+                cv2.imwrite(str(output_frame_path), frame1)
+                output_frame_count += 1
+
+                # Generate intermediate frames using basic interpolation
+                for j in range(1, interpolation_factor):
+                    alpha = j / interpolation_factor
+                    interpolated = cv2.addWeighted(frame1, 1 - alpha, frame2, alpha, 0)
+
+                    output_frame_path = (
+                        interp_dir / f"frame_{output_frame_count:08d}.png"
+                    )
+                    cv2.imwrite(str(output_frame_path), interpolated)
+                    output_frame_count += 1
+
+            # Save final frame
+            if frame_files:
+                final_frame = cv2.imread(str(frame_files[-1]))
+                if final_frame is not None:
+                    output_frame_path = (
+                        interp_dir / f"frame_{output_frame_count:08d}.png"
+                    )
+                    cv2.imwrite(str(output_frame_path), final_frame)
+
+            if progress_callback:
+                progress_callback(85)
+
+            # Update video info with new FPS
+            video_info = {"fps": new_fps}
+
+            # Compile video
+            if not self._compile_video(interp_dir, output_path, video_info):
+                return False
+
+            if progress_callback:
+                progress_callback(100)
+
+            # Log completion with elapsed time
+            elapsed_time = time.time() - start_time
+            self.logger.info(
+                f"Completed basic frame interpolation in {elapsed_time:.1f}s"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed basic frame interpolation: {e}")
+            return False
 
     def _extract_frames(
         self, video_path: Path, output_dir: Path, fps: Optional[float] = None
@@ -650,3 +1332,381 @@ class VideoRefiner:
             self.logger.error(f"Failed to get dimensions for {file_path}: {e}")
 
         return (0, 0)
+
+    def _get_upscale_model_info(
+        self, scale: int, model_type: str = "general"
+    ) -> Tuple[Any, Path]:
+        """
+        Get the appropriate model and path for upscaling.
+
+        Args:
+            scale: Upscaling factor (2 or 4)
+            model_type: Type of model ('general' or 'anime')
+
+        Returns:
+            Tuple of (model, model_path)
+        """
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+
+        if model_type == "anime" and scale == 4:
+            # Use anime-specific model for 4x upscaling
+            model = RRDBNet(
+                num_in_ch=3,
+                num_out_ch=3,
+                num_feat=64,
+                num_block=6,  # Anime model uses 6 blocks
+                num_grow_ch=32,
+                scale=4,
+            )
+            model_path = self.models_dir / "RealESRGAN_x4plus_anime_6B.pth"
+        elif scale == 2:
+            # Use standard x2 model
+            model = RRDBNet(
+                num_in_ch=3,
+                num_out_ch=3,
+                num_feat=64,
+                num_block=23,
+                num_grow_ch=32,
+                scale=2,
+            )
+            model_path = self.models_dir / "RealESRGAN_x2plus.pth"
+        else:
+            # Use standard x4 model
+            model = RRDBNet(
+                num_in_ch=3,
+                num_out_ch=3,
+                num_feat=64,
+                num_block=23,
+                num_grow_ch=32,
+                scale=4,
+            )
+            model_path = self.models_dir / "RealESRGAN_x4plus.pth"
+
+        return model, model_path
+
+    def _check_file_metadata(self, file_path: Path) -> Dict[str, Any]:
+        """Check metadata in a file using exiftool for debugging."""
+        try:
+            if not shutil.which("exiftool"):
+                return {}
+
+            cmd = ["exiftool", "-j", str(file_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                import json
+
+                data = json.loads(result.stdout)
+                return data[0] if data else {}  # type: ignore
+            return {}
+        except Exception:
+            return {}
+
+    def _preserve_metadata(self, source_path: Path, target_path: Path) -> bool:
+        """
+        Preserve metadata from source file to target file using direct copy.
+
+        Args:
+            source_path: Path to the source file with metadata
+            target_path: Path to the target file to receive metadata
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self.logger.debug(f"Starting metadata preservation")
+        self.logger.debug(
+            f"Source path: {source_path} (exists: {source_path.exists()})"
+        )
+        self.logger.debug(
+            f"Target path: {target_path} (exists: {target_path.exists()})"
+        )
+
+        if not source_path.exists():
+            self.logger.error(f"Source file does not exist: {source_path}")
+            return False
+
+        if not target_path.exists():
+            self.logger.error(f"Target file does not exist: {target_path}")
+            return False
+
+        # Check original metadata before processing
+        original_metadata = self._check_file_metadata(source_path)
+        target_metadata_before = self._check_file_metadata(target_path)
+
+        self.logger.debug(
+            f"Original file metadata count: {len(original_metadata)} keys"
+        )
+        self.logger.debug(
+            f"Target file metadata count before: {len(target_metadata_before)} keys"
+        )
+
+        if original_metadata:
+            sample_keys = list(original_metadata.keys())[:5]  # Show first 5 keys
+            self.logger.debug(f"Sample original metadata keys: {sample_keys}")
+
+        try:
+            # Create temp file for output
+            temp_path = target_path.with_suffix(".metadata_temp" + target_path.suffix)
+            self.logger.debug(f"Temp file path: {temp_path}")
+
+            # Determine file type
+            target_ext = target_path.suffix.lower()
+            self.logger.debug(f"File extension: {target_ext}")
+
+            if target_ext in [".jpg", ".jpeg"]:
+                # For JPEG images, use exiftool directly as it's more reliable
+                if shutil.which("exiftool"):
+                    self.logger.debug(
+                        "Using exiftool directly for JPEG metadata preservation"
+                    )
+                    return self._preserve_metadata_exiftool(source_path, target_path)
+                else:
+                    # Fallback to ffmpeg for JPEG images if exiftool not available
+                    cmd = [
+                        "ffmpeg",
+                        "-i",
+                        str(target_path),  # Input: upscaled image
+                        "-i",
+                        str(source_path),  # Input: original with metadata
+                        "-map",
+                        "0:v",  # Use video stream from first input (upscaled)
+                        "-map_metadata",
+                        "1",  # Use all metadata from second input (original)
+                        "-q:v",
+                        "1",  # Highest quality to avoid degradation
+                        "-y",
+                        str(temp_path),
+                    ]
+            elif target_ext in [".png", ".tiff", ".webp"]:
+                # For other images, try codec copy first
+                cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(target_path),  # Input: upscaled image
+                    "-i",
+                    str(source_path),  # Input: original with metadata
+                    "-map",
+                    "0:v",  # Use video stream from first input (upscaled)
+                    "-map_metadata",
+                    "1",  # Use all metadata from second input (original)
+                    "-c:v",
+                    "copy",  # Try to copy without re-encoding
+                    "-y",
+                    str(temp_path),
+                ]
+            else:
+                # For videos, copy metadata
+                cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(target_path),  # Input: upscaled video
+                    "-i",
+                    str(source_path),  # Input: original with metadata
+                    "-map",
+                    "0",  # Use all streams from first input
+                    "-map_metadata",
+                    "1",  # Use metadata from second input
+                    "-c",
+                    "copy",  # Copy codec
+                    "-y",
+                    str(temp_path),
+                ]
+
+            self.logger.debug(f"Executing ffmpeg command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.logger.debug(f"ffmpeg return code: {result.returncode}")
+
+            if result.stdout:
+                self.logger.debug(f"ffmpeg stdout: {result.stdout}")
+            if result.stderr:
+                self.logger.debug(f"ffmpeg stderr: {result.stderr}")
+
+            if result.returncode == 0:
+                self.logger.debug(
+                    f"ffmpeg succeeded, temp file exists: {temp_path.exists()}"
+                )
+
+                if temp_path.exists():
+                    # Check metadata in temp file before moving
+                    temp_metadata = self._check_file_metadata(temp_path)
+                    self.logger.debug(
+                        f"Temp file metadata count: {len(temp_metadata)} keys"
+                    )
+
+                    # Replace target with temp file
+                    self.logger.debug(f"Moving temp file to target location")
+                    shutil.move(str(temp_path), str(target_path))
+
+                    # Verify final metadata
+                    final_metadata = self._check_file_metadata(target_path)
+                    self.logger.debug(
+                        f"Final target metadata count: {len(final_metadata)} keys"
+                    )
+
+                    # Compare metadata preservation
+                    preserved_keys = set(original_metadata.keys()) & set(
+                        final_metadata.keys()
+                    )
+                    self.logger.debug(
+                        f"Preserved {len(preserved_keys)} out of {len(original_metadata)} metadata keys"
+                    )
+
+                    self.logger.info(
+                        f"Successfully preserved metadata from {source_path.name} to {target_path.name}"
+                    )
+                    return True
+                else:
+                    self.logger.error("Temp file was not created by ffmpeg")
+                    return False
+            else:
+                self.logger.debug(f"ffmpeg failed with return code {result.returncode}")
+                self.logger.warning(f"Failed to preserve metadata: {result.stderr}")
+                if temp_path.exists():
+                    temp_path.unlink()
+                    self.logger.debug("Cleaned up failed temp file")
+
+                # Try exiftool as fallback for images
+                if target_ext in [".jpg", ".jpeg"] and shutil.which("exiftool"):
+                    self.logger.debug("Trying exiftool fallback")
+                    return self._preserve_metadata_exiftool(source_path, target_path)
+
+            # For JPEG images, if ffmpeg fails, always try exiftool as the primary approach
+            if target_ext in [".jpg", ".jpeg"] and shutil.which("exiftool"):
+                self.logger.debug(
+                    "ffmpeg failed for JPEG, trying exiftool as primary method"
+                )
+                return self._preserve_metadata_exiftool(source_path, target_path)
+
+            return False
+
+        except Exception as e:
+            self.logger.debug(f"Exception occurred during metadata preservation: {e}")
+            self.logger.warning(f"Failed to preserve metadata: {e}")
+            return False
+
+    def _preserve_metadata_exiftool(self, source_path: Path, target_path: Path) -> bool:
+        """
+        Fallback metadata preservation using exiftool for JPEG images.
+        """
+        self.logger.debug("Starting exiftool metadata preservation")
+
+        # Check metadata before exiftool
+        original_metadata = self._check_file_metadata(source_path)
+        target_metadata_before = self._check_file_metadata(target_path)
+
+        self.logger.debug(f"Original metadata count: {len(original_metadata)} keys")
+        self.logger.debug(
+            f"Target metadata count before: {len(target_metadata_before)} keys"
+        )
+
+        try:
+            cmd = [
+                "exiftool",
+                "-overwrite_original",
+                "-TagsFromFile",
+                str(source_path),
+                "-all:all",
+                str(target_path),
+            ]
+
+            self.logger.debug(f"Executing exiftool: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.logger.debug(f"exiftool return code: {result.returncode}")
+
+            if result.stdout:
+                self.logger.debug(f"exiftool stdout: {result.stdout}")
+            if result.stderr:
+                self.logger.debug(f"exiftool stderr: {result.stderr}")
+
+            if result.returncode == 0:
+                # Check final metadata
+                final_metadata = self._check_file_metadata(target_path)
+                self.logger.debug(f"Final metadata count: {len(final_metadata)} keys")
+
+                # Compare metadata preservation
+                preserved_keys = set(original_metadata.keys()) & set(
+                    final_metadata.keys()
+                )
+                self.logger.debug(
+                    f"Preserved {len(preserved_keys)} out of {len(original_metadata)} metadata keys with exiftool"
+                )
+
+                self.logger.info(
+                    f"Successfully preserved metadata using exiftool from {source_path.name} to {target_path.name}"
+                )
+                return True
+            else:
+                self.logger.debug(f"exiftool failed: {result.stderr}")
+                return False
+
+        except Exception as e:
+            self.logger.debug(f"exiftool exception: {e}")
+            self.logger.warning(f"Failed to use exiftool: {e}")
+            return False
+
+    def _move_to_trash(self, file_path: Path) -> bool:
+        """Move a file to platform-specific trash."""
+        try:
+            import platform
+            import subprocess
+
+            system = platform.system()
+
+            if system == "Darwin":  # macOS
+                # Use macOS Trash via osascript
+                trash_cmd = [
+                    "osascript",
+                    "-e",
+                    f'tell application "Finder" to delete POSIX file "{str(file_path.absolute())}"',
+                ]
+                result = subprocess.run(trash_cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    self.logger.info(f"Moved to Trash: {file_path}")
+                    return True
+                else:
+                    self.logger.warning(f"Failed to move to Trash: {result.stderr}")
+
+            elif system == "Linux":
+                # Try trash-cli first, then fall back to creating backup
+                try:
+                    result = subprocess.run(
+                        ["trash", str(file_path)],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    self.logger.info(f"Moved to Trash: {file_path}")
+                    return True
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    pass
+
+            elif system == "Windows":
+                # Use Windows recycle bin via send2trash
+                try:
+                    from send2trash import send2trash
+
+                    send2trash(str(file_path))
+                    self.logger.info(f"Moved to Recycle Bin: {file_path}")
+                    return True
+                except ImportError:
+                    self.logger.warning("send2trash not available for Windows")
+                except Exception as e:
+                    self.logger.warning(f"Failed to move to Recycle Bin: {e}")
+
+            # Fallback: create backup instead of deleting
+            backup_path = file_path.with_name(
+                file_path.stem + "_original" + file_path.suffix
+            )
+            counter = 1
+            while backup_path.exists():
+                backup_path = file_path.with_name(
+                    f"{file_path.stem}_original_{counter}{file_path.suffix}"
+                )
+                counter += 1
+
+            shutil.move(str(file_path), str(backup_path))
+            self.logger.info(f"Created backup instead of trash: {backup_path}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to move file to trash: {e}")
+            return False

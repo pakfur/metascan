@@ -1830,6 +1830,12 @@ class MainWindow(QMainWindow):
                     file_type=config["file_type"],
                     scale=config["scale"],
                     replace_original=config["replace_original"],
+                    enhance_faces=config.get("enhance_faces", False),
+                    interpolate_frames=config.get("interpolate_frames", False),
+                    interpolation_factor=config.get("interpolation_factor", 2),
+                    model_type=config.get("model_type", "general"),
+                    fps_override=config.get("fps_override"),
+                    preserve_metadata=config.get("preserve_metadata", True),
                 )
 
             # Start worker if not already running
