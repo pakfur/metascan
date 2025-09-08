@@ -461,6 +461,17 @@ class MainWindow(QMainWindow):
             self.on_thumbnail_double_clicked
         )
 
+        # Connect context menu signals
+        self.thumbnail_view.open_requested.connect(self.on_context_open_requested)
+        self.thumbnail_view.open_folder_requested.connect(
+            self.on_context_open_folder_requested
+        )
+        self.thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
+        self.thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        self.thumbnail_view.refresh_metadata_requested.connect(
+            self.on_context_refresh_metadata_requested
+        )
+
         # Load initial media if any exists
         self.load_all_media()
 
@@ -531,6 +542,11 @@ class MainWindow(QMainWindow):
         refresh_action.setShortcut("F5")
         view_menu.addAction(refresh_action)
 
+        # Upscale Queue Window action
+        upscale_queue_action = QAction("Upscale Queue Window", self)
+        upscale_queue_action.triggered.connect(self._show_upscale_queue)
+        view_menu.addAction(upscale_queue_action)
+
         view_menu.addSeparator()
 
         # Sort by submenu
@@ -591,26 +607,7 @@ class MainWindow(QMainWindow):
         scan_button.clicked.connect(self._scan_directories)
         toolbar.addWidget(scan_button)
 
-        # Add some spacing
-        toolbar.addSeparator()
 
-        # Config button - no custom styling, use theme
-        config_button = QPushButton("Config")
-        config_button.clicked.connect(self._open_config)
-        toolbar.addWidget(config_button)
-
-        # Add separator
-        toolbar.addSeparator()
-
-        # Upscale button
-        upscale_button = QPushButton("Upscale")
-        upscale_button.clicked.connect(self._handle_upscale)
-        toolbar.addWidget(upscale_button)
-
-        # Queue button
-        queue_button = QPushButton("Queue")
-        queue_button.clicked.connect(self._show_upscale_queue)
-        toolbar.addWidget(queue_button)
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
@@ -1159,6 +1156,126 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error changing thumbnail size: {e}")
 
+    # Context menu handlers
+    def on_context_open_requested(self, media):
+        """Handle Open request from thumbnail context menu."""
+        try:
+            self.thumbnail_view.on_thumbnail_double_clicked(media)
+        except Exception as e:
+            self.logger.error(f"Error opening media from context menu: {e}")
+
+    def on_context_open_folder_requested(self, media):
+        """Handle Open Folder request from thumbnail context menu."""
+        try:
+            # Temporarily set selected media for existing open folder functionality
+            old_selected = self.thumbnail_view.selected_media
+            self.thumbnail_view.selected_media = media
+            self._open_selected_folder()
+            self.thumbnail_view.selected_media = old_selected
+        except Exception as e:
+            self.logger.error(f"Error opening folder from context menu: {e}")
+
+    def on_context_delete_requested(self, media):
+        """Handle Delete request from thumbnail context menu."""
+        try:
+            # Use existing delete functionality
+            self._confirm_and_delete_media(media)
+        except Exception as e:
+            self.logger.error(f"Error deleting media from context menu: {e}")
+
+    def on_context_upscale_requested(self, media):
+        """Handle Upscale request from thumbnail context menu."""
+        try:
+            # Create a single-item list and use existing upscale functionality
+            selected_media_list = [media]
+            self._show_upscale_dialog(selected_media_list)
+        except Exception as e:
+            self.logger.error(f"Error starting upscale from context menu: {e}")
+
+    def on_context_refresh_metadata_requested(self, media):
+        """Handle Refresh Metadata request from thumbnail context menu."""
+        try:
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self,
+                "Refresh Metadata",
+                f"Refresh metadata for '{media.file_name}'?\n\n"
+                "This will rescan the file and update the database entry and thumbnail.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self._refresh_single_media_metadata(media)
+        except Exception as e:
+            self.logger.error(f"Error refreshing metadata from context menu: {e}")
+
+    def _refresh_single_media_metadata(self, media):
+        """Refresh metadata for a single media file."""
+        try:
+            from metascan.core.media import Media
+
+            file_path = media.file_path
+
+            if not file_path.exists():
+                QMessageBox.warning(
+                    self, "File Not Found", f"The file no longer exists:\n{file_path}"
+                )
+                return
+
+            # Delete old metadata entry from database
+            self.db_manager.delete_media(file_path)
+
+            # Delete old thumbnail
+            if self.thumbnail_cache:
+                thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
+                if thumbnail_path and thumbnail_path.exists():
+                    thumbnail_path.unlink()
+
+            # Rescan the file - Scanner requires db_manager
+            scanner = Scanner(self.db_manager)
+            new_media = scanner._process_media_file(file_path)
+
+            if new_media:
+                # Add to database
+                self.db_manager.save_media(new_media)
+
+                # Generate new thumbnail
+                if self.thumbnail_cache:
+                    self.thumbnail_cache.get_or_create_thumbnail(file_path)
+
+                # Update the in-memory media list
+                for i, existing_media in enumerate(self.all_media):
+                    if existing_media.file_path == file_path:
+                        self.all_media[i] = new_media
+                        break
+
+                # Refresh the UI
+                self.apply_all_filters()
+
+                # Update metadata panel if this media is currently selected
+                if (
+                    self.thumbnail_view.selected_media
+                    and self.thumbnail_view.selected_media.file_path == file_path
+                ):
+                    self.metadata_panel.display_metadata(new_media)
+
+                QMessageBox.information(
+                    self,
+                    "Metadata Refreshed",
+                    f"Successfully refreshed metadata for '{media.file_name}'",
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Scan Failed", f"Failed to rescan file:\n{file_path}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error refreshing metadata for {media.file_path}: {e}")
+            QMessageBox.critical(
+                self, "Refresh Error", f"Failed to refresh metadata:\n{str(e)}"
+            )
+
     def _recreate_thumbnail_view(self, new_size: Tuple[int, int]) -> None:
         """Recreate the thumbnail view with new size."""
         # Get current media list and filters
@@ -1186,6 +1303,13 @@ class MainWindow(QMainWindow):
         self.thumbnail_view.thumbnail_size_changed.disconnect()
         self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
 
+        # Disconnect context menu signals
+        self.thumbnail_view.open_requested.disconnect()
+        self.thumbnail_view.open_folder_requested.disconnect()
+        self.thumbnail_view.delete_requested.disconnect()
+        self.thumbnail_view.upscale_requested.disconnect()
+        self.thumbnail_view.refresh_metadata_requested.disconnect()
+
         # Create new thumbnail view
         scroll_step = self.config.get("scroll_wheel_step", 120)
         new_thumbnail_view = VirtualThumbnailView(
@@ -1203,6 +1327,17 @@ class MainWindow(QMainWindow):
         )
         new_thumbnail_view.scroll_area.item_double_clicked.connect(
             self.on_thumbnail_double_clicked
+        )
+
+        # Connect context menu signals
+        new_thumbnail_view.open_requested.connect(self.on_context_open_requested)
+        new_thumbnail_view.open_folder_requested.connect(
+            self.on_context_open_folder_requested
+        )
+        new_thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
+        new_thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        new_thumbnail_view.refresh_metadata_requested.connect(
+            self.on_context_refresh_metadata_requested
         )
 
         # Replace in splitter using saved reference
