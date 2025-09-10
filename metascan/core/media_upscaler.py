@@ -1,5 +1,5 @@
 """
-Video and image refiner module for metascan.
+Media upscaler module for metascan.
 Handles upscaling using Real-ESRGAN for both images and videos.
 """
 
@@ -56,7 +56,7 @@ if "torchvision.transforms.functional_tensor" not in sys.modules:
         pass
 
 
-class VideoRefiner:
+class MediaUpscaler:
     """Handles video and image upscaling for metascan."""
 
     def __init__(
@@ -451,7 +451,10 @@ class VideoRefiner:
             cv2.imwrite(str(output_path), output)
 
             if progress_callback:
-                progress_callback(100)
+                # Check if callback returns False (indicating cancellation)
+                if not progress_callback(100):
+                    self.logger.info("Processing cancelled by user")
+                    return False
 
             # Log completion with elapsed time
             elapsed_time = time.time() - start_time
@@ -651,7 +654,10 @@ class VideoRefiner:
                 # Keep the upscaled file at output_path (with suffix)
 
             if progress_callback:
-                progress_callback(100)
+                # Check if callback returns False (indicating cancellation)
+                if not progress_callback(100):
+                    self.logger.info("Processing cancelled by user")
+                    return False
 
             # Log completion with elapsed time
             elapsed_time = time.time() - start_time
@@ -731,7 +737,9 @@ class VideoRefiner:
             self.logger.info(f"Using temporary directory: {str(temp_path)}")
 
             if progress_callback:
-                progress_callback(5)
+                if not progress_callback(5):
+                    self.logger.info("Video processing cancelled by user")
+                    return False
 
             # Extract frames
             frames_dir = temp_path / "frames"
@@ -741,7 +749,9 @@ class VideoRefiner:
                 return False
 
             if progress_callback:
-                progress_callback(20)
+                if not progress_callback(20):
+                    self.logger.info("Video processing cancelled by user")
+                    return False
 
             # Get video info
             video_info = self._get_video_info(input_path)
@@ -812,7 +822,10 @@ class VideoRefiner:
 
                 if progress_callback:
                     progress = 20 + (idx * 60 / total_frames)
-                    progress_callback(progress)
+                    # Check if callback returns False (indicating cancellation)
+                    if not progress_callback(progress):
+                        self.logger.info("Video processing cancelled by user")
+                        return False
 
                 img = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
                 if img is None:
@@ -831,7 +844,9 @@ class VideoRefiner:
                 cv2.imwrite(str(output_frame_path), output)
 
             if progress_callback:
-                progress_callback(85)
+                if not progress_callback(85):
+                    self.logger.info("Video processing cancelled by user")
+                    return False
 
             # Override FPS if specified
             if fps is not None:
@@ -844,7 +859,9 @@ class VideoRefiner:
                 return False
 
             if progress_callback:
-                progress_callback(95)
+                if not progress_callback(95):
+                    self.logger.info("Video processing cancelled by user")
+                    return False
 
             # Handle output - always replace original
             # Preserve metadata if requested (copy from original to upscaled)
@@ -872,7 +889,10 @@ class VideoRefiner:
                 # Keep the upscaled file at output_path (with suffix)
 
             if progress_callback:
-                progress_callback(100)
+                # Check if callback returns False (indicating cancellation)
+                if not progress_callback(100):
+                    self.logger.info("Processing cancelled by user")
+                    return False
 
             # Log completion with elapsed time
             elapsed_time = time.time() - start_time
@@ -1080,7 +1100,10 @@ class VideoRefiner:
                 shutil.move(str(output_path), str(input_path))
 
             if progress_callback:
-                progress_callback(100)
+                # Check if callback returns False (indicating cancellation)
+                if not progress_callback(100):
+                    self.logger.info("Processing cancelled by user")
+                    return False
 
             # Log completion with elapsed time
             elapsed_time = time.time() - start_time
@@ -1177,7 +1200,10 @@ class VideoRefiner:
                 return False
 
             if progress_callback:
-                progress_callback(100)
+                # Check if callback returns False (indicating cancellation)
+                if not progress_callback(100):
+                    self.logger.info("Processing cancelled by user")
+                    return False
 
             # Log completion with elapsed time
             elapsed_time = time.time() - start_time
