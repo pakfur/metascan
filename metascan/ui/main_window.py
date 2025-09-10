@@ -19,10 +19,11 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QCheckBox,
     QComboBox,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
 from typing import Tuple, Dict, List
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
 from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
@@ -34,7 +35,7 @@ from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
 from metascan.ui.upscale_queue_window import UpscaleQueueWindow
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.video_refiner import VideoRefiner
+from metascan.core.media_upscaler import MediaUpscaler
 from metascan.core.upscale_queue import UpscaleQueue, UpscaleWorker
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.utils.app_paths import (
@@ -320,7 +321,7 @@ class MainWindow(QMainWindow):
 
         # Initialize upscale components
         models_dir = get_data_dir() / "models"
-        self.video_refiner = VideoRefiner(
+        self.media_upscaler = MediaUpscaler(
             models_dir=models_dir, device="auto", tile_size=512, debug=False
         )
 
@@ -330,7 +331,7 @@ class MainWindow(QMainWindow):
 
         # Initialize upscale worker thread
         self.upscale_worker = UpscaleWorker(
-            self.upscale_queue, self.video_refiner, self.db_manager
+            self.upscale_queue, self.media_upscaler, self.db_manager
         )
 
         # Reset any processing tasks from previous session
@@ -338,8 +339,13 @@ class MainWindow(QMainWindow):
 
         # Connect upscale worker signals
         self.upscale_worker.database_updated.connect(self.on_media_database_updated)
+        
+        # Connect queue signals to show/hide spinner
+        self.upscale_queue.task_added.connect(self._on_task_added)
+        self.upscale_worker.task_completed.connect(self._on_task_completed)
+        self.upscale_worker.task_failed.connect(self._on_task_failed)
 
-        # Start worker if there are pending tasks
+        # Start worker if there are pending tasks (but don't show spinner yet - toolbar not created)
         if self.upscale_queue.get_next_pending():
             self.upscale_worker.start()
 
@@ -409,6 +415,18 @@ class MainWindow(QMainWindow):
         # Create toolbar
         self._create_toolbar()
 
+        # Show spinner if there are pending tasks from previous session
+        pending_task = self.upscale_queue.get_next_pending()
+        if pending_task:
+            # Show spinner for existing pending tasks
+            self._show_spinner()
+        
+        # Also check for PROCESSING tasks and show spinner if found
+        all_tasks = self.upscale_queue.get_all_tasks()
+        processing_tasks = [task for task in all_tasks if task.status.value == 'processing']
+        if processing_tasks:
+            self._show_spinner()
+            
         # Setup keyboard shortcuts
         self._setup_shortcuts()
 
@@ -599,25 +617,37 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # Create theme selector and add to right side of toolbar
-        self._add_theme_selector(toolbar)
-
         # Scan button - no custom styling, use theme
         scan_button = QPushButton("Scan")
         scan_button.clicked.connect(self._scan_directories)
         toolbar.addWidget(scan_button)
+        
+        
+        # Add flexible spacer to center the upscaling indicator
+        left_spacer = QWidget()
+        left_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        toolbar.addWidget(left_spacer)
+        
+        # Add upscaling progress indicator (initially hidden)
+        self._create_upscaling_indicator(toolbar)
+        
+        # Add another spacer for centering
+        right_spacer = QWidget()
+        right_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        toolbar.addWidget(right_spacer)
+
+        # Create theme selector and add to right side of toolbar
+        self._add_theme_selector(toolbar)
 
 
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
-        # Add spacer to push theme selector to the right
-        spacer = QWidget()
-        spacer.setSizePolicy(
-            spacer.sizePolicy().horizontalPolicy().Expanding,
-            spacer.sizePolicy().verticalPolicy().Preferred,
-        )
-        toolbar.addWidget(spacer)
+        # No need for spacer here since we already have spacers in the main toolbar
 
         # Theme label - no custom styling, use theme
         theme_label = QLabel("Theme:")
@@ -640,6 +670,74 @@ class MainWindow(QMainWindow):
         padding = QWidget()
         padding.setFixedWidth(10)
         toolbar.addWidget(padding)
+
+    def _create_upscaling_indicator(self, toolbar):
+        """Create the upscaling progress indicator widget."""
+        self.upscaling_widget = QLabel("⏳ Upscaling...")
+        self.upscaling_widget.setStyleSheet(
+            "QLabel { padding: 4px 8px; font-weight: bold; color: #333; background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 3px; }"
+            "QLabel:hover { background-color: #e0e0e0; }"
+        )
+        self.upscaling_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upscaling_widget.setVisible(False)  # Hidden by default
+        
+        # Set size policy and constraints
+        self.upscaling_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.upscaling_widget.setFixedSize(120, 24)  # Fixed width and height
+        
+        # Add click handler
+        self.upscaling_widget.mousePressEvent = lambda event: self._show_upscale_queue()
+        
+        # Add to toolbar
+        toolbar.addWidget(self.upscaling_widget)
+        
+        # Create animation timer (stopped initially)
+        self.spinner_timer = QTimer()
+        self.spinner_timer.timeout.connect(self._animate_spinner)
+        self.spinner_frames = ["⏳ Upscaling...", "⌛ Upscaling..."]
+        self.spinner_frame_index = 0
+        
+
+    def _animate_spinner(self):
+        """Animate the spinner icon."""
+        self.spinner_frame_index = (self.spinner_frame_index + 1) % len(self.spinner_frames)
+        self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+
+    def _show_spinner(self):
+        """Show the upscaling progress indicator."""
+        self.upscaling_widget.setVisible(True)
+        # Force size after showing (toolkit might override it)
+        self.upscaling_widget.setFixedSize(120, 24)
+        if not self.spinner_timer.isActive():
+            self.spinner_timer.start(500)  # Update every 500ms
+        
+    def _hide_spinner(self):
+        """Hide the upscaling progress indicator."""
+        self.spinner_timer.stop()
+        self.upscaling_widget.setVisible(False)
+
+    def _on_task_added(self, task):
+        """Handle when a task is added to the queue."""
+        self._show_spinner()
+
+    def _on_task_completed(self, task_id, output_path):
+        """Handle when a task is completed."""
+        self._check_hide_spinner()
+
+    def _on_task_failed(self, task_id, error_message):
+        """Handle when a task fails."""
+        self._check_hide_spinner()
+
+    def _check_hide_spinner(self):
+        """Check if there are pending or processing tasks and hide spinner if none."""
+        pending_task = self.upscale_queue.get_next_pending()
+        all_tasks = self.upscale_queue.get_all_tasks()
+        processing_tasks = [task for task in all_tasks if task.status.value == 'processing']
+        
+        if not pending_task and not processing_tasks:
+            self._hide_spinner()
 
     def load_config(self):
         """Load configuration from file."""
@@ -1903,7 +2001,7 @@ class MainWindow(QMainWindow):
                 return
 
             # Check if models are available
-            if not self.video_refiner.models_available:
+            if not self.media_upscaler.models_available:
                 # Show setup dialog
                 setup_dialog = ModelSetupDialog(self)
                 setup_dialog.setup_completed.connect(self._setup_models)
@@ -1977,15 +2075,6 @@ class MainWindow(QMainWindow):
             if not self.upscale_worker.isRunning():
                 self.upscale_worker.start()
 
-            # Show queue window
-            self._show_upscale_queue()
-
-            # Show notification
-            count = len(task_configs)
-            QMessageBox.information(
-                self, "Tasks Added", f"Added {count} file(s) to the upscale queue."
-            )
-
         except Exception as e:
             print(f"Error adding upscale tasks: {e}")
             QMessageBox.critical(
@@ -2010,7 +2099,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         # Run setup in background
-        success = self.video_refiner.setup_models(progress_callback)
+        success = self.media_upscaler.setup_models(progress_callback)
 
         if not success:
             QMessageBox.critical(
