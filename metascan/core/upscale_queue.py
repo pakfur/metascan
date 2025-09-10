@@ -182,6 +182,8 @@ class UpscaleQueue(QObject):
             if task_id not in self.tasks:
                 return
 
+            print(f"DEBUG: Task {task_id}: Status updated to {str(status)}")
+
             task = self.tasks[task_id]
 
             if status is not None:
@@ -213,11 +215,35 @@ class UpscaleQueue(QObject):
         """Remove a task from the queue."""
         with self._lock:
             if task_id in self.tasks:
-                del self.tasks[task_id]
-                self._save_queue()
-
-        self.task_removed.emit(task_id)
-        self.queue_changed.emit()
+                task = self.tasks[task_id]
+                # If the task is currently processing, mark it as cancelled first
+                # so the worker can detect and stop processing it
+                if task.status == UpscaleStatus.PROCESSING:
+                    task.status = UpscaleStatus.CANCELLED
+                    self._save_queue()
+                    self.task_updated.emit(task)
+                    # Give the worker a moment to detect the cancellation
+                    # Then actually remove it using QTimer (Qt-native, no threading issues)
+                    def delayed_remove():
+                        with self._lock:
+                            if task_id in self.tasks:
+                                del self.tasks[task_id]
+                                self._save_queue()
+                                self.task_removed.emit(task_id)
+                                self.queue_changed.emit()
+                    # Use QTimer.singleShot to delay removal by 500ms on main thread
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(500, delayed_remove)
+                else:
+                    # Task is not processing, safe to remove immediately
+                    del self.tasks[task_id]
+                    self._save_queue()
+                    self.task_removed.emit(task_id)
+                    self.queue_changed.emit()
+            else:
+                # Task not found, still emit signals for UI consistency
+                self.task_removed.emit(task_id)
+                self.queue_changed.emit()
 
     def get_next_pending(self) -> Optional[UpscaleTask]:
         """Get the next pending task."""
@@ -287,19 +313,19 @@ class UpscaleWorker(QThread):
     database_updated = pyqtSignal(str, int, int)  # file_path, width, height
 
     def __init__(
-        self, queue: UpscaleQueue, refiner: Any, db_manager: Any = None
+        self, queue: UpscaleQueue, upscaler: Any, db_manager: Any = None
     ) -> None:
         """
         Initialize the worker.
 
         Args:
             queue: The upscale queue
-            refiner: VideoRefiner instance
+            upscaler: MediaUpscaler instance
             db_manager: Database manager for updating media info (optional)
         """
         super().__init__()
         self.queue = queue
-        self.refiner = refiner
+        self.upscaler = upscaler
         self.db_manager = db_manager
         self._stop_requested = False
         self._current_task_id: Optional[str] = None
@@ -320,6 +346,11 @@ class UpscaleWorker(QThread):
                 self.msleep(1000)
                 continue
 
+            # Check if task was cancelled before we start processing
+            current_task = self.queue.get_task(task.id)
+            if not current_task or current_task.status == UpscaleStatus.CANCELLED:
+                continue
+
             self._current_task_id = task.id
 
             # Update task status
@@ -328,6 +359,12 @@ class UpscaleWorker(QThread):
             try:
                 # Process the task
                 success = self._process_task(task)
+
+                # Check again if task was cancelled after processing
+                current_task = self.queue.get_task(task.id)
+                if not current_task or current_task.status == UpscaleStatus.CANCELLED:
+                    self.logger.info(f"Task {task.id} was cancelled after processing")
+                    continue
 
                 if success:
                     # Determine output path
@@ -352,7 +389,7 @@ class UpscaleWorker(QThread):
                                 (
                                     new_width,
                                     new_height,
-                                ) = self.refiner.get_media_dimensions(output_file_path)
+                                ) = self.upscaler.get_media_dimensions(output_file_path)
                                 if new_width > 0 and new_height > 0:
                                     # Update the database - file was replaced at original path
                                     if self.db_manager.update_media_dimensions(
@@ -409,13 +446,20 @@ class UpscaleWorker(QThread):
         def progress_callback(progress: float) -> bool:
             if self._stop_requested:
                 return False
+            
+            # Check if the task has been cancelled
+            current_task = self.queue.get_task(task.id)
+            if not current_task or current_task.status == UpscaleStatus.CANCELLED:
+                self.logger.info(f"Task {task.id} was cancelled during processing")
+                return False
+                
             self.queue.update_task(task.id, progress=progress)
             self.progress_updated.emit(task.id, progress)
             return True
 
         # Process based on file type
         if task.file_type == "image":
-            result = self.refiner.process_image(
+            result = self.upscaler.process_image(
                 input_path,
                 output_path,
                 scale=task.scale,
@@ -435,7 +479,7 @@ class UpscaleWorker(QThread):
                     )
 
                     # Interpolate frames
-                    interp_result = self.refiner.interpolate_frames_rife(
+                    interp_result = self.upscaler.interpolate_frames_rife(
                         input_path,
                         temp_interpolated,
                         interpolation_factor=task.interpolation_factor,
@@ -447,7 +491,7 @@ class UpscaleWorker(QThread):
                         return False
 
                     # Then upscale the interpolated video
-                    result = self.refiner.process_video(
+                    result = self.upscaler.process_video(
                         temp_interpolated,
                         output_path,
                         scale=task.scale,
@@ -465,7 +509,7 @@ class UpscaleWorker(QThread):
                     return bool(result)
                 else:
                     # Just interpolate
-                    result = self.refiner.interpolate_frames_rife(
+                    result = self.upscaler.interpolate_frames_rife(
                         input_path,
                         output_path,
                         interpolation_factor=task.interpolation_factor,
@@ -475,7 +519,7 @@ class UpscaleWorker(QThread):
                     return bool(result)
             else:
                 # Regular video upscaling
-                result = self.refiner.process_video(
+                result = self.upscaler.process_video(
                     input_path,
                     output_path,
                     scale=task.scale,
