@@ -222,6 +222,7 @@ class UpscaleQueue(QObject):
                     task.status = UpscaleStatus.CANCELLED
                     self._save_queue()
                     self.task_updated.emit(task)
+
                     # Give the worker a moment to detect the cancellation
                     # Then actually remove it using QTimer (Qt-native, no threading issues)
                     def delayed_remove():
@@ -231,8 +232,10 @@ class UpscaleQueue(QObject):
                                 self._save_queue()
                                 self.task_removed.emit(task_id)
                                 self.queue_changed.emit()
+
                     # Use QTimer.singleShot to delay removal by 500ms on main thread
                     from PyQt6.QtCore import QTimer
+
                     QTimer.singleShot(500, delayed_remove)
                 else:
                     # Task is not processing, safe to remove immediately
@@ -446,13 +449,13 @@ class UpscaleWorker(QThread):
         def progress_callback(progress: float) -> bool:
             if self._stop_requested:
                 return False
-            
+
             # Check if the task has been cancelled
             current_task = self.queue.get_task(task.id)
             if not current_task or current_task.status == UpscaleStatus.CANCELLED:
                 self.logger.info(f"Task {task.id} was cancelled during processing")
                 return False
-                
+
             self.queue.update_task(task.id, progress=progress)
             self.progress_updated.emit(task.id, progress)
             return True

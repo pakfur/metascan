@@ -246,7 +246,7 @@ class UpscaleDialog(QDialog):
         """Handle accept button click."""
         # Get selected options
         scale = int(self.scale_combo.currentText().replace("x", ""))
-        replace_original = True  
+        replace_original = True
         enhance_faces = self.face_enhancement_checkbox.isChecked()
 
         # Model type

@@ -20,13 +20,17 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QAction
 from pathlib import Path
 from typing import Dict
-from metascan.core.upscale_queue import UpscaleTask, UpscaleStatus, UpscaleQueue
+from metascan.core.upscale_queue_process import (
+    UpscaleTask,
+    UpscaleStatus,
+    ProcessUpscaleQueue,
+)
 
 
 class UpscaleQueueWindow(QMainWindow):
     """Window for displaying and managing the upscale queue."""
 
-    def __init__(self, queue: UpscaleQueue, parent=None):
+    def __init__(self, queue: ProcessUpscaleQueue, parent=None):
         """
         Initialize the queue window.
 

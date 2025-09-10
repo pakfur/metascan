@@ -36,7 +36,7 @@ from metascan.ui.upscale_queue_window import UpscaleQueueWindow
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media_upscaler import MediaUpscaler
-from metascan.core.upscale_queue import UpscaleQueue, UpscaleWorker
+from metascan.core.upscale_queue_process import ProcessUpscaleQueue
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.utils.app_paths import (
     get_data_dir,
@@ -325,29 +325,23 @@ class MainWindow(QMainWindow):
             models_dir=models_dir, device="auto", tile_size=512, debug=False
         )
 
-        # Initialize upscale queue
-        queue_file = get_data_dir() / "upscale_queue.json"
-        self.upscale_queue = UpscaleQueue(queue_file)
+        # Initialize process-based upscale queue
+        queue_dir = get_data_dir() / "queue"
+        self.upscale_queue = ProcessUpscaleQueue(queue_dir)
 
-        # Initialize upscale worker thread
-        self.upscale_worker = UpscaleWorker(
-            self.upscale_queue, self.media_upscaler, self.db_manager
-        )
-
-        # Reset any processing tasks from previous session
-        self.upscale_queue.reset_processing_tasks()
-
-        # Connect upscale worker signals
-        self.upscale_worker.database_updated.connect(self.on_media_database_updated)
-        
         # Connect queue signals to show/hide spinner
         self.upscale_queue.task_added.connect(self._on_task_added)
-        self.upscale_worker.task_completed.connect(self._on_task_completed)
-        self.upscale_worker.task_failed.connect(self._on_task_failed)
+        self.upscale_queue.task_updated.connect(self._on_task_updated)
+        self.upscale_queue.task_removed.connect(self._on_task_removed)
 
-        # Start worker if there are pending tasks (but don't show spinner yet - toolbar not created)
+        # Set up polling timer for queue updates
+        self.queue_poll_timer = QTimer()
+        self.queue_poll_timer.timeout.connect(self._poll_queue_updates)
+        self.queue_poll_timer.start(500)  # Poll every 500ms
+
+        # Start processing if there are pending tasks (but don't show spinner yet - toolbar not created)
         if self.upscale_queue.get_next_pending():
-            self.upscale_worker.start()
+            self.upscale_queue.start_processing()
 
         # Initialize upscale queue window (hidden initially)
         self.upscale_queue_window = None
@@ -420,13 +414,15 @@ class MainWindow(QMainWindow):
         if pending_task:
             # Show spinner for existing pending tasks
             self._show_spinner()
-        
+
         # Also check for PROCESSING tasks and show spinner if found
         all_tasks = self.upscale_queue.get_all_tasks()
-        processing_tasks = [task for task in all_tasks if task.status.value == 'processing']
+        processing_tasks = [
+            task for task in all_tasks if task.status.value == "processing"
+        ]
         if processing_tasks:
             self._show_spinner()
-            
+
         # Setup keyboard shortcuts
         self._setup_shortcuts()
 
@@ -621,18 +617,17 @@ class MainWindow(QMainWindow):
         scan_button = QPushButton("Scan")
         scan_button.clicked.connect(self._scan_directories)
         toolbar.addWidget(scan_button)
-        
-        
+
         # Add flexible spacer to center the upscaling indicator
         left_spacer = QWidget()
         left_spacer.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         toolbar.addWidget(left_spacer)
-        
+
         # Add upscaling progress indicator (initially hidden)
         self._create_upscaling_indicator(toolbar)
-        
+
         # Add another spacer for centering
         right_spacer = QWidget()
         right_spacer.setSizePolicy(
@@ -642,8 +637,6 @@ class MainWindow(QMainWindow):
 
         # Create theme selector and add to right side of toolbar
         self._add_theme_selector(toolbar)
-
-
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
@@ -680,64 +673,90 @@ class MainWindow(QMainWindow):
         )
         self.upscaling_widget.setCursor(Qt.CursorShape.PointingHandCursor)
         self.upscaling_widget.setVisible(False)  # Hidden by default
-        
+
         # Set size policy and constraints
         self.upscaling_widget.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
         self.upscaling_widget.setFixedSize(120, 24)  # Fixed width and height
-        
+
         # Add click handler
         self.upscaling_widget.mousePressEvent = lambda event: self._show_upscale_queue()
-        
+
         # Add to toolbar
         toolbar.addWidget(self.upscaling_widget)
-        
+
         # Create animation timer (stopped initially)
         self.spinner_timer = QTimer()
         self.spinner_timer.timeout.connect(self._animate_spinner)
         self.spinner_frames = ["⏳ Upscaling...", "⌛ Upscaling..."]
         self.spinner_frame_index = 0
-        
 
     def _animate_spinner(self):
         """Animate the spinner icon."""
-        self.spinner_frame_index = (self.spinner_frame_index + 1) % len(self.spinner_frames)
-        self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.spinner_frame_index = (self.spinner_frame_index + 1) % len(
+                self.spinner_frames
+            )
+            self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
 
     def _show_spinner(self):
         """Show the upscaling progress indicator."""
-        self.upscaling_widget.setVisible(True)
-        # Force size after showing (toolkit might override it)
-        self.upscaling_widget.setFixedSize(120, 24)
-        if not self.spinner_timer.isActive():
-            self.spinner_timer.start(500)  # Update every 500ms
-        
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.upscaling_widget.setVisible(True)
+            # Force size after showing (toolkit might override it)
+            self.upscaling_widget.setFixedSize(120, 24)
+            if not self.spinner_timer.isActive():
+                self.spinner_timer.start(500)  # Update every 500ms
+
     def _hide_spinner(self):
         """Hide the upscaling progress indicator."""
         self.spinner_timer.stop()
-        self.upscaling_widget.setVisible(False)
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.upscaling_widget.setVisible(False)
 
     def _on_task_added(self, task):
         """Handle when a task is added to the queue."""
         self._show_spinner()
+        # Start processing immediately if no tasks are currently running
+        self.upscale_queue.start_processing()
 
-    def _on_task_completed(self, task_id, output_path):
-        """Handle when a task is completed."""
-        self._check_hide_spinner()
+    def _on_task_updated(self, task):
+        """Handle when a task is updated."""
+        # Check if we need to hide spinner based on current queue state
+        self._update_spinner_visibility()
 
-    def _on_task_failed(self, task_id, error_message):
-        """Handle when a task fails."""
-        self._check_hide_spinner()
+        # If this task completed successfully, refresh the current view
+        if task.status.value == "completed":
+            # Trigger a rescan to detect new upscaled files
+            self._scan_directories()
 
-    def _check_hide_spinner(self):
-        """Check if there are pending or processing tasks and hide spinner if none."""
-        pending_task = self.upscale_queue.get_next_pending()
+    def _on_task_removed(self, task_id):
+        """Handle when a task is removed from the queue."""
+        self._update_spinner_visibility()
+
+    def _update_spinner_visibility(self):
+        """Update spinner visibility based on current queue state."""
         all_tasks = self.upscale_queue.get_all_tasks()
-        processing_tasks = [task for task in all_tasks if task.status.value == 'processing']
-        
-        if not pending_task and not processing_tasks:
+        has_active_tasks = any(
+            task.status.value in ["pending", "processing"] for task in all_tasks
+        )
+
+        if has_active_tasks:
+            self._show_spinner()
+        else:
             self._hide_spinner()
+
+    def _poll_queue_updates(self):
+        """Poll for queue updates (called by timer)."""
+        try:
+            # Tell the queue to poll for process updates
+            self.upscale_queue.poll_updates()
+            # Update spinner visibility
+            self._update_spinner_visibility()
+        except Exception as e:
+            # Don't let polling errors crash the app
+            print(f"Error during queue polling: {e}")
 
     def load_config(self):
         """Load configuration from file."""
@@ -2071,9 +2090,8 @@ class MainWindow(QMainWindow):
                     preserve_metadata=config.get("preserve_metadata", True),
                 )
 
-            # Start worker if not already running
-            if not self.upscale_worker.isRunning():
-                self.upscale_worker.start()
+            # Start processing (ProcessUpscaleQueue handles worker management)
+            self.upscale_queue.start_processing()
 
         except Exception as e:
             print(f"Error adding upscale tasks: {e}")
@@ -2110,10 +2128,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Handle application close event."""
-        # Stop the upscale worker
-        if hasattr(self, "upscale_worker") and self.upscale_worker.isRunning():
-            self.upscale_worker.stop()
-            self.upscale_worker.wait(5000)  # Wait up to 5 seconds
+        # Stop the polling timer
+        if hasattr(self, "queue_poll_timer"):
+            self.queue_poll_timer.stop()
+
+        # Shutdown the upscale queue and any running processes
+        if hasattr(self, "upscale_queue"):
+            self.upscale_queue.shutdown()
 
         # Close queue window if open
         if hasattr(self, "upscale_queue_window") and self.upscale_queue_window:
