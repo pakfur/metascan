@@ -677,7 +677,7 @@ class MainWindow(QMainWindow):
         self.upscaling_widget.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        self.upscaling_widget.setFixedSize(200, 24)  # Wider to fit progress text
+        self.upscaling_widget.setFixedSize(400, 24)  # Wider to fit progress text
 
         # Add click handler
         self.upscaling_widget.mousePressEvent = lambda event: self._show_upscale_queue()
@@ -688,7 +688,7 @@ class MainWindow(QMainWindow):
         # Create animation timer (stopped initially)
         self.spinner_timer = QTimer()
         self.spinner_timer.timeout.connect(self._animate_spinner)
-        self.spinner_frames = ["⏳", "⌛", "⏲️", "⏰"]
+        self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
         self.spinner_frame_index = 0
 
     def _animate_spinner(self):
@@ -708,14 +708,14 @@ class MainWindow(QMainWindow):
                 total = len(processing) + len(pending)
                 current = len(completed) + 1 if processing else len(completed)
                 
-                if processing and processing[0].progress:
+                if processing and processing[0].progress is not None:
                     percent = int(processing[0].progress)
                 else:
                     percent = 0
                 
                 if total > 0:
                     spinner = self.spinner_frames[self.spinner_frame_index]
-                    self.upscaling_widget.setText(f"{spinner} Upscaling: {current} of {total} ({percent}%)")
+                    self.upscaling_widget.setText(f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}")
                 else:
                     self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
             else:
@@ -735,12 +735,12 @@ class MainWindow(QMainWindow):
                 current = len(completed) + 1 if processing else len(completed)
                 
                 spinner = self.spinner_frames[self.spinner_frame_index]
-                self.upscaling_widget.setText(f"{spinner} Upscaling: {current} of {total} (0%)")
+                self.upscaling_widget.setText(f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}")
             else:
                 self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
 
             if not self.spinner_timer.isActive():
-                self.spinner_timer.start(500)  # Update every 500ms
+                self.spinner_timer.start(100)  
 
     def _hide_spinner(self):
         """Hide the upscaling progress indicator."""

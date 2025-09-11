@@ -629,21 +629,31 @@ class MediaUpscaler:
             # Save to the provided output_path first (which has suffix)
             cv2.imwrite(str(output_path), output)
 
-            # Preserve metadata if requested (copy from original to upscaled)
-            if preserve_metadata:
-                self._preserve_metadata(input_path, output_path)
-
             # Save the target path (where original was) before moving to trash
             final_path = input_path
+            
+            # Save original for metadata preservation before moving to trash
+            original_backup = None
+            if preserve_metadata:
+                # Create a temporary backup of the original for metadata
+                original_backup = output_path.with_suffix('.original_metadata' + input_path.suffix)
+                shutil.copy2(str(input_path), str(original_backup))
 
             # Move original to trash
             if self._move_to_trash(input_path):
-                # Move upscaled (with metadata) from output_path to original location
+                # Move upscaled from output_path to original location
                 # Note: input_path no longer exists as a file, but we can use it as the destination
                 self.logger.debug(
                     f"Moving upscaled file from {output_path} to {final_path}"
                 )
                 shutil.move(str(output_path), str(final_path))
+                
+                # NOW preserve metadata after the file is in its final location
+                if preserve_metadata and original_backup and original_backup.exists():
+                    self._preserve_metadata(original_backup, final_path)
+                    # Clean up the temporary backup
+                    original_backup.unlink()
+                
                 # Update output_path to reflect the final location
                 output_path = final_path
                 self.logger.info(f"Upscaled file with metadata now at: {final_path}")
@@ -864,22 +874,35 @@ class MediaUpscaler:
                     return False
 
             # Handle output - always replace original
-            # Preserve metadata if requested (copy from original to upscaled)
-            if preserve_metadata:
-                self.logger.info(
-                    f"Preserving metadata from '{str(input_path)}' to '{str(output_path)}'"
-                )
-                self._preserve_metadata(input_path, output_path)
-
             # Save the target path (where original was) before moving to trash
             final_path = input_path
+            
+            # Save original for metadata preservation before moving to trash
+            original_backup = None
+            if preserve_metadata:
+                # Create a temporary backup of the original for metadata
+                original_backup = output_path.with_suffix('.original_metadata' + input_path.suffix)
+                shutil.copy2(str(input_path), str(original_backup))
+                self.logger.info(
+                    f"Created metadata backup from '{str(input_path)}'"
+                )
 
             # Move original to trash
             if self._move_to_trash(input_path):
                 self.logger.info(f"Move '{str(input_path)}' to trash")
-                # Move upscaled (with metadata) from output_path to original location
+                # Move upscaled from output_path to original location
                 # Note: input_path no longer exists as a file, but we can use it as the destination
                 shutil.move(str(output_path), str(final_path))
+                
+                # NOW preserve metadata after the file is in its final location
+                if preserve_metadata and original_backup and original_backup.exists():
+                    self.logger.info(
+                        f"Preserving metadata from backup to '{str(final_path)}'"
+                    )
+                    self._preserve_metadata(original_backup, final_path)
+                    # Clean up the temporary backup
+                    original_backup.unlink()
+                
                 # Update output_path to reflect the final location
                 output_path = final_path
             else:
