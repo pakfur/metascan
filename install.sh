@@ -36,9 +36,9 @@ pip install --upgrade pip
 echo "Installing dependencies..."
 pip install -r requirements.txt
 
-# Setup NLTK data
-echo "Setting up NLTK data..."
-python setup_nltk.py
+# Setup NLTK data and AI models
+echo "Setting up NLTK data and AI upscaling models..."
+python setup_models.py
 
 # Create necessary directories
 echo "Creating directories..."

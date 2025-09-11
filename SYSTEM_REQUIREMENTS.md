@@ -44,13 +44,14 @@ pip install -r requirements.txt
 # Install development dependencies (optional)
 pip install -r requirements-dev.txt
 
-# Setup NLTK data
-python setup_nltk.py
+# Setup NLTK data and AI models
+python setup_models.py
 ```
 
 ## Disk Space Requirements
 - Application: ~100 MB
 - Virtual environment: ~500 MB
+- AI upscaling models: ~915 MB (optional, downloaded on first use)
 - Thumbnail cache: Variable (1-5 GB depending on media library size)
 - Database: Variable (10-100 MB depending on media library size)
 
