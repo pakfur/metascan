@@ -14,7 +14,7 @@ import logging
 import subprocess
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, cast
 from dataclasses import dataclass, asdict
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -108,7 +108,7 @@ class ProcessUpscaleQueue(QObject):
         # Clean up any stale processes/files on startup
         self._cleanup_stale_state()
 
-    def _ensure_queue_file(self):
+    def _ensure_queue_file(self) -> None:
         """Ensure the queue file exists with valid structure."""
         if not self.queue_file.exists():
             initial_data = {
@@ -118,17 +118,17 @@ class ProcessUpscaleQueue(QObject):
             }
             self._write_queue_file(initial_data)
 
-    def _read_queue_file(self) -> Dict:
+    def _read_queue_file(self) -> Dict[str, Any]:
         """Read the queue file atomically."""
         try:
             with open(self.queue_file, "r") as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
         except Exception as e:
             self.logger.error(f"Failed to read queue file: {e}")
             # Return empty queue structure on error
             return {"tasks": {}, "created_at": time.time(), "last_updated": time.time()}
 
-    def _write_queue_file(self, data: Dict):
+    def _write_queue_file(self, data: Dict[str, Any]) -> None:
         """Write the queue file atomically."""
         try:
             data["last_updated"] = time.time()
@@ -143,7 +143,7 @@ class ProcessUpscaleQueue(QObject):
             self.logger.error(f"Failed to write queue file: {e}")
             raise
 
-    def _cleanup_stale_state(self):
+    def _cleanup_stale_state(self) -> None:
         """Clean up any stale processes and files from previous runs."""
         try:
             # Clean up progress files
@@ -187,7 +187,7 @@ class ProcessUpscaleQueue(QObject):
         interpolate_frames: bool = False,
         interpolation_factor: int = 2,
         model_type: str = "general",
-        fps_override=None,
+        fps_override: Optional[float] = None,
         preserve_metadata: bool = True,
     ) -> str:
         """
@@ -324,7 +324,7 @@ class ProcessUpscaleQueue(QObject):
         self.logger.info(f"Removed task {task_id}")
         return True
 
-    def _signal_process_stop(self, task_id: str):
+    def _signal_process_stop(self, task_id: str) -> None:
         """Signal a process to stop gracefully."""
         # Create cancel signal file
         cancel_file = self.queue_dir / f"cancel_{task_id}.signal"
@@ -344,7 +344,7 @@ class ProcessUpscaleQueue(QObject):
                     f"Failed to terminate process for task {task_id}: {e}"
                 )
 
-    def _cleanup_task_files(self, task_id: str):
+    def _cleanup_task_files(self, task_id: str) -> None:
         """Clean up files associated with a task."""
         files_to_clean = [
             self.queue_dir / f"progress_{task_id}.json",
@@ -396,7 +396,7 @@ class ProcessUpscaleQueue(QObject):
                 return task
         return None
 
-    def clear_completed(self):
+    def clear_completed(self) -> None:
         """Remove all completed, failed, and cancelled tasks."""
         queue_data = self._read_queue_file()
 
@@ -423,7 +423,7 @@ class ProcessUpscaleQueue(QObject):
 
         self.logger.info(f"Cleared {len(tasks_to_remove)} completed tasks")
 
-    def start_processing(self):
+    def start_processing(self) -> None:
         """Start processing pending tasks."""
         pending_task = self.get_next_pending()
 
@@ -436,7 +436,7 @@ class ProcessUpscaleQueue(QObject):
 
         self._start_task_process(pending_task)
 
-    def _start_task_process(self, task: UpscaleTask):
+    def _start_task_process(self, task: UpscaleTask) -> None:
         """Start a subprocess for processing a task."""
         try:
             # Update status to processing
@@ -476,7 +476,7 @@ class ProcessUpscaleQueue(QObject):
             # Mark task as failed
             self._mark_task_failed(task.id, str(e))
 
-    def _mark_task_failed(self, task_id: str, error_message: str):
+    def _mark_task_failed(self, task_id: str, error_message: str) -> None:
         """Mark a task as failed."""
         queue_data = self._read_queue_file()
         if task_id in queue_data["tasks"]:
@@ -489,7 +489,7 @@ class ProcessUpscaleQueue(QObject):
             task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
             self.task_updated.emit(task)
 
-    def poll_updates(self):
+    def poll_updates(self) -> None:
         """
         Poll for updates from worker processes.
 
@@ -499,7 +499,7 @@ class ProcessUpscaleQueue(QObject):
         self._update_progress_from_files()
         self._start_next_pending_task()
 
-    def _check_process_status(self):
+    def _check_process_status(self) -> None:
         """Check status of active processes."""
         completed_tasks = []
 
@@ -516,7 +516,7 @@ class ProcessUpscaleQueue(QObject):
 
     def _handle_process_completion(
         self, task_id: str, exit_code: int, process: subprocess.Popen
-    ):
+    ) -> None:
         """Handle completion of a worker process."""
         try:
             stdout, stderr = process.communicate()
@@ -541,7 +541,7 @@ class ProcessUpscaleQueue(QObject):
         except Exception as e:
             self.logger.error(f"Failed to handle completion of task {task_id}: {e}")
 
-    def _update_progress_from_files(self):
+    def _update_progress_from_files(self) -> None:
         """Update task progress from progress files."""
         for progress_file in self.queue_dir.glob("progress_*.json"):
             try:
@@ -570,12 +570,12 @@ class ProcessUpscaleQueue(QObject):
                     f"Failed to update progress from {progress_file}: {e}"
                 )
 
-    def _start_next_pending_task(self):
+    def _start_next_pending_task(self) -> None:
         """Start the next pending task if no tasks are currently processing."""
         if not self.active_processes:  # No active processes
             self.start_processing()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Shutdown the queue and clean up processes."""
         self.logger.info("Shutting down upscale queue")
 
