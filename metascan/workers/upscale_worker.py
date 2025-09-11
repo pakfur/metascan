@@ -183,8 +183,12 @@ class UpscaleWorker:
             )
 
             # Perform upscaling with progress callback
-            def progress_callback(progress: float) -> bool:
-                return self._update_progress(progress)
+            def progress_callback(progress: float) -> None:
+                should_continue = self._update_progress(progress)
+                if not should_continue:
+                    # Note: MediaUpscaler doesn't support cancellation via callback
+                    # The worker will check for cancellation in its update method
+                    pass
 
             input_path = Path(task_data["file_path"])
 
