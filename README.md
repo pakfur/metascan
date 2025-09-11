@@ -9,17 +9,32 @@
 
 ## Overview
 
-Metascan is a Open Source, free to use desktop application for browsing, organizing, and analyzing AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing an UI to browse your media collection with filtering capabilities.
+Metascan is an open source desktop application for browsing, organizing, and upscaling AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing a comprehensive interface to manage your media collection with advanced filtering and upscaling capabilities.
 
-<figure>
-    <img src="/assets/screenshot.png"
-         alt="Metascan Screenshot">
-    <figcaption>Screenshot of Metascan showing filters, images and metadata</figcaption>
-</figure>
+<img src="/assets/screenshot.png" alt="Metascan Main Interface" width="600">
+
+## Screenshots
+
+<div align="center">
+  <img src="/assets/media_viewer.png" alt="Media Viewer" width="400">
+  <img src="/assets/context_menu.png" alt="Context Menu" width="400">
+</div>
+<p align="center"><em>Media viewer with zoom controls and right-click context menu</em></p>
+
+<div align="center">
+  <img src="/assets/upscale.png" alt="Upscale Dialog" width="400">
+  <img src="/assets/upscale_queue.png" alt="Upscale Queue" width="400">
+</div>
+<p align="center"><em>Upscaling configuration dialog and queue management window</em></p>
+
+<div align="center">
+  <img src="/assets/upscaling_progress.png" alt="Upscaling Progress" width="500">
+</div>
+<p align="center"><em>Real-time upscaling progress indicator in toolbar</em></p>
 
 ## Quick Start Guide
 
-**First-time setup in 4 easy steps:**
+**First-time setup in 5 easy steps:**
 
 1. **Add Directories**: Click the **Config** button in the toolbar to add folders containing your AI-generated images and videos
 
@@ -33,7 +48,9 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
    - **LoRAs** - Filter by specific LoRA models
    - **Custom Tags** - User-defined tags for organization
 
-**Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon (⭐) in the media viewer or pressing "F".
+5. **Upscale Media**: Right-click any image or video and select "Upscale" to enhance quality using Real-ESRGAN models
+
+**Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon or pressing "F". Access scanning and theme selection from the **Tools** menu.
 
 ## Features
 
@@ -42,27 +59,45 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
 - Video formats: MP4, AVI, MOV with metadata extraction
 - Thumbnail generation with FFMPEG integration
 
+### Media Upscaling
+- Real-ESRGAN powered upscaling for images and videos
+- Multiple model options: General, Anime, Face enhancement
+- Scale factors: 2x, 4x, 8x upscaling
+- Face enhancement option for portrait images
+- Frame interpolation for smoother video playback
+- Metadata preservation during upscaling
+- Process-based queue system for reliable operation
+- Real-time progress tracking with cancellation support
+
 ### Metadata Extraction
-- ComfyUI workflow extraction
+- ComfyUI workflow extraction with enhanced parsing
 - SwarmUI parameter parsing  
-- Fooocus metadata support
+- Fooocus metadata support with improved detection
 - Custom prompt tokenization with NLTK
+- Enhanced extractor system for better metadata detection
 
 ### Filtering & Search
 - Filter by prompts, models, LoRAs, and custom tags
 - Inverted index for fast search across large collections
 - Real-time filter updates
-- Favorites for tagging favorite media.
+- Favorites system for organizing preferred media
 
-### GUI Interface
+### User Interface
 - Virtualized thumbnail grid for performance with large collections
 - Three-panel layout: filters, thumbnails, metadata
 - Flexible thumbnail sorting (File Name, Date Added, Date Modified)
 - Resizable panels with persistent layout
 - Full-size media viewer with zoom capabilities
-- Media deletion with keyboard shortcut (Cmd+D/Ctrl+D)
-- Favorites system with star icon in media viewer
+- Tools menu with centralized access to scanning and themes
+- Configurable mouse wheel sensitivity
+- Material design theme support with multiple color schemes
 
+### Upscaling Interface
+- Dedicated upscaling dialog with model selection
+- Queue management window for monitoring operations
+- Progress indicators with detailed status information
+- Task cancellation and removal capabilities
+- Support for batch operations
 
 ## Tech Stack
 
@@ -75,6 +110,7 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
 **Media Processing:**
 - **Pillow** - Image processing and thumbnail generation
 - **FFMPEG-Python** - Video processing and thumbnail extraction
+- **Real-ESRGAN** - AI-powered upscaling models
 - **Watchdog** - File system monitoring for real-time updates
 
 **Development Tools:**
@@ -87,11 +123,10 @@ Metascan is a Open Source, free to use desktop application for browsing, organiz
 ### Prerequisites
 
 - **Python 3.8 or higher**
-- **FFMPEG** - Required for video thumbnail generation
+- **FFMPEG** - Required for video thumbnail generation and upscaling
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
   - Windows: Download from [FFmpeg.org](https://ffmpeg.org/download.html)
-
 
 ### Quick Start (End Users)
 
@@ -148,11 +183,8 @@ For local development with all dev tools:
    # Run tests
    pytest
    
-   # Check code formatting
-   black --check metascan/ tests/
-   
-   # Run type checking
-   mypy metascan/
+   # Check code formatting and type checking
+   make quality
    ```
 
 ### Alternative Installation (Editable)
@@ -174,7 +206,7 @@ metascan  # Run from anywhere after installation
    - Click "Save" to apply settings
 
 2. **Scan your media:**
-   - Click "Scan" to index your media files
+   - Use **Tools > Scan** or click "Scan" to index your media files
    - The scanning process will extract metadata and generate thumbnails
    - Progress is shown in the status bar
 
@@ -184,6 +216,27 @@ metascan  # Run from anywhere after installation
    - See detailed metadata in the right panel
    - Double-click thumbnails to view full-size media
 
+### Media Upscaling
+
+1. **Single File Upscaling:**
+   - Right-click any image or video in the thumbnail view
+   - Select "Upscale" from the context menu
+   - Choose upscaling options (model, scale factor, enhancements)
+   - Click "Start Upscaling" to begin processing
+
+2. **Queue Management:**
+   - Access the upscaling queue via the main menu
+   - Monitor progress of active upscaling tasks
+   - Cancel or remove tasks as needed
+   - View detailed status and error information
+
+3. **Upscaling Options:**
+   - **Model Type**: General (photos), Anime (illustrations), Face (portraits)
+   - **Scale Factor**: 2x, 4x, or 8x magnification
+   - **Face Enhancement**: Improve facial details (images only)
+   - **Frame Interpolation**: Smooth video playback (videos only)
+   - **Metadata Preservation**: Retain original metadata in upscaled files
+
 ### Key Features
 
 - **Sorting:** Organize your media collection with flexible sorting options
@@ -192,20 +245,46 @@ metascan  # Run from anywhere after installation
     - **Date Added** - Sort by creation/scan date
     - **Date Modified** - Sort by file modification date
   - Sort order persists across all operations (filtering, scanning, app restart)
-  - Current sort selection shown with checkmark (✓) in menu
+  - Current sort selection shown with checkmark in menu
+
 - **Filtering:** Click filter items in the left panel to refine your view
+
 - **Favorites:** Mark media as favorites for quick access
   - In media viewer: Click the star icon in the title bar or press `F` key
-  - Star icon shows hollow (☆) for non-favorites, filled gold (★) for favorites
+  - Star icon shows hollow for non-favorites, filled gold for favorites
   - Use the Favorites filter in the left panel to show only favorite media
+
 - **Search:** Use text filters to search across prompts and metadata
+
 - **Viewer:** Double-click images/videos for full-size viewing with zoom controls
+
 - **Delete Media:** Press `Cmd+D` (macOS) or `Ctrl+D` (Windows/Linux) to delete selected media
   - Works from both the thumbnail view and media viewer
   - Shows confirmation dialog with OK button focused
   - Moves files to system trash/recycle bin (recoverable)
   - Automatically updates database and refreshes views
   - In viewer: navigates to next media (or previous if at end)
+
+- **Theme Selection:** Access multiple material design themes via **Tools > Themes**
+
+- **Mouse Sensitivity:** Configure scroll wheel sensitivity in the configuration dialog
+
+## Menu Reference
+
+### File Menu
+- **Open** - Open selected media in system default application
+- **Open Folder** - Open containing folder in file manager
+- **Delete file** (Ctrl+D) - Delete selected media file
+- **Configuration** - Open settings dialog
+- **Exit** (Ctrl+Q) - Close application
+
+### View Menu
+- **Refresh** (F5) - Reload media collection
+- **Sort by** - Choose sorting method (File Name, Date Added, Date Modified)
+
+### Tools Menu
+- **Scan** (Ctrl+S) - Scan directories for new media
+- **Themes** - Select application theme
 
 ## Configuration
 
@@ -220,21 +299,64 @@ Configuration is stored in `config.json` in the application directory:
   "watch_directories": true,
   "thumbnail_size": [300, 300],
   "cache_size_mb": 500,
-  "sort_order": "file_name"
+  "sort_order": "file_name",
+  "scroll_wheel_step": 120,
+  "theme": "dark_teal.xml"
 }
 ```
 
 ### Configuration Options
 
+- **`scan_directories`**: List of directories to scan for media files
+- **`watch_directories`**: Enable real-time directory monitoring
+- **`thumbnail_size`**: Thumbnail dimensions `[width, height]` in pixels
+- **`cache_size_mb`**: Maximum thumbnail cache size in megabytes
 - **`sort_order`**: Default thumbnail sorting method
   - `"file_name"` - Alphabetical by filename (default)
   - `"date_added"` - Sort by creation/scan date
   - `"date_modified"` - Sort by file modification date
-- **`thumbnail_size`**: Thumbnail dimensions `[width, height]` in pixels
-- **`cache_size_mb`**: Maximum thumbnail cache size in megabytes
-- **`watch_directories`**: Enable real-time directory monitoring
+- **`scroll_wheel_step`**: Mouse wheel scroll sensitivity (pixels per notch)
+- **`theme`**: Selected UI theme file
 
-## Testing
+## Development
+
+### Build Commands
+
+The project includes a Makefile for common development tasks:
+
+```bash
+# Set up development environment
+make setup
+
+# Run the application
+make run
+
+# Run tests
+make test
+
+# Code quality checks (formatting and type checking)
+make quality
+
+# Install package in development mode
+make install-dev
+```
+
+### Code Style
+
+The project uses `black` for code formatting and `mypy` for type checking:
+
+```bash
+# Format code
+black metascan/ tests/
+
+# Type checking
+mypy metascan/
+
+# Run both (via Makefile)
+make quality
+```
+
+### Testing
 
 Run the test suite:
 
@@ -249,22 +371,27 @@ pytest --cov=metascan
 pytest tests/test_prompt_tokenizer.py
 ```
 
-## Development
+## Architecture
 
-### Code Style
+### Process-Based Upscaling
 
-The project uses `black` for code formatting and `mypy` for type checking:
+The application uses a robust process-based architecture for upscaling operations:
 
-```bash
-# Format code
-black metascan/ tests/
+- **Worker Processes**: Upscaling runs in isolated subprocess for stability
+- **JSON Communication**: Inter-process communication via atomic JSON file operations
+- **Queue Management**: Centralized queue with real-time status updates
+- **Signal Handling**: Graceful cancellation via SIGTERM signals
+- **Progress Tracking**: Real-time progress updates with detailed status information
 
-# Type checking
-mypy metascan/
+### Database Structure
 
-# Run both
-black metascan/ tests/ && mypy metascan/
-```
+Media metadata is stored in a SQLite database with the following key tables:
+
+- **media**: Core media file information and metadata
+- **prompts**: Tokenized prompt data for search indexing
+- **models**: AI model information extracted from metadata
+- **loras**: LoRA model references
+- **tags**: User-defined and extracted tags
 
 ## Contributing
 
@@ -280,11 +407,7 @@ We welcome contributions to Metascan! Here's how to get started:
 
 2. **Set up development environment:**
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # or venv\Scripts\activate on Windows
-   pip install -r requirements.txt
-   pip install -r requirements-dev.txt
-   python setup_nltk.py
+   make setup
    ```
 
 3. **Install pre-commit hooks (optional but recommended):**
@@ -300,12 +423,14 @@ We welcome contributions to Metascan! Here's how to get started:
 - Use `black` for code formatting
 - Add type hints where appropriate
 - Write docstrings for public functions and classes
+- Maintain mypy type checking compliance
 
 **Testing:**
 - Write tests for new features using `pytest`
 - Maintain or improve test coverage
 - Test UI changes manually across different screen sizes
 - Include tests for metadata extraction with sample files
+- Test upscaling functionality with various media formats
 
 **Commit Guidelines:**
 - Use clear, descriptive commit messages
@@ -314,23 +439,24 @@ We welcome contributions to Metascan! Here's how to get started:
 
 ### Areas for Contribution
 
-**🐛 Bug Reports & Fixes**
+**Bug Reports & Fixes**
 - Report bugs with detailed steps to reproduce
 - Include system information and error messages
 - Fix existing issues marked as "good first issue"
 
-**✨ Feature Requests & Implementation**
+**Feature Requests & Implementation**
 - New metadata extractors for additional AI tools
 - Additional file format support
 - UI/UX improvements and accessibility features
 - Performance optimizations for large media collections
+- Enhanced upscaling models and options
 
-**📚 Documentation**
+**Documentation**
 - Improve code documentation and docstrings
 - Create tutorials and usage examples
 - Translate documentation to other languages
 
-**🧪 Testing & Quality Assurance**
+**Testing & Quality Assurance**
 - Add test coverage for untested code
 - Create integration tests
 - Test on different operating systems
@@ -345,12 +471,8 @@ We welcome contributions to Metascan! Here's how to get started:
 
 2. **Make your changes and test:**
    ```bash
-   # Run tests
-   pytest
-   
-   # Check code style
-   black metascan/ tests/
-   mypy metascan/
+   make test
+   make quality
    ```
 
 3. **Commit and push:**
@@ -368,9 +490,9 @@ We welcome contributions to Metascan! Here's how to get started:
 
 ### Getting Help
 
-- **Issues:** Use GitHub Issues for bug reports and feature requests
-- **Discussions:** Use GitHub Discussions for general questions
-- **Code Review:** All contributions go through code review process
+- **Issues**: Use GitHub Issues for bug reports and feature requests
+- **Discussions**: Use GitHub Discussions for general questions
+- **Code Review**: All contributions go through code review process
 
 Thank you for contributing to Metascan!
 
@@ -381,6 +503,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## Acknowledgments
 
 - Thanks to the creators of ComfyUI, SwarmUI, and Fooocus for their amazing AI generation tools
+- Real-ESRGAN team for the upscaling models
 - Built with PyQt6 for cross-platform desktop GUI
 - Powered by SQLite for efficient local data storage
 - Uses FFMPEG for robust video processing capabilities
