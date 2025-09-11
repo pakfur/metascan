@@ -36,9 +36,14 @@ deps: venv  ## Install dependencies
 	@echo "Dependencies installed"
 
 .PHONY: nltk-setup
-nltk-setup: venv  ## Set up NLTK data (required for first-time setup)
-	$(PYTHON) setup_nltk.py
-	@echo "NLTK data setup complete"
+nltk-setup: venv  ## Set up NLTK data and AI models (required for first-time setup)
+	$(PYTHON) setup_models.py
+	@echo "NLTK data and AI models setup complete"
+
+.PHONY: models
+models: venv  ## Download AI upscaling models only
+	$(PYTHON) setup_models.py
+	@echo "AI models setup complete"
 
 .PHONY: dev-install
 dev-install: venv  ## Install package in development mode

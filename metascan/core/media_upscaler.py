@@ -103,7 +103,6 @@ class MediaUpscaler:
             "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
             "GFPGANv1.4.pth": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
             "rife_binary": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
-            "rife_model": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-v4.6.tar.gz",
         }
 
         # RIFE binary path
@@ -322,26 +321,10 @@ class MediaUpscaler:
             # Clean up
             zip_path.unlink()
 
-            # Check if rife-v4.6 model already exists (included in binary download)
+            # The RIFE binary package includes models, no need to download separately
             model_path = bin_dir / "rife-ncnn-vulkan-20221029-macos" / "rife-v4.6"
             if not model_path.exists():
-                self.logger.warning(
-                    "RIFE v4.6 model not found in binary package, trying to download separately..."
-                )
-                # Try to download model separately
-                model_archive = self.models_dir / "rife-v4.6.tar.gz"
-                if self._download_file(
-                    self.model_urls["rife_model"], model_archive, "RIFE model"
-                ):
-                    # Extract model to the correct subdirectory
-                    extract_path = bin_dir / "rife-ncnn-vulkan-20221029-macos"
-                    with tarfile.open(model_archive, "r:gz") as tar:
-                        tar.extractall(extract_path)
-                    model_archive.unlink()
-                else:
-                    self.logger.info(
-                        "RIFE model download failed, but other models are available in the binary package"
-                    )
+                self.logger.info("RIFE models will be included in the binary package")
             else:
                 self.logger.info("RIFE v4.6 model already available in binary package")
 
