@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizeGrip,
     QMessageBox,
+    QMenu,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF, QUrl
 from PyQt6.QtGui import (
@@ -44,6 +45,14 @@ class ThumbnailWidget(QLabel):
     favorite_toggled = pyqtSignal(
         object
     )  # Emits the Media object when favorite is toggled
+    # Context menu signals
+    open_requested = pyqtSignal(object)  # Emits Media object for File|Open
+    open_folder_requested = pyqtSignal(
+        object
+    )  # Emits Media object for File|Open Folder
+    delete_requested = pyqtSignal(object)  # Emits Media object for File|Delete
+    upscale_requested = pyqtSignal(object)  # Emits Media object for File|Upscale
+    refresh_metadata_requested = pyqtSignal(object)  # Emits Media object for refresh
 
     def __init__(
         self,
@@ -254,6 +263,45 @@ class ThumbnailWidget(QLabel):
             self.double_clicked.emit(self.media)
         super().mouseDoubleClickEvent(event)
 
+    def contextMenuEvent(self, event):
+        """Show context menu on right-click."""
+        context_menu = QMenu(self)
+
+        # Open (same as File|Open)
+        open_action = context_menu.addAction("Open")
+        open_action.triggered.connect(lambda: self.open_requested.emit(self.media))
+
+        # Open Folder (same as File|Open Folder)
+        open_folder_action = context_menu.addAction("Open Folder")
+        open_folder_action.triggered.connect(
+            lambda: self.open_folder_requested.emit(self.media)
+        )
+
+        context_menu.addSeparator()
+
+        # Delete file... (same as File|Delete file...)
+        delete_action = context_menu.addAction("Delete file...")
+        delete_action.triggered.connect(lambda: self.delete_requested.emit(self.media))
+
+        context_menu.addSeparator()
+
+        # Upscale... (same as File|Upscale...)
+        upscale_action = context_menu.addAction("Upscale...")
+        upscale_action.triggered.connect(
+            lambda: self.upscale_requested.emit(self.media)
+        )
+
+        context_menu.addSeparator()
+
+        # Refresh Metadata (new functionality)
+        refresh_action = context_menu.addAction("Refresh Metadata")
+        refresh_action.triggered.connect(
+            lambda: self.refresh_metadata_requested.emit(self.media)
+        )
+
+        # Show the context menu at the cursor position
+        context_menu.exec(event.globalPos())
+
 
 class ThumbnailLoader(QThread):
     """Background thread for loading thumbnails."""
@@ -294,6 +342,14 @@ class ThumbnailLoader(QThread):
 class ThumbnailView(QWidget):
     selection_changed = pyqtSignal(object)  # Emits selected Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object when favorite is toggled
+    # Context menu action signals to forward to main window
+    open_requested = pyqtSignal(object)  # Forward Media object for File|Open
+    open_folder_requested = pyqtSignal(
+        object
+    )  # Forward Media object for File|Open Folder
+    delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
+    upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
+    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
 
     def __init__(self, parent=None, scroll_step: int = 120):
         super().__init__(parent)
@@ -503,7 +559,9 @@ class ThumbnailView(QWidget):
 
         try:
             for i in reversed(range(self.grid_layout.count())):
-                self.grid_layout.takeAt(i)
+                child = self.grid_layout.takeAt(i)
+                if child.widget():
+                    child.widget().deleteLater()
 
             for i, media in enumerate(self.media_list):
                 thumbnail_widget = ThumbnailWidget(media)
@@ -512,6 +570,16 @@ class ThumbnailView(QWidget):
                     self.on_thumbnail_double_clicked
                 )
                 thumbnail_widget.favorite_toggled.connect(self.on_favorite_toggled)
+                # Connect context menu signals
+                thumbnail_widget.open_requested.connect(self.open_requested.emit)
+                thumbnail_widget.open_folder_requested.connect(
+                    self.open_folder_requested.emit
+                )
+                thumbnail_widget.delete_requested.connect(self.delete_requested.emit)
+                thumbnail_widget.upscale_requested.connect(self.upscale_requested.emit)
+                thumbnail_widget.refresh_metadata_requested.connect(
+                    self.refresh_metadata_requested.emit
+                )
 
                 row = i // columns
                 col = i % columns

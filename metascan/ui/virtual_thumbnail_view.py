@@ -253,6 +253,14 @@ class VirtualScrollArea(QScrollArea):
     item_clicked = pyqtSignal(object)  # Emits Media object
     item_double_clicked = pyqtSignal(object)  # Emits Media object
     favorite_toggled = pyqtSignal(object)  # Emits Media object
+    # Context menu signals
+    open_requested = pyqtSignal(object)  # Forward Media object for File|Open
+    open_folder_requested = pyqtSignal(
+        object
+    )  # Forward Media object for File|Open Folder
+    delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
+    upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
+    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
     selection_changed = pyqtSignal(object)  # Emits Media object
 
     def __init__(
@@ -529,10 +537,50 @@ class VirtualScrollArea(QScrollArea):
         if widget.parent() != self.container_widget:
             widget.setParent(self.container_widget)
 
+        # Disconnect any existing signals first (important for widget reuse)
+        try:
+            widget.clicked.disconnect()
+        except TypeError:
+            pass  # No connections exist
+        try:
+            widget.double_clicked.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.favorite_toggled.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.open_requested.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.open_folder_requested.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.delete_requested.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.upscale_requested.disconnect()
+        except TypeError:
+            pass
+        try:
+            widget.refresh_metadata_requested.disconnect()
+        except TypeError:
+            pass
+
         # Connect signals
         widget.clicked.connect(self._on_widget_clicked)
         widget.double_clicked.connect(self._on_widget_double_clicked)
         widget.favorite_toggled.connect(self._on_favorite_toggled)
+        # Connect context menu signals
+        widget.open_requested.connect(self.open_requested.emit)
+        widget.open_folder_requested.connect(self.open_folder_requested.emit)
+        widget.delete_requested.connect(self.delete_requested.emit)
+        widget.upscale_requested.connect(self.upscale_requested.emit)
+        widget.refresh_metadata_requested.connect(self.refresh_metadata_requested.emit)
 
         # Set selection state based on mode
         if self.multi_select_mode:
@@ -872,7 +920,9 @@ class VirtualScrollArea(QScrollArea):
         # Calculate target scroll position using scroll_step
         # The scroll_step determines how many pixels to scroll per wheel notch
         # Standard wheel delta is 120 for one notch, so we scale accordingly
-        target_scroll = max(0, min(max_scroll, current_scroll + (delta * self.scroll_step) // 120))
+        target_scroll = max(
+            0, min(max_scroll, current_scroll + (delta * self.scroll_step) // 120)
+        )
 
         # Use smooth scrolling for wheel events
         if abs(target_scroll - current_scroll) > 10:
@@ -907,6 +957,14 @@ class VirtualThumbnailView(QWidget):
         tuple
     )  # Emits new thumbnail size (width, height)
     multi_selection_changed = pyqtSignal(int)  # Emits number of selected items
+    # Context menu action signals to forward to main window (to match ThumbnailView)
+    open_requested = pyqtSignal(object)  # Forward Media object for File|Open
+    open_folder_requested = pyqtSignal(
+        object
+    )  # Forward Media object for File|Open Folder
+    delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
+    upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
+    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
 
     def __init__(
         self,
@@ -964,7 +1022,9 @@ class VirtualThumbnailView(QWidget):
 
         # Virtual scroll area
         self.scroll_area = VirtualScrollArea(
-            parent=self, thumbnail_size=self.thumbnail_size, scroll_step=self.scroll_step
+            parent=self,
+            thumbnail_size=self.thumbnail_size,
+            scroll_step=self.scroll_step,
         )
         main_layout.addWidget(self.scroll_area)
 
@@ -1085,6 +1145,14 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.item_double_clicked.connect(self._on_item_double_clicked)
         self.scroll_area.selection_changed.connect(self._on_selection_changed)
         self.scroll_area.favorite_toggled.connect(self._on_favorite_toggled)
+        # Forward context menu signals
+        self.scroll_area.open_requested.connect(self.open_requested.emit)
+        self.scroll_area.open_folder_requested.connect(self.open_folder_requested.emit)
+        self.scroll_area.delete_requested.connect(self.delete_requested.emit)
+        self.scroll_area.upscale_requested.connect(self.upscale_requested.emit)
+        self.scroll_area.refresh_metadata_requested.connect(
+            self.refresh_metadata_requested.emit
+        )
 
     def set_media_list(self, media_list: List[Media]) -> None:
         """

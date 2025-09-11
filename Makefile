@@ -54,6 +54,10 @@ run:  ## Run the application from source
 run-installed:  ## Run the installed metascan command
 	$(VENV_DIR)/bin/metascan
 
+.PHONY: run-inspect
+run-inspect:  ## Run the application with PyQtInspect for debugging
+	$(PYTHON) -m PyQtInspect --direct --qt-support=pyqt6 --file main.py
+
 # Testing targets
 .PHONY: test
 test: venv  ## Run all tests
