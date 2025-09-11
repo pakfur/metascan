@@ -610,15 +610,47 @@ class MainWindow(QMainWindow):
             self.sort_filename_action.setChecked(True)
             self.current_sort_order = "file_name"
 
+        # Tools menu
+        tools_menu = menubar.addMenu("Tools")
+
+        # Scan action
+        scan_action = QAction("Scan...", self)
+        scan_action.setShortcut(QKeySequence("Ctrl+S"))
+        scan_action.triggered.connect(self._scan_directories)
+        tools_menu.addAction(scan_action)
+
+        # Separator
+        tools_menu.addSeparator()
+
+        # Themes submenu
+        themes_menu = tools_menu.addMenu("Themes")
+
+        # Create action group for exclusive theme selection
+        self.theme_action_group = QActionGroup(self)
+
+        # Add theme actions
+        for theme in self.available_themes:
+            theme_action = QAction(theme, self)
+            theme_action.setCheckable(True)
+            theme_action.setActionGroup(self.theme_action_group)
+            theme_action.triggered.connect(
+                lambda checked, t=theme: self.on_theme_changed(t)
+            )
+            themes_menu.addAction(theme_action)
+
+            # Check current theme
+            if theme == self.current_theme:
+                theme_action.setChecked(True)
+
     def _create_toolbar(self):
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # Scan button - no custom styling, use theme
-        scan_button = QPushButton("Scan")
-        scan_button.clicked.connect(self._scan_directories)
-        toolbar.addWidget(scan_button)
+        # # Scan button - no custom styling, use theme
+        # scan_button = QPushButton("Scan")
+        # scan_button.clicked.connect(self._scan_directories)
+        # toolbar.addWidget(scan_button)
 
         # Add flexible spacer to center the upscaling indicator
         left_spacer = QWidget()
@@ -637,8 +669,8 @@ class MainWindow(QMainWindow):
         )
         toolbar.addWidget(right_spacer)
 
-        # Create theme selector and add to right side of toolbar
-        self._add_theme_selector(toolbar)
+        # # Create theme selector and add to right side of toolbar
+        # self._add_theme_selector(toolbar)
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
@@ -688,7 +720,7 @@ class MainWindow(QMainWindow):
         # Create animation timer (stopped initially)
         self.spinner_timer = QTimer()
         self.spinner_timer.timeout.connect(self._animate_spinner)
-        self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_frame_index = 0
 
     def _animate_spinner(self):
@@ -697,29 +729,35 @@ class MainWindow(QMainWindow):
             self.spinner_frame_index = (self.spinner_frame_index + 1) % len(
                 self.spinner_frames
             )
-            
+
             # Get current queue status
             if hasattr(self, "upscale_queue"):
                 tasks = self.upscale_queue.get_all_tasks()
                 processing = [t for t in tasks if t.status.value == "processing"]
                 pending = [t for t in tasks if t.status.value == "pending"]
                 completed = [t for t in tasks if t.status.value == "completed"]
-                
+
                 total = len(processing) + len(pending)
                 current = len(completed) + 1 if processing else len(completed)
-                
+
                 if processing and processing[0].progress is not None:
                     percent = int(processing[0].progress)
                 else:
                     percent = 0
-                
+
                 if total > 0:
                     spinner = self.spinner_frames[self.spinner_frame_index]
-                    self.upscaling_widget.setText(f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}")
+                    self.upscaling_widget.setText(
+                        f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
+                    )
                 else:
-                    self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+                    self.upscaling_widget.setText(
+                        self.spinner_frames[self.spinner_frame_index]
+                    )
             else:
-                self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+                self.upscaling_widget.setText(
+                    self.spinner_frames[self.spinner_frame_index]
+                )
 
     def _show_spinner(self):
         """Show the upscaling progress indicator."""
@@ -730,17 +768,21 @@ class MainWindow(QMainWindow):
                 processing = [t for t in tasks if t.status.value == "processing"]
                 pending = [t for t in tasks if t.status.value == "pending"]
                 completed = [t for t in tasks if t.status.value == "completed"]
-                
+
                 total = len(processing) + len(pending)
                 current = len(completed) + 1 if processing else len(completed)
-                
+
                 spinner = self.spinner_frames[self.spinner_frame_index]
-                self.upscaling_widget.setText(f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}")
+                self.upscaling_widget.setText(
+                    f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
+                )
             else:
-                self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+                self.upscaling_widget.setText(
+                    self.spinner_frames[self.spinner_frame_index]
+                )
 
             if not self.spinner_timer.isActive():
-                self.spinner_timer.start(100)  
+                self.spinner_timer.start(100)
 
     def _hide_spinner(self):
         """Hide the upscaling progress indicator."""
@@ -1414,11 +1456,6 @@ class MainWindow(QMainWindow):
                 ):
                     self.metadata_panel.display_metadata(new_media)
 
-                QMessageBox.information(
-                    self,
-                    "Metadata Refreshed",
-                    f"Successfully refreshed metadata for '{media.file_name}'",
-                )
             else:
                 QMessageBox.warning(
                     self, "Scan Failed", f"Failed to rescan file:\n{file_path}"
