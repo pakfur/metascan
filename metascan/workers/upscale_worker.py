@@ -182,13 +182,35 @@ class UpscaleWorker:
                 models_dir=models_dir, device="auto", tile_size=512, debug=False
             )
 
+            # Check if models are available, download if needed
+            if not upscaler.models_available:
+                self.logger.info("Models not found, downloading...")
+                self._update_task_status(UpscaleStatus.DOWNLOADING_MODELS)
+                self._update_progress(0)
+
+                def download_progress_callback(message: str, progress: float) -> None:
+                    self.logger.info(f"Model download: {message} - {progress:.0f}%")
+                    self._update_progress(progress)
+
+                success = upscaler.setup_models(download_progress_callback)
+                if not success:
+                    self.logger.error("Failed to download models")
+                    self._update_task_status(UpscaleStatus.FAILED)
+                    return 1
+
+                # Re-check models after download
+                upscaler._check_models()
+                if not upscaler.models_available:
+                    self.logger.error("Models still not available after download")
+                    self._update_task_status(UpscaleStatus.FAILED)
+                    return 1
+
             # Perform upscaling with progress callback
-            def progress_callback(progress: float) -> None:
+            def progress_callback(progress: float) -> bool:
                 should_continue = self._update_progress(progress)
-                if not should_continue:
-                    # Note: MediaUpscaler doesn't support cancellation via callback
-                    # The worker will check for cancellation in its update method
-                    pass
+                # Return True to continue, False to cancel
+                # MediaUpscaler expects this return value to determine if processing should continue
+                return should_continue
 
             input_path = Path(task_data["file_path"])
 
@@ -232,10 +254,18 @@ class UpscaleWorker:
 
             if success:
                 self._update_progress(100, UpscaleStatus.COMPLETED)
+                
+                # When replacing original, the final file is at the input path location
+                # The MediaUpscaler moves the upscaled file to replace the original
+                if task_data.get("replace_original", True):
+                    final_output_path = str(input_path)
+                else:
+                    final_output_path = str(output_path)
+                
                 self._update_task_status(
-                    UpscaleStatus.COMPLETED, output_path=str(output_path), progress=100
+                    UpscaleStatus.COMPLETED, output_path=final_output_path, progress=100
                 )
-                self.logger.info("Task completed successfully")
+                self.logger.info(f"Task completed successfully, output at: {final_output_path}")
                 return 0
             else:
                 self._update_task_status(
