@@ -1,5 +1,4 @@
 import sys
-import traceback
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -264,7 +263,6 @@ class MainWindow(QMainWindow):
 
         # Initialize logger
         self.logger = logging.getLogger(__name__)
-        self.printedTraceback = False
 
         # Initialize theme before other components
         self.available_themes = list_themes()
@@ -790,9 +788,6 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "upscaling_widget") and self.upscaling_widget:
             self.upscaling_widget.setText("")  # Clear the text instead of hiding
-            if not self.printedTraceback:
-                traceback.print_stack()
-                self.printedTraceback = True
 
     def _on_task_added(self, task):
         """Handle when a task is added to the queue."""
@@ -2199,6 +2194,9 @@ class MainWindow(QMainWindow):
                 "Setup Failed",
                 "Failed to setup AI models. Please check your internet connection and try again.",
             )
+        else:
+            # Re-check models after successful setup to update the models_available flag
+            self.media_upscaler._check_models()
 
     def closeEvent(self, event):
         """Handle application close event."""
