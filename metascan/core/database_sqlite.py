@@ -388,6 +388,43 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to load favorite status: {e}")
 
+    def update_media_dimensions(self, file_path: Path, width: int, height: int) -> bool:
+        """
+        Update the dimensions of a media file in the database.
+
+        Args:
+            file_path: Path to the media file
+            width: New width in pixels
+            height: New height in pixels
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Get the current media record
+                    media = self.get_media(file_path)
+                    if not media:
+                        return False
+
+                    # Update the dimensions in the media object
+                    media.width = width
+                    media.height = height
+
+                    # Update the database record
+                    conn.execute(
+                        """UPDATE media SET data = ? WHERE file_path = ?""",
+                        (media.to_json(), str(file_path)),  # type: ignore[attr-defined]
+                    )
+
+                    conn.commit()
+                    return True
+
+        except Exception as e:
+            logger.error(f"Error updating media dimensions for {file_path}: {e}")
+            return False
+
     def get_stats(self) -> Dict[str, Any]:
         try:
             with self._get_connection() as conn:
