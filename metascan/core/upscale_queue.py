@@ -182,8 +182,6 @@ class UpscaleQueue(QObject):
             if task_id not in self.tasks:
                 return
 
-            print(f"DEBUG: Task {task_id}: Status updated to {str(status)}")
-
             task = self.tasks[task_id]
 
             if status is not None:
