@@ -1,4 +1,5 @@
 import sys
+import traceback
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -263,6 +264,7 @@ class MainWindow(QMainWindow):
 
         # Initialize logger
         self.logger = logging.getLogger(__name__)
+        self.printedTraceback = False
 
         # Initialize theme before other components
         self.available_themes = list_themes()
@@ -666,19 +668,16 @@ class MainWindow(QMainWindow):
 
     def _create_upscaling_indicator(self, toolbar):
         """Create the upscaling progress indicator widget."""
-        self.upscaling_widget = QLabel("⏳ Upscaling...")
-        self.upscaling_widget.setStyleSheet(
-            "QLabel { padding: 4px 8px; font-weight: bold; color: #333; background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 3px; }"
-            "QLabel:hover { background-color: #e0e0e0; }"
-        )
+        self.upscaling_widget = QLabel("")  # Start with empty text
+        # Use default styling - no custom stylesheet
         self.upscaling_widget.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.upscaling_widget.setVisible(False)  # Hidden by default
+        self.upscaling_widget.setVisible(True)  # Always visible
 
-        # Set size policy and constraints
+        # Set size policy and constraints - wider to fit progress text
         self.upscaling_widget.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
-        self.upscaling_widget.setFixedSize(120, 24)  # Fixed width and height
+        self.upscaling_widget.setFixedSize(200, 24)  # Wider to fit progress text
 
         # Add click handler
         self.upscaling_widget.mousePressEvent = lambda event: self._show_upscale_queue()
@@ -689,7 +688,7 @@ class MainWindow(QMainWindow):
         # Create animation timer (stopped initially)
         self.spinner_timer = QTimer()
         self.spinner_timer.timeout.connect(self._animate_spinner)
-        self.spinner_frames = ["⏳ Upscaling...", "⌛ Upscaling..."]
+        self.spinner_frames = ["⏳", "⌛", "⏲️", "⏰"]
         self.spinner_frame_index = 0
 
     def _animate_spinner(self):
@@ -698,22 +697,60 @@ class MainWindow(QMainWindow):
             self.spinner_frame_index = (self.spinner_frame_index + 1) % len(
                 self.spinner_frames
             )
-            self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+            
+            # Get current queue status
+            if hasattr(self, "upscale_queue"):
+                tasks = self.upscale_queue.get_all_tasks()
+                processing = [t for t in tasks if t.status.value == "processing"]
+                pending = [t for t in tasks if t.status.value == "pending"]
+                completed = [t for t in tasks if t.status.value == "completed"]
+                
+                total = len(processing) + len(pending)
+                current = len(completed) + 1 if processing else len(completed)
+                
+                if processing and processing[0].progress:
+                    percent = int(processing[0].progress)
+                else:
+                    percent = 0
+                
+                if total > 0:
+                    spinner = self.spinner_frames[self.spinner_frame_index]
+                    self.upscaling_widget.setText(f"{spinner} Upscaling: {current} of {total} ({percent}%)")
+                else:
+                    self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+            else:
+                self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
 
     def _show_spinner(self):
         """Show the upscaling progress indicator."""
         if hasattr(self, "upscaling_widget") and self.upscaling_widget:
-            self.upscaling_widget.setVisible(True)
-            # Force size after showing (toolkit might override it)
-            self.upscaling_widget.setFixedSize(120, 24)
+            # Set initial text with progress info
+            if hasattr(self, "upscale_queue"):
+                tasks = self.upscale_queue.get_all_tasks()
+                processing = [t for t in tasks if t.status.value == "processing"]
+                pending = [t for t in tasks if t.status.value == "pending"]
+                completed = [t for t in tasks if t.status.value == "completed"]
+                
+                total = len(processing) + len(pending)
+                current = len(completed) + 1 if processing else len(completed)
+                
+                spinner = self.spinner_frames[self.spinner_frame_index]
+                self.upscaling_widget.setText(f"{spinner} Upscaling: {current} of {total} (0%)")
+            else:
+                self.upscaling_widget.setText(self.spinner_frames[self.spinner_frame_index])
+
             if not self.spinner_timer.isActive():
                 self.spinner_timer.start(500)  # Update every 500ms
 
     def _hide_spinner(self):
         """Hide the upscaling progress indicator."""
         self.spinner_timer.stop()
+
         if hasattr(self, "upscaling_widget") and self.upscaling_widget:
-            self.upscaling_widget.setVisible(False)
+            self.upscaling_widget.setText("")  # Clear the text instead of hiding
+            if not self.printedTraceback:
+                traceback.print_stack()
+                self.printedTraceback = True
 
     def _on_task_added(self, task):
         """Handle when a task is added to the queue."""
@@ -728,8 +765,8 @@ class MainWindow(QMainWindow):
 
         # If this task completed successfully, refresh the current view
         if task.status.value == "completed":
-            # Trigger a rescan to detect new upscaled files
-            self._scan_directories()
+            # Reload media from database to show any new upscaled files
+            self.load_all_media()
 
     def _on_task_removed(self, task_id):
         """Handle when a task is removed from the queue."""
