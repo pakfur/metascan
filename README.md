@@ -16,19 +16,19 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 ## Screenshots
 
 <div align="center">
-  <img src="/assets/media_viewer.png" alt="Media Viewer" width="400">
-  <img src="/assets/context_menu.png" alt="Context Menu" width="400">
+  <img src="/assets/media_viewer.png" alt="Media Viewer" width="256">
+  <img src="/assets/context_menu.png" alt="Context Menu" width="256">
 </div>
 <p align="center"><em>Media viewer with zoom controls and right-click context menu</em></p>
 
 <div align="center">
-  <img src="/assets/upscale.png" alt="Upscale Dialog" width="400">
-  <img src="/assets/upscale_queue.png" alt="Upscale Queue" width="400">
+  <img src="/assets/upscale.png" alt="Upscale Dialog" width="256">
+  <img src="/assets/upscale_queue.png" alt="Upscale Queue" width="256">
 </div>
 <p align="center"><em>Upscaling configuration dialog and queue management window</em></p>
 
 <div align="center">
-  <img src="/assets/upscaling_progress.png" alt="Upscaling Progress" width="500">
+  <img src="/assets/upscaling_progress.png" alt="Upscaling Progress" width="256">
 </div>
 <p align="center"><em>Real-time upscaling progress indicator in toolbar</em></p>
 
