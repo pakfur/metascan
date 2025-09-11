@@ -1,4 +1,5 @@
 import sys
+import traceback
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -19,10 +20,11 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QCheckBox,
     QComboBox,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
 from typing import Tuple, Dict, List
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
 from qt_material import apply_stylesheet, list_themes
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
@@ -30,8 +32,12 @@ from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
 from metascan.ui.media_viewer import MediaViewer
+from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
+from metascan.ui.upscale_queue_window import UpscaleQueueWindow
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media_upscaler import MediaUpscaler
+from metascan.core.upscale_queue_process import ProcessUpscaleQueue
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.utils.app_paths import (
     get_data_dir,
@@ -44,6 +50,7 @@ from pathlib import Path
 import shutil
 import platform
 import subprocess
+import logging
 
 
 class ScannerThread(QThread):
@@ -255,6 +262,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Metascan - AI Media Browser")
 
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+        self.printedTraceback = False
+
         # Initialize theme before other components
         self.available_themes = list_themes()
         self.current_theme = None
@@ -309,6 +320,33 @@ class MainWindow(QMainWindow):
             batch_size=10,
             thumbnail_cache=self.thumbnail_cache,
         )
+
+        # Initialize upscale components
+        models_dir = get_data_dir() / "models"
+        self.media_upscaler = MediaUpscaler(
+            models_dir=models_dir, device="auto", tile_size=512, debug=False
+        )
+
+        # Initialize process-based upscale queue
+        queue_dir = get_data_dir() / "queue"
+        self.upscale_queue = ProcessUpscaleQueue(queue_dir)
+
+        # Connect queue signals to show/hide spinner
+        self.upscale_queue.task_added.connect(self._on_task_added)
+        self.upscale_queue.task_updated.connect(self._on_task_updated)
+        self.upscale_queue.task_removed.connect(self._on_task_removed)
+
+        # Set up polling timer for queue updates
+        self.queue_poll_timer = QTimer()
+        self.queue_poll_timer.timeout.connect(self._poll_queue_updates)
+        self.queue_poll_timer.start(500)  # Poll every 500ms
+
+        # Start processing if there are pending tasks (but don't show spinner yet - toolbar not created)
+        if self.upscale_queue.get_next_pending():
+            self.upscale_queue.start_processing()
+
+        # Initialize upscale queue window (hidden initially)
+        self.upscale_queue_window = None
 
         # Create media viewer (initially hidden)
         self.media_viewer = (
@@ -373,6 +411,20 @@ class MainWindow(QMainWindow):
         # Create toolbar
         self._create_toolbar()
 
+        # Show spinner if there are pending tasks from previous session
+        pending_task = self.upscale_queue.get_next_pending()
+        if pending_task:
+            # Show spinner for existing pending tasks
+            self._show_spinner()
+
+        # Also check for PROCESSING tasks and show spinner if found
+        all_tasks = self.upscale_queue.get_all_tasks()
+        processing_tasks = [
+            task for task in all_tasks if task.status.value == "processing"
+        ]
+        if processing_tasks:
+            self._show_spinner()
+
         # Setup keyboard shortcuts
         self._setup_shortcuts()
 
@@ -425,6 +477,17 @@ class MainWindow(QMainWindow):
             self.on_thumbnail_double_clicked
         )
 
+        # Connect context menu signals
+        self.thumbnail_view.open_requested.connect(self.on_context_open_requested)
+        self.thumbnail_view.open_folder_requested.connect(
+            self.on_context_open_folder_requested
+        )
+        self.thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
+        self.thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        self.thumbnail_view.refresh_metadata_requested.connect(
+            self.on_context_refresh_metadata_requested
+        )
+
         # Load initial media if any exists
         self.load_all_media()
 
@@ -469,6 +532,14 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        # Upscale action
+        self.upscale_action = QAction("Upscale...", self)
+        self.upscale_action.setShortcut("Ctrl+U")
+        self.upscale_action.triggered.connect(self._handle_upscale)
+        file_menu.addAction(self.upscale_action)
+
+        file_menu.addSeparator()
+
         config_action = QAction("Configuration...", self)
         config_action.triggered.connect(self._open_config)
         file_menu.addAction(config_action)
@@ -486,6 +557,11 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("Refresh", self)
         refresh_action.setShortcut("F5")
         view_menu.addAction(refresh_action)
+
+        # Upscale Queue Window action
+        upscale_queue_action = QAction("Upscale Queue Window", self)
+        upscale_queue_action.triggered.connect(self._show_upscale_queue)
+        view_menu.addAction(upscale_queue_action)
 
         view_menu.addSeparator()
 
@@ -534,36 +610,71 @@ class MainWindow(QMainWindow):
             self.sort_filename_action.setChecked(True)
             self.current_sort_order = "file_name"
 
+        # Tools menu
+        tools_menu = menubar.addMenu("Tools")
+
+        # Scan action
+        scan_action = QAction("Scan...", self)
+        scan_action.setShortcut(QKeySequence("Ctrl+S"))
+        scan_action.triggered.connect(self._scan_directories)
+        tools_menu.addAction(scan_action)
+
+        # Separator
+        tools_menu.addSeparator()
+
+        # Themes submenu
+        themes_menu = tools_menu.addMenu("Themes")
+
+        # Create action group for exclusive theme selection
+        self.theme_action_group = QActionGroup(self)
+
+        # Add theme actions
+        for theme in self.available_themes:
+            theme_action = QAction(theme, self)
+            theme_action.setCheckable(True)
+            theme_action.setActionGroup(self.theme_action_group)
+            theme_action.triggered.connect(
+                lambda checked, t=theme: self.on_theme_changed(t)
+            )
+            themes_menu.addAction(theme_action)
+
+            # Check current theme
+            if theme == self.current_theme:
+                theme_action.setChecked(True)
+
     def _create_toolbar(self):
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # Create theme selector and add to right side of toolbar
-        self._add_theme_selector(toolbar)
+        # # Scan button - no custom styling, use theme
+        # scan_button = QPushButton("Scan")
+        # scan_button.clicked.connect(self._scan_directories)
+        # toolbar.addWidget(scan_button)
 
-        # Scan button - no custom styling, use theme
-        scan_button = QPushButton("Scan")
-        scan_button.clicked.connect(self._scan_directories)
-        toolbar.addWidget(scan_button)
+        # Add flexible spacer to center the upscaling indicator
+        left_spacer = QWidget()
+        left_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        toolbar.addWidget(left_spacer)
 
-        # Add some spacing
-        toolbar.addSeparator()
+        # Add upscaling progress indicator (initially hidden)
+        self._create_upscaling_indicator(toolbar)
 
-        # Config button - no custom styling, use theme
-        config_button = QPushButton("Config")
-        config_button.clicked.connect(self._open_config)
-        toolbar.addWidget(config_button)
+        # Add another spacer for centering
+        right_spacer = QWidget()
+        right_spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        toolbar.addWidget(right_spacer)
+
+        # # Create theme selector and add to right side of toolbar
+        # self._add_theme_selector(toolbar)
 
     def _add_theme_selector(self, toolbar):
         """Add theme selector dropdown to the toolbar."""
-        # Add spacer to push theme selector to the right
-        spacer = QWidget()
-        spacer.setSizePolicy(
-            spacer.sizePolicy().horizontalPolicy().Expanding,
-            spacer.sizePolicy().verticalPolicy().Preferred,
-        )
-        toolbar.addWidget(spacer)
+        # No need for spacer here since we already have spacers in the main toolbar
 
         # Theme label - no custom styling, use theme
         theme_label = QLabel("Theme:")
@@ -586,6 +697,145 @@ class MainWindow(QMainWindow):
         padding = QWidget()
         padding.setFixedWidth(10)
         toolbar.addWidget(padding)
+
+    def _create_upscaling_indicator(self, toolbar):
+        """Create the upscaling progress indicator widget."""
+        self.upscaling_widget = QLabel("")  # Start with empty text
+        # Use default styling - no custom stylesheet
+        self.upscaling_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.upscaling_widget.setVisible(True)  # Always visible
+
+        # Set size policy and constraints - wider to fit progress text
+        self.upscaling_widget.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.upscaling_widget.setFixedSize(400, 24)  # Wider to fit progress text
+
+        # Add click handler
+        self.upscaling_widget.mousePressEvent = lambda event: self._show_upscale_queue()
+
+        # Add to toolbar
+        toolbar.addWidget(self.upscaling_widget)
+
+        # Create animation timer (stopped initially)
+        self.spinner_timer = QTimer()
+        self.spinner_timer.timeout.connect(self._animate_spinner)
+        self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self.spinner_frame_index = 0
+
+    def _animate_spinner(self):
+        """Animate the spinner icon."""
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.spinner_frame_index = (self.spinner_frame_index + 1) % len(
+                self.spinner_frames
+            )
+
+            # Get current queue status
+            if hasattr(self, "upscale_queue"):
+                tasks = self.upscale_queue.get_all_tasks()
+                processing = [t for t in tasks if t.status.value == "processing"]
+                pending = [t for t in tasks if t.status.value == "pending"]
+                completed = [t for t in tasks if t.status.value == "completed"]
+
+                total = len(processing) + len(pending)
+                current = len(completed) + 1 if processing else len(completed)
+
+                if processing and processing[0].progress is not None:
+                    percent = int(processing[0].progress)
+                else:
+                    percent = 0
+
+                if total > 0:
+                    spinner = self.spinner_frames[self.spinner_frame_index]
+                    self.upscaling_widget.setText(
+                        f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
+                    )
+                else:
+                    self.upscaling_widget.setText(
+                        self.spinner_frames[self.spinner_frame_index]
+                    )
+            else:
+                self.upscaling_widget.setText(
+                    self.spinner_frames[self.spinner_frame_index]
+                )
+
+    def _show_spinner(self):
+        """Show the upscaling progress indicator."""
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            # Set initial text with progress info
+            if hasattr(self, "upscale_queue"):
+                tasks = self.upscale_queue.get_all_tasks()
+                processing = [t for t in tasks if t.status.value == "processing"]
+                pending = [t for t in tasks if t.status.value == "pending"]
+                completed = [t for t in tasks if t.status.value == "completed"]
+
+                total = len(processing) + len(pending)
+                current = len(completed) + 1 if processing else len(completed)
+
+                spinner = self.spinner_frames[self.spinner_frame_index]
+                self.upscaling_widget.setText(
+                    f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
+                )
+            else:
+                self.upscaling_widget.setText(
+                    self.spinner_frames[self.spinner_frame_index]
+                )
+
+            if not self.spinner_timer.isActive():
+                self.spinner_timer.start(100)
+
+    def _hide_spinner(self):
+        """Hide the upscaling progress indicator."""
+        self.spinner_timer.stop()
+
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.upscaling_widget.setText("")  # Clear the text instead of hiding
+            if not self.printedTraceback:
+                traceback.print_stack()
+                self.printedTraceback = True
+
+    def _on_task_added(self, task):
+        """Handle when a task is added to the queue."""
+        self._show_spinner()
+        # Start processing immediately if no tasks are currently running
+        self.upscale_queue.start_processing()
+
+    def _on_task_updated(self, task):
+        """Handle when a task is updated."""
+        # Check if we need to hide spinner based on current queue state
+        self._update_spinner_visibility()
+
+        # If this task completed successfully, refresh the current view
+        if task.status.value == "completed":
+            # Reload media from database to show any new upscaled files
+            self.load_all_media()
+
+    def _on_task_removed(self, task_id):
+        """Handle when a task is removed from the queue."""
+        self._update_spinner_visibility()
+
+    def _update_spinner_visibility(self):
+        """Update spinner visibility based on current queue state."""
+        all_tasks = self.upscale_queue.get_all_tasks()
+        has_active_tasks = any(
+            task.status.value in ["pending", "processing"] for task in all_tasks
+        )
+
+        if has_active_tasks:
+            self._show_spinner()
+        else:
+            self._hide_spinner()
+
+    def _poll_queue_updates(self):
+        """Poll for queue updates (called by timer)."""
+        try:
+            # Tell the queue to poll for process updates
+            self.upscale_queue.poll_updates()
+            # Update spinner visibility
+            self._update_spinner_visibility()
+        except Exception as e:
+            # Don't let polling errors crash the app
+            print(f"Error during queue polling: {e}")
 
     def load_config(self):
         """Load configuration from file."""
@@ -1102,6 +1352,121 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error changing thumbnail size: {e}")
 
+    # Context menu handlers
+    def on_context_open_requested(self, media):
+        """Handle Open request from thumbnail context menu."""
+        try:
+            self.thumbnail_view.on_thumbnail_double_clicked(media)
+        except Exception as e:
+            self.logger.error(f"Error opening media from context menu: {e}")
+
+    def on_context_open_folder_requested(self, media):
+        """Handle Open Folder request from thumbnail context menu."""
+        try:
+            # Temporarily set selected media for existing open folder functionality
+            old_selected = self.thumbnail_view.selected_media
+            self.thumbnail_view.selected_media = media
+            self._open_selected_folder()
+            self.thumbnail_view.selected_media = old_selected
+        except Exception as e:
+            self.logger.error(f"Error opening folder from context menu: {e}")
+
+    def on_context_delete_requested(self, media):
+        """Handle Delete request from thumbnail context menu."""
+        try:
+            # Use existing delete functionality
+            self._confirm_and_delete_media(media)
+        except Exception as e:
+            self.logger.error(f"Error deleting media from context menu: {e}")
+
+    def on_context_upscale_requested(self, media):
+        """Handle Upscale request from thumbnail context menu."""
+        try:
+            # Create a single-item list and use existing upscale functionality
+            selected_media_list = [media]
+            self._show_upscale_dialog(selected_media_list)
+        except Exception as e:
+            self.logger.error(f"Error starting upscale from context menu: {e}")
+
+    def on_context_refresh_metadata_requested(self, media):
+        """Handle Refresh Metadata request from thumbnail context menu."""
+        try:
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self,
+                "Refresh Metadata",
+                f"Refresh metadata for '{media.file_name}'?\n\n"
+                "This will rescan the file and update the database entry and thumbnail.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self._refresh_single_media_metadata(media)
+        except Exception as e:
+            self.logger.error(f"Error refreshing metadata from context menu: {e}")
+
+    def _refresh_single_media_metadata(self, media):
+        """Refresh metadata for a single media file."""
+        try:
+            from metascan.core.media import Media
+
+            file_path = media.file_path
+
+            if not file_path.exists():
+                QMessageBox.warning(
+                    self, "File Not Found", f"The file no longer exists:\n{file_path}"
+                )
+                return
+
+            # Delete old metadata entry from database
+            self.db_manager.delete_media(file_path)
+
+            # Delete old thumbnail
+            if self.thumbnail_cache:
+                thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
+                if thumbnail_path and thumbnail_path.exists():
+                    thumbnail_path.unlink()
+
+            # Rescan the file - Scanner requires db_manager
+            scanner = Scanner(self.db_manager)
+            new_media = scanner._process_media_file(file_path)
+
+            if new_media:
+                # Add to database
+                self.db_manager.save_media(new_media)
+
+                # Generate new thumbnail
+                if self.thumbnail_cache:
+                    self.thumbnail_cache.get_or_create_thumbnail(file_path)
+
+                # Update the in-memory media list
+                for i, existing_media in enumerate(self.all_media):
+                    if existing_media.file_path == file_path:
+                        self.all_media[i] = new_media
+                        break
+
+                # Refresh the UI
+                self.apply_all_filters()
+
+                # Update metadata panel if this media is currently selected
+                if (
+                    self.thumbnail_view.selected_media
+                    and self.thumbnail_view.selected_media.file_path == file_path
+                ):
+                    self.metadata_panel.display_metadata(new_media)
+
+            else:
+                QMessageBox.warning(
+                    self, "Scan Failed", f"Failed to rescan file:\n{file_path}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error refreshing metadata for {media.file_path}: {e}")
+            QMessageBox.critical(
+                self, "Refresh Error", f"Failed to refresh metadata:\n{str(e)}"
+            )
+
     def _recreate_thumbnail_view(self, new_size: Tuple[int, int]) -> None:
         """Recreate the thumbnail view with new size."""
         # Get current media list and filters
@@ -1129,6 +1494,13 @@ class MainWindow(QMainWindow):
         self.thumbnail_view.thumbnail_size_changed.disconnect()
         self.thumbnail_view.scroll_area.item_double_clicked.disconnect()
 
+        # Disconnect context menu signals
+        self.thumbnail_view.open_requested.disconnect()
+        self.thumbnail_view.open_folder_requested.disconnect()
+        self.thumbnail_view.delete_requested.disconnect()
+        self.thumbnail_view.upscale_requested.disconnect()
+        self.thumbnail_view.refresh_metadata_requested.disconnect()
+
         # Create new thumbnail view
         scroll_step = self.config.get("scroll_wheel_step", 120)
         new_thumbnail_view = VirtualThumbnailView(
@@ -1146,6 +1518,17 @@ class MainWindow(QMainWindow):
         )
         new_thumbnail_view.scroll_area.item_double_clicked.connect(
             self.on_thumbnail_double_clicked
+        )
+
+        # Connect context menu signals
+        new_thumbnail_view.open_requested.connect(self.on_context_open_requested)
+        new_thumbnail_view.open_folder_requested.connect(
+            self.on_context_open_folder_requested
+        )
+        new_thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
+        new_thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        new_thumbnail_view.refresh_metadata_requested.connect(
+            self.on_context_refresh_metadata_requested
         )
 
         # Replace in splitter using saved reference
@@ -1688,6 +2071,182 @@ class MainWindow(QMainWindow):
                 self.open_action.setEnabled(False)
             if hasattr(self, "open_folder_action"):
                 self.open_folder_action.setEnabled(False)
+
+    def _handle_upscale(self):
+        """Handle upscale action for selected media."""
+        try:
+            # Get selected media
+            selected_media_list = []
+
+            if self.thumbnail_view.is_multi_select_mode():
+                selected_media_list = self.thumbnail_view.get_all_selected_media()
+            else:
+                selected_media = self.thumbnail_view.get_selected_media()
+                if selected_media:
+                    selected_media_list = [selected_media]
+
+            if not selected_media_list:
+                QMessageBox.information(
+                    self,
+                    "No Selection",
+                    "Please select one or more media files to upscale.",
+                )
+                return
+
+            # Check if models are available
+            if not self.media_upscaler.models_available:
+                # Show setup dialog
+                setup_dialog = ModelSetupDialog(self)
+                setup_dialog.setup_completed.connect(self._setup_models)
+
+                if setup_dialog.exec() == QDialog.DialogCode.Accepted:
+                    # Models were set up, continue with upscaling
+                    self._show_upscale_dialog(selected_media_list)
+                return
+
+            # Show upscale dialog
+            self._show_upscale_dialog(selected_media_list)
+
+        except Exception as e:
+            print(f"Error handling upscale: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to start upscaling: {str(e)}")
+
+    def _show_upscale_dialog(self, selected_media_list):
+        """Show the upscale configuration dialog."""
+        # Prepare media info for dialog
+        media_files = []
+        for media in selected_media_list:
+            # Determine file type
+            file_ext = Path(media.file_path).suffix.lower()
+            if file_ext in [
+                ".mp4",
+                ".avi",
+                ".mov",
+                ".mkv",
+                ".webm",
+                ".flv",
+                ".wmv",
+                ".m4v",
+            ]:
+                file_type = "video"
+            else:
+                file_type = "image"
+
+            media_info = {
+                "filepath": str(media.file_path),
+                "filename": media.file_name,
+                "type": file_type,
+                "width": media.width or 0,
+                "height": media.height or 0,
+                "file_size": media.file_size,
+            }
+            media_files.append(media_info)
+
+        # Show dialog
+        dialog = UpscaleDialog(media_files, self)
+        dialog.upscale_requested.connect(self._add_upscale_tasks)
+        dialog.exec()
+
+    def _add_upscale_tasks(self, task_configs):
+        """Add upscale tasks to the queue."""
+        try:
+            for config in task_configs:
+                self.upscale_queue.add_task(
+                    file_path=config["file_path"],
+                    file_type=config["file_type"],
+                    scale=config["scale"],
+                    replace_original=config["replace_original"],
+                    enhance_faces=config.get("enhance_faces", False),
+                    interpolate_frames=config.get("interpolate_frames", False),
+                    interpolation_factor=config.get("interpolation_factor", 2),
+                    model_type=config.get("model_type", "general"),
+                    fps_override=config.get("fps_override"),
+                    preserve_metadata=config.get("preserve_metadata", True),
+                )
+
+            # Start processing (ProcessUpscaleQueue handles worker management)
+            self.upscale_queue.start_processing()
+
+        except Exception as e:
+            print(f"Error adding upscale tasks: {e}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to add tasks to queue: {str(e)}"
+            )
+
+    def _show_upscale_queue(self):
+        """Show the upscale queue window."""
+        if self.upscale_queue_window is None:
+            self.upscale_queue_window = UpscaleQueueWindow(self.upscale_queue, self)
+
+        self.upscale_queue_window.show()
+        self.upscale_queue_window.raise_()
+        self.upscale_queue_window.activateWindow()
+
+    def _setup_models(self):
+        """Setup AI models for upscaling."""
+        setup_dialog = self.sender()
+
+        def progress_callback(message, progress):
+            setup_dialog.update_progress(message, progress)
+            QApplication.processEvents()
+
+        # Run setup in background
+        success = self.media_upscaler.setup_models(progress_callback)
+
+        if not success:
+            QMessageBox.critical(
+                self,
+                "Setup Failed",
+                "Failed to setup AI models. Please check your internet connection and try again.",
+            )
+
+    def closeEvent(self, event):
+        """Handle application close event."""
+        # Stop the polling timer
+        if hasattr(self, "queue_poll_timer"):
+            self.queue_poll_timer.stop()
+
+        # Shutdown the upscale queue and any running processes
+        if hasattr(self, "upscale_queue"):
+            self.upscale_queue.shutdown()
+
+        # Close queue window if open
+        if hasattr(self, "upscale_queue_window") and self.upscale_queue_window:
+            self.upscale_queue_window.close()
+
+        # Continue with normal close
+        event.accept()
+
+    def on_media_database_updated(self, file_path: str, width: int, height: int):
+        """Handle when media dimensions are updated in the database."""
+        try:
+            # Find and update the media in our cache
+            for media in self.all_media:
+                if str(media.file_path) == file_path:
+                    media.width = width
+                    media.height = height
+                    break
+
+            # If this media is currently selected, refresh the metadata panel
+            selected_media = self.thumbnail_view.get_selected_media()
+            if selected_media and str(selected_media.file_path) == file_path:
+                self.metadata_panel.display_metadata(selected_media)
+
+            # If this media is currently in the viewer, update it
+            if self.media_viewer.isVisible() and hasattr(
+                self.media_viewer, "current_media"
+            ):
+                if (
+                    self.media_viewer.current_media
+                    and str(self.media_viewer.current_media.file_path) == file_path
+                ):
+                    self.media_viewer.current_media.width = width
+                    self.media_viewer.current_media.height = height
+
+            self.logger.info(f"Updated UI for media {file_path}: {width}x{height}")
+
+        except Exception as e:
+            self.logger.error(f"Error updating UI after database update: {e}")
 
 
 def main():
