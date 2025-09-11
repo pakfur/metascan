@@ -27,6 +27,7 @@ class UpscaleStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    DOWNLOADING_MODELS = "downloading_models"
 
 
 @dataclass

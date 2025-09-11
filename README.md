@@ -152,10 +152,14 @@ Metascan is an open source desktop application for browsing, organizing, and ups
    pip install -r requirements.txt
    ```
 
-4. **Set up NLTK data (first time only):**
+4. **Set up NLTK data and AI models (first time only):**
    ```bash
-   python setup_nltk.py
+   python setup_models.py
    ```
+   This will download:
+   - NLTK data packages for prompt tokenization (~5 MB)
+   - AI upscaling models: RealESRGAN, GFPGAN, RIFE (~915 MB total)
+   - Models can be downloaded later when first using upscaling features
 
 5. **Run the application:**
    ```bash
@@ -174,8 +178,8 @@ For local development with all dev tools:
    # Install development dependencies (testing, formatting, type checking)
    pip install -r requirements-dev.txt
    
-   # Set up NLTK data
-   python setup_nltk.py
+   # Set up NLTK data and AI models
+   python setup_models.py
    ```
 
 2. **Verify development setup:**
