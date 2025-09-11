@@ -223,7 +223,7 @@ class UpscaleQueue(QObject):
 
                     # Give the worker a moment to detect the cancellation
                     # Then actually remove it using QTimer (Qt-native, no threading issues)
-                    def delayed_remove():
+                    def delayed_remove() -> None:
                         with self._lock:
                             if task_id in self.tasks:
                                 del self.tasks[task_id]
