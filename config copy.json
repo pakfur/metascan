@@ -1,26 +1,5 @@
 {
-  "directories": [
-    {
-      "filepath": "/Volumes/Backup/local",
-      "search_subfolders": true
-    },
-    {
-      "filepath": "/Volumes/Backup/linked/video_staging",
-      "search_subfolders": true
-    },
-    {
-      "filepath": "/Volumes/Backup/linked/StabilityMatrix/Images",
-      "search_subfolders": true
-    },
-    {
-      "filepath": "/Volumes/Backup/downloads",
-      "search_subfolders": true
-    },
-    {
-      "filepath": "/Volumes/Backup/linked/images",
-      "search_subfolders": true
-    }
-  ],
+  "directories": [],
   "filler_words": [
     "<break>",
     "BREAK",
