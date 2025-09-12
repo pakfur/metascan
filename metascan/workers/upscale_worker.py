@@ -206,11 +206,11 @@ class UpscaleWorker:
                     return 1
 
             # Perform upscaling with progress callback
-            def progress_callback(progress: float) -> bool:
-                should_continue = self._update_progress(progress)
-                # Return True to continue, False to cancel
-                # MediaUpscaler expects this return value to determine if processing should continue
-                return should_continue
+            def progress_callback(progress: float) -> None:
+                self._update_progress(progress)
+                # Check if cancelled and raise exception to stop processing
+                if self._check_cancelled():
+                    raise RuntimeError("Upscaling cancelled by user")
 
             input_path = Path(task_data["file_path"])
 
@@ -254,18 +254,20 @@ class UpscaleWorker:
 
             if success:
                 self._update_progress(100, UpscaleStatus.COMPLETED)
-                
+
                 # When replacing original, the final file is at the input path location
                 # The MediaUpscaler moves the upscaled file to replace the original
                 if task_data.get("replace_original", True):
                     final_output_path = str(input_path)
                 else:
                     final_output_path = str(output_path)
-                
+
                 self._update_task_status(
                     UpscaleStatus.COMPLETED, output_path=final_output_path, progress=100
                 )
-                self.logger.info(f"Task completed successfully, output at: {final_output_path}")
+                self.logger.info(
+                    f"Task completed successfully, output at: {final_output_path}"
+                )
                 return 0
             else:
                 self._update_task_status(
