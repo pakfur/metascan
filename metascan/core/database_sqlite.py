@@ -238,6 +238,10 @@ class DatabaseManager:
 
         indices.append(("ext", media.file_extension))
 
+        # Add reverse index for the fully qualified file path
+        path_str = str(media.file_path).lower()
+        indices.append(("path", path_str))
+
         for tag in media.tags:
             indices.append(("tag", tag.lower()))
 
@@ -292,31 +296,47 @@ class DatabaseManager:
 
         try:
             with self._get_connection() as conn:
-                conditions = []
-                params = []
+                # Start with all media paths
+                result_set = None
 
                 for index_type, index_keys in filters.items():
                     if index_keys:  # Skip empty lists
-                        placeholders = ",".join(["?" for _ in index_keys])
-                        conditions.append(
-                            f"""
-                            file_path IN (
+                        # Get paths matching this filter type
+                        if index_type == "path":
+                            # Special handling for path filters - use LIKE for prefix matching
+                            path_prefix = index_keys[0].lower()
+                            query = """
+                                SELECT DISTINCT file_path 
+                                FROM indices 
+                                WHERE index_type = 'path' AND index_key LIKE ?
+                            """
+                            rows = conn.execute(query, [f"{path_prefix}%"])
+                        else:
+                            # Regular filter handling for other types
+                            # Multiple values within same type use OR logic
+                            placeholders = ",".join(["?" for _ in index_keys])
+                            query = f"""
                                 SELECT DISTINCT file_path 
                                 FROM indices 
                                 WHERE index_type = ? AND index_key IN ({placeholders})
-                            )
-                        """
-                        )
-                        params.append(index_type)
-                        params.extend(index_keys)
+                            """
+                            params = [index_type] + list(index_keys)
+                            rows = conn.execute(query, params)
 
-                if not conditions:
-                    return set()
+                        # Get paths for this filter
+                        current_paths = {row["file_path"] for row in rows}
 
-                query = f"SELECT DISTINCT file_path FROM indices WHERE {' AND '.join(conditions)}"
+                        # Apply AND logic between different filter types
+                        if result_set is None:
+                            result_set = current_paths
+                        else:
+                            result_set = result_set.intersection(current_paths)
 
-                rows = conn.execute(query, params)
-                return {row["file_path"] for row in rows}
+                        # Early exit if no matches
+                        if not result_set:
+                            return set()
+
+                return result_set if result_set is not None else set()
         except Exception as e:
             logger.error(f"Failed to get filtered media paths: {e}")
             return set()
