@@ -356,7 +356,7 @@ class ThumbnailView(QWidget):
         self.container_widget = None
         self.media_list: List[Media] = []
         self.thumbnail_widgets: Dict[str, ThumbnailWidget] = {}  # file_path -> widget
-        self.filtered_paths: Set[str] = set()
+        self.filtered_paths: Optional[Set[str]] = None
         self.selected_media: Optional[Media] = None
         self.selected_index: int = -1  # Track selected index for keyboard navigation
         self.thumbnail_cache: Optional[ThumbnailCache] = None
@@ -672,7 +672,7 @@ class ThumbnailView(QWidget):
         except Exception as e:
             raise RuntimeError(f"Unexpected error opening file: {e}")
 
-    def apply_filters(self, filtered_paths: Set[str]):
+    def apply_filters(self, filtered_paths: Optional[Set[str]]):
         self.filtered_paths = filtered_paths
 
         # Determine which thumbnails should be visible
@@ -690,8 +690,12 @@ class ThumbnailView(QWidget):
             widget = self.thumbnail_widgets.get(file_path_str)
 
             if widget:
-                # Show widget if no filters (empty set) or if path is in filter set
-                should_show = not filtered_paths or file_path_str in filtered_paths
+                # Show widget only if path is in filter set (when filters are active)
+                # If filtered_paths is None, show all (no filters applied)
+                if filtered_paths is None:
+                    should_show = True
+                else:
+                    should_show = file_path_str in filtered_paths
                 widget.set_filtered(should_show)
 
                 if should_show:
