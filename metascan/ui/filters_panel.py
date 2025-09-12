@@ -14,6 +14,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from typing import Dict, List, Set, Any
 
+from metascan.ui.path_filter_tree import PathFilterTree
+
 
 class FilterSection(QFrame):
     """Individual filter section with collapsible content."""
@@ -191,6 +193,7 @@ class FiltersPanel(QWidget):
         self.sort_order = "count"  # Default sort by count
         self.favorites_checkbox = None
         self.prompt_filter_edit = None
+        self.path_filter_tree = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -242,6 +245,12 @@ class FiltersPanel(QWidget):
         self.favorites_checkbox.setToolTip("Show only favorite items")
         self.favorites_checkbox.stateChanged.connect(self.on_favorites_toggled)
         main_layout.addWidget(self.favorites_checkbox)
+
+        # Path filter tree (above prompt filter)
+        self.path_filter_tree = PathFilterTree(self)
+        self.path_filter_tree.path_selected.connect(self.on_path_filter_changed)
+        self.path_filter_tree.path_cleared.connect(self.on_path_filter_cleared)
+        main_layout.addWidget(self.path_filter_tree)
 
         # Prompt filter text input
         prompt_filter_container = QWidget()
@@ -296,7 +305,7 @@ class FiltersPanel(QWidget):
         # Clear existing sections
         self.clear_sections()
 
-        # Define the order of sections (prompt first, exclude date)
+        # Define the order of sections (prompt first, exclude date and path)
         section_order = ["prompt", "model", "source", "ext", "lora"]
 
         # Create sections in the specified order
@@ -324,9 +333,9 @@ class FiltersPanel(QWidget):
                 if section_name == "prompt" and current_prompt_filter:
                     section.filter_items(current_prompt_filter)
 
-        # Add any remaining sections not in the predefined order
+        # Add any remaining sections not in the predefined order (excluding path)
         for section_name, items in filter_data.items():
-            if section_name not in section_order and items:
+            if section_name not in section_order and section_name != "path" and items:
                 section = FilterSection(section_name, items, self)
                 section.selection_changed.connect(self.on_filter_selection_changed)
 
@@ -367,6 +376,11 @@ class FiltersPanel(QWidget):
             selected_items = section.get_selected_items()
             if selected_items:
                 filters[section_name] = selected_items
+
+        # Add path filter if one is selected
+        if self.path_filter_tree and self.path_filter_tree.get_selected_path():
+            filters["path"] = [self.path_filter_tree.get_selected_path()]
+
         return filters
 
     def clear_all_filters(self):
@@ -376,6 +390,9 @@ class FiltersPanel(QWidget):
         # Also clear the prompt filter text
         if self.prompt_filter_edit:
             self.prompt_filter_edit.clear()
+        # Clear path filter
+        if self.path_filter_tree:
+            self.path_filter_tree.clear_selection()
         self.on_filter_selection_changed()  # Emit the change
 
     def set_sort_order(self, sort_order: str):
@@ -430,3 +447,17 @@ class FiltersPanel(QWidget):
             # Emit filter change if there are selected items
             if prompt_section.get_selected_items():
                 self.on_filter_selection_changed()
+
+    def on_path_filter_changed(self, path: str):
+        """Handle path filter selection."""
+        self.on_filter_selection_changed()
+
+    def on_path_filter_cleared(self):
+        """Handle path filter clearing."""
+        self.on_filter_selection_changed()
+
+    def update_path_filter_data(self, indexed_paths: Set[str]):
+        """Update the path filter tree with indexed paths from database."""
+        if self.path_filter_tree:
+            self.path_filter_tree.load_config("config.json")
+            self.path_filter_tree.update_indexed_paths(indexed_paths)

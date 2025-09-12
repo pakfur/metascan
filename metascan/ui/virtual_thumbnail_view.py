@@ -370,7 +370,7 @@ class VirtualScrollArea(QScrollArea):
         self._update_viewport()
 
     def apply_filters(
-        self, filtered_paths: Set[str], preserve_selection: bool = False
+        self, filtered_paths: Optional[Set[str]], preserve_selection: bool = False
     ) -> None:
         """
         Apply filters to the media list.
@@ -379,13 +379,14 @@ class VirtualScrollArea(QScrollArea):
             filtered_paths: Set of file paths to show (empty set shows all)
             preserve_selection: If True, don't clear selections (used during view recreation)
         """
-        logger.debug(f"Applying filters: {len(filtered_paths)} paths")
-
-        if not filtered_paths:
+        # Handle None vs empty set differently
+        if filtered_paths is None:
+            logger.debug("No filters applied - showing all media")
             # No filter - show all
             self.filtered_media = self.media_list.copy()
         else:
-            # Filter media list
+            logger.debug(f"Applying filters: {len(filtered_paths)} paths")
+            # Filter media list - empty set means show nothing
             self.filtered_media = [
                 media
                 for media in self.media_list
@@ -976,7 +977,7 @@ class VirtualThumbnailView(QWidget):
 
         # Data
         self.media_list: List[Media] = []
-        self.filtered_paths: Set[str] = set()
+        self.filtered_paths: Optional[Set[str]] = None
         self.selected_media: Optional[Media] = None
         self.thumbnail_size = thumbnail_size or (200, 200)
         self.scroll_step = scroll_step
@@ -1170,18 +1171,21 @@ class VirtualThumbnailView(QWidget):
         self._update_info_label()
 
     def apply_filters(
-        self, filtered_paths: Set[str], preserve_selection: bool = False
+        self, filtered_paths: Optional[Set[str]], preserve_selection: bool = False
     ) -> None:
         """
         Apply filters and update the display.
 
         Args:
-            filtered_paths: Set of file paths to show (empty set shows all)
+            filtered_paths: Set of file paths to show (None shows all, empty set shows none)
             preserve_selection: If True, don't clear selections (used during view recreation)
         """
-        logger.debug(
-            f"VirtualThumbnailView: Applying filters to {len(filtered_paths)} paths"
-        )
+        if filtered_paths is None:
+            logger.debug("VirtualThumbnailView: No filters applied - showing all media")
+        else:
+            logger.debug(
+                f"VirtualThumbnailView: Applying filters to {len(filtered_paths)} paths"
+            )
 
         self.filtered_paths = filtered_paths
         self.scroll_area.apply_filters(filtered_paths, preserve_selection)
@@ -1371,7 +1375,7 @@ class VirtualThumbnailView(QWidget):
         """Clear all thumbnails and reset the view."""
         logger.info("Clearing virtual thumbnail view")
         self.media_list.clear()
-        self.filtered_paths.clear()
+        self.filtered_paths = None
         self.selected_media = None
         self.scroll_area.set_media_list([])
         self._update_info_label()

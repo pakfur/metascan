@@ -301,7 +301,9 @@ class MainWindow(QMainWindow):
 
         # Current filter state
         self.current_filters = {}
-        self.filtered_media_paths = set()
+        self.filtered_media_paths = (
+            None  # None means no filters, empty set means filtered to nothing
+        )
         self.favorites_active = False  # Track if favorites filter is active
         self.all_media = []  # Cache of all media for filtering
 
@@ -1178,6 +1180,10 @@ class MainWindow(QMainWindow):
             sort_order = self.filters_panel.get_sort_order()
             filter_data = self.db_manager.get_filter_data(sort_order)
             self.filters_panel.update_filters(filter_data)
+
+            # Update path filter tree with indexed paths
+            indexed_paths = self.db_manager.get_existing_file_paths()
+            self.filters_panel.update_path_filter_data(indexed_paths)
         except Exception as e:
             print(f"Error refreshing filters: {e}")
 
@@ -1224,21 +1230,27 @@ class MainWindow(QMainWindow):
                 )
                 print(f"Filters applied: {self.current_filters}")
                 print(f"Found {len(filtered_paths)} matching media files")
-            else:
-                # No filters - start with all media
-                filtered_paths = {str(media.file_path) for media in self.all_media}
-                print("No filters applied - starting with all media")
 
-            # Apply favorites filter if active
-            if self.favorites_active:
-                favorite_paths = self.db_manager.get_favorite_media_paths()
-                # Intersect with current filtered paths
-                self.filtered_media_paths = filtered_paths & favorite_paths
+                # Apply favorites filter if active
+                if self.favorites_active:
+                    favorite_paths = self.db_manager.get_favorite_media_paths()
+                    # Intersect with current filtered paths
+                    self.filtered_media_paths = filtered_paths & favorite_paths
+                    print(
+                        f"Favorites filter applied: {len(self.filtered_media_paths)} items after favorites filter"
+                    )
+                else:
+                    self.filtered_media_paths = filtered_paths
+            elif self.favorites_active:
+                # Only favorites filter is active
+                self.filtered_media_paths = self.db_manager.get_favorite_media_paths()
                 print(
-                    f"Favorites filter applied: {len(self.filtered_media_paths)} items after favorites filter"
+                    f"Only favorites filter active: {len(self.filtered_media_paths)} favorite items"
                 )
             else:
-                self.filtered_media_paths = filtered_paths
+                # No filters at all - pass None to show all
+                self.filtered_media_paths = None
+                print("No filters applied - showing all media")
 
             # Update thumbnail view
             self.thumbnail_view.apply_filters(self.filtered_media_paths)
