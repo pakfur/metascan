@@ -77,7 +77,7 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 - Enhanced extractor system for better metadata detection
 
 ### Filtering & Search
-- Filter by prompts, models, LoRAs, and custom tags
+- Filter by file directories, prompt keywords, models, LoRAs, and file extensions, 
 - Inverted index for fast search across large collections
 - Real-time filter updates
 - Favorites system for organizing preferred media
@@ -118,7 +118,7 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 - **black** - Code formatting
 - **mypy** - Static type checking
 
-## Installation
+## Installation 
 
 ### Prerequisites
 
@@ -215,7 +215,7 @@ metascan  # Run from anywhere after installation
    - Progress is shown in the status bar
 
 3. **Browse and filter:**
-   - Use the left panel to filter by prompts, models, LoRAs, and tags
+   - Use the left panel to filter by directory paths, prompt keywords, models, LoRAs, and file extensions
    - View thumbnails in the center panel
    - See detailed metadata in the right panel
    - Double-click thumbnails to view full-size media
