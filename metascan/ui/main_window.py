@@ -1894,7 +1894,7 @@ class MainWindow(QMainWindow):
             # 3. Clear in-memory data
             print("Clearing in-memory data...")
             self.all_media.clear()
-            self.filtered_media_paths.clear()
+            self.filtered_media_paths = None  # Reset to None (no filters)
             self.current_filters.clear()
             self.favorites_active = False
 
