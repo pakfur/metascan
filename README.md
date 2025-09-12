@@ -43,12 +43,13 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 3. **Browse Images**: Use the **S/M/L** thumbnail size buttons in the toolbar to adjust thumbnail size for comfortable browsing
 
 4. **Filter Content**: Use the left panel to filter by:
-   - **Prompts** - Search text prompts used in generation
+   - **Paths** - Filter by directory and sub-directory
+   - **Prompts** - Filter text prompts keywords used in generation
    - **Models** - Filter by AI models used
    - **LoRAs** - Filter by specific LoRA models
-   - **Custom Tags** - User-defined tags for organization
+   - **File Extension** - Filter by file type
 
-5. **Upscale Media**: Right-click any image or video and select "Upscale" to enhance quality using Real-ESRGAN models
+6. **Upscale Media**: Right-click any image or video and select "Upscale" to enhance quality using Real-ESRGAN models
 
 **Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon or pressing "F". Access scanning and theme selection from the **Tools** menu.
 
