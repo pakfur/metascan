@@ -15,16 +15,13 @@ import urllib.request
 from tqdm import tqdm
 import logging
 
-# Fix for Python 3.12+ distutils compatibility
 try:
     import distutils  # type: ignore
 except ImportError:
-    # distutils was removed in Python 3.12, but setuptools provides compatibility
     try:
         import setuptools._distutils  # type: ignore
 
         sys.modules["distutils"] = setuptools._distutils
-        # Also setup specific submodules that are commonly used
         for name in ["util", "version", "spawn", "log"]:
             try:
                 module = getattr(setuptools._distutils, name, None)
@@ -33,7 +30,6 @@ except ImportError:
             except AttributeError:
                 pass
     except ImportError:
-        # Fallback - install setuptools
         import subprocess
 
         try:
@@ -46,7 +42,6 @@ except ImportError:
         except Exception as e:
             print(f"Warning: Could not setup distutils compatibility: {e}")
 
-# Fix for newer torchvision versions
 if "torchvision.transforms.functional_tensor" not in sys.modules:
     try:
         import torchvision.transforms.functional as F
@@ -57,8 +52,6 @@ if "torchvision.transforms.functional_tensor" not in sys.modules:
 
 
 class MediaUpscaler:
-    """Handles video and image upscaling for metascan."""
-
     def __init__(
         self,
         models_dir: Path,
@@ -81,12 +74,10 @@ class MediaUpscaler:
         self.tile_size = tile_size
         self.debug = debug
 
-        # Setup logging
         log_level = logging.DEBUG if debug else logging.INFO
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(log_level)
 
-        # Add console handler if not already present
         if not self.logger.handlers:
             console_handler = logging.StreamHandler()
             console_handler.setLevel(log_level)
@@ -96,7 +87,6 @@ class MediaUpscaler:
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-        # Model URLs
         self.model_urls = {
             "RealESRGAN_x2plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
             "RealESRGAN_x4plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
@@ -105,15 +95,12 @@ class MediaUpscaler:
             "rife_binary": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
         }
 
-        # RIFE binary path
         self.rife_bin: Optional[Path] = None
 
-        # Track if models are available
         self.models_available = False
         self._check_models()
 
     def _check_models(self) -> bool:
-        """Check if required models are available."""
         required_models = [
             "RealESRGAN_x2plus.pth",
             "RealESRGAN_x4plus.pth",
@@ -124,7 +111,6 @@ class MediaUpscaler:
             (self.models_dir / model).exists() for model in required_models
         )
 
-        # Check RIFE binary (optional for frame interpolation)
         rife_bin_path = (
             self.models_dir
             / "rife"
@@ -156,14 +142,12 @@ class MediaUpscaler:
             True if setup successful, False otherwise
         """
         try:
-            # Install Python dependencies
             if progress_callback:
                 progress_callback("Installing Python dependencies...", 0)
 
             if not self._install_python_dependencies():
                 return False
 
-            # Download models
             if progress_callback:
                 progress_callback("Downloading AI models...", 20)
 
@@ -181,7 +165,6 @@ class MediaUpscaler:
             return False
 
     def _install_python_dependencies(self) -> bool:
-        """Install required Python packages."""
         try:
             import realesrgan
             import basicsr
@@ -226,7 +209,6 @@ class MediaUpscaler:
     def _download_models(
         self, progress_callback: Optional[Callable[[str, float], None]] = None
     ) -> bool:
-        """Download Real-ESRGAN models."""
         total_models = len(self.model_urls)
 
         for idx, (model_name, model_url) in enumerate(self.model_urls.items()):
@@ -249,7 +231,6 @@ class MediaUpscaler:
                 progress = 20 + ((idx + 1) * 40 / total_models)
                 progress_callback(f"Downloaded {model_name}", progress)
 
-        # Download RIFE (optional for frame interpolation)
         if progress_callback:
             progress_callback("Setting up RIFE for frame interpolation...", 70.0)
 
@@ -264,7 +245,6 @@ class MediaUpscaler:
         return True
 
     def _download_file(self, url: str, dest: Path, desc: str) -> bool:
-        """Download a file with progress."""
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -285,7 +265,6 @@ class MediaUpscaler:
             return False
 
     def _download_rife(self) -> bool:
-        """Download RIFE binary and models."""
         import zipfile
         import tarfile
 
@@ -340,7 +319,7 @@ class MediaUpscaler:
         input_path: Path,
         output_path: Path,
         bg_upsampler: Optional[str] = None,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Optional[Callable[[float], bool]] = None,
     ) -> bool:
         """
         Enhance faces in an image using GFPGAN.
@@ -465,7 +444,7 @@ class MediaUpscaler:
         enhance_faces: bool = False,
         model_type: str = "general",
         preserve_metadata: bool = True,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Optional[Callable[[float], bool]] = None,
     ) -> bool:
         """
         Upscale a single image with optional face enhancement.
@@ -683,7 +662,7 @@ class MediaUpscaler:
         enhance_faces: bool = False,
         model_type: str = "general",
         preserve_metadata: bool = True,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Optional[Callable[[float], bool]] = None,
     ) -> bool:
         """
         Upscale a video with optional face enhancement.
@@ -923,7 +902,7 @@ class MediaUpscaler:
         output_path: Path,
         interpolation_factor: int = 2,
         replace_original: bool = False,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Optional[Callable[[float], bool]] = None,
     ) -> bool:
         """
         Interpolate video frames using RIFE for smoother motion.
@@ -1139,7 +1118,7 @@ class MediaUpscaler:
         new_fps: float,
         output_path: Path,
         replace_original: bool,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Optional[Callable[[float], bool]] = None,
     ) -> bool:
         """Basic frame interpolation using blending (fallback method)."""
         import time
