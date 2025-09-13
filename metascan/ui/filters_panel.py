@@ -459,5 +459,7 @@ class FiltersPanel(QWidget):
     def update_path_filter_data(self, indexed_paths: Set[str]):
         """Update the path filter tree with indexed paths from database."""
         if self.path_filter_tree:
-            self.path_filter_tree.load_config("config.json")
+            from metascan.utils.app_paths import get_config_path
+
+            self.path_filter_tree.load_config(str(get_config_path()))
             self.path_filter_tree.update_indexed_paths(indexed_paths)
