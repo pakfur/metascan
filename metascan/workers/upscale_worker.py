@@ -113,7 +113,9 @@ class UpscaleWorker:
         except Exception as e:
             self.logger.error(f"Failed to update progress: {e}")
             if self.debug:
-                self.logger.debug(f"Progress update traceback: {traceback.format_exc()}")
+                self.logger.debug(
+                    f"Progress update traceback: {traceback.format_exc()}"
+                )
             return True  # Continue processing even if progress update fails
 
     def _load_task(self):
@@ -125,7 +127,9 @@ class UpscaleWorker:
 
             if self.debug:
                 self.logger.debug(f"Queue data keys: {list(queue_data.keys())}")
-                self.logger.debug(f"Available tasks: {list(queue_data.get('tasks', {}).keys())}")
+                self.logger.debug(
+                    f"Available tasks: {list(queue_data.get('tasks', {}).keys())}"
+                )
 
             if self.task_id not in queue_data.get("tasks", {}):
                 raise ValueError(f"Task {self.task_id} not found in queue")
@@ -173,7 +177,9 @@ class UpscaleWorker:
 
             self.logger.info(f"Task status updated to {status.value}")
             if self.debug:
-                self.logger.debug(f"Task update details - Error: {error_message}, Output: {output_path}, Progress: {progress}")
+                self.logger.debug(
+                    f"Task update details - Error: {error_message}, Output: {output_path}, Progress: {progress}"
+                )
 
         except Exception as e:
             self.logger.error(f"Failed to update task status: {e}")
@@ -193,8 +199,12 @@ class UpscaleWorker:
                 self.logger.debug(f"  - Scale: {task_data.get('scale')}")
                 self.logger.debug(f"  - Model: {task_data.get('model')}")
                 self.logger.debug(f"  - Face enhance: {task_data.get('face_enhance')}")
-                self.logger.debug(f"  - Replace original: {task_data.get('replace_original')}")
-                self.logger.debug(f"  - Preserve metadata: {task_data.get('preserve_metadata')}")
+                self.logger.debug(
+                    f"  - Replace original: {task_data.get('replace_original')}"
+                )
+                self.logger.debug(
+                    f"  - Preserve metadata: {task_data.get('preserve_metadata')}"
+                )
 
             # Update status to processing
             self._update_task_status(UpscaleStatus.PROCESSING)
@@ -222,7 +232,9 @@ class UpscaleWorker:
                 def download_progress_callback(message: str, progress: float) -> None:
                     self.logger.info(f"Model download: {message} - {progress:.0f}%")
                     if self.debug:
-                        self.logger.debug(f"Download callback - Message: {message}, Progress: {progress}")
+                        self.logger.debug(
+                            f"Download callback - Message: {message}, Progress: {progress}"
+                        )
                     self._update_progress(progress)
 
                 success = upscaler.setup_models(download_progress_callback)
@@ -270,7 +282,9 @@ class UpscaleWorker:
 
             # Call appropriate method based on file type
             if task_data["file_type"] == "video":
-                self.logger.info(f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}")
+                self.logger.info(
+                    f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}"
+                )
                 success = upscaler.process_video(
                     input_path=input_path,
                     output_path=output_path,
@@ -282,7 +296,9 @@ class UpscaleWorker:
                     progress_callback=progress_callback,
                 )
             else:  # image
-                self.logger.info(f"Processing image with scale={task_data['scale']}, model={task_data.get('model', 'general')}")
+                self.logger.info(
+                    f"Processing image with scale={task_data['scale']}, model={task_data.get('model', 'general')}"
+                )
                 success = upscaler.process_image(
                     input_path=input_path,
                     output_path=output_path,
@@ -307,9 +323,13 @@ class UpscaleWorker:
                 else:
                     final_output_path = str(output_path)
 
-                self.logger.debug(f"Upscaling successful, final output: {final_output_path}")
+                self.logger.debug(
+                    f"Upscaling successful, final output: {final_output_path}"
+                )
                 if Path(final_output_path).exists():
-                    self.logger.debug(f"Output file size: {Path(final_output_path).stat().st_size} bytes")
+                    self.logger.debug(
+                        f"Output file size: {Path(final_output_path).stat().st_size} bytes"
+                    )
 
                 self._update_task_status(
                     UpscaleStatus.COMPLETED, output_path=final_output_path, progress=100
@@ -339,7 +359,9 @@ class UpscaleWorker:
             # Clean up progress file
             try:
                 if self.progress_file.exists():
-                    self.logger.debug(f"Cleaning up progress file: {self.progress_file}")
+                    self.logger.debug(
+                        f"Cleaning up progress file: {self.progress_file}"
+                    )
                     self.progress_file.unlink()
             except Exception as e:
                 self.logger.debug(f"Failed to clean up progress file: {e}")
@@ -348,12 +370,19 @@ class UpscaleWorker:
 def main():
     """Main entry point."""
     if len(sys.argv) < 3:
-        print("Usage: python upscale_worker.py <task_id> <queue_dir> [--debug]", file=sys.stderr)
+        print(
+            "Usage: python upscale_worker.py <task_id> <queue_dir> [--debug]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     task_id = sys.argv[1]
     queue_dir = Path(sys.argv[2])
-    debug = "--debug" in sys.argv or os.environ.get("UPSCALE_DEBUG", "").lower() in ("1", "true", "yes")
+    debug = "--debug" in sys.argv or os.environ.get("UPSCALE_DEBUG", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     # Set up logging
     log_level = logging.DEBUG if debug else logging.INFO
