@@ -556,6 +556,7 @@ class MainWindow(QMainWindow):
 
         refresh_action = QAction("Refresh", self)
         refresh_action.setShortcut("F5")
+        refresh_action.triggered.connect(self.refresh_view)
         view_menu.addAction(refresh_action)
 
         # Upscale Queue Window action
@@ -1172,6 +1173,17 @@ class MainWindow(QMainWindow):
             print(f"Loaded {len(self.all_media)} media items")
         except Exception as e:
             print(f"Error loading media: {e}")
+
+    def refresh_view(self):
+        """Refresh the entire view - reload media and filters."""
+        try:
+            # Reload all media from database
+            self.load_all_media()
+            # Refresh filters to ensure they're up to date
+            self.refresh_filters()
+            self.logger.info("View refreshed successfully")
+        except Exception as e:
+            self.logger.error(f"Error refreshing view: {e}")
             self.all_media = []
 
     def refresh_filters(self):
@@ -1363,9 +1375,21 @@ class MainWindow(QMainWindow):
     def on_context_open_requested(self, media):
         """Handle Open request from thumbnail context menu."""
         try:
-            self.thumbnail_view.on_thumbnail_double_clicked(media)
+            # Use the same logic as double-click but more directly
+            self.on_thumbnail_double_clicked(media)
         except Exception as e:
             self.logger.error(f"Error opening media from context menu: {e}")
+            # Try alternative approach on Windows
+            if platform.system() == "Windows":
+                try:
+                    import os
+                    import subprocess
+
+                    subprocess.run(
+                        ["start", "", str(media.file_path)], shell=True, check=True
+                    )
+                except Exception as e2:
+                    self.logger.error(f"Alternative open method also failed: {e2}")
 
     def on_context_open_folder_requested(self, media):
         """Handle Open Folder request from thumbnail context menu."""
@@ -2027,7 +2051,8 @@ class MainWindow(QMainWindow):
                 subprocess.run(["open", str(directory_path)], check=True)
             elif system == "Windows":
                 # Use explorer to open the folder
-                subprocess.run(["explorer", str(directory_path)], check=True)
+                # Don't use check=True as Windows explorer can return non-zero even on success
+                subprocess.run(["explorer", str(directory_path)])
             elif system == "Linux":
                 # Try common Linux file managers
                 try:
@@ -2261,6 +2286,15 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+
+    # Fix for Windows DirectWrite font issues
+    if platform.system() == "Windows":
+        # Set a reliable font that exists on Windows
+        from PyQt6.QtGui import QFont
+
+        default_font = QFont("Segoe UI", 9)  # Standard Windows font
+        app.setFont(default_font)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
