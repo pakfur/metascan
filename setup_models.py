@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from metascan.core.media_upscaler import MediaUpscaler
-from metascan.utils.app_paths import get_data_dir
+from metascan.utils.app_paths import get_models_dir
 
 # Handle SSL certificate issues
 try:
@@ -46,7 +46,7 @@ def download_upscaling_models():
     print("Setting up AI upscaling models...")
     print("=" * 60)
     
-    models_dir = get_data_dir() / "models"
+    models_dir = get_models_dir()
     print(f"Models directory: {models_dir}")
     
     # Initialize upscaler

@@ -1,0 +1,27 @@
+version: '3.8'
+
+# Development overrides for docker-compose.yml
+# Use with: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  metascan:
+    volumes:
+      # Mount source code for live development
+      - .:/app:rw
+      - ./data:/data
+      - ./models:/models
+    environment:
+      - PYTHONPATH=/app
+      - FLASK_ENV=development
+      - DEBUG=1
+    command: ["python", "main.py"]
+
+  upscaler:
+    volumes:
+      # Mount source code for live development
+      - .:/app:rw
+      - ./data:/data
+      - ./models:/models
+    environment:
+      - PYTHONPATH=/app
+      - DEBUG=1
