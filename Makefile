@@ -142,5 +142,42 @@ check-venv:
 		exit 1; \
 	fi
 
+# Docker targets
+.PHONY: docker-build
+docker-build:  ## Build Docker images
+	docker-compose build
+
+.PHONY: docker-up
+docker-up:  ## Start Docker containers
+	docker-compose up -d
+
+.PHONY: docker-down
+docker-down:  ## Stop Docker containers
+	docker-compose down
+
+.PHONY: docker-logs
+docker-logs:  ## View Docker container logs
+	docker-compose logs -f
+
+.PHONY: docker-clean
+docker-clean:  ## Clean Docker containers and volumes
+	docker-compose down -v
+	docker image rm metascan-metascan metascan-sqlite metascan-upscaler 2>/dev/null || true
+
+.PHONY: docker-shell
+docker-shell:  ## Access metascan container shell
+	docker exec -it metascan-app /bin/bash
+
+.PHONY: docker-sqlite
+docker-sqlite:  ## Access SQLite CLI in container
+	docker exec -it metascan-sqlite sqlite3 /data/metascan.db
+
+.PHONY: docker-rebuild
+docker-rebuild: docker-down docker-clean docker-build docker-up  ## Full rebuild and restart of Docker containers
+
+.PHONY: docker-dev
+docker-dev:  ## Run Docker in development mode with live code mounting
+	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
 # Add dependency to targets that need venv
 deps nltk-setup dev-install test test-prompt-tokenizer test-components test-metadata test-coverage format typecheck build build-manual: check-venv

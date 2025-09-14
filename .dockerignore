@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info
+dist
+build
+venv
+.venv
+env
+.env
+
+# Data directories (will be mounted as volumes)
+data/
+models/
+logs/
+test_db/
+test_cache/
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+*.md
+docs/
+
+# Build artifacts
+*.spec
+*.icns
+*.png
+MetaScan.app/
+
+# Test files
+test_*.py
+tests/
+
+# Configuration (will be mounted from data/)
+config.json
+config_example.json
+"config copy.json"
+
+# Cache
+.mypy_cache
+.pytest_cache
+.cache
+
+# Claude AI
+.claude
+
+# Other
+*.log
+*.sqlite
+*.db

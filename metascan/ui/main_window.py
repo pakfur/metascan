@@ -42,6 +42,8 @@ from metascan.utils.app_paths import (
     get_data_dir,
     get_config_path,
     get_thumbnail_cache_dir,
+    get_models_dir,
+    get_queue_dir,
 )
 import os
 import json
@@ -322,13 +324,13 @@ class MainWindow(QMainWindow):
         )
 
         # Initialize upscale components
-        models_dir = get_data_dir() / "models"
+        models_dir = get_models_dir()
         self.media_upscaler = MediaUpscaler(
             models_dir=models_dir, device="auto", tile_size=512, debug=False
         )
 
         # Initialize process-based upscale queue
-        queue_dir = get_data_dir() / "queue"
+        queue_dir = get_queue_dir()
         self.upscale_queue = ProcessUpscaleQueue(queue_dir)
 
         # Connect queue signals to show/hide spinner

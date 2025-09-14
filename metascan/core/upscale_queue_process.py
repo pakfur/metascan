@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Tuple, Any, cast
 from dataclasses import dataclass, asdict
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from metascan.utils.app_paths import get_queue_dir
+
 
 class UpscaleStatus(Enum):
     """Status of an upscale task."""
@@ -93,7 +95,7 @@ class ProcessUpscaleQueue(QObject):
 
         # Queue directory setup
         if queue_dir is None:
-            queue_dir = Path.home() / ".metascan" / "queue"
+            queue_dir = get_queue_dir()
         self.queue_dir = Path(queue_dir)
         self.queue_dir.mkdir(parents=True, exist_ok=True)
 
