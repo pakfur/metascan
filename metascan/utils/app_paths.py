@@ -25,10 +25,14 @@ def get_base_path() -> Path:
 def get_data_dir() -> Path:
     """Get the data directory for the application.
 
+    Checks DATA_DIR environment variable first, then:
     In bundled mode: Uses user's home directory under .metascan/data
     In development mode: Uses project_root/data
     """
-    if is_bundled():
+    # Check for environment variable override
+    if env_data_dir := os.environ.get("DATA_DIR"):
+        data_dir = Path(env_data_dir)
+    elif is_bundled():
         # Use user's home directory for persistent data
         data_dir = Path.home() / ".metascan" / "data"
     else:
@@ -43,40 +47,21 @@ def get_data_dir() -> Path:
 def get_config_path() -> Path:
     """Get the path to the config file.
 
-    In bundled mode: First checks user's config, then falls back to bundled
-    In development mode: Uses project_root/config.json, creating from config_example.json if needed
+    Uses data directory for config storage.
+    Falls back to config_example.json if config.json doesn't exist.
     """
-    if is_bundled():
-        # Check for user config first
-        user_config = Path.home() / ".metascan" / "config.json"
-        if user_config.exists():
-            return user_config
+    # Always use data directory for config
+    config_path = get_data_dir() / "config.json"
 
-        # Fall back to bundled config (distribution version)
-        bundled_config = get_base_path() / "config_dist.json"
-        if bundled_config.exists():
-            # Copy bundled config to user directory on first run
-            user_config.parent.mkdir(parents=True, exist_ok=True)
+    # If config.json doesn't exist but config_example.json does, copy it
+    if not config_path.exists():
+        example_config = get_base_path() / "config_example.json"
+        if example_config.exists():
             import shutil
+            shutil.copy2(example_config, config_path)
+            print(f"Created config.json from config_example.json")
 
-            shutil.copy2(bundled_config, user_config)
-            return user_config
-
-        return bundled_config
-    else:
-        # Development mode
-        config_path = get_base_path() / "config.json"
-
-        # If config.json doesn't exist but config_example.json does, copy it
-        if not config_path.exists():
-            example_config = get_base_path() / "config_example.json"
-            if example_config.exists():
-                import shutil
-
-                shutil.copy2(example_config, config_path)
-                print(f"Created config.json from config_example.json")
-
-        return config_path
+    return config_path
 
 
 def get_icon_path() -> Path:
@@ -92,3 +77,32 @@ def get_thumbnail_cache_dir() -> Path:
     cache_dir = Path.home() / ".metascan" / "thumbnails"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
+
+
+def get_models_dir() -> Path:
+    """Get the models directory for AI models.
+
+    Checks MODELS_DIR environment variable first, then uses data/models.
+    """
+    # Check for environment variable override
+    if env_models_dir := os.environ.get("MODELS_DIR"):
+        models_dir = Path(env_models_dir)
+    else:
+        # Default to data directory
+        models_dir = get_data_dir() / "models"
+
+    # Ensure directory exists
+    models_dir.mkdir(parents=True, exist_ok=True)
+    return models_dir
+
+
+def get_database_path() -> Path:
+    """Get the path to the SQLite database file."""
+    return get_data_dir() / "metascan.db"
+
+
+def get_queue_dir() -> Path:
+    """Get the queue directory for processing queues."""
+    queue_dir = get_data_dir() / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    return queue_dir

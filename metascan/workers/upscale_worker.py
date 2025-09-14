@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from metascan.core.media_upscaler import MediaUpscaler
 from metascan.core.upscale_queue_process import UpscaleStatus
-from metascan.utils.app_paths import get_data_dir
+from metascan.utils.app_paths import get_models_dir
 
 
 class UpscaleWorker:
@@ -215,7 +215,7 @@ class UpscaleWorker:
                 return 1
 
             # Initialize upscaler with same config as main window
-            models_dir = get_data_dir() / "models"
+            models_dir = get_models_dir()
             self.logger.debug(f"Models directory: {models_dir}")
             self.logger.debug(f"Initializing MediaUpscaler with debug={self.debug}")
 
