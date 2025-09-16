@@ -1762,6 +1762,8 @@ class MainWindow(QMainWindow):
                     self.media_viewer._display_current_media()
 
             # 7. Update thumbnail view (remove from display)
+            # First update the media list in the thumbnail view, then apply filters
+            self.thumbnail_view.set_media_list(self.all_media)
             self.apply_all_filters()
 
             print(f"Successfully deleted: {file_path.name}")
@@ -1819,6 +1821,8 @@ class MainWindow(QMainWindow):
 
             # 5. Update filters and view once after all deletions
             self.refresh_filters()
+            # First update the media list in the thumbnail view, then apply filters
+            self.thumbnail_view.set_media_list(self.all_media)
             self.apply_all_filters()
 
             # 6. Clear multi-selection after deletion

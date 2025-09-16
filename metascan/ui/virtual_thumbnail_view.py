@@ -353,8 +353,9 @@ class VirtualScrollArea(QScrollArea):
         """
         logger.info(f"Setting media list with {len(media_list)} items")
 
-        # Clear existing state
+        # Clear existing state completely - this ensures deleted media is removed
         self._clear_viewport()
+        self.widget_pool.clear_all()
 
         # Set new data
         self.media_list = media_list
@@ -400,7 +401,10 @@ class VirtualScrollArea(QScrollArea):
         # Recalculate layout and update
         self._calculate_layout()
         self._update_scroll_range()
+
+        # Force a complete viewport refresh to ensure deleted media is properly removed
         self._clear_viewport()
+        self.widget_pool.clear_all()
         self._update_viewport()
 
     def _calculate_layout(self) -> None:
