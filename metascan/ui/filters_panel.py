@@ -9,6 +9,8 @@ from PyQt6.QtWidgets import (
     QFrame,
     QSizePolicy,
     QLineEdit,
+    QMessageBox,
+    QToolButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -41,6 +43,12 @@ class FilterSection(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Header container for button and clear icon
+        header_container = QWidget()
+        header_layout = QHBoxLayout(header_container)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+
         # Header button
         self.header_button = QPushButton()
         self.header_button.setCheckable(True)
@@ -49,7 +57,30 @@ class FilterSection(QFrame):
         )
         # Use theme styling for header button
         self.header_button.clicked.connect(self.toggle_section)
-        layout.addWidget(self.header_button)
+        header_layout.addWidget(self.header_button, 1)  # Stretch to fill space
+
+        # Clear selection button
+        self.clear_button = QToolButton()
+        self.clear_button.setText("✕")
+        self.clear_button.setToolTip(f"Clear all selections in {self.section_name}")
+        self.clear_button.setStyleSheet(
+            """
+            QToolButton {
+                border: none;
+                padding: 2px 6px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background-color: rgba(255, 0, 0, 30);
+                border-radius: 3px;
+            }
+        """
+        )
+        self.clear_button.clicked.connect(self.on_clear_section)
+        self.clear_button.setVisible(False)  # Initially hidden
+        header_layout.addWidget(self.clear_button)
+
+        layout.addWidget(header_container)
 
         # Content area (initially hidden)
         self.content_widget = QWidget()
@@ -101,7 +132,30 @@ class FilterSection(QFrame):
 
     def on_checkbox_changed(self):
         """Handle checkbox state changes."""
+        # Show/hide clear button based on whether any items are selected
+        has_selection = any(cb.isChecked() for cb in self.checkboxes.values())
+        self.clear_button.setVisible(has_selection)
         self.selection_changed.emit()
+
+    def on_clear_section(self):
+        """Handle clear button click with confirmation."""
+        # Check if there are any selected items
+        if not self.get_selected_items():
+            return
+
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            "Clear Filters",
+            f"Clear all filters in {self.section_name.title()} section?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.clear_selection()
+            self.clear_button.setVisible(False)
+            self.selection_changed.emit()
 
     def get_selected_items(self) -> List[str]:
         """Get list of selected filter keys."""
@@ -166,6 +220,10 @@ class FilterSection(QFrame):
 
             self.checkboxes[item["key"]] = checkbox
             self.content_layout.addWidget(checkbox)
+
+        # Update clear button visibility based on selections
+        has_selection = any(cb.isChecked() for cb in self.checkboxes.values())
+        self.clear_button.setVisible(has_selection)
 
         # Update header count
         icon = "▼" if self.is_expanded else "▶"
@@ -328,6 +386,9 @@ class FiltersPanel(QWidget):
                     for item_key in selected_states[section_name]:
                         if item_key in section.checkboxes:
                             section.checkboxes[item_key].setChecked(True)
+                    # Update clear button visibility if items were restored
+                    if selected_states[section_name]:
+                        section.clear_button.setVisible(True)
 
                 # Apply prompt filter if it's the prompt section and there's filter text
                 if section_name == "prompt" and current_prompt_filter:
@@ -352,6 +413,9 @@ class FiltersPanel(QWidget):
                     for item_key in selected_states[section_name]:
                         if item_key in section.checkboxes:
                             section.checkboxes[item_key].setChecked(True)
+                    # Update clear button visibility if items were restored
+                    if selected_states[section_name]:
+                        section.clear_button.setVisible(True)
 
         # If there were any selected filters previously, re-emit the filters changed signal
         # to ensure the UI stays in sync
