@@ -233,8 +233,11 @@ class DatabaseManager:
         if media.metadata_source:
             indices.append(("source", media.metadata_source.lower()))
 
+        # Add index for each model in the list
         if media.model:
-            indices.append(("model", media.model.lower()))
+            for model_name in media.model:
+                if model_name:  # Skip empty strings
+                    indices.append(("model", model_name.lower()))
 
         indices.append(("ext", media.file_extension))
 

@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 import json
+import subprocess
+import platform
 
 from metascan.core.media import Media
 from metascan.utils.app_paths import get_config_path
@@ -119,6 +121,14 @@ class VideoPlayer(QWidget):
 
         # Track last position for loop detection
         self._last_position = 0
+        
+        # Track current file for fallback handling
+        self._current_file_path = None
+        self._fallback_attempted = False
+        
+        # Commonly supported formats by QMediaPlayer
+        self._preferred_formats = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
+        self._preferred_codecs = {'h264', 'h265', 'vp8', 'vp9', 'av1'}
 
         self.video_widget = QVideoWidget()
         self.video_widget.setStyleSheet("background-color: black;")
@@ -175,6 +185,37 @@ class VideoPlayer(QWidget):
         try:
             # Stop any current playback
             self.media_player.stop()
+            
+            # Reset fallback state for new file
+            self._current_file_path = file_path
+            self._fallback_attempted = False
+            
+            # Check if file exists and is readable
+            if not file_path.exists():
+                logger.error(f"Video file does not exist: {file_path}")
+                return False
+                
+            # Check file permissions and access
+            if not self._check_file_access(file_path):
+                logger.error(f"Cannot access video file (permission denied): {file_path}")
+                self._show_permission_error(file_path)
+                return False
+                
+            # Validate format before attempting to load
+            format_supported = self._is_format_likely_supported(file_path)
+            if not format_supported:
+                logger.warning(f"Format may not be supported by QMediaPlayer: {file_path.suffix}")
+                
+            # Log codec information for debugging
+            codec_info = self._get_codec_info(file_path)
+            if codec_info:
+                logger.info(f"Video codec info for {file_path.name}: {codec_info}")
+                
+                # Check if codec is likely supported
+                if not self._is_codec_likely_supported(codec_info) and not format_supported:
+                    logger.warning(f"Codec and format may not be supported, attempting fallback first")
+                    self._attempt_fallback()
+                    return False
 
             # Set the new source
             self.media_player.setSource(QUrl.fromLocalFile(str(file_path)))
@@ -273,6 +314,22 @@ class VideoPlayer(QWidget):
         """Handle media player errors."""
         error_string = self.media_player.errorString()
         logger.error(f"Media player error: {error} - {error_string}")
+        
+        # Try to provide more helpful error information
+        from PyQt6.QtMultimedia import QMediaPlayer
+        
+        if error == QMediaPlayer.Error.ResourceError:
+            if self._current_file_path and not self._fallback_attempted:
+                # Check if this might be a permission issue
+                if not self._check_file_access(self._current_file_path):
+                    logger.info(f"ResourceError due to file access issue: {self._current_file_path}")
+                    self._show_permission_error(self._current_file_path)
+                else:
+                    logger.info(f"ResourceError for supported file, attempting fallback: {self._current_file_path}")
+                    self._attempt_fallback()
+            else:
+                logger.warning(f"Could not play video file: {self._current_file_path}")
+                self._show_format_error()
 
     def handle_media_status(self, status):
         """Handle media status changes."""
@@ -283,8 +340,15 @@ class VideoPlayer(QWidget):
             # Video is ready, show first frame
             self.media_player.pause()
             self.media_player.setPosition(0)
+            # Reset fallback flag on successful load
+            self._fallback_attempted = False
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             logger.error("Invalid media format")
+            if self._current_file_path and not self._fallback_attempted:
+                logger.info(f"Invalid media format, attempting fallback: {self._current_file_path}")
+                self._attempt_fallback()
+            else:
+                self._show_format_error()
         elif status == QMediaPlayer.MediaStatus.NoMedia:
             logger.info("No media")
 
@@ -301,6 +365,87 @@ class VideoPlayer(QWidget):
         except Exception as e:
             logger.warning(f"Failed to load playback speed from config: {e}")
         return 1.0  # Default to normal speed
+    
+    def _get_codec_info(self, file_path: Path) -> Optional[str]:
+        """Get codec information for a video file using ffprobe."""
+        try:
+            import ffmpeg
+            probe = ffmpeg.probe(str(file_path))
+            video_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'video']
+            if video_streams:
+                codec = video_streams[0].get('codec_name', 'unknown')
+                return f"Codec: {codec}"
+        except Exception as e:
+            logger.debug(f"Could not get codec info for {file_path}: {e}")
+        return None
+    
+    def _attempt_fallback(self):
+        """Attempt to open video in system default player as fallback."""
+        if not self._current_file_path or self._fallback_attempted:
+            return
+            
+        self._fallback_attempted = True
+        logger.info(f"Opening video in system default player: {self._current_file_path}")
+        
+        try:
+            if platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", str(self._current_file_path)], check=False)
+            elif platform.system() == "Windows":
+                subprocess.run(["start", str(self._current_file_path)], shell=True, check=False)
+            else:  # Linux
+                subprocess.run(["xdg-open", str(self._current_file_path)], check=False)
+                
+            logger.info(f"Opened media file in default viewer: {self._current_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to open video in system player: {e}")
+    
+    def _show_format_error(self):
+        """Show user-friendly error message for unsupported format."""
+        if self._current_file_path:
+            codec_info = self._get_codec_info(self._current_file_path)
+            error_msg = f"Unsupported video format: {self._current_file_path.name}"
+            if codec_info:
+                error_msg += f" ({codec_info})"
+            error_msg += "\nTrying external player..."
+            logger.warning(error_msg)
+    
+    def _is_format_likely_supported(self, file_path: Path) -> bool:
+        """Check if the file format is likely supported by QMediaPlayer."""
+        return file_path.suffix.lower() in self._preferred_formats
+    
+    def _is_codec_likely_supported(self, codec_info: str) -> bool:
+        """Check if the codec is likely supported by QMediaPlayer."""
+        if not codec_info:
+            return False
+        codec_lower = codec_info.lower()
+        return any(supported_codec in codec_lower for supported_codec in self._preferred_codecs)
+    
+    def _check_file_access(self, file_path: Path) -> bool:
+        """Check if the file is accessible for reading."""
+        try:
+            # Try to open the file for reading
+            with open(file_path, 'rb') as f:
+                # Read just a small chunk to verify access
+                f.read(1024)
+            return True
+        except (PermissionError, OSError, IOError) as e:
+            logger.warning(f"File access check failed for {file_path}: {e}")
+            return False
+    
+    def _show_permission_error(self, file_path: Path):
+        """Handle permission errors with helpful user messaging."""
+        logger.error(f"Permission denied accessing file: {file_path}")
+        
+        # Check for common macOS security restrictions
+        if platform.system() == "Darwin":
+            logger.info("On macOS, this might be due to:")
+            logger.info("- File quarantine attributes (try: xattr -r -d com.apple.quarantine file)")
+            logger.info("- System security restrictions")
+            logger.info("- File located on restricted volume")
+            
+        # Still attempt fallback to external player
+        logger.info("Attempting to open with system default player...")
+        self._attempt_fallback()
 
     def clear_video(self):
         """Clear the current video."""

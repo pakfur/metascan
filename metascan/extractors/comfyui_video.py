@@ -1,7 +1,11 @@
+"""
+Improved ComfyUI video metadata extractor with node-specific handlers.
+"""
+
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 
 from metascan.extractors.base import MetadataExtractor
@@ -9,8 +13,321 @@ from metascan.extractors.base import MetadataExtractor
 logger = logging.getLogger(__name__)
 
 
+class NodeHandler:
+    """Base class for ComfyUI node-specific metadata extraction handlers"""
+
+    def can_handle(self, class_type: str) -> bool:
+        """Check if this handler can process the given node type"""
+        return False
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """Extract metadata from the node and update the result dictionary"""
+        pass
+
+
+class CLIPTextEncodeHandler(NodeHandler):
+    """Handler for CLIPTextEncode nodes (prompts)"""
+
+    def can_handle(self, class_type: str) -> bool:
+        return class_type == "CLIPTextEncode"
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+        text = inputs.get("text", "").strip()
+
+        if not text:
+            return
+
+        # Try to determine if positive or negative based on title or content
+        meta = node_data.get("_meta", {})
+        title = meta.get("title", "").lower()
+
+        # Check title first for clear indicators
+        if "negative" in title or "neg" in title:
+            if "negative_prompt" not in result:
+                result["negative_prompt"] = text
+        elif "positive" in title or "pos" in title:
+            if "prompt" not in result:
+                result["prompt"] = text
+        else:
+            # Heuristic: check content for negative keywords
+            # Include both English and Chinese negative indicators
+            negative_indicators = [
+                "negative", "bad", "ugly", "worst", "low quality", "poor",
+                "最差质量", "低质量", "丑陋", "残缺", "畸形", "毁容",  # Chinese negative terms
+                "overexposure", "过曝", "静态", "模糊"  # Common negative terms
+            ]
+
+            # Count how many negative indicators are present
+            negative_count = sum(1 for indicator in negative_indicators if indicator in text.lower())
+
+            # If text has multiple negative indicators, it's likely a negative prompt
+            # Also check if text is mostly Chinese (common pattern for negative prompts)
+            chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+            total_chars = len(text)
+
+            is_negative = (
+                negative_count >= 2 or  # Multiple negative keywords
+                (chinese_chars > total_chars * 0.5 and negative_count >= 1)  # Mostly Chinese with negative keywords
+            )
+
+            if is_negative:
+                if "negative_prompt" not in result:
+                    result["negative_prompt"] = text
+            else:
+                if "prompt" not in result:
+                    result["prompt"] = text
+
+
+class PowerLoraLoaderHandler(NodeHandler):
+    """Handler for Power Lora Loader (rgthree) nodes"""
+
+    def can_handle(self, class_type: str) -> bool:
+        return class_type == "Power Lora Loader (rgthree)"
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+
+        # Initialize loras list if needed
+        if "loras" not in result:
+            result["loras"] = []
+
+        # Iterate through all lora_N inputs
+        for key, value in inputs.items():
+            if key.startswith("lora_") and isinstance(value, dict):
+                # Check if this LoRA is enabled
+                if not value.get("on", False):
+                    continue
+
+                # Extract LoRA name
+                lora_name = value.get("lora", "")
+                if not lora_name:
+                    continue
+
+                # Remove file extension
+                lora_name = (
+                    lora_name.replace(".safetensors", "")
+                    .replace(".ckpt", "")
+                    .replace(".pt", "")
+                )
+
+                # Extract strength
+                strength = value.get("strength", 1.0)
+
+                # Check if this LoRA is already in the list (avoid duplicates)
+                existing_lora = next(
+                    (
+                        lora
+                        for lora in result["loras"]
+                        if lora["lora_name"] == lora_name
+                    ),
+                    None,
+                )
+
+                if not existing_lora:
+                    weight = round(float(strength), 2)
+                    result["loras"].append(
+                        {"lora_name": lora_name, "lora_weight": weight}
+                    )
+
+
+class LoraLoaderHandler(NodeHandler):
+    """Handler for standard LoRA loader nodes"""
+
+    def can_handle(self, class_type: str) -> bool:
+        # Don't handle Power Lora Loader here
+        if "power" in class_type.lower():
+            return False
+        return "lora" in class_type.lower() and "loader" in class_type.lower()
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+
+        # Extract LoRA name
+        lora_name = inputs.get("lora_name", "")
+        if not lora_name:
+            return
+
+        # Remove file extension if present
+        lora_name = (
+            lora_name.replace(".safetensors", "")
+            .replace(".ckpt", "")
+            .replace(".pt", "")
+        )
+
+        # Extract strength/weight
+        strength = inputs.get("strength_model")
+        if strength is None:
+            strength = inputs.get("strength", 1.0)
+
+        # Add to loras list
+        if "loras" not in result:
+            result["loras"] = []
+
+        # Check if this LoRA is already in the list (avoid duplicates)
+        existing_lora = next(
+            (lora for lora in result["loras"] if lora["lora_name"] == lora_name), None
+        )
+
+        if not existing_lora:
+            weight = float(strength) if strength is not None else 1.0
+            # Round weight to avoid floating point precision issues
+            weight = round(weight, 2)
+            result["loras"].append({"lora_name": lora_name, "lora_weight": weight})
+
+
+class UNETLoaderHandler(NodeHandler):
+    """Handler for UNET/Model loader nodes"""
+
+    def can_handle(self, class_type: str) -> bool:
+        return class_type in [
+            "UNETLoader",
+            "CheckpointLoaderSimple",
+            "DiffusionModelLoaderKJ",
+        ]
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+
+        # Extract model name
+        model_name = (
+            inputs.get("unet_name")
+            or inputs.get("ckpt_name")
+            or inputs.get("model_name")
+            or ""
+        )
+
+        if not model_name:
+            return
+
+        # Remove file extension
+        model_name = (
+            model_name.replace(".safetensors", "")
+            .replace(".ckpt", "")
+            .replace(".pt", "")
+        )
+
+        # Store as list to support multiple models (e.g., high/low noise variants)
+        if "models" not in result:
+            result["models"] = []
+
+        if model_name not in result["models"]:
+            result["models"].append(model_name)
+
+
+class SamplerHandler(NodeHandler):
+    """Handler for sampler nodes (KSampler and variants)"""
+
+    def can_handle(self, class_type: str) -> bool:
+        return "sampler" in class_type.lower()
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+
+        # Extract sampler name (handle various formats)
+        sampler_name = inputs.get("sampler_name", "")
+        if sampler_name:
+            # Simplify sampler names like "multistep/res_2m" to "RES4LYF" if needed
+            # This is a custom mapping based on the specific workflow
+            if "res" in sampler_name.lower():
+                result["sampler"] = "RES4LYF"
+            else:
+                result["sampler"] = sampler_name
+
+        # Extract scheduler
+        scheduler = inputs.get("scheduler")
+        if scheduler and "scheduler" not in result:
+            result["scheduler"] = scheduler
+
+        # Extract steps
+        steps = inputs.get("steps")
+        if steps is not None and "steps" not in result:
+            # Handle both direct values and references
+            if isinstance(steps, (int, float)):
+                result["steps"] = int(steps)
+            elif isinstance(steps, list) and len(steps) > 0:
+                # It's a reference to another node, skip for now
+                pass
+
+        # Extract CFG scale
+        cfg = inputs.get("cfg")
+        if cfg is not None and "cfg_scale" not in result:
+            # Round to avoid floating point precision issues
+            result["cfg_scale"] = round(float(cfg), 2)
+
+        # Extract seed
+        seed = inputs.get("seed")
+        if seed is not None and "seed" not in result:
+            result["seed"] = int(seed)
+
+        # Extract denoise strength
+        denoise = inputs.get("denoise")
+        if denoise is not None and "denoise" not in result:
+            result["denoise"] = float(denoise)
+
+
+class VideoGeneratorHandler(NodeHandler):
+    """Handler for video generation nodes"""
+
+    def can_handle(self, class_type: str) -> bool:
+        return class_type in ["WanImageToVideo", "VHS_VideoCombine", "AnimateDiff"]
+
+    def extract(
+        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        inputs = node_data.get("inputs", {})
+
+        # Extract dimensions
+        if "width" not in result:
+            width = inputs.get("width")
+            if width is not None:
+                result["width"] = int(width)
+
+        if "height" not in result:
+            height = inputs.get("height")
+            if height is not None:
+                result["height"] = int(height)
+
+        # Extract frame rate
+        if "frame_rate" not in result:
+            frame_rate = inputs.get("frame_rate") or inputs.get("fps")
+            if frame_rate is not None:
+                result["frame_rate"] = float(frame_rate)
+
+        # Extract video length
+        if "video_length" not in result:
+            length = inputs.get("length") or inputs.get("num_frames")
+            if length is not None:
+                result["video_length"] = int(length)
+
+
 class ComfyUIVideoExtractor(MetadataExtractor):
-    """Extract metadata from ComfyUI generated MP4 videos"""
+    """Improved ComfyUI video metadata extractor with node-specific handlers"""
+
+    def __init__(self):
+        super().__init__()
+        # Initialize node handlers
+        # Order matters: PowerLoraLoaderHandler before LoraLoaderHandler
+        self.handlers: List[NodeHandler] = [
+            CLIPTextEncodeHandler(),
+            PowerLoraLoaderHandler(),
+            LoraLoaderHandler(),
+            UNETLoaderHandler(),
+            SamplerHandler(),
+            VideoGeneratorHandler(),
+        ]
 
     def can_extract(self, media_path: Path) -> bool:
         if media_path.suffix.lower() != ".mp4":
@@ -29,23 +346,24 @@ class ComfyUIVideoExtractor(MetadataExtractor):
             if "prompt" in metadata:
                 try:
                     prompt_data = metadata["prompt"]
-                    # If it's already a dict, use it directly; if string, parse it
+                    # If it's a string, parse it
                     if isinstance(prompt_data, str):
                         prompt_data = json.loads(prompt_data)
+
                     result["raw_metadata"]["prompt"] = prompt_data
 
-                    # Extract common parameters
-                    extracted = self._extract_parameters(prompt_data)
-                    result.update(extracted)
+                    # Process each node with appropriate handler
+                    self._process_nodes(prompt_data, result)
+
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning(
                         f"Failed to parse ComfyUI prompt data from {media_path}: {e}"
                     )
 
+            # Store workflow if present
             if "workflow" in metadata:
                 try:
                     workflow_data = metadata["workflow"]
-                    # If it's already a dict, use it directly; if string, parse it
                     if isinstance(workflow_data, str):
                         workflow_data = json.loads(workflow_data)
                     result["raw_metadata"]["workflow"] = workflow_data
@@ -54,13 +372,60 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                         f"Failed to parse ComfyUI workflow data from {media_path}: {e}"
                     )
 
+            # Post-process results
+            self._post_process_results(result)
+
             return result if result["raw_metadata"] else None
 
         except Exception as e:
             logger.error(f"Failed to extract ComfyUI metadata from {media_path}: {e}")
             return None
 
+    def _process_nodes(
+        self, prompt_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """Process all nodes using appropriate handlers"""
+        for node_id, node_data in prompt_data.items():
+            if not isinstance(node_data, dict):
+                continue
+
+            class_type = node_data.get("class_type", "")
+
+            # Try each handler
+            for handler in self.handlers:
+                if handler.can_handle(class_type):
+                    try:
+                        handler.extract(node_id, node_data, result)
+                    except Exception as e:
+                        logger.debug(
+                            f"Handler {handler.__class__.__name__} failed for node {node_id}: {e}"
+                        )
+
+    def _post_process_results(self, result: Dict[str, Any]) -> None:
+        """Clean up and finalize extracted metadata"""
+
+        # Keep models as list (always use "models" key for consistency)
+        # The scanner will handle converting to the Media.model list field
+        if "models" in result:
+            if len(result["models"]) == 0:
+                del result["models"]
+            # Keep models as list regardless of count
+
+        # Sort LoRAs by name for consistency
+        if "loras" in result:
+            result["loras"].sort(key=lambda x: x["lora_name"])
+
+        # Remove None values
+        keys_to_remove = [
+            k
+            for k, v in result.items()
+            if v is None and k not in ["source", "raw_metadata"]
+        ]
+        for key in keys_to_remove:
+            del result[key]
+
     def _get_video_metadata(self, media_path: Path) -> Dict[str, Any]:
+        """Extract metadata from video file using exiftool with ffprobe fallback"""
         try:
             result = subprocess.run(
                 ["exiftool", "-Comment", "-json", str(media_path)],
@@ -92,6 +457,7 @@ class ComfyUIVideoExtractor(MetadataExtractor):
             return {}
 
     def _get_video_metadata_ffprobe(self, media_path: Path) -> Dict[str, Any]:
+        """Fallback metadata extraction using ffprobe"""
         try:
             result = subprocess.run(
                 [
@@ -135,52 +501,3 @@ class ComfyUIVideoExtractor(MetadataExtractor):
         except Exception as e:
             logger.error(f"ffprobe fallback failed for {media_path}: {e}")
             return {}
-
-    def _extract_parameters(self, prompt_data: Dict[str, Any]) -> Dict[str, Any]:
-        extracted: Dict[str, Any] = {}
-
-        for node_id, node_data in prompt_data.items():
-            if not isinstance(node_data, dict):
-                continue
-
-            class_type = node_data.get("class_type", "")
-            inputs = node_data.get("inputs", {})
-
-            if class_type == "KSampler":
-                extracted["sampler"] = inputs.get("sampler_name")
-                extracted["steps"] = self._safe_int(inputs.get("steps"))
-                extracted["cfg_scale"] = self._safe_float(inputs.get("cfg"))
-                extracted["seed"] = self._safe_int(inputs.get("seed"))
-                extracted["scheduler"] = inputs.get("scheduler")
-
-            elif class_type == "CheckpointLoaderSimple":
-                extracted["model"] = inputs.get("ckpt_name")
-
-            elif class_type == "DiffusionModelLoaderKJ":
-                extracted["model"] = inputs.get("model_name")
-
-            elif class_type == "CLIPTextEncode":
-                text = inputs.get("text", "")
-                if text:
-                    # Try to determine if positive or negative
-                    if any(
-                        neg in text.lower()
-                        for neg in ["negative", "bad", "ugly", "worst", "overexposure"]
-                    ):
-                        if "negative_prompt" not in extracted:
-                            extracted["negative_prompt"] = text
-                    else:
-                        if "prompt" not in extracted:
-                            extracted["prompt"] = text
-
-            elif class_type in ["WanImageToVideo", "VHS_VideoCombine"]:
-                if "width" not in extracted:
-                    extracted["width"] = self._safe_int(inputs.get("width"))
-                if "height" not in extracted:
-                    extracted["height"] = self._safe_int(inputs.get("height"))
-                if "frame_rate" not in extracted:
-                    extracted["frame_rate"] = self._safe_float(inputs.get("frame_rate"))
-                if "length" not in extracted:
-                    extracted["length"] = self._safe_int(inputs.get("length"))
-
-        return extracted
