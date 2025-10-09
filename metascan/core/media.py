@@ -29,7 +29,7 @@ class Media:
 
     prompt: Optional[str] = None
     negative_prompt: Optional[str] = None
-    model: Optional[str] = None
+    model: List[str] = field(default_factory=list)
     sampler: Optional[str] = None
     scheduler: Optional[str] = None
     steps: Optional[int] = None
