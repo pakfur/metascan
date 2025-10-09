@@ -57,23 +57,37 @@ class CLIPTextEncodeHandler(NodeHandler):
             # Heuristic: check content for negative keywords
             # Include both English and Chinese negative indicators
             negative_indicators = [
-                "negative", "bad", "ugly", "worst", "low quality", "poor",
-                "最差质量", "低质量", "丑陋", "残缺", "畸形", "毁容",  # Chinese negative terms
-                "overexposure", "过曝", "静态", "模糊"  # Common negative terms
+                "negative",
+                "bad",
+                "ugly",
+                "worst",
+                "low quality",
+                "poor",
+                "最差质量",
+                "低质量",
+                "丑陋",
+                "残缺",
+                "畸形",
+                "毁容",  # Chinese negative terms
+                "overexposure",
+                "过曝",
+                "静态",
+                "模糊",  # Common negative terms
             ]
 
             # Count how many negative indicators are present
-            negative_count = sum(1 for indicator in negative_indicators if indicator in text.lower())
+            negative_count = sum(
+                1 for indicator in negative_indicators if indicator in text.lower()
+            )
 
             # If text has multiple negative indicators, it's likely a negative prompt
             # Also check if text is mostly Chinese (common pattern for negative prompts)
-            chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+            chinese_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
             total_chars = len(text)
 
-            is_negative = (
-                negative_count >= 2 or  # Multiple negative keywords
-                (chinese_chars > total_chars * 0.5 and negative_count >= 1)  # Mostly Chinese with negative keywords
-            )
+            is_negative = negative_count >= 2 or (  # Multiple negative keywords
+                chinese_chars > total_chars * 0.5 and negative_count >= 1
+            )  # Mostly Chinese with negative keywords
 
             if is_negative:
                 if "negative_prompt" not in result:
