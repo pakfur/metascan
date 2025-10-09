@@ -334,7 +334,11 @@ class MetadataPanel(QWidget):
         section = MetadataSection(section_title)
 
         section.add_field("source", "Source", media.metadata_source or "Unknown")
-        section.add_field("model", "Model", media.model or "Unknown")
+
+        # Display model(s) - join multiple models with comma
+        model_display = ", ".join(media.model) if media.model else "Unknown"
+        section.add_field("model", "Model", model_display)
+
         section.add_field("sampler", "Sampler", media.sampler or "Unknown")
         section.add_field("scheduler", "Scheduler", media.scheduler or "Unknown")
         section.add_field(
