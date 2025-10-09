@@ -172,8 +172,8 @@ def compare_lora_lists(expected: List[Dict], extracted: List[Dict]) -> bool:
     return True
 
 
-def test_extractor(extractor_class, video_path: Path, expected: Dict[str, Any],
-                   extractor_name: str) -> Dict[str, Any]:
+def run_extractor_test(extractor_class, video_path: Path, expected: Dict[str, Any],
+                       extractor_name: str) -> Dict[str, Any]:
     """Test a single extractor and return results"""
     print(f"\n{'=' * 60}")
     print(f"Testing: {extractor_name}")
@@ -259,7 +259,7 @@ def main():
         results = []
 
         # Test current extractor (which is now the improved one)
-        results.append(test_extractor(
+        results.append(run_extractor_test(
             ComfyUIVideoExtractor,
             video_path,
             expected,
