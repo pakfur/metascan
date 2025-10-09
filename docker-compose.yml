@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  sqlite:
+    build:
+      context: .
+      dockerfile: Dockerfile.sqlite
+    container_name: metascan-sqlite
+    volumes:
+      - ./data:/data
+    networks:
+      - metascan-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sqlite3", "/data/metascan.db", "SELECT 1;"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  metascan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: metascan-app
+    depends_on:
+      sqlite:
+        condition: service_healthy
+    volumes:
+      - /Volumes:/Volumes
+      - ./data:/data
+      - ./models:/models
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - MODELS_DIR=/models
+      - DATA_DIR=/data
+      - QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-vnc}
+      - PYTHONUNBUFFERED=1
+    networks:
+      - metascan-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    ports:
+      - "8080:8080"   # Application port
+      - "6080:6080"   # Web VNC interface
+    # For GUI support on Linux
+    privileged: true
+    devices:
+      - /dev/dri:/dev/dri
+
+
+networks:
+  metascan-network:
+    driver: bridge
+
+volumes:
+  data:
+    driver: local
+  models:
+    driver: local

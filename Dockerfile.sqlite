@@ -1,0 +1,31 @@
+# SQLite container with persistent storage
+FROM alpine:3.18
+
+# Install SQLite and utilities
+RUN apk add --no-cache \
+    sqlite \
+    sqlite-dev \
+    bash \
+    curl
+
+# Create data directory
+RUN mkdir -p /data && \
+    chmod 755 /data
+
+# Set working directory
+WORKDIR /data
+
+# Create healthcheck script
+RUN echo '#!/bin/bash' > /healthcheck.sh && \
+    echo 'sqlite3 /data/metascan.db "SELECT 1;" > /dev/null 2>&1' >> /healthcheck.sh && \
+    chmod +x /healthcheck.sh
+
+# Volume for persistent storage
+VOLUME ["/data"]
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD /healthcheck.sh || exit 1
+
+# Keep container running and provide SQLite CLI access
+CMD ["tail", "-f", "/dev/null"]
