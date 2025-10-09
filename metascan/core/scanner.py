@@ -147,7 +147,19 @@ class Scanner:
                 media.metadata_source = metadata.get("source")
                 media.prompt = metadata.get("prompt")
                 media.negative_prompt = metadata.get("negative_prompt")
-                media.model = metadata.get("model")
+
+                # Handle model field - convert to list if needed
+                model_value = metadata.get("models") or metadata.get("model")
+                if model_value:
+                    if isinstance(model_value, list):
+                        media.model = model_value
+                    elif isinstance(model_value, str):
+                        media.model = [model_value]
+                    else:
+                        media.model = []
+                else:
+                    media.model = []
+
                 media.sampler = metadata.get("sampler")
                 media.scheduler = metadata.get("scheduler")
                 media.steps = metadata.get("steps")
