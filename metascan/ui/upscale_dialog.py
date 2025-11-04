@@ -210,15 +210,6 @@ class UpscaleDialog(QDialog):
             # Connect checkbox to enable/disable spinbox
             self.fps_override_checkbox.toggled.connect(self.fps_spinbox.setEnabled)
 
-        # Metadata preservation option
-        self.preserve_metadata_checkbox = QCheckBox("Preserve original metadata")
-        self.preserve_metadata_checkbox.setChecked(True)  # Default to True
-        self.preserve_metadata_checkbox.setToolTip(
-            "Preserves EXIF data for images and metadata for videos.\n"
-            "Includes creation date, camera settings, and other original file information."
-        )
-        options_layout.addWidget(self.preserve_metadata_checkbox)
-
         # Output note
         output_label = QLabel(
             "Note: Original files will be moved to trash after upscaling"
@@ -270,9 +261,6 @@ class UpscaleDialog(QDialog):
         ):
             fps_override = self.fps_spinbox.value()
 
-        # Metadata preservation
-        preserve_metadata = self.preserve_metadata_checkbox.isChecked()
-
         # Prepare task configurations
         tasks = []
         for file_info in self.media_files:
@@ -290,7 +278,7 @@ class UpscaleDialog(QDialog):
                 "fps_override": fps_override
                 if file_info.get("type") == "video"
                 else None,
-                "preserve_metadata": preserve_metadata,
+                "preserve_metadata": False,  # Metadata preserved in database instead
             }
             tasks.append(task_config)
 
