@@ -484,9 +484,6 @@ class MainWindow(QMainWindow):
         )
         self.thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         self.thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
-        self.thumbnail_view.refresh_metadata_requested.connect(
-            self.on_context_refresh_metadata_requested
-        )
 
         # Load initial media if any exists
         self.load_all_media()
@@ -803,9 +800,100 @@ class MainWindow(QMainWindow):
         # Check if we need to hide spinner based on current queue state
         self._update_spinner_visibility()
 
-        # If this task completed successfully, refresh the current view
+        # If this task completed successfully, update the database with new technical metadata
         if task.status.value == "completed":
-            # Reload media from database to show any new upscaled files
+            self._update_upscaled_media(task)
+
+    def _update_upscaled_media(self, task):
+        """
+        Update the database after a file has been upscaled.
+        Updates only file information metadata (dimensions, file size, timestamps, video properties)
+        while preserving all AI generation metadata (prompts, models, seeds, etc.) from the database.
+        Does NOT attempt to extract AI metadata from the upscaled file.
+        """
+        try:
+            from PIL import Image
+            from datetime import datetime
+            import cv2
+
+            file_path = Path(task.file_path)
+
+            if not file_path.exists():
+                self.logger.warning(f"Upscaled file not found: {file_path}")
+                return
+
+            # Get file timestamps
+            file_stat = file_path.stat()
+            file_size = file_stat.st_size
+            modified_at = datetime.fromtimestamp(file_stat.st_mtime)
+            created_at = datetime.fromtimestamp(file_stat.st_ctime)
+
+            # Initialize video-specific properties
+            frame_rate = None
+            duration = None
+
+            # Get dimensions and video-specific properties
+            if task.file_type == "video":
+                # For videos, use cv2 to get dimensions and video properties
+                cap = cv2.VideoCapture(str(file_path))
+                if cap.isOpened():
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+                    # Get video-specific properties
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+                    if fps > 0:
+                        frame_rate = fps
+                        if frame_count > 0:
+                            duration = frame_count / fps
+
+                    cap.release()
+
+                    self.logger.debug(
+                        f"Video info: {width}x{height}, {frame_rate:.2f} fps, "
+                        f"{duration:.2f}s ({frame_count} frames)"
+                    )
+                else:
+                    self.logger.warning(f"Could not open video: {file_path}")
+                    self.load_all_media()  # Fallback to full rescan
+                    return
+            else:
+                # For images, use PIL to get dimensions
+                with Image.open(file_path) as img:
+                    width, height = img.size
+
+            # Update database with new file information (preserves AI metadata from database)
+            success = self.db_manager.update_media_technical_metadata(
+                file_path=file_path,
+                width=width,
+                height=height,
+                file_size=file_size,
+                modified_at=modified_at,
+                created_at=created_at,
+                frame_rate=frame_rate,
+                duration=duration,
+            )
+
+            if success:
+                self.logger.info(
+                    f"Updated file information for upscaled {task.file_type}: {file_path.name}"
+                )
+                # Refresh the view to show updated file information
+                self.load_all_media()
+            else:
+                self.logger.warning(
+                    f"Failed to update database for {file_path.name}, rescanning..."
+                )
+                # Fallback to full rescan if update failed
+                self.load_all_media()
+
+        except Exception as e:
+            self.logger.error(f"Error updating upscaled media: {e}")
+            import traceback
+            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+            # Fallback to full rescan on error
             self.load_all_media()
 
     def _on_task_removed(self, task_id):
@@ -1419,85 +1507,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error starting upscale from context menu: {e}")
 
-    def on_context_refresh_metadata_requested(self, media):
-        """Handle Refresh Metadata request from thumbnail context menu."""
-        try:
-            # Show confirmation dialog
-            reply = QMessageBox.question(
-                self,
-                "Refresh Metadata",
-                f"Refresh metadata for '{media.file_name}'?\n\n"
-                "This will rescan the file and update the database entry and thumbnail.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-
-            if reply == QMessageBox.StandardButton.Yes:
-                self._refresh_single_media_metadata(media)
-        except Exception as e:
-            self.logger.error(f"Error refreshing metadata from context menu: {e}")
-
-    def _refresh_single_media_metadata(self, media):
-        """Refresh metadata for a single media file."""
-        try:
-            from metascan.core.media import Media
-
-            file_path = media.file_path
-
-            if not file_path.exists():
-                QMessageBox.warning(
-                    self, "File Not Found", f"The file no longer exists:\n{file_path}"
-                )
-                return
-
-            # Delete old metadata entry from database
-            self.db_manager.delete_media(file_path)
-
-            # Delete old thumbnail
-            if self.thumbnail_cache:
-                thumbnail_path = self.thumbnail_cache.get_thumbnail_path(file_path)
-                if thumbnail_path and thumbnail_path.exists():
-                    thumbnail_path.unlink()
-
-            # Rescan the file - Scanner requires db_manager
-            scanner = Scanner(self.db_manager)
-            new_media = scanner._process_media_file(file_path)
-
-            if new_media:
-                # Add to database
-                self.db_manager.save_media(new_media)
-
-                # Generate new thumbnail
-                if self.thumbnail_cache:
-                    self.thumbnail_cache.get_or_create_thumbnail(file_path)
-
-                # Update the in-memory media list
-                for i, existing_media in enumerate(self.all_media):
-                    if existing_media.file_path == file_path:
-                        self.all_media[i] = new_media
-                        break
-
-                # Refresh the UI
-                self.apply_all_filters()
-
-                # Update metadata panel if this media is currently selected
-                if (
-                    self.thumbnail_view.selected_media
-                    and self.thumbnail_view.selected_media.file_path == file_path
-                ):
-                    self.metadata_panel.display_metadata(new_media)
-
-            else:
-                QMessageBox.warning(
-                    self, "Scan Failed", f"Failed to rescan file:\n{file_path}"
-                )
-
-        except Exception as e:
-            self.logger.error(f"Error refreshing metadata for {media.file_path}: {e}")
-            QMessageBox.critical(
-                self, "Refresh Error", f"Failed to refresh metadata:\n{str(e)}"
-            )
-
     def _recreate_thumbnail_view(self, new_size: Tuple[int, int]) -> None:
         """Recreate the thumbnail view with new size."""
         # Get current media list and filters
@@ -1530,7 +1539,6 @@ class MainWindow(QMainWindow):
         self.thumbnail_view.open_folder_requested.disconnect()
         self.thumbnail_view.delete_requested.disconnect()
         self.thumbnail_view.upscale_requested.disconnect()
-        self.thumbnail_view.refresh_metadata_requested.disconnect()
 
         # Create new thumbnail view
         scroll_step = self.config.get("scroll_wheel_step", 120)
@@ -1558,9 +1566,6 @@ class MainWindow(QMainWindow):
         )
         new_thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         new_thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
-        new_thumbnail_view.refresh_metadata_requested.connect(
-            self.on_context_refresh_metadata_requested
-        )
 
         # Replace in splitter using saved reference
         old_widget = self.main_splitter.widget(1)  # Middle widget (thumbnail panel)
