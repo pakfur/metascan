@@ -472,8 +472,6 @@ class MediaUpscaler:
         if enhance_faces:
             operation_details.append("face enhancement")
         operation_details.append(f"{model_type} model")
-        if preserve_metadata:
-            operation_details.append("metadata preservation")
 
         operation_str = ", ".join(operation_details)
         self.logger.info(f"Starting image upscale: {input_path.name} - {operation_str}")
@@ -594,15 +592,6 @@ class MediaUpscaler:
             # Save the target path (where original was) before moving to trash
             final_path = input_path
 
-            # Save original for metadata preservation before moving to trash
-            original_backup = None
-            if preserve_metadata:
-                # Create a temporary backup of the original for metadata
-                original_backup = output_path.with_suffix(
-                    ".original_metadata" + input_path.suffix
-                )
-                shutil.copy2(str(input_path), str(original_backup))
-
             # Move original to trash
             if self._move_to_trash(input_path):
                 # Move upscaled from output_path to original location
@@ -612,15 +601,9 @@ class MediaUpscaler:
                 )
                 shutil.move(str(output_path), str(final_path))
 
-                # NOW preserve metadata after the file is in its final location
-                if preserve_metadata and original_backup and original_backup.exists():
-                    self._preserve_metadata(original_backup, final_path)
-                    # Clean up the temporary backup
-                    original_backup.unlink()
-
                 # Update output_path to reflect the final location
                 output_path = final_path
-                self.logger.info(f"Upscaled file with metadata now at: {final_path}")
+                self.logger.info(f"Upscaled file now at: {final_path}")
             else:
                 self.logger.error(
                     "Failed to move original to trash, keeping both files"
@@ -693,8 +676,6 @@ class MediaUpscaler:
         operation_details.append(f"{model_type} model")
         if fps is not None:
             operation_details.append(f"custom FPS: {fps}")
-        if preserve_metadata:
-            operation_details.append("metadata preservation")
 
         operation_str = ", ".join(operation_details)
         self.logger.info(f"Starting video upscale: {input_path.name} - {operation_str}")
@@ -841,16 +822,6 @@ class MediaUpscaler:
             # Save the target path (where original was) before moving to trash
             final_path = input_path
 
-            # Save original for metadata preservation before moving to trash
-            original_backup = None
-            if preserve_metadata:
-                # Create a temporary backup of the original for metadata
-                original_backup = output_path.with_suffix(
-                    ".original_metadata" + input_path.suffix
-                )
-                shutil.copy2(str(input_path), str(original_backup))
-                self.logger.info(f"Created metadata backup from '{str(input_path)}'")
-
             # Move original to trash
             if self._move_to_trash(input_path):
                 self.logger.info(f"Move '{str(input_path)}' to trash")
@@ -858,17 +829,9 @@ class MediaUpscaler:
                 # Note: input_path no longer exists as a file, but we can use it as the destination
                 shutil.move(str(output_path), str(final_path))
 
-                # NOW preserve metadata after the file is in its final location
-                if preserve_metadata and original_backup and original_backup.exists():
-                    self.logger.info(
-                        f"Preserving metadata from backup to '{str(final_path)}'"
-                    )
-                    self._preserve_metadata(original_backup, final_path)
-                    # Clean up the temporary backup
-                    original_backup.unlink()
-
                 # Update output_path to reflect the final location
                 output_path = final_path
+                self.logger.info(f"Upscaled video now at: {final_path}")
             else:
                 self.logger.error(
                     "Failed to move original to trash, keeping both files"
@@ -1412,265 +1375,6 @@ class MediaUpscaler:
             model_path = self.models_dir / "RealESRGAN_x4plus.pth"
 
         return model, model_path
-
-    def _check_file_metadata(self, file_path: Path) -> Dict[str, Any]:
-        """Check metadata in a file using exiftool for debugging."""
-        try:
-            if not shutil.which("exiftool"):
-                return {}
-
-            cmd = ["exiftool", "-j", str(file_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                import json
-
-                data = json.loads(result.stdout)
-                return data[0] if data else {}  # type: ignore
-            return {}
-        except Exception:
-            return {}
-
-    def _preserve_metadata(self, source_path: Path, target_path: Path) -> bool:
-        """
-        Preserve metadata from source file to target file using direct copy.
-
-        Args:
-            source_path: Path to the source file with metadata
-            target_path: Path to the target file to receive metadata
-
-        Returns:
-            True if successful, False otherwise
-        """
-        self.logger.debug(f"Starting metadata preservation")
-        self.logger.debug(
-            f"Source path: {source_path} (exists: {source_path.exists()})"
-        )
-        self.logger.debug(
-            f"Target path: {target_path} (exists: {target_path.exists()})"
-        )
-
-        if not source_path.exists():
-            self.logger.error(f"Source file does not exist: {source_path}")
-            return False
-
-        if not target_path.exists():
-            self.logger.error(f"Target file does not exist: {target_path}")
-            return False
-
-        # Check original metadata before processing
-        original_metadata = self._check_file_metadata(source_path)
-        target_metadata_before = self._check_file_metadata(target_path)
-
-        self.logger.debug(
-            f"Original file metadata count: {len(original_metadata)} keys"
-        )
-        self.logger.debug(
-            f"Target file metadata count before: {len(target_metadata_before)} keys"
-        )
-
-        if original_metadata:
-            sample_keys = list(original_metadata.keys())[:5]  # Show first 5 keys
-            self.logger.debug(f"Sample original metadata keys: {sample_keys}")
-
-        try:
-            # Create temp file for output
-            temp_path = target_path.with_suffix(".metadata_temp" + target_path.suffix)
-            self.logger.debug(f"Temp file path: {temp_path}")
-
-            # Determine file type
-            target_ext = target_path.suffix.lower()
-            self.logger.debug(f"File extension: {target_ext}")
-
-            if target_ext in [".jpg", ".jpeg"]:
-                # For JPEG images, use exiftool directly as it's more reliable
-                if shutil.which("exiftool"):
-                    self.logger.debug(
-                        "Using exiftool directly for JPEG metadata preservation"
-                    )
-                    return self._preserve_metadata_exiftool(source_path, target_path)
-                else:
-                    # Fallback to ffmpeg for JPEG images if exiftool not available
-                    cmd = [
-                        "ffmpeg",
-                        "-i",
-                        str(target_path),  # Input: upscaled image
-                        "-i",
-                        str(source_path),  # Input: original with metadata
-                        "-map",
-                        "0:v",  # Use video stream from first input (upscaled)
-                        "-map_metadata",
-                        "1",  # Use all metadata from second input (original)
-                        "-q:v",
-                        "1",  # Highest quality to avoid degradation
-                        "-y",
-                        str(temp_path),
-                    ]
-            elif target_ext in [".png", ".tiff", ".webp"]:
-                # For other images, try codec copy first
-                cmd = [
-                    "ffmpeg",
-                    "-i",
-                    str(target_path),  # Input: upscaled image
-                    "-i",
-                    str(source_path),  # Input: original with metadata
-                    "-map",
-                    "0:v",  # Use video stream from first input (upscaled)
-                    "-map_metadata",
-                    "1",  # Use all metadata from second input (original)
-                    "-c:v",
-                    "copy",  # Try to copy without re-encoding
-                    "-y",
-                    str(temp_path),
-                ]
-            else:
-                # For videos, copy metadata
-                cmd = [
-                    "ffmpeg",
-                    "-i",
-                    str(target_path),  # Input: upscaled video
-                    "-i",
-                    str(source_path),  # Input: original with metadata
-                    "-map",
-                    "0",  # Use all streams from first input
-                    "-map_metadata",
-                    "1",  # Use metadata from second input
-                    "-c",
-                    "copy",  # Copy codec
-                    "-y",
-                    str(temp_path),
-                ]
-
-            self.logger.debug(f"Executing ffmpeg command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            self.logger.debug(f"ffmpeg return code: {result.returncode}")
-
-            if result.stdout:
-                self.logger.debug(f"ffmpeg stdout: {result.stdout}")
-            if result.stderr:
-                self.logger.debug(f"ffmpeg stderr: {result.stderr}")
-
-            if result.returncode == 0:
-                self.logger.debug(
-                    f"ffmpeg succeeded, temp file exists: {temp_path.exists()}"
-                )
-
-                if temp_path.exists():
-                    # Check metadata in temp file before moving
-                    temp_metadata = self._check_file_metadata(temp_path)
-                    self.logger.debug(
-                        f"Temp file metadata count: {len(temp_metadata)} keys"
-                    )
-
-                    # Replace target with temp file
-                    self.logger.debug(f"Moving temp file to target location")
-                    shutil.move(str(temp_path), str(target_path))
-
-                    # Verify final metadata
-                    final_metadata = self._check_file_metadata(target_path)
-                    self.logger.debug(
-                        f"Final target metadata count: {len(final_metadata)} keys"
-                    )
-
-                    # Compare metadata preservation
-                    preserved_keys = set(original_metadata.keys()) & set(
-                        final_metadata.keys()
-                    )
-                    self.logger.debug(
-                        f"Preserved {len(preserved_keys)} out of {len(original_metadata)} metadata keys"
-                    )
-
-                    self.logger.info(
-                        f"Successfully preserved metadata from {source_path.name} to {target_path.name}"
-                    )
-                    return True
-                else:
-                    self.logger.error("Temp file was not created by ffmpeg")
-                    return False
-            else:
-                self.logger.debug(f"ffmpeg failed with return code {result.returncode}")
-                self.logger.warning(f"Failed to preserve metadata: {result.stderr}")
-                if temp_path.exists():
-                    temp_path.unlink()
-                    self.logger.debug("Cleaned up failed temp file")
-
-                # Try exiftool as fallback for images
-                if target_ext in [".jpg", ".jpeg"] and shutil.which("exiftool"):
-                    self.logger.debug("Trying exiftool fallback")
-                    return self._preserve_metadata_exiftool(source_path, target_path)
-
-            # For JPEG images, if ffmpeg fails, always try exiftool as the primary approach
-            if target_ext in [".jpg", ".jpeg"] and shutil.which("exiftool"):
-                self.logger.debug(
-                    "ffmpeg failed for JPEG, trying exiftool as primary method"
-                )
-                return self._preserve_metadata_exiftool(source_path, target_path)
-
-            return False
-
-        except Exception as e:
-            self.logger.debug(f"Exception occurred during metadata preservation: {e}")
-            self.logger.warning(f"Failed to preserve metadata: {e}")
-            return False
-
-    def _preserve_metadata_exiftool(self, source_path: Path, target_path: Path) -> bool:
-        """
-        Fallback metadata preservation using exiftool for JPEG images.
-        """
-        self.logger.debug("Starting exiftool metadata preservation")
-
-        # Check metadata before exiftool
-        original_metadata = self._check_file_metadata(source_path)
-        target_metadata_before = self._check_file_metadata(target_path)
-
-        self.logger.debug(f"Original metadata count: {len(original_metadata)} keys")
-        self.logger.debug(
-            f"Target metadata count before: {len(target_metadata_before)} keys"
-        )
-
-        try:
-            cmd = [
-                "exiftool",
-                "-overwrite_original",
-                "-TagsFromFile",
-                str(source_path),
-                "-all:all",
-                str(target_path),
-            ]
-
-            self.logger.debug(f"Executing exiftool: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            self.logger.debug(f"exiftool return code: {result.returncode}")
-
-            if result.stdout:
-                self.logger.debug(f"exiftool stdout: {result.stdout}")
-            if result.stderr:
-                self.logger.debug(f"exiftool stderr: {result.stderr}")
-
-            if result.returncode == 0:
-                # Check final metadata
-                final_metadata = self._check_file_metadata(target_path)
-                self.logger.debug(f"Final metadata count: {len(final_metadata)} keys")
-
-                # Compare metadata preservation
-                preserved_keys = set(original_metadata.keys()) & set(
-                    final_metadata.keys()
-                )
-                self.logger.debug(
-                    f"Preserved {len(preserved_keys)} out of {len(original_metadata)} metadata keys with exiftool"
-                )
-
-                self.logger.info(
-                    f"Successfully preserved metadata using exiftool from {source_path.name} to {target_path.name}"
-                )
-                return True
-            else:
-                self.logger.debug(f"exiftool failed: {result.stderr}")
-                return False
-
-        except Exception as e:
-            self.logger.debug(f"exiftool exception: {e}")
-            self.logger.warning(f"Failed to use exiftool: {e}")
-            return False
 
     def _move_to_trash(self, file_path: Path) -> bool:
         """Move a file to platform-specific trash."""

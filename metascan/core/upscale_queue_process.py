@@ -28,6 +28,7 @@ class UpscaleStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     DOWNLOADING_MODELS = "downloading_models"
+    PAUSED = "paused"
 
 
 @dataclass
@@ -423,6 +424,76 @@ class ProcessUpscaleQueue(QObject):
             self.queue_changed.emit()
 
         self.logger.info(f"Cleared {len(tasks_to_remove)} completed tasks")
+
+    def pause_queue(self) -> int:
+        """
+        Pause the queue by changing all pending tasks to paused status.
+        This acts as a "poison pill" - when the current task completes,
+        processing will stop instead of starting the next task.
+
+        Returns:
+            Number of tasks paused
+        """
+        queue_data = self._read_queue_file()
+        paused_task_ids = []
+
+        # First pass: update all pending tasks to paused
+        for task_id, task_data in queue_data["tasks"].items():
+            if task_data.get("status") == UpscaleStatus.PENDING.value:
+                queue_data["tasks"][task_id]["status"] = UpscaleStatus.PAUSED.value
+                queue_data["tasks"][task_id]["last_updated"] = time.time()
+                paused_task_ids.append(task_id)
+
+        if paused_task_ids:
+            # Write the queue file BEFORE emitting signals
+            self._write_queue_file(queue_data)
+            self.queue_changed.emit()
+            self.logger.info(f"Paused {len(paused_task_ids)} pending tasks")
+
+            # Now emit update signals for each paused task
+            for task_id in paused_task_ids:
+                task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                self.task_updated.emit(task)
+        else:
+            self.logger.debug("No pending tasks to pause")
+
+        return len(paused_task_ids)
+
+    def resume_queue(self) -> int:
+        """
+        Resume the queue by changing all paused tasks back to pending status
+        and starting processing.
+
+        Returns:
+            Number of tasks resumed
+        """
+        queue_data = self._read_queue_file()
+        resumed_task_ids = []
+
+        # First pass: update all paused tasks to pending
+        for task_id, task_data in queue_data["tasks"].items():
+            if task_data.get("status") == UpscaleStatus.PAUSED.value:
+                queue_data["tasks"][task_id]["status"] = UpscaleStatus.PENDING.value
+                queue_data["tasks"][task_id]["last_updated"] = time.time()
+                resumed_task_ids.append(task_id)
+
+        if resumed_task_ids:
+            # Write the queue file BEFORE emitting signals
+            self._write_queue_file(queue_data)
+            self.queue_changed.emit()
+            self.logger.info(f"Resumed {len(resumed_task_ids)} paused tasks")
+
+            # Now emit update signals for each resumed task
+            for task_id in resumed_task_ids:
+                task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                self.task_updated.emit(task)
+
+            # Start processing the resumed tasks
+            self.start_processing()
+        else:
+            self.logger.debug("No paused tasks to resume")
+
+        return len(resumed_task_ids)
 
     def start_processing(self) -> None:
         """Start processing pending tasks."""
