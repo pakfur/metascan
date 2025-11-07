@@ -448,6 +448,93 @@ class DatabaseManager:
             logger.error(f"Error updating media dimensions for {file_path}: {e}")
             return False
 
+    def update_media_technical_metadata(
+        self,
+        file_path: Path,
+        width: int,
+        height: int,
+        file_size: int,
+        modified_at: datetime,
+        created_at: Optional[datetime] = None,
+        frame_rate: Optional[float] = None,
+        duration: Optional[float] = None,
+    ) -> bool:
+        """
+        Update only the technical metadata (dimensions, file size, timestamps, video properties)
+        of a media file. Preserves all AI generation metadata (prompts, models, seeds, etc.).
+
+        This is used after upscaling to update the file's physical properties while keeping
+        the original AI generation parameters intact.
+
+        Args:
+            file_path: Path to the media file
+            width: New width in pixels
+            height: New height in pixels
+            file_size: New file size in bytes
+            modified_at: New modification timestamp
+            created_at: New creation timestamp (optional, preserves original if not provided)
+            frame_rate: New frame rate for videos (optional)
+            duration: New duration for videos (optional)
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Get the current media record (with all AI metadata)
+                    media = self.get_media(file_path)
+                    if not media:
+                        logger.warning(f"Media not found in database: {file_path}")
+                        return False
+
+                    # Update technical fields, preserve all AI metadata
+                    media.width = width
+                    media.height = height
+                    media.file_size = file_size
+                    media.modified_at = modified_at
+
+                    # Update created_at only if provided
+                    if created_at is not None:
+                        media.created_at = created_at
+
+                    # Update video-specific properties if provided
+                    if frame_rate is not None:
+                        media.frame_rate = frame_rate
+                    if duration is not None:
+                        media.duration = duration
+
+                    # All AI metadata fields remain unchanged:
+                    # - prompt, negative_prompt, model, sampler, scheduler
+                    # - steps, cfg_scale, seed
+                    # - loras, tags, generation_data
+                    # - metadata_source
+
+                    # Update the database record
+                    conn.execute(
+                        """UPDATE media SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?""",
+                        (media.to_json(), str(file_path)),  # type: ignore[attr-defined]
+                    )
+
+                    conn.commit()
+
+                    # Build log message
+                    log_parts = [f"{width}x{height}", f"{file_size} bytes"]
+                    if frame_rate is not None:
+                        log_parts.append(f"{frame_rate:.2f} fps")
+                    if duration is not None:
+                        log_parts.append(f"{duration:.2f}s")
+
+                    logger.info(
+                        f"Updated technical metadata for {file_path.name}: "
+                        f"{', '.join(log_parts)}"
+                    )
+                    return True
+
+        except Exception as e:
+            logger.error(f"Error updating technical metadata for {file_path}: {e}")
+            return False
+
     def get_stats(self) -> Dict[str, Any]:
         try:
             with self._get_connection() as conn:
