@@ -730,31 +730,65 @@ class MainWindow(QMainWindow):
 
             # Get current queue status
             if hasattr(self, "upscale_queue"):
-                tasks = self.upscale_queue.get_all_tasks()
-                processing = [t for t in tasks if t.status.value == "processing"]
-                pending = [t for t in tasks if t.status.value == "pending"]
-                completed = [t for t in tasks if t.status.value == "completed"]
+                try:
+                    tasks = self.upscale_queue.get_all_tasks()
+                    # Safely get status value
+                    processing = [
+                        t
+                        for t in tasks
+                        if (
+                            t.status.value
+                            if hasattr(t.status, "value")
+                            else str(t.status)
+                        )
+                        == "processing"
+                    ]
+                    pending = [
+                        t
+                        for t in tasks
+                        if (
+                            t.status.value
+                            if hasattr(t.status, "value")
+                            else str(t.status)
+                        )
+                        == "pending"
+                    ]
+                    completed = [
+                        t
+                        for t in tasks
+                        if (
+                            t.status.value
+                            if hasattr(t.status, "value")
+                            else str(t.status)
+                        )
+                        == "completed"
+                    ]
 
-                total = len(processing) + len(pending)
-                current = len(completed) + 1 if processing else len(completed)
+                    total = len(processing) + len(pending)
+                    current = len(completed) + 1 if processing else len(completed)
 
-                if processing and processing[0].progress is not None:
-                    percent = int(processing[0].progress)
-                else:
-                    percent = 0
+                    if processing and processing[0].progress is not None:
+                        percent = int(processing[0].progress)
+                    else:
+                        percent = 0
 
-                if total > 0:
+                    # Always show text when spinner is active
                     spinner = self.spinner_frames[self.spinner_frame_index]
+                    if total > 0:
+                        self.upscaling_widget.setText(
+                            f"{spinner} Upscaling... Processing: {len(processing)} | Pending: {len(pending)} | Completed: {len(completed)}"
+                        )
+                    else:
+                        # Fallback when total is 0 but spinner is active
+                        self.upscaling_widget.setText(f"{spinner} Upscaling...")
+                except Exception as e:
+                    # Fallback on error
                     self.upscaling_widget.setText(
-                        f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
-                    )
-                else:
-                    self.upscaling_widget.setText(
-                        self.spinner_frames[self.spinner_frame_index]
+                        f"{self.spinner_frames[self.spinner_frame_index]} Upscaling..."
                     )
             else:
                 self.upscaling_widget.setText(
-                    self.spinner_frames[self.spinner_frame_index]
+                    f"{self.spinner_frames[self.spinner_frame_index]} Processing..."
                 )
 
     def _show_spinner(self):
@@ -2192,6 +2226,14 @@ class MainWindow(QMainWindow):
     def _add_upscale_tasks(self, task_configs):
         """Add upscale tasks to the queue."""
         try:
+            # Get worker count from first task config (all tasks use same worker count)
+            worker_count = 1
+            if task_configs and "worker_count" in task_configs[0]:
+                worker_count = task_configs[0]["worker_count"]
+
+            # Update queue's max_workers setting
+            self.upscale_queue.max_workers = max(1, min(worker_count, 4))
+
             for config in task_configs:
                 self.upscale_queue.add_task(
                     file_path=config["file_path"],

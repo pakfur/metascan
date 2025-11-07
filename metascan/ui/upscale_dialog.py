@@ -210,6 +210,27 @@ class UpscaleDialog(QDialog):
             # Connect checkbox to enable/disable spinbox
             self.fps_override_checkbox.toggled.connect(self.fps_spinbox.setEnabled)
 
+        # Worker count (concurrent processes)
+        worker_layout = QHBoxLayout()
+        worker_label = QLabel("Concurrent Workers:")
+        worker_layout.addWidget(worker_label)
+
+        self.worker_combo = QComboBox()
+        self.worker_combo.addItems(["1", "2", "3", "4"])
+        self.worker_combo.setCurrentIndex(0)  # Default to 1 worker
+        self.worker_combo.setToolTip("Number of simultaneous upscaling processes")
+        worker_layout.addWidget(self.worker_combo)
+
+        # Info icon button
+        info_button = QPushButton("ℹ️")
+        info_button.setFixedSize(30, 30)
+        info_button.setToolTip("Click for system requirements info")
+        info_button.clicked.connect(self._show_worker_info)
+        worker_layout.addWidget(info_button)
+
+        worker_layout.addStretch()
+        options_layout.addLayout(worker_layout)
+
         # Output note
         output_label = QLabel(
             "Note: Original files will be moved to trash after upscaling"
@@ -233,6 +254,46 @@ class UpscaleDialog(QDialog):
 
         layout.addWidget(button_box)
 
+    def _show_worker_info(self):
+        """Show information dialog about worker count and system requirements."""
+        info_text = """<h3>Concurrent Workers - System Requirements</h3>
+
+<p><b>What are concurrent workers?</b><br>
+Workers are parallel processes that upscale files simultaneously. More workers = faster batch processing.</p>
+
+<p><b>Recommended Configuration:</b></p>
+
+<p><b>1 Worker (Default):</b><br>
+• Any system with GPU<br>
+• 4-6 GB VRAM available<br>
+• Safe choice for most systems</p>
+
+<p><b>2 Workers:</b><br>
+• GPU with 8+ GB VRAM (RTX 3060, RX 6700 XT or better)<br>
+• 16+ GB system RAM<br>
+• Good balance of speed and stability</p>
+
+<p><b>3 Workers:</b><br>
+• GPU with 12+ GB VRAM (RTX 3080, RTX 4070 Ti or better)<br>
+• 24+ GB system RAM<br>
+• For power users with high-end hardware</p>
+
+<p><b>4 Workers:</b><br>
+• GPU with 16+ GB VRAM (RTX 4080, RTX 4090 or better)<br>
+• 32+ GB system RAM<br>
+• Maximum performance for professional workstations</p>
+
+<p><b>Note:</b> Running too many workers for your system may cause out-of-memory errors or crashes.
+Start with 1 worker and increase gradually while monitoring GPU/RAM usage.</p>"""
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Worker Count Information")
+        msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setText(info_text)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
+
     def _on_accept(self):
         """Handle accept button click."""
         # Get selected options
@@ -242,6 +303,9 @@ class UpscaleDialog(QDialog):
 
         # Model type
         model_type = "anime" if self.model_combo.currentIndex() == 1 else "general"
+
+        # Worker count
+        worker_count = int(self.worker_combo.currentText())
 
         # Frame interpolation options
         interpolate_frames = False
@@ -279,6 +343,7 @@ class UpscaleDialog(QDialog):
                 if file_info.get("type") == "video"
                 else None,
                 "preserve_metadata": False,  # Metadata preserved in database instead
+                "worker_count": worker_count,  # Pass worker count with tasks
             }
             tasks.append(task_config)
 
