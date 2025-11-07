@@ -527,12 +527,15 @@ def main():
     # Clear any existing handlers
     root_logger.handlers.clear()
 
-    # Create formatters
+    # Get process ID for logging
+    pid = os.getpid()
+
+    # Create formatters with process ID
     console_formatter = logging.Formatter(
-        f"%(asctime)s - upscale_worker_{task_id} - %(levelname)s - %(message)s"
+        f"%(asctime)s - PID:{pid} - upscale_worker_{task_id} - %(levelname)s - %(message)s"
     )
     file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        f"%(asctime)s - PID:{pid} - %(name)s - %(levelname)s - %(message)s"
     )
 
     # Console handler

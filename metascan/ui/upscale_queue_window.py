@@ -126,8 +126,12 @@ class UpscaleQueueWindow(QMainWindow):
 
         # Check if Command/Ctrl key is pressed
         from PyQt6.QtWidgets import QApplication
+
         modifiers = QApplication.keyboardModifiers()
-        is_cmd_pressed = modifiers & Qt.KeyboardModifier.ControlModifier or modifiers & Qt.KeyboardModifier.MetaModifier
+        is_cmd_pressed = (
+            modifiers & Qt.KeyboardModifier.ControlModifier
+            or modifiers & Qt.KeyboardModifier.MetaModifier
+        )
 
         try:
             if is_cmd_pressed:
@@ -152,9 +156,7 @@ class UpscaleQueueWindow(QMainWindow):
                     subprocess.call(["xdg-open", file_path])
         except Exception as e:
             QMessageBox.warning(
-                self,
-                "Open Failed",
-                f"Failed to open file or folder: {str(e)}"
+                self, "Open Failed", f"Failed to open file or folder: {str(e)}"
             )
 
     def _refresh_queue(self):
