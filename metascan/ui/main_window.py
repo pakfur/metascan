@@ -892,6 +892,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error updating upscaled media: {e}")
             import traceback
+
             self.logger.debug(f"Traceback: {traceback.format_exc()}")
             # Fallback to full rescan on error
             self.load_all_media()

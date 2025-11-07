@@ -78,14 +78,8 @@ class MediaUpscaler:
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(log_level)
 
-        if not self.logger.handlers:
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(log_level)
-            formatter = logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            )
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
+        # Note: Handler setup is done by the calling code (e.g., upscale_worker)
+        # This logger will inherit handlers from the root logger
 
         self.model_urls = {
             "RealESRGAN_x2plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
@@ -1181,12 +1175,17 @@ class MediaUpscaler:
                 "1",
                 "-qmax",
                 "1",
-                "-vsync",
-                "0",
             ]
 
+            # Use fps_mode instead of deprecated vsync
+            # passthrough: preserve frame timing from source
+            # vfr: variable frame rate output
             if fps:
-                cmd.extend(["-r", str(fps)])
+                # When specific fps is requested, use filter to change frame rate
+                cmd.extend(["-vf", f"fps={fps}", "-fps_mode", "vfr"])
+            else:
+                # Extract all frames at original timing
+                cmd.extend(["-fps_mode", "passthrough"])
 
             cmd.append(str(output_dir / "frame_%08d.png"))
 
@@ -1245,6 +1244,10 @@ class MediaUpscaler:
                 self.logger.error("No frames to compile")
                 return False
 
+            self.logger.info(
+                f"Compiling {len(frames)} frames to {output_path.name} at {video_info['fps']} fps"
+            )
+
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -1271,6 +1274,7 @@ class MediaUpscaler:
                 self.logger.error(f"Failed to compile video: {result.stderr}")
                 return False
 
+            self.logger.info(f"Video compilation successful: {output_path.name}")
             return True
         except Exception as e:
             self.logger.error(f"Error compiling video: {e}")
