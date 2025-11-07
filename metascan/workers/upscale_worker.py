@@ -14,6 +14,7 @@ import json
 import time
 import signal
 import logging
+import logging.handlers
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -282,19 +283,146 @@ class UpscaleWorker:
 
             # Call appropriate method based on file type
             if task_data["file_type"] == "video":
-                self.logger.info(
-                    f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}"
-                )
-                success = upscaler.process_video(
-                    input_path=input_path,
-                    output_path=output_path,
-                    scale=task_data["scale"],
-                    fps=task_data.get("fps_override"),
-                    enhance_faces=task_data.get("face_enhance", False),
-                    model_type=task_data.get("model", "general"),
-                    preserve_metadata=task_data.get("preserve_metadata", True),
-                    progress_callback=progress_callback,
-                )
+                # For videos with interpolation, we need to do upscaling and interpolation separately
+                if task_data.get("interpolate_frames", False):
+                    self.logger.info(
+                        f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}, interpolation=True"
+                    )
+
+                    # Step 1: Upscale video to a temporary location (don't replace original yet)
+                    # Note: process_video ALWAYS replaces the input file with the upscaled version
+                    # So we copy the original first, and the upscaled version will be at the copy's location
+
+                    # Create a temporary copy for upscaling
+                    import shutil
+
+                    upscaled_temp_path = (
+                        output_path.parent
+                        / f"{output_path.stem}_upscaled_temp{output_path.suffix}"
+                    )
+                    shutil.copy2(str(input_path), str(upscaled_temp_path))
+
+                    # Dummy output path (process_video ignores this and replaces input_path)
+                    dummy_output = (
+                        output_path.parent
+                        / f"{output_path.stem}_dummy{output_path.suffix}"
+                    )
+
+                    success = upscaler.process_video(
+                        input_path=upscaled_temp_path,  # This will be replaced with upscaled version
+                        output_path=dummy_output,  # Not actually used
+                        scale=task_data["scale"],
+                        fps=None,  # Don't change fps during upscaling
+                        enhance_faces=task_data.get("face_enhance", False),
+                        model_type=task_data.get("model", "general"),
+                        preserve_metadata=task_data.get("preserve_metadata", True),
+                        progress_callback=lambda p: progress_callback(
+                            p * 0.5
+                        ),  # First half of progress
+                    )
+
+                    # Clean up dummy output if it exists
+                    if dummy_output.exists():
+                        dummy_output.unlink()
+
+                    if not success or self._check_cancelled():
+                        # Clean up upscaled temp if it exists
+                        if upscaled_temp_path.exists():
+                            upscaled_temp_path.unlink()
+                        if not success:
+                            self._update_task_status(
+                                UpscaleStatus.FAILED,
+                                error_message="Video upscaling failed",
+                            )
+                        return 1
+
+                    # After upscaling, the upscaled video is at upscaled_temp_path
+                    # (process_video replaced our copy with the upscaled version)
+                    # Original is still intact at input_path
+
+                    # Step 2: Interpolate frames using RIFE
+                    self.logger.info(
+                        f"Interpolating frames: factor={task_data.get('interpolation_factor', 2)}, target_fps={task_data.get('fps_override')}"
+                    )
+
+                    # Determine interpolation factor
+                    if task_data.get("fps_override"):
+                        # Calculate interpolation factor from target fps
+                        video_info = upscaler._get_video_info(input_path)
+                        original_fps = video_info.get("fps", 30.0)
+                        target_fps = task_data["fps_override"]
+                        interpolation_factor = int(target_fps / original_fps + 0.5)
+                        if interpolation_factor < 2:
+                            interpolation_factor = 2
+                        self.logger.info(
+                            f"Calculated interpolation factor: {interpolation_factor} (current: {original_fps} fps, target: {target_fps} fps)"
+                        )
+                    else:
+                        interpolation_factor = task_data.get("interpolation_factor", 2)
+
+                    # Interpolate to another temp location
+                    interpolated_temp_path = (
+                        output_path.parent
+                        / f"{output_path.stem}_interpolated_temp{output_path.suffix}"
+                    )
+
+                    success = upscaler.interpolate_frames_rife(
+                        input_path=upscaled_temp_path,  # Read from upscaled temp file
+                        output_path=interpolated_temp_path,
+                        interpolation_factor=interpolation_factor,
+                        replace_original=False,
+                        progress_callback=lambda p: progress_callback(
+                            50 + p * 0.5
+                        ),  # Second half of progress
+                    )
+
+                    # Clean up upscaled temp file (no longer needed)
+                    if upscaled_temp_path.exists():
+                        upscaled_temp_path.unlink()
+
+                    if not success:
+                        if interpolated_temp_path.exists():
+                            interpolated_temp_path.unlink()
+                        self._update_task_status(
+                            UpscaleStatus.FAILED,
+                            error_message="Frame interpolation failed",
+                        )
+                        return 1
+
+                    # Step 3: Replace original with final interpolated video
+                    if task_data.get("replace_original", True):
+                        # Move original to trash
+                        if upscaler._move_to_trash(input_path):
+                            # Move interpolated to original location
+                            shutil.move(str(interpolated_temp_path), str(input_path))
+                            # Final output is at the original input location
+                            self.logger.info(
+                                f"Final interpolated video at: {input_path}"
+                            )
+                            # Don't change input_path or output_path - they stay as is
+                        else:
+                            self.logger.error("Failed to move original to trash")
+                            # Keep interpolated file at temp location
+                            output_path = interpolated_temp_path
+                    else:
+                        # Keep original, interpolated is at temp location
+                        output_path = interpolated_temp_path
+
+                else:
+                    # Simple upscaling without interpolation
+                    self.logger.info(
+                        f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}"
+                    )
+                    success = upscaler.process_video(
+                        input_path=input_path,
+                        output_path=output_path,
+                        scale=task_data["scale"],
+                        fps=task_data.get("fps_override"),
+                        enhance_faces=task_data.get("face_enhance", False),
+                        model_type=task_data.get("model", "general"),
+                        preserve_metadata=task_data.get("preserve_metadata", True),
+                        progress_callback=progress_callback,
+                    )
             else:  # image
                 self.logger.info(
                     f"Processing image with scale={task_data['scale']}, model={task_data.get('model', 'general')}"
@@ -386,12 +514,45 @@ def main():
 
     # Set up logging
     log_level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format=f"%(asctime)s - upscale_worker_{task_id} - %(levelname)s - %(message)s",
+
+    # Create logs directory
+    logs_dir = Path.home() / ".metascan" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = logs_dir / "upscaler.log"
+
+    # Get root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+
+    # Get process ID for logging
+    pid = os.getpid()
+
+    # Create formatters with process ID
+    console_formatter = logging.Formatter(
+        f"%(asctime)s - PID:{pid} - upscale_worker_{task_id} - %(levelname)s - %(message)s"
+    )
+    file_formatter = logging.Formatter(
+        f"%(asctime)s - PID:{pid} - %(name)s - %(levelname)s - %(message)s"
     )
 
-    # Log startup info
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # Rotating file handler (10 MB max, keep 5 backup files)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"  # 10 MB
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
+
+    # Get task-specific logger
     logger = logging.getLogger(f"upscale_worker_{task_id}")
     logger.info(f"Starting upscale worker for task {task_id}")
     logger.info(f"Queue directory: {queue_dir}")
