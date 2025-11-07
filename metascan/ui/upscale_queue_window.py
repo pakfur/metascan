@@ -18,6 +18,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from pathlib import Path
 from typing import Dict
+import subprocess
+import sys
 from metascan.core.upscale_queue_process import (
     UpscaleTask,
     UpscaleStatus,
@@ -71,6 +73,11 @@ class UpscaleQueueWindow(QMainWindow):
         self.queue_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
+        # Hide the horizontal header (table title row)
+        self.queue_table.horizontalHeader().setVisible(False)
+
+        # Connect double-click signal
+        self.queue_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
 
         layout.addWidget(self.queue_table)
 
@@ -106,6 +113,50 @@ class UpscaleQueueWindow(QMainWindow):
         self.queue.task_removed.connect(self._on_task_removed)
         self.queue.queue_changed.connect(self._refresh_queue)
 
+    def _on_cell_double_clicked(self, row: int, column: int):
+        """Handle double-click on a table cell."""
+        # Get the file path from the first column
+        file_item = self.queue_table.item(row, 0)
+        if not file_item:
+            return
+
+        file_path = file_item.data(Qt.ItemDataRole.UserRole)
+        if not file_path:
+            return
+
+        # Check if Command/Ctrl key is pressed
+        from PyQt6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+        is_cmd_pressed = modifiers & Qt.KeyboardModifier.ControlModifier or modifiers & Qt.KeyboardModifier.MetaModifier
+
+        try:
+            if is_cmd_pressed:
+                # Open folder containing the file
+                if sys.platform == "darwin":
+                    # macOS: reveal in Finder
+                    subprocess.call(["open", "-R", file_path])
+                elif sys.platform == "win32":
+                    # Windows: open folder and select file
+                    subprocess.call(["explorer", "/select,", file_path])
+                else:
+                    # Linux: open parent directory
+                    parent_dir = str(Path(file_path).parent)
+                    subprocess.call(["xdg-open", parent_dir])
+            else:
+                # Open the file directly
+                if sys.platform == "darwin":
+                    subprocess.call(["open", file_path])
+                elif sys.platform == "win32":
+                    subprocess.call(["start", file_path], shell=True)
+                else:
+                    subprocess.call(["xdg-open", file_path])
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Open Failed",
+                f"Failed to open file or folder: {str(e)}"
+            )
+
     def _refresh_queue(self):
         """Refresh the entire queue display."""
         # Clear table
@@ -131,6 +182,8 @@ class UpscaleQueueWindow(QMainWindow):
         file_item = QTableWidgetItem(file_path.name)
         file_item.setToolTip(str(file_path))
         file_item.setFlags(file_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        # Store the full file path in item data for double-click handling
+        file_item.setData(Qt.ItemDataRole.UserRole, str(file_path))
         self.queue_table.setItem(row, 0, file_item)
 
         # Status
