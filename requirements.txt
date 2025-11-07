@@ -31,6 +31,9 @@ tqdm==4.67.1
 # File Watching
 watchdog==3.0.0
 
+# File Locking (cross-platform)
+portalocker==2.8.2
+
 # Data Handling
 dataclasses-json==0.6.3
 marshmallow==3.26.1
