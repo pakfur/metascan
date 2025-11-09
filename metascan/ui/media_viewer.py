@@ -440,9 +440,11 @@ class VideoPlayer(QWidget):
             self.playback_speed = self._load_playback_speed()
             self.media_player.setPlaybackRate(self.playback_speed)
 
-            # Update UI to reflect the playback speed
+            # Update UI to reflect the playback speed (block signals to avoid recursion)
             speed_text = f"{self.playback_speed:g}x"
+            self.speed_selector.blockSignals(True)
             self.speed_selector.setCurrentText(speed_text)
+            self.speed_selector.blockSignals(False)
 
             # Reset position and tracking
             self.position_slider.setValue(0)
@@ -457,8 +459,7 @@ class VideoPlayer(QWidget):
 
     def play(self):
         """Start video playback."""
-        # Apply playback speed before playing (in case config changed)
-        self.playback_speed = self._load_playback_speed()
+        # Apply current playback speed (from UI or config)
         self.media_player.setPlaybackRate(self.playback_speed)
         self.media_player.play()
 
@@ -720,23 +721,9 @@ class VideoPlayer(QWidget):
             speed = float(speed_text.replace("x", ""))
             self.playback_speed = speed
 
-            # Store the current playback state
-            was_playing = (
-                self.media_player.playbackState()
-                == QMediaPlayer.PlaybackState.PlayingState
-            )
-            current_position = self.media_player.position()
-
-            # Set the playback rate
+            # Always set the playback rate - it will take effect immediately
+            # for playing videos and be stored for paused videos
             self.media_player.setPlaybackRate(speed)
-
-            # If paused, we need to ensure the rate is applied by briefly playing
-            # then pausing again at the same position
-            if not was_playing and self.media_player.hasVideo():
-                self.media_player.play()
-                self.media_player.setPosition(current_position)
-                self.media_player.pause()
-                self.media_player.setPosition(current_position)
 
             logger.info(f"Playback speed changed to {speed}x")
         except ValueError:
