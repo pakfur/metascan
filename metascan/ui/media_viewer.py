@@ -255,22 +255,29 @@ class VideoPlayer(QWidget):
         bool
     )  # True if playing, False if paused/stopped
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, db_manager=None):
         super().__init__(parent)
+
+        # Database manager for persisting per-file settings
+        self.db_manager = db_manager
 
         # Create media player and video widget
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.media_player.setAudioOutput(self.audio_output)
 
-        # Set looping to infinite by default
-        self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
+        # Don't use Qt's built-in looping - we'll handle it manually
+        # to avoid position tracking issues after first loop
+        # self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
 
         # Define available playback speeds (needed before loading config)
         self.available_speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
         # Load playback speed from config
         self.playback_speed = self._load_playback_speed()
+
+        # Track current media for database updates
+        self.current_media: Optional[Media] = None
 
         # Track last position for loop detection
         self._last_position = 0
@@ -388,11 +395,19 @@ class VideoPlayer(QWidget):
         self.update_timer.timeout.connect(self.update_time_display)
         self.update_timer.start(100)
 
-    def load_video(self, file_path: Path) -> bool:
-        """Load and prepare a video file for playback."""
+    def load_video(self, file_path: Path, media: Optional[Media] = None) -> bool:
+        """Load and prepare a video file for playback.
+
+        Args:
+            file_path: Path to the video file
+            media: Optional Media object containing metadata including playback_speed
+        """
         try:
             # Stop any current playback
             self.media_player.stop()
+
+            # Store current media for database updates
+            self.current_media = media
 
             # Reset fallback state for new file
             self._current_file_path = file_path
@@ -437,8 +452,25 @@ class VideoPlayer(QWidget):
             # Set the new source
             self.media_player.setSource(QUrl.fromLocalFile(str(file_path)))
 
-            # Apply playback speed from config (reload in case config changed)
-            self.playback_speed = self._load_playback_speed()
+            # Determine playback speed: use per-file setting if available, else default
+            if media and media.playback_speed is not None:
+                # Use per-file playback speed, snap to nearest available
+                configured_speed = media.playback_speed
+                snapped_speed = self._find_closest_speed(configured_speed)
+
+                # If speed was invalid, we'll update it later when user changes speed
+                if abs(snapped_speed - configured_speed) > 0.01:
+                    logger.info(
+                        f"Per-file speed {configured_speed}x invalid, snapping to {snapped_speed}x"
+                    )
+
+                self.playback_speed = snapped_speed
+                logger.info(f"Using per-file playback speed {snapped_speed}x")
+            else:
+                # Use default speed from config
+                self.playback_speed = self._load_playback_speed()
+                logger.info(f"Using default playback speed {self.playback_speed}x")
+
             self.media_player.setPlaybackRate(self.playback_speed)
 
             # Update UI to reflect the playback speed (block signals to avoid recursion)
@@ -493,18 +525,12 @@ class VideoPlayer(QWidget):
 
     def update_position(self, position):
         """Update position slider."""
+        # Always update last position for tracking
+        self._last_position = position
+
         if not self.position_slider.isSliderDown():
-            # Check if video has looped (position jumps from near end to near start)
-            if (
-                hasattr(self, "_last_position")
-                and self._last_position > self.media_player.duration() - 1000
-                and position < 1000
-            ):
-                # Video has looped, ensure slider resets to 0
-                self.position_slider.setValue(0)
-            else:
-                self.position_slider.setValue(position)
-            self._last_position = position
+            # Always set slider to current position
+            self.position_slider.setValue(position)
 
     def update_duration(self, duration):
         """Update duration when media is loaded."""
@@ -576,6 +602,15 @@ class VideoPlayer(QWidget):
             self.media_player.setPosition(0)
             # Reset fallback flag on successful load
             self._fallback_attempted = False
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            logger.info("EndOfMedia reached - manually looping video")
+            # Manually handle looping to ensure position tracking works correctly
+            # Reset to beginning and continue playing
+            self.media_player.setPosition(0)
+            self.position_slider.setValue(0)
+            self._last_position = 0
+            # Resume playback
+            self.media_player.play()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             logger.error("Invalid media format")
             if self._current_file_path and not self._fallback_attempted:
@@ -769,7 +804,7 @@ class VideoPlayer(QWidget):
                 self.mute_button.setText("🔊")
 
     def change_playback_speed(self, speed_text):
-        """Change the playback speed."""
+        """Change the playback speed and save to database for current media."""
         # Extract numeric value from text like "1.5x"
         try:
             speed = float(speed_text.replace("x", ""))
@@ -779,8 +814,25 @@ class VideoPlayer(QWidget):
             # for playing videos and be stored for paused videos
             self.media_player.setPlaybackRate(speed)
 
-            # Save the new speed to config so it persists
-            self._save_playback_speed(speed)
+            # Save per-file speed to database if we have current media and database
+            if self.current_media and self.db_manager:
+                # Snap to nearest available speed before saving
+                snapped_speed = self._find_closest_speed(speed)
+
+                # Update the media object
+                self.current_media.playback_speed = snapped_speed
+
+                # Save to database
+                success = self.db_manager.update_playback_speed(
+                    self.current_media.file_path, snapped_speed
+                )
+
+                if success:
+                    logger.info(
+                        f"Saved playback speed {snapped_speed}x for {self.current_media.file_name}"
+                    )
+                else:
+                    logger.warning(f"Failed to save playback speed to database")
 
             logger.info(f"Playback speed changed to {speed}x")
         except ValueError:
@@ -788,26 +840,25 @@ class VideoPlayer(QWidget):
 
     def previous_frame(self):
         """Go back one frame (approximately)."""
-        # Pause playback for frame stepping
-        was_playing = (
-            self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        )
-        if was_playing:
+        # Ensure we're paused for frame stepping
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.pause()
 
         # Estimate frame duration (assuming 30fps, adjust as needed)
         frame_duration_ms = 33  # ~33ms per frame at 30fps
         current_pos = self.media_player.position()
         new_pos = max(0, current_pos - frame_duration_ms)
+
+        # Force position update
         self.media_player.setPosition(new_pos)
+        # Manually update the slider since position change might not emit signal when paused
+        self.position_slider.setValue(new_pos)
+        self._last_position = new_pos
 
     def next_frame(self):
         """Go forward one frame (approximately)."""
-        # Pause playback for frame stepping
-        was_playing = (
-            self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-        )
-        if was_playing:
+        # Ensure we're paused for frame stepping
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.pause()
 
         # Estimate frame duration (assuming 30fps, adjust as needed)
@@ -815,7 +866,12 @@ class VideoPlayer(QWidget):
         current_pos = self.media_player.position()
         duration = self.media_player.duration()
         new_pos = min(duration, current_pos + frame_duration_ms)
+
+        # Force position update
         self.media_player.setPosition(new_pos)
+        # Manually update the slider since position change might not emit signal when paused
+        self.position_slider.setValue(new_pos)
+        self._last_position = new_pos
 
     def show_keyboard_shortcuts(self):
         """Display keyboard shortcuts help overlay."""
@@ -915,8 +971,11 @@ class MediaViewer(QWidget):
         object, bool
     )  # Emits Media object and new favorite status
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, db_manager=None):
         super().__init__(parent)
+
+        # Database manager for persisting settings
+        self.db_manager = db_manager
 
         # Media list and current index
         self.media_list: List[Media] = []
@@ -998,7 +1057,7 @@ class MediaViewer(QWidget):
         self.stacked_widget.addWidget(self.image_viewer)
 
         # Video player
-        self.video_player = VideoPlayer()
+        self.video_player = VideoPlayer(db_manager=self.db_manager)
         self.stacked_widget.addWidget(self.video_player)
 
         layout.addWidget(self.stacked_widget, 1)  # Give it stretch factor
@@ -1178,7 +1237,9 @@ class MediaViewer(QWidget):
         if self.current_media.is_video:
             # Show video player
             self.stacked_widget.setCurrentWidget(self.video_player)
-            success = self.video_player.load_video(self.current_media.file_path)
+            success = self.video_player.load_video(
+                self.current_media.file_path, self.current_media
+            )
             if not success:
                 self.info_label.setText(
                     f"Failed to load video: {self.current_media.file_name}"

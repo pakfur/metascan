@@ -349,8 +349,8 @@ class MainWindow(QMainWindow):
         self.upscale_queue_window = None
 
         # Create media viewer (initially hidden)
-        self.media_viewer = (
-            MediaViewer()
+        self.media_viewer = MediaViewer(
+            db_manager=self.db_manager
         )  # Create without parent to control positioning
         self.media_viewer.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -1306,6 +1306,8 @@ class MainWindow(QMainWindow):
             self.all_media = self.db_manager.get_all_media()
             # Load favorite status from database
             self.db_manager.load_favorite_status(self.all_media)
+            # Load playback speeds from database
+            self.db_manager.load_playback_speed(self.all_media)
             # Apply current sorting
             self._apply_sorting()
             print(f"Loaded {len(self.all_media)} media items")
