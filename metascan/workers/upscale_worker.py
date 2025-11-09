@@ -17,7 +17,7 @@ import logging
 import logging.handlers
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, IO, Any
 import os
 
 # Add the parent directory to sys.path so we can import metascan modules
@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from metascan.core.media_upscaler import MediaUpscaler
 from metascan.core.upscale_queue_process import UpscaleStatus
 from metascan.utils.app_paths import get_data_dir
+import portalocker
 
 
 class UpscaleWorker:
@@ -43,6 +44,7 @@ class UpscaleWorker:
         self.task_id = task_id
         self.queue_dir = Path(queue_dir)
         self.queue_file = self.queue_dir / "queue.json"
+        self.queue_lock_file = self.queue_dir / "queue.lock"
         self.progress_file = self.queue_dir / f"progress_{task_id}.json"
         self.cancel_file = self.queue_dir / f"cancel_{task_id}.signal"
         self.debug = debug
@@ -62,6 +64,47 @@ class UpscaleWorker:
         self.logger.info(f"Received signal {signum}, shutting down gracefully")
         self.logger.debug(f"Signal frame: {frame}")
         self.cancelled = True
+
+    def _acquire_lock(self, timeout: float = 5.0) -> IO[Any]:
+        """
+        Acquire exclusive lock on queue file.
+
+        Args:
+            timeout: Maximum time to wait for lock
+
+        Returns:
+            File handle with lock acquired
+
+        Raises:
+            TimeoutError: If lock cannot be acquired within timeout
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                # Open lock file for writing
+                lock_fh = open(self.queue_lock_file, "w")
+                # Acquire exclusive lock (non-blocking)
+                portalocker.lock(lock_fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                return lock_fh
+            except (IOError, OSError, portalocker.exceptions.LockException):
+                time.sleep(0.05)  # Wait 50ms before retry
+
+        raise TimeoutError(
+            f"Could not acquire lock on {self.queue_lock_file} within {timeout}s"
+        )
+
+    def _release_lock(self, lock_fh: IO[Any]) -> None:
+        """
+        Release lock and close file handle.
+
+        Args:
+            lock_fh: File handle with lock
+        """
+        try:
+            portalocker.unlock(lock_fh)
+            lock_fh.close()
+        except Exception as e:
+            self.logger.warning(f"Failed to release lock cleanly: {e}")
 
     def _check_cancelled(self) -> bool:
         """Check if the task has been cancelled."""
@@ -120,10 +163,14 @@ class UpscaleWorker:
             return True  # Continue processing even if progress update fails
 
     def _load_task(self):
-        """Load task information from queue file."""
+        """Load task information from queue file with proper file locking."""
+        lock_fh = None
         try:
+            # Acquire lock to ensure consistent read
+            lock_fh = self._acquire_lock(timeout=10.0)
+
             self.logger.debug(f"Loading task from queue file: {self.queue_file}")
-            with open(self.queue_file, "r") as f:
+            with open(self.queue_file, "r", encoding="utf-8") as f:
                 queue_data = json.load(f)
 
             if self.debug:
@@ -139,11 +186,17 @@ class UpscaleWorker:
             self.logger.debug(f"Loaded task data: {json.dumps(task_data, indent=2)}")
             return task_data
 
+        except TimeoutError:
+            self.logger.error(f"Failed to acquire lock for loading task (timeout)")
+            raise
         except Exception as e:
             self.logger.error(f"Failed to load task: {e}")
             if self.debug:
                 self.logger.debug(f"Task load traceback: {traceback.format_exc()}")
             raise
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def _update_task_status(
         self,
@@ -152,10 +205,14 @@ class UpscaleWorker:
         output_path: Optional[str] = None,
         progress: Optional[float] = None,
     ):
-        """Update task status in the queue file."""
+        """Update task status in the queue file with proper file locking."""
+        lock_fh = None
         try:
+            # Acquire exclusive lock before reading/writing
+            lock_fh = self._acquire_lock(timeout=10.0)
+
             # Read current queue
-            with open(self.queue_file, "r") as f:
+            with open(self.queue_file, "r", encoding="utf-8") as f:
                 queue_data = json.load(f)
 
             # Update task
@@ -172,8 +229,9 @@ class UpscaleWorker:
 
             # Write back atomically
             temp_file = self.queue_file.with_suffix(".tmp")
-            with open(temp_file, "w") as f:
-                json.dump(queue_data, f, indent=2)
+            with open(temp_file, "w", encoding="utf-8") as f:
+                # Use ensure_ascii=False to prevent encoding issues
+                json.dump(queue_data, f, indent=2, ensure_ascii=False)
             temp_file.rename(self.queue_file)
 
             self.logger.info(f"Task status updated to {status.value}")
@@ -182,10 +240,20 @@ class UpscaleWorker:
                     f"Task update details - Error: {error_message}, Output: {output_path}, Progress: {progress}"
                 )
 
+        except TimeoutError:
+            self.logger.error(
+                f"Failed to acquire lock for updating task status (timeout)"
+            )
+            if self.debug:
+                self.logger.debug(f"Lock timeout traceback: {traceback.format_exc()}")
         except Exception as e:
             self.logger.error(f"Failed to update task status: {e}")
             if self.debug:
                 self.logger.debug(f"Status update traceback: {traceback.format_exc()}")
+        finally:
+            # Always release the lock
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def run(self):
         """Run the upscaling task."""
