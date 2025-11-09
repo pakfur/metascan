@@ -823,6 +823,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "upscaling_widget") and self.upscaling_widget:
             self.upscaling_widget.setText("")  # Clear the text instead of hiding
 
+    def _show_paused_message(self):
+        """Show the paused message when queue is paused with no active tasks."""
+        self.spinner_timer.stop()
+
+        if hasattr(self, "upscaling_widget") and self.upscaling_widget:
+            self.upscaling_widget.setText(
+                "-- Upscaling Paused. Click here to view queue. --"
+            )
+
     def _on_task_added(self, task):
         """Handle when a task is added to the queue."""
         self._show_spinner()
@@ -938,12 +947,18 @@ class MainWindow(QMainWindow):
     def _update_spinner_visibility(self):
         """Update spinner visibility based on current queue state."""
         all_tasks = self.upscale_queue.get_all_tasks()
-        has_active_tasks = any(
-            task.status.value in ["pending", "processing"] for task in all_tasks
-        )
 
-        if has_active_tasks:
+        # Check for different task states
+        has_processing = any(task.status.value == "processing" for task in all_tasks)
+        has_pending = any(task.status.value == "pending" for task in all_tasks)
+        has_paused = any(task.status.value == "paused" for task in all_tasks)
+
+        # Show spinner if there are processing or pending tasks
+        if has_processing or has_pending:
             self._show_spinner()
+        # Show paused message if queue is paused and nothing is processing
+        elif has_paused and not has_processing:
+            self._show_paused_message()
         else:
             self._hide_spinner()
 
