@@ -140,17 +140,17 @@ class ProcessUpscaleQueue(QObject):
 
     def _restore_worker_count_from_queue(self) -> None:
         """
-        Restore worker_count from queue.json if there are pending/processing tasks.
+        Restore worker_count from queue.json if there are pending/processing/paused tasks.
         This allows the queue to resume with the same worker count it was using before.
         """
         try:
             queue_data = self._read_queue_file()
 
-            # Check if there are any pending or processing tasks
+            # Check if there are any pending, processing, or paused tasks
             has_active_tasks = False
             for task_data in queue_data.get("tasks", {}).values():
                 status = task_data.get("status", "")
-                if status in ["pending", "processing"]:
+                if status in ["pending", "processing", "paused"]:
                     has_active_tasks = True
                     break
 
@@ -174,7 +174,7 @@ class ProcessUpscaleQueue(QObject):
                 self.max_workers = saved_worker_count
                 self.logger.info(
                     f"Restored worker_count from queue: {saved_worker_count} "
-                    f"(found {sum(1 for t in queue_data.get('tasks', {}).values() if t.get('status') in ['pending', 'processing'])} active task(s))"
+                    f"(found {sum(1 for t in queue_data.get('tasks', {}).values() if t.get('status') in ['pending', 'processing', 'paused'])} active task(s))"
                 )
             else:
                 self.logger.debug("No active tasks found, keeping default worker_count")
@@ -520,10 +520,16 @@ class ProcessUpscaleQueue(QObject):
             fps_override=fps_override,
         )
 
-        # Add to queue
-        queue_data = self._read_queue_file()
-        queue_data["tasks"][task_id] = task.to_dict()
-        self._write_queue_file(queue_data)
+        # Add to queue with file locking
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
+            queue_data["tasks"][task_id] = task.to_dict()
+            self._write_queue_file(queue_data)
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
         self.logger.info(f"Added task {task_id} to queue: {file_path}")
 
@@ -543,37 +549,43 @@ class ProcessUpscaleQueue(QObject):
         Returns:
             True if task was cancelled, False if not found
         """
-        queue_data = self._read_queue_file()
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
 
-        if task_id not in queue_data["tasks"]:
-            return False
+            if task_id not in queue_data["tasks"]:
+                return False
 
-        task_data = queue_data["tasks"][task_id]
-        current_status = UpscaleStatus(task_data["status"])
+            task_data = queue_data["tasks"][task_id]
+            current_status = UpscaleStatus(task_data["status"])
 
-        if current_status in [
-            UpscaleStatus.COMPLETED,
-            UpscaleStatus.FAILED,
-            UpscaleStatus.CANCELLED,
-        ]:
-            return False  # Already finished
+            if current_status in [
+                UpscaleStatus.COMPLETED,
+                UpscaleStatus.FAILED,
+                UpscaleStatus.CANCELLED,
+            ]:
+                return False  # Already finished
 
-        # Update status
-        task_data["status"] = UpscaleStatus.CANCELLED.value
-        task_data["last_updated"] = time.time()
-        self._write_queue_file(queue_data)
+            # Update status
+            task_data["status"] = UpscaleStatus.CANCELLED.value
+            task_data["last_updated"] = time.time()
+            self._write_queue_file(queue_data)
 
-        # Signal process to stop if running
-        if current_status == UpscaleStatus.PROCESSING:
-            self._signal_process_stop(task_id)
+            # Signal process to stop if running
+            if current_status == UpscaleStatus.PROCESSING:
+                self._signal_process_stop(task_id)
 
-        # Emit signals
-        task = UpscaleTask.from_dict(task_data)
-        self.task_updated.emit(task)
-        self.queue_changed.emit()
+            # Emit signals
+            task = UpscaleTask.from_dict(task_data)
+            self.task_updated.emit(task)
+            self.queue_changed.emit()
 
-        self.logger.info(f"Cancelled task {task_id}")
-        return True
+            self.logger.info(f"Cancelled task {task_id}")
+            return True
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def remove_task(self, task_id: str) -> bool:
         """
@@ -585,31 +597,37 @@ class ProcessUpscaleQueue(QObject):
         Returns:
             True if task was removed, False if not found
         """
-        queue_data = self._read_queue_file()
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
 
-        if task_id not in queue_data["tasks"]:
-            return False
+            if task_id not in queue_data["tasks"]:
+                return False
 
-        task_data = queue_data["tasks"][task_id]
-        current_status = UpscaleStatus(task_data["status"])
+            task_data = queue_data["tasks"][task_id]
+            current_status = UpscaleStatus(task_data["status"])
 
-        # Cancel first if processing
-        if current_status == UpscaleStatus.PROCESSING:
-            self._signal_process_stop(task_id)
+            # Cancel first if processing
+            if current_status == UpscaleStatus.PROCESSING:
+                self._signal_process_stop(task_id)
 
-        # Remove from queue
-        del queue_data["tasks"][task_id]
-        self._write_queue_file(queue_data)
+            # Remove from queue
+            del queue_data["tasks"][task_id]
+            self._write_queue_file(queue_data)
 
-        # Clean up files
-        self._cleanup_task_files(task_id)
+            # Clean up files
+            self._cleanup_task_files(task_id)
 
-        # Emit signals
-        self.task_removed.emit(task_id)
-        self.queue_changed.emit()
+            # Emit signals
+            self.task_removed.emit(task_id)
+            self.queue_changed.emit()
 
-        self.logger.info(f"Removed task {task_id}")
-        return True
+            self.logger.info(f"Removed task {task_id}")
+            return True
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def _signal_process_stop(self, task_id: str) -> None:
         """Signal a process to stop gracefully."""
@@ -685,30 +703,36 @@ class ProcessUpscaleQueue(QObject):
 
     def clear_completed(self) -> None:
         """Remove all completed, failed, and cancelled tasks."""
-        queue_data = self._read_queue_file()
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
 
-        completed_statuses = [
-            UpscaleStatus.COMPLETED.value,
-            UpscaleStatus.FAILED.value,
-            UpscaleStatus.CANCELLED.value,
-        ]
+            completed_statuses = [
+                UpscaleStatus.COMPLETED.value,
+                UpscaleStatus.FAILED.value,
+                UpscaleStatus.CANCELLED.value,
+            ]
 
-        tasks_to_remove = []
-        for task_id, task_data in queue_data["tasks"].items():
-            if task_data.get("status") in completed_statuses:
-                tasks_to_remove.append(task_id)
+            tasks_to_remove = []
+            for task_id, task_data in queue_data["tasks"].items():
+                if task_data.get("status") in completed_statuses:
+                    tasks_to_remove.append(task_id)
 
-        # Remove tasks
-        for task_id in tasks_to_remove:
-            del queue_data["tasks"][task_id]
-            self._cleanup_task_files(task_id)
-            self.task_removed.emit(task_id)
+            # Remove tasks
+            for task_id in tasks_to_remove:
+                del queue_data["tasks"][task_id]
+                self._cleanup_task_files(task_id)
+                self.task_removed.emit(task_id)
 
-        if tasks_to_remove:
-            self._write_queue_file(queue_data)
-            self.queue_changed.emit()
+            if tasks_to_remove:
+                self._write_queue_file(queue_data)
+                self.queue_changed.emit()
 
-        self.logger.info(f"Cleared {len(tasks_to_remove)} completed tasks")
+            self.logger.info(f"Cleared {len(tasks_to_remove)} completed tasks")
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def pause_queue(self) -> int:
         """
@@ -719,30 +743,36 @@ class ProcessUpscaleQueue(QObject):
         Returns:
             Number of tasks paused
         """
-        queue_data = self._read_queue_file()
-        paused_task_ids = []
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
+            paused_task_ids = []
 
-        # First pass: update all pending tasks to paused
-        for task_id, task_data in queue_data["tasks"].items():
-            if task_data.get("status") == UpscaleStatus.PENDING.value:
-                queue_data["tasks"][task_id]["status"] = UpscaleStatus.PAUSED.value
-                queue_data["tasks"][task_id]["last_updated"] = time.time()
-                paused_task_ids.append(task_id)
+            # First pass: update all pending tasks to paused
+            for task_id, task_data in queue_data["tasks"].items():
+                if task_data.get("status") == UpscaleStatus.PENDING.value:
+                    queue_data["tasks"][task_id]["status"] = UpscaleStatus.PAUSED.value
+                    queue_data["tasks"][task_id]["last_updated"] = time.time()
+                    paused_task_ids.append(task_id)
 
-        if paused_task_ids:
-            # Write the queue file BEFORE emitting signals
-            self._write_queue_file(queue_data)
-            self.queue_changed.emit()
-            self.logger.info(f"Paused {len(paused_task_ids)} pending tasks")
+            if paused_task_ids:
+                # Write the queue file BEFORE emitting signals
+                self._write_queue_file(queue_data)
+                self.queue_changed.emit()
+                self.logger.info(f"Paused {len(paused_task_ids)} pending tasks")
 
-            # Now emit update signals for each paused task
-            for task_id in paused_task_ids:
-                task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                self.task_updated.emit(task)
-        else:
-            self.logger.debug("No pending tasks to pause")
+                # Now emit update signals for each paused task
+                for task_id in paused_task_ids:
+                    task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                    self.task_updated.emit(task)
+            else:
+                self.logger.debug("No pending tasks to pause")
 
-        return len(paused_task_ids)
+            return len(paused_task_ids)
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def resume_queue(self) -> int:
         """
@@ -752,33 +782,45 @@ class ProcessUpscaleQueue(QObject):
         Returns:
             Number of tasks resumed
         """
-        queue_data = self._read_queue_file()
-        resumed_task_ids = []
+        lock_fh = None
+        resumed_count = 0
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
+            resumed_task_ids = []
 
-        # First pass: update all paused tasks to pending
-        for task_id, task_data in queue_data["tasks"].items():
-            if task_data.get("status") == UpscaleStatus.PAUSED.value:
-                queue_data["tasks"][task_id]["status"] = UpscaleStatus.PENDING.value
-                queue_data["tasks"][task_id]["last_updated"] = time.time()
-                resumed_task_ids.append(task_id)
+            # First pass: update all paused tasks to pending
+            for task_id, task_data in queue_data["tasks"].items():
+                if task_data.get("status") == UpscaleStatus.PAUSED.value:
+                    queue_data["tasks"][task_id]["status"] = UpscaleStatus.PENDING.value
+                    queue_data["tasks"][task_id]["last_updated"] = time.time()
+                    resumed_task_ids.append(task_id)
 
-        if resumed_task_ids:
-            # Write the queue file BEFORE emitting signals
-            self._write_queue_file(queue_data)
-            self.queue_changed.emit()
-            self.logger.info(f"Resumed {len(resumed_task_ids)} paused tasks")
+            if resumed_task_ids:
+                # Write the queue file BEFORE emitting signals
+                self._write_queue_file(queue_data)
+                self.queue_changed.emit()
+                self.logger.info(f"Resumed {len(resumed_task_ids)} paused tasks")
 
-            # Now emit update signals for each resumed task
-            for task_id in resumed_task_ids:
-                task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                self.task_updated.emit(task)
+                # Now emit update signals for each resumed task
+                for task_id in resumed_task_ids:
+                    task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                    self.task_updated.emit(task)
 
-            # Start processing the resumed tasks
+                resumed_count = len(resumed_task_ids)
+            else:
+                self.logger.debug("No paused tasks to resume")
+                resumed_count = 0
+
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
+
+        # Start processing AFTER releasing the lock (to avoid deadlock)
+        if resumed_count > 0:
             self.start_processing()
-        else:
-            self.logger.debug("No paused tasks to resume")
 
-        return len(resumed_task_ids)
+        return resumed_count
 
     def start_processing(self) -> None:
         """Start processing pending tasks up to max_workers limit."""
@@ -814,11 +856,17 @@ class ProcessUpscaleQueue(QObject):
 
             self.active_processes[task.id] = process
 
-            # Update task with process ID
-            queue_data = self._read_queue_file()
-            if task.id in queue_data["tasks"]:
-                queue_data["tasks"][task.id]["process_id"] = process.pid
-                self._write_queue_file(queue_data)
+            # Update task with process ID (with locking)
+            lock_fh = None
+            try:
+                lock_fh = self._acquire_lock(timeout=5.0)
+                queue_data = self._read_queue_file()
+                if task.id in queue_data["tasks"]:
+                    queue_data["tasks"][task.id]["process_id"] = process.pid
+                    self._write_queue_file(queue_data)
+            finally:
+                if lock_fh:
+                    self._release_lock(lock_fh)
 
             self.logger.info(f"Started worker process {process.pid} for task {task.id}")
 
@@ -834,16 +882,22 @@ class ProcessUpscaleQueue(QObject):
 
     def _mark_task_failed(self, task_id: str, error_message: str) -> None:
         """Mark a task as failed."""
-        queue_data = self._read_queue_file()
-        if task_id in queue_data["tasks"]:
-            queue_data["tasks"][task_id]["status"] = UpscaleStatus.FAILED.value
-            queue_data["tasks"][task_id]["error_message"] = error_message
-            queue_data["tasks"][task_id]["last_updated"] = time.time()
-            self._write_queue_file(queue_data)
+        lock_fh = None
+        try:
+            lock_fh = self._acquire_lock(timeout=5.0)
+            queue_data = self._read_queue_file()
+            if task_id in queue_data["tasks"]:
+                queue_data["tasks"][task_id]["status"] = UpscaleStatus.FAILED.value
+                queue_data["tasks"][task_id]["error_message"] = error_message
+                queue_data["tasks"][task_id]["last_updated"] = time.time()
+                self._write_queue_file(queue_data)
 
-            # Emit signal
-            task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-            self.task_updated.emit(task)
+                # Emit signal
+                task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                self.task_updated.emit(task)
+        finally:
+            if lock_fh:
+                self._release_lock(lock_fh)
 
     def poll_updates(self) -> None:
         """
@@ -900,13 +954,15 @@ class ProcessUpscaleQueue(QObject):
     def _update_progress_from_files(self) -> None:
         """Update task progress from progress files."""
         for progress_file in self.queue_dir.glob("progress_*.json"):
+            lock_fh = None
             try:
                 task_id = progress_file.stem.replace("progress_", "")
 
                 with open(progress_file, "r") as f:
                     progress_data = json.load(f)
 
-                # Update task progress
+                # Update task progress (with locking)
+                lock_fh = self._acquire_lock(timeout=5.0)
                 queue_data = self._read_queue_file()
                 if task_id in queue_data["tasks"]:
                     queue_data["tasks"][task_id]["progress"] = progress_data.get(
@@ -925,6 +981,9 @@ class ProcessUpscaleQueue(QObject):
                 self.logger.error(
                     f"Failed to update progress from {progress_file}: {e}"
                 )
+            finally:
+                if lock_fh:
+                    self._release_lock(lock_fh)
 
     def _start_next_pending_task(self) -> None:
         """Start pending tasks if we're under the worker limit."""
