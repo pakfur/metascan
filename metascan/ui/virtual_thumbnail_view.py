@@ -966,14 +966,12 @@ class VirtualScrollArea(QScrollArea):
             new_index = media_count - 1
         elif key == Qt.Key.Key_PageUp:
             visible_rows = (
-                self.viewport_info.visible_height
-                // self.layout_metrics.cell_height
+                self.viewport_info.visible_height // self.layout_metrics.cell_height
             )
             new_index = max(0, current_index - (visible_rows * columns))
         elif key == Qt.Key.Key_PageDown:
             visible_rows = (
-                self.viewport_info.visible_height
-                // self.layout_metrics.cell_height
+                self.viewport_info.visible_height // self.layout_metrics.cell_height
             )
             new_index = min(media_count - 1, current_index + (visible_rows * columns))
         else:
