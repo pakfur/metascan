@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
     QSlider,
     QStackedWidget,
     QSizePolicy,
+    QComboBox,
+    QToolTip,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint
 from PyQt6.QtGui import (
@@ -55,6 +57,17 @@ class ImageViewer(QLabel):
         self.setScaledContents(False)
         self.current_pixmap = None
 
+        # Zoom and pan state
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.1  # 10% minimum zoom
+        self.max_zoom = 10.0  # 1000% maximum zoom
+        self.zoom_step = 0.1  # 10% zoom change per scroll step
+        self.pan_offset = QPoint(0, 0)  # Offset for panning
+
+        # Panning state
+        self.is_panning = False
+        self.last_pan_point = QPoint()
+
     def load_image(self, file_path: Path) -> bool:
         """Load and display an image file."""
         try:
@@ -65,6 +78,9 @@ class ImageViewer(QLabel):
                 return False
 
             self.current_pixmap = pixmap
+            # Reset zoom and pan when loading new image
+            self.zoom_factor = 1.0
+            self.pan_offset = QPoint(0, 0)
             self._update_display()
             return True
 
@@ -78,13 +94,40 @@ class ImageViewer(QLabel):
         if not self.current_pixmap:
             return
 
-        # Scale pixmap to fit while maintaining aspect ratio
+        # Calculate the base size (fit to window)
+        base_scaled_size = self.current_pixmap.size().scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+
+        # Apply zoom factor
+        zoomed_size = base_scaled_size * self.zoom_factor
+
+        # Scale pixmap with zoom applied
         scaled_pixmap = self.current_pixmap.scaled(
-            self.size(),
+            zoomed_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.setPixmap(scaled_pixmap)
+
+        # When zoomed, we need to handle panning by cropping/positioning
+        if self.zoom_factor > 1.0:
+            # Create a canvas the size of the widget
+            canvas = QPixmap(self.size())
+            canvas.fill(Qt.GlobalColor.black)
+
+            # Calculate position to draw the zoomed image with pan offset
+            x = (self.width() - scaled_pixmap.width()) // 2 + self.pan_offset.x()
+            y = (self.height() - scaled_pixmap.height()) // 2 + self.pan_offset.y()
+
+            # Draw the scaled pixmap onto the canvas
+            painter = QPainter(canvas)
+            painter.drawPixmap(x, y, scaled_pixmap)
+            painter.end()
+
+            self.setPixmap(canvas)
+        else:
+            # No zoom or zoomed out - just center the image
+            self.setPixmap(scaled_pixmap)
 
     def resizeEvent(self, event):
         """Handle resize events to update the displayed image."""
@@ -92,9 +135,116 @@ class ImageViewer(QLabel):
         if self.current_pixmap:
             self._update_display()
 
+    def wheelEvent(self, event):
+        """Handle mouse wheel events for zooming."""
+        if not self.current_pixmap:
+            return
+
+        # Get the mouse position relative to the widget
+        mouse_pos = event.position().toPoint()
+
+        # Calculate the base size (fit to window) for reference
+        base_scaled_size = self.current_pixmap.size().scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio
+        )
+
+        # Calculate current zoomed size
+        old_zoomed_size = base_scaled_size * self.zoom_factor
+
+        # Calculate position of mouse in image coordinates (before zoom)
+        # Account for centering and pan offset
+        image_x_before = (
+            self.width() - old_zoomed_size.width()
+        ) // 2 + self.pan_offset.x()
+        image_y_before = (
+            self.height() - old_zoomed_size.height()
+        ) // 2 + self.pan_offset.y()
+
+        # Mouse position relative to image top-left
+        rel_x = mouse_pos.x() - image_x_before
+        rel_y = mouse_pos.y() - image_y_before
+
+        # Calculate relative position as percentage of image size
+        if old_zoomed_size.width() > 0 and old_zoomed_size.height() > 0:
+            rel_x_pct = rel_x / old_zoomed_size.width()
+            rel_y_pct = rel_y / old_zoomed_size.height()
+        else:
+            rel_x_pct = 0.5
+            rel_y_pct = 0.5
+
+        # Update zoom factor based on scroll direction
+        # angleDelta().y() is positive for scroll up (zoom in), negative for scroll down (zoom out)
+        old_zoom = self.zoom_factor
+        if event.angleDelta().y() > 0:
+            # Scroll up - zoom in
+            self.zoom_factor = min(self.max_zoom, self.zoom_factor + self.zoom_step)
+        else:
+            # Scroll down - zoom out
+            self.zoom_factor = max(self.min_zoom, self.zoom_factor - self.zoom_step)
+
+        # If zoom didn't change (hit bounds), do nothing
+        if self.zoom_factor == old_zoom:
+            return
+
+        # Calculate new zoomed size
+        new_zoomed_size = base_scaled_size * self.zoom_factor
+
+        # Calculate where the same point in the image should be after zoom
+        new_rel_x = rel_x_pct * new_zoomed_size.width()
+        new_rel_y = rel_y_pct * new_zoomed_size.height()
+
+        # Calculate new image top-left to keep mouse point at same screen position
+        new_image_x = mouse_pos.x() - new_rel_x
+        new_image_y = mouse_pos.y() - new_rel_y
+
+        # Update pan offset to maintain the focal point
+        center_x = (self.width() - new_zoomed_size.width()) // 2
+        center_y = (self.height() - new_zoomed_size.height()) // 2
+        self.pan_offset.setX(int(new_image_x - center_x))
+        self.pan_offset.setY(int(new_image_y - center_y))
+
+        # Reset pan offset when zoomed out to fit or smaller
+        if self.zoom_factor <= 1.0:
+            self.pan_offset = QPoint(0, 0)
+
+        self._update_display()
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """Handle mouse press events for panning."""
+        if event.button() == Qt.MouseButton.LeftButton and self.zoom_factor > 1.0:
+            self.is_panning = True
+            self.last_pan_point = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events for panning."""
+        if self.is_panning:
+            delta = event.pos() - self.last_pan_point
+            self.pan_offset += delta
+            self.last_pan_point = event.pos()
+            self._update_display()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release events for panning."""
+        if event.button() == Qt.MouseButton.LeftButton and self.is_panning:
+            self.is_panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
     def clear_image(self):
         """Clear the current image."""
         self.current_pixmap = None
+        self.zoom_factor = 1.0
+        self.pan_offset = QPoint(0, 0)
         self.clear()
 
 
@@ -137,16 +287,65 @@ class VideoPlayer(QWidget):
         )
         self.media_player.setVideoOutput(self.video_widget)
 
-        # Create controls
+        # Create playback controls
         self.play_button = QPushButton("▶")
         self.play_button.setFixedSize(40, 30)
         self.play_button.clicked.connect(self.toggle_playback)
+        self.play_button.setToolTip("Play/Pause (Space)")
 
+        # Frame-by-frame navigation buttons
+        self.prev_frame_button = QPushButton("◀◀")
+        self.prev_frame_button.setFixedSize(40, 30)
+        self.prev_frame_button.clicked.connect(self.previous_frame)
+        self.prev_frame_button.setToolTip("Previous Frame (,)")
+
+        self.next_frame_button = QPushButton("▶▶")
+        self.next_frame_button.setFixedSize(40, 30)
+        self.next_frame_button.clicked.connect(self.next_frame)
+        self.next_frame_button.setToolTip("Next Frame (.)")
+
+        # Position slider
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
         self.position_slider.sliderMoved.connect(self.set_position)
 
+        # Time label
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setStyleSheet("color: white; padding: 5px;")
+
+        # Playback speed selector
+        self.speed_selector = QComboBox()
+        self.speed_selector.addItems(
+            ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x"]
+        )
+        # Format speed to match dropdown options (remove trailing zeros)
+        speed_text = f"{self.playback_speed:g}x"  # :g removes trailing zeros
+        self.speed_selector.setCurrentText(speed_text)
+        self.speed_selector.currentTextChanged.connect(self.change_playback_speed)
+        self.speed_selector.setFixedWidth(70)
+        self.speed_selector.setStyleSheet(
+            "color: white; background-color: rgba(50, 50, 50, 200); padding: 2px;"
+        )
+        self.speed_selector.setToolTip("Playback Speed")
+
+        # Volume controls
+        self.mute_button = QPushButton("🔊")
+        self.mute_button.setFixedSize(40, 30)
+        self.mute_button.setStyleSheet("padding: 2px;")
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.mute_button.setToolTip("Mute (M)")
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(int(self.audio_output.volume() * 100))
+        self.volume_slider.setFixedWidth(80)
+        self.volume_slider.valueChanged.connect(self.change_volume)
+        self.volume_slider.setToolTip("Volume (↑/↓)")
+
+        # Keyboard shortcuts help button
+        self.shortcuts_button = QPushButton("?")
+        self.shortcuts_button.setFixedSize(30, 30)
+        self.shortcuts_button.clicked.connect(self.show_keyboard_shortcuts)
+        self.shortcuts_button.setToolTip("Show Keyboard Shortcuts (H)")
 
         # Layout
         layout = QVBoxLayout(self)
@@ -154,12 +353,20 @@ class VideoPlayer(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self.video_widget, 1)  # Give it stretch factor
 
-        # Control bar
+        # Control bar - Left section (playback controls)
         control_layout = QHBoxLayout()
         control_layout.setContentsMargins(10, 5, 10, 5)
+        control_layout.addWidget(self.prev_frame_button)
         control_layout.addWidget(self.play_button)
-        control_layout.addWidget(self.position_slider)
+        control_layout.addWidget(self.next_frame_button)
+        control_layout.addWidget(self.position_slider, 1)  # Give slider stretch
         control_layout.addWidget(self.time_label)
+
+        # Right section (speed, volume, help)
+        control_layout.addWidget(self.speed_selector)
+        control_layout.addWidget(self.mute_button)
+        control_layout.addWidget(self.volume_slider)
+        control_layout.addWidget(self.shortcuts_button)
 
         control_widget = QWidget()
         control_widget.setStyleSheet("background-color: rgba(0, 0, 0, 200);")
@@ -232,6 +439,10 @@ class VideoPlayer(QWidget):
             # Apply playback speed from config (reload in case config changed)
             self.playback_speed = self._load_playback_speed()
             self.media_player.setPlaybackRate(self.playback_speed)
+
+            # Update UI to reflect the playback speed
+            speed_text = f"{self.playback_speed:g}x"
+            self.speed_selector.setCurrentText(speed_text)
 
             # Reset position and tracking
             self.position_slider.setValue(0)
@@ -475,6 +686,166 @@ class VideoPlayer(QWidget):
         logger.info("Attempting to open with system default player...")
         self._attempt_fallback()
 
+    def change_volume(self, value):
+        """Change the volume level."""
+        volume = value / 100.0
+        self.audio_output.setVolume(volume)
+        # Update mute button icon based on volume
+        if volume == 0:
+            self.mute_button.setText("🔇")
+        elif volume < 0.5:
+            self.mute_button.setText("🔉")
+        else:
+            self.mute_button.setText("🔊")
+
+    def toggle_mute(self):
+        """Toggle mute on/off."""
+        is_muted = self.audio_output.isMuted()
+        self.audio_output.setMuted(not is_muted)
+
+        if not is_muted:
+            self.mute_button.setText("🔇")
+        else:
+            # Restore volume icon based on current volume
+            volume = self.audio_output.volume()
+            if volume < 0.5:
+                self.mute_button.setText("🔉")
+            else:
+                self.mute_button.setText("🔊")
+
+    def change_playback_speed(self, speed_text):
+        """Change the playback speed."""
+        # Extract numeric value from text like "1.5x"
+        try:
+            speed = float(speed_text.replace("x", ""))
+            self.playback_speed = speed
+
+            # Store the current playback state
+            was_playing = (
+                self.media_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            )
+            current_position = self.media_player.position()
+
+            # Set the playback rate
+            self.media_player.setPlaybackRate(speed)
+
+            # If paused, we need to ensure the rate is applied by briefly playing
+            # then pausing again at the same position
+            if not was_playing and self.media_player.hasVideo():
+                self.media_player.play()
+                self.media_player.setPosition(current_position)
+                self.media_player.pause()
+                self.media_player.setPosition(current_position)
+
+            logger.info(f"Playback speed changed to {speed}x")
+        except ValueError:
+            logger.error(f"Invalid speed format: {speed_text}")
+
+    def previous_frame(self):
+        """Go back one frame (approximately)."""
+        # Pause playback for frame stepping
+        was_playing = (
+            self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        if was_playing:
+            self.pause()
+
+        # Estimate frame duration (assuming 30fps, adjust as needed)
+        frame_duration_ms = 33  # ~33ms per frame at 30fps
+        current_pos = self.media_player.position()
+        new_pos = max(0, current_pos - frame_duration_ms)
+        self.media_player.setPosition(new_pos)
+
+    def next_frame(self):
+        """Go forward one frame (approximately)."""
+        # Pause playback for frame stepping
+        was_playing = (
+            self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        if was_playing:
+            self.pause()
+
+        # Estimate frame duration (assuming 30fps, adjust as needed)
+        frame_duration_ms = 33  # ~33ms per frame at 30fps
+        current_pos = self.media_player.position()
+        duration = self.media_player.duration()
+        new_pos = min(duration, current_pos + frame_duration_ms)
+        self.media_player.setPosition(new_pos)
+
+    def show_keyboard_shortcuts(self):
+        """Display keyboard shortcuts help overlay."""
+        shortcuts_text = """
+        <h3 style='margin-top: 0;'>Video Player Keyboard Shortcuts</h3>
+        <table style='color: white;'>
+        <tr><td><b>Space</b></td><td>Play/Pause</td></tr>
+        <tr><td><b>, (comma)</b></td><td>Previous Frame</td></tr>
+        <tr><td><b>. (period)</b></td><td>Next Frame</td></tr>
+        <tr><td><b>M</b></td><td>Toggle Mute</td></tr>
+        <tr><td><b>↑</b></td><td>Volume Up</td></tr>
+        <tr><td><b>↓</b></td><td>Volume Down</td></tr>
+        <tr><td><b>←</b></td><td>Previous Media</td></tr>
+        <tr><td><b>→</b></td><td>Next Media</td></tr>
+        <tr><td><b>F</b></td><td>Toggle Favorite</td></tr>
+        <tr><td><b>Ctrl+D</b></td><td>Delete Media</td></tr>
+        <tr><td><b>H or ?</b></td><td>Show This Help</td></tr>
+        <tr><td><b>Esc</b></td><td>Close Viewer</td></tr>
+        </table>
+        """
+
+        # Show as tooltip at the center of the video widget
+        QToolTip.showText(
+            self.video_widget.mapToGlobal(self.video_widget.rect().center()),
+            shortcuts_text,
+            self.video_widget,
+            self.video_widget.rect(),
+            5000,  # Show for 5 seconds
+        )
+
+    def keyPressEvent(self, event: Optional[QKeyEvent]) -> None:
+        """Handle keyboard shortcuts for video control."""
+        if event is None:
+            return
+
+        key = event.key()
+
+        # Volume control
+        if key == Qt.Key.Key_Up:
+            current_volume = self.volume_slider.value()
+            self.volume_slider.setValue(min(100, current_volume + 5))
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Down:
+            current_volume = self.volume_slider.value()
+            self.volume_slider.setValue(max(0, current_volume - 5))
+            event.accept()
+            return
+
+        # Mute toggle
+        elif key == Qt.Key.Key_M:
+            self.toggle_mute()
+            event.accept()
+            return
+
+        # Frame navigation
+        elif key == Qt.Key.Key_Comma:
+            self.previous_frame()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Period:
+            self.next_frame()
+            event.accept()
+            return
+
+        # Help shortcuts
+        elif key == Qt.Key.Key_H or key == Qt.Key.Key_Question:
+            self.show_keyboard_shortcuts()
+            event.accept()
+            return
+
+        # Let parent handle other keys (Space, arrows, etc.)
+        super().keyPressEvent(event)
+
     def clear_video(self):
         """Clear the current video."""
         self.stop()
@@ -672,6 +1043,35 @@ class MediaViewer(QWidget):
         favorite_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F), self)
         favorite_shortcut.activated.connect(self.toggle_favorite)
 
+        # Video-specific shortcuts (delegated to video player)
+        # M to toggle mute
+        mute_shortcut = QShortcut(QKeySequence(Qt.Key.Key_M), self)
+        mute_shortcut.activated.connect(self._toggle_video_mute)
+
+        # Up arrow to increase volume
+        vol_up_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
+        vol_up_shortcut.activated.connect(self._increase_volume)
+
+        # Down arrow to decrease volume
+        vol_down_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
+        vol_down_shortcut.activated.connect(self._decrease_volume)
+
+        # Comma to go to previous frame
+        prev_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Comma), self)
+        prev_frame_shortcut.activated.connect(self._video_previous_frame)
+
+        # Period to go to next frame
+        next_frame_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Period), self)
+        next_frame_shortcut.activated.connect(self._video_next_frame)
+
+        # H to show keyboard shortcuts
+        help_shortcut = QShortcut(QKeySequence(Qt.Key.Key_H), self)
+        help_shortcut.activated.connect(self._show_help)
+
+        # Question mark to show keyboard shortcuts
+        help_shortcut2 = QShortcut(QKeySequence(Qt.Key.Key_Question), self)
+        help_shortcut2.activated.connect(self._show_help)
+
     def set_media_list(
         self, media_list: List[Media], initial_media: Optional[Media] = None
     ):
@@ -776,6 +1176,44 @@ class MediaViewer(QWidget):
         if self.current_media and self.current_media.is_video:
             if self.stacked_widget.currentWidget() == self.video_player:
                 self.video_player.toggle_playback()
+
+    def _toggle_video_mute(self):
+        """Toggle video mute if a video is displayed."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                self.video_player.toggle_mute()
+
+    def _increase_volume(self):
+        """Increase video volume if a video is displayed."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                current_volume = self.video_player.volume_slider.value()
+                self.video_player.volume_slider.setValue(min(100, current_volume + 5))
+
+    def _decrease_volume(self):
+        """Decrease video volume if a video is displayed."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                current_volume = self.video_player.volume_slider.value()
+                self.video_player.volume_slider.setValue(max(0, current_volume - 5))
+
+    def _video_previous_frame(self):
+        """Go to previous frame if a video is displayed."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                self.video_player.previous_frame()
+
+    def _video_next_frame(self):
+        """Go to next frame if a video is displayed."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                self.video_player.next_frame()
+
+    def _show_help(self):
+        """Show keyboard shortcuts help."""
+        if self.current_media and self.current_media.is_video:
+            if self.stacked_widget.currentWidget() == self.video_player:
+                self.video_player.show_keyboard_shortcuts()
 
     def close_viewer(self):
         """Close the media viewer."""
