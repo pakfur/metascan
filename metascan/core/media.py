@@ -46,6 +46,8 @@ class Media:
 
     is_favorite: bool = False
 
+    playback_speed: Optional[float] = None  # Per-file playback speed, None uses default
+
     thumbnail_path: Optional[Path] = field(
         default=None,
         metadata=config(
