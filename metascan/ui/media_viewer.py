@@ -266,6 +266,9 @@ class VideoPlayer(QWidget):
         # Set looping to infinite by default
         self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
 
+        # Define available playback speeds (needed before loading config)
+        self.available_speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
         # Load playback speed from config
         self.playback_speed = self._load_playback_speed()
 
@@ -314,9 +317,7 @@ class VideoPlayer(QWidget):
 
         # Playback speed selector
         self.speed_selector = QComboBox()
-        self.speed_selector.addItems(
-            ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x"]
-        )
+        self.speed_selector.addItems([f"{s:g}x" for s in self.available_speeds])
         # Format speed to match dropdown options (remove trailing zeros)
         speed_text = f"{self.playback_speed:g}x"  # :g removes trailing zeros
         self.speed_selector.setCurrentText(speed_text)
@@ -443,7 +444,15 @@ class VideoPlayer(QWidget):
             # Update UI to reflect the playback speed (block signals to avoid recursion)
             speed_text = f"{self.playback_speed:g}x"
             self.speed_selector.blockSignals(True)
-            self.speed_selector.setCurrentText(speed_text)
+            index = self.speed_selector.findText(speed_text)
+            if index >= 0:
+                self.speed_selector.setCurrentIndex(index)
+            else:
+                # If exact match not found, just set the text (shouldn't happen after snapping)
+                self.speed_selector.setCurrentText(speed_text)
+                logger.warning(
+                    f"Speed text '{speed_text}' not found in dropdown options"
+                )
             self.speed_selector.blockSignals(False)
 
             # Reset position and tracking
@@ -579,8 +588,39 @@ class VideoPlayer(QWidget):
         elif status == QMediaPlayer.MediaStatus.NoMedia:
             logger.info("No media")
 
+    def _find_closest_speed(self, target_speed: float) -> float:
+        """Find the closest available speed from the dropdown options."""
+        if not self.available_speeds:
+            return 1.0
+
+        # Find the speed with minimum distance
+        closest: float = min(self.available_speeds, key=lambda x: abs(x - target_speed))
+        return closest
+
+    def _save_playback_speed(self, speed: float) -> None:
+        """Save playback speed to config file."""
+        try:
+            config_path = get_config_path()
+            config = {}
+
+            # Load existing config
+            if config_path.exists():
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+
+            # Update speed
+            config["video_playback_speed"] = speed
+
+            # Save config
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+
+            logger.info(f"Saved playback speed {speed}x to config")
+        except Exception as e:
+            logger.warning(f"Failed to save playback speed to config: {e}")
+
     def _load_playback_speed(self) -> float:
-        """Load playback speed from config file."""
+        """Load playback speed from config file and snap to nearest available speed."""
         try:
             config_path = get_config_path()
             if config_path.exists():
@@ -588,7 +628,21 @@ class VideoPlayer(QWidget):
                     config = json.load(f)
                     # Return configured speed, default to 1.0 if not set
                     speed = config.get("video_playback_speed", 1.0)
-                    return float(speed) if isinstance(speed, (int, float)) else 1.0
+                    configured_speed = (
+                        float(speed) if isinstance(speed, (int, float)) else 1.0
+                    )
+
+                    # Snap to closest available speed
+                    snapped_speed = self._find_closest_speed(configured_speed)
+
+                    # If speed was adjusted, save the new value back to config
+                    if abs(snapped_speed - configured_speed) > 0.01:
+                        logger.info(
+                            f"Adjusting playback speed from {configured_speed}x to nearest available {snapped_speed}x"
+                        )
+                        self._save_playback_speed(snapped_speed)
+
+                    return snapped_speed
         except Exception as e:
             logger.warning(f"Failed to load playback speed from config: {e}")
         return 1.0  # Default to normal speed
@@ -724,6 +778,9 @@ class VideoPlayer(QWidget):
             # Always set the playback rate - it will take effect immediately
             # for playing videos and be stored for paused videos
             self.media_player.setPlaybackRate(speed)
+
+            # Save the new speed to config so it persists
+            self._save_playback_speed(speed)
 
             logger.info(f"Playback speed changed to {speed}x")
         except ValueError:
