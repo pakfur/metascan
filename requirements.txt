@@ -1,4 +1,7 @@
 # Metascan Production Dependencies
+# Python Version Requirement
+python_requires>=3.11,<3.13
+
 # Core UI Framework
 PyQt6==6.6.1
 PyQt6-Qt6==6.6.1
