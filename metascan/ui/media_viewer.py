@@ -306,11 +306,13 @@ class VideoPlayer(QWidget):
         # Frame-by-frame navigation buttons
         self.prev_frame_button = QPushButton("◀◀")
         self.prev_frame_button.setFixedSize(40, 30)
+        self.prev_frame_button.setStyleSheet("padding: 2px;")
         self.prev_frame_button.clicked.connect(self.previous_frame)
         self.prev_frame_button.setToolTip("Previous Frame (,)")
 
         self.next_frame_button = QPushButton("▶▶")
         self.next_frame_button.setFixedSize(40, 30)
+        self.next_frame_button.setStyleSheet("padding: 2px;")
         self.next_frame_button.clicked.connect(self.next_frame)
         self.next_frame_button.setToolTip("Next Frame (.)")
 
@@ -376,12 +378,12 @@ class VideoPlayer(QWidget):
         control_layout.addWidget(self.volume_slider)
         control_layout.addWidget(self.shortcuts_button)
 
-        control_widget = QWidget()
-        control_widget.setStyleSheet("background-color: rgba(0, 0, 0, 200);")
-        control_widget.setLayout(control_layout)
-        control_widget.setFixedHeight(50)
+        self.control_widget = QWidget()
+        self.control_widget.setStyleSheet("background-color: rgba(0, 0, 0, 200);")
+        self.control_widget.setLayout(control_layout)
+        self.control_widget.setFixedHeight(50)
 
-        layout.addWidget(control_widget)
+        layout.addWidget(self.control_widget)
 
         # Connect media player signals
         self.media_player.positionChanged.connect(self.update_position)
