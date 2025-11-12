@@ -31,6 +31,7 @@ from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
 from metascan.ui.metadata_panel import MetadataPanel
 from metascan.ui.media_viewer import MediaViewer
+from metascan.ui.slideshow_viewer import SlideshowViewer
 from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
 from metascan.ui.upscale_queue_window import UpscaleQueueWindow
 from metascan.core.scanner import Scanner, ThreadedScanner
@@ -362,6 +363,12 @@ class MainWindow(QMainWindow):
         )
         self.media_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
 
+        # Create slideshow viewer (initially hidden)
+        self.slideshow_viewer = SlideshowViewer(db_manager=self.db_manager)
+        self.slideshow_viewer.closed.connect(self.on_slideshow_closed)
+        self.slideshow_viewer.media_changed.connect(self.on_viewer_media_changed)
+        self.slideshow_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
+
         # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -556,6 +563,12 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_view)
         view_menu.addAction(refresh_action)
 
+        # Slideshow action
+        slideshow_action = QAction("Slideshow", self)
+        slideshow_action.setShortcut("Ctrl+Shift+S")
+        slideshow_action.triggered.connect(self.show_slideshow)
+        view_menu.addAction(slideshow_action)
+
         # Upscale Queue Window action
         upscale_queue_action = QAction("Upscale Queue Window", self)
         upscale_queue_action.triggered.connect(self._show_upscale_queue)
@@ -644,11 +657,6 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar()
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-
-        # # Scan button - no custom styling, use theme
-        # scan_button = QPushButton("Scan")
-        # scan_button.clicked.connect(self._scan_directories)
-        # toolbar.addWidget(scan_button)
 
         # Add flexible spacer to center the upscaling indicator
         left_spacer = QWidget()
@@ -1475,6 +1483,50 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         self.thumbnail_view.setFocus()
         # Do not refresh filters here - they should maintain their state
+
+    def show_slideshow(self):
+        """Show the slideshow viewer with currently filtered media."""
+        try:
+            # Get currently filtered media
+            if self.filtered_media_paths:
+                filtered_media = [
+                    m
+                    for m in self.all_media
+                    if str(m.file_path) in self.filtered_media_paths
+                ]
+            else:
+                filtered_media = self.all_media
+
+            if not filtered_media:
+                QMessageBox.information(
+                    self,
+                    "No Media",
+                    "No media files to display in slideshow.",
+                )
+                return
+
+            # Get currently selected media (if any)
+            current_media = None
+            if hasattr(self.thumbnail_view, "get_selected_media"):
+                current_media = self.thumbnail_view.get_selected_media()
+
+            # Set media list and show slideshow
+            self.slideshow_viewer.set_media_list(filtered_media, current_media)
+            self.slideshow_viewer.showFullScreen()
+
+        except Exception as e:
+            print(f"Error opening slideshow viewer: {e}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to open slideshow viewer: {e}",
+            )
+
+    def on_slideshow_closed(self):
+        """Handle when slideshow viewer is closed."""
+        # Return focus to main window
+        self.activateWindow()
+        self.thumbnail_view.setFocus()
 
     def on_viewer_media_changed(self, media):
         """Handle when media changes in the viewer."""
