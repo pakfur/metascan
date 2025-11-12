@@ -736,9 +736,8 @@ class ProcessUpscaleQueue(QObject):
 
     def pause_queue(self) -> int:
         """
-        Pause the queue by changing all pending tasks to paused status.
-        This acts as a "poison pill" - when the current task completes,
-        processing will stop instead of starting the next task.
+        Pause the queue by changing all pending and processing tasks to paused status.
+        This will kill all active worker processes with SIGKILL (-9) and update task statuses.
 
         Returns:
             Number of tasks paused
@@ -748,26 +747,78 @@ class ProcessUpscaleQueue(QObject):
             lock_fh = self._acquire_lock(timeout=5.0)
             queue_data = self._read_queue_file()
             paused_task_ids = []
+            processes_to_kill = []
 
-            # First pass: update all pending tasks to paused
+            # First pass: update all pending and processing tasks to paused
             for task_id, task_data in queue_data["tasks"].items():
-                if task_data.get("status") == UpscaleStatus.PENDING.value:
+                status = task_data.get("status")
+                if status == UpscaleStatus.PENDING.value:
                     queue_data["tasks"][task_id]["status"] = UpscaleStatus.PAUSED.value
                     queue_data["tasks"][task_id]["last_updated"] = time.time()
                     paused_task_ids.append(task_id)
+                elif status == UpscaleStatus.PROCESSING.value:
+                    queue_data["tasks"][task_id]["status"] = UpscaleStatus.PAUSED.value
+                    queue_data["tasks"][task_id]["progress"] = 0  # Reset progress
+                    queue_data["tasks"][task_id]["process_id"] = None
+                    queue_data["tasks"][task_id]["worker_id"] = None
+                    queue_data["tasks"][task_id]["claimed_at"] = None
+                    queue_data["tasks"][task_id]["last_updated"] = time.time()
+                    paused_task_ids.append(task_id)
 
+                    # Track process for killing
+                    process = self.active_processes.get(task_id)
+                    if process and process.poll() is None:
+                        processes_to_kill.append((task_id, process))
+
+            # Write the queue file with updated statuses
             if paused_task_ids:
-                # Write the queue file BEFORE emitting signals
                 self._write_queue_file(queue_data)
-                self.queue_changed.emit()
-                self.logger.info(f"Paused {len(paused_task_ids)} pending tasks")
+                self.logger.info(
+                    f"Paused {len(paused_task_ids)} tasks (pending + processing)"
+                )
 
-                # Now emit update signals for each paused task
+            # Kill all active processes with SIGKILL (-9)
+            for task_id, process in processes_to_kill:
+                try:
+                    process.kill()  # SIGKILL (-9) - immediate termination
+                    self.logger.info(
+                        f"Sent SIGKILL to process {process.pid} for task {task_id}"
+                    )
+
+                    # Wait for process to die with timeout
+                    try:
+                        process.wait(timeout=5.0)
+                        self.logger.info(
+                            f"Process {process.pid} terminated successfully"
+                        )
+                    except subprocess.TimeoutExpired:
+                        self.logger.warning(
+                            f"Process {process.pid} did not terminate within 5s timeout"
+                        )
+
+                except Exception as e:
+                    self.logger.error(f"Failed to kill process for task {task_id}: {e}")
+
+                # Remove from active processes
+                if task_id in self.active_processes:
+                    del self.active_processes[task_id]
+
+            # Release lock before emitting signals to avoid UI deadlock
+            if lock_fh:
+                self._release_lock(lock_fh)
+                lock_fh = None
+
+            # Now emit signals after lock is released
+            if paused_task_ids:
+                self.queue_changed.emit()
+                # Reload queue data to get fresh data for signal emission
+                queue_data = self._read_queue_file()
                 for task_id in paused_task_ids:
-                    task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                    self.task_updated.emit(task)
+                    if task_id in queue_data["tasks"]:
+                        task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
+                        self.task_updated.emit(task)
             else:
-                self.logger.debug("No pending tasks to pause")
+                self.logger.debug("No tasks to pause")
 
             return len(paused_task_ids)
         finally:
