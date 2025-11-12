@@ -30,8 +30,6 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QEasingCurve,
     QRect,
-    QParallelAnimationGroup,
-    QAbstractAnimation,
 )
 from PyQt6.QtGui import QKeyEvent, QMouseEvent, QCursor, QCloseEvent
 
@@ -67,8 +65,10 @@ class SlideshowViewer(QWidget):
         self.transition_effect = "None"  # "None", "Fade", or "Slide"
         self.transition_duration = 500  # milliseconds (default 0.5s)
 
-        # Transition animation (can be QPropertyAnimation or QParallelAnimationGroup)
-        self.transition_animation: Optional[QAbstractAnimation] = None
+        # Transition animation
+        self.transition_animation: Optional[QPropertyAnimation] = None
+        # Store widgets for two-stage slide transition
+        self.slide_new_widget: Optional[QWidget] = None
 
         # Timers
         self.advance_timer = QTimer(self)
@@ -408,8 +408,8 @@ class SlideshowViewer(QWidget):
         self.transition_animation.finished.connect(cleanup)
         self.transition_animation.start()
 
-    def _apply_slide_transition(self, old_widget: Optional[QWidget], new_widget: QWidget):
-        """Apply slide transition - old widget slides out left, new widget slides in from right."""
+    def _apply_slide_transition(self, old_widget: QWidget, new_widget: QWidget):
+        """Apply two-stage slide transition: old widget slides out left, then new widget slides in from right."""
         if self.transition_effect != "Slide" or not self.is_running:
             return
 
@@ -418,49 +418,68 @@ class SlideshowViewer(QWidget):
             self.transition_animation.stop()
             self.transition_animation.deleteLater()
 
+        # Store new widget for second stage
+        self.slide_new_widget = new_widget
+
         # Get the stacked widget geometry
         stacked_geom = self.stacked_widget.geometry()
 
-        # Create animation group for parallel animations
-        anim_group = QParallelAnimationGroup()
+        # Stage 1: Slide old widget out to the left
+        old_pos = old_widget.pos()
+        end_x = -stacked_geom.width()
 
-        # Animate old widget sliding out to the left (if exists)
+        self.transition_animation = QPropertyAnimation(old_widget, b"pos")
+        self.transition_animation.setDuration(self.transition_duration // 2)  # Half duration for slide out
+        self.transition_animation.setStartValue(old_pos)
+        self.transition_animation.setEndValue(QPoint(end_x, old_pos.y()))
+        self.transition_animation.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        # When slide-out completes, start slide-in
+        self.transition_animation.finished.connect(self._slide_in_new_widget)
+        self.transition_animation.start()
+
+    def _slide_in_new_widget(self):
+        """Stage 2 of slide transition: slide in the new widget from the right."""
+        if self.slide_new_widget is None:
+            return
+
+        new_widget = self.slide_new_widget
+        self.slide_new_widget = None
+
+        # Reset old widget position (it's now hidden by stacked widget)
+        old_widget = self.stacked_widget.currentWidget()
         if old_widget is not None:
-            old_pos = old_widget.pos()
-            # Target position: completely off screen to the left
-            end_x = -stacked_geom.width()
+            old_widget.move(0, old_widget.pos().y())
 
-            slide_out = QPropertyAnimation(old_widget, b"pos")
-            slide_out.setDuration(self.transition_duration)
-            slide_out.setStartValue(old_pos)
-            slide_out.setEndValue(QPoint(end_x, old_pos.y()))
-            slide_out.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            anim_group.addAnimation(slide_out)
+        # Get the stacked widget geometry
+        stacked_geom = self.stacked_widget.geometry()
 
-        # Animate new widget sliding in from the right
+        # Switch to new widget
+        self.stacked_widget.setCurrentWidget(new_widget)
+
+        # Position new widget off-screen to the right
         new_pos = new_widget.pos()
-        # Start position: off screen to the right
         start_x = stacked_geom.width()
         new_widget.move(start_x, new_pos.y())
 
-        slide_in = QPropertyAnimation(new_widget, b"pos")
-        slide_in.setDuration(self.transition_duration)
-        slide_in.setStartValue(QPoint(start_x, new_pos.y()))
-        slide_in.setEndValue(new_pos)
-        slide_in.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        anim_group.addAnimation(slide_in)
+        # Clean up old animation
+        if self.transition_animation is not None:
+            self.transition_animation.deleteLater()
+
+        # Stage 2: Slide new widget in from the right
+        self.transition_animation = QPropertyAnimation(new_widget, b"pos")
+        self.transition_animation.setDuration(self.transition_duration // 2)  # Half duration for slide in
+        self.transition_animation.setStartValue(QPoint(start_x, new_pos.y()))
+        self.transition_animation.setEndValue(new_pos)
+        self.transition_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         # Clean up after animation
         def cleanup():
-            # Reset old widget position if it exists
-            if old_widget is not None:
-                old_widget.move(0, old_widget.pos().y())
             if self.transition_animation is not None:
                 self.transition_animation.deleteLater()
                 self.transition_animation = None
 
-        anim_group.finished.connect(cleanup)
-        self.transition_animation = anim_group
+        self.transition_animation.finished.connect(cleanup)
         self.transition_animation.start()
 
     def _display_current_media(self):
@@ -500,35 +519,26 @@ class SlideshowViewer(QWidget):
                 except Exception:
                     pass
 
-            # Load video before showing to avoid blank frame
+            # Load video first (before showing)
             try:
                 success = self.video_player.load_video(
                     current_media.file_path, current_media
                 )
                 if not success:
-                    print(f"Error loading video: {current_media.file_path}")
+                    print(f"Failed to load video: {current_media.file_path}")
             except Exception as e:
-                print(f"Error loading/playing video: {e}")
+                print(f"Error loading video: {e}")
 
-            # For slide transition, we need to handle widget switching differently
+            # Apply transition effect if enabled and widget is changing
             if self.transition_effect == "Slide" and self.is_running and old_widget != self.video_player:
-                # Make old widget temporarily visible during transition
-                old_widget.show()
-                old_widget.raise_()
-                # Set new widget as current
-                self.stacked_widget.setCurrentWidget(self.video_player)
-                # Ensure new widget is on top for the slide-in animation
-                self.video_player.raise_()
-                # Apply slide transition with both widgets
                 self._apply_slide_transition(old_widget, self.video_player)
             else:
-                # Normal switch without transition or same widget
+                # No transition or same widget - just switch
                 self.stacked_widget.setCurrentWidget(self.video_player)
-                # Apply fade transition if enabled
                 if self.transition_effect == "Fade" and self.is_running:
                     self._apply_fade_transition(self.video_player)
 
-            # Start playback if running
+            # Start playback after showing
             if self.is_running:
                 try:
                     self.video_player.play()
@@ -541,28 +551,18 @@ class SlideshowViewer(QWidget):
             if self.video_player is not None:
                 self._cleanup_video_player()
 
-            # Load image before showing
+            # Load image first (before showing)
             try:
                 self.image_viewer.load_image(str(current_media.file_path))
             except Exception as e:
                 print(f"Error loading image: {e}")
 
-            # For slide transition, we need to handle widget switching differently
+            # Apply transition effect if enabled and widget is changing
             if self.transition_effect == "Slide" and self.is_running and old_widget != self.image_viewer:
-                # Make old widget temporarily visible during transition
-                if old_widget is not None:
-                    old_widget.show()
-                    old_widget.raise_()
-                # Set new widget as current
-                self.stacked_widget.setCurrentWidget(self.image_viewer)
-                # Ensure new widget is on top for the slide-in animation
-                self.image_viewer.raise_()
-                # Apply slide transition with both widgets
                 self._apply_slide_transition(old_widget, self.image_viewer)
             else:
-                # Normal switch without transition or same widget
+                # No transition or same widget - just switch
                 self.stacked_widget.setCurrentWidget(self.image_viewer)
-                # Apply fade transition if enabled
                 if self.transition_effect == "Fade" and self.is_running:
                     self._apply_fade_transition(self.image_viewer)
 
