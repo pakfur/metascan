@@ -18,8 +18,21 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QButtonGroup,
     QFrame,
+    QGraphicsOpacityEffect,
+    QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QCoreApplication
+from PyQt6.QtCore import (
+    Qt,
+    pyqtSignal,
+    QTimer,
+    QPoint,
+    QCoreApplication,
+    QPropertyAnimation,
+    QEasingCurve,
+    QRect,
+    QParallelAnimationGroup,
+    QAbstractAnimation,
+)
 from PyQt6.QtGui import QKeyEvent, QMouseEvent, QCursor, QCloseEvent
 
 from metascan.core.media import Media
@@ -51,6 +64,11 @@ class SlideshowViewer(QWidget):
         self.is_paused = False
         self.view_mode = "ordered"  # "ordered" or "random"
         self.slide_duration = 5000  # milliseconds (default 5s)
+        self.transition_effect = "None"  # "None", "Fade", or "Slide"
+        self.transition_duration = 500  # milliseconds (default 0.5s)
+
+        # Transition animation (can be QPropertyAnimation or QParallelAnimationGroup)
+        self.transition_animation: Optional[QAbstractAnimation] = None
 
         # Timers
         self.advance_timer = QTimer(self)
@@ -89,6 +107,10 @@ class SlideshowViewer(QWidget):
         # Create stacked widget for image/video switching
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.setStyleSheet("background-color: black;")
+        # Ensure stacked widget expands to fill available space
+        self.stacked_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
         # Create image viewer
         self.image_viewer = ImageViewer()
@@ -96,12 +118,16 @@ class SlideshowViewer(QWidget):
 
         # Video player will be created on demand to avoid state issues
 
-        # Add stacked widget to main layout
-        main_layout.addWidget(self.stacked_widget)
+        # Add stacked widget to main layout with stretch factor 1 (takes all available space)
+        main_layout.addWidget(self.stacked_widget, 1)
 
-        # Create setup panel at the bottom (not overlaid)
+        # Create setup panel at the bottom (not overlaid) with stretch factor 0 (fixed size)
         self.setup_panel = self._create_setup_panel()
-        main_layout.addWidget(self.setup_panel)
+        # Ensure setup panel has fixed vertical size
+        self.setup_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        main_layout.addWidget(self.setup_panel, 0)
 
         self.setLayout(main_layout)
 
@@ -204,6 +230,32 @@ class SlideshowViewer(QWidget):
         layout.addWidget(timing_label)
         layout.addWidget(self.timing_combo)
 
+        # Spacer
+        layout.addStretch()
+
+        # Effects selector
+        effects_label = QLabel("Effects:")
+        self.effects_combo = QComboBox()
+        self.effects_combo.addItems(["None", "Fade", "Slide"])
+        self.effects_combo.setCurrentIndex(0)  # Default to None
+
+        layout.addWidget(effects_label)
+        layout.addWidget(self.effects_combo)
+
+        # Spacer
+        layout.addStretch()
+
+        # Transition duration selector
+        transition_duration_label = QLabel("Transition Duration:")
+        self.transition_duration_combo = QComboBox()
+        self.transition_duration_combo.addItems(
+            ["0.25 seconds", "0.5 seconds", "0.75 seconds", "1 second", "1.5 seconds"]
+        )
+        self.transition_duration_combo.setCurrentIndex(1)  # Default to 0.5 seconds
+
+        layout.addWidget(transition_duration_label)
+        layout.addWidget(self.transition_duration_combo)
+
         return panel
 
     def set_media_list(
@@ -251,8 +303,24 @@ class SlideshowViewer(QWidget):
         seconds = int(timing_text.split()[0])
         self.slide_duration = seconds * 1000
 
-        # Hide setup panel
+        # Get transition effect
+        self.transition_effect = self.effects_combo.currentText()
+
+        # Get transition duration
+        duration_text = self.transition_duration_combo.currentText()
+        if "second" in duration_text:
+            # Parse the duration (e.g., "0.5 seconds" or "1 second")
+            duration_value = float(duration_text.split()[0])
+            self.transition_duration = int(duration_value * 1000)
+
+        # Hide setup panel and constrain stacked widget to prevent layout expansion
+        panel_height = self.setup_panel.height()
         self.setup_panel.hide()
+
+        # Prevent stacked widget from expanding into panel's space
+        # Set max height to window height minus panel height
+        max_height = self.height() - panel_height
+        self.stacked_widget.setMaximumHeight(max_height)
 
         # Set focus to main window to ensure key events are received
         self.setFocus()
@@ -309,6 +377,92 @@ class SlideshowViewer(QWidget):
         except Exception as e:
             print(f"Error creating video player: {e}")
 
+    def _apply_fade_transition(self, widget: QWidget):
+        """Apply fade-in transition to a widget."""
+        if self.transition_effect != "Fade" or not self.is_running:
+            return
+
+        # Stop any existing animation
+        if self.transition_animation is not None:
+            self.transition_animation.stop()
+            self.transition_animation.deleteLater()
+
+        # Create opacity effect
+        opacity_effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(opacity_effect)
+
+        # Create animation
+        self.transition_animation = QPropertyAnimation(opacity_effect, b"opacity")
+        self.transition_animation.setDuration(self.transition_duration)
+        self.transition_animation.setStartValue(0.0)
+        self.transition_animation.setEndValue(1.0)
+        self.transition_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+        # Clean up effect after animation completes
+        def cleanup():
+            widget.setGraphicsEffect(None)
+            if self.transition_animation is not None:
+                self.transition_animation.deleteLater()
+                self.transition_animation = None
+
+        self.transition_animation.finished.connect(cleanup)
+        self.transition_animation.start()
+
+    def _apply_slide_transition(self, old_widget: Optional[QWidget], new_widget: QWidget):
+        """Apply slide transition - old widget slides out left, new widget slides in from right."""
+        if self.transition_effect != "Slide" or not self.is_running:
+            return
+
+        # Stop any existing animation
+        if self.transition_animation is not None:
+            self.transition_animation.stop()
+            self.transition_animation.deleteLater()
+
+        # Get the stacked widget geometry
+        stacked_geom = self.stacked_widget.geometry()
+
+        # Create animation group for parallel animations
+        anim_group = QParallelAnimationGroup()
+
+        # Animate old widget sliding out to the left (if exists)
+        if old_widget is not None:
+            old_pos = old_widget.pos()
+            # Target position: completely off screen to the left
+            end_x = -stacked_geom.width()
+
+            slide_out = QPropertyAnimation(old_widget, b"pos")
+            slide_out.setDuration(self.transition_duration)
+            slide_out.setStartValue(old_pos)
+            slide_out.setEndValue(QPoint(end_x, old_pos.y()))
+            slide_out.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            anim_group.addAnimation(slide_out)
+
+        # Animate new widget sliding in from the right
+        new_pos = new_widget.pos()
+        # Start position: off screen to the right
+        start_x = stacked_geom.width()
+        new_widget.move(start_x, new_pos.y())
+
+        slide_in = QPropertyAnimation(new_widget, b"pos")
+        slide_in.setDuration(self.transition_duration)
+        slide_in.setStartValue(QPoint(start_x, new_pos.y()))
+        slide_in.setEndValue(new_pos)
+        slide_in.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim_group.addAnimation(slide_in)
+
+        # Clean up after animation
+        def cleanup():
+            # Reset old widget position if it exists
+            if old_widget is not None:
+                old_widget.move(0, old_widget.pos().y())
+            if self.transition_animation is not None:
+                self.transition_animation.deleteLater()
+                self.transition_animation = None
+
+        anim_group.finished.connect(cleanup)
+        self.transition_animation = anim_group
+        self.transition_animation.start()
+
     def _display_current_media(self):
         """Display the current media item."""
         if not self.media_list or self.current_index >= len(self.media_list):
@@ -318,6 +472,9 @@ class SlideshowViewer(QWidget):
 
         # Stop any existing timer
         self.advance_timer.stop()
+
+        # Capture the current widget before switching (for slide transition)
+        old_widget = self.stacked_widget.currentWidget()
 
         # Determine if video or image
         is_video = current_media.file_path.suffix.lower() in [
@@ -343,29 +500,71 @@ class SlideshowViewer(QWidget):
                 except Exception:
                     pass
 
-            # Show video player
-            self.stacked_widget.setCurrentWidget(self.video_player)
-
+            # Load video before showing to avoid blank frame
             try:
                 success = self.video_player.load_video(
                     current_media.file_path, current_media
                 )
-                if success and self.is_running:
-                    self.video_player.play()
+                if not success:
+                    print(f"Error loading video: {current_media.file_path}")
             except Exception as e:
                 print(f"Error loading/playing video: {e}")
+
+            # For slide transition, we need to handle widget switching differently
+            if self.transition_effect == "Slide" and self.is_running and old_widget != self.video_player:
+                # Make old widget temporarily visible during transition
+                old_widget.show()
+                old_widget.raise_()
+                # Set new widget as current
+                self.stacked_widget.setCurrentWidget(self.video_player)
+                # Ensure new widget is on top for the slide-in animation
+                self.video_player.raise_()
+                # Apply slide transition with both widgets
+                self._apply_slide_transition(old_widget, self.video_player)
+            else:
+                # Normal switch without transition or same widget
+                self.stacked_widget.setCurrentWidget(self.video_player)
+                # Apply fade transition if enabled
+                if self.transition_effect == "Fade" and self.is_running:
+                    self._apply_fade_transition(self.video_player)
+
+            # Start playback if running
+            if self.is_running:
+                try:
+                    self.video_player.play()
+                except Exception:
+                    pass
+
             # No auto-advance for videos
         else:
             # If there's a video player, clean it up when switching to image
             if self.video_player is not None:
                 self._cleanup_video_player()
 
-            # Show image viewer
-            self.stacked_widget.setCurrentWidget(self.image_viewer)
+            # Load image before showing
             try:
                 self.image_viewer.load_image(str(current_media.file_path))
             except Exception as e:
                 print(f"Error loading image: {e}")
+
+            # For slide transition, we need to handle widget switching differently
+            if self.transition_effect == "Slide" and self.is_running and old_widget != self.image_viewer:
+                # Make old widget temporarily visible during transition
+                if old_widget is not None:
+                    old_widget.show()
+                    old_widget.raise_()
+                # Set new widget as current
+                self.stacked_widget.setCurrentWidget(self.image_viewer)
+                # Ensure new widget is on top for the slide-in animation
+                self.image_viewer.raise_()
+                # Apply slide transition with both widgets
+                self._apply_slide_transition(old_widget, self.image_viewer)
+            else:
+                # Normal switch without transition or same widget
+                self.stacked_widget.setCurrentWidget(self.image_viewer)
+                # Apply fade transition if enabled
+                if self.transition_effect == "Fade" and self.is_running:
+                    self._apply_fade_transition(self.image_viewer)
 
             # Start auto-advance timer if slideshow is running and not paused
             if self.is_running and not self.is_paused:
@@ -476,6 +675,14 @@ class SlideshowViewer(QWidget):
         # Ensure setup panel is visible when window opens (if slideshow not running)
         if not self.is_running:
             self.setup_panel.show()
+            self.setup_panel.raise_()  # Ensure it's on top
+            # Force aggressive layout recalculation
+            self.layout().invalidate()
+            self.setup_panel.updateGeometry()
+            self.stacked_widget.updateGeometry()
+            self.layout().activate()
+            self.updateGeometry()
+            QCoreApplication.processEvents()
             # Show cursor when browsing (setup panel visible)
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
@@ -560,6 +767,16 @@ class SlideshowViewer(QWidget):
         # Show setup panel and cursor for next time
         self.setup_panel.show()
         self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # Remove maximum height constraint from stacked widget to restore normal layout
+        self.stacked_widget.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+
+        # Force layout recalculation before closing to reset geometry
+        self.layout().invalidate()
+        self.setup_panel.updateGeometry()
+        self.stacked_widget.updateGeometry()
+        self.layout().activate()
+        QCoreApplication.processEvents()
 
         # Emit closed signal
         self.closed.emit()
