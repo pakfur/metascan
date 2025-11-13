@@ -25,14 +25,7 @@
   - Previous/Next frame buttons (◀◀ / ▶▶) in the control bar
   - Help overlay (press H or ?) displays all available keyboard shortcuts
   - Shows for 5 seconds with formatted shortcut list
-
-##  Bug Fixes
-  - Fixed playback speed dropdown not updating when switching between videos
-  - Fixed playback speed changes being ignored when video is paused
-  - Fixed playback speed not persisting after app restart
-  - Fixed video looping issues: Progress bar now resets correctly and frame navigation works reliably after video loops
-  - Switched from Qt's built-in infinite loop to manual loop control for better position tracking
-
+    
 ## UI Improvements
   - Reduced internal padding on speed dropdown and mute button for better icon visibility
   - All controls include tooltips showing keyboard shortcuts
