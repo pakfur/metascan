@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QGraphicsOpacityEffect,
+    QGraphicsBlurEffect,
     QSizePolicy,
 )
 from PyQt6.QtCore import (
@@ -63,7 +64,7 @@ class SlideshowViewer(QWidget):
         self.view_mode = "ordered"  # "ordered" or "random"
         self.slide_duration = 5000  # milliseconds (default 5s)
         self.transition_effect = "None"  # "None", "Fade", or "Slide"
-        self.transition_duration = 500  # milliseconds (default 0.5s)
+        self.transition_duration = 1000  # milliseconds (default 1.0s)
 
         # Transition animation
         self.transition_animation: Optional[QPropertyAnimation] = None
@@ -141,7 +142,7 @@ class SlideshowViewer(QWidget):
             }
             QLabel {
                 color: white;
-                font-size: 16px;
+                font-size: 12px;
                 font-weight: bold;
             }
             QPushButton {
@@ -149,8 +150,8 @@ class SlideshowViewer(QWidget):
                 color: white;
                 border: none;
                 border-radius: 5px;
-                padding: 12px 30px;
-                font-size: 16px;
+                padding: 8px 20px;
+                font-size: 12px;
                 font-weight: bold;
             }
             QPushButton:hover {
@@ -158,27 +159,27 @@ class SlideshowViewer(QWidget):
             }
             QRadioButton {
                 color: white;
-                font-size: 14px;
+                font-size: 12px;
                 spacing: 5px;
             }
             QComboBox {
                 background-color: #424242;
                 color: white;
                 border: 1px solid #666;
-                border-radius: 3px;
-                padding: 5px 10px;
-                font-size: 14px;
-                min-width: 100px;
+                border-radius: 1px;
+                padding: 2px 8px;
+                font-size: 12px;
+                min-width: 120px;
             }
             QComboBox::drop-down {
                 border: none;
             }
             QComboBox::down-arrow {
                 image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 5px solid white;
-                margin-right: 5px;
+                border-left: 2px solid transparent;
+                border-right: 2px solid transparent;
+                border-top: 2px solid white;
+                margin-right: 2px;
             }
             QComboBox QAbstractItemView {
                 background-color: #424242;
@@ -236,8 +237,8 @@ class SlideshowViewer(QWidget):
         # Effects selector
         effects_label = QLabel("Effects:")
         self.effects_combo = QComboBox()
-        self.effects_combo.addItems(["None", "Fade", "Slide"])
-        self.effects_combo.setCurrentIndex(0)  # Default to None
+        self.effects_combo.addItems(["None", "Fade", "Blur", "Zoom"])
+        self.effects_combo.setCurrentIndex(1)  # Default to Fade
 
         layout.addWidget(effects_label)
         layout.addWidget(self.effects_combo)
@@ -251,7 +252,7 @@ class SlideshowViewer(QWidget):
         self.transition_duration_combo.addItems(
             ["0.25 seconds", "0.5 seconds", "0.75 seconds", "1 second", "1.5 seconds"]
         )
-        self.transition_duration_combo.setCurrentIndex(1)  # Default to 0.5 seconds
+        self.transition_duration_combo.setCurrentIndex(3)  # Default to 1 second
 
         layout.addWidget(transition_duration_label)
         layout.addWidget(self.transition_duration_combo)
@@ -408,8 +409,70 @@ class SlideshowViewer(QWidget):
         self.transition_animation.finished.connect(cleanup)
         self.transition_animation.start()
 
-    def _apply_slide_transition(self, old_widget: QWidget, new_widget: QWidget):
-        """Apply two-stage slide transition: old widget slides out left, then new widget slides in from right."""
+    def _apply_blur_transition(self, widget: QWidget):
+        """Apply blur transition to a widget."""
+        if self.transition_effect != "Blur" or not self.is_running:
+            return
+
+        # Stop any existing animation
+        if self.transition_animation is not None:
+            self.transition_animation.stop()
+            self.transition_animation.deleteLater()
+
+        # Create blur effect
+        blur_effect = QGraphicsBlurEffect(widget)
+        widget.setGraphicsEffect(blur_effect)
+
+        # Create animation - start blurred, end sharp
+        self.transition_animation = QPropertyAnimation(blur_effect, b"blurRadius")
+        self.transition_animation.setDuration(self.transition_duration)
+        self.transition_animation.setStartValue(20.0)  # Start blurred
+        self.transition_animation.setEndValue(0.0)     # End sharp
+        self.transition_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        # Clean up effect after animation completes
+        def cleanup():
+            widget.setGraphicsEffect(None)
+            if self.transition_animation is not None:
+                self.transition_animation.deleteLater()
+                self.transition_animation = None
+
+        self.transition_animation.finished.connect(cleanup)
+        self.transition_animation.start()
+
+    def _apply_zoom_transition(self, widget: QWidget):
+        """Apply zoom transition to a widget."""
+        if self.transition_effect != "Zoom" or not self.is_running:
+            return
+
+        # Stop any existing animation
+        if self.transition_animation is not None:
+            self.transition_animation.stop()
+            self.transition_animation.deleteLater()
+
+        # Create opacity effect
+        opacity_effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(opacity_effect)
+
+        # Create animation - fade in (simulates zoom in effect)
+        self.transition_animation = QPropertyAnimation(opacity_effect, b"opacity")
+        self.transition_animation.setDuration(self.transition_duration)
+        self.transition_animation.setStartValue(0.0)
+        self.transition_animation.setEndValue(1.0)
+        self.transition_animation.setEasingCurve(QEasingCurve.Type.OutCubic)  # Different easing for zoom feel
+
+        # Clean up effect after animation completes
+        def cleanup():
+            widget.setGraphicsEffect(None)
+            if self.transition_animation is not None:
+                self.transition_animation.deleteLater()
+                self.transition_animation = None
+
+        self.transition_animation.finished.connect(cleanup)
+        self.transition_animation.start()
+
+    def _old_slide_transition(self, old_widget: QWidget, new_widget: QWidget):
+        """OLD SLIDE - TO BE REMOVED."""
         if self.transition_effect != "Slide" or not self.is_running:
             return
 
@@ -529,14 +592,17 @@ class SlideshowViewer(QWidget):
             except Exception as e:
                 print(f"Error loading video: {e}")
 
-            # Apply transition effect if enabled and widget is changing
-            if self.transition_effect == "Slide" and self.is_running and old_widget != self.video_player:
-                self._apply_slide_transition(old_widget, self.video_player)
-            else:
-                # No transition or same widget - just switch
-                self.stacked_widget.setCurrentWidget(self.video_player)
-                if self.transition_effect == "Fade" and self.is_running:
+            # Switch to video player
+            self.stacked_widget.setCurrentWidget(self.video_player)
+
+            # Apply transition effect if enabled
+            if self.is_running:
+                if self.transition_effect == "Fade":
                     self._apply_fade_transition(self.video_player)
+                elif self.transition_effect == "Blur":
+                    self._apply_blur_transition(self.video_player)
+                elif self.transition_effect == "Zoom":
+                    self._apply_zoom_transition(self.video_player)
 
             # Start playback after showing
             if self.is_running:
@@ -557,14 +623,17 @@ class SlideshowViewer(QWidget):
             except Exception as e:
                 print(f"Error loading image: {e}")
 
-            # Apply transition effect if enabled and widget is changing
-            if self.transition_effect == "Slide" and self.is_running and old_widget != self.image_viewer:
-                self._apply_slide_transition(old_widget, self.image_viewer)
-            else:
-                # No transition or same widget - just switch
-                self.stacked_widget.setCurrentWidget(self.image_viewer)
-                if self.transition_effect == "Fade" and self.is_running:
+            # Switch to image viewer
+            self.stacked_widget.setCurrentWidget(self.image_viewer)
+
+            # Apply transition effect if enabled
+            if self.is_running:
+                if self.transition_effect == "Fade":
                     self._apply_fade_transition(self.image_viewer)
+                elif self.transition_effect == "Blur":
+                    self._apply_blur_transition(self.image_viewer)
+                elif self.transition_effect == "Zoom":
+                    self._apply_zoom_transition(self.image_viewer)
 
             # Start auto-advance timer if slideshow is running and not paused
             if self.is_running and not self.is_paused:
