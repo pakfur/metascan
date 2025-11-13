@@ -7,8 +7,53 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
 
-# Latest Release
-## Version v0.2
+# Latest Release v0.2.5
+
+### New Features
+
+## Slideshow
+ - New Slideshow feature
+
+## Volume Control
+  - Volume slider with real-time adjustment (0-100%)
+
+## Playback Speed Control
+  - UI dropdown selector with preset speeds: 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 2x
+  - Per-file speed persistence - each video remembers its playback speed in the database
+
+## Frame-by-Frame Navigation
+  - Previous/Next frame buttons (◀◀ / ▶▶) in the control bar
+  - Help overlay (press H or ?) displays all available keyboard shortcuts
+  - Shows for 5 seconds with formatted shortcut list
+
+##  Bug Fixes
+  - Fixed playback speed dropdown not updating when switching between videos
+  - Fixed playback speed changes being ignored when video is paused
+  - Fixed playback speed not persisting after app restart
+  - Fixed video looping issues: Progress bar now resets correctly and frame navigation works reliably after video loops
+  - Switched from Qt's built-in infinite loop to manual loop control for better position tracking
+
+## UI Improvements
+  - Reduced internal padding on speed dropdown and mute button for better icon visibility
+  - All controls include tooltips showing keyboard shortcuts
+  - Control bar now displays: frame nav, play/pause, timeline, time display, speed, volume, and help
+
+  ---
+##  Keyboard Shortcuts Quick Reference:
+
+```
+  - Space: Play/Pause
+  - , / . : Previous/Next Frame
+  - ↑ / ↓: Volume Up/Down
+  - M: Mute
+  - ← / →: Previous/Next Media
+  - F: Toggle Favorite
+  - Ctrl+D: Delete
+  - H or ?: Show Shortcuts
+  - Esc: Close Viewer
+ ```
+
+## Version v0.2.0
 
 ### New Features
 
