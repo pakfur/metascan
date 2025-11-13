@@ -46,6 +46,11 @@ class DatabaseManager:
                     "ALTER TABLE media ADD COLUMN is_favorite INTEGER DEFAULT 0"
                 )
                 logger.info("Added is_favorite column to media table")
+            if "playback_speed" not in columns:
+                conn.execute(
+                    "ALTER TABLE media ADD COLUMN playback_speed REAL DEFAULT NULL"
+                )
+                logger.info("Added playback_speed column to media table")
 
             conn.execute(
                 """
@@ -100,13 +105,14 @@ class DatabaseManager:
                 with self._get_connection() as conn:
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
                             str(media.file_path),
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
+                            media.playback_speed,
                         ),
                     )
 
@@ -125,13 +131,14 @@ class DatabaseManager:
                     # Save media with favorite status
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
                             str(media.file_path),
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
+                            media.playback_speed,
                         ),
                     )
 
@@ -410,6 +417,39 @@ class DatabaseManager:
                         media.is_favorite = bool(row["is_favorite"])
         except Exception as e:
             logger.error(f"Failed to load favorite status: {e}")
+
+    def load_playback_speed(self, media_list: List[Media]) -> None:
+        """Load playback_speed for a list of media objects from the database."""
+        try:
+            with self._get_connection() as conn:
+                for media in media_list:
+                    row = conn.execute(
+                        "SELECT playback_speed FROM media WHERE file_path = ?",
+                        (str(media.file_path),),
+                    ).fetchone()
+                    if row and row["playback_speed"] is not None:
+                        media.playback_speed = float(row["playback_speed"])
+        except Exception as e:
+            logger.error(f"Failed to load playback speed: {e}")
+
+    def update_playback_speed(self, file_path: Path, speed: float) -> bool:
+        """Update the playback speed for a specific media file."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    conn.execute(
+                        """
+                        UPDATE media
+                        SET playback_speed = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE file_path = ?
+                    """,
+                        (speed, str(file_path)),
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to update playback speed for {file_path}: {e}")
+            return False
 
     def update_media_dimensions(self, file_path: Path, width: int, height: int) -> bool:
         """
