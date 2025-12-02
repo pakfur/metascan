@@ -7,6 +7,110 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
 
+# Latest Release v0.2.5
+
+### New Features
+
+## Slideshow
+ - New Slideshow feature
+
+## Volume Control
+  - Volume slider with real-time adjustment (0-100%)
+
+## Playback Speed Control
+  - UI dropdown selector with preset speeds: 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 2x
+  - Per-file speed persistence - each video remembers its playback speed in the database
+
+## Frame-by-Frame Navigation
+  - Previous/Next frame buttons (◀◀ / ▶▶) in the control bar
+  - Help overlay (press H or ?) displays all available keyboard shortcuts
+  - Shows for 5 seconds with formatted shortcut list
+    
+## UI Improvements
+  - Reduced internal padding on speed dropdown and mute button for better icon visibility
+  - All controls include tooltips showing keyboard shortcuts
+  - Control bar now displays: frame nav, play/pause, timeline, time display, speed, volume, and help
+
+  ---
+##  Keyboard Shortcuts Quick Reference:
+
+```
+  - Space: Play/Pause
+  - , / . : Previous/Next Frame
+  - ↑ / ↓: Volume Up/Down
+  - M: Mute
+  - ← / →: Previous/Next Media
+  - F: Toggle Favorite
+  - Ctrl+D: Delete
+  - H or ?: Show Shortcuts
+  - Esc: Close Viewer
+ ```
+
+## Version v0.2.0
+
+### New Features
+
+#### Queue Pause/Resume
+  - The upscaler queue can now be paused and resumed, giving you full control over batch processing
+  - Perfect for when you need to free up system resources temporarily
+
+#### Multi-worker Processing
+  - Support for 1-4 concurrent upscale workers to maximize hardware utilization
+  - Worker count is preserved across application restarts when there are pending tasks
+
+#### Interactive Queue Management
+  - Double-click any queue item to open the upscaled file
+  - Cmd/Ctrl+double-click to open the file's containing folder
+  - Quick access to your upscaled media right from the queue window
+
+#### Frame Interpolation
+  - RIFE frame interpolation is now fully functional for video upscaling
+  - Smoothly increase frame rates while upscaling (e.g., 24fps → 48fps)
+  - Configurable interpolation factors
+
+### Improvements
+
+#### Queue Management
+  - Process-safe file locking prevents corruption when multiple instances run
+  - Automatic corruption detection and recovery with backup creation
+  - Better error handling and recovery from failed tasks
+
+#### Metadata Preservation
+  - All AI generation metadata (prompts, models, seeds, LoRAs, etc.) is now preserved correctly after upscaling
+  - Only technical properties (dimensions, file size, timestamps) are updated
+  - More reliable metadata handling for both images and videos
+
+#### Better User Feedback
+  - Improved status messages and progress reporting
+  - Clearer error messages when operations fail
+  - Enhanced logging for troubleshooting
+
+####  Video Processing
+  - Modern FFmpeg parameter usage (fps_mode instead of deprecated vsync)
+  - More reliable frame extraction and video compilation
+  - Better handling of various video formats and frame rates
+
+#### Bug Fixes
+
+  - Fixed race conditions in queue processing that could cause tasks to be skipped or duplicated
+  - Fixed frame interpolation not being applied to videos
+  - Fixed metadata being lost after upscaling operations
+  - Fixed FFmpeg deprecation warnings
+  - Fixed various edge cases in queue state management
+  - Removed error-prone metadata copying code
+
+### Dependencies
+
+  New dependencies added:
+  - portalocker - Cross-platform file locking for queue safety
+  - psutil - Better process management and monitoring
+  - Pillow - Image processing utilities
+
+#### Upgrade Notes
+
+  No manual migration required. Existing queue files will be automatically upgraded to the new format. If corruption is detected, a backup will be created before recovery.
+
+  
 ## Overview
 
 Metascan is an open source desktop application for browsing, organizing, and upscaling AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing a comprehensive interface to manage your media collection with advanced filtering and upscaling capabilities.
