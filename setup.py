@@ -10,7 +10,7 @@ setup(
     author="Metascan",
     packages=find_packages(),
     install_requires=requirements,
-    python_requires=">=3.8",
+    python_requires=">=3.11,<3.13",
     entry_points={
         "console_scripts": [
             "metascan=metascan.ui.main_window:main",

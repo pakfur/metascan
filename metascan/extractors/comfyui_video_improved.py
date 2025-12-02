@@ -55,7 +55,6 @@ class CLIPTextEncodeHandler(NodeHandler):
                 result["prompt"] = text
         else:
             # Heuristic: check content for negative keywords
-            # Include both English and Chinese negative indicators
             negative_indicators = [
                 "negative",
                 "bad",
@@ -63,33 +62,8 @@ class CLIPTextEncodeHandler(NodeHandler):
                 "worst",
                 "low quality",
                 "poor",
-                "最差质量",
-                "低质量",
-                "丑陋",
-                "残缺",
-                "畸形",
-                "毁容",  # Chinese negative terms
-                "overexposure",
-                "过曝",
-                "静态",
-                "模糊",  # Common negative terms
             ]
-
-            # Count how many negative indicators are present
-            negative_count = sum(
-                1 for indicator in negative_indicators if indicator in text.lower()
-            )
-
-            # If text has multiple negative indicators, it's likely a negative prompt
-            # Also check if text is mostly Chinese (common pattern for negative prompts)
-            chinese_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-            total_chars = len(text)
-
-            is_negative = negative_count >= 2 or (  # Multiple negative keywords
-                chinese_chars > total_chars * 0.5 and negative_count >= 1
-            )  # Mostly Chinese with negative keywords
-
-            if is_negative:
+            if any(indicator in text.lower() for indicator in negative_indicators):
                 if "negative_prompt" not in result:
                     result["negative_prompt"] = text
             else:
@@ -97,67 +71,10 @@ class CLIPTextEncodeHandler(NodeHandler):
                     result["prompt"] = text
 
 
-class PowerLoraLoaderHandler(NodeHandler):
-    """Handler for Power Lora Loader (rgthree) nodes"""
-
-    def can_handle(self, class_type: str) -> bool:
-        return class_type == "Power Lora Loader (rgthree)"
-
-    def extract(
-        self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
-    ) -> None:
-        inputs = node_data.get("inputs", {})
-
-        # Initialize loras list if needed
-        if "loras" not in result:
-            result["loras"] = []
-
-        # Iterate through all lora_N inputs
-        for key, value in inputs.items():
-            if key.startswith("lora_") and isinstance(value, dict):
-                # Check if this LoRA is enabled
-                if not value.get("on", False):
-                    continue
-
-                # Extract LoRA name
-                lora_name = value.get("lora", "")
-                if not lora_name:
-                    continue
-
-                # Remove file extension
-                lora_name = (
-                    lora_name.replace(".safetensors", "")
-                    .replace(".ckpt", "")
-                    .replace(".pt", "")
-                )
-
-                # Extract strength
-                strength = value.get("strength", 1.0)
-
-                # Check if this LoRA is already in the list (avoid duplicates)
-                existing_lora = next(
-                    (
-                        lora
-                        for lora in result["loras"]
-                        if lora["lora_name"] == lora_name
-                    ),
-                    None,
-                )
-
-                if not existing_lora:
-                    weight = round(float(strength), 2)
-                    result["loras"].append(
-                        {"lora_name": lora_name, "lora_weight": weight}
-                    )
-
-
 class LoraLoaderHandler(NodeHandler):
-    """Handler for standard LoRA loader nodes"""
+    """Handler for LoRA loader nodes"""
 
     def can_handle(self, class_type: str) -> bool:
-        # Don't handle Power Lora Loader here
-        if "power" in class_type.lower():
-            return False
         return "lora" in class_type.lower() and "loader" in class_type.lower()
 
     def extract(
@@ -327,16 +244,14 @@ class VideoGeneratorHandler(NodeHandler):
                 result["video_length"] = int(length)
 
 
-class ComfyUIVideoExtractor(MetadataExtractor):
+class ComfyUIVideoExtractorImproved(MetadataExtractor):
     """Improved ComfyUI video metadata extractor with node-specific handlers"""
 
     def __init__(self):
         super().__init__()
         # Initialize node handlers
-        # Order matters: PowerLoraLoaderHandler before LoraLoaderHandler
         self.handlers: List[NodeHandler] = [
             CLIPTextEncodeHandler(),
-            PowerLoraLoaderHandler(),
             LoraLoaderHandler(),
             UNETLoaderHandler(),
             SamplerHandler(),
@@ -418,12 +333,16 @@ class ComfyUIVideoExtractor(MetadataExtractor):
     def _post_process_results(self, result: Dict[str, Any]) -> None:
         """Clean up and finalize extracted metadata"""
 
-        # Keep models as list (always use "models" key for consistency)
-        # The scanner will handle converting to the Media.model list field
+        # Convert models list to single model if only one
         if "models" in result:
-            if len(result["models"]) == 0:
+            if len(result["models"]) == 1:
+                result["model"] = result["models"][0]
                 del result["models"]
-            # Keep models as list regardless of count
+            elif len(result["models"]) > 1:
+                # Keep as models list for multiple models
+                pass
+            else:
+                del result["models"]
 
         # Sort LoRAs by name for consistency
         if "loras" in result:

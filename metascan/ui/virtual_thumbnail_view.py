@@ -260,7 +260,6 @@ class VirtualScrollArea(QScrollArea):
     )  # Forward Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
-    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
     selection_changed = pyqtSignal(object)  # Emits Media object
 
     def __init__(
@@ -571,10 +570,6 @@ class VirtualScrollArea(QScrollArea):
             widget.upscale_requested.disconnect()
         except TypeError:
             pass
-        try:
-            widget.refresh_metadata_requested.disconnect()
-        except TypeError:
-            pass
 
         # Connect signals
         widget.clicked.connect(self._on_widget_clicked)
@@ -585,7 +580,6 @@ class VirtualScrollArea(QScrollArea):
         widget.open_folder_requested.connect(self.open_folder_requested.emit)
         widget.delete_requested.connect(self.delete_requested.emit)
         widget.upscale_requested.connect(self.upscale_requested.emit)
-        widget.refresh_metadata_requested.connect(self.refresh_metadata_requested.emit)
 
         # Set selection state based on mode
         if self.multi_select_mode:
@@ -937,6 +931,56 @@ class VirtualScrollArea(QScrollArea):
 
         event.accept()
 
+    def keyPressEvent(self, event) -> None:
+        """Handle keyboard navigation."""
+        if not self.filtered_media:
+            return super().keyPressEvent(event)
+
+        current_index = self.selected_index
+        media_count = len(self.filtered_media)
+        columns = self.layout_metrics.columns
+
+        # Initialize selection if none exists
+        if current_index == -1 and media_count > 0:
+            self.select_by_index(0)
+            return
+
+        key = event.key()
+        new_index = current_index
+
+        if key == Qt.Key.Key_Left:
+            if current_index > 0:
+                new_index = current_index - 1
+        elif key == Qt.Key.Key_Right:
+            if current_index < media_count - 1:
+                new_index = current_index + 1
+        elif key == Qt.Key.Key_Up:
+            if current_index >= columns:
+                new_index = current_index - columns
+        elif key == Qt.Key.Key_Down:
+            if current_index + columns < media_count:
+                new_index = current_index + columns
+        elif key == Qt.Key.Key_Home:
+            new_index = 0
+        elif key == Qt.Key.Key_End:
+            new_index = media_count - 1
+        elif key == Qt.Key.Key_PageUp:
+            visible_rows = (
+                self.viewport_info.visible_height // self.layout_metrics.cell_height
+            )
+            new_index = max(0, current_index - (visible_rows * columns))
+        elif key == Qt.Key.Key_PageDown:
+            visible_rows = (
+                self.viewport_info.visible_height // self.layout_metrics.cell_height
+            )
+            new_index = min(media_count - 1, current_index + (visible_rows * columns))
+        else:
+            return super().keyPressEvent(event)
+
+        if new_index != current_index and 0 <= new_index < media_count:
+            self.select_by_index(new_index)
+            event.accept()
+
 
 class VirtualThumbnailView(QWidget):
     """
@@ -969,7 +1013,6 @@ class VirtualThumbnailView(QWidget):
     )  # Forward Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
-    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
 
     def __init__(
         self,
@@ -1155,9 +1198,6 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.open_folder_requested.connect(self.open_folder_requested.emit)
         self.scroll_area.delete_requested.connect(self.delete_requested.emit)
         self.scroll_area.upscale_requested.connect(self.upscale_requested.emit)
-        self.scroll_area.refresh_metadata_requested.connect(
-            self.refresh_metadata_requested.emit
-        )
 
     def set_media_list(self, media_list: List[Media]) -> None:
         """
@@ -1218,6 +1258,8 @@ class VirtualThumbnailView(QWidget):
         """Handle item selection."""
         logger.debug(f"Item clicked: {media.file_name}")
         self.selected_media = media
+        # Set focus to enable keyboard navigation
+        self.setFocus()
 
     def _on_selection_changed(self, media: Media) -> None:
         """Handle selection change."""
@@ -1313,55 +1355,9 @@ class VirtualThumbnailView(QWidget):
             raise RuntimeError(f"Unexpected error opening file: {e}")
 
     def keyPressEvent(self, event) -> None:
-        """Handle keyboard navigation."""
-        if not self.scroll_area.filtered_media:
-            return super().keyPressEvent(event)
-
-        current_index = self.scroll_area.selected_index
-        media_count = len(self.scroll_area.filtered_media)
-        columns = self.scroll_area.layout_metrics.columns
-
-        # Initialize selection if none exists
-        if current_index == -1 and media_count > 0:
-            self.scroll_area.select_by_index(0)
-            return
-
-        key = event.key()
-        new_index = current_index
-
-        if key == Qt.Key.Key_Left:
-            if current_index > 0:
-                new_index = current_index - 1
-        elif key == Qt.Key.Key_Right:
-            if current_index < media_count - 1:
-                new_index = current_index + 1
-        elif key == Qt.Key.Key_Up:
-            if current_index >= columns:
-                new_index = current_index - columns
-        elif key == Qt.Key.Key_Down:
-            if current_index + columns < media_count:
-                new_index = current_index + columns
-        elif key == Qt.Key.Key_Home:
-            new_index = 0
-        elif key == Qt.Key.Key_End:
-            new_index = media_count - 1
-        elif key == Qt.Key.Key_PageUp:
-            visible_rows = (
-                self.scroll_area.viewport_info.visible_height
-                // self.scroll_area.layout_metrics.cell_height
-            )
-            new_index = max(0, current_index - (visible_rows * columns))
-        elif key == Qt.Key.Key_PageDown:
-            visible_rows = (
-                self.scroll_area.viewport_info.visible_height
-                // self.scroll_area.layout_metrics.cell_height
-            )
-            new_index = min(media_count - 1, current_index + (visible_rows * columns))
-        else:
-            return super().keyPressEvent(event)
-
-        if new_index != current_index and 0 <= new_index < media_count:
-            self.scroll_area.select_by_index(new_index)
+        """Handle keyboard navigation by delegating to scroll area."""
+        # Delegate to the scroll area's keyPressEvent handler
+        self.scroll_area.keyPressEvent(event)
 
     def get_selected_media(self) -> Optional[Media]:
         """Get the currently selected media object."""

@@ -108,7 +108,8 @@ class MetadataExtractor(ABC):
             # STANDARD AI GENERATION FIELDS (Optional)
             "prompt": Optional[str],              # Positive text prompt
             "negative_prompt": Optional[str],     # Negative text prompt
-            "model": Optional[str],               # AI model name/checkpoint used
+            "model": Optional[str],               # AI model name/checkpoint used (single model)
+            "models": Optional[List[str]],        # AI model names (multiple models - preferred for videos)
             "sampler": Optional[str],             # Sampling method ("euler", "dpm++_2m", etc.)
             "scheduler": Optional[str],           # Scheduler type ("normal", "karras", etc.)
             "steps": Optional[int],               # Number of sampling steps
