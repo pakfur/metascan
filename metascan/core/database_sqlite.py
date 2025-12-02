@@ -46,6 +46,11 @@ class DatabaseManager:
                     "ALTER TABLE media ADD COLUMN is_favorite INTEGER DEFAULT 0"
                 )
                 logger.info("Added is_favorite column to media table")
+            if "playback_speed" not in columns:
+                conn.execute(
+                    "ALTER TABLE media ADD COLUMN playback_speed REAL DEFAULT NULL"
+                )
+                logger.info("Added playback_speed column to media table")
 
             conn.execute(
                 """
@@ -100,13 +105,14 @@ class DatabaseManager:
                 with self._get_connection() as conn:
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
                             str(media.file_path),
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
+                            media.playback_speed,
                         ),
                     )
 
@@ -125,13 +131,14 @@ class DatabaseManager:
                     # Save media with favorite status
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
+                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
                             str(media.file_path),
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
+                            media.playback_speed,
                         ),
                     )
 
@@ -233,8 +240,11 @@ class DatabaseManager:
         if media.metadata_source:
             indices.append(("source", media.metadata_source.lower()))
 
+        # Add index for each model in the list
         if media.model:
-            indices.append(("model", media.model.lower()))
+            for model_name in media.model:
+                if model_name:  # Skip empty strings
+                    indices.append(("model", model_name.lower()))
 
         indices.append(("ext", media.file_extension))
 
@@ -408,6 +418,39 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to load favorite status: {e}")
 
+    def load_playback_speed(self, media_list: List[Media]) -> None:
+        """Load playback_speed for a list of media objects from the database."""
+        try:
+            with self._get_connection() as conn:
+                for media in media_list:
+                    row = conn.execute(
+                        "SELECT playback_speed FROM media WHERE file_path = ?",
+                        (str(media.file_path),),
+                    ).fetchone()
+                    if row and row["playback_speed"] is not None:
+                        media.playback_speed = float(row["playback_speed"])
+        except Exception as e:
+            logger.error(f"Failed to load playback speed: {e}")
+
+    def update_playback_speed(self, file_path: Path, speed: float) -> bool:
+        """Update the playback speed for a specific media file."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    conn.execute(
+                        """
+                        UPDATE media
+                        SET playback_speed = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE file_path = ?
+                    """,
+                        (speed, str(file_path)),
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to update playback speed for {file_path}: {e}")
+            return False
+
     def update_media_dimensions(self, file_path: Path, width: int, height: int) -> bool:
         """
         Update the dimensions of a media file in the database.
@@ -443,6 +486,93 @@ class DatabaseManager:
 
         except Exception as e:
             logger.error(f"Error updating media dimensions for {file_path}: {e}")
+            return False
+
+    def update_media_technical_metadata(
+        self,
+        file_path: Path,
+        width: int,
+        height: int,
+        file_size: int,
+        modified_at: datetime,
+        created_at: Optional[datetime] = None,
+        frame_rate: Optional[float] = None,
+        duration: Optional[float] = None,
+    ) -> bool:
+        """
+        Update only the technical metadata (dimensions, file size, timestamps, video properties)
+        of a media file. Preserves all AI generation metadata (prompts, models, seeds, etc.).
+
+        This is used after upscaling to update the file's physical properties while keeping
+        the original AI generation parameters intact.
+
+        Args:
+            file_path: Path to the media file
+            width: New width in pixels
+            height: New height in pixels
+            file_size: New file size in bytes
+            modified_at: New modification timestamp
+            created_at: New creation timestamp (optional, preserves original if not provided)
+            frame_rate: New frame rate for videos (optional)
+            duration: New duration for videos (optional)
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Get the current media record (with all AI metadata)
+                    media = self.get_media(file_path)
+                    if not media:
+                        logger.warning(f"Media not found in database: {file_path}")
+                        return False
+
+                    # Update technical fields, preserve all AI metadata
+                    media.width = width
+                    media.height = height
+                    media.file_size = file_size
+                    media.modified_at = modified_at
+
+                    # Update created_at only if provided
+                    if created_at is not None:
+                        media.created_at = created_at
+
+                    # Update video-specific properties if provided
+                    if frame_rate is not None:
+                        media.frame_rate = frame_rate
+                    if duration is not None:
+                        media.duration = duration
+
+                    # All AI metadata fields remain unchanged:
+                    # - prompt, negative_prompt, model, sampler, scheduler
+                    # - steps, cfg_scale, seed
+                    # - loras, tags, generation_data
+                    # - metadata_source
+
+                    # Update the database record
+                    conn.execute(
+                        """UPDATE media SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?""",
+                        (media.to_json(), str(file_path)),  # type: ignore[attr-defined]
+                    )
+
+                    conn.commit()
+
+                    # Build log message
+                    log_parts = [f"{width}x{height}", f"{file_size} bytes"]
+                    if frame_rate is not None:
+                        log_parts.append(f"{frame_rate:.2f} fps")
+                    if duration is not None:
+                        log_parts.append(f"{duration:.2f}s")
+
+                    logger.info(
+                        f"Updated technical metadata for {file_path.name}: "
+                        f"{', '.join(log_parts)}"
+                    )
+                    return True
+
+        except Exception as e:
+            logger.error(f"Error updating technical metadata for {file_path}: {e}")
             return False
 
     def get_stats(self) -> Dict[str, Any]:

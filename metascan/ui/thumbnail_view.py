@@ -52,7 +52,6 @@ class ThumbnailWidget(QLabel):
     )  # Emits Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Emits Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Emits Media object for File|Upscale
-    refresh_metadata_requested = pyqtSignal(object)  # Emits Media object for refresh
 
     def __init__(
         self,
@@ -291,14 +290,6 @@ class ThumbnailWidget(QLabel):
             lambda: self.upscale_requested.emit(self.media)
         )
 
-        context_menu.addSeparator()
-
-        # Refresh Metadata (new functionality)
-        refresh_action = context_menu.addAction("Refresh Metadata")
-        refresh_action.triggered.connect(
-            lambda: self.refresh_metadata_requested.emit(self.media)
-        )
-
         # Show the context menu at the cursor position
         context_menu.exec(event.globalPos())
 
@@ -349,7 +340,6 @@ class ThumbnailView(QWidget):
     )  # Forward Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
-    refresh_metadata_requested = pyqtSignal(object)  # Forward Media object for refresh
 
     def __init__(self, parent=None, scroll_step: int = 120):
         super().__init__(parent)
@@ -577,9 +567,6 @@ class ThumbnailView(QWidget):
                 )
                 thumbnail_widget.delete_requested.connect(self.delete_requested.emit)
                 thumbnail_widget.upscale_requested.connect(self.upscale_requested.emit)
-                thumbnail_widget.refresh_metadata_requested.connect(
-                    self.refresh_metadata_requested.emit
-                )
 
                 row = i // columns
                 col = i % columns
