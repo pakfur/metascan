@@ -2,7 +2,7 @@
 
 **Media browser with metadata extraction and intelligent indexing**
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
@@ -207,7 +207,7 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 ## Tech Stack
 
 **Core Technologies:**
-- **Python 3.8+** - Core application language
+- **Python 3.11** - Core application language (required for package compatibility)
 - **PyQt6** - Cross-platform GUI framework
 - **SQLite** - Local database for metadata storage
 - **NLTK** - Natural language processing for prompt analysis
@@ -227,7 +227,7 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 
 ### Prerequisites
 
-- **Python 3.8 or higher**
+- **Python 3.11** (required for package compatibility)
 - **FFMPEG** - Required for video thumbnail generation and upscaling
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
@@ -243,7 +243,7 @@ Metascan is an open source desktop application for browsing, organizing, and ups
 
 2. **Set up virtual environment:**
    ```bash
-   python -m venv venv
+   python3.11 -m venv venv
    
    # Activate virtual environment:
    # On macOS/Linux:
