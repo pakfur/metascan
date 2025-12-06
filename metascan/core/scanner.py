@@ -9,6 +9,7 @@ import threading
 import queue
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from metascan.utils.startup_profiler import log_startup, profile_phase
 from metascan.core.media import Media, LoRA
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
@@ -322,11 +323,14 @@ class ThreadedScanner:
         batch_size: int = 10,
         thumbnail_cache: Optional[ThumbnailCache] = None,
     ):
+        log_startup("    ThreadedScanner.__init__: Starting")
         self.db_manager = db_manager
+        log_startup("    ThreadedScanner: Creating MetadataExtractorManager...")
         self.extractor_manager = MetadataExtractorManager()
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.thumbnail_cache = thumbnail_cache
+        log_startup("    ThreadedScanner.__init__: Complete")
 
         self.file_queue: Queue[Optional[Path]] = queue.Queue(maxsize=500)
         self.result_queue: Queue[Tuple[Path, Optional[Media]]] = queue.Queue(

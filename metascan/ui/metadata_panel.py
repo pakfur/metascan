@@ -107,9 +107,9 @@ class MetadataSection(QGroupBox):
         self.setCheckable(True)
         self.setChecked(True)  # Start expanded
 
-        self.layout: QVBoxLayout = QVBoxLayout(self)
-        self.layout.setContentsMargins(6, 12, 6, 6)
-        self.layout.setSpacing(3)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(6, 12, 6, 6)
+        self._layout.setSpacing(3)
 
         self.toggled.connect(self.on_toggled)
 
@@ -118,7 +118,7 @@ class MetadataSection(QGroupBox):
             value = "N/A"
 
         field = MetadataField(label, str(value), is_multiline)
-        self.layout.addWidget(field)
+        self._layout.addWidget(field)
         self.fields[key] = field
         return field
 

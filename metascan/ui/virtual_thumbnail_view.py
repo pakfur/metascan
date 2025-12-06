@@ -1,8 +1,8 @@
 """
 Virtual Thumbnail View for PyQt6
 
-A high-performance virtualized thumbnail grid view that can efficiently handle 
-thousands of thumbnails by only creating widgets for visible items and reusing 
+A high-performance virtualized thumbnail grid view that can efficiently handle
+thousands of thumbnails by only creating widgets for visible items and reusing
 them as the user scrolls.
 
 This implementation provides:
@@ -279,9 +279,9 @@ class VirtualScrollArea(QScrollArea):
 
         # Multi-selection support
         self.multi_select_mode: bool = False
-        self.selected_media_set: Set[
-            str
-        ] = set()  # Set of file paths for multi-selection
+        self.selected_media_set: Set[str] = (
+            set()
+        )  # Set of file paths for multi-selection
 
         # Layout and viewport
         self.layout_metrics = LayoutMetrics()

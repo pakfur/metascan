@@ -1,6 +1,7 @@
 """
 Metadata parsing logger and error tracking system.
 """
+
 import csv
 import json
 import logging
