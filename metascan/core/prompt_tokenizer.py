@@ -2,27 +2,69 @@ import logging
 from typing import Set, Dict, Any, Tuple, Optional
 from pathlib import Path
 import json
-import nltk
-from nltk.corpus import stopwords
 import sys
+
+from metascan.utils.startup_profiler import log_startup
+
+log_startup("prompt_tokenizer.py: Module loading started")
 
 logger = logging.getLogger(__name__)
 
-# Setup NLTK data path for bundled application
-if getattr(sys, "frozen", False):
-    # In bundled app, use user directory for NLTK data
-    nltk_data_dir = Path.home() / ".metascan" / "nltk_data"
-    nltk_data_dir.mkdir(parents=True, exist_ok=True)
-    nltk.data.path.insert(0, str(nltk_data_dir))
+# Flag to track if NLTK has been initialized
+_nltk_initialized = False
+_nltk_stopwords: Optional[Set[str]] = None
 
-try:
-    nltk.data.find("corpora/stopwords")
-except LookupError:
+
+def _ensure_nltk_initialized() -> Set[str]:
+    """
+    Lazily initialize NLTK and load stopwords.
+    Returns the set of English stopwords.
+    """
+    global _nltk_initialized, _nltk_stopwords
+
+    if _nltk_initialized:
+        return _nltk_stopwords or set()
+
+    log_startup("prompt_tokenizer.py: Importing NLTK (lazy)...")
+
+    import nltk
+    from nltk.corpus import stopwords
+
+    log_startup("prompt_tokenizer.py: NLTK import complete")
+
+    # Setup NLTK data path for bundled application
+    if getattr(sys, "frozen", False):
+        # In bundled app, use user directory for NLTK data
+        nltk_data_dir = Path.home() / ".metascan" / "nltk_data"
+        nltk_data_dir.mkdir(parents=True, exist_ok=True)
+        nltk.data.path.insert(0, str(nltk_data_dir))
+
+    log_startup("prompt_tokenizer.py: Checking NLTK stopwords data...")
     try:
-        nltk.download("stopwords", quiet=True)
-    except:
-        # If download fails in bundled app, use empty set
-        logger.warning("Could not download NLTK stopwords, using empty set")
+        nltk.data.find("corpora/stopwords")
+    except LookupError:
+        try:
+            log_startup("prompt_tokenizer.py: Downloading NLTK stopwords...")
+            nltk.download("stopwords", quiet=True)
+        except:
+            # If download fails in bundled app, use empty set
+            logger.warning("Could not download NLTK stopwords, using empty set")
+
+    # Load stopwords
+    try:
+        log_startup("prompt_tokenizer.py: Loading NLTK stopwords...")
+        _nltk_stopwords = set(stopwords.words("english"))
+    except LookupError:
+        logger.warning("NLTK stopwords not available, using empty set")
+        _nltk_stopwords = set()
+
+    _nltk_initialized = True
+    log_startup("prompt_tokenizer.py: NLTK initialization complete")
+
+    return _nltk_stopwords
+
+
+log_startup("prompt_tokenizer.py: Module loading complete")
 
 
 class PromptTokenizer:
@@ -32,19 +74,17 @@ class PromptTokenizer:
         filler_words: Optional[Set[str]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
+        log_startup("      PromptTokenizer.__init__: Starting")
         if stop_words is not None:
             self.stop_words = stop_words
         else:
-            try:
-                self.stop_words = set(stopwords.words("english"))
-            except LookupError:
-                # Fallback to empty set if stopwords not available
-                logger.warning("NLTK stopwords not available, using empty set")
-                self.stop_words = set()
+            # Lazy load NLTK stopwords
+            self.stop_words = _ensure_nltk_initialized()
 
         if config is not None:
             self.config = config
         else:
+            log_startup("      PromptTokenizer: Loading config...")
             self.config = self._load_config()
 
         if filler_words is not None:

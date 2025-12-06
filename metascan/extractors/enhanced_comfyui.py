@@ -34,9 +34,9 @@ class _Node:
     inputs: Dict[str, Any]  # canonicalized name->info (may be empty if unknown)
     widgets: Dict[str, Any]  # canonicalized widget-name -> value
     title: Optional[str] = None
-    raw: Optional[
-        Dict[str, Any]
-    ] = None  # original node JSON (optional for advanced heuristics)
+    raw: Optional[Dict[str, Any]] = (
+        None  # original node JSON (optional for advanced heuristics)
+    )
 
 
 class _Graph:

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from threading import Lock
 
+from metascan.utils.startup_profiler import log_startup, profile_phase
 from metascan.core.media import Media
 from metascan.core.prompt_tokenizer import PromptTokenizer
 
@@ -14,15 +15,26 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     def __init__(self, db_path: Path):
+        log_startup("    DatabaseManager.__init__: Starting")
         self.db_path = db_path
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.db_file = self.db_path / "metascan.db"
         self.lock = Lock()
 
-        # Initialize prompt tokenizer
-        self.prompt_tokenizer = PromptTokenizer()
+        # Lazy-initialize prompt tokenizer (deferred until first use)
+        self._prompt_tokenizer: Optional[PromptTokenizer] = None
 
+        log_startup("    DatabaseManager: Initializing database schema...")
         self._init_database()
+        log_startup("    DatabaseManager.__init__: Complete")
+
+    @property
+    def prompt_tokenizer(self) -> PromptTokenizer:
+        """Lazy-load the PromptTokenizer on first access."""
+        if self._prompt_tokenizer is None:
+            log_startup("    DatabaseManager: Lazy-loading PromptTokenizer...")
+            self._prompt_tokenizer = PromptTokenizer()
+        return self._prompt_tokenizer
 
     def _init_database(self) -> None:
         with self._get_connection() as conn:

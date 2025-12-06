@@ -1,4 +1,5 @@
 """Application path utilities for handling bundled and development environments."""
+
 import os
 import sys
 from pathlib import Path
