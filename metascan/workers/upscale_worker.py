@@ -198,6 +198,40 @@ class UpscaleWorker:
             if lock_fh:
                 self._release_lock(lock_fh)
 
+    def _cleanup_backup_files(self, base_path: Path) -> None:
+        """
+        Clean up any _original backup files that might have been created.
+
+        Args:
+            base_path: Base path to check for backup files
+        """
+        try:
+            # Look for files with _original suffix in the same directory
+            parent_dir = base_path.parent
+            base_stem = base_path.stem
+            base_suffix = base_path.suffix
+
+            # Common patterns for backup files
+            patterns = [
+                f"{base_stem}_original{base_suffix}",
+                f"{base_stem}_original_*{base_suffix}",
+                f"{base_stem}*_temp_original{base_suffix}",
+                f"{base_stem}*_upscaled_temp_original{base_suffix}",
+                f"{base_stem}*_interpolated_temp_original{base_suffix}",
+            ]
+
+            for pattern in patterns:
+                backup_files = list(parent_dir.glob(pattern))
+                for backup_file in backup_files:
+                    if backup_file.exists():
+                        self.logger.info(f"Cleaning up backup file: {backup_file}")
+                        backup_file.unlink()
+
+        except Exception as e:
+            self.logger.warning(f"Failed to clean up backup files: {e}")
+            if self.debug:
+                self.logger.debug(f"Cleanup traceback: {traceback.format_exc()}")
+
     def _update_task_status(
         self,
         status: UpscaleStatus,
@@ -448,6 +482,9 @@ class UpscaleWorker:
                     if upscaled_temp_path.exists():
                         upscaled_temp_path.unlink()
 
+                    # Clean up any _original backup files from upscaling step
+                    self._cleanup_backup_files(input_path)
+
                     if not success:
                         if interpolated_temp_path.exists():
                             interpolated_temp_path.unlink()
@@ -467,6 +504,8 @@ class UpscaleWorker:
                             self.logger.info(
                                 f"Final interpolated video at: {input_path}"
                             )
+                            # Clean up any _original backup files
+                            self._cleanup_backup_files(input_path)
                             # Don't change input_path or output_path - they stay as is
                         else:
                             self.logger.error("Failed to move original to trash")
@@ -516,6 +555,8 @@ class UpscaleWorker:
                 # The MediaUpscaler moves the upscaled file to replace the original
                 if task_data.get("replace_original", True):
                     final_output_path = str(input_path)
+                    # Clean up any _original backup files
+                    self._cleanup_backup_files(input_path)
                 else:
                     final_output_path = str(output_path)
 
