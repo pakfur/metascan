@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import logging
 
+from metascan.utils.startup_profiler import log_startup
 from metascan.extractors.base import MetadataExtractor
 from metascan.extractors.comfyui import ComfyUIExtractor
 from metascan.extractors.comfyui_video import ComfyUIVideoExtractor
@@ -16,6 +17,7 @@ class MetadataExtractorManager:
     """Manages all metadata extractors"""
 
     def __init__(self, enable_logging: bool = True):
+        log_startup("      MetadataExtractorManager.__init__: Creating extractors...")
         self.extractors: List[MetadataExtractor] = [
             ComfyUIVideoExtractor(),  # Check video first for MP4 files
             FooocusExtractor(),  # Check Fooocus first as it has more specific markers
@@ -25,6 +27,7 @@ class MetadataExtractorManager:
 
         # Initialize metadata parsing logger
         self.parsing_logger = MetadataParsingLogger() if enable_logging else None
+        log_startup("      MetadataExtractorManager.__init__: Complete")
 
     def extract_metadata(self, media_path: Path) -> Optional[Dict[str, Any]]:
         """Extract metadata using the appropriate extractor"""
