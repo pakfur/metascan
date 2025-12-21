@@ -193,6 +193,32 @@ class DatabaseManager:
 
         return media_list
 
+    def get_all_media_with_details(self) -> List[Media]:
+        """Load all media with favorite status and playback speed in a single query.
+
+        This eliminates N+1 query problems by fetching data, is_favorite, and
+        playback_speed together instead of making separate queries per item.
+        """
+        media_list = []
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT data, is_favorite, playback_speed FROM media ORDER BY created_at DESC"
+                )
+                for row in rows:
+                    try:
+                        media = Media.from_json_fast(row["data"])
+                        media.is_favorite = bool(row["is_favorite"])
+                        if row["playback_speed"] is not None:
+                            media.playback_speed = float(row["playback_speed"])
+                        media_list.append(media)
+                    except Exception as e:
+                        logger.error(f"Failed to decode media: {e}")
+        except Exception as e:
+            logger.error(f"Failed to get all media with details: {e}")
+
+        return media_list
+
     def delete_media(self, file_path: Path) -> bool:
         try:
             with self.lock:
@@ -206,6 +232,31 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to delete media {file_path}: {e}")
             return False
+
+    def delete_media_batch(self, file_paths: List[Path]) -> int:
+        """Delete multiple media items in a single transaction.
+
+        This is much faster than calling delete_media() repeatedly because
+        it uses a single commit for all deletes instead of one per item.
+
+        Returns the number of items successfully deleted.
+        """
+        if not file_paths:
+            return 0
+
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    # Use executemany for batch deletion
+                    path_tuples = [(str(fp),) for fp in file_paths]
+                    conn.executemany(
+                        "DELETE FROM media WHERE file_path = ?", path_tuples
+                    )
+                    conn.commit()
+                    return len(file_paths)
+        except Exception as e:
+            logger.error(f"Failed to batch delete media: {e}")
+            return 0
 
     def get_existing_file_paths(self) -> Set[str]:
         try:

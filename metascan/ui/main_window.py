@@ -26,13 +26,17 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QSizePolicy,
 )
+
 log_startup("  Importing PyQt6.QtCore...")
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
 from typing import Tuple, Dict, List
+
 log_startup("  Importing PyQt6.QtGui...")
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
+
 log_startup("  Importing qt_material...")
 from qt_material import apply_stylesheet, list_themes
+
 log_startup("  Importing UI components...")
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
@@ -43,6 +47,7 @@ from metascan.ui.media_viewer import MediaViewer
 from metascan.ui.slideshow_viewer import SlideshowViewer
 from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
 from metascan.ui.upscale_queue_window import UpscaleQueueWindow
+
 log_startup("  Importing core components...")
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
@@ -392,7 +397,9 @@ class MainWindow(QMainWindow):
             self.slideshow_viewer = SlideshowViewer(db_manager=self.db_manager)
             self.slideshow_viewer.closed.connect(self.on_slideshow_closed)
             self.slideshow_viewer.media_changed.connect(self.on_viewer_media_changed)
-            self.slideshow_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
+            self.slideshow_viewer.favorite_toggled.connect(
+                self.on_viewer_favorite_toggled
+            )
 
         # Create central widget and main layout
         log_startup("  Creating central widget and layout...")
@@ -1345,11 +1352,9 @@ class MainWindow(QMainWindow):
     def load_all_media(self):
         """Load all media from database."""
         try:
-            self.all_media = self.db_manager.get_all_media()
-            # Load favorite status from database
-            self.db_manager.load_favorite_status(self.all_media)
-            # Load playback speeds from database
-            self.db_manager.load_playback_speed(self.all_media)
+            # Use optimized single-query method that fetches data, is_favorite,
+            # and playback_speed together (eliminates N+1 query problem)
+            self.all_media = self.db_manager.get_all_media_with_details()
             # Apply current sorting
             self._apply_sorting()
             print(f"Loaded {len(self.all_media)} media items")
@@ -1921,16 +1926,17 @@ class MainWindow(QMainWindow):
         failed_files = []
 
         try:
+            # 1. Batch delete from database (single transaction - much faster)
+            file_paths = [media.file_path for media in media_list]
+            self.db_manager.delete_media_batch(file_paths)
+
+            # 2. Process file operations for each media
+            deleted_paths = set()
             for media in media_list:
                 try:
                     file_path = media.file_path
 
-                    # 1. Delete from database
-                    db_success = self.db_manager.delete_media(file_path)
-                    if not db_success:
-                        print(f"Warning: Media not found in database: {file_path}")
-
-                    # 2. Move thumbnail to trash
+                    # Move thumbnail to trash
                     if self.thumbnail_cache:
                         thumbnail_path = self.thumbnail_cache.get_thumbnail_path(
                             file_path
@@ -1942,25 +1948,29 @@ class MainWindow(QMainWindow):
                             except Exception as e:
                                 print(f"Failed to move thumbnail to trash: {e}")
 
-                    # 3. Move media file to trash
+                    # Move media file to trash
                     if file_path.exists():
                         try:
                             self._move_to_trash(file_path)
                             print(f"Moved media file to trash: {file_path}")
                             deleted_count += 1
+                            deleted_paths.add(file_path)
                         except Exception as e:
                             print(f"Failed to move media file to trash: {e}")
                             failed_files.append(file_path.name)
                             continue
-
-                    # 4. Remove from all_media list
-                    self.all_media = [
-                        m for m in self.all_media if m.file_path != file_path
-                    ]
+                    else:
+                        # File already gone, still count as deleted from DB
+                        deleted_paths.add(file_path)
 
                 except Exception as e:
                     print(f"Error deleting {media.file_name}: {e}")
                     failed_files.append(media.file_name)
+
+            # 3. Batch update all_media list (single list comprehension)
+            self.all_media = [
+                m for m in self.all_media if m.file_path not in deleted_paths
+            ]
 
             # 5. Update filters and view once after all deletions
             self.refresh_filters()
@@ -2159,7 +2169,9 @@ class MainWindow(QMainWindow):
                 if is_wsl:
                     # In WSL, convert path to Windows format and use Windows commands
                     windows_path = self._convert_wsl_path_to_windows(file_path)
-                    subprocess.run(["cmd.exe", "/c", "start", "", windows_path], check=True)
+                    subprocess.run(
+                        ["cmd.exe", "/c", "start", "", windows_path], check=True
+                    )
                 else:
                     # Use xdg-open to open with default application
                     subprocess.run(["xdg-open", str(file_path)], check=True)
@@ -2229,7 +2241,9 @@ class MainWindow(QMainWindow):
                             except (subprocess.CalledProcessError, FileNotFoundError):
                                 continue
                         else:
-                            raise RuntimeError("No suitable file manager found on Linux")
+                            raise RuntimeError(
+                                "No suitable file manager found on Linux"
+                            )
             else:
                 raise OSError(f"Unsupported platform: {system}")
 

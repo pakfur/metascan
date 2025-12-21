@@ -33,9 +33,7 @@ def init_startup_profiler() -> float:
     if not _logger.handlers:
         handler = logging.StreamHandler()
         handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            "[STARTUP %(elapsed).3fs] %(message)s"
-        )
+        formatter = logging.Formatter("[STARTUP %(elapsed).3fs] %(message)s")
         handler.setFormatter(_StartupFormatter())
         _logger.addHandler(handler)
 

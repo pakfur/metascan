@@ -42,6 +42,7 @@ dataclasses-json==0.6.3
 marshmallow==3.26.1
 typing-inspect==0.9.0
 typing_extensions==4.14.1
+orjson>=3.9.0  # Fast JSON parsing for media deserialization
 
 # Code Formatting
 black==25.11.0
