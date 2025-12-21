@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import tempfile
+import platform
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, Tuple
 import json
@@ -15,40 +16,65 @@ import urllib.request
 from tqdm import tqdm
 import logging
 
-try:
-    import distutils  # type: ignore
-except ImportError:
+from metascan.utils.startup_profiler import log_startup
+
+log_startup("media_upscaler.py: Module loading started")
+
+# Flag to track if heavy imports have been done
+_heavy_imports_done = False
+
+
+def _ensure_heavy_imports() -> None:
+    """
+    Lazily import heavy dependencies (torchvision, distutils compatibility).
+    Called only when upscaling operations are actually needed.
+    """
+    global _heavy_imports_done
+    if _heavy_imports_done:
+        return
+
+    log_startup("media_upscaler.py: Loading heavy dependencies (torchvision)...")
+
+    # Setup distutils compatibility
     try:
-        import setuptools._distutils  # type: ignore
-
-        sys.modules["distutils"] = setuptools._distutils
-        for name in ["util", "version", "spawn", "log"]:
-            try:
-                module = getattr(setuptools._distutils, name, None)
-                if module:
-                    sys.modules[f"distutils.{name}"] = module
-            except AttributeError:
-                pass
+        import distutils  # type: ignore
     except ImportError:
-        import subprocess
-
         try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "setuptools>=68.0.0"]
-            )
             import setuptools._distutils  # type: ignore
 
             sys.modules["distutils"] = setuptools._distutils
-        except Exception as e:
-            print(f"Warning: Could not setup distutils compatibility: {e}")
+            for name in ["util", "version", "spawn", "log"]:
+                try:
+                    module = getattr(setuptools._distutils, name, None)
+                    if module:
+                        sys.modules[f"distutils.{name}"] = module
+                except AttributeError:
+                    pass
+        except ImportError:
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "setuptools>=68.0.0"]
+                )
+                import setuptools._distutils  # type: ignore
 
-if "torchvision.transforms.functional_tensor" not in sys.modules:
-    try:
-        import torchvision.transforms.functional as F
+                sys.modules["distutils"] = setuptools._distutils
+            except Exception as e:
+                print(f"Warning: Could not setup distutils compatibility: {e}")
 
-        sys.modules["torchvision.transforms.functional_tensor"] = F
-    except ImportError:
-        pass
+    # Setup torchvision compatibility shim
+    if "torchvision.transforms.functional_tensor" not in sys.modules:
+        try:
+            import torchvision.transforms.functional as F
+
+            sys.modules["torchvision.transforms.functional_tensor"] = F
+        except ImportError:
+            pass
+
+    _heavy_imports_done = True
+    log_startup("media_upscaler.py: Heavy dependencies loaded")
+
+
+log_startup("media_upscaler.py: Module loading complete")
 
 
 class MediaUpscaler:
@@ -68,6 +94,7 @@ class MediaUpscaler:
             tile_size: Tile size for Real-ESRGAN processing
             debug: Enable debug logging
         """
+        log_startup("    MediaUpscaler.__init__: Starting")
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
@@ -81,18 +108,53 @@ class MediaUpscaler:
         # Note: Handler setup is done by the calling code (e.g., upscale_worker)
         # This logger will inherit handlers from the root logger
 
+        # Detect OS and set RIFE binary URL accordingly
+        self.os_name = platform.system()
+        rife_info = self._get_rife_platform_info()
+
         self.model_urls = {
             "RealESRGAN_x2plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
             "RealESRGAN_x4plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
             "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
             "GFPGANv1.4.pth": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
-            "rife_binary": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
+            "rife_binary": rife_info["url"],
         }
 
+        self.rife_dir_name = rife_info["dir_name"]
         self.rife_bin: Optional[Path] = None
 
         self.models_available = False
+        log_startup("    MediaUpscaler: Checking models...")
         self._check_models()
+        log_startup("    MediaUpscaler.__init__: Complete")
+
+    def _get_rife_platform_info(self) -> Dict[str, str]:
+        """Get platform-specific RIFE download URL and directory name."""
+        system = platform.system()
+
+        if system == "Darwin":  # macOS
+            return {
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
+                "dir_name": "rife-ncnn-vulkan-20221029-macos",
+            }
+        elif system == "Linux":
+            return {
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",
+                "dir_name": "rife-ncnn-vulkan-20221029-ubuntu",
+            }
+        elif system == "Windows":
+            return {
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip",
+                "dir_name": "rife-ncnn-vulkan-20221029-windows",
+            }
+        else:
+            self.logger.warning(
+                f"Unsupported OS for RIFE: {system}, defaulting to Linux"
+            )
+            return {
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",
+                "dir_name": "rife-ncnn-vulkan-20221029-ubuntu",
+            }
 
     def _check_models(self) -> bool:
         required_models = [
@@ -106,10 +168,7 @@ class MediaUpscaler:
         )
 
         rife_bin_path = (
-            self.models_dir
-            / "rife"
-            / "rife-ncnn-vulkan-20221029-macos"
-            / "rife-ncnn-vulkan"
+            self.models_dir / "rife" / self.rife_dir_name / "rife-ncnn-vulkan"
         )
         if rife_bin_path.exists():
             self.rife_bin = rife_bin_path
@@ -160,6 +219,7 @@ class MediaUpscaler:
 
     def _install_python_dependencies(self) -> bool:
         try:
+            _ensure_heavy_imports()
             import realesrgan
             import basicsr
             import cv2
@@ -264,7 +324,7 @@ class MediaUpscaler:
 
         bin_dir = self.models_dir / "rife"
         # The actual binary is in the extracted subdirectory
-        bin_path = bin_dir / "rife-ncnn-vulkan-20221029-macos" / "rife-ncnn-vulkan"
+        bin_path = bin_dir / self.rife_dir_name / "rife-ncnn-vulkan"
 
         if bin_path.exists():
             self.rife_bin = bin_path
@@ -295,7 +355,7 @@ class MediaUpscaler:
             zip_path.unlink()
 
             # The RIFE binary package includes models, no need to download separately
-            model_path = bin_dir / "rife-ncnn-vulkan-20221029-macos" / "rife-v4.6"
+            model_path = bin_dir / self.rife_dir_name / "rife-v4.6"
             if not model_path.exists():
                 self.logger.info("RIFE models will be included in the binary package")
             else:
@@ -332,6 +392,7 @@ class MediaUpscaler:
         start_time = time.time()
 
         try:
+            _ensure_heavy_imports()
             from gfpgan import GFPGANer  # type: ignore
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -471,6 +532,7 @@ class MediaUpscaler:
         self.logger.info(f"Starting image upscale: {input_path.name} - {operation_str}")
 
         try:
+            _ensure_heavy_imports()
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
             import cv2
@@ -676,6 +738,7 @@ class MediaUpscaler:
 
         temp_dir = None
         try:
+            _ensure_heavy_imports()
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
             import cv2
@@ -886,10 +949,7 @@ class MediaUpscaler:
         # Re-scan for RIFE binary if not currently set (handles case where RIFE was downloaded by another instance)
         if self.rife_bin is None:
             rife_bin_path = (
-                self.models_dir
-                / "rife"
-                / "rife-ncnn-vulkan-20221029-macos"
-                / "rife-ncnn-vulkan"
+                self.models_dir / "rife" / self.rife_dir_name / "rife-ncnn-vulkan"
             )
             if rife_bin_path.exists():
                 self.rife_bin = rife_bin_path
@@ -991,12 +1051,7 @@ class MediaUpscaler:
                 "-o",
                 str(interp_dir),
                 "-m",
-                str(
-                    self.models_dir
-                    / "rife"
-                    / "rife-ncnn-vulkan-20221029-macos"
-                    / "rife-v4.6"
-                ),
+                str(self.models_dir / "rife" / self.rife_dir_name / "rife-v4.6"),
                 "-n",
                 str(target_frame_count),
                 "-f",
@@ -1383,6 +1438,21 @@ class MediaUpscaler:
     def _move_to_trash(self, file_path: Path) -> bool:
         """Move a file to platform-specific trash."""
         try:
+            # Try send2trash first - it's cross-platform and most reliable
+            try:
+                from send2trash import send2trash
+
+                send2trash(str(file_path))
+                self.logger.info(f"Moved to Trash: {file_path}")
+                return True
+            except ImportError:
+                self.logger.warning(
+                    "send2trash not available - install it with: pip install send2trash"
+                )
+            except Exception as e:
+                self.logger.warning(f"send2trash failed: {e}")
+
+            # Platform-specific fallbacks
             import platform
             import subprocess
 
@@ -1397,13 +1467,13 @@ class MediaUpscaler:
                 ]
                 result = subprocess.run(trash_cmd, capture_output=True, text=True)
                 if result.returncode == 0:
-                    self.logger.info(f"Moved to Trash: {file_path}")
+                    self.logger.info(f"Moved to Trash (macOS): {file_path}")
                     return True
                 else:
-                    self.logger.warning(f"Failed to move to Trash: {result.stderr}")
+                    self.logger.error(f"Failed to move to Trash: {result.stderr}")
 
             elif system == "Linux":
-                # Try trash-cli first, then fall back to creating backup
+                # Try trash-cli
                 try:
                     result = subprocess.run(
                         ["trash", str(file_path)],
@@ -1411,38 +1481,20 @@ class MediaUpscaler:
                         text=True,
                         check=True,
                     )
-                    self.logger.info(f"Moved to Trash: {file_path}")
+                    self.logger.info(f"Moved to Trash (trash-cli): {file_path}")
                     return True
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    pass
+                except FileNotFoundError:
+                    self.logger.error(
+                        "trash-cli not installed. Install it with: sudo apt-get install trash-cli"
+                    )
+                except subprocess.CalledProcessError as e:
+                    self.logger.error(f"trash-cli failed: {e.stderr}")
 
-            elif system == "Windows":
-                # Use Windows recycle bin via send2trash
-                try:
-                    from send2trash import send2trash
-
-                    send2trash(str(file_path))
-                    self.logger.info(f"Moved to Recycle Bin: {file_path}")
-                    return True
-                except ImportError:
-                    self.logger.warning("send2trash not available for Windows")
-                except Exception as e:
-                    self.logger.warning(f"Failed to move to Recycle Bin: {e}")
-
-            # Fallback: create backup instead of deleting
-            backup_path = file_path.with_name(
-                file_path.stem + "_original" + file_path.suffix
+            # If all trash methods failed, return False
+            self.logger.error(
+                f"Failed to move file to trash: {file_path}. No trash method available."
             )
-            counter = 1
-            while backup_path.exists():
-                backup_path = file_path.with_name(
-                    f"{file_path.stem}_original_{counter}{file_path.suffix}"
-                )
-                counter += 1
-
-            shutil.move(str(file_path), str(backup_path))
-            self.logger.info(f"Created backup instead of trash: {backup_path}")
-            return True
+            return False
 
         except Exception as e:
             self.logger.error(f"Failed to move file to trash: {e}")

@@ -334,14 +334,14 @@ Start with 1 worker and increase gradually while monitoring GPU/RAM usage.</p>""
                 "scale": scale,
                 "replace_original": replace_original,
                 "enhance_faces": enhance_faces,
-                "interpolate_frames": interpolate_frames
-                if file_info.get("type") == "video"
-                else False,
+                "interpolate_frames": (
+                    interpolate_frames if file_info.get("type") == "video" else False
+                ),
                 "interpolation_factor": interpolation_factor,
                 "model_type": model_type,
-                "fps_override": fps_override
-                if file_info.get("type") == "video"
-                else None,
+                "fps_override": (
+                    fps_override if file_info.get("type") == "video" else None
+                ),
                 "preserve_metadata": False,  # Metadata preserved in database instead
                 "worker_count": worker_count,  # Pass worker count with tasks
             }
