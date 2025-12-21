@@ -427,7 +427,7 @@ class SlideshowViewer(QWidget):
         self.transition_animation = QPropertyAnimation(blur_effect, b"blurRadius")
         self.transition_animation.setDuration(self.transition_duration)
         self.transition_animation.setStartValue(20.0)  # Start blurred
-        self.transition_animation.setEndValue(0.0)     # End sharp
+        self.transition_animation.setEndValue(0.0)  # End sharp
         self.transition_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
 
         # Clean up effect after animation completes
@@ -459,7 +459,9 @@ class SlideshowViewer(QWidget):
         self.transition_animation.setDuration(self.transition_duration)
         self.transition_animation.setStartValue(0.0)
         self.transition_animation.setEndValue(1.0)
-        self.transition_animation.setEasingCurve(QEasingCurve.Type.OutCubic)  # Different easing for zoom feel
+        self.transition_animation.setEasingCurve(
+            QEasingCurve.Type.OutCubic
+        )  # Different easing for zoom feel
 
         # Clean up effect after animation completes
         def cleanup():
@@ -492,7 +494,9 @@ class SlideshowViewer(QWidget):
         end_x = -stacked_geom.width()
 
         self.transition_animation = QPropertyAnimation(old_widget, b"pos")
-        self.transition_animation.setDuration(self.transition_duration // 2)  # Half duration for slide out
+        self.transition_animation.setDuration(
+            self.transition_duration // 2
+        )  # Half duration for slide out
         self.transition_animation.setStartValue(old_pos)
         self.transition_animation.setEndValue(QPoint(end_x, old_pos.y()))
         self.transition_animation.setEasingCurve(QEasingCurve.Type.InCubic)
@@ -531,7 +535,9 @@ class SlideshowViewer(QWidget):
 
         # Stage 2: Slide new widget in from the right
         self.transition_animation = QPropertyAnimation(new_widget, b"pos")
-        self.transition_animation.setDuration(self.transition_duration // 2)  # Half duration for slide in
+        self.transition_animation.setDuration(
+            self.transition_duration // 2
+        )  # Half duration for slide in
         self.transition_animation.setStartValue(QPoint(start_x, new_pos.y()))
         self.transition_animation.setEndValue(new_pos)
         self.transition_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -746,10 +752,13 @@ class SlideshowViewer(QWidget):
             self.setup_panel.show()
             self.setup_panel.raise_()  # Ensure it's on top
             # Force aggressive layout recalculation
-            self.layout().invalidate()
+            layout = self.layout()
+            if layout:
+                layout.invalidate()
             self.setup_panel.updateGeometry()
             self.stacked_widget.updateGeometry()
-            self.layout().activate()
+            if layout:
+                layout.activate()
             self.updateGeometry()
             QCoreApplication.processEvents()
             # Show cursor when browsing (setup panel visible)
@@ -841,10 +850,13 @@ class SlideshowViewer(QWidget):
         self.stacked_widget.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
 
         # Force layout recalculation before closing to reset geometry
-        self.layout().invalidate()
+        layout = self.layout()
+        if layout:
+            layout.invalidate()
         self.setup_panel.updateGeometry()
         self.stacked_widget.updateGeometry()
-        self.layout().activate()
+        if layout:
+            layout.activate()
         QCoreApplication.processEvents()
 
         # Emit closed signal

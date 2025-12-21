@@ -53,7 +53,7 @@ dev-install: venv  ## Install package in development mode
 # Running targets
 .PHONY: run
 run:  ## Run the application from source
-	$(PYTHON) main.py
+	QT_LOGGING_RULES="qt.multimedia.ffmpeg.libsymbolsresolver.debug=false" $(PYTHON) main.py
 
 .PHONY: run-installed
 run-installed:  ## Run the installed metascan command

@@ -1,4 +1,9 @@
 import sys
+from metascan.utils.startup_profiler import log_startup, profile_phase
+
+log_startup("main_window.py: Module loading started")
+
+log_startup("  Importing PyQt6.QtWidgets...")
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -21,10 +26,18 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QSizePolicy,
 )
+
+log_startup("  Importing PyQt6.QtCore...")
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
 from typing import Tuple, Dict, List
+
+log_startup("  Importing PyQt6.QtGui...")
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
+
+log_startup("  Importing qt_material...")
 from qt_material import apply_stylesheet, list_themes
+
+log_startup("  Importing UI components...")
 from metascan.ui.config_dialog import ConfigDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
@@ -34,6 +47,8 @@ from metascan.ui.media_viewer import MediaViewer
 from metascan.ui.slideshow_viewer import SlideshowViewer
 from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
 from metascan.ui.upscale_queue_window import UpscaleQueueWindow
+
+log_startup("  Importing core components...")
 from metascan.core.scanner import Scanner, ThreadedScanner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media_upscaler import MediaUpscaler
@@ -51,6 +66,8 @@ import shutil
 import platform
 import subprocess
 import logging
+
+log_startup("main_window.py: All imports complete")
 
 
 class ScannerThread(QThread):
@@ -259,6 +276,7 @@ class ScanConfirmationDialog(QDialog):
 
 class MainWindow(QMainWindow):
     def __init__(self):
+        log_startup("MainWindow.__init__: Starting")
         super().__init__()
         self.setWindowTitle("Metascan - AI Media Browser")
 
@@ -266,10 +284,12 @@ class MainWindow(QMainWindow):
         self.logger = logging.getLogger(__name__)
 
         # Initialize theme before other components
+        log_startup("  Listing available themes...")
         self.available_themes = list_themes()
         self.current_theme = None
 
         # Initialize components
+        log_startup("  Loading config...")
         self.config_file = str(get_config_path())
         self.config = self.load_config()
 
@@ -296,9 +316,13 @@ class MainWindow(QMainWindow):
             # Window needs to fit: filter panel (250) + thumbnails (2 cols minimum) + metadata (350)
             min_window_width = 250 + ((thumbnail_size[0] + 10) * 2 + 40) + 350
             self.setGeometry(100, 100, max(1200, min_window_width), 800)
-        self.load_and_apply_theme()
-        db_path = get_data_dir()
-        self.db_manager = DatabaseManager(db_path)
+
+        with profile_phase("Applying theme"):
+            self.load_and_apply_theme()
+
+        with profile_phase("Initializing DatabaseManager"):
+            db_path = get_data_dir()
+            self.db_manager = DatabaseManager(db_path)
 
         # Current filter state
         self.current_filters = {}
@@ -309,28 +333,32 @@ class MainWindow(QMainWindow):
         self.all_media = []  # Cache of all media for filtering
 
         # Initialize thumbnail cache for metadata panel
-        cache_dir = get_thumbnail_cache_dir()
-        # Get thumbnail size from config, default to (200, 200)
-        thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
-        self.thumbnail_cache = ThumbnailCache(cache_dir, thumbnail_size)
+        with profile_phase("Initializing ThumbnailCache"):
+            cache_dir = get_thumbnail_cache_dir()
+            # Get thumbnail size from config, default to (200, 200)
+            thumbnail_size = tuple(self.config.get("thumbnail_size", [200, 200]))
+            self.thumbnail_cache = ThumbnailCache(cache_dir, thumbnail_size)
 
         # Initialize scanner with thumbnail cache
-        self.scanner = ThreadedScanner(
-            self.db_manager,
-            num_workers=4,
-            batch_size=10,
-            thumbnail_cache=self.thumbnail_cache,
-        )
+        with profile_phase("Initializing ThreadedScanner"):
+            self.scanner = ThreadedScanner(
+                self.db_manager,
+                num_workers=4,
+                batch_size=10,
+                thumbnail_cache=self.thumbnail_cache,
+            )
 
         # Initialize upscale components
-        models_dir = get_data_dir() / "models"
-        self.media_upscaler = MediaUpscaler(
-            models_dir=models_dir, device="auto", tile_size=512, debug=False
-        )
+        with profile_phase("Initializing MediaUpscaler"):
+            models_dir = get_data_dir() / "models"
+            self.media_upscaler = MediaUpscaler(
+                models_dir=models_dir, device="auto", tile_size=512, debug=False
+            )
 
         # Initialize process-based upscale queue
-        queue_dir = get_data_dir() / "queue"
-        self.upscale_queue = ProcessUpscaleQueue(queue_dir)
+        with profile_phase("Initializing ProcessUpscaleQueue"):
+            queue_dir = get_data_dir() / "queue"
+            self.upscale_queue = ProcessUpscaleQueue(queue_dir)
 
         # Connect queue signals to show/hide spinner
         self.upscale_queue.task_added.connect(self._on_task_added)
@@ -350,26 +378,31 @@ class MainWindow(QMainWindow):
         self.upscale_queue_window = None
 
         # Create media viewer (initially hidden)
-        self.media_viewer = MediaViewer(
-            db_manager=self.db_manager
-        )  # Create without parent to control positioning
-        self.media_viewer.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.media_viewer.closed.connect(self.on_media_viewer_closed)
-        self.media_viewer.media_changed.connect(self.on_viewer_media_changed)
-        self.media_viewer.delete_requested.connect(
-            lambda media: self._confirm_and_delete_media(media, from_viewer=True)
-        )
-        self.media_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
+        with profile_phase("Creating MediaViewer"):
+            self.media_viewer = MediaViewer(
+                db_manager=self.db_manager
+            )  # Create without parent to control positioning
+            self.media_viewer.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.media_viewer.closed.connect(self.on_media_viewer_closed)
+            self.media_viewer.media_changed.connect(self.on_viewer_media_changed)
+            self.media_viewer.delete_requested.connect(
+                lambda media: self._confirm_and_delete_media(media, from_viewer=True)
+            )
+            self.media_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
 
         # Create slideshow viewer (initially hidden)
-        self.slideshow_viewer = SlideshowViewer(db_manager=self.db_manager)
-        self.slideshow_viewer.closed.connect(self.on_slideshow_closed)
-        self.slideshow_viewer.media_changed.connect(self.on_viewer_media_changed)
-        self.slideshow_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
+        with profile_phase("Creating SlideshowViewer"):
+            self.slideshow_viewer = SlideshowViewer(db_manager=self.db_manager)
+            self.slideshow_viewer.closed.connect(self.on_slideshow_closed)
+            self.slideshow_viewer.media_changed.connect(self.on_viewer_media_changed)
+            self.slideshow_viewer.favorite_toggled.connect(
+                self.on_viewer_favorite_toggled
+            )
 
         # Create central widget and main layout
+        log_startup("  Creating central widget and layout...")
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -379,16 +412,19 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.main_splitter)
 
         # Left panel - Filters
-        filter_panel = self._create_filter_panel()
-        self.main_splitter.addWidget(filter_panel)
+        with profile_phase("Creating filter panel"):
+            filter_panel = self._create_filter_panel()
+            self.main_splitter.addWidget(filter_panel)
 
         # Middle panel - Thumbnails
-        thumbnail_panel = self._create_thumbnail_panel()
-        self.main_splitter.addWidget(thumbnail_panel)
+        with profile_phase("Creating thumbnail panel"):
+            thumbnail_panel = self._create_thumbnail_panel()
+            self.main_splitter.addWidget(thumbnail_panel)
 
         # Right panel - Metadata
-        metadata_panel = self._create_metadata_panel()
-        self.main_splitter.addWidget(metadata_panel)
+        with profile_phase("Creating metadata panel"):
+            metadata_panel = self._create_metadata_panel()
+            self.main_splitter.addWidget(metadata_panel)
 
         # Restore splitter sizes from config or use defaults
         splitter_sizes = self.config.get("splitter_sizes", [])
@@ -413,10 +449,12 @@ class MainWindow(QMainWindow):
         self.main_splitter.splitterMoved.connect(self.on_splitter_moved)
 
         # Create menu bar
-        self._create_menu_bar()
+        with profile_phase("Creating menu bar"):
+            self._create_menu_bar()
 
         # Create toolbar
-        self._create_toolbar()
+        with profile_phase("Creating toolbar"):
+            self._create_toolbar()
 
         # Show spinner if there are pending tasks from previous session
         pending_task = self.upscale_queue.get_next_pending()
@@ -437,8 +475,10 @@ class MainWindow(QMainWindow):
 
         # Initialize Open action states
         self._update_open_actions_state()
+        log_startup("MainWindow.__init__: Complete")
 
     def _create_filter_panel(self) -> QWidget:
+        log_startup("    Creating FiltersPanel widget...")
         self.filters_panel = FiltersPanel()
 
         # Set maximum width constraint
@@ -451,6 +491,7 @@ class MainWindow(QMainWindow):
         self.filters_panel.set_refresh_callback(self.refresh_filters)
 
         # Load initial filter data
+        log_startup("    Loading initial filter data from database...")
         self.refresh_filters()
 
         return self.filters_panel
@@ -1311,11 +1352,9 @@ class MainWindow(QMainWindow):
     def load_all_media(self):
         """Load all media from database."""
         try:
-            self.all_media = self.db_manager.get_all_media()
-            # Load favorite status from database
-            self.db_manager.load_favorite_status(self.all_media)
-            # Load playback speeds from database
-            self.db_manager.load_playback_speed(self.all_media)
+            # Use optimized single-query method that fetches data, is_favorite,
+            # and playback_speed together (eliminates N+1 query problem)
+            self.all_media = self.db_manager.get_all_media_with_details()
             # Apply current sorting
             self._apply_sorting()
             print(f"Loaded {len(self.all_media)} media items")
@@ -1887,16 +1926,17 @@ class MainWindow(QMainWindow):
         failed_files = []
 
         try:
+            # 1. Batch delete from database (single transaction - much faster)
+            file_paths = [media.file_path for media in media_list]
+            self.db_manager.delete_media_batch(file_paths)
+
+            # 2. Process file operations for each media
+            deleted_paths = set()
             for media in media_list:
                 try:
                     file_path = media.file_path
 
-                    # 1. Delete from database
-                    db_success = self.db_manager.delete_media(file_path)
-                    if not db_success:
-                        print(f"Warning: Media not found in database: {file_path}")
-
-                    # 2. Move thumbnail to trash
+                    # Move thumbnail to trash
                     if self.thumbnail_cache:
                         thumbnail_path = self.thumbnail_cache.get_thumbnail_path(
                             file_path
@@ -1908,25 +1948,29 @@ class MainWindow(QMainWindow):
                             except Exception as e:
                                 print(f"Failed to move thumbnail to trash: {e}")
 
-                    # 3. Move media file to trash
+                    # Move media file to trash
                     if file_path.exists():
                         try:
                             self._move_to_trash(file_path)
                             print(f"Moved media file to trash: {file_path}")
                             deleted_count += 1
+                            deleted_paths.add(file_path)
                         except Exception as e:
                             print(f"Failed to move media file to trash: {e}")
                             failed_files.append(file_path.name)
                             continue
-
-                    # 4. Remove from all_media list
-                    self.all_media = [
-                        m for m in self.all_media if m.file_path != file_path
-                    ]
+                    else:
+                        # File already gone, still count as deleted from DB
+                        deleted_paths.add(file_path)
 
                 except Exception as e:
                     print(f"Error deleting {media.file_name}: {e}")
                     failed_files.append(media.file_name)
+
+            # 3. Batch update all_media list (single list comprehension)
+            self.all_media = [
+                m for m in self.all_media if m.file_path not in deleted_paths
+            ]
 
             # 5. Update filters and view once after all deletions
             self.refresh_filters()
@@ -2119,8 +2163,18 @@ class MainWindow(QMainWindow):
                 # Use start command to open with default application
                 subprocess.run(["start", str(file_path)], shell=True, check=True)
             elif system == "Linux":
-                # Use xdg-open to open with default application
-                subprocess.run(["xdg-open", str(file_path)], check=True)
+                # Check if running in WSL (Windows Subsystem for Linux)
+                is_wsl = self._is_wsl()
+
+                if is_wsl:
+                    # In WSL, convert path to Windows format and use Windows commands
+                    windows_path = self._convert_wsl_path_to_windows(file_path)
+                    subprocess.run(
+                        ["cmd.exe", "/c", "start", "", windows_path], check=True
+                    )
+                else:
+                    # Use xdg-open to open with default application
+                    subprocess.run(["xdg-open", str(file_path)], check=True)
             else:
                 raise OSError(f"Unsupported platform: {system}")
 
@@ -2167,19 +2221,29 @@ class MainWindow(QMainWindow):
                 # Don't use check=True as Windows explorer can return non-zero even on success
                 subprocess.run(["explorer", str(directory_path)])
             elif system == "Linux":
-                # Try common Linux file managers
-                try:
-                    subprocess.run(["xdg-open", str(directory_path)], check=True)
-                except subprocess.CalledProcessError:
-                    # Fallback to common file managers
-                    for fm in ["nautilus", "dolphin", "thunar", "pcmanfm"]:
-                        try:
-                            subprocess.run([fm, str(directory_path)], check=True)
-                            break
-                        except (subprocess.CalledProcessError, FileNotFoundError):
-                            continue
-                    else:
-                        raise RuntimeError("No suitable file manager found on Linux")
+                # Check if running in WSL (Windows Subsystem for Linux)
+                is_wsl = self._is_wsl()
+
+                if is_wsl:
+                    # In WSL, convert path to Windows format and use explorer.exe
+                    windows_path = self._convert_wsl_path_to_windows(directory_path)
+                    subprocess.run(["explorer.exe", windows_path])
+                else:
+                    # Try common Linux file managers
+                    try:
+                        subprocess.run(["xdg-open", str(directory_path)], check=True)
+                    except subprocess.CalledProcessError:
+                        # Fallback to common file managers
+                        for fm in ["nautilus", "dolphin", "thunar", "pcmanfm"]:
+                            try:
+                                subprocess.run([fm, str(directory_path)], check=True)
+                                break
+                            except (subprocess.CalledProcessError, FileNotFoundError):
+                                continue
+                        else:
+                            raise RuntimeError(
+                                "No suitable file manager found on Linux"
+                            )
             else:
                 raise OSError(f"Unsupported platform: {system}")
 
@@ -2189,6 +2253,31 @@ class MainWindow(QMainWindow):
             raise RuntimeError(f"Failed to open directory with file manager: {e}")
         except Exception as e:
             raise RuntimeError(f"Unexpected error opening directory: {e}")
+
+    def _is_wsl(self) -> bool:
+        """Check if running in Windows Subsystem for Linux (WSL)."""
+        try:
+            # Check for WSL by looking at /proc/version
+            with open("/proc/version", "r") as f:
+                version_info = f.read().lower()
+                return "microsoft" in version_info or "wsl" in version_info
+        except Exception:
+            return False
+
+    def _convert_wsl_path_to_windows(self, path: Path) -> str:
+        """Convert a WSL path to Windows format using wslpath."""
+        try:
+            result = subprocess.run(
+                ["wslpath", "-w", str(path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            windows_path = result.stdout.strip()
+            return windows_path
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to convert WSL path to Windows: {e}")
+            raise RuntimeError(f"Failed to convert WSL path: {path}")
 
     def _update_open_actions_state(self):
         """Update the Open and Open Folder action enabled/disabled states."""
@@ -2406,6 +2495,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    from metascan.utils.startup_profiler import log_startup_complete
+
+    log_startup("main(): Creating QApplication")
     app = QApplication(sys.argv)
 
     # Fix for Windows DirectWrite font issues
@@ -2416,8 +2508,11 @@ def main():
         default_font = QFont("Segoe UI", 9)  # Standard Windows font
         app.setFont(default_font)
 
+    log_startup("main(): Creating MainWindow")
     window = MainWindow()
+    log_startup("main(): Showing MainWindow")
     window.show()
+    log_startup_complete()
     sys.exit(app.exec())
 
 

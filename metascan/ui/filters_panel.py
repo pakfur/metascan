@@ -14,13 +14,17 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Optional
 
 from metascan.ui.path_filter_tree import PathFilterTree
 
 
 class FilterSection(QFrame):
-    """Individual filter section with collapsible content."""
+    """Individual filter section with collapsible content.
+
+    Uses lazy loading to defer checkbox creation until the section is first expanded.
+    This significantly improves startup performance when there are many filter items.
+    """
 
     selection_changed = pyqtSignal()
 
@@ -31,14 +35,24 @@ class FilterSection(QFrame):
         self.section_name = section_name
         self.items_list = filter_items
         self.all_items = filter_items.copy()  # Keep original list for filtering
-        self.is_expanded = True
+        self.is_expanded = False  # Start collapsed for lazy loading
         self.checkboxes: Dict[str, QCheckBox] = {}
+        self.toggleable_widget: Optional[QWidget] = (
+            None  # Widget to show/hide when toggling
+        )
+        self._content_initialized = False  # Track if checkboxes have been created
 
         self.setFrameStyle(QFrame.Shape.Box)
         self.setLineWidth(1)
-        self.setup_ui()
 
-    def setup_ui(self):
+        # Set size policy to expand vertically with minimum height
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(100)
+
+        self._setup_header()
+
+    def _setup_header(self):
+        """Set up only the header and scroll area container - defer checkbox creation."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -49,11 +63,11 @@ class FilterSection(QFrame):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(0)
 
-        # Header button
+        # Header button - start collapsed
         self.header_button = QPushButton()
         self.header_button.setCheckable(True)
         self.header_button.setText(
-            f"▼ {self.section_name.title()} ({len(self.items_list)})"
+            f"▶ {self.section_name.title()} ({len(self.items_list)})"
         )
         # Use theme styling for header button
         self.header_button.clicked.connect(self.toggle_section)
@@ -82,46 +96,68 @@ class FilterSection(QFrame):
 
         layout.addWidget(header_container)
 
-        # Content area (initially hidden)
+        # Content area - create container but don't populate with checkboxes yet
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(10, 5, 10, 5)
         self.content_layout.setSpacing(2)
 
-        # Add checkboxes for each filter item
+        # Content widget should size itself based on checkboxes (fixed height each)
+        self.content_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.content_widget)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Scroll area expands to show more items as panel grows
+        scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
+        layout.addWidget(scroll_area, 1)  # Stretch factor to expand
+        self.toggleable_widget = scroll_area
+
+        # Start collapsed for lazy loading
+        if self.toggleable_widget:
+            self.toggleable_widget.setVisible(False)
+        self.header_button.setChecked(False)
+
+    def _create_checkboxes(self):
+        """Create checkbox widgets - called lazily on first expand."""
+        if self._content_initialized:
+            return
+
         for item in self.items_list:
             checkbox = QCheckBox(f"{item['key']} ({item['count']})")
             checkbox.setObjectName(item["key"])  # Store the key for easy retrieval
             checkbox.stateChanged.connect(self.on_checkbox_changed)
 
-            # Ensure proper minimum height for checkbox to prevent text compression
+            # Ensure fixed height for checkbox - don't expand vertically
             checkbox.setMinimumHeight(20)
-            # Use theme styling for checkbox
+            checkbox.setMaximumHeight(30)
+            checkbox.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
 
             self.checkboxes[item["key"]] = checkbox
             self.content_layout.addWidget(checkbox)
 
-        # Add content to scroll area if there are many items
-        if len(self.items_list) > 10:
-            scroll_area = QScrollArea()
-            scroll_area.setWidget(self.content_widget)
-            scroll_area.setWidgetResizable(True)
-            scroll_area.setMaximumHeight(200)  # Limit height
-            scroll_area.setHorizontalScrollBarPolicy(
-                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            )
-            layout.addWidget(scroll_area)
-        else:
-            layout.addWidget(self.content_widget)
+        self._content_initialized = True
 
-        # Initially show content (expanded by default)
-        self.content_widget.setVisible(True)
-        self.header_button.setChecked(True)
+    def setup_ui(self):
+        """Legacy method for compatibility - now handled by _setup_header."""
+        pass
 
     def toggle_section(self):
         """Toggle the expanded/collapsed state of the section."""
+        # Create checkboxes on first expand (lazy loading)
+        if not self._content_initialized and not self.is_expanded:
+            self._create_checkboxes()
+
         self.is_expanded = not self.is_expanded
-        self.content_widget.setVisible(self.is_expanded)
+        if self.toggleable_widget:
+            self.toggleable_widget.setVisible(self.is_expanded)
 
         # Update header button text and icon
         icon = "▼" if self.is_expanded else "▶"
@@ -172,6 +208,30 @@ class FilterSection(QFrame):
 
     def filter_items(self, filter_text: str):
         """Filter displayed items based on text."""
+        # Filter items
+        if filter_text:
+            filtered_items = [
+                item
+                for item in self.all_items
+                if item["key"].lower().startswith(filter_text.lower())
+            ]
+        else:
+            filtered_items = self.all_items
+
+        # Update items_list for display
+        self.items_list = filtered_items
+
+        # Update header count
+        icon = "▼" if self.is_expanded else "▶"
+        self.header_button.setText(
+            f"{icon} {self.section_name.title()} ({len(filtered_items)})"
+        )
+
+        # If content hasn't been initialized yet, just update the items list
+        # Checkboxes will be created with filtered items on first expand
+        if not self._content_initialized:
+            return
+
         # Store current selections
         current_selections = self.get_selected_items()
 
@@ -191,28 +251,18 @@ class FilterSection(QFrame):
                 if widget:
                     widget.deleteLater()
 
-        # Filter items
-        if filter_text:
-            filtered_items = [
-                item
-                for item in self.all_items
-                if item["key"].lower().startswith(filter_text.lower())
-            ]
-        else:
-            filtered_items = self.all_items
-
-        # Update items_list for display
-        self.items_list = filtered_items
-
         # Recreate checkboxes with filtered items
         for item in filtered_items:
             checkbox = QCheckBox(f"{item['key']} ({item['count']})")
             checkbox.setObjectName(item["key"])  # Store the key for easy retrieval
             checkbox.stateChanged.connect(self.on_checkbox_changed)
 
-            # Ensure proper minimum height for checkbox to prevent text compression
+            # Ensure fixed height for checkbox - don't expand vertically
             checkbox.setMinimumHeight(20)
-            # Use theme styling for checkbox
+            checkbox.setMaximumHeight(30)
+            checkbox.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
 
             # Restore selection if it was selected before
             if item["key"] in current_selections:
@@ -225,15 +275,10 @@ class FilterSection(QFrame):
         has_selection = any(cb.isChecked() for cb in self.checkboxes.values())
         self.clear_button.setVisible(has_selection)
 
-        # Update header count
-        icon = "▼" if self.is_expanded else "▶"
-        self.header_button.setText(
-            f"{icon} {self.section_name.title()} ({len(filtered_items)})"
-        )
-
         # Restore expansion state
         if was_expanded:
-            self.content_widget.setVisible(True)
+            if self.toggleable_widget:
+                self.toggleable_widget.setVisible(True)
             self.is_expanded = True
             self.header_button.setChecked(True)
 
@@ -310,8 +355,11 @@ class FiltersPanel(QWidget):
         self.path_filter_tree.path_cleared.connect(self.on_path_filter_cleared)
         main_layout.addWidget(self.path_filter_tree)
 
-        # Prompt filter text input
+        # Prompt filter text input - fixed at top of filter sections
         prompt_filter_container = QWidget()
+        prompt_filter_container.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         prompt_filter_layout = QVBoxLayout(prompt_filter_container)
         prompt_filter_layout.setContentsMargins(5, 5, 5, 5)
         prompt_filter_layout.setSpacing(2)
@@ -328,11 +376,15 @@ class FiltersPanel(QWidget):
 
         main_layout.addWidget(prompt_filter_container)
 
-        # Scroll area for filter sections
+        # Scroll area for filter sections - expands to fill available space
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        # Set size policy to expand and fill available vertical space
+        self.scroll_area.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
         )
 
         self.scroll_widget = QWidget()
@@ -341,10 +393,8 @@ class FiltersPanel(QWidget):
         self.scroll_layout.setSpacing(2)
 
         self.scroll_area.setWidget(self.scroll_widget)
-        main_layout.addWidget(self.scroll_area)
-
-        # Add stretch to push everything to top
-        self.scroll_layout.addStretch()
+        # Add with stretch factor to expand proportionally
+        main_layout.addWidget(self.scroll_area, 1)
 
     def update_filters(self, filter_data: Dict[str, List[Dict[str, Any]]]):
         """Update the filter sections with new data."""

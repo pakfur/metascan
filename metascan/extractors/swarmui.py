@@ -92,9 +92,11 @@ class SwarmUIExtractor(MetadataExtractor):
                                     {
                                         "error_type": "JSONDecodeError",
                                         "error_message": str(e),
-                                        "raw_data": comment[:500]
-                                        if isinstance(comment, str)
-                                        else str(comment)[:500],
+                                        "raw_data": (
+                                            comment[:500]
+                                            if isinstance(comment, str)
+                                            else str(comment)[:500]
+                                        ),
                                     }
                                 )
                                 result["parsing_errors"] = json_parsing_errors
@@ -413,10 +415,12 @@ class SwarmUIExtractor(MetadataExtractor):
                 prompt_text = re.sub(r"\s+\w*$", "", prompt_text).strip()
                 prompt_text = re.sub(
                     r"\w*$",
-                    lambda m: ""
-                    if len(m.group()) < 4
-                    and not m.group().endswith((".", ",", "!", "?"))
-                    else m.group(),
+                    lambda m: (
+                        ""
+                        if len(m.group()) < 4
+                        and not m.group().endswith((".", ",", "!", "?"))
+                        else m.group()
+                    ),
                     prompt_text,
                 ).strip()
                 if len(prompt_text) > 5:  # Only use if we have meaningful content
