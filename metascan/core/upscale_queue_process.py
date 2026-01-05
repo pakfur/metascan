@@ -394,7 +394,7 @@ class ProcessUpscaleQueue(QObject):
 
             for task_id, task_data in queue_data["tasks"].items():
                 if task_data.get("status") == "processing":
-                    claimed_at = task_data.get("claimed_at", 0)
+                    claimed_at = task_data.get("claimed_at") or 0
                     if claimed_at > 0 and now - claimed_at > timeout:
                         # Task has been processing too long, reset it
                         task_data["status"] = "pending"
@@ -1009,6 +1009,11 @@ class ProcessUpscaleQueue(QObject):
             try:
                 task_id = progress_file.stem.replace("progress_", "")
 
+                # Check if file still exists - it may have been cleaned up between
+                # glob and now (race condition with _cleanup_task_files)
+                if not progress_file.exists():
+                    continue
+
                 with open(progress_file, "r") as f:
                     progress_data = json.load(f)
 
@@ -1016,6 +1021,17 @@ class ProcessUpscaleQueue(QObject):
                 lock_fh = self._acquire_lock(timeout=5.0)
                 queue_data = self._read_queue_file()
                 if task_id in queue_data["tasks"]:
+                    current_status = queue_data["tasks"][task_id].get("status")
+
+                    # Skip if task is already in a terminal state - prevents duplicate signals
+                    # when _handle_process_completion has already processed this task
+                    if current_status in [
+                        UpscaleStatus.COMPLETED.value,
+                        UpscaleStatus.FAILED.value,
+                        UpscaleStatus.CANCELLED.value,
+                    ]:
+                        continue
+
                     queue_data["tasks"][task_id]["progress"] = progress_data.get(
                         "progress", 0
                     )
@@ -1028,6 +1044,10 @@ class ProcessUpscaleQueue(QObject):
                     task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
                     self.task_updated.emit(task)
 
+            except FileNotFoundError:
+                # File was deleted between glob/exists check and open - this is expected
+                # when _cleanup_task_files runs concurrently. Silently skip.
+                pass
             except Exception as e:
                 self.logger.error(
                     f"Failed to update progress from {progress_file}: {e}"

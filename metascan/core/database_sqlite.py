@@ -219,6 +219,33 @@ class DatabaseManager:
 
         return media_list
 
+    def get_media_with_details(self, file_path: Path) -> Optional[Media]:
+        """Load a single media item with favorite status and playback speed.
+
+        Args:
+            file_path: Path to the media file
+
+        Returns:
+            Media object with is_favorite and playback_speed set, or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT data, is_favorite, playback_speed FROM media WHERE file_path = ?",
+                    (str(file_path),),
+                ).fetchone()
+
+                if row:
+                    media = Media.from_json_fast(row["data"])
+                    media.is_favorite = bool(row["is_favorite"])
+                    if row["playback_speed"] is not None:
+                        media.playback_speed = float(row["playback_speed"])
+                    return media
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get media with details {file_path}: {e}")
+            return None
+
     def delete_media(self, file_path: Path) -> bool:
         try:
             with self.lock:

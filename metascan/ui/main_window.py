@@ -331,6 +331,9 @@ class MainWindow(QMainWindow):
         )
         self.favorites_active = False  # Track if favorites filter is active
         self.all_media = []  # Cache of all media for filtering
+        self._processed_upscale_tasks = (
+            set()
+        )  # Track processed upscale task IDs to avoid duplicates
 
         # Initialize thumbnail cache for metadata panel
         with profile_phase("Initializing ThumbnailCache"):
@@ -894,6 +897,10 @@ class MainWindow(QMainWindow):
 
         # If this task completed successfully, update the database with new technical metadata
         if task.status.value == "completed":
+            # Guard against duplicate signals - only process each completed task once
+            if task.id in self._processed_upscale_tasks:
+                return
+            self._processed_upscale_tasks.add(task.id)
             self._update_upscaled_media(task)
 
     def _update_upscaled_media(self, task):
@@ -949,7 +956,7 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     self.logger.warning(f"Could not open video: {file_path}")
-                    self.load_all_media()  # Fallback to full rescan
+                    # Can't get video info - skip update, data in DB is still valid
                     return
             else:
                 # For images, use PIL to get dimensions
@@ -972,22 +979,78 @@ class MainWindow(QMainWindow):
                 self.logger.info(
                     f"Updated file information for upscaled {task.file_type}: {file_path.name}"
                 )
-                # Refresh the view to show updated file information
-                self.load_all_media()
+                # Update in-memory list instead of full reload
+                self._update_single_media_item(file_path)
             else:
                 self.logger.warning(
                     f"Failed to update database for {file_path.name}, rescanning..."
                 )
                 # Fallback to full rescan if update failed
-                self.load_all_media()
+                self._update_single_media_item(file_path)
 
         except Exception as e:
             self.logger.error(f"Error updating upscaled media: {e}")
             import traceback
 
             self.logger.debug(f"Traceback: {traceback.format_exc()}")
-            # Fallback to full rescan on error
-            self.load_all_media()
+            # Fallback to full rescan on error - only if we really need it
+            self._update_single_media_item(file_path)
+
+    def _update_single_media_item(self, file_path: Path) -> None:
+        """
+        Update a single media item in the in-memory list without reloading everything.
+        This is much faster than load_all_media() for single-item updates.
+        """
+        try:
+            # Get the updated media from database
+            updated_media = self.db_manager.get_media_with_details(file_path)
+            if not updated_media:
+                self.logger.warning(f"Could not get updated media for {file_path}")
+                return
+
+            # Find and update in all_media list
+            file_path_str = str(file_path)
+            updated = False
+            for i, media in enumerate(self.all_media):
+                if str(media.file_path) == file_path_str:
+                    self.all_media[i] = updated_media
+                    updated = True
+                    break
+
+            if not updated:
+                self.logger.debug(f"Media not found in list, adding: {file_path}")
+                self.all_media.append(updated_media)
+
+            # Update thumbnail view's internal lists
+            self._update_thumbnail_view_item(file_path_str, updated_media)
+
+            # Note: Thumbnail cache uses file mtime/size in hash, so it will
+            # automatically regenerate the thumbnail when the file is accessed
+
+            self.logger.debug(f"Updated single media item: {file_path.name}")
+
+        except Exception as e:
+            self.logger.error(f"Error updating single media item: {e}")
+            # Don't fall back to full reload - the data is already in DB
+
+    def _update_thumbnail_view_item(self, file_path_str: str, updated_media) -> None:
+        """Update a single item in the thumbnail view's internal lists."""
+        try:
+            # Update in thumbnail view's media_list
+            scroll_area = self.thumbnail_view.scroll_area
+            for i, media in enumerate(scroll_area.media_list):
+                if str(media.file_path) == file_path_str:
+                    scroll_area.media_list[i] = updated_media
+                    break
+
+            # Update in filtered_media if present
+            for i, media in enumerate(scroll_area.filtered_media):
+                if str(media.file_path) == file_path_str:
+                    scroll_area.filtered_media[i] = updated_media
+                    break
+
+        except Exception as e:
+            self.logger.error(f"Error updating thumbnail view item: {e}")
 
     def _on_task_removed(self, task_id):
         """Handle when a task is removed from the queue."""
