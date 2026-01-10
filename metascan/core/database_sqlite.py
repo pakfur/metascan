@@ -7,6 +7,7 @@ from datetime import datetime
 from threading import Lock
 
 from metascan.utils.startup_profiler import log_startup, profile_phase
+from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
 from metascan.core.prompt_tokenizer import PromptTokenizer
 
@@ -115,13 +116,15 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
+                    # Convert file_path to POSIX format for storage
+                    posix_path = to_posix_path(media.file_path)
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
                         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
-                            str(media.file_path),
+                            posix_path,
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
                             media.playback_speed,
@@ -140,6 +143,8 @@ class DatabaseManager:
         with self.batch_writer() as conn:
             for media in media_list:
                 try:
+                    # Convert file_path to POSIX format for storage
+                    posix_path = to_posix_path(media.file_path)
                     # Save media with favorite status
                     conn.execute(
                         """
@@ -147,7 +152,7 @@ class DatabaseManager:
                         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                         (
-                            str(media.file_path),
+                            posix_path,
                             media.to_json(),  # type: ignore[attr-defined]
                             1 if media.is_favorite else 0,
                             media.playback_speed,
@@ -166,8 +171,10 @@ class DatabaseManager:
     def get_media(self, file_path: Path) -> Optional[Media]:
         try:
             with self._get_connection() as conn:
+                # Convert to POSIX format for database lookup
+                posix_path = to_posix_path(file_path)
                 row = conn.execute(
-                    "SELECT data FROM media WHERE file_path = ?", (str(file_path),)
+                    "SELECT data FROM media WHERE file_path = ?", (posix_path,)
                 ).fetchone()
 
                 if row:
@@ -230,9 +237,11 @@ class DatabaseManager:
         """
         try:
             with self._get_connection() as conn:
+                # Convert to POSIX format for database lookup
+                posix_path = to_posix_path(file_path)
                 row = conn.execute(
                     "SELECT data, is_favorite, playback_speed FROM media WHERE file_path = ?",
-                    (str(file_path),),
+                    (posix_path,),
                 ).fetchone()
 
                 if row:
@@ -250,9 +259,11 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(file_path)
                     # Delete from media table (indices will cascade delete)
                     cursor = conn.execute(
-                        "DELETE FROM media WHERE file_path = ?", (str(file_path),)
+                        "DELETE FROM media WHERE file_path = ?", (posix_path,)
                     )
                     conn.commit()
                     return cursor.rowcount > 0  # type: ignore[no-any-return]
@@ -274,8 +285,8 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
-                    # Use executemany for batch deletion
-                    path_tuples = [(str(fp),) for fp in file_paths]
+                    # Convert paths to POSIX format for database lookup
+                    path_tuples = [(to_posix_path(fp),) for fp in file_paths]
                     conn.executemany(
                         "DELETE FROM media WHERE file_path = ?", path_tuples
                     )
@@ -289,7 +300,8 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.execute("SELECT file_path FROM media")
-                return {row["file_path"] for row in cursor}
+                # Convert paths from POSIX storage format to native format
+                return {to_native_path(row["file_path"]) for row in cursor}
         except Exception as e:
             logger.error(f"Failed to get existing file paths: {e}")
             return set()
@@ -299,24 +311,27 @@ class DatabaseManager:
             with self._get_connection() as conn:
                 rows = conn.execute(
                     """
-                    SELECT DISTINCT file_path 
-                    FROM indices 
+                    SELECT DISTINCT file_path
+                    FROM indices
                     WHERE index_type = ? AND index_key = ?
                 """,
                     (index_type, term.lower()),
                 )
 
-                return {row["file_path"] for row in rows}
+                # Convert paths from POSIX storage format to native format
+                return {to_native_path(row["file_path"]) for row in rows}
         except Exception as e:
             logger.error(f"Index search failed for {index_type}:{term}: {e}")
             return set()
 
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
-        conn.execute("DELETE FROM indices WHERE file_path = ?", (str(media.file_path),))
+        # Use POSIX path for consistency with storage format
+        posix_path = to_posix_path(media.file_path)
+        conn.execute("DELETE FROM indices WHERE file_path = ?", (posix_path,))
 
         indices_to_insert = []
         for index_type, index_key in self._generate_indices(media):
-            indices_to_insert.append((index_type, index_key, str(media.file_path)))
+            indices_to_insert.append((index_type, index_key, posix_path))
 
         if indices_to_insert:
             conn.executemany(
@@ -338,8 +353,8 @@ class DatabaseManager:
 
         indices.append(("ext", media.file_extension))
 
-        # Add reverse index for the fully qualified file path
-        path_str = str(media.file_path).lower()
+        # Add reverse index for the fully qualified file path (in POSIX format)
+        path_str = to_posix_path(media.file_path).lower()
         indices.append(("path", path_str))
 
         for tag in media.tags:
@@ -404,10 +419,11 @@ class DatabaseManager:
                         # Get paths matching this filter type
                         if index_type == "path":
                             # Special handling for path filters - use LIKE for prefix matching
-                            path_prefix = index_keys[0].lower()
+                            # Convert path to POSIX format for database query
+                            path_prefix = to_posix_path(index_keys[0]).lower()
                             query = """
-                                SELECT DISTINCT file_path 
-                                FROM indices 
+                                SELECT DISTINCT file_path
+                                FROM indices
                                 WHERE index_type = 'path' AND index_key LIKE ?
                             """
                             rows = conn.execute(query, [f"{path_prefix}%"])
@@ -416,15 +432,15 @@ class DatabaseManager:
                             # Multiple values within same type use OR logic
                             placeholders = ",".join(["?" for _ in index_keys])
                             query = f"""
-                                SELECT DISTINCT file_path 
-                                FROM indices 
+                                SELECT DISTINCT file_path
+                                FROM indices
                                 WHERE index_type = ? AND index_key IN ({placeholders})
                             """
                             params = [index_type] + list(index_keys)
                             rows = conn.execute(query, params)
 
-                        # Get paths for this filter
-                        current_paths = {row["file_path"] for row in rows}
+                        # Get paths for this filter (convert from POSIX to native)
+                        current_paths = {to_native_path(row["file_path"]) for row in rows}
 
                         # Apply AND logic between different filter types
                         if result_set is None:
@@ -445,21 +461,23 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(file_path)
                     # Get current favorite status
                     row = conn.execute(
                         "SELECT is_favorite FROM media WHERE file_path = ?",
-                        (str(file_path),),
+                        (posix_path,),
                     ).fetchone()
 
                     if row is not None:
                         new_status = 0 if row["is_favorite"] else 1
                         conn.execute(
                             """
-                            UPDATE media 
+                            UPDATE media
                             SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
                             WHERE file_path = ?
                         """,
-                            (new_status, str(file_path)),
+                            (new_status, posix_path),
                         )
                         conn.commit()
                         return bool(new_status)
@@ -472,13 +490,15 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(file_path)
                     cursor = conn.execute(
                         """
-                        UPDATE media 
+                        UPDATE media
                         SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE file_path = ?
                     """,
-                        (1 if is_favorite else 0, str(file_path)),
+                        (1 if is_favorite else 0, posix_path),
                     )
                     conn.commit()
                     return cursor.rowcount > 0  # type: ignore[no-any-return]
@@ -490,7 +510,8 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 rows = conn.execute("SELECT file_path FROM media WHERE is_favorite = 1")
-                return {row["file_path"] for row in rows}
+                # Convert paths from POSIX storage format to native format
+                return {to_native_path(row["file_path"]) for row in rows}
         except Exception as e:
             logger.error(f"Failed to get favorite media paths: {e}")
             return set()
@@ -499,9 +520,11 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 for media in media_list:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(media.file_path)
                     row = conn.execute(
                         "SELECT is_favorite FROM media WHERE file_path = ?",
-                        (str(media.file_path),),
+                        (posix_path,),
                     ).fetchone()
                     if row:
                         media.is_favorite = bool(row["is_favorite"])
@@ -513,9 +536,11 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 for media in media_list:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(media.file_path)
                     row = conn.execute(
                         "SELECT playback_speed FROM media WHERE file_path = ?",
-                        (str(media.file_path),),
+                        (posix_path,),
                     ).fetchone()
                     if row and row["playback_speed"] is not None:
                         media.playback_speed = float(row["playback_speed"])
@@ -527,13 +552,15 @@ class DatabaseManager:
         try:
             with self.lock:
                 with self._get_connection() as conn:
+                    # Convert to POSIX format for database lookup
+                    posix_path = to_posix_path(file_path)
                     conn.execute(
                         """
                         UPDATE media
                         SET playback_speed = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE file_path = ?
                     """,
-                        (speed, str(file_path)),
+                        (speed, posix_path),
                     )
                     conn.commit()
                     return True
@@ -565,10 +592,11 @@ class DatabaseManager:
                     media.width = width
                     media.height = height
 
-                    # Update the database record
+                    # Update the database record (use POSIX format for query)
+                    posix_path = to_posix_path(file_path)
                     conn.execute(
                         """UPDATE media SET data = ? WHERE file_path = ?""",
-                        (media.to_json(), str(file_path)),  # type: ignore[attr-defined]
+                        (media.to_json(), posix_path),  # type: ignore[attr-defined]
                     )
 
                     conn.commit()
@@ -640,10 +668,11 @@ class DatabaseManager:
                     # - loras, tags, generation_data
                     # - metadata_source
 
-                    # Update the database record
+                    # Update the database record (use POSIX format for query)
+                    posix_path = to_posix_path(file_path)
                     conn.execute(
                         """UPDATE media SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?""",
-                        (media.to_json(), str(file_path)),  # type: ignore[attr-defined]
+                        (media.to_json(), posix_path),  # type: ignore[attr-defined]
                     )
 
                     conn.commit()

@@ -88,8 +88,9 @@ def get_icon_path() -> Path:
 def get_thumbnail_cache_dir() -> Path:
     """Get the thumbnail cache directory.
 
-    Always uses user's home directory for cache.
+    Uses the data directory to keep thumbnails alongside the database,
+    which simplifies cross-platform compatibility (Windows/WSL).
     """
-    cache_dir = Path.home() / ".metascan" / "thumbnails"
+    cache_dir = get_data_dir() / "thumbnails"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
