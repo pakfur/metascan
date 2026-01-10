@@ -5,7 +5,9 @@ import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
+import shutil
 import os
+import sys
 
 try:
     import ffmpeg
@@ -15,6 +17,46 @@ except ImportError:
     HAS_FFMPEG_PYTHON = False
 
 logger = logging.getLogger(__name__)
+
+
+def _find_ffmpeg() -> Optional[str]:
+    """Find ffmpeg executable on the system."""
+    # First try shutil.which (checks PATH)
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+
+    # On Windows, check common installation locations
+    if sys.platform == "win32":
+        common_paths = [
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path.home() / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path.home() / "scoop" / "apps" / "ffmpeg" / "current" / "bin" / "ffmpeg.exe",
+            Path("C:\\ffmpeg\\bin\\ffmpeg.exe"),
+        ]
+        for path in common_paths:
+            if path.exists():
+                return str(path)
+
+    return None
+
+
+# Cache the ffmpeg path lookup
+_FFMPEG_PATH: Optional[str] = None
+
+
+def get_ffmpeg_path() -> Optional[str]:
+    """Get the cached ffmpeg path, finding it on first call."""
+    global _FFMPEG_PATH
+    if _FFMPEG_PATH is None:
+        _FFMPEG_PATH = _find_ffmpeg()
+        if _FFMPEG_PATH:
+            logger.info(f"Found ffmpeg at: {_FFMPEG_PATH}")
+        else:
+            logger.warning("ffmpeg not found in PATH or common locations")
+    return _FFMPEG_PATH
 
 
 class ThumbnailCache:
@@ -178,9 +220,14 @@ class ThumbnailCache:
     ) -> bool:
         """Create video thumbnail using ffmpeg"""
         try:
+            ffmpeg_path = get_ffmpeg_path()
+            if not ffmpeg_path:
+                logger.debug("ffmpeg not found, skipping subprocess thumbnail creation")
+                return False
+
             # Extract frame at 1 second (or 10% into video if shorter)
             cmd = [
-                "ffmpeg",
+                ffmpeg_path,
                 "-i",
                 str(video_path),
                 "-vf",
@@ -208,9 +255,14 @@ class ThumbnailCache:
     ) -> Optional[Path]:
         """Fallback method for video thumbnail creation"""
         try:
+            ffmpeg_path = get_ffmpeg_path()
+            if not ffmpeg_path:
+                logger.debug("ffmpeg not found, creating placeholder thumbnail")
+                return self._create_video_placeholder(thumbnail_path)
+
             # Try simpler ffmpeg command
             cmd = [
-                "ffmpeg",
+                ffmpeg_path,
                 "-i",
                 str(video_path),
                 "-ss",

@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from metascan.utils.app_paths import get_config_path
+from metascan.utils.path_utils import to_posix_path, to_native_path
 import os
 import json
 from typing import List, Dict, Any
@@ -132,6 +133,10 @@ class ConfigDialog(QDialog):
                     config = json.load(f)
                     self.directories = config.get("directories", [])
 
+                # Convert paths from POSIX storage format to native format
+                for dir_info in self.directories:
+                    dir_info["filepath"] = to_native_path(dir_info["filepath"])
+
                 # Populate table
                 for dir_info in self.directories:
                     self._add_table_row(
@@ -152,8 +157,16 @@ class ConfigDialog(QDialog):
                 with open(self.config_file, "r") as f:
                     config = json.load(f)
 
+            # Convert paths to POSIX format for storage
+            posix_directories = []
+            for dir_info in self.directories:
+                posix_directories.append({
+                    "filepath": to_posix_path(dir_info["filepath"]),
+                    "search_subfolders": dir_info["search_subfolders"],
+                })
+
             # Update directories
-            config["directories"] = self.directories
+            config["directories"] = posix_directories
 
             # Save back to file
             with open(self.config_file, "w") as f:

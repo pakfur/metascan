@@ -297,63 +297,139 @@ class VideoPlayer(QWidget):
         )
         self.media_player.setVideoOutput(self.video_widget)
 
+        # Compact button style for video controls
+        ctrl_btn_style = """
+            QPushButton {
+                color: white;
+                background-color: transparent;
+                border: none;
+                font-size: 18px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 30);
+            }
+        """
+
         # Create playback controls
         self.play_button = QPushButton("▶")
-        self.play_button.setFixedSize(40, 30)
+        self.play_button.setFixedSize(48, 48)
+        self.play_button.setFlat(True)
+        self.play_button.setStyleSheet(ctrl_btn_style)
         self.play_button.clicked.connect(self.toggle_playback)
         self.play_button.setToolTip("Play/Pause (Space)")
 
         # Frame-by-frame navigation buttons
-        self.prev_frame_button = QPushButton("◀◀")
-        self.prev_frame_button.setFixedSize(40, 30)
-        self.prev_frame_button.setStyleSheet("padding: 2px;")
+        self.prev_frame_button = QPushButton("⏮")
+        self.prev_frame_button.setFixedSize(48, 48)
+        self.prev_frame_button.setFlat(True)
+        self.prev_frame_button.setStyleSheet(ctrl_btn_style)
         self.prev_frame_button.clicked.connect(self.previous_frame)
         self.prev_frame_button.setToolTip("Previous Frame (,)")
 
-        self.next_frame_button = QPushButton("▶▶")
-        self.next_frame_button.setFixedSize(40, 30)
-        self.next_frame_button.setStyleSheet("padding: 2px;")
+        self.next_frame_button = QPushButton("⏭")
+        self.next_frame_button.setFixedSize(48, 48)
+        self.next_frame_button.setFlat(True)
+        self.next_frame_button.setStyleSheet(ctrl_btn_style)
         self.next_frame_button.clicked.connect(self.next_frame)
         self.next_frame_button.setToolTip("Next Frame (.)")
 
         # Position slider
         self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setStyleSheet(
+            """
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: rgba(255, 255, 255, 40);
+            }
+            QSlider::handle:horizontal {
+                width: 12px;
+                margin: -4px 0;
+                background: white;
+                border-radius: 6px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(255, 255, 255, 120);
+            }
+        """
+        )
         self.position_slider.sliderMoved.connect(self.set_position)
 
         # Time label
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet("color: white; padding: 5px;")
+        self.time_label.setStyleSheet("color: rgba(255,255,255,180); font-size: 11px;")
 
         # Playback speed selector
         self.speed_selector = QComboBox()
         self.speed_selector.addItems([f"{s:g}x" for s in self.available_speeds])
-        # Format speed to match dropdown options (remove trailing zeros)
-        speed_text = f"{self.playback_speed:g}x"  # :g removes trailing zeros
+        speed_text = f"{self.playback_speed:g}x"
         self.speed_selector.setCurrentText(speed_text)
         self.speed_selector.currentTextChanged.connect(self.change_playback_speed)
-        self.speed_selector.setFixedWidth(70)
+        self.speed_selector.setFixedWidth(81)
         self.speed_selector.setStyleSheet(
-            "color: white; background-color: rgba(50, 50, 50, 200); padding: 2px;"
+            """
+            QComboBox {
+                color: rgba(255,255,255,180);
+                background-color: transparent;
+                border: none;
+                font-size: 12px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background-color: rgba(30, 30, 30, 240);
+                color: white;
+                selection-background-color: rgba(255, 255, 255, 40);
+            }
+        """
         )
         self.speed_selector.setToolTip("Playback Speed")
 
         # Volume controls
         self.mute_button = QPushButton("🔊")
-        self.mute_button.setFixedSize(40, 30)
-        self.mute_button.setStyleSheet("padding: 2px;")
+        self.mute_button.setFixedSize(48, 48)
+        self.mute_button.setStyleSheet(ctrl_btn_style.replace("14px", "12px"))
         self.mute_button.clicked.connect(self.toggle_mute)
         self.mute_button.setToolTip("Mute (M)")
 
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(int(self.audio_output.volume() * 100))
-        self.volume_slider.setFixedWidth(80)
+        self.volume_slider.setFixedWidth(64)
+        self.volume_slider.setStyleSheet(
+            """
+            QSlider::groove:horizontal {
+                height: 5px;
+                background: rgba(255, 255, 255, 40);
+            }
+            QSlider::handle:horizontal {
+                width: 16px;
+                margin: -5px 0;
+                background: white;
+                border-radius: 5px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(255, 255, 255, 120);
+            }
+        """
+        )
         self.volume_slider.valueChanged.connect(self.change_volume)
         self.volume_slider.setToolTip("Volume (↑/↓)")
 
         # Keyboard shortcuts help button
         self.shortcuts_button = QPushButton("?")
-        self.shortcuts_button.setFixedSize(30, 30)
+        self.shortcuts_button.setFixedSize(32, 32)
+        self.shortcuts_button.setStyleSheet(
+            """
+            QPushButton {
+                color: rgba(255,255,255,150);
+                background-color: transparent;
+                border: none;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                color: white;
+            }
+        """
+        )
         self.shortcuts_button.clicked.connect(self.show_keyboard_shortcuts)
         self.shortcuts_button.setToolTip("Show Keyboard Shortcuts (H)")
 
@@ -361,27 +437,29 @@ class VideoPlayer(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.video_widget, 1)  # Give it stretch factor
+        layout.addWidget(self.video_widget, 1)
 
-        # Control bar - Left section (playback controls)
+        # Control bar
         control_layout = QHBoxLayout()
-        control_layout.setContentsMargins(10, 5, 10, 5)
+        control_layout.setContentsMargins(8, 4, 8, 4)
+        control_layout.setSpacing(4)
         control_layout.addWidget(self.prev_frame_button)
         control_layout.addWidget(self.play_button)
         control_layout.addWidget(self.next_frame_button)
-        control_layout.addWidget(self.position_slider, 1)  # Give slider stretch
+        control_layout.addSpacing(4)
+        control_layout.addWidget(self.position_slider, 1)
+        control_layout.addSpacing(4)
         control_layout.addWidget(self.time_label)
-
-        # Right section (speed, volume, help)
+        control_layout.addSpacing(8)
         control_layout.addWidget(self.speed_selector)
         control_layout.addWidget(self.mute_button)
         control_layout.addWidget(self.volume_slider)
         control_layout.addWidget(self.shortcuts_button)
 
         self.control_widget = QWidget()
-        self.control_widget.setStyleSheet("background-color: rgba(0, 0, 0, 200);")
+        self.control_widget.setStyleSheet("background-color: rgba(0, 0, 0, 180);")
         self.control_widget.setLayout(control_layout)
-        self.control_widget.setFixedHeight(50)
+        self.control_widget.setFixedHeight(48)
 
         layout.addWidget(self.control_widget)
 
@@ -972,17 +1050,25 @@ class MediaViewer(QWidget):
     favorite_toggled = pyqtSignal(
         object, bool
     )  # Emits Media object and new favorite status
+    delete_with_undo_requested = pyqtSignal(
+        object
+    )  # Emits Media object for delete with undo
+    restore_requested = pyqtSignal(object)  # Emits undo data dict for restore
 
-    def __init__(self, parent=None, db_manager=None):
+    def __init__(self, parent=None, db_manager=None, thumbnail_cache=None):
         super().__init__(parent)
 
         # Database manager for persisting settings
         self.db_manager = db_manager
+        self.thumbnail_cache = thumbnail_cache
 
         # Media list and current index
         self.media_list: List[Media] = []
         self.current_index: int = -1
         self.current_media: Optional[Media] = None
+
+        # Undo state for delete operation
+        self._pending_undo: Optional[dict] = None
 
         # Setup UI
         self._setup_ui()
@@ -997,56 +1083,123 @@ class MediaViewer(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # Header with media info and close button
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(10, 10, 10, 10)
-
-        # Favorite button (star icon)
-        self.favorite_button = QPushButton("☆")
-        self.favorite_button.setFixedSize(30, 30)
-        self.favorite_button.setStyleSheet(
-            """
+        # Compact header button style
+        header_btn_style = """
             QPushButton {
                 color: white;
                 background-color: transparent;
                 border: none;
-                font-size: 24px;
-                padding: 0px;
+                font-size: 18px;
             }
             QPushButton:hover {
-                background-color: rgba(255, 255, 255, 20);
+                background-color: rgba(255, 255, 255, 25);
             }
         """
-        )
+
+        # Header bar
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        header_layout.setSpacing(6)
+
+        # Favorite button (star icon)
+        self.favorite_button = QPushButton("☆")
+        self.favorite_button.setFixedSize(48, 48)
+        self.favorite_button.setStyleSheet(header_btn_style)
         self.favorite_button.clicked.connect(self.toggle_favorite)
         header_layout.addWidget(self.favorite_button)
 
         self.info_label = QLabel()
-        self.info_label.setStyleSheet("color: white; font-size: 14px;")
+        self.info_label.setStyleSheet("color: rgba(255,255,255,200); font-size: 12px;")
         header_layout.addWidget(self.info_label)
+
+        # Undo link (hidden by default)
+        self.undo_link = QPushButton("Undo")
+        self.undo_link.setStyleSheet(
+            """
+            QPushButton {
+                color: #2196F3;
+                background-color: transparent;
+                border: none;
+                font-size: 12px;
+                text-decoration: underline;
+            }
+            QPushButton:hover { color: #64B5F6; }
+        """
+        )
+        self.undo_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.undo_link.clicked.connect(self._perform_undo)
+        self.undo_link.hide()
+        header_layout.addWidget(self.undo_link)
 
         header_layout.addStretch()
 
-        self.close_button = QPushButton("✕")
-        self.close_button.setStyleSheet(
+        # Delete button (red trashcan)
+        self.delete_button = QPushButton("🗑")
+        self.delete_button.setFixedSize(48, 48)
+        self.delete_button.setStyleSheet(
             """
             QPushButton {
-                color: white;
-                background-color: rgba(255, 255, 255, 20);
+                color: #f44336;
+                background-color: transparent;
                 border: none;
-                font-size: 20px;
-                padding: 5px 10px;
+                font-size: 18px;
             }
             QPushButton:hover {
-                background-color: rgba(255, 255, 255, 40);
+                background-color: rgba(244, 67, 54, 25);
             }
         """
         )
+        self.delete_button.setToolTip("Delete (Ctrl+D)")
+        self.delete_button.clicked.connect(self._perform_delete)
+        header_layout.addWidget(self.delete_button)
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setFixedSize(48, 48)
+        self.close_button.setStyleSheet(header_btn_style)
         self.close_button.clicked.connect(self.close_viewer)
         header_layout.addWidget(self.close_button)
 
         layout.addLayout(header_layout)
+
+        # Content area: info panel on left, media viewer on right
+        content_layout = QHBoxLayout()
+        content_layout.setContentsMargins(8, 6, 8, 6)
+        content_layout.setSpacing(6)
+
+        # Left info panel (minimal)
+        self.info_panel = QWidget()
+        self.info_panel.setFixedWidth(100)
+        self.info_panel.setStyleSheet("background-color: rgba(0, 0, 0, 160);")
+        info_panel_layout = QVBoxLayout(self.info_panel)
+        info_panel_layout.setContentsMargins(8, 8, 8, 8)
+        info_panel_layout.setSpacing(6)
+
+        value_style = "color: rgba(255,255,255,180); font-size: 11px;"
+
+        # Dimensions
+        self.dimensions_value = QLabel()
+        self.dimensions_value.setStyleSheet(value_style)
+        info_panel_layout.addWidget(self.dimensions_value)
+
+        # Media type
+        self.type_value = QLabel()
+        self.type_value.setStyleSheet(value_style)
+        info_panel_layout.addWidget(self.type_value)
+
+        # File size
+        self.size_value = QLabel()
+        self.size_value.setStyleSheet(value_style)
+        info_panel_layout.addWidget(self.size_value)
+
+        # FPS (for videos only)
+        self.fps_value = QLabel()
+        self.fps_value.setStyleSheet(value_style)
+        info_panel_layout.addWidget(self.fps_value)
+
+        info_panel_layout.addStretch()
+        content_layout.addWidget(self.info_panel)
 
         # Stacked widget for image/video display
         self.stacked_widget = QStackedWidget()
@@ -1062,61 +1215,50 @@ class MediaViewer(QWidget):
         self.video_player = VideoPlayer(db_manager=self.db_manager)
         self.stacked_widget.addWidget(self.video_player)
 
-        layout.addWidget(self.stacked_widget, 1)  # Give it stretch factor
+        content_layout.addWidget(self.stacked_widget, 1)  # Give it stretch factor
 
-        # Navigation buttons
+        layout.addLayout(content_layout, 1)
+
+        # Navigation bar
         nav_layout = QHBoxLayout()
-        nav_layout.setContentsMargins(10, 10, 10, 10)
+        nav_layout.setContentsMargins(8, 6, 8, 6)
 
-        self.prev_button = QPushButton("◀ Previous")
-        self.prev_button.setStyleSheet(
-            """
+        nav_btn_style = """
             QPushButton {
                 color: white;
-                background-color: rgba(255, 255, 255, 20);
+                background-color: transparent;
                 border: none;
-                padding: 10px 20px;
-                font-size: 14px;
+                font-size: 16px;
             }
             QPushButton:hover {
-                background-color: rgba(255, 255, 255, 40);
+                background-color: rgba(255, 255, 255, 25);
             }
             QPushButton:disabled {
-                color: gray;
-                background-color: rgba(255, 255, 255, 10);
+                color: rgba(255, 255, 255, 40);
             }
         """
-        )
+
+        self.prev_button = QPushButton("◀")
+        self.prev_button.setFixedSize(48, 32)
+        self.prev_button.setStyleSheet(nav_btn_style)
+        self.prev_button.setToolTip("Previous (Left Arrow)")
         self.prev_button.clicked.connect(self.show_previous)
         nav_layout.addWidget(self.prev_button)
 
         nav_layout.addStretch()
 
         self.position_label = QLabel()
-        self.position_label.setStyleSheet("color: white; font-size: 14px;")
+        self.position_label.setStyleSheet(
+            "color: rgba(255,255,255,150); font-size: 11px;"
+        )
         nav_layout.addWidget(self.position_label)
 
         nav_layout.addStretch()
 
-        self.next_button = QPushButton("Next ▶")
-        self.next_button.setStyleSheet(
-            """
-            QPushButton {
-                color: white;
-                background-color: rgba(255, 255, 255, 20);
-                border: none;
-                padding: 10px 20px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 40);
-            }
-            QPushButton:disabled {
-                color: gray;
-                background-color: rgba(255, 255, 255, 10);
-            }
-        """
-        )
+        self.next_button = QPushButton("▶")
+        self.next_button.setFixedSize(48, 32)
+        self.next_button.setStyleSheet(nav_btn_style)
+        self.next_button.setToolTip("Next (Right Arrow)")
         self.next_button.clicked.connect(self.show_next)
         nav_layout.addWidget(self.next_button)
 
@@ -1226,6 +1368,9 @@ class MediaViewer(QWidget):
         # Update favorite button
         self._update_favorite_button()
 
+        # Update left info panel
+        self._update_info_panel()
+
         # Update position label
         self.position_label.setText(
             f"{self.current_index + 1} / {len(self.media_list)}"
@@ -1261,6 +1406,9 @@ class MediaViewer(QWidget):
     def show_previous(self):
         """Show the previous media item."""
         if self.current_index > 0:
+            # Clear pending undo when navigating
+            self._clear_pending_undo()
+
             # Stop video if playing
             if self.current_media and self.current_media.is_video:
                 self.video_player.stop()
@@ -1271,6 +1419,9 @@ class MediaViewer(QWidget):
     def show_next(self):
         """Show the next media item."""
         if self.current_index < len(self.media_list) - 1:
+            # Clear pending undo when navigating
+            self._clear_pending_undo()
+
             # Stop video if playing
             if self.current_media and self.current_media.is_video:
                 self.video_player.stop()
@@ -1324,6 +1475,9 @@ class MediaViewer(QWidget):
 
     def close_viewer(self):
         """Close the media viewer."""
+        # Clear pending undo when closing
+        self._clear_pending_undo()
+
         # Stop video if playing
         if self.current_media and self.current_media.is_video:
             self.video_player.stop()
@@ -1358,38 +1512,101 @@ class MediaViewer(QWidget):
 
     def _update_favorite_button(self):
         """Update the favorite button icon based on current media's favorite status."""
+        base_style = """
+            QPushButton {{
+                color: {color};
+                background-color: transparent;
+                border: none;
+                font-size: 18px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 25);
+            }}
+        """
         if self.current_media and self.current_media.is_favorite:
             self.favorite_button.setText("★")
-            self.favorite_button.setStyleSheet(
-                """
-                QPushButton {
-                    color: gold;
-                    background-color: transparent;
-                    border: none;
-                    font-size: 24px;
-                    padding: 0px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 20);
-                }
-            """
-            )
+            self.favorite_button.setStyleSheet(base_style.format(color="gold"))
         else:
             self.favorite_button.setText("☆")
-            self.favorite_button.setStyleSheet(
-                """
-                QPushButton {
-                    color: white;
-                    background-color: transparent;
-                    border: none;
-                    font-size: 24px;
-                    padding: 0px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(255, 255, 255, 20);
-                }
-            """
-            )
+            self.favorite_button.setStyleSheet(base_style.format(color="white"))
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        """Format file size in bytes to human-readable format."""
+        size: float = float(size_bytes)
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def _update_info_panel(self):
+        """Update the left info panel with current media information."""
+        if not self.current_media:
+            return
+
+        # Update dimensions
+        self.dimensions_value.setText(
+            f"{self.current_media.width} x {self.current_media.height}"
+        )
+
+        # Update media type
+        self.type_value.setText("Video" if self.current_media.is_video else "Image")
+
+        # Update file size
+        self.size_value.setText(self._format_file_size(self.current_media.file_size))
+
+        # Update FPS (for videos only)
+        if self.current_media.is_video and self.current_media.frame_rate:
+            self.fps_value.show()
+            self.fps_value.setText(f"{self.current_media.frame_rate:.2f} fps")
+        else:
+            self.fps_value.hide()
+
+    def _perform_delete(self):
+        """Handle delete button click - delete without confirmation."""
+        if self.current_media:
+            # Emit signal to request delete with undo capability
+            self.delete_with_undo_requested.emit(self.current_media)
+
+    def _perform_undo(self):
+        """Handle undo link click - restore the deleted media."""
+        if self._pending_undo:
+            # Emit signal to restore the deleted media
+            self.restore_requested.emit(self._pending_undo)
+            # Clear undo state after emitting
+            self._pending_undo = None
+            self.undo_link.hide()
+
+    def _clear_pending_undo(self):
+        """Clear the pending undo state and hide the undo link."""
+        self._pending_undo = None
+        self.undo_link.hide()
+
+    def receive_undo_data(self, undo_data: dict):
+        """Receive undo data from main_window after delete operation.
+
+        Called by main_window after successfully deleting the media.
+        Stores the undo data and shows the undo link.
+        """
+        self._pending_undo = undo_data
+        self.undo_link.show()
+
+    def navigate_after_delete(self):
+        """Navigate to next/previous media after a delete operation.
+
+        Called by main_window after delete. Does not clear undo state.
+        """
+        if not self.media_list:
+            # No more media, close viewer
+            self.close_viewer()
+            return
+
+        # Adjust index if needed
+        if self.current_index >= len(self.media_list):
+            self.current_index = len(self.media_list) - 1
+
+        self.current_index = max(0, self.current_index)
+        self._display_current_media()
 
     def keyPressEvent(self, event: Optional[QKeyEvent]) -> None:
         """Handle key press events."""
