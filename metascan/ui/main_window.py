@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 
 log_startup("  Importing PyQt6.QtCore...")
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Optional
 
 log_startup("  Importing PyQt6.QtGui...")
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
@@ -59,6 +59,7 @@ from metascan.utils.app_paths import (
     get_config_path,
     get_thumbnail_cache_dir,
 )
+from metascan.utils.path_utils import to_native_path
 import os
 import json
 from pathlib import Path
@@ -127,7 +128,7 @@ class ScannerThread(QThread):
 class ScanProgressDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Scanning Media Files (Threaded)")
+        self.setWindowTitle("Scanning Media Files")
         self.setModal(True)
         self.setFixedSize(550, 250)
 
@@ -220,27 +221,64 @@ class ScanProgressDialog(QDialog):
             self.file_label.setText("Cancelling...")
 
 
+class ScanPreparationThread(QThread):
+    """Background thread to count unprocessed media files."""
+
+    preparation_complete = pyqtSignal(int, int, int)  # total_dirs, total_files, unprocessed_files
+
+    def __init__(self, directories: List[Dict], db_manager: DatabaseManager):
+        super().__init__()
+        self.directories = directories
+        self.db_manager = db_manager
+
+    def run(self):
+        SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
+
+        total_dirs = len(self.directories)
+        all_files: List[Path] = []
+
+        # Collect all media files from all directories
+        for dir_info in self.directories:
+            dir_path = Path(dir_info["filepath"])
+            if dir_path.exists():
+                recursive = dir_info.get("search_subfolders", True)
+                try:
+                    if recursive:
+                        for ext in SUPPORTED_EXTENSIONS:
+                            all_files.extend(dir_path.rglob(f"*{ext}"))
+                            all_files.extend(dir_path.rglob(f"*{ext.upper()}"))
+                    else:
+                        for ext in SUPPORTED_EXTENSIONS:
+                            all_files.extend(dir_path.glob(f"*{ext}"))
+                            all_files.extend(dir_path.glob(f"*{ext.upper()}"))
+                except Exception as e:
+                    print(f"Error counting files in {dir_path}: {e}")
+
+        total_files = len(all_files)
+
+        # Get existing paths from database
+        existing_paths = self.db_manager.get_existing_file_paths()
+
+        # Count unprocessed files
+        unprocessed_files = sum(1 for f in all_files if str(f) not in existing_paths)
+
+        self.preparation_complete.emit(total_dirs, total_files, unprocessed_files)
+
+
 class ScanConfirmationDialog(QDialog):
-    def __init__(self, total_dirs: int, total_files: int, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Confirm Scan")
         self.setModal(True)
-        self.setFixedSize(400, 200)
+        self.setFixedSize(400, 220)
 
         # Layout
         layout = QVBoxLayout(self)
 
-        # Information text
-        info_text = f"Scan Configuration:\n\n"
-        info_text += f"Directories to scan: {total_dirs}\n"
-        info_text += f"Media files to process: {total_files:,}\n\n"
-        info_text += (
-            "This operation may take several minutes depending on the number of files."
-        )
-
-        info_label = QLabel(info_text)
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        # Information label - initially shows preparing message
+        self.info_label = QLabel("Preparing scan...\n\nCounting media files and checking database...")
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
 
         # Full clean checkbox - no custom styling, use theme
         self.full_clean_checkbox = QCheckBox("Full clean and scan")
@@ -249,25 +287,46 @@ class ScanConfirmationDialog(QDialog):
             "This ensures a completely fresh start but will remove all previously scanned data."
         )
         self.full_clean_checkbox.setChecked(False)
+        self.full_clean_checkbox.setEnabled(False)  # Disabled until preparation complete
         layout.addWidget(self.full_clean_checkbox)
 
         # Question - no custom styling, use theme
-        question_label = QLabel("Do you want to continue?")
-        layout.addWidget(question_label)
+        self.question_label = QLabel("")
+        layout.addWidget(self.question_label)
 
         # Buttons
-        button_box = QDialogButtonBox(
+        self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No,
             Qt.Orientation.Horizontal,
         )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
 
-        # Set focus on Yes button
-        yes_button = button_box.button(QDialogButtonBox.StandardButton.Yes)
-        if yes_button:
-            yes_button.setFocus()
+        # Disable Yes button until preparation complete
+        self.yes_button = self.button_box.button(QDialogButtonBox.StandardButton.Yes)
+        if self.yes_button:
+            self.yes_button.setEnabled(False)
+
+    def update_with_counts(self, total_dirs: int, total_files: int, unprocessed_files: int):
+        """Update the dialog with the actual file counts."""
+        info_text = f"Scan Configuration:\n\n"
+        info_text += f"Directories to scan: {total_dirs}\n"
+        info_text += f"Total media files: {total_files:,}\n"
+        info_text += f"New files to process: {unprocessed_files:,}\n\n"
+        if unprocessed_files == 0:
+            info_text += "All files are already in the database."
+        else:
+            info_text += "This operation may take several minutes depending on the number of files."
+
+        self.info_label.setText(info_text)
+        self.question_label.setText("Do you want to continue?")
+
+        # Enable controls
+        self.full_clean_checkbox.setEnabled(True)
+        if self.yes_button:
+            self.yes_button.setEnabled(True)
+            self.yes_button.setFocus()
 
     def is_full_clean_requested(self) -> bool:
         """Check if full clean was requested."""
@@ -383,7 +442,7 @@ class MainWindow(QMainWindow):
         # Create media viewer (initially hidden)
         with profile_phase("Creating MediaViewer"):
             self.media_viewer = MediaViewer(
-                db_manager=self.db_manager
+                db_manager=self.db_manager, thumbnail_cache=self.thumbnail_cache
             )  # Create without parent to control positioning
             self.media_viewer.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -393,6 +452,8 @@ class MainWindow(QMainWindow):
             self.media_viewer.delete_requested.connect(
                 lambda media: self._confirm_and_delete_media(media, from_viewer=True)
             )
+            self.media_viewer.delete_with_undo_requested.connect(self._delete_with_undo)
+            self.media_viewer.restore_requested.connect(self._restore_deleted_media)
             self.media_viewer.favorite_toggled.connect(self.on_viewer_favorite_toggled)
 
         # Create slideshow viewer (initially hidden)
@@ -1281,26 +1342,30 @@ class MainWindow(QMainWindow):
                 self._open_config()
                 return
 
-            # Count directories and estimate media files
-            total_dirs = len(directories)
-            total_files = 0
-
-            # Count media files in each directory
+            # Convert paths from POSIX storage format to native format
             for dir_info in directories:
-                dir_path = Path(dir_info["filepath"])
-                if dir_path.exists():
-                    recursive = dir_info.get("search_subfolders", True)
-                    media_files = self._count_media_files(dir_path, recursive)
-                    total_files += media_files
+                dir_info["filepath"] = to_native_path(dir_info["filepath"])
 
-            # Show confirmation dialog with full clean option
-            confirmation_dialog = ScanConfirmationDialog(total_dirs, total_files, self)
-            if confirmation_dialog.exec() != QDialog.DialogCode.Accepted:
+            # Store directories for later use
+            self._scan_directories_list = directories
+
+            # Show confirmation dialog immediately with "Preparing..." state
+            self._confirmation_dialog = ScanConfirmationDialog(self)
+
+            # Start preparation thread to count files in background
+            self._preparation_thread = ScanPreparationThread(directories, self.db_manager)
+            self._preparation_thread.preparation_complete.connect(
+                self._on_scan_preparation_complete
+            )
+            self._preparation_thread.start()
+
+            # Show dialog (blocks until user accepts/rejects)
+            if self._confirmation_dialog.exec() != QDialog.DialogCode.Accepted:
                 print("Scan cancelled by user")
                 return
 
             # Check if full clean was requested
-            full_clean_requested = confirmation_dialog.is_full_clean_requested()
+            full_clean_requested = self._confirmation_dialog.is_full_clean_requested()
 
             if full_clean_requested:
                 print("Full clean and scan requested")
@@ -1318,7 +1383,7 @@ class MainWindow(QMainWindow):
 
             # Create and configure scanner thread
             self.scanner_thread = ScannerThread(
-                self.scanner, directories, full_scan=full_clean_requested
+                self.scanner, self._scan_directories_list, full_scan=full_clean_requested
             )
             self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
             self.scanner_thread.directory_progress_updated.connect(
@@ -1337,25 +1402,10 @@ class MainWindow(QMainWindow):
             print(f"Error during scanning: {e}")
             QMessageBox.critical(self, "Scan Error", f"Failed to start scanning: {e}")
 
-    def _count_media_files(self, directory: Path, recursive: bool) -> int:
-        """Count media files in a directory without processing them."""
-        # Use the same supported extensions as the Scanner class
-        SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
-
-        count = 0
-        try:
-            if recursive:
-                for ext in SUPPORTED_EXTENSIONS:
-                    count += len(list(directory.rglob(f"*{ext}")))
-                    count += len(list(directory.rglob(f"*{ext.upper()}")))
-            else:
-                for ext in SUPPORTED_EXTENSIONS:
-                    count += len(list(directory.glob(f"*{ext}")))
-                    count += len(list(directory.glob(f"*{ext.upper()}")))
-        except Exception as e:
-            print(f"Error counting files in {directory}: {e}")
-
-        return count
+    def _on_scan_preparation_complete(self, total_dirs: int, total_files: int, unprocessed_files: int):
+        """Handle scan preparation thread completion."""
+        if hasattr(self, "_confirmation_dialog") and self._confirmation_dialog:
+            self._confirmation_dialog.update_with_counts(total_dirs, total_files, unprocessed_files)
 
     def _on_scan_file_progress(self, current, total, file_path):
         """Handle file scan progress updates."""
@@ -1914,6 +1964,10 @@ class MainWindow(QMainWindow):
         try:
             file_path = media.file_path
 
+            # 0. Release video file handle if this is a video being played
+            if media.is_video and self.media_viewer.video_player:
+                self.media_viewer.video_player.clear_video()
+
             # 1. Delete from database
             db_success = self.db_manager.delete_media(file_path)
             if not db_success:
@@ -2113,6 +2167,204 @@ class MainWindow(QMainWindow):
         else:
             # Fallback: just delete the file
             file_path.unlink()
+
+    def _move_to_trash_with_path(self, file_path: Path) -> Optional[Path]:
+        """Move a file to the system trash and return the destination path.
+
+        Returns the path where the file was moved, or None if it couldn't be determined.
+        """
+        system = platform.system()
+
+        if system == "Darwin":  # macOS
+            trash_dir = Path.home() / ".Trash"
+            trash_dir.mkdir(exist_ok=True)
+
+            dest_path = trash_dir / file_path.name
+            counter = 1
+            while dest_path.exists():
+                stem = file_path.stem
+                suffix = file_path.suffix
+                dest_path = trash_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            shutil.move(str(file_path), str(dest_path))
+            return dest_path
+
+        elif system == "Windows":
+            # On Windows, move to a temp trash location for undo capability
+            trash_dir = Path.home() / ".metascan_trash"
+            trash_dir.mkdir(exist_ok=True)
+
+            dest_path = trash_dir / file_path.name
+            counter = 1
+            while dest_path.exists():
+                stem = file_path.stem
+                suffix = file_path.suffix
+                dest_path = trash_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            shutil.move(str(file_path), str(dest_path))
+            return dest_path
+
+        elif system == "Linux":
+            trash_dir = Path.home() / ".local" / "share" / "Trash" / "files"
+            trash_dir.mkdir(parents=True, exist_ok=True)
+
+            dest_path = trash_dir / file_path.name
+            counter = 1
+            while dest_path.exists():
+                stem = file_path.stem
+                suffix = file_path.suffix
+                dest_path = trash_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            shutil.move(str(file_path), str(dest_path))
+            return dest_path
+
+        else:
+            # Fallback: can't track the file after deletion
+            file_path.unlink()
+            return None
+
+    def _delete_with_undo(self, media):
+        """Delete media file with undo capability (no confirmation dialog)."""
+        try:
+            file_path = media.file_path
+            original_file_path = file_path
+
+            # 0. Release video file handle if this is a video being played
+            if media.is_video and self.media_viewer.video_player:
+                self.media_viewer.video_player.clear_video()
+
+            # Get thumbnail path before deletion
+            original_thumbnail_path = None
+            if self.thumbnail_cache:
+                original_thumbnail_path = self.thumbnail_cache.get_thumbnail_path(
+                    file_path
+                )
+
+            # 1. Delete from database
+            db_success = self.db_manager.delete_media(file_path)
+            if not db_success:
+                print(f"Warning: Media not found in database: {file_path}")
+
+            # 2. Move thumbnail to trash
+            thumbnail_trash_path = None
+            if self.thumbnail_cache and original_thumbnail_path:
+                if original_thumbnail_path.exists():
+                    try:
+                        thumbnail_trash_path = self._move_to_trash_with_path(
+                            original_thumbnail_path
+                        )
+                        print(f"Moved thumbnail to trash: {thumbnail_trash_path}")
+                    except Exception as e:
+                        print(f"Failed to move thumbnail to trash: {e}")
+
+            # 3. Move media file to trash
+            file_trash_path = None
+            if file_path.exists():
+                try:
+                    file_trash_path = self._move_to_trash_with_path(file_path)
+                    print(f"Moved media file to trash: {file_trash_path}")
+                except Exception as e:
+                    print(f"Failed to move media file to trash: {e}")
+                    QMessageBox.critical(
+                        self, "Delete Error", f"Failed to move file to trash: {e}"
+                    )
+                    return
+
+            # 4. Remove from all_media list
+            self.all_media = [m for m in self.all_media if m.file_path != file_path]
+
+            # 5. Update filters
+            self.refresh_filters()
+
+            # 6. Update media viewer's media list
+            current_index = self.media_viewer.current_index
+            media_list = self.media_viewer.media_list
+            media_list = [m for m in media_list if m.file_path != file_path]
+            self.media_viewer.media_list = media_list
+
+            # 7. Update thumbnail view
+            self.thumbnail_view.set_media_list(self.all_media)
+            self.apply_all_filters()
+
+            # 8. Prepare undo data
+            undo_data = {
+                "media": media,
+                "file_trash_path": file_trash_path,
+                "thumbnail_trash_path": thumbnail_trash_path,
+                "original_file_path": original_file_path,
+                "original_thumbnail_path": original_thumbnail_path,
+            }
+
+            # 9. Send undo data to media viewer and navigate to next file
+            self.media_viewer.receive_undo_data(undo_data)
+            self.media_viewer.navigate_after_delete()
+
+            print(f"Successfully deleted with undo: {file_path.name}")
+
+        except Exception as e:
+            print(f"Error deleting media: {e}")
+            QMessageBox.critical(self, "Delete Error", f"Failed to delete media: {e}")
+
+    def _restore_deleted_media(self, undo_data: dict):
+        """Restore a deleted media file from trash."""
+        try:
+            media = undo_data["media"]
+            file_trash_path = undo_data["file_trash_path"]
+            thumbnail_trash_path = undo_data["thumbnail_trash_path"]
+            original_file_path = undo_data["original_file_path"]
+            original_thumbnail_path = undo_data["original_thumbnail_path"]
+
+            # 1. Restore media file from trash
+            if file_trash_path and file_trash_path.exists():
+                shutil.move(str(file_trash_path), str(original_file_path))
+                print(f"Restored media file: {original_file_path}")
+            else:
+                print(f"Warning: Cannot restore - file not found in trash")
+                QMessageBox.warning(
+                    self,
+                    "Restore Failed",
+                    "Could not restore file - it may have been permanently deleted.",
+                )
+                return
+
+            # 2. Restore thumbnail from trash
+            if thumbnail_trash_path and thumbnail_trash_path.exists():
+                if original_thumbnail_path:
+                    shutil.move(str(thumbnail_trash_path), str(original_thumbnail_path))
+                    print(f"Restored thumbnail: {original_thumbnail_path}")
+
+            # 3. Re-add to database
+            self.db_manager.save_media(media)
+            print(f"Re-added media to database: {media.file_name}")
+
+            # 4. Add back to all_media list
+            self.all_media.append(media)
+
+            # 5. Update filters
+            self.refresh_filters()
+
+            # 6. Add back to media viewer's list
+            self.media_viewer.media_list.append(media)
+
+            # 7. Update thumbnail view
+            self.thumbnail_view.set_media_list(self.all_media)
+            self.apply_all_filters()
+
+            # 8. Navigate to restored media in viewer
+            if media in self.media_viewer.media_list:
+                self.media_viewer.current_index = self.media_viewer.media_list.index(
+                    media
+                )
+                self.media_viewer._display_current_media()
+
+            print(f"Successfully restored: {media.file_name}")
+
+        except Exception as e:
+            print(f"Error restoring media: {e}")
+            QMessageBox.critical(self, "Restore Error", f"Failed to restore media: {e}")
 
     def _perform_full_cleanup(self):
         """Perform full cleanup: truncate database and move thumbnail cache to trash"""

@@ -5,6 +5,8 @@ from typing import Dict, Any, Optional, List
 from dataclasses_json import dataclass_json, config
 from dataclasses_json.cfg import LetterCase
 
+from metascan.utils.path_utils import to_posix_path, to_native_path
+
 
 @dataclass_json
 @dataclass
@@ -16,7 +18,12 @@ class LoRA:
 @dataclass_json
 @dataclass
 class Media:
-    file_path: Path = field(metadata=config(encoder=str, decoder=Path))
+    file_path: Path = field(
+        metadata=config(
+            encoder=lambda p: to_posix_path(p),
+            decoder=lambda s: Path(to_native_path(s)),
+        )
+    )
     file_size: int
     width: int
     height: int
@@ -51,8 +58,8 @@ class Media:
     thumbnail_path: Optional[Path] = field(
         default=None,
         metadata=config(
-            encoder=lambda x: str(x) if x else None,
-            decoder=lambda x: Path(x) if x else None,
+            encoder=lambda x: to_posix_path(x) if x else None,
+            decoder=lambda x: Path(to_native_path(x)) if x else None,
         ),
     )
 
@@ -114,13 +121,13 @@ class Media:
         elif isinstance(modified_at, (int, float)):
             modified_at = datetime.fromtimestamp(modified_at)
 
-        # Parse Path fields
+        # Parse Path fields (convert from POSIX storage format to native)
         thumbnail_path = None
         if data.get("thumbnail_path"):
-            thumbnail_path = Path(data["thumbnail_path"])
+            thumbnail_path = Path(to_native_path(data["thumbnail_path"]))
 
         return Media(
-            file_path=Path(data["file_path"]),
+            file_path=Path(to_native_path(data["file_path"])),
             file_size=data["file_size"],
             width=data["width"],
             height=data["height"],

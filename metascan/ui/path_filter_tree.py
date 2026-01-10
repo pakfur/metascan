@@ -16,6 +16,8 @@ from typing import Dict, List, Set, Optional, Tuple
 from pathlib import Path
 import json
 
+from metascan.utils.path_utils import to_native_path
+
 
 class PathFilterTree(QFrame):
     """Tree widget for filtering by file paths based on configured directories."""
@@ -103,6 +105,11 @@ class PathFilterTree(QFrame):
             with open(config_path, "r") as f:
                 config = json.load(f)
                 self.config_dirs = config.get("directories", [])
+
+            # Convert paths from POSIX storage format to native format
+            for dir_config in self.config_dirs:
+                if "filepath" in dir_config:
+                    dir_config["filepath"] = to_native_path(dir_config["filepath"])
         except Exception as e:
             print(f"Error loading config: {e}")
             self.config_dirs = []
