@@ -7,6 +7,7 @@ file-based JSON communication to eliminate deadlocks and threading issues.
 """
 
 import json
+import sys
 import time
 import uuid
 import signal
@@ -320,13 +321,14 @@ class ProcessUpscaleQueue(QObject):
             # Ensure worker_count is always present and reflects current setting
             data["worker_count"] = self.max_workers
 
-            # Write to temporary file first, then atomic rename
+            # Write to temporary file first, then atomic replace
             temp_file = self.queue_file.with_suffix(".tmp")
             with open(temp_file, "w", encoding="utf-8") as f:
                 # Use ensure_ascii=False to handle unicode properly
                 # This prevents control character issues
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            temp_file.rename(self.queue_file)
+            # Use os.replace() instead of rename() - works on Windows when target exists
+            os.replace(temp_file, self.queue_file)
 
         except Exception as e:
             self.logger.error(f"Failed to write queue file: {e}")
@@ -895,11 +897,11 @@ class ProcessUpscaleQueue(QObject):
             # Task should already be marked as PROCESSING by claim_next_pending
             # But we'll ensure it's set correctly with process_id
 
-            # Start worker process
+            # Start worker process (use sys.executable to ensure same Python as main app)
             worker_script = (
                 Path(__file__).parent.parent / "workers" / "upscale_worker.py"
             )
-            cmd = ["python", str(worker_script), task.id, str(self.queue_dir)]
+            cmd = [sys.executable, str(worker_script), task.id, str(self.queue_dir)]
 
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True

@@ -254,6 +254,8 @@ class ScanPreparationThread(QThread):
                 except Exception as e:
                     print(f"Error counting files in {dir_path}: {e}")
 
+        # De-duplicate files (needed for case-insensitive file systems like Windows)
+        all_files = list(set(all_files))
         total_files = len(all_files)
 
         # Get existing paths from database
