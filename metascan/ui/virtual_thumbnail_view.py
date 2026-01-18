@@ -53,6 +53,7 @@ from PyQt6.QtGui import (
     QShortcut,
     QPaintEvent,
     QResizeEvent,
+    QShowEvent,
     QWheelEvent,
     QMouseEvent,
 )
@@ -67,7 +68,8 @@ from collections import deque
 
 from metascan.core.media import Media
 from metascan.cache.thumbnail import ThumbnailCache
-from metascan.ui.thumbnail_view import ThumbnailWidget, ThumbnailLoader
+from metascan.ui.thumbnail_view import ThumbnailWidget
+from metascan.utils.app_paths import get_thumbnail_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -302,9 +304,14 @@ class VirtualScrollArea(QScrollArea):
         self.widget_pool = WidgetPool(viewport, thumbnail_size=thumb_size)
         self.visible_widgets: Dict[int, ThumbnailWidget] = {}  # item_index -> widget
 
-        # Thumbnail loading
+        # Thumbnail loading (synchronous approach)
         self.thumbnail_cache: Optional[ThumbnailCache] = None
-        self.loader_thread: Optional[ThumbnailLoader] = None
+        self._cancel_thumbnail_render: bool = False  # Flag to stop rendering on state change
+
+        # Timer for rendering thumbnails after scroll stops (debounce)
+        self._thumbnail_render_timer = QTimer(self)
+        self._thumbnail_render_timer.setSingleShot(True)
+        self._thumbnail_render_timer.timeout.connect(self._render_visible_thumbnails)
 
         # Performance optimization
         self.update_timer = QTimer(self)
@@ -338,8 +345,8 @@ class VirtualScrollArea(QScrollArea):
         if vscroll:
             vscroll.valueChanged.connect(self._on_scroll)
 
-        # Initialize thumbnail cache with correct size
-        cache_dir = Path.home() / ".metascan" / "thumbnails"
+        # Initialize thumbnail cache with correct size (use app's cache directory)
+        cache_dir = get_thumbnail_cache_dir()
         thumb_size = (self.layout_metrics.item_width, self.layout_metrics.item_height)
         self.thumbnail_cache = ThumbnailCache(cache_dir, thumb_size)
 
@@ -351,6 +358,10 @@ class VirtualScrollArea(QScrollArea):
             media_list: List of Media objects to display
         """
         logger.info(f"Setting media list with {len(media_list)} items")
+
+        # Cancel any pending thumbnail rendering
+        self._cancel_thumbnail_render = True
+        self._thumbnail_render_timer.stop()
 
         # Clear existing state completely - this ensures deleted media is removed
         self._clear_viewport()
@@ -369,6 +380,10 @@ class VirtualScrollArea(QScrollArea):
         # Update viewport
         self._update_viewport()
 
+        # Schedule thumbnail rendering after a short delay
+        self._cancel_thumbnail_render = False
+        self._thumbnail_render_timer.start(100)
+
     def apply_filters(
         self, filtered_paths: Optional[Set[str]], preserve_selection: bool = False
     ) -> None:
@@ -379,6 +394,10 @@ class VirtualScrollArea(QScrollArea):
             filtered_paths: Set of file paths to show (empty set shows all)
             preserve_selection: If True, don't clear selections (used during view recreation)
         """
+        # Cancel any pending thumbnail rendering
+        self._cancel_thumbnail_render = True
+        self._thumbnail_render_timer.stop()
+
         # Handle None vs empty set differently
         if filtered_paths is None:
             logger.debug("No filters applied - showing all media")
@@ -405,6 +424,10 @@ class VirtualScrollArea(QScrollArea):
         self._clear_viewport()
         self.widget_pool.clear_all()
         self._update_viewport()
+
+        # Schedule thumbnail rendering after a short delay
+        self._cancel_thumbnail_render = False
+        self._thumbnail_render_timer.start(100)
 
     def _calculate_layout(self) -> None:
         """Calculate grid layout metrics based on current size and media count."""
@@ -467,6 +490,10 @@ class VirtualScrollArea(QScrollArea):
 
     def _on_scroll(self, value: int) -> None:
         """Handle scroll bar value changes."""
+        # Cancel any in-progress thumbnail rendering
+        self._cancel_thumbnail_render = True
+        self._thumbnail_render_timer.stop()
+
         vscroll = self.verticalScrollBar()
         if vscroll:
             self.viewport_info.scroll_y = vscroll.value()
@@ -474,11 +501,27 @@ class VirtualScrollArea(QScrollArea):
         if not self.update_timer.isActive():
             self.update_timer.start(16)  # ~60 FPS
 
+        # Schedule thumbnail rendering after scroll stops (debounce)
+        self._cancel_thumbnail_render = False
+        self._thumbnail_render_timer.start(150)  # Wait 150ms after last scroll
+
     def _update_viewport(self) -> None:
         """Update the viewport to show the correct widgets."""
         if not self.filtered_media:
             self._clear_viewport()
             return
+
+        # Ensure we have valid viewport dimensions
+        # If visible_height is 0, try to get current viewport dimensions
+        if self.viewport_info.visible_height <= 0:
+            viewport = self.viewport()
+            if viewport and viewport.height() > 0:
+                self.viewport_info.visible_height = viewport.height()
+            else:
+                # Viewport not yet laid out, skip this update
+                # showEvent or resizeEvent will trigger update when dimensions are valid
+                logger.debug("Skipping viewport update - viewport height not yet available")
+                return
 
         # Calculate which rows are visible
         scroll_y = self.viewport_info.scroll_y
@@ -639,7 +682,7 @@ class VirtualScrollArea(QScrollArea):
             self._position_widget(widget, index)
 
     def _load_thumbnail_for_widget(self, widget: ThumbnailWidget) -> None:
-        """Load thumbnail for a widget if not already loaded."""
+        """Load thumbnail for a widget from cache if available."""
         if not widget.pixmap() or widget.pixmap().isNull():
             # Check if thumbnail exists in cache
             if self.thumbnail_cache:
@@ -648,50 +691,75 @@ class VirtualScrollArea(QScrollArea):
                 )
                 if thumbnail_path and thumbnail_path.exists():
                     widget.load_thumbnail(thumbnail_path)
-                else:
-                    # Request thumbnail generation
-                    self._request_thumbnail_generation(widget.media)
+                # If not in cache, _render_visible_thumbnails will handle it
 
-    def _request_thumbnail_generation(self, media: Media) -> None:
-        """Request thumbnail generation for media (if not already in progress)."""
-        if self.thumbnail_cache and not self.loader_thread:
-            # Start background loader for visible items
-            visible_media = [
-                self.filtered_media[index]
-                for index in self.visible_widgets.keys()
-                if index < len(self.filtered_media)
-            ]
+    def _render_visible_thumbnails(self) -> None:
+        """Synchronously render thumbnails for visible widgets that are missing them.
 
-            if visible_media:
-                self._start_thumbnail_loader(visible_media)
+        Called after scroll stops or state changes. Checks cancel flag between each
+        thumbnail to allow immediate interruption on new scroll/state change.
+        """
+        if not self.thumbnail_cache or not self.visible_widgets:
+            return
 
-    def _start_thumbnail_loader(self, media_list: List[Media]) -> None:
-        """Start background thumbnail loading for given media list."""
-        if self.loader_thread and self.loader_thread.isRunning():
-            return  # Already loading
+        logger.debug(f"Starting thumbnail render for {len(self.visible_widgets)} visible widgets")
 
-        if self.thumbnail_cache:
-            self.loader_thread = ThumbnailLoader(media_list, self.thumbnail_cache)
-            self.loader_thread.thumbnail_ready.connect(self._on_thumbnail_ready)
-            self.loader_thread.finished.connect(self._on_loading_finished)
-            self.loader_thread.start()
+        # Get a snapshot of visible widgets to avoid modification during iteration
+        widgets_snapshot = list(self.visible_widgets.items())
 
-    def _on_thumbnail_ready(self, media: Media, thumbnail_path: Optional[Path]) -> None:
-        """Handle thumbnail ready from loader."""
-        # Find the widget for this media
-        for index, widget in self.visible_widgets.items():
-            if (
-                index < len(self.filtered_media)
-                and self.filtered_media[index].file_path == media.file_path
-            ):
-                if thumbnail_path and thumbnail_path.exists():
-                    widget.load_thumbnail(thumbnail_path)
-                break
+        for index, widget in widgets_snapshot:
+            # Check cancel flag before each thumbnail - allows immediate stop on scroll
+            if self._cancel_thumbnail_render:
+                logger.debug("Thumbnail rendering cancelled")
+                return
 
-    def _on_loading_finished(self) -> None:
-        """Handle thumbnail loading completion."""
-        self.loader_thread = None
-        logger.debug("Thumbnail loading completed")
+            # Skip if widget is no longer in visible_widgets (was removed by scroll)
+            if index not in self.visible_widgets or self.visible_widgets[index] is not widget:
+                continue
+
+            # Skip if widget already has a thumbnail (with guard for deleted widgets)
+            try:
+                if widget.pixmap() and not widget.pixmap().isNull():
+                    continue
+            except RuntimeError:
+                # Widget's C++ object was deleted, skip it
+                continue
+
+            # Skip if index is no longer valid
+            if index >= len(self.filtered_media):
+                continue
+
+            try:
+                media = self.filtered_media[index]
+                # Get or create thumbnail (this may generate it if not cached)
+                thumbnail_path = self.thumbnail_cache.get_or_create_thumbnail(
+                    media.file_path
+                )
+
+                # Check cancel flag again after potentially slow thumbnail generation
+                if self._cancel_thumbnail_render:
+                    logger.debug("Thumbnail rendering cancelled after generation")
+                    return
+
+                # Load the thumbnail into the widget if it's still visible and same widget
+                if (
+                    index in self.visible_widgets
+                    and self.visible_widgets[index] is widget
+                    and thumbnail_path
+                    and thumbnail_path.exists()
+                ):
+                    try:
+                        self.visible_widgets[index].load_thumbnail(thumbnail_path)
+                    except RuntimeError:
+                        # Widget was deleted, skip
+                        pass
+
+                # Process Qt events to keep UI responsive
+                from PyQt6.QtWidgets import QApplication
+                QApplication.processEvents()
+
+            except Exception as e:
+                logger.error(f"Failed to render thumbnail for index {index}: {e}")
 
     def _clear_viewport(self) -> None:
         """Clear all visible widgets."""
@@ -887,20 +955,43 @@ class VirtualScrollArea(QScrollArea):
             self._hide_widget_at_index(index)
             self._show_widget_at_index(index)
 
+    def showEvent(self, event: Optional[QShowEvent]) -> None:
+        """Handle show events - ensures viewport is updated when widget becomes visible."""
+        super().showEvent(event)
+        # Schedule a viewport update when the widget becomes visible
+        # This handles cases where set_media_list was called before the widget was shown
+        if self.filtered_media and not self.visible_widgets:
+            # Update scroll range to get correct viewport dimensions
+            self._update_scroll_range()
+            self.update_timer.start(50)
+
     def resizeEvent(self, event: Optional[QResizeEvent]) -> None:
         """Handle resize events."""
         super().resizeEvent(event)
+
+        # Track previous visible height to detect initial layout
+        old_visible_height = self.viewport_info.visible_height
 
         # Recalculate layout
         old_columns = self.layout_metrics.columns
         self._calculate_layout()
 
-        # Update scroll range
+        # Update scroll range (this updates viewport_info.visible_height)
         self._update_scroll_range()
 
-        # If columns changed significantly, update viewport
-        if abs(self.layout_metrics.columns - old_columns) >= 1:
-            self._clear_viewport()
+        # Determine if we need to update the viewport:
+        # 1. Columns changed significantly
+        # 2. Height became valid (changed from 0 to > 0) - handles initial layout
+        # 3. We have media but no visible widgets (initial state after set_media_list)
+        columns_changed = abs(self.layout_metrics.columns - old_columns) >= 1
+        height_became_valid = old_visible_height == 0 and self.viewport_info.visible_height > 0
+        needs_initial_widgets = (
+            self.filtered_media and not self.visible_widgets
+        )
+
+        if columns_changed or height_became_valid or needs_initial_widgets:
+            if columns_changed:
+                self._clear_viewport()
             self.update_timer.start(50)  # Slight delay to avoid rapid updates
 
     def wheelEvent(self, event: Optional[QWheelEvent]) -> None:
