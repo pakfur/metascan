@@ -19,6 +19,25 @@ import traceback
 from pathlib import Path
 from typing import Optional, IO, Any
 import os
+import platform
+
+# Pre-load PyTorch c10.dll on Windows to prevent DLL loading errors
+# See: https://github.com/pytorch/pytorch/issues/166628
+if platform.system() == "Windows":
+    import ctypes
+    from importlib.util import find_spec
+
+    try:
+        if (
+            (spec := find_spec("torch"))
+            and spec.origin
+            and os.path.exists(
+                dll_path := os.path.join(os.path.dirname(spec.origin), "lib", "c10.dll")
+            )
+        ):
+            ctypes.CDLL(os.path.normpath(dll_path))
+    except Exception:
+        pass
 
 # Add the parent directory to sys.path so we can import metascan modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -149,7 +168,8 @@ class UpscaleWorker:
             temp_file = self.progress_file.with_suffix(".tmp")
             with open(temp_file, "w") as f:
                 json.dump(progress_data, f, indent=2)
-            temp_file.rename(self.progress_file)
+            # Use os.replace() instead of rename() - works on Windows when target exists
+            os.replace(temp_file, self.progress_file)
 
             self.logger.debug(f"Progress updated: {progress}% (status: {status})")
             return True
@@ -266,7 +286,8 @@ class UpscaleWorker:
             with open(temp_file, "w", encoding="utf-8") as f:
                 # Use ensure_ascii=False to prevent encoding issues
                 json.dump(queue_data, f, indent=2, ensure_ascii=False)
-            temp_file.rename(self.queue_file)
+            # Use os.replace() instead of rename() - works on Windows when target exists
+            os.replace(temp_file, self.queue_file)
 
             self.logger.info(f"Task status updated to {status.value}")
             if self.debug:
