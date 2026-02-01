@@ -63,7 +63,7 @@ class ThumbnailCache:
     """Manages thumbnail generation and caching"""
 
     DEFAULT_SIZE = (256, 256)
-    SUPPORTED_FORMATS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".mp4"}
+    SUPPORTED_FORMATS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".mp4", ".webm"}
 
     def __init__(self, cache_dir: Path, thumbnail_size: Tuple[int, int] = DEFAULT_SIZE):
         self.cache_dir = cache_dir
@@ -109,7 +109,7 @@ class ThumbnailCache:
     ) -> Optional[Path]:
         """Create a thumbnail for the given media file"""
         try:
-            if media_path.suffix.lower() == ".mp4":
+            if media_path.suffix.lower() in {".mp4", ".webm"}:
                 return self._create_video_thumbnail(media_path, thumbnail_path)
             else:
                 return self._create_image_thumbnail(media_path, thumbnail_path)

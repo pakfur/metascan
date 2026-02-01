@@ -13,7 +13,7 @@ class ComfyUIVideoExtractor(MetadataExtractor):
     """Extract metadata from ComfyUI generated MP4 videos"""
 
     def can_extract(self, media_path: Path) -> bool:
-        if media_path.suffix.lower() != ".mp4":
+        if media_path.suffix.lower() not in {".mp4", ".webm"}:
             return False
 
         metadata = self._get_video_metadata(media_path)
