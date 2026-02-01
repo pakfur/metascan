@@ -232,7 +232,7 @@ class ScanPreparationThread(QThread):
         self.db_manager = db_manager
 
     def run(self):
-        SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
+        SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
 
         total_dirs = len(self.directories)
         all_files: List[Path] = []

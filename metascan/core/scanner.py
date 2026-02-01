@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class Scanner:
-    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
+    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
 
     def __init__(
         self,
@@ -193,7 +193,7 @@ class Scanner:
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
         try:
-            if file_path.suffix.lower() == ".mp4":
+            if file_path.suffix.lower() in {".mp4", ".webm"}:
                 return self._get_video_info(file_path)
             else:
                 with Image.open(file_path) as img:
@@ -412,7 +412,7 @@ class ThreadedScanner:
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
         media_files: List[Path] = []
-        supported_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
+        supported_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
 
         if recursive:
             for ext in supported_extensions:

@@ -13,7 +13,7 @@ class ComfyUIExtractor(MetadataExtractor):
 
     def can_extract(self, media_path: Path) -> bool:
         """Check if image contains ComfyUI metadata"""
-        if media_path.suffix.lower() == ".mp4":
+        if media_path.suffix.lower() in {".mp4", ".webm"}:
             return False
 
         metadata = self._get_exif_metadata(media_path)
