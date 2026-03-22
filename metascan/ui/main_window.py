@@ -555,6 +555,8 @@ class MainWindow(QMainWindow):
         self.filters_panel.filters_changed.connect(self.on_filters_changed)
         self.filters_panel.sort_changed.connect(self.on_sort_order_changed)
         self.filters_panel.favorites_toggled.connect(self.on_favorites_toggled)
+        self.filters_panel.content_search_requested.connect(self._on_content_search)
+        self.filters_panel.content_search_cleared.connect(self._on_content_search_cleared)
         self.filters_panel.set_refresh_callback(self.refresh_filters)
 
         # Load initial filter data
@@ -1327,6 +1329,77 @@ class MainWindow(QMainWindow):
         # Start/restart the timer to debounce saves
         self.geometry_save_timer.stop()
         self.geometry_save_timer.start(500)  # Save after 500ms of no move activity
+
+    def _on_content_search(self, query):
+        """Handle CLIP-based content search."""
+        from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
+        from metascan.utils.app_paths import get_data_dir
+
+        index_dir = get_data_dir() / "similarity"
+        faiss_mgr = FaissIndexManager(index_dir)
+
+        if not faiss_mgr.load():
+            QMessageBox.information(
+                self,
+                "No Index",
+                "No embedding index found. Please build the similarity index first\n"
+                "via Tools > Similarity Settings.",
+            )
+            return
+
+        # Load config for model selection
+        config = self._load_similarity_config()
+        model_key = config.get("clip_model", "small")
+        device = config.get("device", "auto")
+
+        embedding_mgr = EmbeddingManager(model_key=model_key, device=device)
+        text_embedding = embedding_mgr.compute_text_embedding(query)
+
+        if text_embedding is None:
+            QMessageBox.warning(self, "Error", "Failed to compute text embedding.")
+            return
+
+        top_k = config.get("search_results_count", 100)
+        results = faiss_mgr.search(text_embedding, top_k=top_k)
+
+        if not results:
+            self.statusBar().showMessage("No content search results found.")
+            return
+
+        # Filter the view to show only matching files
+        matching_paths = {r[0] for r in results}
+        # Create a sorted list based on similarity score
+        score_map = {r[0]: r[1] for r in results}
+
+        filtered_media = [
+            m for m in self.all_media
+            if str(m.file_path) in matching_paths
+        ]
+        # Sort by similarity score (highest first)
+        filtered_media.sort(key=lambda m: score_map.get(str(m.file_path), 0), reverse=True)
+
+        self.thumbnail_view.set_media_list(filtered_media)
+        self.statusBar().showMessage(
+            f"Content search: {len(filtered_media)} results for '{query}'"
+        )
+
+        # Unload model after search to free memory
+        embedding_mgr.unload_model()
+
+    def _on_content_search_cleared(self):
+        """Clear content search and restore normal view."""
+        self.thumbnail_view.set_media_list(self.all_media)
+        self.statusBar().showMessage("")
+
+    def _load_similarity_config(self):
+        """Load similarity config from config file."""
+        try:
+            import json
+            with open(self.config_file, "r") as f:
+                config = json.load(f)
+            return config.get("similarity", {})
+        except Exception:
+            return {}
 
     def _open_duplicate_finder(self):
         dialog = DuplicateFinderDialog(self.db_manager, parent=self)
