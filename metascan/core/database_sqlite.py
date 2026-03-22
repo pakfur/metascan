@@ -84,6 +84,23 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at)"
             )
 
+            # Similarity / embedding tracking table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_hashes (
+                    file_path TEXT PRIMARY KEY,
+                    phash TEXT,
+                    clip_model TEXT,
+                    has_embedding INTEGER DEFAULT 0,
+                    embedding_updated_at TIMESTAMP,
+                    FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
+                )
+            """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_hashes_phash ON media_hashes(phash)"
+            )
+
             conn.commit()
 
     @contextmanager
@@ -693,6 +710,158 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error updating technical metadata for {file_path}: {e}")
             return False
+
+    # ── Similarity / embedding methods ──────────────────────────────
+
+    def save_media_hash(
+        self, file_path: Path, phash: Optional[str], clip_model: Optional[str] = None
+    ) -> bool:
+        """Save a perceptual hash for a media file."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    posix_path = to_posix_path(file_path)
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO media_hashes
+                            (file_path, phash, clip_model, has_embedding, embedding_updated_at)
+                        VALUES (?, ?, ?, 0, NULL)
+                    """,
+                        (posix_path, phash, clip_model),
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to save media hash for {file_path}: {e}")
+            return False
+
+    def save_media_hash_batch(
+        self, items: List[tuple]
+    ) -> int:
+        """Save perceptual hashes in batch.
+
+        Each item is a tuple of (file_path: Path, phash: str).
+        """
+        saved = 0
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    for file_path, phash in items:
+                        try:
+                            posix_path = to_posix_path(file_path)
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO media_hashes
+                                    (file_path, phash, clip_model, has_embedding, embedding_updated_at)
+                                VALUES (?, ?, NULL, 0, NULL)
+                            """,
+                                (posix_path, phash),
+                            )
+                            saved += 1
+                        except Exception as e:
+                            logger.error(f"Failed to save hash for {file_path}: {e}")
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to save media hash batch: {e}")
+        return saved
+
+    def get_all_phashes(self) -> Dict[str, str]:
+        """Return dict of {file_path (native): phash_hex} for all files with a pHash."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT file_path, phash FROM media_hashes WHERE phash IS NOT NULL"
+                )
+                return {
+                    to_native_path(row["file_path"]): row["phash"] for row in rows
+                }
+        except Exception as e:
+            logger.error(f"Failed to get all phashes: {e}")
+            return {}
+
+    def get_unembedded_file_paths(self) -> List[str]:
+        """Get file paths that exist in media but don't have CLIP embeddings."""
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT m.file_path FROM media m
+                    LEFT JOIN media_hashes mh ON m.file_path = mh.file_path
+                    WHERE mh.has_embedding IS NULL OR mh.has_embedding = 0
+                """
+                )
+                return [to_native_path(row["file_path"]) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to get unembedded file paths: {e}")
+            return []
+
+    def mark_embedded(self, file_paths: List[str], clip_model: str) -> int:
+        """Mark files as having CLIP embeddings in the index."""
+        marked = 0
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    for fp in file_paths:
+                        posix_path = to_posix_path(fp)
+                        conn.execute(
+                            """
+                            INSERT INTO media_hashes (file_path, clip_model, has_embedding, embedding_updated_at)
+                            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                            ON CONFLICT(file_path) DO UPDATE SET
+                                clip_model = excluded.clip_model,
+                                has_embedding = 1,
+                                embedding_updated_at = CURRENT_TIMESTAMP
+                        """,
+                            (posix_path, clip_model),
+                        )
+                        marked += 1
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to mark files as embedded: {e}")
+        return marked
+
+    def clear_embeddings(self) -> bool:
+        """Reset all has_embedding flags (used when CLIP model changes)."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    conn.execute(
+                        "UPDATE media_hashes SET has_embedding = 0, clip_model = NULL, embedding_updated_at = NULL"
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            logger.error(f"Failed to clear embeddings: {e}")
+            return False
+
+    def get_embedding_stats(self) -> Dict[str, Any]:
+        """Get statistics about embedding coverage."""
+        try:
+            with self._get_connection() as conn:
+                total = conn.execute("SELECT COUNT(*) as c FROM media").fetchone()["c"]
+                hashed = conn.execute(
+                    "SELECT COUNT(*) as c FROM media_hashes WHERE phash IS NOT NULL"
+                ).fetchone()["c"]
+                embedded = conn.execute(
+                    "SELECT COUNT(*) as c FROM media_hashes WHERE has_embedding = 1"
+                ).fetchone()["c"]
+                model_row = conn.execute(
+                    "SELECT clip_model FROM media_hashes WHERE clip_model IS NOT NULL LIMIT 1"
+                ).fetchone()
+                return {
+                    "total_media": total,
+                    "hashed": hashed,
+                    "embedded": embedded,
+                    "clip_model": model_row["clip_model"] if model_row else None,
+                }
+        except Exception as e:
+            logger.error(f"Failed to get embedding stats: {e}")
+            return {
+                "total_media": 0,
+                "hashed": 0,
+                "embedded": 0,
+                "clip_model": None,
+            }
 
     def get_stats(self) -> Dict[str, Any]:
         try:
