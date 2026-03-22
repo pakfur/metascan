@@ -262,6 +262,7 @@ class VirtualScrollArea(QScrollArea):
     )  # Forward Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
+    find_similar_requested = pyqtSignal(object)  # Forward Media for similarity search
     selection_changed = pyqtSignal(object)  # Emits Media object
 
     def __init__(
@@ -623,6 +624,7 @@ class VirtualScrollArea(QScrollArea):
         widget.open_folder_requested.connect(self.open_folder_requested.emit)
         widget.delete_requested.connect(self.delete_requested.emit)
         widget.upscale_requested.connect(self.upscale_requested.emit)
+        widget.find_similar_requested.connect(self.find_similar_requested.emit)
 
         # Set selection state based on mode
         if self.multi_select_mode:
@@ -1104,6 +1106,7 @@ class VirtualThumbnailView(QWidget):
     )  # Forward Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Forward Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Forward Media object for File|Upscale
+    find_similar_requested = pyqtSignal(object)  # Forward Media for similarity search
 
     def __init__(
         self,
@@ -1289,6 +1292,7 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.open_folder_requested.connect(self.open_folder_requested.emit)
         self.scroll_area.delete_requested.connect(self.delete_requested.emit)
         self.scroll_area.upscale_requested.connect(self.upscale_requested.emit)
+        self.scroll_area.find_similar_requested.connect(self.find_similar_requested.emit)
 
     def set_media_list(self, media_list: List[Media]) -> None:
         """

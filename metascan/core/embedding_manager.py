@@ -522,15 +522,10 @@ class FaissIndexManager:
         if self._index is None or file_path not in self._path_to_id:
             return None
 
-        _ensure_heavy_imports()
-        assert _faiss is not None
-
         idx = self._path_to_id[file_path]
-        vector = _faiss.rev_swig_ptr(
-            self._index.get_xb().data() + idx * self._index.d,
-            self._index.d,
-        )
-        return np.array(vector, dtype=np.float32)
+        vector = np.zeros(self._index.d, dtype=np.float32)
+        self._index.reconstruct(idx, vector)
+        return vector
 
     def has_file(self, file_path: str) -> bool:
         """Check if a file is already in the index."""
