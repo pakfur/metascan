@@ -39,6 +39,7 @@ from qt_material import apply_stylesheet, list_themes
 
 log_startup("  Importing UI components...")
 from metascan.ui.config_dialog import ConfigDialog
+from metascan.ui.duplicate_finder_dialog import DuplicateFinderDialog
 from metascan.ui.filters_panel import FiltersPanel
 from metascan.ui.thumbnail_view import ThumbnailView
 from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
@@ -737,6 +738,12 @@ class MainWindow(QMainWindow):
         scan_action.triggered.connect(self._scan_directories)
         tools_menu.addAction(scan_action)
 
+        # Find Duplicates action
+        find_duplicates_action = QAction("Find Duplicates...", self)
+        find_duplicates_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        find_duplicates_action.triggered.connect(self._open_duplicate_finder)
+        tools_menu.addAction(find_duplicates_action)
+
         # Separator
         tools_menu.addSeparator()
 
@@ -1320,6 +1327,26 @@ class MainWindow(QMainWindow):
         # Start/restart the timer to debounce saves
         self.geometry_save_timer.stop()
         self.geometry_save_timer.start(500)  # Save after 500ms of no move activity
+
+    def _open_duplicate_finder(self):
+        dialog = DuplicateFinderDialog(self.db_manager, parent=self)
+        dialog.delete_requested.connect(self._handle_duplicate_delete)
+        dialog.show()
+
+    def _handle_duplicate_delete(self, paths):
+        """Handle deletion of duplicate files from the duplicate finder."""
+        from send2trash import send2trash
+
+        deleted = 0
+        for fp in paths:
+            try:
+                send2trash(fp)
+                self.db_manager.delete_media(Path(fp))
+                deleted += 1
+            except Exception as e:
+                self.logger.error(f"Failed to delete {fp}: {e}")
+        if deleted:
+            self.refresh_view()
 
     def _open_config(self):
         dialog = ConfigDialog(self)
