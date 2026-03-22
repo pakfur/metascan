@@ -13,6 +13,7 @@ from metascan.utils.startup_profiler import log_startup, profile_phase
 from metascan.core.media import Media, LoRA
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
+from metascan.core.phash_utils import compute_phash_for_file
 from metascan.cache.thumbnail import ThumbnailCache
 
 try:
@@ -80,6 +81,14 @@ class Scanner:
                 media = self._process_media_file(file_path)
                 if media:
                     self.db_manager.save_media(media)
+
+                    # Compute and store perceptual hash (lightweight, ~10ms)
+                    try:
+                        phash = compute_phash_for_file(file_path)
+                        if phash:
+                            self.db_manager.save_media_hash(file_path, phash)
+                    except Exception as e:
+                        logger.debug(f"pHash computation failed for {file_path}: {e}")
 
                     if self.thumbnail_cache:
                         try:
@@ -630,6 +639,10 @@ class ThreadedScanner:
                         if batch:
                             saved_count = self.db_manager.save_media_batch(batch)
 
+                            # Compute pHashes for saved media
+                            if saved_count > 0:
+                                self._compute_phashes_for_batch(batch[:saved_count])
+
                             # Generate thumbnails for successfully saved media files
                             if self.thumbnail_cache and saved_count > 0:
                                 self._generate_thumbnails_for_batch(batch[:saved_count])
@@ -652,6 +665,10 @@ class ThreadedScanner:
                     current_time = time.time()
                     if batch and current_time - last_write_time >= batch_timeout:
                         saved_count = self.db_manager.save_media_batch(batch)
+
+                        # Compute pHashes for saved media
+                        if saved_count > 0:
+                            self._compute_phashes_for_batch(batch[:saved_count])
 
                         # Generate thumbnails for successfully saved media files
                         if self.thumbnail_cache and saved_count > 0:
@@ -687,6 +704,10 @@ class ThreadedScanner:
 
             if batch:
                 saved_count = self.db_manager.save_media_batch(batch)
+
+                # Compute pHashes for saved media
+                if saved_count > 0:
+                    self._compute_phashes_for_batch(batch[:saved_count])
 
                 # Generate thumbnails for successfully saved media files
                 if self.thumbnail_cache and saved_count > 0:
@@ -748,6 +769,24 @@ class ThreadedScanner:
                 self.result_queue.get_nowait()
             except queue.Empty:
                 break
+
+    def _compute_phashes_for_batch(self, media_batch: List[Media]) -> None:
+        """Compute and store perceptual hashes for a batch of media files."""
+        if not media_batch:
+            return
+
+        hash_items = []
+        for media in media_batch:
+            try:
+                phash = compute_phash_for_file(media.file_path)
+                if phash:
+                    hash_items.append((media.file_path, phash))
+            except Exception as e:
+                logger.debug(f"pHash failed for {media.file_path}: {e}")
+
+        if hash_items:
+            self.db_manager.save_media_hash_batch(hash_items)
+            logger.debug(f"Saved {len(hash_items)} pHashes")
 
     def _generate_thumbnails_for_batch(self, media_batch: List[Media]) -> None:
         if not self.thumbnail_cache or not media_batch:
