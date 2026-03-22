@@ -601,6 +601,7 @@ class MainWindow(QMainWindow):
         )
         self.thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         self.thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        self.thumbnail_view.find_similar_requested.connect(self._on_find_similar)
 
         # Load initial media if any exists
         self.load_all_media()
@@ -1386,6 +1387,73 @@ class MainWindow(QMainWindow):
         # Unload model after search to free memory
         embedding_mgr.unload_model()
 
+    def _on_find_similar(self, media):
+        """Find media similar to the selected item using CLIP embeddings."""
+        from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
+        from metascan.utils.app_paths import get_data_dir
+
+        index_dir = get_data_dir() / "similarity"
+        faiss_mgr = FaissIndexManager(index_dir)
+
+        if not faiss_mgr.load():
+            QMessageBox.information(
+                self,
+                "No Index",
+                "No embedding index found. Please build the similarity index first\n"
+                "via Tools > Similarity Settings.",
+            )
+            return
+
+        file_path_str = str(media.file_path)
+
+        # Try to get embedding from the index first
+        embedding = faiss_mgr.get_embedding(file_path_str)
+
+        if embedding is None:
+            # Compute on-the-fly
+            config = self._load_similarity_config()
+            model_key = config.get("clip_model", "small")
+            device = config.get("device", "auto")
+            embedding_mgr = EmbeddingManager(model_key=model_key, device=device)
+
+            if media.is_video:
+                embedding = embedding_mgr.compute_video_embedding(file_path_str)
+            else:
+                embedding = embedding_mgr.compute_image_embedding(file_path_str)
+
+            embedding_mgr.unload_model()
+
+            if embedding is None:
+                QMessageBox.warning(
+                    self, "Error", "Failed to compute embedding for this file."
+                )
+                return
+
+        config = self._load_similarity_config()
+        top_k = config.get("search_results_count", 50)
+        results = faiss_mgr.search(embedding, top_k=top_k)
+
+        if not results:
+            self.statusBar().showMessage("No similar items found.")
+            return
+
+        # Filter the view to show matching files
+        score_map = {r[0]: r[1] for r in results}
+        matching_paths = set(score_map.keys())
+
+        filtered_media = [
+            m for m in self.all_media
+            if str(m.file_path) in matching_paths
+        ]
+        filtered_media.sort(
+            key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
+        )
+
+        self.thumbnail_view.set_media_list(filtered_media)
+        self.statusBar().showMessage(
+            f"Showing {len(filtered_media)} items similar to '{media.file_name}'"
+        )
+
     def _on_content_search_cleared(self):
         """Clear content search and restore normal view."""
         self.thumbnail_view.set_media_list(self.all_media)
@@ -1924,6 +1992,7 @@ class MainWindow(QMainWindow):
         )
         new_thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         new_thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
+        new_thumbnail_view.find_similar_requested.connect(self._on_find_similar)
 
         # Replace in splitter using saved reference
         old_widget = self.main_splitter.widget(1)  # Middle widget (thumbnail panel)
