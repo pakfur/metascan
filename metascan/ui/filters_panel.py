@@ -289,6 +289,8 @@ class FiltersPanel(QWidget):
     filters_changed = pyqtSignal(dict)  # Emits current filter selections
     sort_changed = pyqtSignal(str)  # Emits sort order: "count" or "alphabetical"
     favorites_toggled = pyqtSignal(bool)  # Emits when favorites filter is toggled
+    content_search_requested = pyqtSignal(str)  # Emits CLIP content search query
+    content_search_cleared = pyqtSignal()  # Emits when content search is cleared
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -348,6 +350,33 @@ class FiltersPanel(QWidget):
         self.favorites_checkbox.setToolTip("Show only favorite items")
         self.favorites_checkbox.stateChanged.connect(self.on_favorites_toggled)
         main_layout.addWidget(self.favorites_checkbox)
+
+        # Content search (CLIP-based semantic search)
+        content_search_container = QWidget()
+        content_search_container.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        content_search_layout = QVBoxLayout(content_search_container)
+        content_search_layout.setContentsMargins(5, 5, 5, 5)
+        content_search_layout.setSpacing(2)
+
+        content_search_label = QLabel("Content Search:")
+        content_search_layout.addWidget(content_search_label)
+
+        search_row = QHBoxLayout()
+        self.content_search_edit = QLineEdit()
+        self.content_search_edit.setPlaceholderText("Search by description...")
+        self.content_search_edit.setClearButtonEnabled(True)
+        self.content_search_edit.returnPressed.connect(self._on_content_search)
+        search_row.addWidget(self.content_search_edit)
+
+        self.content_search_button = QPushButton("Search")
+        self.content_search_button.setFixedWidth(60)
+        self.content_search_button.clicked.connect(self._on_content_search)
+        search_row.addWidget(self.content_search_button)
+
+        content_search_layout.addLayout(search_row)
+        main_layout.addWidget(content_search_container)
 
         # Path filter tree (above prompt filter)
         self.path_filter_tree = PathFilterTree(self)
@@ -497,6 +526,18 @@ class FiltersPanel(QWidget):
 
         return filters
 
+    def _on_content_search(self):
+        """Handle content search request."""
+        query = self.content_search_edit.text().strip()
+        if query:
+            self.content_search_requested.emit(query)
+        else:
+            self.content_search_cleared.emit()
+
+    def clear_content_search(self):
+        """Clear the content search input."""
+        self.content_search_edit.clear()
+
     def clear_all_filters(self):
         """Clear all filter selections."""
         for section in self.filter_sections.values():
@@ -507,6 +548,9 @@ class FiltersPanel(QWidget):
         # Clear path filter
         if self.path_filter_tree:
             self.path_filter_tree.clear_selection()
+        # Clear content search
+        self.content_search_edit.clear()
+        self.content_search_cleared.emit()
         self.on_filter_selection_changed()  # Emit the change
 
     def set_sort_order(self, sort_order: str):
