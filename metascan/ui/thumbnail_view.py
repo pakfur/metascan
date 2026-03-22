@@ -52,6 +52,7 @@ class ThumbnailWidget(QLabel):
     )  # Emits Media object for File|Open Folder
     delete_requested = pyqtSignal(object)  # Emits Media object for File|Delete
     upscale_requested = pyqtSignal(object)  # Emits Media object for File|Upscale
+    find_similar_requested = pyqtSignal(object)  # Emits Media for similarity search
 
     def __init__(
         self,
@@ -288,6 +289,14 @@ class ThumbnailWidget(QLabel):
         upscale_action = context_menu.addAction("Upscale...")
         upscale_action.triggered.connect(
             lambda: self.upscale_requested.emit(self.media)
+        )
+
+        context_menu.addSeparator()
+
+        # Find Similar...
+        find_similar_action = context_menu.addAction("Find Similar...")
+        find_similar_action.triggered.connect(
+            lambda: self.find_similar_requested.emit(self.media)
         )
 
         # Show the context menu at the cursor position
