@@ -387,6 +387,11 @@ class MainWindow(QMainWindow):
             db_path = get_data_dir()
             self.db_manager = DatabaseManager(db_path)
 
+        # Embedding queue — singleton, survives dialog close/reopen
+        from metascan.core.embedding_queue import EmbeddingQueue
+
+        self.embedding_queue = EmbeddingQueue(parent=self)
+
         # Current filter state
         self.current_filters = {}
         self.filtered_media_paths = (
@@ -1476,7 +1481,9 @@ class MainWindow(QMainWindow):
             return {}
 
     def _open_similarity_settings(self):
-        dialog = SimilaritySettingsDialog(self.db_manager, parent=self)
+        dialog = SimilaritySettingsDialog(
+            self.db_manager, self.embedding_queue, parent=self
+        )
         dialog.show()
 
     def _open_duplicate_finder(self):
@@ -1489,14 +1496,37 @@ class MainWindow(QMainWindow):
         from send2trash import send2trash
 
         deleted = 0
+        failed = 0
+        path_objects = []
+
         for fp in paths:
             try:
+                # Remove cached thumbnail
+                if self.thumbnail_cache:
+                    thumb_path = self.thumbnail_cache.get_thumbnail_path(Path(fp))
+                    if thumb_path and thumb_path.exists():
+                        try:
+                            thumb_path.unlink()
+                        except Exception as e:
+                            self.logger.debug(f"Failed to remove thumbnail for {fp}: {e}")
+
+                # Move media file to trash
                 send2trash(fp)
-                self.db_manager.delete_media(Path(fp))
+                path_objects.append(Path(fp))
                 deleted += 1
             except Exception as e:
                 self.logger.error(f"Failed to delete {fp}: {e}")
+                failed += 1
+
+        # Batch delete from database
+        if path_objects:
+            self.db_manager.delete_media_batch(path_objects)
+
         if deleted:
+            self.logger.info(
+                f"Duplicate delete: {deleted} files trashed"
+                + (f", {failed} failed" if failed else "")
+            )
             self.refresh_view()
 
     def _open_config(self):
@@ -2990,8 +3020,47 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error updating UI after database update: {e}")
 
 
+def _setup_logging() -> None:
+    """Configure logging for the main application process.
+
+    Sets up a rotating file handler (logs/metascan.log) and a stderr
+    handler so that INFO+ messages are captured to both file and console.
+    """
+    import logging
+    import logging.handlers
+    from metascan.utils.app_paths import get_data_dir
+
+    log_dir = get_data_dir().parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_dir / "metascan.log"
+
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    logging.getLogger(__name__).info(f"Logging initialized — log file: {log_file}")
+
+
 def main():
     from metascan.utils.startup_profiler import log_startup_complete
+
+    _setup_logging()
 
     log_startup("main(): Creating QApplication")
     app = QApplication(sys.argv)

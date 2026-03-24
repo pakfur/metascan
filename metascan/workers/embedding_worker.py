@@ -18,6 +18,7 @@ import signal
 import sys
 import time
 import traceback
+import threading
 from pathlib import Path
 from typing import Any, IO, Optional
 
@@ -50,6 +51,54 @@ from metascan.core.database_sqlite import DatabaseManager
 from metascan.utils.app_paths import get_data_dir
 
 
+# Maximum time to spend on a single file (seconds).
+# If exceeded, the entire worker process exits and the queue will detect the
+# crash and report the last file. The queue can then be restarted and will
+# skip already-embedded files.
+PER_FILE_TIMEOUT = 120
+
+# Threshold for logging a slow-file warning
+SLOW_FILE_THRESHOLD = 10.0
+
+
+class WatchdogTimer:
+    """Process-level watchdog that force-exits if a file takes too long.
+
+    Unlike ThreadPoolExecutor.future.result(timeout=N), this actually works
+    for CPU-bound PyTorch inference that holds the GIL.
+    """
+
+    def __init__(self, timeout: float, logger: logging.Logger):
+        self.timeout = timeout
+        self.logger = logger
+        self._timer: Optional[threading.Timer] = None
+        self._current_file: str = ""
+
+    def start(self, file_path: str) -> None:
+        """Start the watchdog for a new file."""
+        self.cancel()
+        self._current_file = file_path
+        self._timer = threading.Timer(self.timeout, self._on_timeout)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def cancel(self) -> None:
+        """Cancel the current watchdog (file completed in time)."""
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _on_timeout(self) -> None:
+        """Called when a file exceeds the timeout — force-exit the process."""
+        self.logger.error(
+            f"WATCHDOG: File exceeded {self.timeout}s timeout: {self._current_file}. "
+            f"Force-exiting worker process. The queue will detect this and can be restarted."
+        )
+        # Flush logs before exit
+        logging.shutdown()
+        os._exit(99)  # Hard exit, bypasses finally blocks
+
+
 class EmbeddingWorker:
     """Worker process for computing embeddings."""
 
@@ -63,6 +112,8 @@ class EmbeddingWorker:
         self.lock_file = self.queue_dir / "embedding.lock"
 
         self.cancelled = False
+        self.errors_count = 0
+        self.last_error = ""
 
         self.logger = logging.getLogger("embedding_worker")
         self.logger.setLevel(logging.INFO)
@@ -90,25 +141,56 @@ class EmbeddingWorker:
         current_file: str = "",
         error: str = "",
     ) -> None:
-        """Write progress to a JSON file for the main process to read."""
+        """Write progress to a JSON file for the main process to read.
+
+        Uses a retry loop to handle Windows file locking race conditions
+        where the main process may have the file open for reading.
+        """
         progress_data = {
             "current": current,
             "total": total,
             "status": status,
             "current_file": current_file,
             "error": error,
+            "errors_count": self.errors_count,
+            "last_error": self.last_error,
             "timestamp": time.time(),
         }
         temp_file = self.progress_file.with_suffix(".tmp")
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                with open(temp_file, "w") as f:
+                    json.dump(progress_data, f)
+                os.replace(str(temp_file), str(self.progress_file))
+                return
+            except PermissionError:
+                # Windows: main process likely has the file open for reading
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                else:
+                    self.logger.warning(
+                        f"Could not update progress file after {max_retries} retries "
+                        f"(status={status}, current={current}/{total})"
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to write progress: {e}")
+                return
+
+    def _get_file_size_mb(self, file_path: str) -> float:
+        """Get file size in MB, or -1 if not accessible."""
         try:
-            with open(temp_file, "w") as f:
-                json.dump(progress_data, f)
-            os.replace(str(temp_file), str(self.progress_file))
-        except Exception as e:
-            self.logger.error(f"Failed to write progress: {e}")
+            return os.path.getsize(file_path) / (1024 * 1024)
+        except OSError:
+            return -1.0
 
     def run(self) -> None:
         """Main worker loop."""
+        # Write initial progress immediately so the queue knows we're alive
+        self._write_progress(0, 0, "starting")
+        self.logger.info("=" * 60)
+        self.logger.info("Embedding worker starting")
+
         try:
             # Read task configuration
             if not self.task_file.exists():
@@ -128,18 +210,50 @@ class EmbeddingWorker:
             compute_phash = task.get("compute_phash", True)
 
             if not file_paths:
+                self.logger.info("No files to process")
                 self._write_progress(0, 0, "complete")
                 return
 
             total = len(file_paths)
-            self._write_progress(0, total, "loading_model")
             self.logger.info(
-                f"Starting embedding computation: {total} files, "
-                f"model={model_key}, device={device}"
+                f"Task: {total} files, model={model_key}, device={device}, "
+                f"phash={compute_phash}, keyframes={num_keyframes}"
             )
+            self.logger.info(f"DB path: {db_path}")
+            self.logger.info(f"Index dir: {index_dir}")
 
-            # Initialize components
+            # Initialize components — model download may happen here
+            self._write_progress(0, total, "loading_model")
+            self.logger.info("Initializing EmbeddingManager...")
             embedding_mgr = EmbeddingManager(model_key=model_key, device=device)
+
+            # Check if model weights need downloading before loading
+            config = embedding_mgr.model_config
+            needs_download = embedding_mgr._check_model_needs_download(
+                config["name"], config["pretrained"]
+            )
+            if needs_download:
+                self._write_progress(
+                    0,
+                    total,
+                    "downloading_model",
+                    current_file=f"Downloading {config['name']} weights...",
+                )
+                self.logger.info(
+                    f"Downloading CLIP model weights for {config['name']} "
+                    f"({config['pretrained']})"
+                )
+
+            # Force model load (triggers download if needed)
+            self.logger.info("Loading CLIP model (this may take a while)...")
+            embedding_mgr._ensure_model_loaded()
+
+            if needs_download:
+                self.logger.info("Model download complete")
+            self.logger.info("CLIP model ready")
+            self._write_progress(0, total, "loading_model")
+
+            self.logger.info("Initializing FAISS index...")
             faiss_mgr = FaissIndexManager(Path(index_dir))
             db_mgr = DatabaseManager(Path(db_path))
 
@@ -151,10 +265,19 @@ class EmbeddingWorker:
                 )
 
             self._write_progress(0, total, "processing")
+            self.logger.info("Starting file processing loop")
 
             processed = 0
+            embedded_count = 0
+            skipped_count = 0
             batch_paths = []
             hash_batch = []
+            batch_start_time = time.time()
+
+            # Watchdog kills the process if a single file takes too long.
+            # This is the only reliable way to interrupt CPU-bound PyTorch
+            # inference that holds the GIL.
+            watchdog = WatchdogTimer(PER_FILE_TIMEOUT, self.logger)
 
             for i, file_path in enumerate(file_paths):
                 if self._check_cancelled():
@@ -163,21 +286,31 @@ class EmbeddingWorker:
                     break
 
                 try:
-                    self._write_progress(
-                        i, total, "processing", current_file=Path(file_path).name
-                    )
-
+                    file_name = Path(file_path).name
                     ext = Path(file_path).suffix.lower()
                     is_video = ext in self.VIDEO_EXTENSIONS
+                    size_mb = self._get_file_size_mb(file_path)
+
+                    self._write_progress(
+                        i, total, "processing", current_file=file_name
+                    )
+
+                    # Per-file log: type, size, path
+                    self.logger.debug(
+                        f"[{i+1}/{total}] {'VIDEO' if is_video else 'IMAGE'} "
+                        f"{size_mb:.1f}MB {file_path}"
+                    )
+
+                    file_start = time.time()
+                    watchdog.start(file_path)
 
                     # Compute pHash
+                    phash = None
                     if compute_phash:
                         if is_video:
                             phash = EmbeddingManager.compute_video_phash(file_path)
                         else:
                             phash = EmbeddingManager.compute_phash(file_path)
-                        if phash:
-                            hash_batch.append((Path(file_path), phash))
 
                     # Compute CLIP embedding
                     if is_video:
@@ -187,9 +320,25 @@ class EmbeddingWorker:
                     else:
                         embedding = embedding_mgr.compute_image_embedding(file_path)
 
+                    watchdog.cancel()
+                    file_elapsed = time.time() - file_start
+
+                    # Log slow files so we can identify problematic content
+                    if file_elapsed > SLOW_FILE_THRESHOLD:
+                        self.logger.warning(
+                            f"Slow file ({file_elapsed:.1f}s): {file_path} "
+                            f"({size_mb:.1f}MB, {'video' if is_video else 'image'})"
+                        )
+
+                    if phash:
+                        hash_batch.append((Path(file_path), phash))
+
                     if embedding is not None:
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
+                        embedded_count += 1
+                    else:
+                        skipped_count += 1
 
                     processed += 1
 
@@ -202,14 +351,34 @@ class EmbeddingWorker:
                         if batch_paths:
                             db_mgr.mark_embedded(batch_paths, model_key)
                             batch_paths = []
-                        self.logger.info(f"Progress: {processed}/{total}")
+
+                        elapsed = time.time() - batch_start_time
+                        rate = 100 / elapsed if elapsed > 0 else 0
+                        eta_seconds = (total - processed) / rate if rate > 0 else 0
+                        eta_min = eta_seconds / 60
+
+                        self.logger.info(
+                            f"Progress: {processed}/{total} "
+                            f"({embedded_count} embedded, {skipped_count} skipped, "
+                            f"{self.errors_count} errors) "
+                            f"[{rate:.1f} files/sec, ETA {eta_min:.0f}m]"
+                        )
+                        batch_start_time = time.time()
 
                 except Exception as e:
-                    self.logger.error(f"Failed to process {file_path}: {e}")
-                    traceback.print_exc()
+                    watchdog.cancel()
+                    self.errors_count += 1
+                    self.last_error = f"{Path(file_path).name}: {e}"
+                    self.logger.error(
+                        f"Failed to process {file_path}: {e}"
+                    )
+                    if self.errors_count <= 10:
+                        traceback.print_exc()
+                    processed += 1
                     continue
 
             # Final save
+            self.logger.info("Saving final batch...")
             faiss_mgr.save()
             if hash_batch:
                 db_mgr.save_media_hash_batch(hash_batch)
@@ -222,13 +391,22 @@ class EmbeddingWorker:
             if not self.cancelled:
                 self._write_progress(processed, total, "complete")
                 self.logger.info(
-                    f"Embedding computation complete: {processed}/{total} files"
+                    f"Embedding computation complete: "
+                    f"{processed}/{total} processed, "
+                    f"{embedded_count} embedded, "
+                    f"{skipped_count} skipped, "
+                    f"{self.errors_count} errors"
                 )
 
         except Exception as e:
-            self.logger.error(f"Worker failed: {e}")
+            self.logger.error(f"Worker failed with unhandled exception: {e}")
             traceback.print_exc()
             self._write_progress(0, 0, "error", error=str(e))
+
+        self.logger.info("Embedding worker exiting")
+        self.logger.info("=" * 60)
+        # Ensure all log handlers are flushed
+        logging.shutdown()
 
 
 def setup_logging(queue_dir: Path) -> None:
@@ -236,24 +414,39 @@ def setup_logging(queue_dir: Path) -> None:
     log_dir = get_data_dir().parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    log_file = log_dir / "embedding_worker.log"
+
     handler = logging.handlers.RotatingFileHandler(
-        log_dir / "embedding_worker.log",
-        maxBytes=5 * 1024 * 1024,
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=3,
     )
     handler.setFormatter(
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
 
+    # Also log to stderr so the parent process can capture output
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
-    root_logger.addHandler(logging.StreamHandler(sys.stdout))
+    root_logger.addHandler(stderr_handler)
     root_logger.setLevel(logging.INFO)
+
+    # Log the startup information
+    root_logger.info(f"Embedding worker process started (PID={os.getpid()})")
+    root_logger.info(f"Log file: {log_file}")
+    root_logger.info(f"Queue dir: {queue_dir}")
+    root_logger.info(f"Python: {sys.executable}")
+    root_logger.info(f"Platform: {platform.platform()}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python embedding_worker.py <queue_dir>")
+        print("Usage: python embedding_worker.py <queue_dir>", file=sys.stderr)
         sys.exit(1)
 
     queue_dir = Path(sys.argv[1])

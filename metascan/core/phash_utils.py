@@ -51,10 +51,13 @@ def _compute_image_phash(file_path: Path) -> Optional[str]:
 
 def _compute_video_phash(file_path: Path) -> Optional[str]:
     try:
-        import ffmpeg
         import numpy as np
+        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
 
-        probe = ffmpeg.probe(str(file_path))
+        probe = probe_with_timeout(str(file_path))
+        if not probe:
+            return None
+
         video_stream = next(
             (s for s in probe["streams"] if s["codec_type"] == "video"), None
         )
@@ -64,11 +67,9 @@ def _compute_video_phash(file_path: Path) -> Optional[str]:
         width = int(video_stream.get("width", 224))
         height = int(video_stream.get("height", 224))
 
-        out, _ = (
-            ffmpeg.input(str(file_path), ss=0)
-            .output("pipe:", format="rawvideo", pix_fmt="rgb24", vframes=1)
-            .run(capture_stdout=True, capture_stderr=True, quiet=True)
-        )
+        out = extract_frame_with_timeout(str(file_path), 0, width, height)
+        if not out:
+            return None
 
         _ensure_imagehash()
         assert _imagehash is not None
