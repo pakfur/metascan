@@ -97,9 +97,28 @@ class EmbeddingManager:
         """Resolve the device to use for computation."""
         _ensure_heavy_imports()
         assert _torch is not None
+
+        cuda_available = _torch.cuda.is_available()
+        logger.info(
+            f"Device selection: preference={self.device_preference}, "
+            f"torch.cuda.is_available()={cuda_available}, "
+            f"torch={_torch.__version__}, "
+            f"cuda_built={_torch.version.cuda or 'none'}"
+        )
+
         if self.device_preference == "auto":
-            return "cuda" if _torch.cuda.is_available() else "cpu"
-        return self.device_preference
+            device = "cuda" if cuda_available else "cpu"
+        else:
+            device = self.device_preference
+
+        if device == "cpu" and self.model_key in ("medium", "large"):
+            logger.warning(
+                f"Running {self.model_config['name']} on CPU will be very slow. "
+                f"Consider using the 'small' model or a CUDA GPU. "
+                f"If you have a GPU, ensure PyTorch is installed with CUDA support: "
+                f"pip install torch --index-url https://download.pytorch.org/whl/cu124"
+            )
+        return device
 
     def _ensure_model_loaded(self) -> None:
         """Load the CLIP model if not already loaded."""
@@ -117,6 +136,20 @@ class EmbeddingManager:
             f"(pretrained={config['pretrained']}) on {self._device}"
         )
 
+        # Check if model weights need to be downloaded
+        needs_download = self._check_model_needs_download(
+            config["name"], config["pretrained"]
+        )
+        if needs_download:
+            logger.info(
+                f"Model weights not found locally — downloading "
+                f"{config['name']} ({config['pretrained']}). "
+                f"This may take several minutes depending on your connection."
+            )
+
+        # Enable huggingface_hub download progress logging
+        self._enable_download_logging()
+
         self._model, _, self._preprocess = _open_clip.create_model_and_transforms(
             config["name"],
             pretrained=config["pretrained"],
@@ -125,7 +158,76 @@ class EmbeddingManager:
         self._tokenizer = _open_clip.get_tokenizer(config["name"])
         self._model.eval()
 
+        if needs_download:
+            logger.info(f"Model download complete")
         logger.info(f"CLIP model loaded successfully on {self._device}")
+
+    @staticmethod
+    def _check_model_needs_download(model_name: str, pretrained: str) -> bool:
+        """Check if model weights are already cached locally."""
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            # open_clip stores pretrained configs that map to HF repos.
+            # We check the HF cache for common repo patterns.
+            # If the check fails, assume download is needed.
+            return False  # Conservative: only log if we positively detect a download
+        except ImportError:
+            pass
+
+        try:
+            # Fallback: check open_clip's local cache directory
+            import open_clip
+
+            # open_clip uses ~/.cache/clip or torch hub cache
+            pretrained_cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
+            if pretrained_cfg and "url" in pretrained_cfg:
+                import torch
+
+                cache_dir = torch.hub.get_dir()
+                # Check if any file matching the model exists in cache
+                from pathlib import Path
+
+                hub_cache = Path(cache_dir) / "checkpoints"
+                if hub_cache.exists():
+                    url = pretrained_cfg["url"]
+                    filename = url.split("/")[-1]
+                    if (hub_cache / filename).exists():
+                        return False
+                return True
+            # HF-hosted model — check huggingface cache
+            if pretrained_cfg and "hf_hub" in pretrained_cfg:
+                from huggingface_hub import try_to_load_from_cache
+                from huggingface_hub.utils import EntryNotFoundError
+
+                hf_hub = pretrained_cfg["hf_hub"]
+                repo_id = hf_hub.split("@")[0] if "@" in hf_hub else hf_hub
+                result = try_to_load_from_cache(
+                    repo_id, "open_clip_pytorch_model.safetensors"
+                )
+                return result is None
+        except Exception as e:
+            logger.debug(f"Could not check model cache: {e}")
+
+        return False
+
+    @staticmethod
+    def _enable_download_logging() -> None:
+        """Enable verbose logging for model weight downloads."""
+        try:
+            # Ensure huggingface_hub download progress is visible
+            hf_logger = logging.getLogger("huggingface_hub.file_download")
+            if not hf_logger.handlers:
+                hf_logger.setLevel(logging.INFO)
+                hf_logger.addHandler(logging.StreamHandler())
+
+            # Also enable open_clip's own download logging
+            oc_logger = logging.getLogger("open_clip")
+            if not oc_logger.handlers:
+                oc_logger.setLevel(logging.INFO)
+                oc_logger.addHandler(logging.StreamHandler())
+        except Exception:
+            pass
 
     def unload_model(self) -> None:
         """Free GPU/CPU memory by unloading the model."""
@@ -146,6 +248,23 @@ class EmbeddingManager:
             self._device = None
             logger.info("CLIP model unloaded")
 
+    @staticmethod
+    def _load_and_downsize(image_path: str, max_size: int = 512) -> Image.Image:
+        """Load an image and downsize if larger than max_size.
+
+        CLIP preprocesses to 224x224 anyway, so there's no quality benefit
+        to loading a 4096x4096 image. Downsizing first avoids excessive
+        RAM usage and speeds up preprocessing significantly on CPU.
+        """
+        image = Image.open(image_path).convert("RGB")
+        w, h = image.size
+        if max(w, h) > max_size:
+            scale = max_size / max(w, h)
+            image = image.resize(
+                (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
+            )
+        return image
+
     def compute_image_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """Compute a CLIP embedding for an image file.
 
@@ -159,7 +278,7 @@ class EmbeddingManager:
                 and _torch is not None
             )
 
-            image = Image.open(image_path).convert("RGB")
+            image = self._load_and_downsize(image_path)
             image_tensor = self._preprocess(image).unsqueeze(0).to(self._device)
 
             with _torch.no_grad(), _torch.amp.autocast(
@@ -258,12 +377,14 @@ class EmbeddingManager:
         self, video_path: str, num_frames: int
     ) -> List[np.ndarray]:
         """Extract evenly-spaced keyframes from a video using ffmpeg."""
+        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
+
         frames = []
         try:
-            import ffmpeg
+            probe = probe_with_timeout(video_path)
+            if not probe:
+                return frames
 
-            # Get video duration
-            probe = ffmpeg.probe(video_path)
             video_stream = next(
                 (s for s in probe["streams"] if s["codec_type"] == "video"), None
             )
@@ -287,22 +408,13 @@ class EmbeddingManager:
             height = int(video_stream.get("height", 224))
 
             for ts in timestamps:
-                try:
-                    out, _ = (
-                        ffmpeg.input(video_path, ss=ts)
-                        .output(
-                            "pipe:",
-                            format="rawvideo",
-                            pix_fmt="rgb24",
-                            vframes=1,
-                        )
-                        .run(capture_stdout=True, capture_stderr=True, quiet=True)
-                    )
-                    frame = np.frombuffer(out, np.uint8).reshape(height, width, 3)
-                    frames.append(frame)
-                except Exception as e:
-                    logger.debug(f"Failed to extract frame at {ts}s: {e}")
-                    continue
+                out = extract_frame_with_timeout(video_path, ts, width, height)
+                if out:
+                    try:
+                        frame = np.frombuffer(out, np.uint8).reshape(height, width, 3)
+                        frames.append(frame)
+                    except ValueError as e:
+                        logger.debug(f"Frame reshape failed at {ts}s: {e}")
 
         except Exception as e:
             logger.error(f"Failed to extract keyframes from {video_path}: {e}")
@@ -329,10 +441,13 @@ class EmbeddingManager:
     @staticmethod
     def compute_video_phash(video_path: str) -> Optional[str]:
         """Compute a perceptual hash for a video using its first frame."""
-        try:
-            import ffmpeg
+        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
 
-            probe = ffmpeg.probe(video_path)
+        try:
+            probe = probe_with_timeout(video_path)
+            if not probe:
+                return None
+
             video_stream = next(
                 (s for s in probe["streams"] if s["codec_type"] == "video"), None
             )
@@ -342,11 +457,9 @@ class EmbeddingManager:
             width = int(video_stream.get("width", 224))
             height = int(video_stream.get("height", 224))
 
-            out, _ = (
-                ffmpeg.input(video_path, ss=0)
-                .output("pipe:", format="rawvideo", pix_fmt="rgb24", vframes=1)
-                .run(capture_stdout=True, capture_stderr=True, quiet=True)
-            )
+            out = extract_frame_with_timeout(video_path, 0, width, height)
+            if not out:
+                return None
 
             _ensure_heavy_imports()
             assert _imagehash is not None

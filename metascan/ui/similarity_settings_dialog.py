@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QMessageBox,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 
 from metascan.core.embedding_manager import CLIP_MODELS
 from metascan.core.embedding_queue import EmbeddingQueue
@@ -36,17 +36,22 @@ logger = logging.getLogger(__name__)
 
 
 class SimilaritySettingsDialog(QDialog):
-    """Settings dialog for similarity features."""
+    """Settings dialog for similarity features.
+
+    The EmbeddingQueue is owned externally (by MainWindow) so that indexing
+    survives dialog close/reopen. This dialog connects to the queue's signals
+    on show and reflects the current state.
+    """
 
     def __init__(
         self,
         db_manager: DatabaseManager,
-        embedding_queue: Optional[EmbeddingQueue] = None,
+        embedding_queue: EmbeddingQueue,
         parent=None,
     ):
         super().__init__(parent)
         self.db_manager = db_manager
-        self.embedding_queue = embedding_queue or EmbeddingQueue()
+        self.embedding_queue = embedding_queue
         self._config = self._load_config()
 
         self.setWindowTitle("Similarity Settings")
@@ -56,14 +61,13 @@ class SimilaritySettingsDialog(QDialog):
         self._init_ui()
         self._update_index_status()
 
-        # Poll timer for embedding progress
-        self._poll_timer = QTimer(self)
-        self._poll_timer.timeout.connect(self._poll_progress)
-        self._poll_timer.setInterval(500)
-
+        # Connect to queue signals
         self.embedding_queue.progress_updated.connect(self._on_progress)
         self.embedding_queue.indexing_complete.connect(self._on_complete)
         self.embedding_queue.indexing_error.connect(self._on_error)
+
+        # If indexing is already running, restore the progress UI
+        self._sync_ui_to_queue_state()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -191,6 +195,50 @@ class SimilaritySettingsDialog(QDialog):
 
         layout.addLayout(button_row)
 
+    def _sync_ui_to_queue_state(self) -> None:
+        """Sync the dialog UI to the current queue/worker state.
+
+        Called on dialog open to restore progress display if a worker
+        is already running.
+        """
+        if self.embedding_queue.is_indexing():
+            # Worker is running — show progress UI
+            self.build_button.setEnabled(False)
+            self.rebuild_button.setEnabled(False)
+            self.cancel_button.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+            self.progress_label.setText("Indexing in progress...")
+
+            # Read current progress from file to populate the bar
+            last = self.embedding_queue.get_last_progress()
+            if last:
+                current = last.get("current", 0)
+                total = last.get("total", 0)
+                status = last.get("status", "")
+                self.progress_bar.setMaximum(max(total, 1))
+                self.progress_bar.setValue(current)
+                if status == "processing":
+                    current_file = last.get("current_file", "")
+                    errors_count = last.get("errors_count", 0)
+                    label = f"Indexing {current}/{total}"
+                    if current_file:
+                        label += f" — {current_file}"
+                    if errors_count > 0:
+                        label += f" ({errors_count} errors)"
+                    self.progress_label.setText(label)
+                elif status == "loading_model":
+                    self.progress_label.setText("Loading CLIP model...")
+                elif status == "downloading_model":
+                    self.progress_label.setText("Downloading model...")
+        else:
+            # Not running — idle state
+            self.build_button.setEnabled(True)
+            self.rebuild_button.setEnabled(True)
+            self.cancel_button.setEnabled(False)
+            self.progress_bar.setVisible(False)
+            self.progress_label.setVisible(False)
+
     def _on_phash_threshold_changed(self, value: int) -> None:
         self.phash_label.setText(str(value))
 
@@ -292,14 +340,10 @@ class SimilaritySettingsDialog(QDialog):
             compute_phash=self.phash_scan_check.isChecked(),
             video_keyframes=self.keyframes_spin.value(),
         )
-        self._poll_timer.start()
 
     def _cancel_indexing(self) -> None:
         self.embedding_queue.cancel_indexing()
         self.progress_label.setText("Cancelling...")
-
-    def _poll_progress(self) -> None:
-        self.embedding_queue.poll_updates()
 
     def _on_progress(self, current: int, total: int, status_text: str) -> None:
         self.progress_bar.setMaximum(max(total, 1))
@@ -307,22 +351,29 @@ class SimilaritySettingsDialog(QDialog):
         self.progress_label.setText(status_text)
 
     def _on_complete(self, total: int) -> None:
-        self._poll_timer.stop()
         self.build_button.setEnabled(True)
         self.rebuild_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setVisible(False)
-        self.progress_label.setText(f"Indexing complete: {total} files")
+        self.progress_label.setText(f"Indexing complete: {total} files processed")
+        self.progress_label.setVisible(True)
         self._update_index_status()
+        logger.info(f"Indexing complete: {total} files")
 
     def _on_error(self, error: str) -> None:
-        self._poll_timer.stop()
         self.build_button.setEnabled(True)
         self.rebuild_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_bar.setVisible(False)
-        self.progress_label.setText(f"Error: {error}")
-        QMessageBox.warning(self, "Indexing Error", error)
+        self.progress_label.setText(f"Error: {error[:200]}")
+        self.progress_label.setVisible(True)
+        self._update_index_status()
+        logger.error(f"Indexing error: {error}")
+        QMessageBox.warning(
+            self,
+            "Indexing Error",
+            f"{error}\n\nCheck logs/embedding_worker.log for details.",
+        )
 
     def _load_config(self) -> Dict[str, Any]:
         """Load similarity config from the application config file."""

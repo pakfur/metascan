@@ -230,7 +230,11 @@ class Scanner:
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
         try:
-            probe = ffmpeg.probe(str(file_path))
+            from metascan.utils.ffmpeg_utils import probe_with_timeout
+
+            probe = probe_with_timeout(str(file_path))
+            if not probe:
+                return None, None, None
 
             video_stream = None
             for stream in probe["streams"]:
@@ -246,9 +250,6 @@ class Scanner:
 
             return None, None, None
 
-        except ffmpeg.Error as e:
-            logger.debug(f"python-ffmpeg probe failed for {file_path}: {e}")
-            return None, None, None
         except Exception as e:
             logger.debug(f"python-ffmpeg unexpected error for {file_path}: {e}")
             return None, None, None
