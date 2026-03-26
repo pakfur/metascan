@@ -151,9 +151,7 @@ class TestProgressCallback(unittest.TestCase):
 
     def test_progress_callback_called(self):
         """Progress callback should be invoked during comparison."""
-        phashes = {
-            f"file{i}.png": f"{i:016x}" for i in range(20)
-        }
+        phashes = {f"file{i}.png": f"{i:016x}" for i in range(20)}
         calls = []
 
         def cb(current, total):
@@ -194,9 +192,7 @@ class TestProgressCallback(unittest.TestCase):
             # Cancel after the first progress report
             return call_count < 2
 
-        groups = find_phash_duplicate_groups(
-            phashes, threshold=5, progress_callback=cb
-        )
+        groups = find_phash_duplicate_groups(phashes, threshold=5, progress_callback=cb)
         # Should have stopped early — not all comparisons done
         self.assertLessEqual(call_count, 5)
         # Should still return a valid (possibly empty) list
@@ -205,7 +201,9 @@ class TestProgressCallback(unittest.TestCase):
     def test_no_callback_works(self):
         """None callback should work (backward compatible)."""
         phashes = {"a.png": "0000000000000000", "b.png": "0000000000000000"}
-        groups = find_phash_duplicate_groups(phashes, threshold=5, progress_callback=None)
+        groups = find_phash_duplicate_groups(
+            phashes, threshold=5, progress_callback=None
+        )
         self.assertEqual(len(groups), 1)
 
 

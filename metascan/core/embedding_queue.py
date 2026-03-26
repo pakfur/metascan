@@ -133,9 +133,7 @@ class EmbeddingQueue(QObject):
         os.replace(str(temp_task), str(task_file))
 
         # Spawn the worker
-        worker_script = (
-            Path(__file__).parent.parent / "workers" / "embedding_worker.py"
-        )
+        worker_script = Path(__file__).parent.parent / "workers" / "embedding_worker.py"
         cmd = [sys.executable, str(worker_script), str(self._queue_dir)]
 
         try:
@@ -181,9 +179,7 @@ class EmbeddingQueue(QObject):
         Called periodically by a QTimer in the main window.
         """
         # First check: did the process exit?
-        process_exited = (
-            self._process is not None and self._process.poll() is not None
-        )
+        process_exited = self._process is not None and self._process.poll() is not None
 
         progress_file = self._queue_dir / "progress_embedding.json"
 
@@ -252,9 +248,7 @@ class EmbeddingQueue(QObject):
                 self.progress_updated.emit(0, total, "Worker starting...")
             elif status == "downloading_model":
                 dl_file = data.get("current_file", "")
-                self.progress_updated.emit(
-                    0, total, f"Downloading model... {dl_file}"
-                )
+                self.progress_updated.emit(0, total, f"Downloading model... {dl_file}")
             elif status == "loading_model":
                 self.progress_updated.emit(0, total, "Loading CLIP model...")
             elif status == "processing":
