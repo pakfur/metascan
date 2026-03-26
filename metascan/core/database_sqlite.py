@@ -820,6 +820,35 @@ class DatabaseManager:
             logger.error(f"Failed to mark files as embedded: {e}")
         return marked
 
+    def mark_embedding_skipped(self, file_paths: List[str]) -> int:
+        """Mark files as permanently skipped for embedding (e.g. corrupt, unreadable).
+
+        Sets has_embedding = -1 so get_unembedded_file_paths() excludes them.
+        A full rebuild (clear_embeddings) resets these back to 0 for retry.
+        """
+        if not file_paths:
+            return 0
+        marked = 0
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    for fp in file_paths:
+                        posix_path = to_posix_path(fp)
+                        conn.execute(
+                            """
+                            INSERT INTO media_hashes (file_path, has_embedding)
+                            VALUES (?, -1)
+                            ON CONFLICT(file_path) DO UPDATE SET
+                                has_embedding = -1
+                        """,
+                            (posix_path,),
+                        )
+                        marked += 1
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to mark files as skipped: {e}")
+        return marked
+
     def clear_embeddings(self) -> bool:
         """Reset all has_embedding flags (used when CLIP model changes)."""
         try:
