@@ -119,9 +119,7 @@ class ScannerThread(QThread):
                 self.scanner.db_manager.delete_media_batch(
                     [Path(p) for p in stale_paths]
                 )
-                logger.info(
-                    f"Removed {len(stale_paths)} stale entries from database"
-                )
+                logger.info(f"Removed {len(stale_paths)} stale entries from database")
             return len(stale_paths)
         except Exception as e:
             logger.error(f"Failed to remove stale entries: {e}")
@@ -283,7 +281,9 @@ class ScanProgressDialog(QDialog):
 class ScanPreparationThread(QThread):
     """Background thread to count unprocessed media files."""
 
-    preparation_complete = pyqtSignal(int, int, int)  # total_dirs, total_files, unprocessed_files
+    preparation_complete = pyqtSignal(
+        int, int, int
+    )  # total_dirs, total_files, unprocessed_files
 
     def __init__(self, directories: List[Dict], db_manager: DatabaseManager):
         super().__init__()
@@ -291,7 +291,15 @@ class ScanPreparationThread(QThread):
         self.db_manager = db_manager
 
     def run(self):
-        SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+        SUPPORTED_EXTENSIONS = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".mp4",
+            ".webm",
+        }
 
         total_dirs = len(self.directories)
         all_files: List[Path] = []
@@ -337,7 +345,9 @@ class ScanConfirmationDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Information label - initially shows preparing message
-        self.info_label = QLabel("Preparing scan...\n\nCounting media files and checking database...")
+        self.info_label = QLabel(
+            "Preparing scan...\n\nCounting media files and checking database..."
+        )
         self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
 
@@ -348,7 +358,9 @@ class ScanConfirmationDialog(QDialog):
             "This ensures a completely fresh start but will remove all previously scanned data."
         )
         self.full_clean_checkbox.setChecked(False)
-        self.full_clean_checkbox.setEnabled(False)  # Disabled until preparation complete
+        self.full_clean_checkbox.setEnabled(
+            False
+        )  # Disabled until preparation complete
         layout.addWidget(self.full_clean_checkbox)
 
         # Question - no custom styling, use theme
@@ -369,7 +381,9 @@ class ScanConfirmationDialog(QDialog):
         if self.yes_button:
             self.yes_button.setEnabled(False)
 
-    def update_with_counts(self, total_dirs: int, total_files: int, unprocessed_files: int):
+    def update_with_counts(
+        self, total_dirs: int, total_files: int, unprocessed_files: int
+    ):
         """Update the dialog with the actual file counts."""
         info_text = f"Scan Configuration:\n\n"
         info_text += f"Directories to scan: {total_dirs}\n"
@@ -619,7 +633,9 @@ class MainWindow(QMainWindow):
         self.filters_panel.sort_changed.connect(self.on_sort_order_changed)
         self.filters_panel.favorites_toggled.connect(self.on_favorites_toggled)
         self.filters_panel.content_search_requested.connect(self._on_content_search)
-        self.filters_panel.content_search_cleared.connect(self._on_content_search_cleared)
+        self.filters_panel.content_search_cleared.connect(
+            self._on_content_search_cleared
+        )
         self.filters_panel.set_refresh_callback(self.refresh_filters)
 
         # Load initial filter data
@@ -1441,11 +1457,12 @@ class MainWindow(QMainWindow):
         score_map = {r[0]: r[1] for r in results}
 
         filtered_media = [
-            m for m in self.all_media
-            if str(m.file_path) in matching_paths
+            m for m in self.all_media if str(m.file_path) in matching_paths
         ]
         # Sort by similarity score (highest first)
-        filtered_media.sort(key=lambda m: score_map.get(str(m.file_path), 0), reverse=True)
+        filtered_media.sort(
+            key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
+        )
 
         self.thumbnail_view.set_media_list(filtered_media)
         self.statusBar().showMessage(
@@ -1510,8 +1527,7 @@ class MainWindow(QMainWindow):
         matching_paths = set(score_map.keys())
 
         filtered_media = [
-            m for m in self.all_media
-            if str(m.file_path) in matching_paths
+            m for m in self.all_media if str(m.file_path) in matching_paths
         ]
         filtered_media.sort(
             key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
@@ -1531,6 +1547,7 @@ class MainWindow(QMainWindow):
         """Load similarity config from config file."""
         try:
             import json
+
             with open(self.config_file, "r") as f:
                 config = json.load(f)
             return config.get("similarity", {})
@@ -1565,7 +1582,9 @@ class MainWindow(QMainWindow):
                         try:
                             thumb_path.unlink()
                         except Exception as e:
-                            self.logger.debug(f"Failed to remove thumbnail for {fp}: {e}")
+                            self.logger.debug(
+                                f"Failed to remove thumbnail for {fp}: {e}"
+                            )
 
                 # Move media file to trash
                 send2trash(fp)
@@ -1620,7 +1639,9 @@ class MainWindow(QMainWindow):
             self._confirmation_dialog = ScanConfirmationDialog(self)
 
             # Start preparation thread to count files in background
-            self._preparation_thread = ScanPreparationThread(directories, self.db_manager)
+            self._preparation_thread = ScanPreparationThread(
+                directories, self.db_manager
+            )
             self._preparation_thread.preparation_complete.connect(
                 self._on_scan_preparation_complete
             )
@@ -1650,7 +1671,9 @@ class MainWindow(QMainWindow):
 
             # Create and configure scanner thread
             self.scanner_thread = ScannerThread(
-                self.scanner, self._scan_directories_list, full_scan=full_clean_requested
+                self.scanner,
+                self._scan_directories_list,
+                full_scan=full_clean_requested,
             )
             self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
             self.scanner_thread.directory_progress_updated.connect(
@@ -1669,10 +1692,14 @@ class MainWindow(QMainWindow):
             print(f"Error during scanning: {e}")
             QMessageBox.critical(self, "Scan Error", f"Failed to start scanning: {e}")
 
-    def _on_scan_preparation_complete(self, total_dirs: int, total_files: int, unprocessed_files: int):
+    def _on_scan_preparation_complete(
+        self, total_dirs: int, total_files: int, unprocessed_files: int
+    ):
         """Handle scan preparation thread completion."""
         if hasattr(self, "_confirmation_dialog") and self._confirmation_dialog:
-            self._confirmation_dialog.update_with_counts(total_dirs, total_files, unprocessed_files)
+            self._confirmation_dialog.update_with_counts(
+                total_dirs, total_files, unprocessed_files
+            )
 
     def _on_scan_file_progress(self, current, total, file_path):
         """Handle file scan progress updates."""
@@ -1692,7 +1719,9 @@ class MainWindow(QMainWindow):
 
     def _on_scan_complete(self, processed_count, stale_count=0):
         """Handle scan completion."""
-        print(f"Scanning completed. Processed {processed_count} files, removed {stale_count} stale entries.")
+        print(
+            f"Scanning completed. Processed {processed_count} files, removed {stale_count} stale entries."
+        )
         self._scan_processed_count = processed_count
         self._scan_stale_count = stale_count
 
@@ -1717,7 +1746,9 @@ class MainWindow(QMainWindow):
 
         message = f"Successfully processed {processed_count} media files."
         if stale_count > 0:
-            message += f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+            message += (
+                f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+            )
 
         QMessageBox.information(self, "Scan Complete", message)
 
@@ -1753,15 +1784,9 @@ class MainWindow(QMainWindow):
                 self.progress_dialog.switch_to_embedding_phase(len(unembedded))
 
             # Connect embedding signals to dialog and completion handler
-            self.embedding_queue.progress_updated.connect(
-                self._on_embedding_progress
-            )
-            self.embedding_queue.indexing_complete.connect(
-                self._on_embedding_complete
-            )
-            self.embedding_queue.indexing_error.connect(
-                self._on_embedding_error
-            )
+            self.embedding_queue.progress_updated.connect(self._on_embedding_progress)
+            self.embedding_queue.indexing_complete.connect(self._on_embedding_complete)
+            self.embedding_queue.indexing_error.connect(self._on_embedding_error)
 
             self.logger.info(
                 f"Auto-triggering CLIP embeddings for {len(unembedded)} files"
@@ -1782,9 +1807,7 @@ class MainWindow(QMainWindow):
     def _on_embedding_progress(self, current: int, total: int, status_text: str):
         """Update progress dialog with embedding progress."""
         if hasattr(self, "progress_dialog"):
-            self.progress_dialog.update_embedding_progress(
-                current, total, status_text
-            )
+            self.progress_dialog.update_embedding_progress(current, total, status_text)
             # Check if user cancelled via dialog
             if self.progress_dialog.cancel_requested:
                 self.embedding_queue.cancel_indexing()
@@ -1802,7 +1825,9 @@ class MainWindow(QMainWindow):
             f"CLIP embeddings computed for {total} files."
         )
         if stale_count > 0:
-            message += f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+            message += (
+                f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+            )
         QMessageBox.information(self, "Scan Complete", message)
 
     def _on_embedding_error(self, error: str):
@@ -1829,9 +1854,7 @@ class MainWindow(QMainWindow):
             self.embedding_queue.indexing_complete.disconnect(
                 self._on_embedding_complete
             )
-            self.embedding_queue.indexing_error.disconnect(
-                self._on_embedding_error
-            )
+            self.embedding_queue.indexing_error.disconnect(self._on_embedding_error)
         except TypeError:
             pass  # Already disconnected
 

@@ -422,7 +422,15 @@ class ThreadedScanner:
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
         media_files: List[Path] = []
-        supported_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+        supported_extensions = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".mp4",
+            ".webm",
+        }
 
         if recursive:
             for ext in supported_extensions:

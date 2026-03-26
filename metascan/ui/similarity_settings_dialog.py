@@ -80,7 +80,11 @@ class SimilaritySettingsDialog(QDialog):
         for key, info in CLIP_MODELS.items():
             self.model_combo.addItem(info["description"], key)
         current_model = self._config.get("clip_model", "small")
-        idx = list(CLIP_MODELS.keys()).index(current_model) if current_model in CLIP_MODELS else 0
+        idx = (
+            list(CLIP_MODELS.keys()).index(current_model)
+            if current_model in CLIP_MODELS
+            else 0
+        )
         self.model_combo.setCurrentIndex(idx)
         model_layout.addRow("Model:", self.model_combo)
 
@@ -306,9 +310,7 @@ class SimilaritySettingsDialog(QDialog):
         self.db_manager.clear_embeddings()
 
         # Get all file paths
-        all_paths = [
-            str(p) for p in self.db_manager.get_existing_file_paths()
-        ]
+        all_paths = [str(p) for p in self.db_manager.get_existing_file_paths()]
         if not all_paths:
             QMessageBox.information(self, "No Files", "No media files in database.")
             return

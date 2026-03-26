@@ -32,9 +32,7 @@ if platform.system() == "Windows":
             (spec := find_spec("torch"))
             and spec.origin
             and os.path.exists(
-                dll_path := os.path.join(
-                    os.path.dirname(spec.origin), "lib", "c10.dll"
-                )
+                dll_path := os.path.join(os.path.dirname(spec.origin), "lib", "c10.dll")
             )
         ):
             ctypes.CDLL(os.path.normpath(dll_path))
@@ -331,9 +329,7 @@ class EmbeddingWorker:
                     is_video = ext in self.VIDEO_EXTENSIONS
                     size_mb = self._get_file_size_mb(file_path)
 
-                    self._write_progress(
-                        i, total, "processing", current_file=file_name
-                    )
+                    self._write_progress(i, total, "processing", current_file=file_name)
 
                     # Per-file log: type, size, path
                     self.logger.debug(
@@ -413,9 +409,7 @@ class EmbeddingWorker:
                     watchdog.cancel()
                     self.errors_count += 1
                     self.last_error = f"{Path(file_path).name}: {e}"
-                    self.logger.error(
-                        f"Failed to process {file_path}: {e}"
-                    )
+                    self.logger.error(f"Failed to process {file_path}: {e}")
                     if self.errors_count <= 10:
                         traceback.print_exc()
                     skipped_paths.append(file_path)

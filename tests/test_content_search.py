@@ -66,9 +66,7 @@ class TestContentSearchFlow(unittest.TestCase):
         new_mgr = FaissIndexManager(self.index_dir)
         new_mgr.load()
 
-        results = new_mgr.search(
-            np.array([1, 0, 0, 0], dtype=np.float32), top_k=1
-        )
+        results = new_mgr.search(np.array([1, 0, 0, 0], dtype=np.float32), top_k=1)
         self.assertEqual(results[0][0], "file1.png")
 
 

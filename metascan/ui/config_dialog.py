@@ -160,10 +160,12 @@ class ConfigDialog(QDialog):
             # Convert paths to POSIX format for storage
             posix_directories = []
             for dir_info in self.directories:
-                posix_directories.append({
-                    "filepath": to_posix_path(dir_info["filepath"]),
-                    "search_subfolders": dir_info["search_subfolders"],
-                })
+                posix_directories.append(
+                    {
+                        "filepath": to_posix_path(dir_info["filepath"]),
+                        "search_subfolders": dir_info["search_subfolders"],
+                    }
+                )
 
             # Update directories
             config["directories"] = posix_directories

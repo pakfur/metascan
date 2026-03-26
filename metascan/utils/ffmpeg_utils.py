@@ -31,8 +31,10 @@ def probe_with_timeout(
         # to it directly, so we call ffprobe ourselves with a timeout.
         cmd = [
             "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
             "-show_streams",
             str(file_path),

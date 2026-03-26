@@ -457,7 +457,9 @@ class DatabaseManager:
                             rows = conn.execute(query, params)
 
                         # Get paths for this filter (convert from POSIX to native)
-                        current_paths = {to_native_path(row["file_path"]) for row in rows}
+                        current_paths = {
+                            to_native_path(row["file_path"]) for row in rows
+                        }
 
                         # Apply AND logic between different filter types
                         if result_set is None:
@@ -735,9 +737,7 @@ class DatabaseManager:
             logger.error(f"Failed to save media hash for {file_path}: {e}")
             return False
 
-    def save_media_hash_batch(
-        self, items: List[tuple]
-    ) -> int:
+    def save_media_hash_batch(self, items: List[tuple]) -> int:
         """Save perceptual hashes in batch.
 
         Each item is a tuple of (file_path: Path, phash: str).
@@ -772,9 +772,7 @@ class DatabaseManager:
                 rows = conn.execute(
                     "SELECT file_path, phash FROM media_hashes WHERE phash IS NOT NULL"
                 )
-                return {
-                    to_native_path(row["file_path"]): row["phash"] for row in rows
-                }
+                return {to_native_path(row["file_path"]): row["phash"] for row in rows}
         except Exception as e:
             logger.error(f"Failed to get all phashes: {e}")
             return {}
