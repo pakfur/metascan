@@ -52,7 +52,10 @@ def _compute_image_phash(file_path: Path) -> Optional[str]:
 def _compute_video_phash(file_path: Path) -> Optional[str]:
     try:
         import numpy as np
-        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
+        from metascan.utils.ffmpeg_utils import (
+            probe_with_timeout,
+            extract_frame_with_timeout,
+        )
 
         probe = probe_with_timeout(str(file_path))
         if not probe:
