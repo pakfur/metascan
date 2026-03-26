@@ -61,6 +61,34 @@ PER_FILE_TIMEOUT = 120
 SLOW_FILE_THRESHOLD = 10.0
 
 
+def _write_progress_fatal(queue_dir: Path, error: str) -> None:
+    """Last-resort progress write for critical/unrecoverable errors.
+
+    Writes directly to the progress file without temp-file atomicity or
+    retries.  Used when the normal _write_progress path may not be
+    available (e.g. before EmbeddingWorker is constructed, or from the
+    watchdog timer thread).
+    """
+    progress_file = Path(queue_dir) / "progress_embedding.json"
+    try:
+        with open(progress_file, "w") as f:
+            json.dump(
+                {
+                    "current": 0,
+                    "total": 0,
+                    "status": "error",
+                    "current_file": "",
+                    "error": error,
+                    "errors_count": 1,
+                    "last_error": error,
+                    "timestamp": time.time(),
+                },
+                f,
+            )
+    except Exception:
+        pass  # Nothing more we can do
+
+
 class WatchdogTimer:
     """Process-level watchdog that force-exits if a file takes too long.
 
@@ -68,9 +96,10 @@ class WatchdogTimer:
     for CPU-bound PyTorch inference that holds the GIL.
     """
 
-    def __init__(self, timeout: float, logger: logging.Logger):
+    def __init__(self, timeout: float, logger: logging.Logger, queue_dir: Path):
         self.timeout = timeout
         self.logger = logger
+        self.queue_dir = queue_dir
         self._timer: Optional[threading.Timer] = None
         self._current_file: str = ""
 
@@ -90,10 +119,13 @@ class WatchdogTimer:
 
     def _on_timeout(self) -> None:
         """Called when a file exceeds the timeout — force-exit the process."""
-        self.logger.error(
-            f"WATCHDOG: File exceeded {self.timeout}s timeout: {self._current_file}. "
-            f"Force-exiting worker process. The queue will detect this and can be restarted."
+        error_msg = (
+            f"File exceeded {self.timeout}s timeout: {self._current_file}. "
+            f"Worker process killed. The queue can be restarted to continue "
+            f"(already-embedded files will be skipped)."
         )
+        self.logger.error(f"WATCHDOG: {error_msg}")
+        _write_progress_fatal(self.queue_dir, error_msg)
         # Flush logs before exit
         logging.shutdown()
         os._exit(99)  # Hard exit, bypasses finally blocks
@@ -272,12 +304,13 @@ class EmbeddingWorker:
             skipped_count = 0
             batch_paths = []
             hash_batch = []
+            skipped_paths = []
             batch_start_time = time.time()
 
             # Watchdog kills the process if a single file takes too long.
             # This is the only reliable way to interrupt CPU-bound PyTorch
             # inference that holds the GIL.
-            watchdog = WatchdogTimer(PER_FILE_TIMEOUT, self.logger)
+            watchdog = WatchdogTimer(PER_FILE_TIMEOUT, self.logger, self.queue_dir)
 
             for i, file_path in enumerate(file_paths):
                 if self._check_cancelled():
@@ -286,6 +319,13 @@ class EmbeddingWorker:
                     break
 
                 try:
+                    if not os.path.exists(file_path):
+                        self.logger.warning(f"Skipping missing file: {file_path}")
+                        skipped_paths.append(file_path)
+                        processed += 1
+                        skipped_count += 1
+                        continue
+
                     file_name = Path(file_path).name
                     ext = Path(file_path).suffix.lower()
                     is_video = ext in self.VIDEO_EXTENSIONS
@@ -338,6 +378,7 @@ class EmbeddingWorker:
                         batch_paths.append(file_path)
                         embedded_count += 1
                     else:
+                        skipped_paths.append(file_path)
                         skipped_count += 1
 
                     processed += 1
@@ -351,6 +392,9 @@ class EmbeddingWorker:
                         if batch_paths:
                             db_mgr.mark_embedded(batch_paths, model_key)
                             batch_paths = []
+                        if skipped_paths:
+                            db_mgr.mark_embedding_skipped(skipped_paths)
+                            skipped_paths = []
 
                         elapsed = time.time() - batch_start_time
                         rate = 100 / elapsed if elapsed > 0 else 0
@@ -374,6 +418,7 @@ class EmbeddingWorker:
                     )
                     if self.errors_count <= 10:
                         traceback.print_exc()
+                    skipped_paths.append(file_path)
                     processed += 1
                     continue
 
@@ -384,6 +429,8 @@ class EmbeddingWorker:
                 db_mgr.save_media_hash_batch(hash_batch)
             if batch_paths:
                 db_mgr.mark_embedded(batch_paths, model_key)
+            if skipped_paths:
+                db_mgr.mark_embedding_skipped(skipped_paths)
 
             # Unload model to free GPU memory
             embedding_mgr.unload_model()
@@ -399,9 +446,13 @@ class EmbeddingWorker:
                 )
 
         except Exception as e:
-            self.logger.error(f"Worker failed with unhandled exception: {e}")
-            traceback.print_exc()
-            self._write_progress(0, 0, "error", error=str(e))
+            error_msg = f"{type(e).__name__}: {e}"
+            # Write error to progress file FIRST — before any logging that
+            # could block on a full stderr pipe (the subprocess stderr is a
+            # pipe that the parent only drains after we exit).
+            _write_progress_fatal(self.queue_dir, error_msg)
+            self.logger.error(f"Worker failed with unhandled exception: {error_msg}")
+            self.logger.error(traceback.format_exc())
 
         self.logger.info("Embedding worker exiting")
         self.logger.info("=" * 60)
@@ -425,15 +476,8 @@ def setup_logging(queue_dir: Path) -> None:
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
 
-    # Also log to stderr so the parent process can capture output
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
-    root_logger.addHandler(stderr_handler)
     root_logger.setLevel(logging.INFO)
 
     # Log the startup information
@@ -452,5 +496,18 @@ if __name__ == "__main__":
     queue_dir = Path(sys.argv[1])
     setup_logging(queue_dir)
 
-    worker = EmbeddingWorker(queue_dir)
-    worker.run()
+    try:
+        worker = EmbeddingWorker(queue_dir)
+        worker.run()
+    except Exception as e:
+        # Catch-all for any unhandled exception, including import errors
+        # triggered lazily during construction or run().
+        error_msg = f"{type(e).__name__}: {e}"
+        # Write progress FIRST so the parent process can surface the error,
+        # then log (logging to file is safe but must come second).
+        _write_progress_fatal(queue_dir, error_msg)
+        logging.getLogger("embedding_worker").error(
+            f"Fatal worker error: {error_msg}\n{traceback.format_exc()}"
+        )
+        logging.shutdown()
+        sys.exit(1)

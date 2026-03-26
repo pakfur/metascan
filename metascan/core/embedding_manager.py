@@ -383,12 +383,14 @@ class EmbeddingManager:
         try:
             probe = probe_with_timeout(video_path)
             if not probe:
+                logger.warning(f"ffprobe failed for {video_path}")
                 return frames
 
             video_stream = next(
                 (s for s in probe["streams"] if s["codec_type"] == "video"), None
             )
             if not video_stream:
+                logger.warning(f"No video stream found in {video_path}")
                 return frames
 
             duration = float(video_stream.get("duration", 0))
@@ -415,6 +417,11 @@ class EmbeddingManager:
                         frames.append(frame)
                     except ValueError as e:
                         logger.debug(f"Frame reshape failed at {ts}s: {e}")
+                else:
+                    logger.debug(
+                        f"Frame extraction returned no data at {ts:.1f}s "
+                        f"for {video_path}"
+                    )
 
         except Exception as e:
             logger.error(f"Failed to extract keyframes from {video_path}: {e}")
