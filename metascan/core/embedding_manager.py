@@ -373,11 +373,12 @@ class EmbeddingManager:
             logger.error(f"Failed to compute video embedding for {video_path}: {e}")
             return None
 
-    def _extract_keyframes(
-        self, video_path: str, num_frames: int
-    ) -> List[np.ndarray]:
+    def _extract_keyframes(self, video_path: str, num_frames: int) -> List[np.ndarray]:
         """Extract evenly-spaced keyframes from a video using ffmpeg."""
-        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
+        from metascan.utils.ffmpeg_utils import (
+            probe_with_timeout,
+            extract_frame_with_timeout,
+        )
 
         frames = []
         try:
@@ -448,7 +449,10 @@ class EmbeddingManager:
     @staticmethod
     def compute_video_phash(video_path: str) -> Optional[str]:
         """Compute a perceptual hash for a video using its first frame."""
-        from metascan.utils.ffmpeg_utils import probe_with_timeout, extract_frame_with_timeout
+        from metascan.utils.ffmpeg_utils import (
+            probe_with_timeout,
+            extract_frame_with_timeout,
+        )
 
         try:
             probe = probe_with_timeout(video_path)
@@ -542,9 +546,7 @@ class FaissIndexManager:
                     with open(self._meta_path, "r") as f:
                         self._meta = json.load(f)
 
-                logger.info(
-                    f"Loaded FAISS index with {self._index.ntotal} vectors"
-                )
+                logger.info(f"Loaded FAISS index with {self._index.ntotal} vectors")
                 return True
             else:
                 logger.info("No existing FAISS index found")
@@ -571,9 +573,7 @@ class FaissIndexManager:
             "file_count": 0,
         }
         self._dirty = True
-        logger.info(
-            f"Created new FAISS index (dim={embedding_dim}, model={model_key})"
-        )
+        logger.info(f"Created new FAISS index (dim={embedding_dim}, model={model_key})")
 
     def add(self, file_path: str, embedding: np.ndarray) -> None:
         """Add a single embedding to the index."""
@@ -716,9 +716,7 @@ class FaissIndexManager:
             os.replace(str(temp_meta), str(self._meta_path))
 
             self._dirty = False
-            logger.info(
-                f"Saved FAISS index ({len(self._id_to_path)} vectors)"
-            )
+            logger.info(f"Saved FAISS index ({len(self._id_to_path)} vectors)")
             return True
 
         except Exception as e:

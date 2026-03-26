@@ -129,7 +129,9 @@ def find_phash_duplicate_groups(
     # Process images
     if image_hashes:
         groups, cmp_done, cancelled = _find_groups_single_partition(
-            image_hashes, threshold, progress_callback,
+            image_hashes,
+            threshold,
+            progress_callback,
             comparisons_offset=0,
             total_comparisons=total_comparisons,
             report_interval=report_interval,
@@ -143,7 +145,9 @@ def find_phash_duplicate_groups(
     # Process videos
     if video_hashes:
         groups, cmp_done, cancelled = _find_groups_single_partition(
-            video_hashes, threshold, progress_callback,
+            video_hashes,
+            threshold,
+            progress_callback,
             comparisons_offset=cmp_done,
             total_comparisons=total_comparisons,
             report_interval=report_interval,
@@ -276,16 +280,10 @@ class DuplicateFinderDialog(QDialog):
 
         # Left: results tree
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(
-            ["File", "Dimensions", "Size", "Distance"]
-        )
+        self.tree.setHeaderLabels(["File", "Dimensions", "Size", "Distance"])
         self.tree.setAlternatingRowColors(True)
-        self.tree.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
-        self.tree.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setColumnWidth(1, 100)
         self.tree.setColumnWidth(2, 80)
         self.tree.setColumnWidth(3, 70)
@@ -314,9 +312,7 @@ class DuplicateFinderDialog(QDialog):
 
         self.preview_hint = QLabel("Double-click image to open in viewer")
         self.preview_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_hint.setStyleSheet(
-            "QLabel { color: gray; font-size: 11px; }"
-        )
+        self.preview_hint.setStyleSheet("QLabel { color: gray; font-size: 11px; }")
         self.preview_hint.setVisible(False)
         preview_layout.addWidget(self.preview_hint)
 
@@ -387,7 +383,9 @@ class DuplicateFinderDialog(QDialog):
             n = len(phashes)
             total_cmp = n * (n - 1) // 2
             self.progress_bar.setMaximum(max(total_cmp, 1))
-            self.status_label.setText(f"Comparing {n} files ({total_cmp:,} comparisons)...")
+            self.status_label.setText(
+                f"Comparing {n} files ({total_cmp:,} comparisons)..."
+            )
             QApplication.processEvents()
 
             threshold = self.threshold_slider.value()
@@ -437,9 +435,7 @@ class DuplicateFinderDialog(QDialog):
             group_item = QTreeWidgetItem(
                 [f"Group {group_idx + 1} ({len(group)} files)", "", "", ""]
             )
-            group_item.setFlags(
-                group_item.flags() | Qt.ItemFlag.ItemIsAutoTristate
-            )
+            group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsAutoTristate)
             self.tree.addTopLevelItem(group_item)
 
             for file_path, distance in group:
@@ -456,20 +452,18 @@ class DuplicateFinderDialog(QDialog):
                 else:
                     dims = "N/A"
 
-                child = QTreeWidgetItem(
-                    [str(path.name), dims, size_str, str(distance)]
-                )
+                child = QTreeWidgetItem([str(path.name), dims, size_str, str(distance)])
                 child.setData(0, Qt.ItemDataRole.UserRole, file_path)
                 child.setToolTip(0, file_path)
-                child.setFlags(
-                    child.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                )
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.CheckState.Unchecked)
                 group_item.addChild(child)
 
             group_item.setExpanded(True)
 
-    def _on_item_selected(self, current: QTreeWidgetItem, previous: QTreeWidgetItem) -> None:
+    def _on_item_selected(
+        self, current: QTreeWidgetItem, previous: QTreeWidgetItem
+    ) -> None:
         """Update the preview panel when a tree item is selected."""
         if current is None:
             return

@@ -307,7 +307,9 @@ class VirtualScrollArea(QScrollArea):
 
         # Thumbnail loading (synchronous approach)
         self.thumbnail_cache: Optional[ThumbnailCache] = None
-        self._cancel_thumbnail_render: bool = False  # Flag to stop rendering on state change
+        self._cancel_thumbnail_render: bool = (
+            False  # Flag to stop rendering on state change
+        )
 
         # Timer for rendering thumbnails after scroll stops (debounce)
         self._thumbnail_render_timer = QTimer(self)
@@ -521,7 +523,9 @@ class VirtualScrollArea(QScrollArea):
             else:
                 # Viewport not yet laid out, skip this update
                 # showEvent or resizeEvent will trigger update when dimensions are valid
-                logger.debug("Skipping viewport update - viewport height not yet available")
+                logger.debug(
+                    "Skipping viewport update - viewport height not yet available"
+                )
                 return
 
         # Calculate which rows are visible
@@ -704,7 +708,9 @@ class VirtualScrollArea(QScrollArea):
         if not self.thumbnail_cache or not self.visible_widgets:
             return
 
-        logger.debug(f"Starting thumbnail render for {len(self.visible_widgets)} visible widgets")
+        logger.debug(
+            f"Starting thumbnail render for {len(self.visible_widgets)} visible widgets"
+        )
 
         # Get a snapshot of visible widgets to avoid modification during iteration
         widgets_snapshot = list(self.visible_widgets.items())
@@ -716,7 +722,10 @@ class VirtualScrollArea(QScrollArea):
                 return
 
             # Skip if widget is no longer in visible_widgets (was removed by scroll)
-            if index not in self.visible_widgets or self.visible_widgets[index] is not widget:
+            if (
+                index not in self.visible_widgets
+                or self.visible_widgets[index] is not widget
+            ):
                 continue
 
             # Skip if widget already has a thumbnail (with guard for deleted widgets)
@@ -758,6 +767,7 @@ class VirtualScrollArea(QScrollArea):
 
                 # Process Qt events to keep UI responsive
                 from PyQt6.QtWidgets import QApplication
+
                 QApplication.processEvents()
 
             except Exception as e:
@@ -986,10 +996,10 @@ class VirtualScrollArea(QScrollArea):
         # 2. Height became valid (changed from 0 to > 0) - handles initial layout
         # 3. We have media but no visible widgets (initial state after set_media_list)
         columns_changed = abs(self.layout_metrics.columns - old_columns) >= 1
-        height_became_valid = old_visible_height == 0 and self.viewport_info.visible_height > 0
-        needs_initial_widgets = (
-            self.filtered_media and not self.visible_widgets
+        height_became_valid = (
+            old_visible_height == 0 and self.viewport_info.visible_height > 0
         )
+        needs_initial_widgets = self.filtered_media and not self.visible_widgets
 
         if columns_changed or height_became_valid or needs_initial_widgets:
             if columns_changed:
@@ -1292,7 +1302,9 @@ class VirtualThumbnailView(QWidget):
         self.scroll_area.open_folder_requested.connect(self.open_folder_requested.emit)
         self.scroll_area.delete_requested.connect(self.delete_requested.emit)
         self.scroll_area.upscale_requested.connect(self.upscale_requested.emit)
-        self.scroll_area.find_similar_requested.connect(self.find_similar_requested.emit)
+        self.scroll_area.find_similar_requested.connect(
+            self.find_similar_requested.emit
+        )
 
     def set_media_list(self, media_list: List[Media]) -> None:
         """

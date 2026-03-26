@@ -29,11 +29,23 @@ def _find_ffmpeg() -> Optional[str]:
     # On Windows, check common installation locations
     if sys.platform == "win32":
         common_paths = [
-            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "ffmpeg" / "bin" / "ffmpeg.exe",
-            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")) / "ffmpeg" / "bin" / "ffmpeg.exe",
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files"))
+            / "ffmpeg"
+            / "bin"
+            / "ffmpeg.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"))
+            / "ffmpeg"
+            / "bin"
+            / "ffmpeg.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "ffmpeg" / "bin" / "ffmpeg.exe",
             Path.home() / "ffmpeg" / "bin" / "ffmpeg.exe",
-            Path.home() / "scoop" / "apps" / "ffmpeg" / "current" / "bin" / "ffmpeg.exe",
+            Path.home()
+            / "scoop"
+            / "apps"
+            / "ffmpeg"
+            / "current"
+            / "bin"
+            / "ffmpeg.exe",
             Path("C:\\ffmpeg\\bin\\ffmpeg.exe"),
         ]
         for path in common_paths:
@@ -63,7 +75,16 @@ class ThumbnailCache:
     """Manages thumbnail generation and caching"""
 
     DEFAULT_SIZE = (256, 256)
-    SUPPORTED_FORMATS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".mp4", ".webm"}
+    SUPPORTED_FORMATS = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp",
+        ".gif",
+        ".mp4",
+        ".webm",
+    }
 
     def __init__(self, cache_dir: Path, thumbnail_size: Tuple[int, int] = DEFAULT_SIZE):
         self.cache_dir = cache_dir
