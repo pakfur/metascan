@@ -70,6 +70,8 @@ import platform
 import subprocess
 import logging
 
+logger = logging.getLogger(__name__)
+
 log_startup("main_window.py: All imports complete")
 
 
@@ -78,7 +80,7 @@ class ScannerThread(QThread):
     directory_progress_updated = pyqtSignal(
         int, int, str
     )  # current_dir, total_dirs, dir_path
-    scan_complete = pyqtSignal(int)  # processed_count
+    scan_complete = pyqtSignal(int, int)  # processed_count, stale_count
     scan_error = pyqtSignal(str)  # error message
 
     def __init__(self, scanner, directories, full_scan=False):
@@ -93,6 +95,37 @@ class ScannerThread(QThread):
         # If using ThreadedScanner, signal it to stop
         if hasattr(self.scanner, "stop_scanning"):
             self.scanner.stop_scanning()
+
+    def _remove_stale_entries(self) -> int:
+        """Remove DB entries for files that no longer exist on disk.
+
+        Re-discovers all media files from the configured scan directories
+        and deletes any database entries whose paths are not found.
+        """
+        try:
+            # Collect all files currently on disk across all scan directories
+            all_disk_paths: set = set()
+            for dir_info in self.directories:
+                dir_path = dir_info["filepath"]
+                recursive = dir_info["search_subfolders"]
+                found = self.scanner._find_media_files(Path(dir_path), recursive)
+                all_disk_paths.update(str(p) for p in found)
+
+            # Compare against database
+            db_paths = self.scanner.db_manager.get_existing_file_paths()
+            stale_paths = db_paths - all_disk_paths
+
+            if stale_paths:
+                self.scanner.db_manager.delete_media_batch(
+                    [Path(p) for p in stale_paths]
+                )
+                logger.info(
+                    f"Removed {len(stale_paths)} stale entries from database"
+                )
+            return len(stale_paths)
+        except Exception as e:
+            logger.error(f"Failed to remove stale entries: {e}")
+            return 0
 
     def run(self):
         total_processed = 0
@@ -122,7 +155,8 @@ class ScannerThread(QThread):
                 total_processed += processed
 
             if not self._is_cancelled:
-                self.scan_complete.emit(total_processed)
+                stale_count = self._remove_stale_entries()
+                self.scan_complete.emit(total_processed, stale_count)
         except Exception as e:
             self.scan_error.emit(str(e))
 
@@ -208,12 +242,35 @@ class ScanProgressDialog(QDialog):
             file_name = Path(file_path).name
             self.file_label.setText(f"Processing: {file_name}")
 
+    def switch_to_embedding_phase(self, total_files: int):
+        """Transition the dialog to show embedding progress."""
+        self.setWindowTitle("Computing CLIP Embeddings")
+        self.cancel_requested = False
+        self._embedding_phase = True
+
+        # Hide directory bar, repurpose file bar for embeddings
+        self.dir_progress_bar.setVisible(False)
+        self.dir_label.setText("Computing CLIP embeddings...")
+        self.file_progress_bar.setMaximum(total_files)
+        self.file_progress_bar.setValue(0)
+        self.file_progress_bar.setFormat("File %v of %m")
+        self.file_label.setText("Starting embedding worker...")
+        self.progress_label.setText(f"0 / {total_files} files")
+
+    def update_embedding_progress(self, current: int, total: int, status_text: str):
+        """Update embedding progress display."""
+        self.file_progress_bar.setMaximum(max(total, 1))
+        self.file_progress_bar.setValue(current)
+        self.progress_label.setText(f"{current} / {total} files")
+        self.file_label.setText(status_text)
+
     def on_cancel_clicked(self):
         """Handle cancel button click."""
+        phase = "embedding" if getattr(self, "_embedding_phase", False) else "scanning"
         reply = QMessageBox.question(
             self,
-            "Cancel Scanning",
-            "Are you sure you want to cancel the scanning process?",
+            f"Cancel {phase.title()}",
+            f"Are you sure you want to cancel the {phase} process?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1633,13 +1690,11 @@ class MainWindow(QMainWindow):
                 current_dir, total_dirs, dir_path
             )
 
-    def _on_scan_complete(self, processed_count):
+    def _on_scan_complete(self, processed_count, stale_count=0):
         """Handle scan completion."""
-        print(f"Scanning completed. Processed {processed_count} files.")
-
-        # Close progress dialog
-        if hasattr(self, "progress_dialog"):
-            self.progress_dialog.accept()
+        print(f"Scanning completed. Processed {processed_count} files, removed {stale_count} stale entries.")
+        self._scan_processed_count = processed_count
+        self._scan_stale_count = stale_count
 
         # Restore favorites if we had saved them before a full clean
         if hasattr(self, "_favorites_to_restore") and self._favorites_to_restore:
@@ -1652,12 +1707,133 @@ class MainWindow(QMainWindow):
         # Reload media after scanning
         self.load_all_media()
 
-        # Show completion message
-        QMessageBox.information(
-            self,
-            "Scan Complete",
-            f"Successfully processed {processed_count} media files.",
+        # Try to transition to embedding phase instead of closing dialog
+        if self._auto_trigger_embeddings():
+            return  # Dialog stays open for embedding progress
+
+        # No embeddings needed — close dialog and show completion
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.accept()
+
+        message = f"Successfully processed {processed_count} media files."
+        if stale_count > 0:
+            message += f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+
+        QMessageBox.information(self, "Scan Complete", message)
+
+    def _auto_trigger_embeddings(self) -> bool:
+        """Auto-start CLIP embedding computation for unembedded files after scan.
+
+        Returns True if embeddings were started (dialog stays open), False otherwise.
+        """
+        try:
+            if self.embedding_queue.is_indexing():
+                return False
+
+            config_path = get_config_path()
+            if not config_path.exists():
+                return False
+            with open(config_path, "r") as f:
+                full_config = json.load(f)
+            sim_config = full_config.get("similarity", {})
+            if not sim_config:
+                return False
+
+            unembedded = self.db_manager.get_unembedded_file_paths()
+            if not unembedded:
+                return False
+
+            model_key = sim_config.get("clip_model", "small")
+            device = sim_config.get("device", "auto")
+            db_path = str(self.db_manager.db_path)
+            video_keyframes = sim_config.get("video_keyframes", 4)
+
+            # Transition dialog to embedding phase
+            if hasattr(self, "progress_dialog"):
+                self.progress_dialog.switch_to_embedding_phase(len(unembedded))
+
+            # Connect embedding signals to dialog and completion handler
+            self.embedding_queue.progress_updated.connect(
+                self._on_embedding_progress
+            )
+            self.embedding_queue.indexing_complete.connect(
+                self._on_embedding_complete
+            )
+            self.embedding_queue.indexing_error.connect(
+                self._on_embedding_error
+            )
+
+            self.logger.info(
+                f"Auto-triggering CLIP embeddings for {len(unembedded)} files"
+            )
+            self.embedding_queue.start_indexing(
+                file_paths=unembedded,
+                clip_model_key=model_key,
+                device=device,
+                db_path=db_path,
+                compute_phash=False,
+                video_keyframes=video_keyframes,
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to auto-trigger embeddings: {e}")
+            return False
+
+    def _on_embedding_progress(self, current: int, total: int, status_text: str):
+        """Update progress dialog with embedding progress."""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.update_embedding_progress(
+                current, total, status_text
+            )
+            # Check if user cancelled via dialog
+            if self.progress_dialog.cancel_requested:
+                self.embedding_queue.cancel_indexing()
+
+    def _on_embedding_complete(self, total: int):
+        """Handle embedding completion — close dialog and show summary."""
+        self._disconnect_embedding_signals()
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.accept()
+
+        scan_count = getattr(self, "_scan_processed_count", 0)
+        stale_count = getattr(self, "_scan_stale_count", 0)
+        message = (
+            f"Successfully processed {scan_count} media files.\n"
+            f"CLIP embeddings computed for {total} files."
         )
+        if stale_count > 0:
+            message += f"\nRemoved {stale_count} stale entries (files no longer on disk)."
+        QMessageBox.information(self, "Scan Complete", message)
+
+    def _on_embedding_error(self, error: str):
+        """Handle embedding error — close dialog and notify."""
+        self._disconnect_embedding_signals()
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.accept()
+
+        scan_count = getattr(self, "_scan_processed_count", 0)
+        QMessageBox.warning(
+            self,
+            "Scan Complete (Embedding Error)",
+            f"Scanned {scan_count} files successfully.\n\n"
+            f"CLIP embedding failed: {error}\n"
+            f"Check logs/embedding_worker.log for details.",
+        )
+
+    def _disconnect_embedding_signals(self):
+        """Safely disconnect embedding queue signals from scan handlers."""
+        try:
+            self.embedding_queue.progress_updated.disconnect(
+                self._on_embedding_progress
+            )
+            self.embedding_queue.indexing_complete.disconnect(
+                self._on_embedding_complete
+            )
+            self.embedding_queue.indexing_error.disconnect(
+                self._on_embedding_error
+            )
+        except TypeError:
+            pass  # Already disconnected
 
     def _on_scan_error(self, error_message):
         """Handle scan errors."""
