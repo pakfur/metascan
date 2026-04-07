@@ -1,4 +1,6 @@
 import sys
+import enum
+import time
 from metascan.utils.startup_profiler import log_startup, profile_phase
 
 log_startup("main_window.py: Module loading started")
@@ -25,6 +27,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QSizePolicy,
+    QStackedWidget,
 )
 
 log_startup("  Importing PyQt6.QtCore...")
@@ -80,6 +83,7 @@ class ScannerThread(QThread):
     directory_progress_updated = pyqtSignal(
         int, int, str
     )  # current_dir, total_dirs, dir_path
+    stale_cleanup_started = pyqtSignal()
     scan_complete = pyqtSignal(int, int)  # processed_count, stale_count
     scan_error = pyqtSignal(str)  # error message
 
@@ -153,129 +157,449 @@ class ScannerThread(QThread):
                 total_processed += processed
 
             if not self._is_cancelled:
+                self.stale_cleanup_started.emit()
                 stale_count = self._remove_stale_entries()
                 self.scan_complete.emit(total_processed, stale_count)
         except Exception as e:
             self.scan_error.emit(str(e))
 
 
+class ScanPhase(enum.IntEnum):
+    PREPARATION = 0
+    CONFIRMATION = 1
+    SCANNING = 2
+    STALE_CLEANUP = 3
+    EMBEDDING = 4
+    COMPLETE = 5
+
+
+# Step labels shown in the step tracker (phases map to steps)
+_STEP_LABELS = ["Prepare", "Confirm", "Scan", "Embed", "Done"]
+# Map each ScanPhase to its step index (STALE_CLEANUP shares step 2 with SCANNING)
+_PHASE_TO_STEP = {
+    ScanPhase.PREPARATION: 0,
+    ScanPhase.CONFIRMATION: 1,
+    ScanPhase.SCANNING: 2,
+    ScanPhase.STALE_CLEANUP: 2,
+    ScanPhase.EMBEDDING: 3,
+    ScanPhase.COMPLETE: 4,
+}
+
+
 class ScanProgressDialog(QDialog):
-    def __init__(self, parent=None):
+    scan_confirmed = pyqtSignal(bool)  # full_clean requested
+
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("Scanning Media Files")
+        self.setWindowTitle("Scan Media Files")
         self.setModal(True)
-        self.setFixedSize(550, 250)
+        self.setFixedSize(600, 420)
 
-        # Layout
-        layout = QVBoxLayout(self)
-        layout.setSpacing(5)  # Default spacing between widgets
+        self.cancel_requested = False
+        self._current_phase = ScanPhase.PREPARATION
+        self._completed_steps: set = set()
+        self._skipped_steps: set = set()
+        self._overall_start_time = time.monotonic()
+        self._phase_start_time = self._overall_start_time
+        self._phase_start_items = 0
+        self._current_items = 0
+        self._total_items = 0
 
-        # Container for stacked progress bars with no gap
-        progress_container = QWidget()
-        progress_layout = QVBoxLayout(progress_container)
-        progress_layout.setContentsMargins(0, 0, 0, 0)
-        progress_layout.setSpacing(0)  # No gap between progress bars
+        root_layout = QVBoxLayout(self)
+        root_layout.setSpacing(8)
 
-        # Directory progress bar
-        self.dir_progress_bar = QProgressBar()
-        self.dir_progress_bar.setTextVisible(True)
-        self.dir_progress_bar.setFormat("Directory %v of %m")
-        progress_layout.addWidget(self.dir_progress_bar)
+        # --- Step tracker ---
+        root_layout.addWidget(self._create_step_tracker())
 
-        # File progress bar (stacked directly below with no gap)
-        self.file_progress_bar = QProgressBar()
-        self.file_progress_bar.setTextVisible(True)
-        self.file_progress_bar.setFormat("File %v of %m")
-        progress_layout.addWidget(self.file_progress_bar)
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        root_layout.addWidget(sep)
 
-        # Add the progress container to main layout
-        layout.addWidget(progress_container)
+        # --- Stacked content area ---
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._create_preparation_page())  # 0
+        self._stack.addWidget(self._create_confirmation_page())  # 1
+        self._stack.addWidget(self._create_scanning_page())  # 2
+        self._stack.addWidget(self._create_stale_cleanup_page())  # 3
+        self._stack.addWidget(self._create_embedding_page())  # 4
+        self._stack.addWidget(self._create_complete_page())  # 5
+        root_layout.addWidget(self._stack, 1)
 
-        # Add small spacing after progress bars
-        layout.addSpacing(10)
+        # --- Time display ---
+        time_row = QHBoxLayout()
+        self._elapsed_label = QLabel("Elapsed: 0s")
+        self._eta_label = QLabel("")
+        time_row.addWidget(self._elapsed_label)
+        time_row.addStretch()
+        time_row.addWidget(self._eta_label)
+        root_layout.addLayout(time_row)
 
-        # Current directory label
-        self.dir_label = QLabel("Preparing to scan...")
-        layout.addWidget(self.dir_label)
+        # --- Button bar ---
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel_clicked)
+        root_layout.addWidget(self._cancel_btn)
 
-        # Current file label
-        self.file_label = QLabel("")
-        layout.addWidget(self.file_label)
+        # Elapsed-time timer
+        self._tick_timer = QTimer(self)
+        self._tick_timer.timeout.connect(self._update_elapsed_time)
+        self._tick_timer.start(1000)
 
-        # Progress text summary
-        self.progress_label = QLabel("0 / 0 files")
-        layout.addWidget(self.progress_label)
+    # ------------------------------------------------------------------ #
+    #  Step tracker
+    # ------------------------------------------------------------------ #
+    def _create_step_tracker(self) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 4, 10, 4)
+        self._step_circles: list = []
+        self._step_labels_widgets: list = []
+        self._step_lines: list = []
 
-        # Add stretch to push cancel button to bottom
+        for i, label_text in enumerate(_STEP_LABELS):
+            if i > 0:
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.HLine)
+                line.setFixedHeight(2)
+                line.setStyleSheet("background-color: #555;")
+                layout.addWidget(line, 1, Qt.AlignmentFlag.AlignVCenter)
+                self._step_lines.append(line)
+
+            step_w = QWidget()
+            step_l = QVBoxLayout(step_w)
+            step_l.setContentsMargins(0, 0, 0, 0)
+            step_l.setSpacing(2)
+
+            circle = QLabel(str(i + 1))
+            circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            circle.setFixedSize(28, 28)
+            circle.setStyleSheet(
+                "border-radius: 14px; border: 2px solid #555; color: #888; font-weight: bold;"
+            )
+            step_l.addWidget(circle, 0, Qt.AlignmentFlag.AlignCenter)
+
+            lbl = QLabel(label_text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color: #888; font-size: 11px;")
+            step_l.addWidget(lbl)
+
+            self._step_circles.append(circle)
+            self._step_labels_widgets.append(lbl)
+            layout.addWidget(step_w, 0)
+
+        return container
+
+    def _update_step_tracker(self) -> None:
+        active_step = _PHASE_TO_STEP[self._current_phase]
+        for i in range(len(_STEP_LABELS)):
+            circle = self._step_circles[i]
+            lbl = self._step_labels_widgets[i]
+            if i in self._skipped_steps:
+                circle.setText("—")
+                circle.setStyleSheet(
+                    "border-radius: 14px; border: 2px solid #555; color: #666; font-weight: bold;"
+                )
+                lbl.setStyleSheet("color: #666; font-size: 11px;")
+            elif i in self._completed_steps:
+                circle.setText("✓")
+                circle.setStyleSheet(
+                    "border-radius: 14px; background-color: #4caf50; color: white; font-weight: bold;"
+                )
+                lbl.setStyleSheet("color: #4caf50; font-size: 11px;")
+            elif i == active_step:
+                circle.setStyleSheet(
+                    "border-radius: 14px; background-color: #2196f3; color: white; font-weight: bold;"
+                )
+                lbl.setStyleSheet("color: #2196f3; font-size: 11px; font-weight: bold;")
+            else:
+                circle.setText(str(i + 1))
+                circle.setStyleSheet(
+                    "border-radius: 14px; border: 2px solid #555; color: #888; font-weight: bold;"
+                )
+                lbl.setStyleSheet("color: #888; font-size: 11px;")
+
+            # Update connecting lines
+            if i > 0:
+                line = self._step_lines[i - 1]
+                if i <= active_step or i in self._completed_steps:
+                    line.setStyleSheet("background-color: #4caf50;")
+                else:
+                    line.setStyleSheet("background-color: #555;")
+
+    # ------------------------------------------------------------------ #
+    #  Content pages
+    # ------------------------------------------------------------------ #
+    def _create_preparation_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addStretch()
+        bar = QProgressBar()
+        bar.setRange(0, 0)  # indeterminate
+        bar.setTextVisible(False)
+        layout.addWidget(bar)
+        lbl = QLabel("Counting media files and checking database...")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl)
+        layout.addStretch()
+        return page
+
+    def _create_confirmation_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
         layout.addStretch()
 
-        # Cancel button
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.on_cancel_clicked)
-        layout.addWidget(cancel_button)
+        self._confirm_info_label = QLabel("Preparing scan details...")
+        self._confirm_info_label.setWordWrap(True)
+        layout.addWidget(self._confirm_info_label)
 
+        layout.addSpacing(10)
+
+        self._full_clean_checkbox = QCheckBox("Full clean and scan")
+        self._full_clean_checkbox.setToolTip(
+            "Clear all existing data (media records, indices, and thumbnails) before scanning.\n"
+            "This ensures a completely fresh start but will remove all previously scanned data."
+        )
+        layout.addWidget(self._full_clean_checkbox)
+
+        layout.addSpacing(10)
+
+        self._start_scan_btn = QPushButton("Start Scan")
+        self._start_scan_btn.setFixedWidth(140)
+        self._start_scan_btn.clicked.connect(self._on_start_scan_clicked)
+        layout.addWidget(self._start_scan_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch()
+        return page
+
+    def _create_scanning_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        # Directory progress bar
+        self._scan_dir_bar = QProgressBar()
+        self._scan_dir_bar.setTextVisible(True)
+        self._scan_dir_bar.setFormat("Directory %v of %m")
+        layout.addWidget(self._scan_dir_bar)
+
+        # File progress bar
+        self._scan_file_bar = QProgressBar()
+        self._scan_file_bar.setTextVisible(True)
+        self._scan_file_bar.setFormat("File %v of %m")
+        layout.addWidget(self._scan_file_bar)
+
+        layout.addSpacing(8)
+
+        self._scan_dir_label = QLabel("Preparing to scan...")
+        layout.addWidget(self._scan_dir_label)
+
+        self._scan_file_label = QLabel("")
+        layout.addWidget(self._scan_file_label)
+
+        self._scan_progress_label = QLabel("0 / 0 files")
+        layout.addWidget(self._scan_progress_label)
+
+        layout.addStretch()
+        return page
+
+    def _create_stale_cleanup_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addStretch()
+        bar = QProgressBar()
+        bar.setRange(0, 0)  # indeterminate
+        bar.setTextVisible(False)
+        layout.addWidget(bar)
+        lbl = QLabel("Removing stale database entries for deleted files...")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl)
+        layout.addStretch()
+        return page
+
+    def _create_embedding_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self._embed_bar = QProgressBar()
+        self._embed_bar.setTextVisible(True)
+        self._embed_bar.setFormat("File %v of %m")
+        layout.addWidget(self._embed_bar)
+
+        layout.addSpacing(8)
+
+        self._embed_status_label = QLabel("Starting embedding worker...")
+        layout.addWidget(self._embed_status_label)
+
+        self._embed_progress_label = QLabel("0 / 0 files")
+        layout.addWidget(self._embed_progress_label)
+
+        layout.addStretch()
+        return page
+
+    def _create_complete_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addStretch()
+
+        self._complete_label = QLabel("")
+        self._complete_label.setWordWrap(True)
+        self._complete_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._complete_label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(self._complete_label)
+
+        layout.addStretch()
+        return page
+
+    # ------------------------------------------------------------------ #
+    #  Phase transitions
+    # ------------------------------------------------------------------ #
+    def set_phase(self, phase: ScanPhase) -> None:
+        prev_step = _PHASE_TO_STEP[self._current_phase]
+        new_step = _PHASE_TO_STEP[phase]
+
+        # Mark prior steps as completed (unless skipped)
+        for s in range(prev_step, new_step):
+            if s not in self._skipped_steps:
+                self._completed_steps.add(s)
+
+        self._current_phase = phase
+        self._stack.setCurrentIndex(int(phase))
+        self._phase_start_time = time.monotonic()
+        self._phase_start_items = 0
+        self._current_items = 0
+        self._total_items = 0
         self.cancel_requested = False
 
-    def update_directory_progress(self, current_dir, total_dirs, dir_path):
-        """Update the directory progress display."""
-        self.dir_progress_bar.setMaximum(total_dirs)
-        self.dir_progress_bar.setValue(current_dir)
+        if phase == ScanPhase.COMPLETE:
+            self._cancel_btn.setText("Close")
+            self._tick_timer.stop()
+            self._eta_label.setText("")
+            self._completed_steps.add(new_step)
+        elif phase == ScanPhase.STALE_CLEANUP:
+            self._cancel_btn.setEnabled(False)
+            self._eta_label.setText("")
+        else:
+            self._cancel_btn.setEnabled(True)
+            self._cancel_btn.setText("Cancel")
 
-        # Show shortened directory path
+        self._update_step_tracker()
+
+    def show_confirmation(
+        self, total_dirs: int, total_files: int, unprocessed_files: int
+    ) -> None:
+        info = f"Directories to scan: {total_dirs}\n"
+        info += f"Total media files found: {total_files:,}\n"
+        info += f"New files to process: {unprocessed_files:,}\n\n"
+        if unprocessed_files == 0:
+            info += "All files are already in the database."
+        else:
+            info += "This may take several minutes depending on file count."
+        self._confirm_info_label.setText(info)
+        self.set_phase(ScanPhase.CONFIRMATION)
+
+    def update_directory_progress(
+        self, current_dir: int, total_dirs: int, dir_path: str
+    ) -> None:
+        self._scan_dir_bar.setMaximum(total_dirs)
+        self._scan_dir_bar.setValue(current_dir)
         if isinstance(dir_path, str):
-            dir_name = Path(dir_path).name
-            parent_name = Path(dir_path).parent.name
-            # Show parent/directory for better context
-            display_path = f"{parent_name}/{dir_name}" if parent_name else dir_name
-            self.dir_label.setText(f"Directory: {display_path}")
+            p = Path(dir_path)
+            display = f"{p.parent.name}/{p.name}" if p.parent.name else p.name
+            self._scan_dir_label.setText(f"Directory: {display}")
 
-    def update_file_progress(self, current, total, file_path):
-        """Update the file progress display."""
-        self.file_progress_bar.setMaximum(total)
-        self.file_progress_bar.setValue(current)
-        self.progress_label.setText(f"{current} / {total} files")
-
-        # Show shortened file path
+    def update_file_progress(self, current: int, total: int, file_path: str) -> None:
+        self._scan_file_bar.setMaximum(total)
+        self._scan_file_bar.setValue(current)
+        self._scan_progress_label.setText(f"{current} / {total} files")
+        self._current_items = current
+        self._total_items = total
         if isinstance(file_path, str):
-            file_name = Path(file_path).name
-            self.file_label.setText(f"Processing: {file_name}")
+            self._scan_file_label.setText(f"Processing: {Path(file_path).name}")
 
-    def switch_to_embedding_phase(self, total_files: int):
-        """Transition the dialog to show embedding progress."""
-        self.setWindowTitle("Computing CLIP Embeddings")
-        self.cancel_requested = False
-        self._embedding_phase = True
+    def enter_stale_cleanup(self) -> None:
+        self.set_phase(ScanPhase.STALE_CLEANUP)
 
-        # Hide directory bar, repurpose file bar for embeddings
-        self.dir_progress_bar.setVisible(False)
-        self.dir_label.setText("Computing CLIP embeddings...")
-        self.file_progress_bar.setMaximum(total_files)
-        self.file_progress_bar.setValue(0)
-        self.file_progress_bar.setFormat("File %v of %m")
-        self.file_label.setText("Starting embedding worker...")
-        self.progress_label.setText(f"0 / {total_files} files")
+    def update_embedding_progress(
+        self, current: int, total: int, status_text: str
+    ) -> None:
+        self._embed_bar.setMaximum(max(total, 1))
+        self._embed_bar.setValue(current)
+        self._embed_progress_label.setText(f"{current} / {total} files")
+        self._embed_status_label.setText(status_text)
+        self._current_items = current
+        self._total_items = total
 
-    def update_embedding_progress(self, current: int, total: int, status_text: str):
-        """Update embedding progress display."""
-        self.file_progress_bar.setMaximum(max(total, 1))
-        self.file_progress_bar.setValue(current)
-        self.progress_label.setText(f"{current} / {total} files")
-        self.file_label.setText(status_text)
+    def skip_embedding_step(self) -> None:
+        self._skipped_steps.add(3)
 
-    def on_cancel_clicked(self):
-        """Handle cancel button click."""
-        phase = "embedding" if getattr(self, "_embedding_phase", False) else "scanning"
+    def show_completion(self, summary_text: str) -> None:
+        self._complete_label.setText(summary_text)
+        self.set_phase(ScanPhase.COMPLETE)
+
+    def is_full_clean_requested(self) -> bool:
+        return self._full_clean_checkbox.isChecked()
+
+    # ------------------------------------------------------------------ #
+    #  Time tracking
+    # ------------------------------------------------------------------ #
+    def _update_elapsed_time(self) -> None:
+        elapsed = time.monotonic() - self._overall_start_time
+        self._elapsed_label.setText(f"Elapsed: {self._format_time(elapsed)}")
+
+        # ETA during scanning / embedding phases
+        if self._current_phase in (ScanPhase.SCANNING, ScanPhase.EMBEDDING):
+            phase_elapsed = time.monotonic() - self._phase_start_time
+            done = self._current_items - self._phase_start_items
+            remaining = self._total_items - self._current_items
+            if done >= 5 and phase_elapsed >= 3 and remaining > 0:
+                rate = phase_elapsed / done
+                eta = rate * remaining
+                self._eta_label.setText(f"Remaining: ~{self._format_time(eta)}")
+            else:
+                self._eta_label.setText("")
+        else:
+            self._eta_label.setText("")
+
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        s = int(seconds)
+        if s < 60:
+            return f"{s}s"
+        m, s = divmod(s, 60)
+        return f"{m}m {s:02d}s"
+
+    # ------------------------------------------------------------------ #
+    #  Button handlers
+    # ------------------------------------------------------------------ #
+    def _on_start_scan_clicked(self) -> None:
+        self.scan_confirmed.emit(self._full_clean_checkbox.isChecked())
+
+    def _on_cancel_clicked(self) -> None:
+        if self._current_phase == ScanPhase.COMPLETE:
+            self.accept()
+            return
+
+        if self._current_phase in (ScanPhase.PREPARATION, ScanPhase.CONFIRMATION):
+            self.reject()
+            return
+
+        # Active work phases — ask for confirmation
+        phase_name = (
+            "embedding" if self._current_phase == ScanPhase.EMBEDDING else "scanning"
+        )
         reply = QMessageBox.question(
             self,
-            f"Cancel {phase.title()}",
-            f"Are you sure you want to cancel the {phase} process?",
+            f"Cancel {phase_name.title()}",
+            f"Are you sure you want to cancel the {phase_name} process?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-
         if reply == QMessageBox.StandardButton.Yes:
             self.cancel_requested = True
-            self.file_label.setText("Cancelling...")
+            if self._current_phase == ScanPhase.SCANNING:
+                self._scan_file_label.setText("Cancelling...")
+            elif self._current_phase == ScanPhase.EMBEDDING:
+                self._embed_status_label.setText("Cancelling...")
 
 
 class ScanPreparationThread(QThread):
@@ -332,80 +656,6 @@ class ScanPreparationThread(QThread):
         unprocessed_files = sum(1 for f in all_files if str(f) not in existing_paths)
 
         self.preparation_complete.emit(total_dirs, total_files, unprocessed_files)
-
-
-class ScanConfirmationDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Confirm Scan")
-        self.setModal(True)
-        self.setFixedSize(400, 220)
-
-        # Layout
-        layout = QVBoxLayout(self)
-
-        # Information label - initially shows preparing message
-        self.info_label = QLabel(
-            "Preparing scan...\n\nCounting media files and checking database..."
-        )
-        self.info_label.setWordWrap(True)
-        layout.addWidget(self.info_label)
-
-        # Full clean checkbox - no custom styling, use theme
-        self.full_clean_checkbox = QCheckBox("Full clean and scan")
-        self.full_clean_checkbox.setToolTip(
-            "Clear all existing data (media records, indices, and thumbnails) before scanning.\n"
-            "This ensures a completely fresh start but will remove all previously scanned data."
-        )
-        self.full_clean_checkbox.setChecked(False)
-        self.full_clean_checkbox.setEnabled(
-            False
-        )  # Disabled until preparation complete
-        layout.addWidget(self.full_clean_checkbox)
-
-        # Question - no custom styling, use theme
-        self.question_label = QLabel("")
-        layout.addWidget(self.question_label)
-
-        # Buttons
-        self.button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No,
-            Qt.Orientation.Horizontal,
-        )
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
-
-        # Disable Yes button until preparation complete
-        self.yes_button = self.button_box.button(QDialogButtonBox.StandardButton.Yes)
-        if self.yes_button:
-            self.yes_button.setEnabled(False)
-
-    def update_with_counts(
-        self, total_dirs: int, total_files: int, unprocessed_files: int
-    ):
-        """Update the dialog with the actual file counts."""
-        info_text = f"Scan Configuration:\n\n"
-        info_text += f"Directories to scan: {total_dirs}\n"
-        info_text += f"Total media files: {total_files:,}\n"
-        info_text += f"New files to process: {unprocessed_files:,}\n\n"
-        if unprocessed_files == 0:
-            info_text += "All files are already in the database."
-        else:
-            info_text += "This operation may take several minutes depending on the number of files."
-
-        self.info_label.setText(info_text)
-        self.question_label.setText("Do you want to continue?")
-
-        # Enable controls
-        self.full_clean_checkbox.setEnabled(True)
-        if self.yes_button:
-            self.yes_button.setEnabled(True)
-            self.yes_button.setFocus()
-
-    def is_full_clean_requested(self) -> bool:
-        """Check if full clean was requested."""
-        return self.full_clean_checkbox.isChecked()
 
 
 class MainWindow(QMainWindow):
@@ -1635,8 +1885,9 @@ class MainWindow(QMainWindow):
             # Store directories for later use
             self._scan_directories_list = directories
 
-            # Show confirmation dialog immediately with "Preparing..." state
-            self._confirmation_dialog = ScanConfirmationDialog(self)
+            # Create unified progress dialog (starts in PREPARATION phase)
+            self.progress_dialog = ScanProgressDialog(self)
+            self.progress_dialog.scan_confirmed.connect(self._on_scan_confirmed)
 
             # Start preparation thread to count files in background
             self._preparation_thread = ScanPreparationThread(
@@ -1647,45 +1898,7 @@ class MainWindow(QMainWindow):
             )
             self._preparation_thread.start()
 
-            # Show dialog (blocks until user accepts/rejects)
-            if self._confirmation_dialog.exec() != QDialog.DialogCode.Accepted:
-                print("Scan cancelled by user")
-                return
-
-            # Check if full clean was requested
-            full_clean_requested = self._confirmation_dialog.is_full_clean_requested()
-
-            if full_clean_requested:
-                print("Full clean and scan requested")
-                # Save favorites before cleanup
-                saved_favorites = self._save_favorites_before_cleanup()
-                # Perform cleanup before scanning
-                self._perform_full_cleanup()
-                # Store favorites to restore after scan
-                self._favorites_to_restore = saved_favorites
-            else:
-                self._favorites_to_restore = {}
-
-            # Create progress dialog
-            self.progress_dialog = ScanProgressDialog(self)
-
-            # Create and configure scanner thread
-            self.scanner_thread = ScannerThread(
-                self.scanner,
-                self._scan_directories_list,
-                full_scan=full_clean_requested,
-            )
-            self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
-            self.scanner_thread.directory_progress_updated.connect(
-                self._on_scan_directory_progress
-            )
-            self.scanner_thread.scan_complete.connect(self._on_scan_complete)
-            self.scanner_thread.scan_error.connect(self._on_scan_error)
-
-            # Start scanning
-            self.scanner_thread.start()
-
-            # Show progress dialog
+            # Show dialog — stays open across all phases
             self.progress_dialog.exec()
 
         except Exception as e:
@@ -1695,11 +1908,42 @@ class MainWindow(QMainWindow):
     def _on_scan_preparation_complete(
         self, total_dirs: int, total_files: int, unprocessed_files: int
     ):
-        """Handle scan preparation thread completion."""
-        if hasattr(self, "_confirmation_dialog") and self._confirmation_dialog:
-            self._confirmation_dialog.update_with_counts(
+        """Preparation done — transition dialog to confirmation phase."""
+        if hasattr(self, "progress_dialog") and self.progress_dialog:
+            self.progress_dialog.show_confirmation(
                 total_dirs, total_files, unprocessed_files
             )
+
+    def _on_scan_confirmed(self, full_clean: bool):
+        """User confirmed scan — start scanning phase."""
+        if full_clean:
+            print("Full clean and scan requested")
+            saved_favorites = self._save_favorites_before_cleanup()
+            self._perform_full_cleanup()
+            self._favorites_to_restore = saved_favorites
+        else:
+            self._favorites_to_restore = {}
+
+        self.progress_dialog.set_phase(ScanPhase.SCANNING)
+
+        # Create and configure scanner thread
+        self.scanner_thread = ScannerThread(
+            self.scanner,
+            self._scan_directories_list,
+            full_scan=full_clean,
+        )
+        self.scanner_thread.progress_updated.connect(self._on_scan_file_progress)
+        self.scanner_thread.directory_progress_updated.connect(
+            self._on_scan_directory_progress
+        )
+        self.scanner_thread.stale_cleanup_started.connect(
+            self._on_stale_cleanup_started
+        )
+        self.scanner_thread.scan_complete.connect(self._on_scan_complete)
+        self.scanner_thread.scan_error.connect(self._on_scan_error)
+
+        # Start scanning
+        self.scanner_thread.start()
 
     def _on_scan_file_progress(self, current, total, file_path):
         """Handle file scan progress updates."""
@@ -1716,6 +1960,11 @@ class MainWindow(QMainWindow):
             self.progress_dialog.update_directory_progress(
                 current_dir, total_dirs, dir_path
             )
+
+    def _on_stale_cleanup_started(self):
+        """Scanner entering stale cleanup sub-phase."""
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.enter_stale_cleanup()
 
     def _on_scan_complete(self, processed_count, stale_count=0):
         """Handle scan completion."""
@@ -1736,21 +1985,12 @@ class MainWindow(QMainWindow):
         # Reload media after scanning
         self.load_all_media()
 
-        # Try to transition to embedding phase instead of closing dialog
+        # Try to transition to embedding phase instead of closing
         if self._auto_trigger_embeddings():
             return  # Dialog stays open for embedding progress
 
-        # No embeddings needed — close dialog and show completion
-        if hasattr(self, "progress_dialog"):
-            self.progress_dialog.accept()
-
-        message = f"Successfully processed {processed_count} media files."
-        if stale_count > 0:
-            message += (
-                f"\nRemoved {stale_count} stale entries (files no longer on disk)."
-            )
-
-        QMessageBox.information(self, "Scan Complete", message)
+        # No embeddings needed — show completion in dialog
+        self._show_scan_completion()
 
     def _auto_trigger_embeddings(self) -> bool:
         """Auto-start CLIP embedding computation for unembedded files after scan.
@@ -1781,7 +2021,7 @@ class MainWindow(QMainWindow):
 
             # Transition dialog to embedding phase
             if hasattr(self, "progress_dialog"):
-                self.progress_dialog.switch_to_embedding_phase(len(unembedded))
+                self.progress_dialog.set_phase(ScanPhase.EMBEDDING)
 
             # Connect embedding signals to dialog and completion handler
             self.embedding_queue.progress_updated.connect(self._on_embedding_progress)
@@ -1813,37 +2053,40 @@ class MainWindow(QMainWindow):
                 self.embedding_queue.cancel_indexing()
 
     def _on_embedding_complete(self, total: int):
-        """Handle embedding completion — close dialog and show summary."""
+        """Handle embedding completion — show summary in dialog."""
         self._disconnect_embedding_signals()
-        if hasattr(self, "progress_dialog"):
-            self.progress_dialog.accept()
-
-        scan_count = getattr(self, "_scan_processed_count", 0)
-        stale_count = getattr(self, "_scan_stale_count", 0)
-        message = (
-            f"Successfully processed {scan_count} media files.\n"
-            f"CLIP embeddings computed for {total} files."
-        )
-        if stale_count > 0:
-            message += (
-                f"\nRemoved {stale_count} stale entries (files no longer on disk)."
-            )
-        QMessageBox.information(self, "Scan Complete", message)
+        self._show_scan_completion(embedding_count=total)
 
     def _on_embedding_error(self, error: str):
-        """Handle embedding error — close dialog and notify."""
+        """Handle embedding error — show error in completion summary."""
         self._disconnect_embedding_signals()
-        if hasattr(self, "progress_dialog"):
-            self.progress_dialog.accept()
+        self._show_scan_completion(embedding_error=error)
 
+    def _show_scan_completion(
+        self, embedding_count: int = 0, embedding_error: str = ""
+    ):
+        """Build summary and transition dialog to COMPLETE phase."""
         scan_count = getattr(self, "_scan_processed_count", 0)
-        QMessageBox.warning(
-            self,
-            "Scan Complete (Embedding Error)",
-            f"Scanned {scan_count} files successfully.\n\n"
-            f"CLIP embedding failed: {error}\n"
-            f"Check logs/embedding_worker.log for details.",
-        )
+        stale_count = getattr(self, "_scan_stale_count", 0)
+
+        lines = [f"Successfully processed {scan_count} media files."]
+        if stale_count > 0:
+            lines.append(
+                f"Removed {stale_count} stale entries (files no longer on disk)."
+            )
+        if embedding_count > 0:
+            lines.append(f"CLIP embeddings computed for {embedding_count} files.")
+        if embedding_error:
+            lines.append(f"\nCLIP embedding failed: {embedding_error}")
+            lines.append("Check logs/embedding_worker.log for details.")
+
+        # Mark embedding step as skipped if it was never started
+        if embedding_count == 0 and not embedding_error:
+            if hasattr(self, "progress_dialog"):
+                self.progress_dialog.skip_embedding_step()
+
+        if hasattr(self, "progress_dialog"):
+            self.progress_dialog.show_completion("\n".join(lines))
 
     def _disconnect_embedding_signals(self):
         """Safely disconnect embedding queue signals from scan handlers."""
@@ -1862,14 +2105,12 @@ class MainWindow(QMainWindow):
         """Handle scan errors."""
         print(f"Scan error: {error_message}")
 
-        # Close progress dialog
+        # Show error in the dialog completion page
         if hasattr(self, "progress_dialog"):
-            self.progress_dialog.reject()
-
-        # Show error message
-        QMessageBox.critical(
-            self, "Scan Error", f"An error occurred during scanning:\n{error_message}"
-        )
+            self.progress_dialog.skip_embedding_step()
+            self.progress_dialog.show_completion(
+                f"An error occurred during scanning:\n{error_message}"
+            )
 
     def load_all_media(self):
         """Load all media from database."""
