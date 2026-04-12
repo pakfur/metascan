@@ -187,5 +187,24 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         empty_dir.cleanup()
 
 
+class TestSimilarityCacheInvalidation(unittest.TestCase):
+    """Test that cache invalidation resets cached state."""
+
+    def test_invalidate_clears_faiss_mgr(self):
+        """_invalidate_similarity_cache should set _faiss_mgr to None."""
+        from unittest.mock import MagicMock
+
+        window = MagicMock()
+        window._faiss_mgr = "something"
+        window._similarity_config = {"clip_model": "small"}
+
+        # Call the real method
+        from metascan.ui.main_window import MainWindow
+        MainWindow._invalidate_similarity_cache(window)
+
+        self.assertIsNone(window._faiss_mgr)
+        self.assertIsNone(window._similarity_config)
+
+
 if __name__ == "__main__":
     unittest.main()
