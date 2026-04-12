@@ -362,6 +362,11 @@ class SimilaritySettingsDialog(QDialog):
         self._update_index_status()
         logger.info(f"Indexing complete: {total} files")
 
+        # Invalidate MainWindow's cached FAISS index so next search picks up changes
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_invalidate_similarity_cache"):
+            parent._invalidate_similarity_cache()
+
     def _on_error(self, error: str) -> None:
         self.build_button.setEnabled(True)
         self.rebuild_button.setEnabled(True)

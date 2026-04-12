@@ -206,5 +206,27 @@ class TestSimilarityCacheInvalidation(unittest.TestCase):
         self.assertIsNone(window._similarity_config)
 
 
+class TestCacheInvalidationOnIndexRebuild(unittest.TestCase):
+    """Test that index rebuild invalidates the MainWindow similarity cache."""
+
+    def test_on_complete_invalidates_cache(self):
+        """_on_complete in SimilaritySettingsDialog should call _invalidate_similarity_cache."""
+        from unittest.mock import MagicMock, patch
+
+        mock_parent = MagicMock()
+        mock_parent._invalidate_similarity_cache = MagicMock()
+
+        # Build a mock 'self' with the attributes _on_complete reads/writes
+        mock_self = MagicMock()
+        mock_self.parent.return_value = mock_parent
+
+        with patch("metascan.ui.similarity_settings_dialog.get_data_dir"):
+            from metascan.ui.similarity_settings_dialog import SimilaritySettingsDialog
+            # Call the unbound method directly, bypassing QDialog construction
+            SimilaritySettingsDialog._on_complete(mock_self, 100)
+
+        mock_parent._invalidate_similarity_cache.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
