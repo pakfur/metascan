@@ -89,5 +89,103 @@ class TestSignalPropagation(unittest.TestCase):
         self.assertTrue(hasattr(VirtualThumbnailView, "find_similar_requested"))
 
 
+class TestSimilaritySearchWorker(unittest.TestCase):
+    """Test the async similarity search worker."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.index_dir = Path(self.temp_dir.name)
+        self.faiss_mgr = FaissIndexManager(self.index_dir)
+        self.faiss_mgr.create(embedding_dim=8, model_key="test")
+
+        np.random.seed(42)
+        for i in range(10):
+            vec = np.random.randn(8).astype(np.float32)
+            vec = vec / np.linalg.norm(vec)
+            self.faiss_mgr.add(f"file_{i:02d}.png", vec)
+        self.faiss_mgr.save()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_worker_returns_results_for_indexed_file(self):
+        from metascan.ui.main_window import SimilaritySearchWorker
+
+        worker = SimilaritySearchWorker(
+            faiss_mgr=self.faiss_mgr,
+            file_path="file_00.png",
+            top_k=5,
+            index_dir=self.index_dir,
+        )
+        results = []
+        errors = []
+        worker.results_ready.connect(lambda r, mgr: results.append(r))
+        worker.error.connect(lambda msg: errors.append(msg))
+        worker.run()  # Call run() directly instead of start() for synchronous testing
+
+        self.assertEqual(len(errors), 0)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0][0], "file_00.png")  # Self is best match
+
+    def test_worker_emits_error_for_unindexed_file(self):
+        from metascan.ui.main_window import SimilaritySearchWorker
+
+        worker = SimilaritySearchWorker(
+            faiss_mgr=self.faiss_mgr,
+            file_path="not_in_index.png",
+            top_k=5,
+            index_dir=self.index_dir,
+        )
+        results = []
+        errors = []
+        worker.results_ready.connect(lambda r, mgr: results.append(r))
+        worker.error.connect(lambda msg: errors.append(msg))
+        worker.run()
+
+        self.assertEqual(len(results), 0)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("hasn't been indexed", errors[0])
+
+    def test_worker_loads_index_from_disk_when_not_cached(self):
+        from metascan.ui.main_window import SimilaritySearchWorker
+
+        worker = SimilaritySearchWorker(
+            faiss_mgr=None,  # Not cached — worker must load from disk
+            file_path="file_05.png",
+            top_k=3,
+            index_dir=self.index_dir,
+        )
+        results = []
+        returned_mgrs = []
+        worker.results_ready.connect(
+            lambda r, mgr: (results.append(r), returned_mgrs.append(mgr))
+        )
+        worker.run()
+
+        self.assertEqual(len(results), 1)
+        self.assertGreater(len(results[0]), 0)
+        # Worker should return the newly loaded manager for caching
+        self.assertEqual(len(returned_mgrs), 1)
+        self.assertIsNotNone(returned_mgrs[0])
+
+    def test_worker_emits_error_when_no_index_on_disk(self):
+        from metascan.ui.main_window import SimilaritySearchWorker
+
+        empty_dir = tempfile.TemporaryDirectory()
+        worker = SimilaritySearchWorker(
+            faiss_mgr=None,
+            file_path="file_00.png",
+            top_k=5,
+            index_dir=Path(empty_dir.name),
+        )
+        errors = []
+        worker.error.connect(lambda msg: errors.append(msg))
+        worker.run()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("No embedding index found", errors[0])
+        empty_dir.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()
