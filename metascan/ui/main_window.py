@@ -771,6 +771,7 @@ class MainWindow(QMainWindow):
         self._faiss_mgr = None  # Optional[FaissIndexManager]
         self._similarity_config = None  # Optional[Dict]
         self._similarity_worker = None  # Optional[SimilaritySearchWorker]
+        self._similarity_search_media = None  # Media being searched for
 
         # Current filter state
         self.current_filters = {}
@@ -1783,49 +1784,44 @@ class MainWindow(QMainWindow):
 
     def _on_find_similar(self, media):
         """Find media similar to the selected item using CLIP embeddings."""
-        from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
+        # Prevent stacking searches
+        if self._similarity_worker is not None and self._similarity_worker.isRunning():
+            self.statusBar().showMessage("Similarity search already in progress...")
+            return
+
         from metascan.utils.app_paths import get_data_dir
 
         index_dir = get_data_dir() / "similarity"
-        faiss_mgr = FaissIndexManager(index_dir)
-
-        if not faiss_mgr.load():
-            QMessageBox.information(
-                self,
-                "No Index",
-                "No embedding index found. Please build the similarity index first\n"
-                "via Tools > Similarity Settings.",
-            )
-            return
-
         file_path_str = str(media.file_path)
 
-        # Try to get embedding from the index first
-        embedding = faiss_mgr.get_embedding(file_path_str)
+        # Load config once and cache
+        if self._similarity_config is None:
+            self._similarity_config = self._load_similarity_config()
 
-        if embedding is None:
-            # Compute on-the-fly
-            config = self._load_similarity_config()
-            model_key = config.get("clip_model", "small")
-            device = config.get("device", "auto")
-            embedding_mgr = EmbeddingManager(model_key=model_key, device=device)
+        top_k = self._similarity_config.get("search_results_count", 50)
 
-            if media.is_video:
-                embedding = embedding_mgr.compute_video_embedding(file_path_str)
-            else:
-                embedding = embedding_mgr.compute_image_embedding(file_path_str)
+        # Show loading status if index not yet cached
+        if self._faiss_mgr is None:
+            self.statusBar().showMessage("Loading similarity index...")
 
-            embedding_mgr.unload_model()
+        self._similarity_search_media = media  # Store for the callback
 
-            if embedding is None:
-                QMessageBox.warning(
-                    self, "Error", "Failed to compute embedding for this file."
-                )
-                return
+        self._similarity_worker = SimilaritySearchWorker(
+            faiss_mgr=self._faiss_mgr,
+            file_path=file_path_str,
+            top_k=top_k,
+            index_dir=index_dir,
+            parent=self,
+        )
+        self._similarity_worker.results_ready.connect(self._on_similarity_results)
+        self._similarity_worker.error.connect(self._on_similarity_error)
+        self._similarity_worker.finished.connect(self._on_similarity_finished)
+        self._similarity_worker.start()
 
-        config = self._load_similarity_config()
-        top_k = config.get("search_results_count", 50)
-        results = faiss_mgr.search(embedding, top_k=top_k)
+    def _on_similarity_results(self, results, faiss_mgr):
+        """Handle results from the similarity search worker."""
+        # Cache the manager for future searches
+        self._faiss_mgr = faiss_mgr
 
         if not results:
             self.statusBar().showMessage("No similar items found.")
@@ -1842,10 +1838,22 @@ class MainWindow(QMainWindow):
             key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
         )
 
+        media = self._similarity_search_media
         self.thumbnail_view.set_media_list(filtered_media)
         self.statusBar().showMessage(
             f"Showing {len(filtered_media)} items similar to '{media.file_name}'"
         )
+
+    def _on_similarity_error(self, error_msg):
+        """Handle errors from the similarity search worker."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        self.statusBar().clearMessage()
+        QMessageBox.information(self, "Find Similar", error_msg)
+
+    def _on_similarity_finished(self):
+        """Clean up after similarity search worker completes."""
+        self._similarity_worker = None
 
     def _on_content_search_cleared(self):
         """Clear content search and restore normal view."""
