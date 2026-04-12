@@ -658,6 +658,60 @@ class ScanPreparationThread(QThread):
         self.preparation_complete.emit(total_dirs, total_files, unprocessed_files)
 
 
+class SimilaritySearchWorker(QThread):
+    """Background worker for FAISS similarity search.
+
+    Loads the index (if not cached) and performs the search off the UI thread.
+    """
+
+    results_ready = pyqtSignal(list, object)  # results, faiss_mgr
+    error = pyqtSignal(str)  # error message
+
+    def __init__(
+        self,
+        faiss_mgr,  # Optional[FaissIndexManager]
+        file_path: str,
+        top_k: int,
+        index_dir,  # Path
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.faiss_mgr = faiss_mgr
+        self.file_path = file_path
+        self.top_k = top_k
+        self.index_dir = index_dir
+
+    def run(self):
+        try:
+            from metascan.core.embedding_manager import FaissIndexManager
+
+            # Load index if not cached
+            if self.faiss_mgr is None:
+                self.faiss_mgr = FaissIndexManager(self.index_dir)
+                if not self.faiss_mgr.load():
+                    self.error.emit(
+                        "No embedding index found. Please build the similarity "
+                        "index first via Tools > Similarity Settings."
+                    )
+                    return
+
+            # Get embedding for query file
+            embedding = self.faiss_mgr.get_embedding(self.file_path)
+            if embedding is None:
+                self.error.emit(
+                    "This file hasn't been indexed yet. Please rebuild the "
+                    "similarity index via Tools > Similarity Settings to include it."
+                )
+                return
+
+            # Search
+            results = self.faiss_mgr.search(embedding, top_k=self.top_k)
+            self.results_ready.emit(results, self.faiss_mgr)
+
+        except Exception as e:
+            self.error.emit(f"Similarity search failed: {e}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         log_startup("MainWindow.__init__: Starting")
