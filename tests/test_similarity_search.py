@@ -200,6 +200,7 @@ class TestSimilarityCacheInvalidation(unittest.TestCase):
 
         # Call the real method
         from metascan.ui.main_window import MainWindow
+
         MainWindow._invalidate_similarity_cache(window)
 
         self.assertIsNone(window._faiss_mgr)
@@ -222,6 +223,7 @@ class TestCacheInvalidationOnIndexRebuild(unittest.TestCase):
 
         with patch("metascan.ui.similarity_settings_dialog.get_data_dir"):
             from metascan.ui.similarity_settings_dialog import SimilaritySettingsDialog
+
             # Call the unbound method directly, bypassing QDialog construction
             SimilaritySettingsDialog._on_complete(mock_self, 100)
 
