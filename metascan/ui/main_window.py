@@ -767,6 +767,11 @@ class MainWindow(QMainWindow):
 
         self.embedding_queue = EmbeddingQueue(parent=self)
 
+        # Similarity search cache — loaded on first use, invalidated on index rebuild
+        self._faiss_mgr = None  # Optional[FaissIndexManager]
+        self._similarity_config = None  # Optional[Dict]
+        self._similarity_worker = None  # Optional[SimilaritySearchWorker]
+
         # Current filter state
         self.current_filters = {}
         self.filtered_media_paths = (
@@ -1857,6 +1862,14 @@ class MainWindow(QMainWindow):
             return config.get("similarity", {})
         except Exception:
             return {}
+
+    def _invalidate_similarity_cache(self):
+        """Clear cached FAISS index and similarity config.
+
+        Called after the similarity index is rebuilt or the CLIP model is changed.
+        """
+        self._faiss_mgr = None
+        self._similarity_config = None
 
     def _open_similarity_settings(self):
         dialog = SimilaritySettingsDialog(
