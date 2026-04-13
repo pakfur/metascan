@@ -25,6 +25,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QFrame,
     QButtonGroup,
+    QSlider,
+    QSizePolicy,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -46,6 +48,7 @@ from PyQt6.QtGui import (
     QPen,
     QColor,
     QBrush,
+    QPalette,
     QPolygon,
     QPolygonF,
     QDesktopServices,
@@ -1085,6 +1088,152 @@ class VirtualScrollArea(QScrollArea):
             event.accept()
 
 
+class SimilarityBanner(QWidget):
+    """Banner shown when the view is in similarity mode.
+
+    Displays the reference filename, a dynamic-range threshold slider
+    (mapped to the actual min/max scores of the results), result count,
+    and an exit button to return to normal viewing mode.
+    """
+
+    threshold_changed = pyqtSignal(float)
+    exit_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._score_min = 0.0
+        self._score_max = 1.0
+        self._setup_ui()
+        self.setVisible(False)
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+
+        # Apply theme-safe background tint
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        highlight = palette.color(QPalette.ColorRole.Highlight)
+        highlight.setAlpha(40)
+        palette.setColor(QPalette.ColorRole.Window, highlight)
+        self.setPalette(palette)
+
+        # "Similar to" label
+        self._ref_text = QLabel("Similar to:")
+        layout.addWidget(self._ref_text)
+
+        # Reference thumbnail
+        self._ref_thumb = QLabel()
+        self._ref_thumb.setFixedSize(48, 48)
+        self._ref_thumb.setScaledContents(True)
+        layout.addWidget(self._ref_thumb)
+
+        layout.addStretch()
+
+        # Threshold controls with endpoint labels
+        least_label = QLabel("Least Similar")
+        least_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(least_label)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setMinimum(0)
+        self._slider.setMaximum(1000)
+        self._slider.setValue(0)
+        self._slider.setFixedWidth(180)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        layout.addWidget(self._slider)
+
+        most_label = QLabel("Most Similar")
+        most_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(most_label)
+
+        # Result count
+        self._count_label = QLabel("0 results")
+        self._count_label.setFixedWidth(80)
+        layout.addWidget(self._count_label)
+
+        # Exit button
+        exit_btn = QPushButton("Exit")
+        exit_btn.setToolTip("Exit similarity mode (Esc)")
+        exit_btn.setFixedWidth(60)
+        exit_btn.clicked.connect(self.exit_requested.emit)
+        layout.addWidget(exit_btn)
+
+    def _slider_to_score(self, value):
+        """Map slider position (0-1000) to the actual score range."""
+        t = value / 1000.0
+        return self._score_min + t * (self._score_max - self._score_min)
+
+    def _score_to_slider(self, score):
+        """Map an actual score to slider position (0-1000)."""
+        span = self._score_max - self._score_min
+        if span <= 0:
+            return 0
+        t = (score - self._score_min) / span
+        return int(max(0.0, min(1.0, t)) * 1000)
+
+    def _on_slider_released(self):
+        """Emit threshold_changed when the user releases the slider."""
+        score = self._slider_to_score(self._slider.value())
+        self.threshold_changed.emit(score)
+
+    def show_for(
+        self,
+        filename,
+        initial_threshold,
+        score_min=0.0,
+        score_max=1.0,
+        thumbnail_path=None,
+        full_path="",
+    ):
+        """Show the banner for a similarity search result.
+
+        Args:
+            filename: Reference file name to display.
+            initial_threshold: Initial threshold score for the slider.
+            score_min: Minimum score in the result set (slider left end).
+            score_max: Maximum score in the result set (slider right end).
+            thumbnail_path: Path to a thumbnail image for the reference file.
+            full_path: Full file path shown as hover tooltip.
+        """
+        self._score_min = score_min
+        self._score_max = score_max
+
+        # Set reference thumbnail
+        if thumbnail_path and Path(str(thumbnail_path)).exists():
+            pixmap = QPixmap(str(thumbnail_path))
+            self._ref_thumb.setPixmap(
+                pixmap.scaled(
+                    48,
+                    48,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            self._ref_thumb.clear()
+            self._ref_thumb.setText(filename[:3])
+        self._ref_thumb.setToolTip(str(full_path) if full_path else filename)
+
+        self._slider.blockSignals(True)
+        self._slider.setValue(self._score_to_slider(initial_threshold))
+        self._slider.blockSignals(False)
+        self.setVisible(True)
+
+    def hide_banner(self):
+        """Hide the banner and reset state."""
+        self.setVisible(False)
+        self._ref_thumb.clear()
+        self._slider.blockSignals(True)
+        self._slider.setValue(0)
+        self._slider.blockSignals(False)
+        self._count_label.setText("0 results")
+
+    def update_result_count(self, count):
+        """Update the displayed result count."""
+        self._count_label.setText(f"{count} results")
+
+
 class VirtualThumbnailView(QWidget):
     """
     Main virtual thumbnail view widget.
@@ -1171,6 +1320,11 @@ class VirtualThumbnailView(QWidget):
         header_layout.addWidget(self.info_label)
 
         main_layout.addLayout(header_layout)
+
+        # Similarity mode banner (hidden by default)
+        self.similarity_banner = SimilarityBanner(self)
+        self.similarity_banner.setVisible(False)
+        main_layout.addWidget(self.similarity_banner)
 
         # Virtual scroll area
         self.scroll_area = VirtualScrollArea(
