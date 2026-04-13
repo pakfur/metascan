@@ -283,7 +283,9 @@ class DuplicateFinderDialog(QDialog):
         self.tree.setHeaderLabels(["File", "Dimensions", "Size", "Distance"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header = self.tree.header()
+        assert header is not None
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setColumnWidth(1, 100)
         self.tree.setColumnWidth(2, 80)
         self.tree.setColumnWidth(3, 70)

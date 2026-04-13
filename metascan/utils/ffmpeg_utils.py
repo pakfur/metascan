@@ -51,7 +51,7 @@ def probe_with_timeout(
 
         import json
 
-        return json.loads(result.stdout)
+        return dict(json.loads(result.stdout))
 
     except subprocess.TimeoutExpired:
         logger.warning(f"ffprobe timed out after {timeout}s for {file_path}")
@@ -97,7 +97,7 @@ def extract_frame_with_timeout(
                     f"for {file_path} at {ss}s: {err_text}"
                 )
                 return None
-            return out
+            return bytes(out)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()  # Clean up
