@@ -673,6 +673,7 @@ class SimilaritySearchWorker(QThread):
         file_path: str,
         top_k: int,
         index_dir,  # Path
+        min_score: float = 0.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -680,6 +681,7 @@ class SimilaritySearchWorker(QThread):
         self.file_path = file_path
         self.top_k = top_k
         self.index_dir = index_dir
+        self.min_score = min_score
 
     def run(self):
         try:
@@ -704,8 +706,10 @@ class SimilaritySearchWorker(QThread):
                 )
                 return
 
-            # Search
+            # Search and filter by minimum score
             results = self.faiss_mgr.search(embedding, top_k=self.top_k)
+            if self.min_score > 0:
+                results = [(p, s) for p, s in results if s >= self.min_score]
             self.results_ready.emit(results, self.faiss_mgr)
 
         except Exception as e:
@@ -772,6 +776,10 @@ class MainWindow(QMainWindow):
         self._similarity_config = None  # Optional[Dict]
         self._similarity_worker = None  # Optional[SimilaritySearchWorker]
         self._similarity_search_media = None  # Media being searched for
+        self._similarity_mode_active = False  # True when showing similarity results
+        self._similarity_score_map: dict = {}  # path -> score cache
+        self._similarity_filtered_media: list = []  # Full results before threshold
+        self._similarity_reference_name = ""
 
         # Current filter state
         self.current_filters = {}
@@ -991,6 +999,12 @@ class MainWindow(QMainWindow):
         self.thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         self.thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
         self.thumbnail_view.find_similar_requested.connect(self._on_find_similar)
+        self.thumbnail_view.similarity_banner.exit_requested.connect(
+            self._exit_similarity_mode
+        )
+        self.thumbnail_view.similarity_banner.threshold_changed.connect(
+            self._apply_similarity_threshold
+        )
 
         # Load initial media if any exists
         self.load_all_media()
@@ -1727,6 +1741,9 @@ class MainWindow(QMainWindow):
 
     def _on_content_search(self, query):
         """Handle CLIP-based content search."""
+        if self._similarity_mode_active:
+            self._exit_similarity_mode()
+
         from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
         from metascan.utils.app_paths import get_data_dir
 
@@ -1838,10 +1855,47 @@ class MainWindow(QMainWindow):
             key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
         )
 
+        # Enter similarity mode
         media = self._similarity_search_media
-        self.thumbnail_view.set_media_list(filtered_media)
+        self._similarity_mode_active = True
+        self._similarity_score_map = score_map
+        self._similarity_filtered_media = filtered_media
+        self._similarity_reference_name = media.file_name
+
+        # Compute score range for dynamic slider
+        scores = list(score_map.values())
+        score_min = min(scores) if scores else 0.0
+        score_max = max(scores) if scores else 1.0
+
+        # Use saved threshold from config as initial value, clamped to score range
+        if self._similarity_config is None:
+            self._similarity_config = self._load_similarity_config()
+        initial_threshold = self._similarity_config.get("clip_threshold", 0.0)
+        initial_threshold = max(score_min, min(score_max, initial_threshold))
+
+        # Filter by saved threshold
+        visible = [
+            m
+            for m in filtered_media
+            if score_map.get(str(m.file_path), 0) >= initial_threshold
+        ]
+
+        # Get thumbnail for the reference image
+        ref_thumb = self.thumbnail_cache.get_or_create_thumbnail(Path(media.file_path))
+
+        # Show banner with dynamic score range and display results
+        self.thumbnail_view.similarity_banner.show_for(
+            media.file_name,
+            initial_threshold,
+            score_min,
+            score_max,
+            thumbnail_path=ref_thumb,
+            full_path=media.file_path,
+        )
+        self.thumbnail_view.set_media_list(visible)
+        self.thumbnail_view.similarity_banner.update_result_count(len(visible))
         self.statusBar().showMessage(
-            f"Showing {len(filtered_media)} items similar to '{media.file_name}'"
+            f"Showing {len(visible)} items similar to '{media.file_name}'"
         )
 
     def _on_similarity_error(self, error_msg):
@@ -1854,6 +1908,89 @@ class MainWindow(QMainWindow):
     def _on_similarity_finished(self):
         """Clean up after similarity search worker completes."""
         self._similarity_worker = None
+
+    def _apply_similarity_threshold(self, threshold):
+        """Re-run similarity search with the given minimum score threshold."""
+        if self._similarity_search_media is None:
+            return
+
+        # Prevent stacking searches
+        if self._similarity_worker is not None and self._similarity_worker.isRunning():
+            return
+
+        # Persist threshold to config
+        self._save_similarity_threshold(threshold)
+
+        from metascan.utils.app_paths import get_data_dir
+
+        index_dir = get_data_dir() / "similarity"
+        file_path_str = str(self._similarity_search_media.file_path)
+
+        if self._similarity_config is None:
+            self._similarity_config = self._load_similarity_config()
+
+        top_k = self._similarity_config.get("search_results_count", 50)
+
+        self.statusBar().showMessage("Re-running similarity search...")
+
+        self._similarity_worker = SimilaritySearchWorker(
+            faiss_mgr=self._faiss_mgr,
+            file_path=file_path_str,
+            top_k=top_k,
+            index_dir=index_dir,
+            min_score=threshold,
+            parent=self,
+        )
+        self._similarity_worker.results_ready.connect(
+            lambda results, mgr: self._on_threshold_search_results(
+                results, mgr, threshold
+            )
+        )
+        self._similarity_worker.error.connect(self._on_similarity_error)
+        self._similarity_worker.finished.connect(self._on_similarity_finished)
+        self._similarity_worker.start()
+
+    def _on_threshold_search_results(self, results, faiss_mgr, threshold):
+        """Handle results from a threshold-adjusted similarity search."""
+        self._faiss_mgr = faiss_mgr
+
+        score_map = {r[0]: r[1] for r in results}
+        matching_paths = set(score_map.keys())
+
+        filtered_media = [
+            m for m in self.all_media if str(m.file_path) in matching_paths
+        ]
+        filtered_media.sort(
+            key=lambda m: score_map.get(str(m.file_path), 0), reverse=True
+        )
+
+        self._similarity_score_map = score_map
+        self._similarity_filtered_media = filtered_media
+
+        self.thumbnail_view.set_media_list(filtered_media)
+        self.thumbnail_view.similarity_banner.update_result_count(len(filtered_media))
+        self.statusBar().showMessage(
+            f"Showing {len(filtered_media)} items similar to "
+            f"'{self._similarity_reference_name}'"
+        )
+
+    def _exit_similarity_mode(self):
+        """Exit similarity mode and restore normal filtered view."""
+        self._similarity_mode_active = False
+        self._similarity_score_map = {}
+        self._similarity_filtered_media = []
+        self._similarity_reference_name = ""
+
+        self.thumbnail_view.similarity_banner.hide_banner()
+        self.statusBar().clearMessage()
+
+        # Restore the full media list to the scroll area without triggering
+        # a viewport rebuild (apply_all_filters will do that once).
+        self.thumbnail_view.media_list = self.all_media
+        self.thumbnail_view.scroll_area.media_list = self.all_media
+
+        # Re-apply current filters (single viewport rebuild)
+        self.apply_all_filters()
 
     def _on_content_search_cleared(self):
         """Clear content search and restore normal view."""
@@ -1870,6 +2007,24 @@ class MainWindow(QMainWindow):
             return config.get("similarity", {})
         except Exception:
             return {}
+
+    def _save_similarity_threshold(self, threshold):
+        """Save the similarity threshold to config file."""
+        try:
+            import json
+
+            with open(self.config_file, "r") as f:
+                config = json.load(f)
+            if "similarity" not in config:
+                config["similarity"] = {}
+            config["similarity"]["clip_threshold"] = round(threshold, 2)
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
+            # Update cached config
+            if self._similarity_config is not None:
+                self._similarity_config["clip_threshold"] = round(threshold, 2)
+        except Exception as e:
+            print(f"Error saving similarity threshold: {e}")
 
     def _invalidate_similarity_cache(self):
         """Clear cached FAISS index and similarity config.
@@ -2258,6 +2413,15 @@ class MainWindow(QMainWindow):
 
     def apply_all_filters(self):
         """Apply both regular filters and favorites filter."""
+        # Exit similarity mode if active so filters apply to the full media set
+        if self._similarity_mode_active:
+            self._similarity_mode_active = False
+            self._similarity_score_map = {}
+            self._similarity_filtered_media = []
+            self._similarity_reference_name = ""
+            self.thumbnail_view.similarity_banner.hide_banner()
+            self.statusBar().clearMessage()
+
         try:
             # Start with all media paths or filtered paths
             if self.current_filters:
@@ -2548,6 +2712,12 @@ class MainWindow(QMainWindow):
         new_thumbnail_view.delete_requested.connect(self.on_context_delete_requested)
         new_thumbnail_view.upscale_requested.connect(self.on_context_upscale_requested)
         new_thumbnail_view.find_similar_requested.connect(self._on_find_similar)
+        new_thumbnail_view.similarity_banner.exit_requested.connect(
+            self._exit_similarity_mode
+        )
+        new_thumbnail_view.similarity_banner.threshold_changed.connect(
+            self._apply_similarity_threshold
+        )
 
         # Replace in splitter using saved reference
         old_widget = self.main_splitter.widget(1)  # Middle widget (thumbnail panel)
@@ -2559,7 +2729,31 @@ class MainWindow(QMainWindow):
         self.thumbnail_view = new_thumbnail_view
 
         # Restore media and filters
-        if current_media:
+        if self._similarity_mode_active:
+            # Re-show the similarity banner and cached results
+            scores = list(self._similarity_score_map.values())
+            s_min = min(scores) if scores else 0.0
+            s_max = max(scores) if scores else 1.0
+            ref_media = self._similarity_search_media
+            ref_thumb = (
+                self.thumbnail_cache.get_or_create_thumbnail(Path(ref_media.file_path))
+                if ref_media
+                else None
+            )
+            ref_path = ref_media.file_path if ref_media else ""
+            self.thumbnail_view.similarity_banner.show_for(
+                self._similarity_reference_name,
+                s_min,
+                s_min,
+                s_max,
+                thumbnail_path=ref_thumb,
+                full_path=ref_path,
+            )
+            self.thumbnail_view.set_media_list(self._similarity_filtered_media)
+            self.thumbnail_view.similarity_banner.update_result_count(
+                len(self._similarity_filtered_media)
+            )
+        elif current_media:
             self.thumbnail_view.set_media_list(current_media)
             if current_filtered_paths:
                 self.thumbnail_view.apply_filters(
@@ -2608,6 +2802,15 @@ class MainWindow(QMainWindow):
         # Command-D (or Ctrl-D on non-Mac) for delete
         delete_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         delete_shortcut.activated.connect(self._handle_delete_shortcut)
+
+        # Escape exits similarity mode
+        escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        escape_shortcut.activated.connect(self._on_escape_pressed)
+
+    def _on_escape_pressed(self):
+        """Handle Escape key press."""
+        if self._similarity_mode_active:
+            self._exit_similarity_mode()
 
     def _handle_delete_shortcut(self):
         """Handle the delete shortcut from the main window."""

@@ -81,7 +81,7 @@ class EmbeddingManager:
         self._model = None
         self._preprocess = None
         self._tokenizer = None
-        self._device = None
+        self._device: Optional[str] = None
 
     @property
     def model_config(self) -> Dict[str, Any]:
@@ -91,7 +91,7 @@ class EmbeddingManager:
     @property
     def embedding_dim(self) -> int:
         """Get the embedding dimension for the current model."""
-        return self.model_config["embedding_dim"]
+        return int(self.model_config["embedding_dim"])
 
     def _resolve_device(self) -> str:
         """Resolve the device to use for computation."""
@@ -156,6 +156,7 @@ class EmbeddingManager:
             device=self._device,
         )
         self._tokenizer = _open_clip.get_tokenizer(config["name"])
+        assert self._model is not None
         self._model.eval()
 
         if needs_download:
@@ -380,7 +381,7 @@ class EmbeddingManager:
             extract_frame_with_timeout,
         )
 
-        frames = []
+        frames: List[np.ndarray] = []
         try:
             probe = probe_with_timeout(video_path)
             if not probe:
@@ -491,7 +492,7 @@ class EmbeddingManager:
         assert _imagehash is not None
         h1 = _imagehash.hex_to_hash(hash1)
         h2 = _imagehash.hex_to_hash(hash2)
-        return h1 - h2
+        return int(h1 - h2)
 
 
 class FaissIndexManager:
@@ -546,6 +547,7 @@ class FaissIndexManager:
                     with open(self._meta_path, "r") as f:
                         self._meta = json.load(f)
 
+                assert self._index is not None
                 logger.info(f"Loaded FAISS index with {self._index.ntotal} vectors")
                 return True
             else:

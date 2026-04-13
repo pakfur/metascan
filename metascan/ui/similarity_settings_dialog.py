@@ -118,15 +118,17 @@ class SimilaritySettingsDialog(QDialog):
         threshold_layout.addRow("pHash threshold:", phash_row)
 
         clip_row = QHBoxLayout()
+        least_label = QLabel("Least Similar")
+        least_label.setStyleSheet("font-size: 10px;")
+        clip_row.addWidget(least_label)
         self.clip_slider = QSlider(Qt.Orientation.Horizontal)
         self.clip_slider.setMinimum(0)
         self.clip_slider.setMaximum(100)
         self.clip_slider.setValue(int(self._config.get("clip_threshold", 0.7) * 100))
-        self.clip_slider.valueChanged.connect(self._on_clip_threshold_changed)
         clip_row.addWidget(self.clip_slider)
-        self.clip_label = QLabel(f"{self.clip_slider.value() / 100:.2f}")
-        self.clip_label.setFixedWidth(40)
-        clip_row.addWidget(self.clip_label)
+        most_label = QLabel("Most Similar")
+        most_label.setStyleSheet("font-size: 10px;")
+        clip_row.addWidget(most_label)
         threshold_layout.addRow("CLIP threshold:", clip_row)
 
         self.results_spin = QSpinBox()
@@ -245,9 +247,6 @@ class SimilaritySettingsDialog(QDialog):
 
     def _on_phash_threshold_changed(self, value: int) -> None:
         self.phash_label.setText(str(value))
-
-    def _on_clip_threshold_changed(self, value: int) -> None:
-        self.clip_label.setText(f"{value / 100:.2f}")
 
     def _update_index_status(self) -> None:
         """Update the index status label."""
@@ -389,7 +388,8 @@ class SimilaritySettingsDialog(QDialog):
             if config_path.exists():
                 with open(config_path, "r") as f:
                     full_config = json.load(f)
-                return full_config.get("similarity", {})
+                result = full_config.get("similarity", {})
+                return dict(result)
         except Exception as e:
             logger.error(f"Failed to load similarity config: {e}")
         return {}
