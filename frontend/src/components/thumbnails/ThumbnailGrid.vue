@@ -151,7 +151,14 @@ function ctxDelete() {
     <SimilarityBanner v-if="simStore.active" />
 
     <div ref="container" class="thumbnail-grid" @scroll="onScroll">
-      <div class="scroll-spacer" :style="{ height: totalHeight + 'px' }">
+      <!-- Empty state -->
+      <div v-if="displayList.length === 0 && !mediaStore.loading" class="empty-state">
+        <span class="empty-icon">🖼</span>
+        <span>No media to display</span>
+        <span class="empty-hint">Try adjusting your filters or running a scan</span>
+      </div>
+
+      <div v-else class="scroll-spacer" :style="{ height: totalHeight + 'px' }">
         <div
           v-for="item in visibleItems"
           :key="item.media.file_path"
@@ -212,6 +219,27 @@ function ctxDelete() {
 .scroll-spacer {
   position: relative;
   width: 100%;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-color-secondary);
+  font-size: 14px;
+}
+
+.empty-icon {
+  font-size: 48px;
+  opacity: 0.4;
+}
+
+.empty-hint {
+  font-size: 12px;
+  opacity: 0.7;
 }
 </style>
 

@@ -7,6 +7,7 @@ import { useSettingsStore } from './stores/settings'
 import { useScanStore } from './stores/scan'
 import { useSimilarityStore } from './stores/similarity'
 import { useKeyboard } from './composables/useKeyboard'
+import { useWebSocket } from './composables/useWebSocket'
 import AppHeader from './components/layout/AppHeader.vue'
 import ThreePanel from './components/layout/ThreePanel.vue'
 import FilterPanel from './components/filters/FilterPanel.vue'
@@ -19,6 +20,7 @@ import SimilaritySettings from './components/dialogs/SimilaritySettings.vue'
 import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from './components/dialogs/UpscaleDialog.vue'
 import UpscaleQueue from './components/dialogs/UpscaleQueue.vue'
+import ConfigDialog from './components/dialogs/ConfigDialog.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -26,7 +28,7 @@ const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
 
-// Viewer state
+// Dialog state
 const viewerOpen = ref(false)
 const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
@@ -35,6 +37,7 @@ const dupFinderOpen = ref(false)
 const upscaleDialogOpen = ref(false)
 const upscaleQueueOpen = ref(false)
 const upscaleTargets = ref<Media[]>([])
+const configOpen = ref(false)
 
 onMounted(async () => {
   await Promise.all([
@@ -42,6 +45,17 @@ onMounted(async () => {
     mediaStore.loadAllMedia(),
     filterStore.loadFilterData(),
   ])
+})
+
+// File watcher: auto-refresh when files change on disk
+let watcherDebounce: ReturnType<typeof setTimeout> | null = null
+useWebSocket('watcher', () => {
+  // Debounce rapid file changes into a single refresh
+  if (watcherDebounce) clearTimeout(watcherDebounce)
+  watcherDebounce = setTimeout(() => {
+    mediaStore.loadAllMedia()
+    filterStore.loadFilterData()
+  }, 2000)
 })
 
 function openViewer(media: Media) {
@@ -117,6 +131,7 @@ useKeyboard([
       @similarity-settings="simSettingsOpen = true"
       @find-duplicates="dupFinderOpen = true"
       @upscale-queue="upscaleQueueOpen = true"
+      @config="configOpen = true"
     />
 
     <ThreePanel>
@@ -132,6 +147,12 @@ useKeyboard([
         <MetadataPanel />
       </template>
     </ThreePanel>
+
+    <!-- Loading overlay -->
+    <div v-if="mediaStore.loading" class="loading-overlay">
+      <div class="loading-spinner" />
+      <span>Loading media...</span>
+    </div>
 
     <!-- Media Viewer overlay -->
     <MediaViewer
@@ -179,6 +200,12 @@ useKeyboard([
       v-if="upscaleQueueOpen"
       @close="upscaleQueueOpen = false"
     />
+
+    <!-- Config dialog -->
+    <ConfigDialog
+      v-if="configOpen"
+      @close="configOpen = false"
+    />
   </div>
 </template>
 
@@ -187,5 +214,32 @@ useKeyboard([
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #fff;
+  font-size: 14px;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>
