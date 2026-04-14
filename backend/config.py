@@ -3,10 +3,9 @@
 import json
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import List, Optional
 
-from metascan.utils.app_paths import get_config_path, get_data_dir, get_thumbnail_cache_dir
+from metascan.utils.app_paths import get_config_path
 
 
 @dataclass

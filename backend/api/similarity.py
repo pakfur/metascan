@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -193,7 +192,9 @@ async def _run_index_build(rebuild: bool) -> None:
         unembedded = await asyncio.to_thread(db.get_unembedded_file_paths)
         total = len(unembedded)
 
-        await ws_manager.broadcast("embedding", "progress", {"current": 0, "total": total})
+        await ws_manager.broadcast(
+            "embedding", "progress", {"current": 0, "total": total}
+        )
 
         # Process in batches
         batch_size = 32

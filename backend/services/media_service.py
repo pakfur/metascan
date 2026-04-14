@@ -23,9 +23,7 @@ class MediaService:
         return await asyncio.to_thread(self.db.get_all_media_with_details)
 
     async def get_media(self, file_path: str) -> Optional[Media]:
-        return await asyncio.to_thread(
-            self.db.get_media_with_details, Path(file_path)
-        )
+        return await asyncio.to_thread(self.db.get_media_with_details, Path(file_path))
 
     async def delete_media(self, file_path: str) -> bool:
         """Delete a media file by moving it to trash and removing from DB."""
@@ -50,9 +48,7 @@ class MediaService:
     async def get_filter_data(self) -> Dict[str, List[Dict[str, Any]]]:
         return await asyncio.to_thread(self.db.get_filter_data)
 
-    async def get_filtered_media_paths(
-        self, filters: Dict[str, List[str]]
-    ) -> Set[str]:
+    async def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
         return await asyncio.to_thread(self.db.get_filtered_media_paths, filters)
 
     async def get_favorite_paths(self) -> Set[str]:
@@ -94,8 +90,8 @@ class MediaService:
             "video_length": media.video_length,
             "tags": media.tags,
             "loras": [
-                {"lora_name": l.lora_name, "lora_weight": l.lora_weight}
-                for l in media.loras
+                {"lora_name": lora.lora_name, "lora_weight": lora.lora_weight}
+                for lora in media.loras
             ],
             "is_favorite": media.is_favorite,
             "is_video": media.is_video,
