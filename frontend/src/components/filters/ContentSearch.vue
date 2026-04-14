@@ -1,21 +1,28 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import { useFilterStore } from '../../stores/filters'
+import { ref } from 'vue'
+import { useSimilarityStore } from '../../stores/similarity'
 
-const filterStore = useFilterStore()
+const simStore = useSimilarityStore()
 const query = ref('')
-let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
-watch(query, (val) => {
-  if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => {
-    filterStore.contentSearchQuery = val
-  }, 400)
-})
+function onSubmit() {
+  const q = query.value.trim()
+  if (q) {
+    simStore.searchByText(q)
+  }
+}
 
 function clear() {
   query.value = ''
-  filterStore.contentSearchQuery = ''
+  if (simStore.active && simStore.isContentSearch) {
+    simStore.exit()
+  }
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter') {
+    onSubmit()
+  }
 }
 </script>
 
@@ -25,8 +32,9 @@ function clear() {
       <input
         v-model="query"
         type="text"
-        placeholder="Search content..."
+        placeholder="Search by content (CLIP)..."
         class="search-input"
+        @keydown="onKeydown"
       />
       <button v-if="query" class="clear-btn" @click="clear">&times;</button>
     </div>

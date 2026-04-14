@@ -5,6 +5,7 @@ import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
 import { useSettingsStore } from './stores/settings'
 import { useScanStore } from './stores/scan'
+import { useSimilarityStore } from './stores/similarity'
 import { useKeyboard } from './composables/useKeyboard'
 import AppHeader from './components/layout/AppHeader.vue'
 import ThreePanel from './components/layout/ThreePanel.vue'
@@ -14,16 +15,21 @@ import MetadataPanel from './components/metadata/MetadataPanel.vue'
 import MediaViewer from './components/viewer/MediaViewer.vue'
 import SlideshowViewer from './components/viewer/SlideshowViewer.vue'
 import ScanDialog from './components/dialogs/ScanDialog.vue'
+import SimilaritySettings from './components/dialogs/SimilaritySettings.vue'
+import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
 const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
+const simStore = useSimilarityStore()
 
 // Viewer state
 const viewerOpen = ref(false)
 const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
+const simSettingsOpen = ref(false)
+const dupFinderOpen = ref(false)
 
 onMounted(async () => {
   await Promise.all([
@@ -60,7 +66,6 @@ function openScan() {
 }
 
 function closeScan() {
-  // Refresh media list after scan completes
   if (scanStore.phase === 'complete' || scanStore.embeddingPhase === 'complete') {
     mediaStore.loadAllMedia()
     filterStore.loadFilterData()
@@ -74,19 +79,27 @@ useKeyboard([
   {
     key: 'Escape',
     handler: () => {
-      if (!viewerOpen.value && !slideshowOpen.value) {
+      if (simStore.active) {
+        simStore.exit()
+      } else if (!viewerOpen.value && !slideshowOpen.value) {
         mediaStore.selectMedia(null)
       }
     },
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 's', ctrl: true, handler: openScan },
+  { key: 'd', ctrl: true, shift: true, handler: () => { dupFinderOpen.value = true } },
 ])
 </script>
 
 <template>
   <div class="app-shell">
-    <AppHeader @slideshow="openSlideshow" @scan="openScan" />
+    <AppHeader
+      @slideshow="openSlideshow"
+      @scan="openScan"
+      @similarity-settings="simSettingsOpen = true"
+      @find-duplicates="dupFinderOpen = true"
+    />
 
     <ThreePanel>
       <template #left>
@@ -121,6 +134,18 @@ useKeyboard([
     <ScanDialog
       v-if="scanStore.phase !== 'idle'"
       @close="closeScan"
+    />
+
+    <!-- Similarity Settings dialog -->
+    <SimilaritySettings
+      v-if="simSettingsOpen"
+      @close="simSettingsOpen = false"
+    />
+
+    <!-- Duplicate Finder dialog -->
+    <DuplicateFinder
+      v-if="dupFinderOpen"
+      @close="dupFinderOpen = false"
     />
   </div>
 </template>

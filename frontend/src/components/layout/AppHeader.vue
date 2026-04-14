@@ -6,6 +6,8 @@ import type { ThumbnailSize } from '../../stores/settings'
 const emit = defineEmits<{
   slideshow: []
   scan: []
+  'similarity-settings': []
+  'find-duplicates': []
 }>()
 
 const mediaStore = useMediaStore()
@@ -61,6 +63,14 @@ function refresh() {
 
       <button class="header-btn" @click="emit('slideshow')" title="Slideshow (Ctrl+Shift+S)">
         Slideshow
+      </button>
+
+      <button class="header-btn" @click="emit('find-duplicates')" title="Find Duplicates (Ctrl+Shift+D)">
+        Duplicates
+      </button>
+
+      <button class="header-btn" @click="emit('similarity-settings')" title="Similarity Settings">
+        Settings
       </button>
 
       <span class="media-count">{{ mediaStore.displayedMedia.length }} items</span>
