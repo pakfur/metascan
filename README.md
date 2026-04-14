@@ -276,9 +276,8 @@ Then open `http://<server-ip>:8700` from any browser. For the dev frontend, run 
    # On Windows:
    venv\Scripts\activate
 
-   # Install backend dependencies
+   # Install all dependencies (backend + server)
    pip install -r requirements.txt
-   pip install -r requirements-server.txt
    ```
 
 3. **Set up NLTK data and AI models (first time only):**
@@ -502,7 +501,6 @@ We welcome contributions to Metascan! Here's how to get started:
    python3.11 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
-   pip install -r requirements-server.txt
    pip install -r requirements-dev.txt
    python setup_models.py
 
