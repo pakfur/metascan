@@ -9,6 +9,7 @@ const emit = defineEmits<{
   'similarity-settings': []
   'find-duplicates': []
   'upscale-queue': []
+  config: []
 }>()
 
 const mediaStore = useMediaStore()
@@ -75,7 +76,11 @@ function refresh() {
       </button>
 
       <button class="header-btn" @click="emit('similarity-settings')" title="Similarity Settings">
-        Settings
+        Similarity
+      </button>
+
+      <button class="header-btn" @click="emit('config')" title="Configuration">
+        Config
       </button>
 
       <span class="media-count">{{ mediaStore.displayedMedia.length }} items</span>
