@@ -1,10 +1,12 @@
 """FastAPI application factory for the metascan backend."""
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.config import get_server_config
 from backend.api import (
@@ -49,9 +51,11 @@ def create_app() -> FastAPI:
 
         @app.middleware("http")
         async def auth_middleware(request: Request, call_next):
-            # Skip auth for WebSocket upgrades (handled separately), docs, and health
+            # Skip auth for non-API routes (frontend, docs, health, WebSocket)
+            path = request.url.path
             if (
-                request.url.path in ("/docs", "/openapi.json", "/health", "/ws")
+                not path.startswith("/api/")
+                or path in ("/docs", "/openapi.json", "/health", "/ws")
                 or request.headers.get("upgrade") == "websocket"
             ):
                 return await call_next(request)
@@ -85,6 +89,29 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(embeddings.router)
     app.include_router(websocket.router)
+
+    # Serve Vue frontend production build (npm run build -> frontend/dist/)
+    frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        # Serve static assets (JS, CSS, fonts) at /assets/
+        assets_dir = frontend_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        # Serve index.html for all non-API routes (SPA fallback)
+        index_html = frontend_dist / "index.html"
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Serve actual files from dist/ if they exist (favicon, icons, etc.)
+            file_path = frontend_dist / full_path
+            if full_path and file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(index_html)
+
+        logger.info(f"Serving frontend from {frontend_dist}")
+    else:
+        logger.info("No frontend/dist/ found — run 'cd frontend && npm run build'")
 
     logger.info(f"Metascan API ready on {server_config.host}:{server_config.port}")
 
