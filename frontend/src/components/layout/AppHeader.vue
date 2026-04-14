@@ -8,6 +8,7 @@ const emit = defineEmits<{
   scan: []
   'similarity-settings': []
   'find-duplicates': []
+  'upscale-queue': []
 }>()
 
 const mediaStore = useMediaStore()
@@ -67,6 +68,10 @@ function refresh() {
 
       <button class="header-btn" @click="emit('find-duplicates')" title="Find Duplicates (Ctrl+Shift+D)">
         Duplicates
+      </button>
+
+      <button class="header-btn" @click="emit('upscale-queue')" title="Upscale Queue">
+        Queue
       </button>
 
       <button class="header-btn" @click="emit('similarity-settings')" title="Similarity Settings">
