@@ -5,6 +5,7 @@ import type { ThumbnailSize } from '../../stores/settings'
 
 const emit = defineEmits<{
   slideshow: []
+  scan: []
 }>()
 
 const mediaStore = useMediaStore()
@@ -52,6 +53,10 @@ function refresh() {
 
       <button class="header-btn" @click="refresh" title="Refresh (F5)">
         Refresh
+      </button>
+
+      <button class="header-btn" @click="emit('scan')" title="Scan (Ctrl+S)">
+        Scan
       </button>
 
       <button class="header-btn" @click="emit('slideshow')" title="Slideshow (Ctrl+Shift+S)">

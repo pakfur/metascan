@@ -224,16 +224,18 @@ function formatSize(bytes: number): string {
         <div class="help-card" @click.stop>
           <h3>Keyboard Shortcuts</h3>
           <table>
-            <tr><td>Esc</td><td>Close viewer</td></tr>
-            <tr><td>← →</td><td>Previous / Next</td></tr>
-            <tr><td>Space</td><td>Play / Pause (video)</td></tr>
-            <tr><td>F</td><td>Toggle favorite</td></tr>
-            <tr><td>Ctrl+D</td><td>Delete file</td></tr>
-            <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
-            <tr><td>M</td><td>Mute / Unmute (video)</td></tr>
-            <tr><td>↑ ↓</td><td>Volume up / down (video)</td></tr>
-            <tr><td>H / ?</td><td>Toggle this help</td></tr>
-            <tr><td>Dbl-click</td><td>Reset zoom (image)</td></tr>
+            <tbody>
+              <tr><td>Esc</td><td>Close viewer</td></tr>
+              <tr><td>← →</td><td>Previous / Next</td></tr>
+              <tr><td>Space</td><td>Play / Pause (video)</td></tr>
+              <tr><td>F</td><td>Toggle favorite</td></tr>
+              <tr><td>Ctrl+D</td><td>Delete file</td></tr>
+              <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
+              <tr><td>M</td><td>Mute / Unmute (video)</td></tr>
+              <tr><td>↑ ↓</td><td>Volume up / down (video)</td></tr>
+              <tr><td>H / ?</td><td>Toggle this help</td></tr>
+              <tr><td>Dbl-click</td><td>Reset zoom (image)</td></tr>
+            </tbody>
           </table>
           <button class="close-help" @click="showHelp = false">Close</button>
         </div>
