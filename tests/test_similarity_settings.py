@@ -7,13 +7,14 @@ from pathlib import Path
 from metascan.core.embedding_manager import CLIP_MODELS
 from metascan.core.embedding_queue import EmbeddingQueue
 
-# Check if PyQt6 is available for UI-dependent tests
+# Check if PyQt6 UI stack is fully available (including qt_material)
 try:
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication  # noqa: F401
+    import qt_material  # noqa: F401
 
-    _HAS_PYQT = True
+    _HAS_PYQT_UI = True
 except ImportError:
-    _HAS_PYQT = False
+    _HAS_PYQT_UI = False
 
 
 class TestSimilarityConfig(unittest.TestCase):
@@ -121,7 +122,7 @@ class TestEmbeddingQueueTaskGeneration(unittest.TestCase):
         self.assertFalse(eq.is_indexing())
 
 
-@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
+@unittest.skipUnless(_HAS_PYQT_UI, "PyQt6 not available")
 class TestSimilaritySettingsDialogExists(unittest.TestCase):
     """Test that the settings dialog can be imported."""
 
