@@ -1,10 +1,8 @@
 """Tests for the embedding manager and FAISS index."""
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import numpy as np
 
@@ -16,6 +14,12 @@ from metascan.core.embedding_manager import (
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 from datetime import datetime
+
+
+def _norm(v):
+    """Normalize a vector for inner-product search."""
+    v = np.array(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
 
 
 class TestClipModelRegistry(unittest.TestCase):
@@ -84,80 +88,74 @@ class TestFaissIndexManager(unittest.TestCase):
         self.assertEqual(self.manager.meta["embedding_dim"], 512)
 
     def test_add_and_search(self):
-        self.manager.create(embedding_dim=4, model_key="test")
+        self.manager.create(embedding_dim=32, model_key="test")
 
-        # Add some vectors
-        vec1 = np.array([1, 0, 0, 0], dtype=np.float32)
-        vec2 = np.array([0, 1, 0, 0], dtype=np.float32)
-        vec3 = np.array([0.9, 0.1, 0, 0], dtype=np.float32)
-
-        self.manager.add("file1.png", vec1)
-        self.manager.add("file2.png", vec2)
-        self.manager.add("file3.png", vec3)
+        self.manager.add("file1.png", _norm(np.eye(32, dtype=np.float32)[0]))
+        self.manager.add("file2.png", _norm(np.eye(32, dtype=np.float32)[1]))
+        self.manager.add(
+            "file3.png",
+            _norm(
+                np.eye(32, dtype=np.float32)[0] * 0.9
+                + np.eye(32, dtype=np.float32)[1] * 0.1
+            ),
+        )
 
         self.assertEqual(self.manager.file_count, 3)
 
-        # Search for vec1 - should find file1 and file3 as most similar
-        results = self.manager.search(vec1, top_k=3)
+        results = self.manager.search(_norm(np.eye(32, dtype=np.float32)[0]), top_k=3)
         self.assertEqual(len(results), 3)
-        # First result should be file1 (exact match)
         self.assertEqual(results[0][0], "file1.png")
-        # Second should be file3 (similar)
         self.assertEqual(results[1][0], "file3.png")
 
     def test_add_duplicate_path_skipped(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        vec = np.array([1, 0, 0, 0], dtype=np.float32)
+        self.manager.create(embedding_dim=32, model_key="test")
+        vec = _norm(np.eye(32, dtype=np.float32)[0])
         self.manager.add("file1.png", vec)
-        self.manager.add("file1.png", vec)  # duplicate
+        self.manager.add("file1.png", vec)
         self.assertEqual(self.manager.file_count, 1)
 
     def test_add_batch(self):
-        self.manager.create(embedding_dim=4, model_key="test")
+        self.manager.create(embedding_dim=32, model_key="test")
         paths = ["a.png", "b.png", "c.png"]
-        vecs = np.eye(3, 4, dtype=np.float32)
+        vecs = np.eye(3, 32, dtype=np.float32)
+        vecs = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
         self.manager.add_batch(paths, vecs)
         self.assertEqual(self.manager.file_count, 3)
 
     def test_has_file(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        vec = np.array([1, 0, 0, 0], dtype=np.float32)
-        self.manager.add("file1.png", vec)
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.manager.add("file1.png", _norm(np.eye(32, dtype=np.float32)[0]))
         self.assertTrue(self.manager.has_file("file1.png"))
         self.assertFalse(self.manager.has_file("file2.png"))
 
     def test_save_and_load(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        vec = np.array([1, 0, 0, 0], dtype=np.float32)
-        self.manager.add("file1.png", vec)
-        self.manager.add("file2.png", np.array([0, 1, 0, 0], dtype=np.float32))
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.manager.add("file1.png", _norm(np.eye(32, dtype=np.float32)[0]))
+        self.manager.add("file2.png", _norm(np.eye(32, dtype=np.float32)[1]))
 
         self.assertTrue(self.manager.save())
 
-        # Load into new manager
         new_manager = FaissIndexManager(self.index_dir)
         self.assertTrue(new_manager.load())
         self.assertEqual(new_manager.file_count, 2)
         self.assertTrue(new_manager.has_file("file1.png"))
         self.assertTrue(new_manager.has_file("file2.png"))
 
-        # Verify search still works
-        results = new_manager.search(vec, top_k=2)
+        results = new_manager.search(_norm(np.eye(32, dtype=np.float32)[0]), top_k=2)
         self.assertEqual(results[0][0], "file1.png")
 
     def test_search_empty_index(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        vec = np.array([1, 0, 0, 0], dtype=np.float32)
-        results = self.manager.search(vec, top_k=5)
+        self.manager.create(embedding_dim=32, model_key="test")
+        results = self.manager.search(_norm(np.eye(32, dtype=np.float32)[0]), top_k=5)
         self.assertEqual(results, [])
 
     def test_search_unloaded_index(self):
-        results = self.manager.search(np.array([1, 0, 0, 0], dtype=np.float32))
+        results = self.manager.search(np.eye(32, dtype=np.float32)[0])
         self.assertEqual(results, [])
 
     def test_clear(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        self.manager.add("file1.png", np.array([1, 0, 0, 0], dtype=np.float32))
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.manager.add("file1.png", _norm(np.eye(32, dtype=np.float32)[0]))
         self.manager.save()
 
         self.manager.clear()
@@ -166,15 +164,15 @@ class TestFaissIndexManager(unittest.TestCase):
         self.assertFalse(self.manager._index_path.exists())
 
     def test_check_model_match(self):
-        self.manager.create(embedding_dim=4, model_key="small")
+        self.manager.create(embedding_dim=32, model_key="small")
         self.assertTrue(self.manager.check_model_match("small"))
         self.assertFalse(self.manager.check_model_match("large"))
 
     def test_remove_stale_entries(self):
-        self.manager.create(embedding_dim=4, model_key="test")
-        self.manager.add("file1.png", np.array([1, 0, 0, 0], dtype=np.float32))
-        self.manager.add("file2.png", np.array([0, 1, 0, 0], dtype=np.float32))
-        self.manager.add("file3.png", np.array([0, 0, 1, 0], dtype=np.float32))
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.manager.add("file1.png", _norm(np.eye(32, dtype=np.float32)[0]))
+        self.manager.add("file2.png", _norm(np.eye(32, dtype=np.float32)[1]))
+        self.manager.add("file3.png", _norm(np.eye(32, dtype=np.float32)[2]))
 
         removed = self.manager.remove_stale_entries({"file1.png", "file3.png"})
         self.assertEqual(removed, 1)
@@ -191,7 +189,6 @@ class TestDatabaseHashMethods(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = DatabaseManager(Path(self.temp_dir.name))
 
-        # Insert a media record so foreign key works
         self.test_media = Media(
             file_path=Path("/test/image.png"),
             file_size=1000,
@@ -209,13 +206,11 @@ class TestDatabaseHashMethods(unittest.TestCase):
     def test_save_and_get_phash(self):
         self.db.save_media_hash(Path("/test/image.png"), "abcdef1234567890")
         phashes = self.db.get_all_phashes()
-        # Path may be native format
         self.assertEqual(len(phashes), 1)
         found_hash = list(phashes.values())[0]
         self.assertEqual(found_hash, "abcdef1234567890")
 
     def test_save_hash_batch(self):
-        # Add another media record
         media2 = Media(
             file_path=Path("/test/image2.png"),
             file_size=2000,
@@ -242,14 +237,11 @@ class TestDatabaseHashMethods(unittest.TestCase):
         self.assertEqual(len(unembedded), 1)
 
     def test_mark_embedded(self):
-        # First file is unembedded
         unembedded = self.db.get_unembedded_file_paths()
         self.assertEqual(len(unembedded), 1)
 
-        # Mark it as embedded
         self.db.mark_embedded(unembedded, "small")
 
-        # Now should be empty
         unembedded2 = self.db.get_unembedded_file_paths()
         self.assertEqual(len(unembedded2), 0)
 
