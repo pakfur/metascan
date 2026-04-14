@@ -1,12 +1,19 @@
 """Tests for similarity settings and configuration."""
 
 import json
-import tempfile
 import unittest
 from pathlib import Path
 
 from metascan.core.embedding_manager import CLIP_MODELS
 from metascan.core.embedding_queue import EmbeddingQueue
+
+# Check if PyQt6 is available for UI-dependent tests
+try:
+    from PyQt6.QtWidgets import QApplication
+
+    _HAS_PYQT = True
+except ImportError:
+    _HAS_PYQT = False
 
 
 class TestSimilarityConfig(unittest.TestCase):
@@ -104,7 +111,6 @@ class TestEmbeddingQueueTaskGeneration(unittest.TestCase):
     def test_start_empty_list_completes(self):
         """Starting indexing with empty list should emit complete immediately."""
         eq = EmbeddingQueue()
-        # Empty list should return True and not actually start a process
         result = eq.start_indexing(
             file_paths=[],
             clip_model_key="small",
@@ -115,6 +121,7 @@ class TestEmbeddingQueueTaskGeneration(unittest.TestCase):
         self.assertFalse(eq.is_indexing())
 
 
+@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
 class TestSimilaritySettingsDialogExists(unittest.TestCase):
     """Test that the settings dialog can be imported."""
 
