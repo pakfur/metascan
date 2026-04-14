@@ -10,16 +10,13 @@ import json
 import sys
 import time
 import uuid
-import signal
 import logging
 import subprocess
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, cast, IO
-import io
+from typing import IO, Callable, Dict, List, Optional, Any, cast
 from dataclasses import dataclass, asdict
-from PyQt6.QtCore import QObject, pyqtSignal
 import portalocker
 
 
@@ -73,19 +70,19 @@ class UpscaleTask:
         return cls(**data)
 
 
-class ProcessUpscaleQueue(QObject):
+class ProcessUpscaleQueue:
     """
     Process-based upscale queue manager.
 
     Uses subprocess execution and file-based communication instead of threading.
     This eliminates all threading-related deadlocks and synchronization issues.
-    """
 
-    # Signals for GUI updates (emitted via polling, not cross-thread)
-    task_added = pyqtSignal(UpscaleTask)
-    task_updated = pyqtSignal(UpscaleTask)
-    task_removed = pyqtSignal(str)
-    queue_changed = pyqtSignal()
+    Connect callbacks to receive updates:
+        queue.on_task_added = lambda task: ...
+        queue.on_task_updated = lambda task: ...
+        queue.on_task_removed = lambda task_id: ...
+        queue.on_queue_changed = lambda: ...
+    """
 
     def __init__(self, queue_dir: Optional[Path] = None, max_workers: int = 1):
         """
@@ -95,9 +92,14 @@ class ProcessUpscaleQueue(QObject):
             queue_dir: Directory for queue files (default: ~/.metascan/queue)
             max_workers: Maximum number of concurrent worker processes (default: 1)
         """
-        super().__init__()
 
         self.logger = logging.getLogger(__name__)
+
+        # Callback-based signals (replace PyQt pyqtSignal)
+        self.on_task_added: Optional[Callable[[UpscaleTask], None]] = None
+        self.on_task_updated: Optional[Callable[[UpscaleTask], None]] = None
+        self.on_task_removed: Optional[Callable[[str], None]] = None
+        self.on_queue_changed: Optional[Callable[[], None]] = None
 
         # Queue directory setup
         if queue_dir is None:
@@ -536,8 +538,10 @@ class ProcessUpscaleQueue(QObject):
         self.logger.info(f"Added task {task_id} to queue: {file_path}")
 
         # Emit signal
-        self.task_added.emit(task)
-        self.queue_changed.emit()
+        if self.on_task_added:
+            self.on_task_added(task)
+        if self.on_queue_changed:
+            self.on_queue_changed()
 
         return task_id
 
@@ -580,8 +584,10 @@ class ProcessUpscaleQueue(QObject):
 
             # Emit signals
             task = UpscaleTask.from_dict(task_data)
-            self.task_updated.emit(task)
-            self.queue_changed.emit()
+            if self.on_task_updated:
+                self.on_task_updated(task)
+            if self.on_queue_changed:
+                self.on_queue_changed()
 
             self.logger.info(f"Cancelled task {task_id}")
             return True
@@ -622,8 +628,10 @@ class ProcessUpscaleQueue(QObject):
             self._cleanup_task_files(task_id)
 
             # Emit signals
-            self.task_removed.emit(task_id)
-            self.queue_changed.emit()
+            if self.on_task_removed:
+                self.on_task_removed(task_id)
+            if self.on_queue_changed:
+                self.on_queue_changed()
 
             self.logger.info(f"Removed task {task_id}")
             return True
@@ -725,11 +733,13 @@ class ProcessUpscaleQueue(QObject):
             for task_id in tasks_to_remove:
                 del queue_data["tasks"][task_id]
                 self._cleanup_task_files(task_id)
-                self.task_removed.emit(task_id)
+                if self.on_task_removed:
+                    self.on_task_removed(task_id)
 
             if tasks_to_remove:
                 self._write_queue_file(queue_data)
-                self.queue_changed.emit()
+                if self.on_queue_changed:
+                    self.on_queue_changed()
 
             self.logger.info(f"Cleared {len(tasks_to_remove)} completed tasks")
         finally:
@@ -812,13 +822,15 @@ class ProcessUpscaleQueue(QObject):
 
             # Now emit signals after lock is released
             if paused_task_ids:
-                self.queue_changed.emit()
+                if self.on_queue_changed:
+                    self.on_queue_changed()
                 # Reload queue data to get fresh data for signal emission
                 queue_data = self._read_queue_file()
                 for task_id in paused_task_ids:
                     if task_id in queue_data["tasks"]:
                         task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                        self.task_updated.emit(task)
+                        if self.on_task_updated:
+                            self.on_task_updated(task)
             else:
                 self.logger.debug("No tasks to pause")
 
@@ -852,13 +864,15 @@ class ProcessUpscaleQueue(QObject):
             if resumed_task_ids:
                 # Write the queue file BEFORE emitting signals
                 self._write_queue_file(queue_data)
-                self.queue_changed.emit()
+                if self.on_queue_changed:
+                    self.on_queue_changed()
                 self.logger.info(f"Resumed {len(resumed_task_ids)} paused tasks")
 
                 # Now emit update signals for each resumed task
                 for task_id in resumed_task_ids:
                     task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                    self.task_updated.emit(task)
+                    if self.on_task_updated:
+                        self.on_task_updated(task)
 
                 resumed_count = len(resumed_task_ids)
             else:
@@ -926,7 +940,8 @@ class ProcessUpscaleQueue(QObject):
             # Emit signal
             updated_task = self.get_task(task.id)
             if updated_task:
-                self.task_updated.emit(updated_task)
+                if self.on_task_updated:
+                    self.on_task_updated(updated_task)
 
         except Exception as e:
             self.logger.error(f"Failed to start process for task {task.id}: {e}")
@@ -947,7 +962,8 @@ class ProcessUpscaleQueue(QObject):
 
                 # Emit signal
                 task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                self.task_updated.emit(task)
+                if self.on_task_updated:
+                    self.on_task_updated(task)
         finally:
             if lock_fh:
                 self._release_lock(lock_fh)
@@ -995,8 +1011,10 @@ class ProcessUpscaleQueue(QObject):
             # Just emit the update signal
             task = self.get_task(task_id)
             if task:
-                self.task_updated.emit(task)
-                self.queue_changed.emit()
+                if self.on_task_updated:
+                    self.on_task_updated(task)
+                if self.on_queue_changed:
+                    self.on_queue_changed()
 
             # Clean up task files
             self._cleanup_task_files(task_id)
@@ -1044,7 +1062,8 @@ class ProcessUpscaleQueue(QObject):
 
                     # Emit update signal
                     task = UpscaleTask.from_dict(queue_data["tasks"][task_id])
-                    self.task_updated.emit(task)
+                    if self.on_task_updated:
+                        self.on_task_updated(task)
 
             except FileNotFoundError:
                 # File was deleted between glob/exists check and open - this is expected
