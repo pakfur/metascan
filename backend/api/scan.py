@@ -33,7 +33,16 @@ async def prepare_scan():
     config = load_app_config()
     directories = get_directories(config)
 
-    supported_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".bmp"}
+    supported_extensions = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".mp4",
+        ".webm",
+        ".bmp",
+    }
     total_files = 0
     dir_stats = []
 
@@ -49,15 +58,18 @@ async def prepare_scan():
                 )
         else:
             count = sum(
-                1 for f in dir_path.iterdir()
+                1
+                for f in dir_path.iterdir()
                 if f.is_file() and f.suffix.lower() in supported_extensions
             )
         total_files += count
-        dir_stats.append({
-            "path": d.filepath,
-            "file_count": count,
-            "search_subfolders": d.search_subfolders,
-        })
+        dir_stats.append(
+            {
+                "path": d.filepath,
+                "file_count": count,
+                "search_subfolders": d.search_subfolders,
+            }
+        )
 
     db = get_db()
     existing_count = len(await asyncio.to_thread(db.get_existing_file_paths))
@@ -149,14 +161,16 @@ async def _run_scan(full_cleanup: bool) -> None:
         # Stale cleanup
         stale_count = 0
         if full_cleanup:
-            await ws_manager.broadcast("scan", "phase_changed", {"phase": "stale_cleanup"})
+            await ws_manager.broadcast(
+                "scan", "phase_changed", {"phase": "stale_cleanup"}
+            )
             # Get all paths in DB, remove those whose files no longer exist
             existing_db_paths = await asyncio.to_thread(db.get_existing_file_paths)
-            stale_paths = [
-                Path(p) for p in existing_db_paths if not Path(p).exists()
-            ]
+            stale_paths = [Path(p) for p in existing_db_paths if not Path(p).exists()]
             if stale_paths:
-                stale_count = await asyncio.to_thread(db.delete_media_batch, stale_paths)
+                stale_count = await asyncio.to_thread(
+                    db.delete_media_batch, stale_paths
+                )
 
         await ws_manager.broadcast(
             "scan",
