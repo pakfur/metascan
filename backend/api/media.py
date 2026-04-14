@@ -1,11 +1,9 @@
 """Media CRUD and streaming endpoints."""
 
 import mimetypes
-import os
 from pathlib import Path
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.dependencies import get_db, get_thumbnail_cache

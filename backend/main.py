@@ -1,14 +1,23 @@
 """FastAPI application factory for the metascan backend."""
 
 import logging
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.config import get_server_config
-from backend.api import media, filters, scan, similarity, duplicates, upscale, config, embeddings, websocket
+from backend.api import (
+    media,
+    filters,
+    scan,
+    similarity,
+    duplicates,
+    upscale,
+    config,
+    embeddings,
+    websocket,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,9 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(embeddings.router)
     app.include_router(websocket.router)
 
-    logger.info(
-        f"Metascan API ready on {server_config.host}:{server_config.port}"
-    )
+    logger.info(f"Metascan API ready on {server_config.host}:{server_config.port}")
 
     return app
 

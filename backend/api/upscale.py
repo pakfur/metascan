@@ -7,8 +7,6 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.ws.manager import ws_manager
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/upscale", tags=["upscale"])
