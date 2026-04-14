@@ -3,6 +3,10 @@ import { useMediaStore } from '../../stores/media'
 import { useSettingsStore } from '../../stores/settings'
 import type { ThumbnailSize } from '../../stores/settings'
 
+const emit = defineEmits<{
+  slideshow: []
+}>()
+
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
 
@@ -48,6 +52,10 @@ function refresh() {
 
       <button class="header-btn" @click="refresh" title="Refresh (F5)">
         Refresh
+      </button>
+
+      <button class="header-btn" @click="emit('slideshow')" title="Slideshow (Ctrl+Shift+S)">
+        Slideshow
       </button>
 
       <span class="media-count">{{ mediaStore.displayedMedia.length }} items</span>
