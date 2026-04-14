@@ -8,13 +8,14 @@ import numpy as np
 
 from metascan.core.embedding_manager import FaissIndexManager
 
-# Check if PyQt6 is available for UI-dependent tests
+# Check if PyQt6 UI stack is fully available (including qt_material)
 try:
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication  # noqa: F401
+    import qt_material  # noqa: F401
 
-    _HAS_PYQT = True
+    _HAS_PYQT_UI = True
 except ImportError:
-    _HAS_PYQT = False
+    _HAS_PYQT_UI = False
 
 
 class TestSimilaritySearch(unittest.TestCase):
@@ -76,7 +77,7 @@ class TestSimilaritySearch(unittest.TestCase):
         self.assertEqual(results[0][0], "file_10.png")
 
 
-@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
+@unittest.skipUnless(_HAS_PYQT_UI, "PyQt6 not available")
 class TestSignalPropagation(unittest.TestCase):
     """Test that the find_similar_requested signal exists on all view classes."""
 
@@ -96,7 +97,7 @@ class TestSignalPropagation(unittest.TestCase):
         self.assertTrue(hasattr(VirtualThumbnailView, "find_similar_requested"))
 
 
-@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
+@unittest.skipUnless(_HAS_PYQT_UI, "PyQt6 not available")
 class TestSimilaritySearchWorker(unittest.TestCase):
     """Test the async similarity search worker."""
 
@@ -194,7 +195,7 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         empty_dir.cleanup()
 
 
-@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
+@unittest.skipUnless(_HAS_PYQT_UI, "PyQt6 not available")
 class TestSimilarityCacheInvalidation(unittest.TestCase):
     """Test that cache invalidation resets cached state."""
 
@@ -212,7 +213,7 @@ class TestSimilarityCacheInvalidation(unittest.TestCase):
         self.assertIsNone(window._similarity_config)
 
 
-@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
+@unittest.skipUnless(_HAS_PYQT_UI, "PyQt6 not available")
 class TestCacheInvalidationOnIndexRebuild(unittest.TestCase):
     """Test that index rebuild invalidates the MainWindow similarity cache."""
 
