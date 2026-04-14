@@ -96,8 +96,6 @@ async def cancel_scan():
 
 async def _run_scan(full_cleanup: bool) -> None:
     """Run the scan in a background task with WebSocket progress updates."""
-    global _cancel_requested
-
     db = get_db()
     thumbnail_cache = get_thumbnail_cache()
     config = load_app_config()
