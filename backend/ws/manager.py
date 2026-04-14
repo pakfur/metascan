@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Callable, Coroutine, Dict, List, Set
+from typing import Any, Callable, Coroutine, Dict, List
 
 from fastapi import WebSocket
 
@@ -51,9 +51,7 @@ class ConnectionManager:
         except RuntimeError:
             pass
 
-    def register_handler(
-        self, action: str, handler: Callable[..., Coroutine]
-    ) -> None:
+    def register_handler(self, action: str, handler: Callable[..., Coroutine]) -> None:
         """Register a handler for client-to-server actions."""
         self._handlers[action] = handler
 
