@@ -4,6 +4,7 @@ import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
 import { useSettingsStore } from './stores/settings'
+import { useScanStore } from './stores/scan'
 import { useKeyboard } from './composables/useKeyboard'
 import AppHeader from './components/layout/AppHeader.vue'
 import ThreePanel from './components/layout/ThreePanel.vue'
@@ -12,10 +13,12 @@ import ThumbnailGrid from './components/thumbnails/ThumbnailGrid.vue'
 import MetadataPanel from './components/metadata/MetadataPanel.vue'
 import MediaViewer from './components/viewer/MediaViewer.vue'
 import SlideshowViewer from './components/viewer/SlideshowViewer.vue'
+import ScanDialog from './components/dialogs/ScanDialog.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
 const settingsStore = useSettingsStore()
+const scanStore = useScanStore()
 
 // Viewer state
 const viewerOpen = ref(false)
@@ -52,6 +55,20 @@ function closeSlideshow() {
   slideshowOpen.value = false
 }
 
+function openScan() {
+  scanStore.prepare()
+}
+
+function closeScan() {
+  // Refresh media list after scan completes
+  if (scanStore.phase === 'complete' || scanStore.embeddingPhase === 'complete') {
+    mediaStore.loadAllMedia()
+    filterStore.loadFilterData()
+  }
+  scanStore.reset()
+  scanStore.resetEmbedding()
+}
+
 useKeyboard([
   { key: 'F5', handler: () => mediaStore.loadAllMedia() },
   {
@@ -63,12 +80,13 @@ useKeyboard([
     },
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
+  { key: 's', ctrl: true, handler: openScan },
 ])
 </script>
 
 <template>
   <div class="app-shell">
-    <AppHeader @slideshow="openSlideshow" />
+    <AppHeader @slideshow="openSlideshow" @scan="openScan" />
 
     <ThreePanel>
       <template #left>
@@ -97,6 +115,12 @@ useKeyboard([
       v-if="slideshowOpen"
       :media-list="mediaStore.displayedMedia"
       @close="closeSlideshow"
+    />
+
+    <!-- Scan dialog -->
+    <ScanDialog
+      v-if="scanStore.phase !== 'idle'"
+      @close="closeScan"
     />
   </div>
 </template>
