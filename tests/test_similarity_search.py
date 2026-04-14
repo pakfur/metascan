@@ -8,6 +8,14 @@ import numpy as np
 
 from metascan.core.embedding_manager import FaissIndexManager
 
+# Check if PyQt6 is available for UI-dependent tests
+try:
+    from PyQt6.QtWidgets import QApplication
+
+    _HAS_PYQT = True
+except ImportError:
+    _HAS_PYQT = False
+
 
 class TestSimilaritySearch(unittest.TestCase):
     """Test similarity search via FAISS index."""
@@ -16,14 +24,14 @@ class TestSimilaritySearch(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.index_dir = Path(self.temp_dir.name)
         self.faiss_mgr = FaissIndexManager(self.index_dir)
-        self.faiss_mgr.create(embedding_dim=8, model_key="test")
+        self.faiss_mgr.create(embedding_dim=32, model_key="test")
 
-        # Add a set of vectors representing different content
+        # Add a set of normalized vectors representing different content
         np.random.seed(42)
         self.files = {}
         for i in range(20):
-            vec = np.random.randn(8).astype(np.float32)
-            vec = vec / np.linalg.norm(vec)  # normalize
+            vec = np.random.randn(32).astype(np.float32)
+            vec = vec / np.linalg.norm(vec)
             name = f"file_{i:02d}.png"
             self.faiss_mgr.add(name, vec)
             self.files[name] = vec
@@ -48,16 +56,14 @@ class TestSimilaritySearch(unittest.TestCase):
 
     def test_find_similar_excludes_dissimilar(self):
         """Similar vectors should rank higher than dissimilar ones."""
-        # Create a query similar to file_00
         base = self.files["file_00.png"]
-        similar = base + np.random.randn(8).astype(np.float32) * 0.1
+        similar = base + np.random.randn(32).astype(np.float32) * 0.1
         similar = similar / np.linalg.norm(similar)
 
         self.faiss_mgr.add("similar_to_00.png", similar)
 
         results = self.faiss_mgr.search(base, top_k=3)
         result_files = [r[0] for r in results]
-        # file_00 should be first, similar_to_00 should be in top 3
         self.assertEqual(result_files[0], "file_00.png")
         self.assertIn("similar_to_00.png", result_files)
 
@@ -70,6 +76,7 @@ class TestSimilaritySearch(unittest.TestCase):
         self.assertEqual(results[0][0], "file_10.png")
 
 
+@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
 class TestSignalPropagation(unittest.TestCase):
     """Test that the find_similar_requested signal exists on all view classes."""
 
@@ -89,6 +96,7 @@ class TestSignalPropagation(unittest.TestCase):
         self.assertTrue(hasattr(VirtualThumbnailView, "find_similar_requested"))
 
 
+@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
 class TestSimilaritySearchWorker(unittest.TestCase):
     """Test the async similarity search worker."""
 
@@ -96,11 +104,11 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.index_dir = Path(self.temp_dir.name)
         self.faiss_mgr = FaissIndexManager(self.index_dir)
-        self.faiss_mgr.create(embedding_dim=8, model_key="test")
+        self.faiss_mgr.create(embedding_dim=32, model_key="test")
 
         np.random.seed(42)
         for i in range(10):
-            vec = np.random.randn(8).astype(np.float32)
+            vec = np.random.randn(32).astype(np.float32)
             vec = vec / np.linalg.norm(vec)
             self.faiss_mgr.add(f"file_{i:02d}.png", vec)
         self.faiss_mgr.save()
@@ -121,11 +129,11 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         errors = []
         worker.results_ready.connect(lambda r, mgr: results.append(r))
         worker.error.connect(lambda msg: errors.append(msg))
-        worker.run()  # Call run() directly instead of start() for synchronous testing
+        worker.run()
 
         self.assertEqual(len(errors), 0)
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0][0][0], "file_00.png")  # Self is best match
+        self.assertEqual(results[0][0][0], "file_00.png")
 
     def test_worker_emits_error_for_unindexed_file(self):
         from metascan.ui.main_window import SimilaritySearchWorker
@@ -150,7 +158,7 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         from metascan.ui.main_window import SimilaritySearchWorker
 
         worker = SimilaritySearchWorker(
-            faiss_mgr=None,  # Not cached — worker must load from disk
+            faiss_mgr=None,
             file_path="file_05.png",
             top_k=3,
             index_dir=self.index_dir,
@@ -164,7 +172,6 @@ class TestSimilaritySearchWorker(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertGreater(len(results[0]), 0)
-        # Worker should return the newly loaded manager for caching
         self.assertEqual(len(returned_mgrs), 1)
         self.assertIsNotNone(returned_mgrs[0])
 
@@ -187,19 +194,17 @@ class TestSimilaritySearchWorker(unittest.TestCase):
         empty_dir.cleanup()
 
 
+@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
 class TestSimilarityCacheInvalidation(unittest.TestCase):
     """Test that cache invalidation resets cached state."""
 
     def test_invalidate_clears_faiss_mgr(self):
-        """_invalidate_similarity_cache should set _faiss_mgr to None."""
         from unittest.mock import MagicMock
+        from metascan.ui.main_window import MainWindow
 
         window = MagicMock()
         window._faiss_mgr = "something"
         window._similarity_config = {"clip_model": "small"}
-
-        # Call the real method
-        from metascan.ui.main_window import MainWindow
 
         MainWindow._invalidate_similarity_cache(window)
 
@@ -207,24 +212,24 @@ class TestSimilarityCacheInvalidation(unittest.TestCase):
         self.assertIsNone(window._similarity_config)
 
 
+@unittest.skipUnless(_HAS_PYQT, "PyQt6 not available")
 class TestCacheInvalidationOnIndexRebuild(unittest.TestCase):
     """Test that index rebuild invalidates the MainWindow similarity cache."""
 
     def test_on_complete_invalidates_cache(self):
-        """_on_complete in SimilaritySettingsDialog should call _invalidate_similarity_cache."""
         from unittest.mock import MagicMock, patch
 
         mock_parent = MagicMock()
         mock_parent._invalidate_similarity_cache = MagicMock()
 
-        # Build a mock 'self' with the attributes _on_complete reads/writes
         mock_self = MagicMock()
         mock_self.parent.return_value = mock_parent
 
         with patch("metascan.ui.similarity_settings_dialog.get_data_dir"):
-            from metascan.ui.similarity_settings_dialog import SimilaritySettingsDialog
+            from metascan.ui.similarity_settings_dialog import (
+                SimilaritySettingsDialog,
+            )
 
-            # Call the unbound method directly, bypassing QDialog construction
             SimilaritySettingsDialog._on_complete(mock_self, 100)
 
         mock_parent._invalidate_similarity_cache.assert_called_once()
