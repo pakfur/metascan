@@ -7,11 +7,6 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 
-# PyQt6 (still required by core/upscale_queue_process.py and core/embedding_queue.py)
-PyQt6==6.6.1
-PyQt6-Qt6==6.6.1
-PyQt6-sip==13.6.0
-
 # Image Processing
 Pillow==10.2.0
 piexif==1.1.3
