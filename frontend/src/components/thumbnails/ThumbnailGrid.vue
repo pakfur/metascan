@@ -7,8 +7,9 @@ import { useSimilarityStore } from '../../stores/similarity'
 import ThumbnailCard from './ThumbnailCard.vue'
 import SimilarityBanner from './SimilarityBanner.vue'
 
-defineEmits<{
+const emit = defineEmits<{
   open: [media: Media]
+  upscale: [items: Media[]]
 }>()
 
 const mediaStore = useMediaStore()
@@ -127,6 +128,13 @@ function ctxFindSimilar() {
   }
 }
 
+function ctxUpscale() {
+  if (contextMenu.value) {
+    emit('upscale', [contextMenu.value.media])
+    contextMenu.value = null
+  }
+}
+
 function ctxDelete() {
   if (contextMenu.value) {
     const media = contextMenu.value.media
@@ -161,7 +169,7 @@ function ctxDelete() {
             :size="settingsStore.thumbnailSize[0]"
             :selected="mediaStore.selectedMedia?.file_path === item.media.file_path"
             @click="onSelect(item.media)"
-            @dblclick="$emit('open', item.media)"
+            @dblclick="emit('open', item.media)"
             @contextmenu.prevent="onContextMenu(item.media, $event)"
           />
         </div>
@@ -175,10 +183,11 @@ function ctxDelete() {
         class="context-menu"
         :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
       >
-        <button @click="$emit('open', contextMenu!.media); closeContextMenu()">
+        <button @click="emit('open', contextMenu!.media); closeContextMenu()">
           Open
         </button>
         <button @click="ctxFindSimilar">Find Similar</button>
+        <button @click="ctxUpscale">Upscale</button>
         <hr />
         <button class="danger" @click="ctxDelete">Delete</button>
       </div>
