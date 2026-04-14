@@ -8,7 +8,7 @@ import numpy as np
 
 from metascan.core.embedding_manager import FaissIndexManager
 
-# Check if PyQt6 UI stack is fully available (including qt_material)
+# Check if PyQt6 UI stack is available for UI-dependent tests
 try:
     from PyQt6.QtWidgets import QApplication  # noqa: F401
     import qt_material  # noqa: F401
