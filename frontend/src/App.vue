@@ -17,6 +17,8 @@ import SlideshowViewer from './components/viewer/SlideshowViewer.vue'
 import ScanDialog from './components/dialogs/ScanDialog.vue'
 import SimilaritySettings from './components/dialogs/SimilaritySettings.vue'
 import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
+import UpscaleDialog from './components/dialogs/UpscaleDialog.vue'
+import UpscaleQueue from './components/dialogs/UpscaleQueue.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -30,6 +32,9 @@ const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
 const simSettingsOpen = ref(false)
 const dupFinderOpen = ref(false)
+const upscaleDialogOpen = ref(false)
+const upscaleQueueOpen = ref(false)
+const upscaleTargets = ref<Media[]>([])
 
 onMounted(async () => {
   await Promise.all([
@@ -74,6 +79,17 @@ function closeScan() {
   scanStore.resetEmbedding()
 }
 
+function openUpscale(items: Media[]) {
+  upscaleTargets.value = items
+  upscaleDialogOpen.value = true
+}
+
+function handleUpscaleFromSelected() {
+  if (mediaStore.selectedMedia) {
+    openUpscale([mediaStore.selectedMedia])
+  }
+}
+
 useKeyboard([
   { key: 'F5', handler: () => mediaStore.loadAllMedia() },
   {
@@ -89,6 +105,7 @@ useKeyboard([
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 's', ctrl: true, handler: openScan },
   { key: 'd', ctrl: true, shift: true, handler: () => { dupFinderOpen.value = true } },
+  { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
 </script>
 
@@ -99,6 +116,7 @@ useKeyboard([
       @scan="openScan"
       @similarity-settings="simSettingsOpen = true"
       @find-duplicates="dupFinderOpen = true"
+      @upscale-queue="upscaleQueueOpen = true"
     />
 
     <ThreePanel>
@@ -107,7 +125,7 @@ useKeyboard([
       </template>
 
       <template #center>
-        <ThumbnailGrid @open="openViewer" />
+        <ThumbnailGrid @open="openViewer" @upscale="openUpscale" />
       </template>
 
       <template #right>
@@ -146,6 +164,20 @@ useKeyboard([
     <DuplicateFinder
       v-if="dupFinderOpen"
       @close="dupFinderOpen = false"
+    />
+
+    <!-- Upscale dialog -->
+    <UpscaleDialog
+      v-if="upscaleDialogOpen"
+      :media-items="upscaleTargets"
+      @close="upscaleDialogOpen = false"
+      @submitted="upscaleQueueOpen = true"
+    />
+
+    <!-- Upscale Queue -->
+    <UpscaleQueue
+      v-if="upscaleQueueOpen"
+      @close="upscaleQueueOpen = false"
     />
   </div>
 </template>
