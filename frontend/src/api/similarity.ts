@@ -36,3 +36,40 @@ export function fetchEmbeddingStatus(): Promise<{
 }> {
   return get('/embeddings/status')
 }
+
+export interface SimilarityResult {
+  file_path: string
+  file_name: string
+  file_size: number
+  width: number
+  height: number
+  format: string
+  is_favorite: boolean
+  is_video: boolean
+  media_type: 'image' | 'video'
+  similarity_score: number
+  [key: string]: unknown
+}
+
+export function searchSimilar(filePath: string, threshold = 0.7, maxResults = 100): Promise<SimilarityResult[]> {
+  return post<SimilarityResult[]>('/similarity/search', {
+    file_path: filePath,
+    threshold,
+    max_results: maxResults,
+  })
+}
+
+export function contentSearch(query: string, maxResults = 100): Promise<SimilarityResult[]> {
+  return post<SimilarityResult[]>('/similarity/content-search', {
+    query,
+    max_results: maxResults,
+  })
+}
+
+export function findDuplicates(): Promise<{ groups: Record<string, unknown>[][]; total_groups: number }> {
+  return post('/duplicates/find')
+}
+
+export function deleteDuplicates(filePaths: string[]): Promise<{ deleted: number }> {
+  return post('/duplicates/delete', { file_paths: filePaths })
+}
