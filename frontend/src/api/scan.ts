@@ -10,8 +10,13 @@ export function prepareScan(): Promise<ScanPrepareResult> {
   return post<ScanPrepareResult>('/scan/prepare')
 }
 
-export function startScan(fullCleanup = false): Promise<{ status: string }> {
-  return post<{ status: string }>('/scan/start', { full_cleanup: fullCleanup })
+export interface StartScanPayload {
+  full_cleanup: boolean
+  full_clean: boolean
+}
+
+export function startScan(payload: StartScanPayload): Promise<{ status: string }> {
+  return post<{ status: string }>('/scan/start', payload)
 }
 
 export function cancelScan(): Promise<{ status: string }> {
