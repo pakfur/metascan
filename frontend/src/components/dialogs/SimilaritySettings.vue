@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   fetchSimilaritySettings,
   updateSimilaritySettings,
@@ -36,7 +36,7 @@ const deviceOptions = [
   { label: 'CUDA (GPU)', value: 'cuda' },
 ]
 
-onMounted(async () => {
+async function refreshSettings() {
   loading.value = true
   try {
     settings.value = await fetchSimilaritySettings()
@@ -50,6 +50,25 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+onMounted(refreshSettings)
+
+const missingCount = computed(() => {
+  if (!settings.value) return 0
+  const s = settings.value.embedding_stats
+  return Math.max(0, s.total_media - s.embedded)
+})
+
+const embPct = computed(() =>
+  scanStore.embeddingTotal > 0
+    ? Math.round((scanStore.embeddingCurrent / scanStore.embeddingTotal) * 100)
+    : 0
+)
+
+// Refresh stats once a build completes
+watch(() => scanStore.embeddingPhase, (phase) => {
+  if (phase === 'complete' || phase === 'idle') refreshSettings()
 })
 
 async function save() {
@@ -65,18 +84,29 @@ async function save() {
   emit('close')
 }
 
-function buildIndex(rebuild: boolean) {
-  scanStore.startEmbeddingBuild(rebuild)
+async function toggleAutoIndex(value: boolean) {
+  if (!settings.value) return
+  settings.value.auto_index_after_scan = value
+  await updateSimilaritySettings({ auto_index_after_scan: value })
 }
 
-const embeddingProgressPct = ref(0)
-// Reactively compute from scanStore
-import { computed } from 'vue'
-const embPct = computed(() =>
-  scanStore.embeddingTotal > 0
-    ? Math.round((scanStore.embeddingCurrent / scanStore.embeddingTotal) * 100)
-    : 0
-)
+async function toggleComputePhash(value: boolean) {
+  if (!settings.value) return
+  settings.value.compute_phash_during_scan = value
+  computePhashDuringScan.value = value
+  await updateSimilaritySettings({ compute_phash_during_scan: value })
+}
+
+async function buildMissing() {
+  await scanStore.startEmbeddingBuild(false)
+}
+
+async function rebuildAll() {
+  if (!confirm(
+    'Rebuild ALL embeddings? This clears the existing index and re-indexes every media file. May take a long time.',
+  )) return
+  await scanStore.startEmbeddingBuild(true)
+}
 </script>
 
 <template>
@@ -150,58 +180,84 @@ const embPct = computed(() =>
         </div>
 
         <!-- Embedding Index -->
-        <div class="section-divider" />
-        <h4>Embedding Index</h4>
-
-        <div v-if="settings?.embedding_stats" class="stats-grid">
-          <div class="stat-item">
-            <span class="stat-val">{{ settings.embedding_stats.total_media }}</span>
-            <span class="stat-lbl">Total Media</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-val">{{ settings.embedding_stats.embedded }}</span>
-            <span class="stat-lbl">Embedded</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-val">{{ settings.embedding_stats.clip_model || 'none' }}</span>
-            <span class="stat-lbl">Model</span>
-          </div>
-        </div>
-
-        <!-- Embedding progress -->
-        <template v-if="scanStore.embeddingPhase === 'building'">
-          <div class="progress-section">
-            <div class="progress-bar">
-              <div class="progress-fill" :style="{ width: embPct + '%' }" />
-            </div>
-            <span class="progress-text">
-              {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }} ({{ embPct }}%)
+        <section v-if="settings" class="embed-section">
+          <h4>Embedding Index</h4>
+          <p class="stats">
+            Files:
+            <strong>{{ settings.embedding_stats.total_media }}</strong> total |
+            <strong>{{ settings.embedding_stats.hashed }}</strong> hashed |
+            <strong>{{ settings.embedding_stats.embedded }}</strong> embedded
+            <span v-if="missingCount > 0" class="missing">
+              ({{ missingCount }} missing)
             </span>
-          </div>
-        </template>
-        <template v-else-if="scanStore.embeddingPhase === 'complete'">
-          <p class="success-msg">Index build complete.</p>
-        </template>
-        <template v-else-if="scanStore.embeddingPhase === 'error'">
-          <p class="error-msg">{{ scanStore.embeddingError }}</p>
-        </template>
+          </p>
 
-        <div class="index-actions">
-          <button
-            class="btn-secondary"
-            @click="buildIndex(false)"
-            :disabled="scanStore.embeddingPhase === 'building'"
-          >
-            Build Index
-          </button>
-          <button
-            class="btn-secondary"
-            @click="buildIndex(true)"
-            :disabled="scanStore.embeddingPhase === 'building'"
-          >
-            Rebuild All
-          </button>
-        </div>
+          <!-- Embedding progress -->
+          <template v-if="scanStore.embeddingPhase === 'building'">
+            <div class="progress-section">
+              <div class="progress-bar">
+                <div class="progress-fill" :style="{ width: embPct + '%' }" />
+              </div>
+              <span class="progress-text">
+                {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }} ({{ embPct }}%)
+              </span>
+            </div>
+            <p class="building">
+              {{ scanStore.embeddingLabel || 'Indexing...' }}
+              <span v-if="scanStore.embeddingTotal > 0">
+                — {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }}
+              </span>
+            </p>
+          </template>
+          <template v-else-if="scanStore.embeddingPhase === 'complete'">
+            <p class="success-msg">Index build complete.</p>
+          </template>
+          <template v-else-if="scanStore.embeddingPhase === 'error'">
+            <p class="error-msg">{{ scanStore.embeddingError }}</p>
+          </template>
+
+          <div class="embed-actions">
+            <button
+              class="btn-primary"
+              :disabled="missingCount === 0 || scanStore.embeddingPhase === 'building'"
+              @click="buildMissing"
+            >
+              Build Index ({{ missingCount }} missing)
+            </button>
+            <button
+              class="btn-secondary"
+              :disabled="scanStore.embeddingPhase === 'building'"
+              @click="rebuildAll"
+            >
+              Rebuild All
+            </button>
+            <button
+              v-if="scanStore.embeddingPhase === 'building'"
+              class="btn-danger"
+              @click="scanStore.cancelEmbedding()"
+            >
+              Cancel
+            </button>
+          </div>
+
+          <label class="setting-toggle">
+            <input
+              type="checkbox"
+              :checked="settings.auto_index_after_scan"
+              @change="toggleAutoIndex(($event.target as HTMLInputElement).checked)"
+            />
+            Auto-index after scan completes
+          </label>
+
+          <label class="setting-toggle">
+            <input
+              type="checkbox"
+              :checked="settings.compute_phash_during_scan"
+              @change="toggleComputePhash(($event.target as HTMLInputElement).checked)"
+            />
+            Compute pHash during scan (used for duplicate detection)
+          </label>
+        </section>
 
         <!-- Actions -->
         <div class="dialog-actions">
@@ -311,32 +367,27 @@ h4 {
   color: var(--text-color);
 }
 
-.section-divider {
+.embed-section {
+  margin-top: 16px;
+  padding-top: 16px;
   border-top: 1px solid var(--surface-border);
-  margin: 16px 0;
 }
 
-.stats-grid {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 12px;
-}
+.embed-section h4 { margin: 0 0 8px; font-size: 14px; color: var(--text-color); }
 
-.stat-item {
+.stats { font-size: 13px; color: var(--text-color-secondary); margin-bottom: 8px; }
+.stats strong { color: var(--text-color); }
+.missing { color: var(--danger-color, #d33); margin-left: 6px; }
+.building { font-size: 12px; color: var(--primary-color); margin-bottom: 8px; }
+.embed-actions { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.setting-toggle {
   display: flex;
-  flex-direction: column;
   align-items: center;
-}
-
-.stat-val {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--primary-color);
-}
-
-.stat-lbl {
-  font-size: 11px;
-  color: var(--text-color-secondary);
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-color);
+  cursor: pointer;
+  margin-bottom: 6px;
 }
 
 .progress-section {
@@ -375,12 +426,6 @@ h4 {
   margin-bottom: 8px;
 }
 
-.index-actions {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
 .dialog-actions {
   display: flex;
   gap: 10px;
@@ -402,6 +447,11 @@ h4 {
   opacity: 0.9;
 }
 
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   padding: 8px 20px;
   background: var(--surface-ground);
@@ -419,5 +469,19 @@ h4 {
 .btn-secondary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.btn-danger {
+  padding: 8px 20px;
+  background: var(--danger-color, #d33);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-danger:hover {
+  opacity: 0.9;
 }
 </style>
