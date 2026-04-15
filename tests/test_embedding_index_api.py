@@ -270,3 +270,44 @@ def test_get_favorite_file_paths_returns_only_favorites(tmp_path):
 
     favs = db.get_favorite_file_paths()
     assert sorted(favs) == ["/m/a.png", "/m/c.png"]
+
+
+def test_full_clean_snapshots_and_restores_favorites(monkeypatch):
+    """In full_clean mode the scan must:
+      1) capture favorites before truncating,
+      2) truncate the media table,
+      3) re-mark favorites that exist after the rescan."""
+    from backend.api import scan as scan_api
+
+    favs_before = ["/m/keep.png", "/m/also.png"]
+    truncated = {"called": False}
+    restored = []
+    final_existing = {"/m/keep.png", "/m/new.png"}  # "also.png" gone after rescan
+
+    class FakeDB:
+        def get_favorite_file_paths(self): return list(favs_before)
+        def truncate_all_data(self):
+            truncated["called"] = True
+            return True
+        def get_existing_file_paths(self): return final_existing
+        def delete_media_batch(self, paths): return 0
+        def set_favorite(self, path, is_favorite):
+            restored.append((str(path), is_favorite))
+            return True
+        def get_unembedded_file_paths(self): return []
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+    monkeypatch.setattr(scan_api, "Scanner", lambda *a, **k: object())
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: {"similarity": {}})
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [])
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    assert truncated["called"] is True
+    # Only paths still present after rescan should be restored
+    restored_paths = {p for p, fav in restored if fav}
+    assert restored_paths == {"/m/keep.png"}
