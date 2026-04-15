@@ -26,6 +26,7 @@ _cancel_requested = False
 
 class ScanRequest(BaseModel):
     full_cleanup: bool = False
+    full_clean: bool = False  # destructive: truncates DB, preserves favorites
 
 
 @router.post("/prepare")
@@ -91,7 +92,7 @@ async def start_scan(body: ScanRequest):
         raise HTTPException(status_code=409, detail="Scan already in progress")
 
     _cancel_requested = False
-    _scan_task = asyncio.create_task(_run_scan(body.full_cleanup))
+    _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
     return {"status": "started"}
 
 
@@ -107,7 +108,7 @@ async def cancel_scan():
     return {"status": "cancelling"}
 
 
-async def _run_scan(full_cleanup: bool) -> None:
+async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
     """Run the scan in a background task with WebSocket progress updates."""
     db = get_db()
     thumbnail_cache = get_thumbnail_cache()
@@ -116,7 +117,18 @@ async def _run_scan(full_cleanup: bool) -> None:
 
     scanner = Scanner(db, thumbnail_cache)
 
-    await ws_manager.broadcast("scan", "started", {})
+    await ws_manager.broadcast("scan", "started", {"full_clean": full_clean})
+
+    # Snapshot favorites before any destructive operation
+    favorites_snapshot: list = []
+    if full_clean:
+        favorites_snapshot = await asyncio.to_thread(db.get_favorite_file_paths)
+        await asyncio.to_thread(db.truncate_all_data)
+        await ws_manager.broadcast(
+            "scan",
+            "phase_changed",
+            {"phase": "full_clean", "favorites_preserved": len(favorites_snapshot)},
+        )
 
     try:
         total_processed = 0
@@ -172,6 +184,18 @@ async def _run_scan(full_cleanup: bool) -> None:
                 stale_count = await asyncio.to_thread(
                     db.delete_media_batch, stale_paths
                 )
+
+        # Restore favorites for files that re-appeared in the rescan
+        if full_clean and favorites_snapshot:
+            existing = await asyncio.to_thread(db.get_existing_file_paths)
+            restored = 0
+            for path in favorites_snapshot:
+                if path in existing:
+                    await asyncio.to_thread(db.set_favorite, Path(path), True)
+                    restored += 1
+            await ws_manager.broadcast(
+                "scan", "favorites_restored", {"count": restored}
+            )
 
         # Auto-trigger embedding build when:
         #   - the scan was not cancelled,
