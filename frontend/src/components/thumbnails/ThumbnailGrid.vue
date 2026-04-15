@@ -20,6 +20,14 @@ const container = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
 const containerHeight = ref(600)
 
+// Scroll-velocity gate: suppress thumbnail src assignment while actively
+// scrolling. When scroll stops for SCROLL_SETTLE_MS, visible cards load.
+// Prevents the HTTP/1.1 connection pool from filling with stale requests
+// for rows the user has already scrolled past.
+const isScrolling = ref(false)
+const SCROLL_SETTLE_MS = 150
+let scrollSettleId: ReturnType<typeof setTimeout> | null = null
+
 // Context menu state
 const contextMenu = ref<{ x: number; y: number; media: Media } | null>(null)
 
@@ -76,6 +84,12 @@ function onScroll() {
   if (container.value) {
     scrollTop.value = container.value.scrollTop
   }
+  isScrolling.value = true
+  if (scrollSettleId) clearTimeout(scrollSettleId)
+  scrollSettleId = setTimeout(() => {
+    isScrolling.value = false
+    scrollSettleId = null
+  }, SCROLL_SETTLE_MS)
 }
 
 function updateSize() {
@@ -97,6 +111,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
+  if (scrollSettleId) clearTimeout(scrollSettleId)
   document.removeEventListener('click', closeContextMenu)
 })
 
@@ -175,6 +190,7 @@ function ctxDelete() {
             :media="item.media"
             :size="settingsStore.thumbnailSize[0]"
             :selected="mediaStore.selectedMedia?.file_path === item.media.file_path"
+            :defer-load="isScrolling"
             @click="onSelect(item.media)"
             @dblclick="emit('open', item.media)"
             @contextmenu.prevent="onContextMenu(item.media, $event)"
