@@ -147,3 +147,104 @@ def test_cancel_endpoint_returns_409_when_idle(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(sim_api.cancel_index_build())
     assert exc.value.status_code == 409
+
+
+def test_scan_auto_triggers_when_config_present_and_unembedded(monkeypatch):
+    from backend.api import scan as scan_api
+    from backend.api import similarity as sim_api
+
+    # Config with similarity block + auto_index enabled
+    monkeypatch.setattr(
+        scan_api,
+        "load_app_config",
+        lambda: {
+            "similarity": {"clip_model": "small", "auto_index_after_scan": True},
+        },
+    )
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [])
+    monkeypatch.setattr(scan_api, "get_db", lambda: type("D", (), {
+        "get_existing_file_paths": lambda self: set(),
+        "delete_media_batch": lambda self, paths: 0,
+        "get_unembedded_file_paths": lambda self: ["/m/a.png"],
+    })())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+    monkeypatch.setattr(scan_api, "Scanner", lambda *a, **k: object())
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    triggered = {"called": False, "rebuild": None}
+    async def fake_build(rebuild=False):
+        triggered["called"] = True
+        triggered["rebuild"] = rebuild
+        return {"status": "started", "total": 1}
+    monkeypatch.setattr(sim_api, "build_index", fake_build)
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False))
+
+    assert triggered["called"] is True
+    assert triggered["rebuild"] is False
+
+
+def test_scan_skips_auto_trigger_when_disabled(monkeypatch):
+    from backend.api import scan as scan_api
+    from backend.api import similarity as sim_api
+
+    monkeypatch.setattr(
+        scan_api,
+        "load_app_config",
+        lambda: {
+            "similarity": {"auto_index_after_scan": False},
+        },
+    )
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [])
+    monkeypatch.setattr(scan_api, "get_db", lambda: type("D", (), {
+        "get_existing_file_paths": lambda self: set(),
+        "delete_media_batch": lambda self, paths: 0,
+        "get_unembedded_file_paths": lambda self: ["/m/a.png"],
+    })())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+    monkeypatch.setattr(scan_api, "Scanner", lambda *a, **k: object())
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    triggered = {"called": False}
+    async def fake_build(rebuild=False):
+        triggered["called"] = True
+        return {"status": "started"}
+    monkeypatch.setattr(sim_api, "build_index", fake_build)
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False))
+    assert triggered["called"] is False
+
+
+def test_scan_skips_auto_trigger_when_no_unembedded(monkeypatch):
+    from backend.api import scan as scan_api
+    from backend.api import similarity as sim_api
+
+    monkeypatch.setattr(
+        scan_api,
+        "load_app_config",
+        lambda: {"similarity": {"auto_index_after_scan": True}},
+    )
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [])
+    monkeypatch.setattr(scan_api, "get_db", lambda: type("D", (), {
+        "get_existing_file_paths": lambda self: set(),
+        "delete_media_batch": lambda self, paths: 0,
+        "get_unembedded_file_paths": lambda self: [],
+    })())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+    monkeypatch.setattr(scan_api, "Scanner", lambda *a, **k: object())
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    triggered = {"called": False}
+    async def fake_build(rebuild=False):
+        triggered["called"] = True
+        return {"status": "started"}
+    monkeypatch.setattr(sim_api, "build_index", fake_build)
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False))
+    assert triggered["called"] is False
