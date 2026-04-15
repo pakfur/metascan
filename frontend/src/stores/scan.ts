@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { prepareScan, startScan, cancelScan, type ScanPrepareResult } from '../api/scan'
-import { buildIndex, fetchEmbeddingStatus } from '../api/similarity'
+import { buildIndex, cancelIndex, fetchEmbeddingStatus } from '../api/similarity'
 import { useWebSocket } from '../composables/useWebSocket'
 
 export type ScanPhase =
@@ -39,6 +39,12 @@ export const useScanStore = defineStore('scan', () => {
   const embeddingCurrent = ref(0)
   const embeddingTotal = ref(0)
   const embeddingError = ref('')
+  const embeddingStatus = ref<
+    'idle' | 'starting' | 'downloading_model' | 'loading_model' | 'processing'
+  >('idle')
+  const embeddingLabel = ref('')
+  const embeddingCurrentFile = ref('')
+  const embeddingErrorsCount = ref(0)
 
   const isActive = computed(() =>
     phase.value !== 'idle' && phase.value !== 'complete' && phase.value !== 'error' && phase.value !== 'cancelled'
@@ -86,13 +92,35 @@ export const useScanStore = defineStore('scan', () => {
     switch (event) {
       case 'started':
         embeddingPhase.value = 'building'
+        embeddingStatus.value = 'starting'
+        embeddingLabel.value = ''
+        embeddingCurrentFile.value = ''
+        embeddingErrorsCount.value = 0
+        embeddingError.value = ''
+        if (data.total !== undefined) {
+          embeddingTotal.value = (data.total as number) || 0
+        }
+        if (phase.value === 'complete') phase.value = 'embedding'
         break
       case 'progress':
         embeddingCurrent.value = (data.current as number) || 0
         embeddingTotal.value = (data.total as number) || 0
+        if (data.label) embeddingLabel.value = data.label as string
+        if (data.status) embeddingStatus.value = data.status as typeof embeddingStatus.value
+        if (data.current_file !== undefined) {
+          embeddingCurrentFile.value = (data.current_file as string) || ''
+        }
+        if (data.errors_count !== undefined) {
+          embeddingErrorsCount.value = (data.errors_count as number) || 0
+        }
         break
       case 'complete':
         embeddingPhase.value = 'complete'
+        if (phase.value === 'embedding') phase.value = 'complete'
+        break
+      case 'cancelled':
+        embeddingPhase.value = 'idle'
+        if (phase.value === 'embedding') phase.value = 'complete'
         break
       case 'error':
         embeddingPhase.value = 'error'
@@ -147,10 +175,18 @@ export const useScanStore = defineStore('scan', () => {
     await buildIndex(rebuild)
   }
 
+  async function cancelEmbedding() {
+    try { await cancelIndex() } catch { /* 409 = already finished */ }
+  }
+
   function resetEmbedding() {
     embeddingPhase.value = 'idle'
+    embeddingStatus.value = 'idle'
     embeddingCurrent.value = 0
     embeddingTotal.value = 0
+    embeddingLabel.value = ''
+    embeddingCurrentFile.value = ''
+    embeddingErrorsCount.value = 0
     embeddingError.value = ''
   }
 
@@ -171,12 +207,17 @@ export const useScanStore = defineStore('scan', () => {
     embeddingCurrent,
     embeddingTotal,
     embeddingError,
+    embeddingStatus,
+    embeddingLabel,
+    embeddingCurrentFile,
+    embeddingErrorsCount,
     isActive,
     prepare,
     start,
     cancel,
     reset,
     startEmbeddingBuild,
+    cancelEmbedding,
     resetEmbedding,
   }
 })
