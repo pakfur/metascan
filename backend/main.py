@@ -1,5 +1,6 @@
 """FastAPI application factory for the metascan backend."""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from backend.api import (
     embeddings,
     websocket,
 )
+from backend.ws.manager import ws_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +75,16 @@ def create_app() -> FastAPI:
                     content={"detail": "Invalid API key"},
                 )
             return await call_next(request)
+
+    # Startup/shutdown hooks
+    @app.on_event("startup")
+    async def _on_startup() -> None:
+        ws_manager.attach_loop(asyncio.get_running_loop())
+        upscale.init_upscale_queue()
+
+    @app.on_event("shutdown")
+    async def _on_shutdown() -> None:
+        await upscale.shutdown_upscale_queue()
 
     # Health check
     @app.get("/health")
