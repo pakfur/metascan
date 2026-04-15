@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.api import similarity as similarity_api
 from backend.config import load_app_config, get_directories
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
@@ -171,6 +172,24 @@ async def _run_scan(full_cleanup: bool) -> None:
                 stale_count = await asyncio.to_thread(
                     db.delete_media_batch, stale_paths
                 )
+
+        # Auto-trigger embedding build when:
+        #   - the scan was not cancelled,
+        #   - config has a similarity block with auto_index_after_scan true (default true),
+        #   - at least one file is missing an embedding.
+        # Mirrors PyQt _auto_trigger_embeddings (metascan/ui/main_window.py:2231).
+        sim = config.get("similarity") if isinstance(config, dict) else None
+        if (
+            not _cancel_requested
+            and sim is not None
+            and sim.get("auto_index_after_scan", True)
+        ):
+            unembedded = await asyncio.to_thread(db.get_unembedded_file_paths)
+            if unembedded:
+                try:
+                    await similarity_api.build_index(rebuild=False)
+                except Exception as e:
+                    logger.warning(f"Auto-trigger embedding build failed: {e}")
 
         await ws_manager.broadcast(
             "scan",
