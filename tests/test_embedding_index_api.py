@@ -541,3 +541,51 @@ def test_full_clean_restores_favorites_on_exception(monkeypatch):
     assert restored_paths == {
         "/m/keep.png"
     }, f"Error path lost favorites; got {restored_paths!r}"
+
+
+def test_poll_updates_noop_when_no_active_worker(tmp_path, caplog):
+    """Regression: once the worker completes _cleanup sets _process to None.
+    Subsequent poll_updates ticks must NOT re-read the stale progress file and
+    must NOT emit warnings or callbacks — otherwise the poll loop spams
+    'Worker progress stale' every tick forever (and keeps broadcasting fake
+    'progress' WS events to the frontend)."""
+    import json
+    import logging
+    from metascan.core.embedding_queue import EmbeddingQueue
+
+    eq = EmbeddingQueue()
+    # Point the queue at a fresh tmp dir so we don't collide with real state
+    eq._queue_dir = tmp_path
+
+    # Simulate the aftermath of a successful run: _cleanup has set _process
+    # to None, but the completed-status progress file is still on disk.
+    eq._process = None
+    eq._last_progress = {
+        "current": 10,
+        "total": 10,
+        "status": "complete",
+        "timestamp": 0.0,
+    }
+    eq._last_progress_time = 0.0  # Very old — would trigger stale warning
+    stale_file = tmp_path / "progress_embedding.json"
+    stale_file.write_text(json.dumps(eq._last_progress))
+
+    progress_calls: list = []
+    eq.on_progress = lambda c, t, s: progress_calls.append((c, t, s))
+    complete_calls: list = []
+    eq.on_complete = lambda total: complete_calls.append(total)
+    error_calls: list = []
+    eq.on_error = lambda msg: error_calls.append(msg)
+
+    with caplog.at_level(logging.WARNING, logger="metascan.core.embedding_queue"):
+        for _ in range(20):
+            eq.poll_updates()
+
+    assert progress_calls == [], f"Unexpected progress emits: {progress_calls!r}"
+    assert complete_calls == []
+    assert error_calls == []
+    stale_warnings = [r for r in caplog.records if "stale" in r.getMessage().lower()]
+    assert stale_warnings == [], (
+        f"poll_updates kept warning after completion: "
+        f"{[r.getMessage() for r in stale_warnings]!r}"
+    )
