@@ -20,6 +20,7 @@ export const useScanStore = defineStore('scan', () => {
   const phase = ref<ScanPhase>('idle')
   const prepareResult = ref<ScanPrepareResult | null>(null)
   const fullCleanup = ref(false)
+  const scanMode = ref<'incremental' | 'full_clean'>('incremental')
   const errorMessage = ref('')
 
   // Scan progress
@@ -147,7 +148,10 @@ export const useScanStore = defineStore('scan', () => {
     currentFile.value = ''
     processedCount.value = 0
     staleRemoved.value = 0
-    await startScan(fullCleanup.value)
+    await startScan({
+      full_cleanup: fullCleanup.value,
+      full_clean: scanMode.value === 'full_clean',
+    })
   }
 
   async function cancel() {
@@ -194,6 +198,7 @@ export const useScanStore = defineStore('scan', () => {
     phase,
     prepareResult,
     fullCleanup,
+    scanMode,
     errorMessage,
     currentDir,
     dirCurrent,
