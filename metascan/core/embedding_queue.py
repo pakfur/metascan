@@ -184,8 +184,15 @@ class EmbeddingQueue:
 
         Should be called periodically (e.g. every 500ms) while indexing.
         """
+        # No active worker to monitor. Bail before re-reading the stale
+        # progress file left on disk by the previous run; otherwise the
+        # stale-progress branch below fires a warning (and a spurious
+        # 'progress' callback) on every tick forever.
+        if self._process is None:
+            return
+
         # First check: did the process exit?
-        process_exited = self._process is not None and self._process.poll() is not None
+        process_exited = self._process.poll() is not None
 
         progress_file = self._queue_dir / "progress_embedding.json"
 
