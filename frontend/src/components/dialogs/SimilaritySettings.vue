@@ -22,7 +22,6 @@ const phashThreshold = ref(10)
 const clipThreshold = ref(0.7)
 const searchResultsCount = ref(100)
 const videoKeyframes = ref(4)
-const computePhashDuringScan = ref(true)
 
 const modelOptions = [
   { label: 'Small (ViT-B-16, 512MB)', value: 'small' },
@@ -46,7 +45,6 @@ async function refreshSettings() {
     clipThreshold.value = settings.value.clip_threshold
     searchResultsCount.value = settings.value.search_results_count
     videoKeyframes.value = settings.value.video_keyframes
-    computePhashDuringScan.value = settings.value.compute_phash_during_scan
   } finally {
     loading.value = false
   }
@@ -79,7 +77,6 @@ async function save() {
     clip_threshold: clipThreshold.value,
     search_results_count: searchResultsCount.value,
     video_keyframes: videoKeyframes.value,
-    compute_phash_during_scan: computePhashDuringScan.value,
   })
   emit('close')
 }
@@ -93,19 +90,26 @@ async function toggleAutoIndex(value: boolean) {
 async function toggleComputePhash(value: boolean) {
   if (!settings.value) return
   settings.value.compute_phash_during_scan = value
-  computePhashDuringScan.value = value
   await updateSimilaritySettings({ compute_phash_during_scan: value })
 }
 
 async function buildMissing() {
-  await scanStore.startEmbeddingBuild(false)
+  try {
+    await scanStore.startEmbeddingBuild(false)
+  } catch (e) {
+    console.error('Build index failed:', e)
+  }
 }
 
 async function rebuildAll() {
   if (!confirm(
     'Rebuild ALL embeddings? This clears the existing index and re-indexes every media file. May take a long time.',
   )) return
-  await scanStore.startEmbeddingBuild(true)
+  try {
+    await scanStore.startEmbeddingBuild(true)
+  } catch (e) {
+    console.error('Rebuild index failed:', e)
+  }
 }
 </script>
 
@@ -169,14 +173,6 @@ async function rebuildAll() {
         <div class="form-group">
           <label>Video Keyframes</label>
           <input type="number" v-model.number="videoKeyframes" min="1" max="16" />
-        </div>
-
-        <!-- pHash during scan -->
-        <div class="form-group">
-          <label class="checkbox-label">
-            <input type="checkbox" v-model="computePhashDuringScan" />
-            Compute pHash during scan
-          </label>
         </div>
 
         <!-- Embedding Index -->
