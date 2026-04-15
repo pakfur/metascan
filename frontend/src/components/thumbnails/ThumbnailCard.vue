@@ -1,17 +1,43 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import type { Media } from '../../types/media'
 import { thumbnailUrl } from '../../api/client'
 import { useMediaStore } from '../../stores/media'
 
-const props = defineProps<{
-  media: Media
-  size: number
-  selected: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    media: Media
+    size: number
+    selected: boolean
+    deferLoad?: boolean
+  }>(),
+  { deferLoad: false },
+)
 
 const mediaStore = useMediaStore()
-const imgSrc = computed(() => thumbnailUrl(props.media.file_path))
+const imgEl = ref<HTMLImageElement | null>(null)
+
+// Latch: once we've started loading the thumbnail, keep showing it even if
+// the user resumes scrolling. deferLoad only prevents STARTING a new load.
+const hasStartedLoading = ref(!props.deferLoad)
+watch(
+  () => props.deferLoad,
+  (defer) => {
+    if (!defer) hasStartedLoading.value = true
+  },
+)
+
+const imgSrc = computed(() =>
+  hasStartedLoading.value ? thumbnailUrl(props.media.file_path) : '',
+)
+
+onBeforeUnmount(() => {
+  // Cancel any in-flight fetch for this thumbnail before the element is
+  // removed. Chrome usually cancels on DOM removal, but belt-and-suspenders:
+  // clearing src guarantees the connection slot is freed.
+  const el = imgEl.value
+  if (el) el.removeAttribute('src')
+})
 
 function onFavoriteClick(e: MouseEvent) {
   e.stopPropagation()
@@ -31,12 +57,15 @@ function onImgError(e: Event) {
     :style="{ width: size + 'px', height: size + 'px' }"
   >
     <img
+      v-if="hasStartedLoading"
+      ref="imgEl"
       :src="imgSrc"
       :alt="media.file_name"
       class="thumb-img"
       loading="lazy"
       @error="onImgError"
     />
+    <div v-else class="thumb-placeholder" aria-hidden="true" />
 
     <button
       class="fav-btn"
@@ -83,6 +112,12 @@ function onImgError(e: Event) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  background: var(--surface-ground);
 }
 
 .fav-btn {
