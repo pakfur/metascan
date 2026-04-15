@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Callable, Coroutine, Dict, List
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from fastapi import WebSocket
 
@@ -16,6 +16,12 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.active_connections: List[WebSocket] = []
         self._handlers: Dict[str, Callable[..., Coroutine]] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Capture the main event loop so sync code on worker threads can
+        schedule broadcasts via run_coroutine_threadsafe."""
+        self._loop = loop
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -44,7 +50,16 @@ class ConnectionManager:
             self.disconnect(conn)
 
     def broadcast_sync(self, channel: str, event: str, data: Any = None) -> None:
-        """Broadcast from synchronous code by scheduling on the event loop."""
+        """Broadcast from synchronous code (including worker threads).
+
+        Uses the loop captured via attach_loop() so this works from threads
+        without a running event loop (e.g. asyncio.to_thread workers).
+        """
+        if self._loop is not None and not self._loop.is_closed():
+            asyncio.run_coroutine_threadsafe(
+                self.broadcast(channel, event, data), self._loop
+            )
+            return
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self.broadcast(channel, event, data))
