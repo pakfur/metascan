@@ -132,7 +132,7 @@ def init_embedding_queue() -> None:
 
 async def shutdown_embedding_queue() -> None:
     """Shutdown hook: cancel poller and any running worker."""
-    global _embed_poll_task, _embedding_queue
+    global _embed_poll_task
     if _embed_poll_task is not None:
         _embed_poll_task.cancel()
         try:
@@ -185,7 +185,13 @@ async def search_similar(
         raise HTTPException(status_code=503, detail="No embedding index loaded yet")
 
     # Compute query vector for the input file
-    is_video = Path(body.file_path).suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+    is_video = Path(body.file_path).suffix.lower() in {
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".mkv",
+        ".avi",
+    }
 
     def _compute() -> Any:
         if is_video:
