@@ -8,6 +8,7 @@ export interface SimilaritySettings {
   search_results_count: number
   video_keyframes: number
   compute_phash_during_scan: boolean
+  auto_index_after_scan: boolean
   embedding_stats: {
     total_media: number
     hashed: number
@@ -26,6 +27,10 @@ export function updateSimilaritySettings(updates: Partial<SimilaritySettings>): 
 
 export function buildIndex(rebuild = false): Promise<{ status: string }> {
   return post<{ status: string }>(`/similarity/index/build?rebuild=${rebuild}`)
+}
+
+export function cancelIndex(): Promise<{ status: string }> {
+  return post<{ status: string }>('/similarity/index/cancel')
 }
 
 export function fetchEmbeddingStatus(): Promise<{
