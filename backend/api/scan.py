@@ -130,12 +130,34 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
             {"phase": "full_clean", "favorites_preserved": len(favorites_snapshot)},
         )
 
+    async def _restore_favorites_from_snapshot() -> None:
+        """Best-effort: re-mark favorite paths from the snapshot that exist
+        in the current DB. Safe to call even if no snapshot was taken."""
+        if not (full_clean and favorites_snapshot):
+            return
+        try:
+            existing = set(await asyncio.to_thread(db.get_existing_file_paths))
+            restored = 0
+            for path in favorites_snapshot:
+                if path in existing:
+                    await asyncio.to_thread(db.set_favorite, Path(path), True)
+                    restored += 1
+            await ws_manager.broadcast(
+                "scan", "favorites_restored", {"count": restored}
+            )
+        except Exception as restore_err:
+            logger.error(
+                f"Failed to restore favorites after scan: {restore_err}",
+                exc_info=True,
+            )
+
     try:
         total_processed = 0
         total_dirs = len(directories)
 
         for dir_idx, dir_config in enumerate(directories):
             if _cancel_requested:
+                await _restore_favorites_from_snapshot()
                 await ws_manager.broadcast("scan", "cancelled", {})
                 return
 
@@ -177,7 +199,6 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
             await ws_manager.broadcast(
                 "scan", "phase_changed", {"phase": "stale_cleanup"}
             )
-            # Get all paths in DB, remove those whose files no longer exist
             existing_db_paths = await asyncio.to_thread(db.get_existing_file_paths)
             stale_paths = [Path(p) for p in existing_db_paths if not Path(p).exists()]
             if stale_paths:
@@ -186,16 +207,7 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
                 )
 
         # Restore favorites for files that re-appeared in the rescan
-        if full_clean and favorites_snapshot:
-            existing = await asyncio.to_thread(db.get_existing_file_paths)
-            restored = 0
-            for path in favorites_snapshot:
-                if path in existing:
-                    await asyncio.to_thread(db.set_favorite, Path(path), True)
-                    restored += 1
-            await ws_manager.broadcast(
-                "scan", "favorites_restored", {"count": restored}
-            )
+        await _restore_favorites_from_snapshot()
 
         # Auto-trigger embedding build when:
         #   - the scan was not cancelled,
@@ -222,5 +234,8 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
         )
 
     except Exception as e:
+        # Best-effort restore so users don't silently lose favorites on a
+        # failed full-clean rescan.
+        await _restore_favorites_from_snapshot()
         logger.error(f"Scan error: {e}", exc_info=True)
         await ws_manager.broadcast("scan", "error", {"message": str(e)})
