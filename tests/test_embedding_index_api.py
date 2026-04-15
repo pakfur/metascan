@@ -248,3 +248,21 @@ def test_scan_skips_auto_trigger_when_no_unembedded(monkeypatch):
 
     asyncio.run(scan_api._run_scan(full_cleanup=False))
     assert triggered["called"] is False
+
+
+def test_get_favorite_file_paths_returns_only_favorites(tmp_path):
+    """Verify the new helper returns paths where is_favorite=1."""
+    from metascan.core.database_sqlite import DatabaseManager
+    from metascan.core.media import Media
+    from pathlib import Path as P
+
+    db = DatabaseManager(tmp_path)
+    a = Media(file_path=P("/m/a.png"), file_size=100, width=640, height=480, format="png", created_at=None, modified_at=None)
+    b = Media(file_path=P("/m/b.png"), file_size=100, width=640, height=480, format="png", created_at=None, modified_at=None)
+    c = Media(file_path=P("/m/c.png"), file_size=100, width=640, height=480, format="png", created_at=None, modified_at=None)
+    a.is_favorite = True
+    c.is_favorite = True
+    db.save_media(a); db.save_media(b); db.save_media(c)
+
+    favs = db.get_favorite_file_paths()
+    assert sorted(favs) == ["/m/a.png", "/m/c.png"]
