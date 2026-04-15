@@ -311,3 +311,96 @@ def test_full_clean_snapshots_and_restores_favorites(monkeypatch):
     # Only paths still present after rescan should be restored
     restored_paths = {p for p, fav in restored if fav}
     assert restored_paths == {"/m/keep.png"}
+
+
+def test_full_clean_restores_favorites_on_cancel(monkeypatch):
+    """Cancelling a full_clean scan must still restore favorites for any
+    files that exist in the post-truncate DB state."""
+    from backend.api import scan as scan_api
+
+    favs = ["/m/keep.png", "/m/lost.png"]
+    restored = []
+
+    class FakeDirCfg:
+        filepath = "/nonexistent"
+        search_subfolders = False
+
+    class FakeDB:
+        def get_favorite_file_paths(self): return list(favs)
+        def truncate_all_data(self): return True
+        def get_existing_file_paths(self): return {"/m/keep.png"}
+        def delete_media_batch(self, paths): return 0
+        def set_favorite(self, path, is_favorite):
+            restored.append((str(path), is_favorite))
+            return True
+        def get_unembedded_file_paths(self): return []
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+    monkeypatch.setattr(scan_api, "Scanner", lambda *a, **k: object())
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: {"similarity": {}})
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [FakeDirCfg()])
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    # Trip cancel BEFORE the loop so the first iteration short-circuits
+    scan_api._cancel_requested = True
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    finally:
+        scan_api._cancel_requested = False
+
+    restored_paths = {p for p, fav in restored if fav}
+    assert restored_paths == {"/m/keep.png"}, (
+        f"Cancel path lost favorites; got {restored_paths!r}"
+    )
+
+
+def test_full_clean_restores_favorites_on_exception(monkeypatch):
+    """A scan exception must trigger best-effort favorite restore."""
+    from backend.api import scan as scan_api
+
+    favs = ["/m/keep.png"]
+    restored = []
+
+    class FakeDirCfg:
+        filepath = "/will-explode"
+        search_subfolders = False
+
+    class FakeDB:
+        def get_favorite_file_paths(self): return list(favs)
+        def truncate_all_data(self): return True
+        def get_existing_file_paths(self): return {"/m/keep.png"}
+        def delete_media_batch(self, paths): return 0
+        def set_favorite(self, path, is_favorite):
+            restored.append((str(path), is_favorite))
+            return True
+        def get_unembedded_file_paths(self): return []
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: FakeDB())
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: object())
+
+    # Scanner that explodes on use
+    class BoomScanner:
+        def __init__(self, *a, **k): pass
+        def scan_directory(self, *a, **k):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(scan_api, "Scanner", BoomScanner)
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: {"similarity": {}})
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [FakeDirCfg()])
+
+    # Make the directory "exist" so we proceed past the if-not-exists check
+    import os
+    monkeypatch.setattr(scan_api.Path, "exists", lambda self: True)
+
+    async def fake_broadcast(channel, event, data=None): pass
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    restored_paths = {p for p, fav in restored if fav}
+    assert restored_paths == {"/m/keep.png"}, (
+        f"Error path lost favorites; got {restored_paths!r}"
+    )
