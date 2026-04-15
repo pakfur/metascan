@@ -158,7 +158,9 @@ Thumbs.db
 # Project-specific files
 data/
 logs/
-thumbnails/
+# Anchored with leading slash so it only matches a root-level thumbnails
+# cache dir, not source directories like frontend/src/components/thumbnails/.
+/thumbnails/
 config.json
 config_dist.json
 
