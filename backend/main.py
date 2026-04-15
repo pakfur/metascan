@@ -81,10 +81,12 @@ def create_app() -> FastAPI:
     async def _on_startup() -> None:
         ws_manager.attach_loop(asyncio.get_running_loop())
         upscale.init_upscale_queue()
+        similarity.init_embedding_queue()
 
     @app.on_event("shutdown")
     async def _on_shutdown() -> None:
         await upscale.shutdown_upscale_queue()
+        await similarity.shutdown_embedding_queue()
 
     # Health check
     @app.get("/health")
