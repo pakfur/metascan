@@ -323,6 +323,18 @@ class DatabaseManager:
             logger.error(f"Failed to get existing file paths: {e}")
             return set()
 
+    def get_favorite_file_paths(self) -> List[str]:
+        """Return all file paths flagged as favorite."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.execute(
+                    "SELECT file_path FROM media WHERE is_favorite = 1"
+                )
+                return [to_native_path(row["file_path"]) for row in cursor]
+        except Exception as e:
+            logger.error(f"Failed to get favorite file paths: {e}")
+            return []
+
     def search_by_index(self, index_type: str, term: str) -> Set[str]:
         try:
             with self._get_connection() as conn:
