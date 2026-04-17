@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import type { Media } from '../../types/media'
 import { submitUpscale } from '../../api/upscale'
+import { fileName } from '../../utils/path'
 
 const props = defineProps<{
   mediaItems: Media[]
@@ -69,7 +70,7 @@ async function submit() {
       <!-- File list (up to 10) -->
       <div v-if="mediaItems.length <= 10" class="file-list">
         <div v-for="m in mediaItems" :key="m.file_path" class="file-row">
-          <span class="file-name">{{ m.file_name }}</span>
+          <span class="file-name">{{ m.file_name ?? fileName(m.file_path) }}</span>
           <span class="file-meta">{{ m.width }}x{{ m.height }}</span>
           <span class="file-meta">{{ formatSize(m.file_size) }}</span>
         </div>

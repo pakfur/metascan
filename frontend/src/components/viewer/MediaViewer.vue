@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
 import { updateMedia, deleteMedia } from '../../api/media'
+import { fileName } from '../../utils/path'
 import ImageViewer from './ImageViewer.vue'
 import VideoPlayer from './VideoPlayer.vue'
 
@@ -52,7 +53,9 @@ async function toggleFavorite() {
 // Delete with undo
 async function deleteCurrent() {
   if (!current.value) return
-  const confirmed = window.confirm(`Delete "${current.value.file_name}"?`)
+  const confirmed = window.confirm(
+    `Delete "${current.value.file_name ?? fileName(current.value.file_path)}"?`,
+  )
   if (!confirmed) return
 
   const deletedMedia = current.value
@@ -213,7 +216,7 @@ function formatSize(bytes: number): string {
 
       <!-- Info bar -->
       <div v-if="current" class="viewer-info">
-        <span>{{ current.file_name }}</span>
+        <span>{{ current.file_name ?? fileName(current.file_path) }}</span>
         <span>{{ current.width }} x {{ current.height }}</span>
         <span>{{ formatSize(current.file_size) }}</span>
         <span v-if="current.frame_rate">{{ current.frame_rate.toFixed(1) }} fps</span>

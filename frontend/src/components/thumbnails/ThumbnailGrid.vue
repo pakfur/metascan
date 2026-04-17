@@ -6,6 +6,7 @@ import { useSettingsStore } from '../../stores/settings'
 import { useSimilarityStore } from '../../stores/similarity'
 import ThumbnailCard from './ThumbnailCard.vue'
 import SimilarityBanner from './SimilarityBanner.vue'
+import { fileName } from '../../utils/path'
 
 const emit = defineEmits<{
   open: [media: Media]
@@ -154,7 +155,7 @@ function ctxDelete() {
   if (contextMenu.value) {
     const media = contextMenu.value.media
     contextMenu.value = null
-    if (confirm(`Delete "${media.file_name}"?`)) {
+    if (confirm(`Delete "${media.file_name ?? fileName(media.file_path)}"?`)) {
       mediaStore.removeMedia(media)
     }
   }

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useMediaStore } from '../../stores/media'
 import MetadataField from './MetadataField.vue'
+import { fileName } from '../../utils/path'
 
 const mediaStore = useMediaStore()
 const media = computed(() => mediaStore.selectedMedia)
@@ -38,10 +39,10 @@ function copyAll() {
       <details class="meta-section" open>
         <summary class="section-title">File Information</summary>
         <div class="section-body">
-          <MetadataField label="Name" :value="media.file_name" />
+          <MetadataField label="Name" :value="media.file_name ?? fileName(media.file_path)" />
           <MetadataField label="Path" :value="media.file_path" />
           <MetadataField label="Size" :value="formatSize(media.file_size)" />
-          <MetadataField label="Modified" :value="formatDate(media.modified_at)" />
+          <MetadataField label="Modified" :value="formatDate(media.modified_at ?? null)" />
         </div>
       </details>
 
@@ -50,8 +51,8 @@ function copyAll() {
         <summary class="section-title">Properties</summary>
         <div class="section-body">
           <MetadataField label="Resolution" :value="`${media.width} x ${media.height}`" />
-          <MetadataField label="Format" :value="media.format" />
-          <MetadataField label="Type" :value="media.media_type" />
+          <MetadataField label="Format" :value="media.format ?? '-'" />
+          <MetadataField label="Type" :value="media.media_type ?? (media.is_video ? 'video' : 'image')" />
           <MetadataField v-if="media.frame_rate" label="Frame Rate" :value="`${media.frame_rate} fps`" />
           <MetadataField v-if="media.duration" label="Duration" :value="`${media.duration.toFixed(1)}s`" />
         </div>
@@ -62,7 +63,7 @@ function copyAll() {
         <summary class="section-title">AI Generation</summary>
         <div class="section-body">
           <MetadataField label="Source" :value="media.metadata_source" />
-          <MetadataField v-if="media.model.length" label="Model" :value="media.model.join(', ')" />
+          <MetadataField v-if="media.model?.length" label="Model" :value="media.model.join(', ')" />
           <MetadataField v-if="media.sampler" label="Sampler" :value="media.sampler" />
           <MetadataField v-if="media.scheduler" label="Scheduler" :value="media.scheduler" />
           <MetadataField v-if="media.steps" label="Steps" :value="String(media.steps)" />
@@ -74,7 +75,7 @@ function copyAll() {
       </details>
 
       <!-- LoRAs -->
-      <details v-if="media.loras.length" class="meta-section">
+      <details v-if="media.loras?.length" class="meta-section">
         <summary class="section-title">LoRAs ({{ media.loras.length }})</summary>
         <div class="section-body">
           <MetadataField
@@ -86,8 +87,8 @@ function copyAll() {
         </div>
       </details>
 
-      <!-- Tags -->
-      <details v-if="media.tags.length" class="meta-section">
+      <!-- Tags (merged prompt + CLIP from the indices table; unrelated to AI metadata) -->
+      <details v-if="media.tags?.length" class="meta-section">
         <summary class="section-title">Tags ({{ media.tags.length }})</summary>
         <div class="section-body">
           <div class="tags-list">
