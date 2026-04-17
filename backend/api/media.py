@@ -22,19 +22,18 @@ async def list_media(
     favorites_only: bool = False,
     service: MediaService = Depends(_get_service),
 ):
-    """List all media, optionally sorted and filtered."""
-    all_media = await service.get_all_media()
+    """List all media, optionally sorted and filtered.
 
-    if favorites_only:
-        all_media = [m for m in all_media if m.is_favorite]
-
-    if sort == "file_name":
-        all_media.sort(key=lambda m: m.file_name.lower())
-    elif sort == "date_modified":
-        all_media.sort(key=lambda m: m.modified_at or m.created_at, reverse=True)
-    # date_added is the default DB order (created_at DESC)
-
-    return [service.media_to_dict(m) for m in all_media]
+    Returns a *very* lightweight summary per item — just enough for the
+    grid and viewer status bar. File name, format, and timestamps are
+    dropped from the wire payload (client derives ``file_name`` from the
+    path; detail view fetches the rest on selection). Generation metadata
+    (prompt, model, loras, tags, etc.) is only served by
+    ``GET /api/media/{path}``.
+    """
+    return await service.get_all_media_summaries(
+        sort=sort, favorites_only=favorites_only
+    )
 
 
 @router.get("/media/{file_path:path}")
@@ -42,11 +41,18 @@ async def get_media(
     file_path: str,
     service: MediaService = Depends(_get_service),
 ):
-    """Get a single media record by file path."""
+    """Get the full detail record for a single media file.
+
+    Tags are taken from the ``indices`` table rather than the serialized
+    ``media.data`` blob — CLIP-generated tags are only written to
+    ``indices`` via ``add_tag_indices`` and would otherwise be invisible in
+    the details panel for files that never had a prompt.
+    """
     media = await service.get_media(file_path)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
-    return service.media_to_dict(media)
+    tags = await service.get_tags_for_file(file_path)
+    return {**service.media_to_dict(media), "tags": tags}
 
 
 @router.delete("/media/{file_path:path}")
@@ -75,7 +81,7 @@ async def update_media(
     media = await service.get_media(file_path)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
-    return service.media_to_dict(media)
+    return service.media_to_summary_dict(media)
 
 
 @router.get("/stream/{file_path:path}")

@@ -22,6 +22,18 @@ class MediaService:
     async def get_all_media(self) -> List[Media]:
         return await asyncio.to_thread(self.db.get_all_media_with_details)
 
+    async def get_all_media_summaries(
+        self, sort: str = "date_added", favorites_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Lightweight list for the grid — all fields come from materialized
+        columns so this stays sub-second regardless of sort."""
+        summaries = await asyncio.to_thread(
+            self.db.get_all_media_summaries, favorites_only, sort
+        )
+        if sort == "file_name":
+            summaries.sort(key=lambda s: Path(s["file_path"]).name.lower())
+        return summaries
+
     async def get_media(self, file_path: str) -> Optional[Media]:
         return await asyncio.to_thread(self.db.get_media_with_details, Path(file_path))
 
@@ -64,6 +76,29 @@ class MediaService:
 
     async def get_embedding_stats(self) -> Dict[str, Any]:
         return await asyncio.to_thread(self.db.get_embedding_stats)
+
+    async def get_tags_for_file(self, file_path: str) -> List[str]:
+        return await asyncio.to_thread(self.db.get_tags_for_file, Path(file_path))
+
+    def media_to_summary_dict(self, media: Media) -> dict:
+        """Light payload for list-style responses (grid + viewer).
+
+        Shape matches ``DatabaseManager.get_all_media_summaries`` — only
+        materialized columns — so PATCH responses are interchangeable with
+        items from the list endpoint. Heavier detail fields (prompt,
+        tags, loras, ...) still arrive through ``GET /api/media/{path}``.
+        """
+        return {
+            "file_path": str(media.file_path),
+            "is_favorite": media.is_favorite,
+            "is_video": media.is_video,
+            "playback_speed": media.playback_speed,
+            "width": media.width,
+            "height": media.height,
+            "file_size": media.file_size,
+            "frame_rate": media.frame_rate,
+            "duration": media.duration,
+        }
 
     def media_to_dict(self, media: Media) -> dict:
         """Convert a Media object to a JSON-serializable dict for the API."""
