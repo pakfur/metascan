@@ -215,14 +215,37 @@ class DatabaseManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_indices_lookup ON indices(index_type, index_key)"
             )
-            # Per-file predicates in `_update_indices` (DELETE/UPDATE WHERE
-            # file_path = ?) would otherwise fall back to a full table scan —
-            # the compound PK starts with index_type, so it can't serve
-            # file_path lookups. Without this index, save_media cost grows
-            # linearly with total indices rows, making the whole scan O(N²).
+            # Composite index serving the two per-file workloads that were
+            # otherwise SQLite's worst cases here:
+            #
+            # (1) `DELETE/UPDATE ... WHERE file_path = ?` inside
+            #     `_update_indices` — the compound PK starts with
+            #     index_type, so it can't serve a file_path lookup and
+            #     writes degrade to O(total rows) per file, making a full
+            #     scan O(N²).
+            # (2) `get_tags_for_file` (`SELECT index_key ... WHERE
+            #     file_path=? AND index_type='tag' ORDER BY index_key`) —
+            #     the SQLite planner prefers the autoindex on
+            #     (index_type, index_key, file_path) as a covering index
+            #     for `index_type='tag'` alone, which means scanning every
+            #     `tag` row (~115 K on a 12 K-file library) to filter down
+            #     to the ~30-150 rows actually matching. That took ~1.8 s
+            #     per detail-panel open.
+            #
+            # A composite `(file_path, index_type, index_key)` covers both:
+            # DELETE seeks on the file_path prefix, and the tag SELECT is
+            # answered entirely from the index (prefix match + covered
+            # projection, and `index_key` is already sorted so no explicit
+            # sort step). Result: DELETE ~ms instead of O(N), tag lookup
+            # ~0.3 ms instead of 1.8 s.
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_indices_file_path ON indices(file_path)"
+                "CREATE INDEX IF NOT EXISTS idx_indices_by_file_type "
+                "ON indices(file_path, index_type, index_key)"
             )
+            # Supersedes the earlier narrower file_path-only index — the
+            # composite above handles the same queries plus more. Drop
+            # idempotently so existing DBs reclaim the space on next boot.
+            conn.execute("DROP INDEX IF EXISTS idx_indices_file_path")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at)"
             )
