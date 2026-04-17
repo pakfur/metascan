@@ -12,8 +12,9 @@ from backend.config import load_app_config, save_app_config
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
 from backend.ws.manager import ws_manager
-from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
+from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.embedding_queue import EmbeddingQueue
+from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -21,10 +22,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/similarity", tags=["similarity"])
 
 # Lazy-loaded singletons
-_embedding_manager: Optional[EmbeddingManager] = None
 _faiss_manager: Optional[FaissIndexManager] = None
 _embedding_queue: Optional[EmbeddingQueue] = None
 _embed_poll_task: Optional[asyncio.Task] = None
+_inference_client: Optional[InferenceClient] = None
 _EMBED_POLL_INTERVAL_SECONDS = 0.5
 
 
@@ -32,15 +33,35 @@ def _get_service() -> MediaService:
     return MediaService(get_db(), get_thumbnail_cache())
 
 
-def _get_embedding_manager() -> EmbeddingManager:
-    global _embedding_manager
-    if _embedding_manager is None:
-        config = load_app_config()
-        sim_config = config.get("similarity", {})
-        model_size = sim_config.get("clip_model", "small")
-        device = sim_config.get("device", "auto")
-        _embedding_manager = EmbeddingManager(model_size=model_size, device=device)
-    return _embedding_manager
+def get_inference_client() -> InferenceClient:
+    """Return the module-level ``InferenceClient`` created by the server
+    lifespan. Raises 503 if the client hasn't been initialized yet (e.g.
+    during very early startup)."""
+    if _inference_client is None:
+        raise HTTPException(status_code=503, detail="inference client not initialized")
+    return _inference_client
+
+
+def set_inference_client(client: InferenceClient) -> None:
+    """Install the ``InferenceClient`` singleton. Called once by the
+    FastAPI lifespan after the client has been constructed."""
+    global _inference_client
+    _inference_client = client
+
+
+async def _ensure_worker_ready(client: InferenceClient) -> None:
+    """Belt-and-suspenders: make sure the worker is spawned with the
+    currently-configured CLIP model before a search endpoint tries to use
+    it. Without this, a search that arrives before the (optional) startup
+    preload finishes would just block on ``_wait_ready`` forever because
+    nothing else triggers a spawn."""
+    sim_cfg = load_app_config().get("similarity", {}) or {}
+    model_key = str(sim_cfg.get("clip_model") or "small")
+    device = str(sim_cfg.get("device") or "auto")
+    try:
+        await client.ensure_started(model_key=model_key, device=device)
+    except Exception:
+        logger.exception("Inference worker start failed")
 
 
 def _get_faiss_manager() -> FaissIndexManager:
@@ -172,19 +193,47 @@ class SimilaritySettingsUpdate(BaseModel):
     auto_index_after_scan: Optional[bool] = None
 
 
+def _assert_dim_matches(fm: FaissIndexManager, vec_dim: int) -> None:
+    """Raise 409 if the query vector's dim doesn't match the on-disk index.
+
+    Most common cause: the user switched ``similarity.clip_model`` after
+    the index was built. Previously the FAISS search would return zero
+    results silently; now the UI can surface an actionable rebuild prompt.
+    """
+    index_dim = int(fm.meta.get("embedding_dim", 0)) or None
+    if index_dim is None and fm._index is not None:  # type: ignore[truthy-bool]
+        index_dim = int(getattr(fm._index, "d", 0)) or None
+    if index_dim and index_dim != vec_dim:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "dim_mismatch",
+                "message": (
+                    "The current CLIP model produces embeddings of size "
+                    f"{vec_dim}, but the FAISS index was built with size "
+                    f"{index_dim}. Rebuild the index to use this model."
+                ),
+                "index_dim": index_dim,
+                "model_dim": vec_dim,
+                "index_model_key": fm.meta.get("model_key"),
+            },
+        )
+
+
 @router.post("/search")
 async def search_similar(
     body: SimilaritySearchRequest,
     service: MediaService = Depends(_get_service),
 ):
     """Search for media similar to the given file path using FAISS."""
-    em = _get_embedding_manager()
+    client = get_inference_client()
     fm = _get_faiss_manager()
 
     if not fm.is_loaded:
         raise HTTPException(status_code=503, detail="No embedding index loaded yet")
 
-    # Compute query vector for the input file
+    await _ensure_worker_ready(client)
+
     is_video = Path(body.file_path).suffix.lower() in {
         ".mp4",
         ".webm",
@@ -193,14 +242,19 @@ async def search_similar(
         ".avi",
     }
 
-    def _compute() -> Any:
+    try:
         if is_video:
-            return em.compute_video_embedding(body.file_path)
-        return em.compute_image_embedding(body.file_path)
+            sim_cfg = load_app_config().get("similarity", {})
+            keyframes = int(sim_cfg.get("video_keyframes", 4))
+            vec = await client.encode_video(body.file_path, num_keyframes=keyframes)
+        else:
+            vec = await client.encode_image(body.file_path)
+    except InferenceError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Failed to compute query embedding: {e}"
+        )
 
-    vec = await asyncio.to_thread(_compute)
-    if vec is None:
-        raise HTTPException(status_code=400, detail="Failed to compute query embedding")
+    _assert_dim_matches(fm, int(vec.shape[0]))
 
     raw = await asyncio.to_thread(fm.search, vec, body.max_results)
 
@@ -222,15 +276,22 @@ async def content_search(
     service: MediaService = Depends(_get_service),
 ):
     """Search for media matching a text query using CLIP embeddings."""
-    em = _get_embedding_manager()
+    client = get_inference_client()
     fm = _get_faiss_manager()
 
     if not fm.is_loaded:
         raise HTTPException(status_code=503, detail="No embedding index loaded yet")
 
-    vec = await asyncio.to_thread(em.compute_text_embedding, body.query)
-    if vec is None:
-        raise HTTPException(status_code=400, detail="Failed to compute text embedding")
+    await _ensure_worker_ready(client)
+
+    try:
+        vec = await client.encode_text(body.query)
+    except InferenceError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Failed to compute text embedding: {e}"
+        )
+
+    _assert_dim_matches(fm, int(vec.shape[0]))
 
     raw = await asyncio.to_thread(fm.search, vec, body.max_results)
 
@@ -268,7 +329,6 @@ async def get_similarity_settings():
 
 @router.put("/settings")
 async def update_similarity_settings(body: SimilaritySettingsUpdate):
-    global _embedding_manager
     config = load_app_config()
     sim_config = config.setdefault("similarity", {})
 
@@ -280,10 +340,25 @@ async def update_similarity_settings(body: SimilaritySettingsUpdate):
 
     save_app_config(config)
 
-    if changed_model:
-        _embedding_manager = None  # Force reload on next use
+    if changed_model and _inference_client is not None:
+        model_key = sim_config.get("clip_model", "small")
+        device = sim_config.get("device", "auto")
+        # Fire and forget: reloading the worker takes 15-30s, and the
+        # server must respond to the PUT within the request timeout. The
+        # client will broadcast loading/ready events on its status channel
+        # as it reloads.
+        asyncio.create_task(_reload_inference_client(model_key, device))
 
     return sim_config
+
+
+async def _reload_inference_client(model_key: str, device: str) -> None:
+    if _inference_client is None:
+        return
+    try:
+        await _inference_client.reload(model_key=model_key, device=device)
+    except Exception:
+        logger.exception("Inference client reload failed")
 
 
 # ----- Index build/cancel (subprocess-driven) -----

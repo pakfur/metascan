@@ -2,11 +2,17 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { FilterData, ActiveFilters } from '../types/filters'
 import { fetchFilterData } from '../api/filters'
+import { useMediaStore } from './media'
+
+export type ViewPreset = 'home' | 'video' | 'images' | 'favorites'
+
+export const VIDEO_EXTENSIONS = ['.mp4', '.webm']
+export const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
 
 export const useFilterStore = defineStore('filters', () => {
   const filterData = ref<FilterData>({})
   const activeFilters = ref<ActiveFilters>({})
-  const contentSearchQuery = ref('')
+  const activeView = ref<ViewPreset>('home')
   const loading = ref(false)
 
   async function loadFilterData() {
@@ -32,22 +38,45 @@ export const useFilterStore = defineStore('filters', () => {
 
   function clearAllFilters() {
     activeFilters.value = {}
-    contentSearchQuery.value = ''
+    activeView.value = 'home'
+    useMediaStore().favoritesOnly = false
   }
 
   function hasActiveFilters(): boolean {
-    return Object.values(activeFilters.value).some((v) => v.length > 0) || contentSearchQuery.value !== ''
+    return (
+      Object.values(activeFilters.value).some((v) => v.length > 0) ||
+      activeView.value !== 'home'
+    )
+  }
+
+  function setView(view: ViewPreset) {
+    activeView.value = view
+    const media = useMediaStore()
+    if (view === 'video') {
+      activeFilters.value.ext = [...VIDEO_EXTENSIONS]
+      media.favoritesOnly = false
+    } else if (view === 'images') {
+      activeFilters.value.ext = [...IMAGE_EXTENSIONS]
+      media.favoritesOnly = false
+    } else if (view === 'favorites') {
+      delete activeFilters.value.ext
+      media.favoritesOnly = true
+    } else {
+      delete activeFilters.value.ext
+      media.favoritesOnly = false
+    }
   }
 
   return {
     filterData,
     activeFilters,
-    contentSearchQuery,
+    activeView,
     loading,
     loadFilterData,
     setFilter,
     clearFilter,
     clearAllFilters,
     hasActiveFilters,
+    setView,
   }
 })

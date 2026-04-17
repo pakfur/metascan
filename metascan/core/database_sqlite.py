@@ -14,6 +14,32 @@ from metascan.core.prompt_tokenizer import PromptTokenizer
 logger = logging.getLogger(__name__)
 
 
+def _idempotent_add_column(
+    conn: sqlite3.Connection, table: str, column: str, ddl: str
+) -> None:
+    """Run ``ddl`` (an ``ALTER TABLE ... ADD COLUMN``) and swallow the
+    duplicate-column error so concurrent ``DatabaseManager`` instances can
+    both try the migration without one crashing the other.
+
+    ``get_db()`` constructs a new manager per request and FastAPI resolves
+    dependencies in a threadpool, so it's normal for two inits to enter
+    ``_init_database`` simultaneously on a cold DB. The PRAGMA-then-ALTER
+    pattern has a TOCTOU race — the loser raises
+    ``sqlite3.OperationalError: duplicate column name``, which is benign."""
+    try:
+        conn.execute(ddl)
+        logger.info("Added %s column to %s table", column, table)
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e).lower():
+            logger.debug(
+                "Migration for %s.%s lost race with another init; " "already present.",
+                table,
+                column,
+            )
+            return
+        raise
+
+
 class DatabaseManager:
     def __init__(self, db_path: Path):
         log_startup("    DatabaseManager.__init__: Starting")
@@ -55,15 +81,19 @@ class DatabaseManager:
             cursor = conn.execute("PRAGMA table_info(media)")
             columns = [column[1] for column in cursor.fetchall()]
             if "is_favorite" not in columns:
-                conn.execute(
-                    "ALTER TABLE media ADD COLUMN is_favorite INTEGER DEFAULT 0"
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "is_favorite",
+                    "ALTER TABLE media ADD COLUMN is_favorite INTEGER DEFAULT 0",
                 )
-                logger.info("Added is_favorite column to media table")
             if "playback_speed" not in columns:
-                conn.execute(
-                    "ALTER TABLE media ADD COLUMN playback_speed REAL DEFAULT NULL"
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "playback_speed",
+                    "ALTER TABLE media ADD COLUMN playback_speed REAL DEFAULT NULL",
                 )
-                logger.info("Added playback_speed column to media table")
 
             conn.execute(
                 """
@@ -71,11 +101,26 @@ class DatabaseManager:
                     index_type TEXT NOT NULL,
                     index_key TEXT NOT NULL,
                     file_path TEXT NOT NULL,
+                    source TEXT,
                     PRIMARY KEY (index_type, index_key, file_path),
                     FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
                 )
             """
             )
+
+            # Migration for existing DBs created before the `source` column
+            # was added. For non-tag rows ``source`` is always NULL; for tag
+            # rows it's one of 'prompt', 'clip', 'both' — see
+            # `_generate_indices` and `add_tag_indices`.
+            cursor = conn.execute("PRAGMA table_info(indices)")
+            index_cols = [column[1] for column in cursor.fetchall()]
+            if "source" not in index_cols:
+                _idempotent_add_column(
+                    conn,
+                    "indices",
+                    "source",
+                    "ALTER TABLE indices ADD COLUMN source TEXT",
+                )
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_indices_lookup ON indices(index_type, index_key)"
@@ -356,46 +401,118 @@ class DatabaseManager:
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
         # Use POSIX path for consistency with storage format
         posix_path = to_posix_path(media.file_path)
-        conn.execute("DELETE FROM indices WHERE file_path = ?", (posix_path,))
+        # Preserve tag rows contributed by CLIP so a rescan / metadata update
+        # doesn't blow away the embedding-derived tags. A `both` row had
+        # contributions from prompt AND clip; we're about to rewrite the
+        # prompt half, so temporarily demote those to `clip`-only — the
+        # UPSERT below will upgrade back to `both` for tags the new prompt
+        # still contains.
+        conn.execute(
+            "DELETE FROM indices WHERE file_path = ? AND "
+            "(index_type != 'tag' OR source IS NULL OR source = 'prompt')",
+            (posix_path,),
+        )
+        conn.execute(
+            "UPDATE indices SET source = 'clip' "
+            "WHERE file_path = ? AND index_type = 'tag' AND source = 'both'",
+            (posix_path,),
+        )
 
-        indices_to_insert = []
-        for index_type, index_key in self._generate_indices(media):
-            indices_to_insert.append((index_type, index_key, posix_path))
+        non_tag_rows: List[tuple] = []
+        prompt_tag_keys: List[str] = []
+        for index_type, index_key, source in self._generate_indices(media):
+            if index_type == "tag" and source == "prompt":
+                prompt_tag_keys.append(index_key)
+            else:
+                non_tag_rows.append((index_type, index_key, posix_path, source))
 
-        if indices_to_insert:
+        if non_tag_rows:
             conn.executemany(
-                "INSERT INTO indices (index_type, index_key, file_path) VALUES (?, ?, ?)",
-                indices_to_insert,
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES (?, ?, ?, ?)",
+                non_tag_rows,
+            )
+        # Prompt-sourced tags may collide with pre-existing clip rows — merge
+        # via ON CONFLICT so the resulting row records both sources.
+        for key in prompt_tag_keys:
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'prompt') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'clip' THEN 'both' "
+                "  WHEN indices.source = 'both' THEN 'both' "
+                "  ELSE 'prompt' END",
+                (key, posix_path),
             )
 
+    def add_tag_indices(
+        self, file_path: Path, tags: List[str], source: str = "clip"
+    ) -> None:
+        """Add or merge tag rows sourced from ``source`` for ``file_path``.
+
+        Called by the embedding worker after CLIP-based tag generation. If a
+        tag already exists for the file from the *other* source (typically
+        ``prompt``), the row is upgraded to ``both`` rather than duplicated.
+        """
+        if not tags:
+            return
+        if source not in ("prompt", "clip"):
+            raise ValueError(f"tag source must be 'prompt' or 'clip', got {source!r}")
+        posix_path = to_posix_path(file_path)
+        other = "prompt" if source == "clip" else "clip"
+        sql = (
+            "INSERT INTO indices (index_type, index_key, file_path, source) "
+            "VALUES ('tag', ?, ?, ?) "
+            "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+            "source = CASE "
+            f"  WHEN indices.source = ? THEN 'both' "
+            f"  WHEN indices.source = 'both' THEN 'both' "
+            f"  ELSE excluded.source END"
+        )
+        rows = [(t.lower(), posix_path, source, other) for t in tags if t]
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    conn.executemany(sql, rows)
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to add {source} tag indices for {file_path}: {e}")
+
     def _generate_indices(self, media: Media) -> List[tuple]:
-        indices = []
+        """Returns ``(index_type, index_key, source)`` triples. ``source`` is
+        non-NULL only for tag rows — see the ``indices.source`` column.
+        Callers writing non-tag rows should pass ``source=None``."""
+        indices: List[tuple] = []
 
         if media.metadata_source:
-            indices.append(("source", media.metadata_source.lower()))
+            indices.append(("source", media.metadata_source.lower(), None))
 
         # Add index for each model in the list
         if media.model:
             for model_name in media.model:
                 if model_name:  # Skip empty strings
-                    indices.append(("model", model_name.lower()))
+                    indices.append(("model", model_name.lower(), None))
 
-        indices.append(("ext", media.file_extension))
+        indices.append(("ext", media.file_extension, None))
 
         # Add reverse index for the fully qualified file path (in POSIX format)
         path_str = to_posix_path(media.file_path).lower()
-        indices.append(("path", path_str))
+        indices.append(("path", path_str, None))
 
+        # Tag rows coming from media.tags are sourced from the prompt
+        # tokenizer (see scanner.py). CLIP-sourced tags are written later
+        # by the embedding worker via add_tag_indices().
         for tag in media.tags:
-            indices.append(("tag", tag.lower()))
+            indices.append(("tag", tag.lower(), "prompt"))
 
         if media.prompt:
             filtered_words = self.prompt_tokenizer.tokenize(media.prompt)
             for word in filtered_words:
-                indices.append(("prompt", word))
+                indices.append(("prompt", word, None))
 
         for lora in media.loras:
-            indices.append(("lora", lora.lora_name.lower()))
+            indices.append(("lora", lora.lora_name.lower(), None))
 
         return indices
 
