@@ -24,10 +24,14 @@ export const useFilterStore = defineStore('filters', () => {
       const t1 = now()
       filterData.value = data
       const groupCount = Object.keys(data).length
+      const browser = phases.queued !== undefined
+        ? ` queued=${phases.queued.toFixed(0)}ms connect=${phases.connect!.toFixed(0)}ms `
+          + `waiting=${phases.waiting!.toFixed(0)}ms download=${phases.download!.toFixed(0)}ms`
+        : ''
       // eslint-disable-next-line no-console
       console.info(
         `[perf] loadFilterData: ttfb=${phases.ttfb.toFixed(0)}ms `
-          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms `
+          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms${browser} `
           + `assign=${since(t1)} total=${since(t0)} `
           + `groups=${groupCount} bytes=${(phases.bytes / 1024).toFixed(0)}KB`,
       )
