@@ -24,6 +24,26 @@ export interface FetchPhases {
   body: number       // headers received -> full body buffered
   parse: number      // body received -> JSON.parse complete
   bytes: number      // response body size
+  // Browser-reported phases (from PerformanceResourceTiming). These are
+  // the most trustworthy because they're measured by the browser itself,
+  // not by user-space JS which can be blocked on the main thread.
+  // Undefined when the browser didn't emit an entry (e.g. opaque CORS).
+  queued?: number    // fetch() call -> browser's fetchStart (pool/queue)
+  connect?: number   // TCP + TLS handshake (0 on reused connection)
+  send?: number      // connectEnd -> requestStart (usually ~0)
+  waiting?: number   // requestStart -> responseStart (server round-trip)
+  download?: number  // responseStart -> responseEnd (bytes on wire)
+}
+
+function resourceTimingFor(url: string): PerformanceResourceTiming | null {
+  try {
+    const absolute = new URL(url, window.location.origin).toString()
+    const entries = performance.getEntriesByName(absolute, 'resource')
+    const entry = entries[entries.length - 1] as PerformanceResourceTiming | undefined
+    return entry ?? null
+  } catch {
+    return null
+  }
 }
 
 // Performs the request and returns both the parsed body AND a phase
@@ -43,8 +63,9 @@ async function requestWithPhases<T>(
     headers['Authorization'] = `Bearer ${apiKey}`
   }
 
+  const url = `${API_BASE}${path}`
   const t0 = performance.now()
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  const res = await fetch(url, { ...options, headers })
   const tHead = performance.now()
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
@@ -59,15 +80,28 @@ async function requestWithPhases<T>(
   const tBody = performance.now()
   const data = text ? JSON.parse(text) : (null as unknown as T)
   const tParse = performance.now()
-  return {
-    data: data as T,
-    phases: {
-      ttfb: tHead - t0,
-      body: tBody - tHead,
-      parse: tParse - tBody,
-      bytes: text.length,
-    },
+
+  const phases: FetchPhases = {
+    ttfb: tHead - t0,
+    body: tBody - tHead,
+    parse: tParse - tBody,
+    bytes: text.length,
   }
+  const entry = resourceTimingFor(url)
+  if (entry) {
+    // The PerformanceResourceTiming clock and performance.now() share the
+    // same time origin, so we can subtract directly. `queued` is the gap
+    // between our `fetch()` call and the browser actually starting to
+    // work on the request — a large value means the browser held the
+    // request in its connection pool (6-per-origin HTTP/1.1 cap) or had
+    // nothing to send yet.
+    phases.queued = Math.max(0, entry.fetchStart - t0)
+    phases.connect = Math.max(0, entry.connectEnd - entry.connectStart)
+    phases.send = Math.max(0, entry.requestStart - entry.connectEnd)
+    phases.waiting = Math.max(0, entry.responseStart - entry.requestStart)
+    phases.download = Math.max(0, entry.responseEnd - entry.responseStart)
+  }
+  return { data: data as T, phases }
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
