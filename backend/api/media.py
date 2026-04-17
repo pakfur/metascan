@@ -1,8 +1,6 @@
 """Media CRUD and streaming endpoints."""
 
-import logging
 import mimetypes
-import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,8 +8,6 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["media"])
 
@@ -35,18 +31,9 @@ async def list_media(
     (prompt, model, loras, tags, etc.) is only served by
     ``GET /api/media/{path}``.
     """
-    t_start = time.perf_counter()
-    try:
-        return await service.get_all_media_summaries(
-            sort=sort, favorites_only=favorites_only
-        )
-    finally:
-        logger.info(
-            "GET /api/media: total=%.1fms sort=%s favorites_only=%s",
-            (time.perf_counter() - t_start) * 1000,
-            sort,
-            favorites_only,
-        )
+    return await service.get_all_media_summaries(
+        sort=sort, favorites_only=favorites_only
+    )
 
 
 @router.get("/media/{file_path:path}")
@@ -61,25 +48,11 @@ async def get_media(
     ``indices`` via ``add_tag_indices`` and would otherwise be invisible in
     the details panel for files that never had a prompt.
     """
-    t_start = time.perf_counter()
     media = await service.get_media(file_path)
-    t_media = time.perf_counter()
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
     tags = await service.get_tags_for_file(file_path)
-    t_tags = time.perf_counter()
-    result = {**service.media_to_dict(media), "tags": tags}
-    t_end = time.perf_counter()
-    logger.info(
-        "GET /api/media/{path}: media=%.1fms tags=%.1fms serialize=%.1fms "
-        "total=%.1fms tag_count=%d",
-        (t_media - t_start) * 1000,
-        (t_tags - t_media) * 1000,
-        (t_end - t_tags) * 1000,
-        (t_end - t_start) * 1000,
-        len(tags),
-    )
-    return result
+    return {**service.media_to_dict(media), "tags": tags}
 
 
 @router.delete("/media/{file_path:path}")
