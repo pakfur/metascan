@@ -1,5 +1,7 @@
 """Filter data and application endpoints."""
 
+import logging
+import time
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends
@@ -7,6 +9,8 @@ from pydantic import BaseModel
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["filters"])
 
@@ -22,7 +26,14 @@ class FilterRequest(BaseModel):
 @router.get("/filters")
 async def get_filters(service: MediaService = Depends(_get_service)):
     """Get all filter groups with counts (source, model, ext, tag, etc.)."""
-    return await service.get_filter_data()
+    t_start = time.perf_counter()
+    try:
+        return await service.get_filter_data()
+    finally:
+        logger.info(
+            "GET /api/filters: total=%.1fms",
+            (time.perf_counter() - t_start) * 1000,
+        )
 
 
 @router.post("/filters/apply")
@@ -31,5 +42,13 @@ async def apply_filters(
     service: MediaService = Depends(_get_service),
 ):
     """Apply filters and return matching file paths."""
-    paths = await service.get_filtered_media_paths(body.filters)
-    return {"paths": list(paths)}
+    t_start = time.perf_counter()
+    try:
+        paths = await service.get_filtered_media_paths(body.filters)
+        return {"paths": list(paths)}
+    finally:
+        logger.info(
+            "POST /api/filters/apply: total=%.1fms groups=%d",
+            (time.perf_counter() - t_start) * 1000,
+            len(body.filters),
+        )
