@@ -192,6 +192,19 @@ class Scanner:
                             )
                             media.loras.append(lora)
 
+            # Populate tag set from the prompt so it shows up in the Tags
+            # filter. Previously PromptTokenizer ran only during index
+            # generation and wrote to indices(index_type='prompt', ...),
+            # never to indices(index_type='tag', ...), which is why the
+            # Tags facet was empty in the UI.
+            if media.prompt:
+                try:
+                    media.tags = sorted(
+                        self.db_manager.prompt_tokenizer.tokenize(media.prompt)
+                    )
+                except Exception as e:
+                    logger.debug(f"Prompt tokenization failed for {file_path}: {e}")
+
             return media
 
         except Exception as e:

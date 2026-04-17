@@ -2,14 +2,21 @@
 
 import asyncio
 import logging
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator, Dict, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import get_server_config
+from backend.config import (
+    get_models_config,
+    get_server_config,
+    load_app_config,
+)
 from backend.api import (
     media,
     filters,
@@ -19,15 +26,93 @@ from backend.api import (
     upscale,
     config,
     embeddings,
+    models,
     websocket,
 )
 from backend.ws.manager import ws_manager
+from metascan.core.inference_client import InferenceClient
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _inject_huggingface_token(token: str) -> None:
+    """Expose ``token`` as HF_TOKEN / HUGGING_FACE_HUB_TOKEN so that
+    huggingface_hub picks it up both in the server process and in any
+    subprocess that inherits the environment."""
+    if not token:
+        return
+    os.environ["HF_TOKEN"] = token
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+
+
+def _wire_inference_client_status(client: InferenceClient) -> None:
+    """Bridge inference client state transitions onto the ``models`` WS
+    channel so the frontend can render a loading indicator and gate
+    content-search submit until the worker is ready."""
+
+    def on_status(_state: str, payload: Dict[str, Any]) -> None:
+        ws_manager.broadcast_sync("models", "inference_status", payload)
+
+    def on_progress(payload: Dict[str, Any]) -> None:
+        ws_manager.broadcast_sync("models", "inference_progress", payload)
+
+    client.on_status(on_status)
+    client.on_progress(on_progress)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    ws_manager.attach_loop(asyncio.get_running_loop())
+
+    app_config = load_app_config()
+    models_cfg = get_models_config(app_config)
+    _inject_huggingface_token(models_cfg["huggingface_token"])
+
+    sim_cfg = app_config.get("similarity", {}) or {}
+    clip_model_key = str(sim_cfg.get("clip_model") or "small")
+    device = str(sim_cfg.get("device") or "auto")
+
+    client = InferenceClient()
+    _wire_inference_client_status(client)
+    similarity.set_inference_client(client)
+
+    # Preload the inference worker eagerly when the user has opted in for
+    # the currently-selected CLIP model. Non-blocking so the server comes
+    # up immediately.
+    preload_list = models_cfg["preload_at_startup"]
+    if f"clip-{clip_model_key}" in preload_list:
+        logger.info(
+            "Preloading inference worker at startup (model=%s, device=%s)",
+            clip_model_key,
+            device,
+        )
+
+        async def _preload() -> None:
+            try:
+                await client.start(
+                    model_key=clip_model_key, device=device, wait_ready=False
+                )
+            except Exception:
+                logger.exception("Inference worker preload failed")
+
+        asyncio.create_task(_preload())
+
+    upscale.init_upscale_queue()
+    similarity.init_embedding_queue()
+
+    try:
+        yield
+    finally:
+        await upscale.shutdown_upscale_queue()
+        await similarity.shutdown_embedding_queue()
+        try:
+            await client.shutdown()
+        except Exception:
+            logger.exception("Inference client shutdown raised")
 
 
 def create_app() -> FastAPI:
@@ -37,6 +122,7 @@ def create_app() -> FastAPI:
         title="Metascan API",
         description="Backend API for the Metascan media browser",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     # CORS
@@ -76,18 +162,6 @@ def create_app() -> FastAPI:
                 )
             return await call_next(request)
 
-    # Startup/shutdown hooks
-    @app.on_event("startup")
-    async def _on_startup() -> None:
-        ws_manager.attach_loop(asyncio.get_running_loop())
-        upscale.init_upscale_queue()
-        similarity.init_embedding_queue()
-
-    @app.on_event("shutdown")
-    async def _on_shutdown() -> None:
-        await upscale.shutdown_upscale_queue()
-        await similarity.shutdown_embedding_queue()
-
     # Health check
     @app.get("/health")
     async def health():
@@ -102,6 +176,7 @@ def create_app() -> FastAPI:
     app.include_router(upscale.router)
     app.include_router(config.router)
     app.include_router(embeddings.router)
+    app.include_router(models.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

@@ -2,8 +2,8 @@
 # A media metadata scanning application
 
 # Variables
-PYTHON := python
 VENV_DIR := venv
+PYTHON := $(VENV_DIR)/bin/python
 VENV_ACTIVATE := $(VENV_DIR)/bin/activate
 PIP := $(VENV_DIR)/bin/pip
 PYTEST := $(VENV_DIR)/bin/pytest
@@ -30,7 +30,7 @@ install: venv deps nltk-setup frontend-deps dev-install  ## Complete first-time 
 
 .PHONY: venv
 venv:  ## Create virtual environment
-	$(PYTHON) -m venv $(VENV_DIR)
+	$(shell which python3 || which python) -m venv $(VENV_DIR)
 	@echo "Virtual environment created in $(VENV_DIR)"
 
 .PHONY: deps
@@ -132,6 +132,15 @@ build: venv  ## Build desktop application bundle/executable
 .PHONY: build-manual
 build-manual: venv  ## Manual PyInstaller build
 	$(PYINSTALLER) metascan.spec --clean
+
+# Local run targets
+.PHONY: start-frontend
+start-frontend:  venv
+	cd frontend && npm run dev
+
+.PHONY: start-backend
+start-backend: venv
+	$(PYTHON) run_server.py
 
 # Debugging and analysis targets
 .PHONY: analyze-metadata

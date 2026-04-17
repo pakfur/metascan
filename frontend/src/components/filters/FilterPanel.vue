@@ -3,21 +3,16 @@ import { watch } from 'vue'
 import { useFilterStore } from '../../stores/filters'
 import { useMediaStore } from '../../stores/media'
 import FilterSection from './FilterSection.vue'
-import ContentSearch from './ContentSearch.vue'
 
 const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
 
-// Display order and labels for filter types
 const filterSections = [
-  { type: 'source', label: 'Source' },
   { type: 'model', label: 'Model' },
-  { type: 'ext', label: 'File Type' },
   { type: 'lora', label: 'LoRA' },
-  { type: 'tag', label: 'Tag' },
+  { type: 'tag', label: 'Tags' },
 ]
 
-// Whenever activeFilters change, apply them
 watch(
   () => filterStore.activeFilters,
   (filters) => {
@@ -34,6 +29,10 @@ function onClearAll() {
 
 <template>
   <div class="filter-panel">
+    <div class="app-title-block">
+      <span class="app-title">Metascan</span>
+    </div>
+
     <div class="filter-header">
       <span class="filter-title">Filters</span>
       <button
@@ -44,8 +43,6 @@ function onClearAll() {
         Clear All
       </button>
     </div>
-
-    <ContentSearch />
 
     <div class="filter-sections">
       <FilterSection
@@ -69,6 +66,18 @@ function onClearAll() {
   height: 100%;
   padding: 12px;
   gap: 8px;
+}
+
+.app-title-block {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--surface-border);
+  margin-bottom: 4px;
+}
+
+.app-title {
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--primary-color);
 }
 
 .filter-header {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { fetchConfig, updateConfig } from '../../api/config'
+import ConfigModelsTab from './ConfigModelsTab.vue'
 
 const emit = defineEmits<{
   close: []
@@ -10,6 +11,10 @@ interface DirEntry {
   filepath: string
   search_subfolders: boolean
 }
+
+type TabKey = 'directories' | 'models'
+
+const activeTab = ref<TabKey>('directories')
 
 const directories = ref<DirEntry[]>([])
 const newPath = ref('')
@@ -41,7 +46,7 @@ function toggleSubfolders(idx: number) {
   directories.value[idx].search_subfolders = !directories.value[idx].search_subfolders
 }
 
-async function save() {
+async function saveDirectories() {
   await updateConfig({ directories: directories.value })
   emit('close')
 }
@@ -52,51 +57,77 @@ async function save() {
     <div class="dialog-card">
       <h3>Configuration</h3>
 
-      <div v-if="loading" class="muted">Loading...</div>
+      <nav class="tabs">
+        <button
+          class="tab"
+          :class="{ active: activeTab === 'directories' }"
+          @click="activeTab = 'directories'"
+        >
+          Directories
+        </button>
+        <button
+          class="tab"
+          :class="{ active: activeTab === 'models' }"
+          @click="activeTab = 'models'"
+        >
+          Models
+        </button>
+      </nav>
 
-      <template v-else>
-        <h4>Scan Directories</h4>
+      <div v-if="activeTab === 'directories'" class="tab-panel">
+        <div v-if="loading" class="muted">Loading...</div>
 
-        <div class="dir-table">
-          <div v-for="(dir, idx) in directories" :key="idx" class="dir-row">
-            <label class="subfolder-toggle" title="Search subfolders">
-              <input
-                type="checkbox"
-                :checked="dir.search_subfolders"
-                @change="toggleSubfolders(idx)"
-              />
-            </label>
-            <span class="dir-path" :title="dir.filepath">{{ dir.filepath }}</span>
-            <button class="remove-btn" @click="removeDirectory(idx)" title="Remove">
-              &times;
+        <template v-else>
+          <h4>Scan Directories</h4>
+
+          <div class="dir-table">
+            <div v-for="(dir, idx) in directories" :key="idx" class="dir-row">
+              <label class="subfolder-toggle" title="Search subfolders">
+                <input
+                  type="checkbox"
+                  :checked="dir.search_subfolders"
+                  @change="toggleSubfolders(idx)"
+                />
+              </label>
+              <span class="dir-path" :title="dir.filepath">{{ dir.filepath }}</span>
+              <button class="remove-btn" @click="removeDirectory(idx)" title="Remove">
+                &times;
+              </button>
+            </div>
+
+            <div v-if="directories.length === 0" class="empty-msg">
+              No directories configured.
+            </div>
+          </div>
+
+          <div class="add-row">
+            <input
+              v-model="newPath"
+              type="text"
+              placeholder="Enter directory path..."
+              class="add-input"
+              @keydown.enter="addDirectory"
+            />
+            <button class="add-btn" @click="addDirectory" :disabled="!newPath.trim()">
+              Add
             </button>
           </div>
 
-          <div v-if="directories.length === 0" class="empty-msg">
-            No directories configured.
+          <p class="hint">Check the box to include subfolders when scanning.</p>
+
+          <div class="dialog-actions">
+            <button class="btn-primary" @click="saveDirectories">Save</button>
+            <button class="btn-secondary" @click="emit('close')">Cancel</button>
           </div>
-        </div>
+        </template>
+      </div>
 
-        <div class="add-row">
-          <input
-            v-model="newPath"
-            type="text"
-            placeholder="Enter directory path..."
-            class="add-input"
-            @keydown.enter="addDirectory"
-          />
-          <button class="add-btn" @click="addDirectory" :disabled="!newPath.trim()">
-            Add
-          </button>
-        </div>
-
-        <p class="hint">Check the box to include subfolders when scanning.</p>
-
+      <div v-else-if="activeTab === 'models'" class="tab-panel">
+        <ConfigModelsTab />
         <div class="dialog-actions">
-          <button class="btn-primary" @click="save">Save</button>
-          <button class="btn-secondary" @click="emit('close')">Cancel</button>
+          <button class="btn-secondary" @click="emit('close')">Close</button>
         </div>
-      </template>
+      </div>
     </div>
   </div>
 </template>
@@ -115,17 +146,41 @@ async function save() {
 .dialog-card {
   background: var(--surface-section);
   border-radius: 12px;
-  padding: 28px 32px;
-  min-width: 460px;
-  max-width: 580px;
-  max-height: 80vh;
+  padding: 22px 28px 24px;
+  width: 720px;
+  max-width: 92vw;
+  max-height: 85vh;
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
 
-h3 { margin: 0 0 20px; font-size: 18px; color: var(--text-color); }
+h3 { margin: 0 0 14px; font-size: 18px; color: var(--text-color); }
 h4 { margin: 0 0 10px; font-size: 14px; color: var(--text-color); }
 .muted { color: var(--text-color-secondary); font-size: 14px; }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--surface-border);
+  margin-bottom: 16px;
+}
+.tab {
+  background: none;
+  border: none;
+  padding: 8px 14px;
+  color: var(--text-color-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--text-color); }
+.tab.active {
+  color: var(--text-color);
+  border-bottom-color: var(--primary-color);
+}
+
+.tab-panel { min-height: 240px; }
 
 .dir-table {
   border: 1px solid var(--surface-border);
