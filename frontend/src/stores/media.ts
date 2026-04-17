@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Media } from '../types/media'
 import type { ActiveFilters } from '../types/filters'
-import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
+import { fetchAllMediaTimed, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
 import { applyFilters } from '../api/filters'
 import { now, since } from '../utils/timing'
 
@@ -39,7 +39,7 @@ export const useMediaStore = defineStore('media', () => {
     loading.value = true
     const t0 = now()
     try {
-      const data = await fetchAllMedia(sortOrder.value)
+      const { data, phases } = await fetchAllMediaTimed(sortOrder.value)
       const t1 = now()
       allMedia.value = data
       favoritePaths.value = new Set(
@@ -48,8 +48,10 @@ export const useMediaStore = defineStore('media', () => {
       const t2 = now()
       // eslint-disable-next-line no-console
       console.info(
-        `[perf] loadAllMedia: fetch+parse=${(t1 - t0).toFixed(0)}ms `
-          + `assign=${(t2 - t1).toFixed(0)}ms total=${since(t0)} items=${data.length}`,
+        `[perf] loadAllMedia: ttfb=${phases.ttfb.toFixed(0)}ms `
+          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms `
+          + `assign=${(t2 - t1).toFixed(0)}ms total=${since(t0)} `
+          + `items=${data.length} bytes=${(phases.bytes / 1024).toFixed(0)}KB`,
       )
     } finally {
       loading.value = false

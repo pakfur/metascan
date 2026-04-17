@@ -1,10 +1,22 @@
 import type { Media } from '../types/media'
-import { get, patch, del } from './client'
+import { get, getWithPhases, patch, del } from './client'
+import type { FetchPhases } from './client'
 
 export function fetchAllMedia(sort = 'date_added', favoritesOnly = false): Promise<Media[]> {
   const params = new URLSearchParams({ sort })
   if (favoritesOnly) params.set('favorites_only', 'true')
   return get<Media[]>(`/media?${params}`)
+}
+
+// Variant used on startup so we can attribute startup latency to the
+// right layer (see stores/media.ts). Same URL and response shape.
+export function fetchAllMediaTimed(
+  sort = 'date_added',
+  favoritesOnly = false,
+): Promise<{ data: Media[]; phases: FetchPhases }> {
+  const params = new URLSearchParams({ sort })
+  if (favoritesOnly) params.set('favorites_only', 'true')
+  return getWithPhases<Media[]>(`/media?${params}`)
 }
 
 // Fetch the full detail record for a single file — includes AI-generation
