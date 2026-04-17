@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { fetchConfig, updateConfig } from '../api/config'
+import { now, since } from '../utils/timing'
 
 export type ThumbnailSize = 'small' | 'medium' | 'large'
 
@@ -17,7 +18,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const config = ref<Record<string, unknown>>({})
 
   async function loadConfig() {
+    const t0 = now()
     config.value = await fetchConfig()
+    const t1 = now()
     const t = config.value.theme as string | undefined
     if (t) theme.value = t.replace('.xml', '')
     const ts = config.value.thumbnail_size as [number, number] | undefined
@@ -28,6 +31,11 @@ export const useSettingsStore = defineStore('settings', () => {
       else if (ts[0] <= 250) thumbnailSizeLabel.value = 'medium'
       else thumbnailSizeLabel.value = 'large'
     }
+    // eslint-disable-next-line no-console
+    console.info(
+      `[perf] loadConfig: fetch+parse=${(t1 - t0).toFixed(0)}ms `
+        + `assign=${since(t1)}`,
+    )
   }
 
   function setThumbnailSize(label: ThumbnailSize) {

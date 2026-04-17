@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import type { FilterData, ActiveFilters } from '../types/filters'
 import { fetchFilterData } from '../api/filters'
 import { useMediaStore } from './media'
+import { now, since } from '../utils/timing'
 
 export type ViewPreset = 'home' | 'video' | 'images' | 'favorites'
 
@@ -17,8 +18,17 @@ export const useFilterStore = defineStore('filters', () => {
 
   async function loadFilterData() {
     loading.value = true
+    const t0 = now()
     try {
-      filterData.value = await fetchFilterData()
+      const data = await fetchFilterData()
+      const t1 = now()
+      filterData.value = data
+      const groupCount = Object.keys(data).length
+      // eslint-disable-next-line no-console
+      console.info(
+        `[perf] loadFilterData: fetch+parse=${(t1 - t0).toFixed(0)}ms `
+          + `assign=${since(t1)} groups=${groupCount}`,
+      )
     } finally {
       loading.value = false
     }
