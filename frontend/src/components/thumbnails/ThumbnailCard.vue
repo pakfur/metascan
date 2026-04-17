@@ -3,6 +3,7 @@ import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import type { Media } from '../../types/media'
 import { thumbnailUrl } from '../../api/client'
 import { useMediaStore } from '../../stores/media'
+import { fileName } from '../../utils/path'
 
 const props = withDefaults(
   defineProps<{
@@ -30,6 +31,7 @@ watch(
 const imgSrc = computed(() =>
   hasStartedLoading.value ? thumbnailUrl(props.media.file_path) : '',
 )
+const displayName = computed(() => props.media.file_name ?? fileName(props.media.file_path))
 
 onBeforeUnmount(() => {
   // Cancel any in-flight fetch for this thumbnail before the element is
@@ -60,7 +62,7 @@ function onImgError(e: Event) {
       v-if="hasStartedLoading"
       ref="imgEl"
       :src="imgSrc"
-      :alt="media.file_name"
+      :alt="displayName"
       class="thumb-img"
       loading="lazy"
       @error="onImgError"
@@ -78,8 +80,8 @@ function onImgError(e: Event) {
 
     <span v-if="media.is_video" class="video-badge">▶</span>
 
-    <div class="filename-overlay" :title="media.file_name">
-      {{ media.file_name }}
+    <div class="filename-overlay" :title="displayName">
+      {{ displayName }}
     </div>
 
     <div v-if="media.similarity_score != null" class="similarity-badge">

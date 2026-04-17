@@ -7,7 +7,11 @@ export function fetchAllMedia(sort = 'date_added', favoritesOnly = false): Promi
   return get<Media[]>(`/media?${params}`)
 }
 
-export function fetchMedia(filePath: string): Promise<Media> {
+// Fetch the full detail record for a single file — includes AI-generation
+// fields (prompt, model, tags, loras, etc.) that the list endpoint omits.
+// Callers should NOT cache the result; fetch again on each selection so the
+// panel always reflects the latest DB state.
+export function fetchMediaDetails(filePath: string): Promise<Media> {
   return get<Media>(`/media/${encodeURIComponent(filePath)}`)
 }
 

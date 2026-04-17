@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useSimilarityStore } from '../../stores/similarity'
+import { fileName } from '../../utils/path'
 
 const simStore = useSimilarityStore()
 
@@ -48,7 +49,7 @@ function onThresholdInput(val: number) {
         Content search: <strong>"{{ simStore.contentQuery }}"</strong>
       </span>
       <span v-else-if="simStore.referenceMedia" class="banner-label">
-        Similar to: <strong>{{ simStore.referenceMedia.file_name }}</strong>
+        Similar to: <strong>{{ simStore.referenceMedia.file_name ?? fileName(simStore.referenceMedia.file_path) }}</strong>
       </span>
       <span class="result-count">
         {{ simStore.filteredResults.length }} results

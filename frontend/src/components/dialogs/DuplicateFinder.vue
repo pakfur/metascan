@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import type { Media } from '../../types/media'
 import { findDuplicates, deleteDuplicates } from '../../api/similarity'
 import { thumbnailUrl } from '../../api/client'
+import { fileName } from '../../utils/path'
 
 const emit = defineEmits<{
   close: []
@@ -121,7 +122,7 @@ function formatSize(bytes: number): string {
                 loading="lazy"
               />
               <div class="dup-info">
-                <span class="dup-name" :title="media.file_path">{{ media.file_name }}</span>
+                <span class="dup-name" :title="media.file_path">{{ media.file_name ?? fileName(media.file_path) }}</span>
                 <span class="dup-meta">
                   {{ media.width }}x{{ media.height }} &middot;
                   {{ formatSize(media.file_size) }}

@@ -122,8 +122,105 @@ class DatabaseManager:
                     "ALTER TABLE indices ADD COLUMN source TEXT",
                 )
 
+            # Materialize summary fields that would otherwise live inside the
+            # ``data`` JSON blob. Without these columns, the list endpoint
+            # had to pull the entire blob off disk through ``json_extract``
+            # (710 MB of overflow pages for a 12 K-row library on WSL
+            # /mnt/c). Adding columns means the summary SELECT touches only
+            # narrow rows — orders of magnitude faster.
+            #
+            # We detect the migration using ``modified_at`` as a sentinel:
+            # if it's absent we assume *none* of the six are present and
+            # treat them as one group so the backfill does a single pass
+            # over the blob instead of six.
+            if "modified_at" not in columns:
+                _idempotent_add_column(
+                    conn, "media", "width", "ALTER TABLE media ADD COLUMN width INTEGER"
+                )
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "height",
+                    "ALTER TABLE media ADD COLUMN height INTEGER",
+                )
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "file_size",
+                    "ALTER TABLE media ADD COLUMN file_size INTEGER",
+                )
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "frame_rate",
+                    "ALTER TABLE media ADD COLUMN frame_rate REAL",
+                )
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "duration",
+                    "ALTER TABLE media ADD COLUMN duration REAL",
+                )
+                _idempotent_add_column(
+                    conn,
+                    "media",
+                    "modified_at",
+                    "ALTER TABLE media ADD COLUMN modified_at TEXT",
+                )
+                logger.info(
+                    "Backfilling materialized summary columns from Media "
+                    "JSON blob (one-time, may take a minute on large "
+                    "libraries)…"
+                )
+                conn.execute(
+                    """
+                    UPDATE media SET
+                        width       = json_extract(data, '$.width'),
+                        height      = json_extract(data, '$.height'),
+                        file_size   = json_extract(data, '$.file_size'),
+                        frame_rate  = json_extract(data, '$.frame_rate'),
+                        duration    = json_extract(data, '$.duration'),
+                        modified_at = json_extract(data, '$.modified_at')
+                    """
+                )
+                logger.info("Summary-column backfill complete.")
+
+            # Covering indexes for the grid list endpoint. The `media` row
+            # layout is `[file_path][data][is_favorite]...[width]...`, so
+            # reading any column positioned after `data` would force SQLite
+            # to seek through `data`'s 700+ MB overflow-page chain. A
+            # covering index holds every summary column at the leaf level,
+            # letting the query planner answer list requests without
+            # touching the main table — ~6 ms instead of ~25 s.
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_media_summary_added
+                ON media(
+                    created_at, file_path, is_favorite, playback_speed,
+                    width, height, file_size, frame_rate, duration
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_media_summary_modified
+                ON media(
+                    modified_at, file_path, is_favorite, playback_speed,
+                    width, height, file_size, frame_rate, duration
+                )
+                """
+            )
+
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_indices_lookup ON indices(index_type, index_key)"
+            )
+            # Per-file predicates in `_update_indices` (DELETE/UPDATE WHERE
+            # file_path = ?) would otherwise fall back to a full table scan —
+            # the compound PK starts with index_type, so it can't serve
+            # file_path lookups. Without this index, save_media cost grows
+            # linearly with total indices rows, making the whole scan O(N²).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_indices_file_path ON indices(file_path)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at)"
@@ -174,6 +271,29 @@ class DatabaseManager:
                     logger.error(f"Batch write failed: {e}")
                     raise
 
+    _MEDIA_UPSERT_SQL = """
+        INSERT OR REPLACE INTO media (
+            file_path, data, is_favorite, playback_speed,
+            width, height, file_size, frame_rate, duration, modified_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """
+
+    @staticmethod
+    def _media_upsert_params(media: Media, posix_path: str) -> tuple:
+        return (
+            posix_path,
+            media.to_json(),  # type: ignore[attr-defined]
+            1 if media.is_favorite else 0,
+            media.playback_speed,
+            media.width,
+            media.height,
+            media.file_size,
+            media.frame_rate,
+            media.duration,
+            media.modified_at.isoformat() if media.modified_at else None,
+        )
+
     def save_media(self, media: Media) -> bool:
         try:
             with self.lock:
@@ -181,16 +301,8 @@ class DatabaseManager:
                     # Convert file_path to POSIX format for storage
                     posix_path = to_posix_path(media.file_path)
                     conn.execute(
-                        """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """,
-                        (
-                            posix_path,
-                            media.to_json(),  # type: ignore[attr-defined]
-                            1 if media.is_favorite else 0,
-                            media.playback_speed,
-                        ),
+                        self._MEDIA_UPSERT_SQL,
+                        self._media_upsert_params(media, posix_path),
                     )
 
                     self._update_indices(conn, media)
@@ -207,18 +319,9 @@ class DatabaseManager:
                 try:
                     # Convert file_path to POSIX format for storage
                     posix_path = to_posix_path(media.file_path)
-                    # Save media with favorite status
                     conn.execute(
-                        """
-                        INSERT OR REPLACE INTO media (file_path, data, is_favorite, playback_speed, updated_at)
-                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """,
-                        (
-                            posix_path,
-                            media.to_json(),  # type: ignore[attr-defined]
-                            1 if media.is_favorite else 0,
-                            media.playback_speed,
-                        ),
+                        self._MEDIA_UPSERT_SQL,
+                        self._media_upsert_params(media, posix_path),
                     )
 
                     self._update_indices(conn, media)
@@ -287,6 +390,58 @@ class DatabaseManager:
             logger.error(f"Failed to get all media with details: {e}")
 
         return media_list
+
+    def get_all_media_summaries(
+        self,
+        favorites_only: bool = False,
+        sort: str = "date_added",
+    ) -> List[Dict[str, Any]]:
+        """Return a per-file summary tailored for the thumbnail grid.
+
+        All fields live on columns (see the ``_init_database`` migration
+        that materializes ``width``, ``height``, ``file_size``,
+        ``frame_rate``, ``duration`` and ``modified_at`` off the JSON
+        blob). A projection across these narrow columns skips the 700+ MB
+        of overflow pages a ``json_extract`` query would have to page in.
+        """
+        order_clause = {
+            "date_modified": "modified_at DESC",
+            # file_name sort happens in the service layer (Python basename
+            # extraction) — SQLite has no cheap basename function.
+        }.get(sort, "created_at DESC")
+        where = "WHERE is_favorite = 1" if favorites_only else ""
+        sql = (
+            "SELECT file_path, is_favorite, playback_speed, "
+            "width, height, file_size, frame_rate, duration "
+            f"FROM media {where} ORDER BY {order_clause}"
+        )
+        out: List[Dict[str, Any]] = []
+        video_exts = {".mp4", ".webm"}
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(sql)
+                for row in rows:
+                    file_path = to_native_path(row["file_path"])
+                    ext = Path(file_path).suffix.lower()
+                    playback = row["playback_speed"]
+                    out.append(
+                        {
+                            "file_path": file_path,
+                            "is_favorite": bool(row["is_favorite"]),
+                            "is_video": ext in video_exts,
+                            "playback_speed": (
+                                float(playback) if playback is not None else None
+                            ),
+                            "width": row["width"],
+                            "height": row["height"],
+                            "file_size": row["file_size"],
+                            "frame_rate": row["frame_rate"],
+                            "duration": row["duration"],
+                        }
+                    )
+        except Exception as e:
+            logger.error(f"Failed to get media summaries: {e}")
+        return out
 
     def get_media_with_details(self, file_path: Path) -> Optional[Media]:
         """Load a single media item with favorite status and playback speed.
@@ -397,6 +552,29 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Index search failed for {index_type}:{term}: {e}")
             return set()
+
+    def get_tags_for_file(self, file_path: Path) -> List[str]:
+        """Return every tag attached to ``file_path``, regardless of source.
+
+        Tags are stored in ``indices`` with ``index_type='tag'`` and a
+        ``source`` of ``'prompt'``, ``'clip'``, or ``'both'``. The UI wants
+        the union, so callers merge by querying this single view instead of
+        relying on the prompt-only ``media.tags`` field that lives inside the
+        serialized ``media.data`` blob.
+        """
+        try:
+            with self._get_connection() as conn:
+                posix_path = to_posix_path(file_path)
+                rows = conn.execute(
+                    "SELECT index_key FROM indices "
+                    "WHERE file_path = ? AND index_type = 'tag' "
+                    "ORDER BY index_key",
+                    (posix_path,),
+                )
+                return [row["index_key"] for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to get tags for {file_path}: {e}")
+            return []
 
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
         # Use POSIX path for consistency with storage format
