@@ -296,8 +296,21 @@ async def start_inference() -> Dict[str, Any]:
     return client.snapshot()
 
 
-@router.get("/status")
-async def get_status() -> Dict[str, Any]:
+def _build_status_payload() -> Dict[str, Any]:
+    """Synchronous worker that builds the models-status snapshot.
+
+    Runs on a thread because the helpers below do non-trivial sync work:
+    ``_clip_status_rows`` imports ``open_clip`` (which transitively loads
+    torch on first call — tens of seconds cold on WSL /mnt/c), and both
+    ``_upscale_status_rows`` / ``_nltk_status_rows`` do ``Path.rglob``
+    over cache dirs that live on slow 9P-backed storage.
+
+    Previously this was inlined into the async handler below, which
+    pinned the asyncio event loop for ~30 s on first request and
+    blocked every other incoming request from being dispatched during
+    that window — including the startup ``GET /api/media`` and
+    ``GET /api/filters`` that the page load waits on.
+    """
     config = load_app_config()
     models_cfg = get_models_config(config)
     preload = models_cfg["preload_at_startup"]
@@ -320,6 +333,11 @@ async def get_status() -> Dict[str, Any]:
         "current_clip_model": current_clip,
         "current_clip_dim": current_dim,
     }
+
+
+@router.get("/status")
+async def get_status() -> Dict[str, Any]:
+    return await asyncio.to_thread(_build_status_payload)
 
 
 @router.post("/preload")
