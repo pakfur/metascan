@@ -30,6 +30,7 @@ from backend.api import (
     models,
     websocket,
 )
+from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
 
@@ -98,6 +99,23 @@ async def _event_loop_heartbeat() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ws_manager.attach_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
+
+    # Warm the singletons before we start accepting requests. Both do
+    # synchronous work (SQLite schema migration + index builds for the
+    # DB, directory creation + ffmpeg lookup for the thumbnail cache) so
+    # running them via `asyncio.to_thread` keeps the lifespan free to
+    # handle other startup steps in parallel and, crucially, keeps the
+    # first incoming request from paying the init cost on the asyncio
+    # thread.
+    t0 = time.perf_counter()
+    await asyncio.gather(
+        asyncio.to_thread(get_db),
+        asyncio.to_thread(get_thumbnail_cache),
+    )
+    logger.info(
+        "Warmed DB + thumbnail cache singletons in %.0fms",
+        (time.perf_counter() - t0) * 1000,
+    )
 
     app_config = load_app_config()
     models_cfg = get_models_config(app_config)
