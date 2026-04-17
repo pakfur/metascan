@@ -2,9 +2,8 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Media } from '../types/media'
 import type { ActiveFilters } from '../types/filters'
-import { fetchAllMediaTimed, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
+import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
 import { applyFilters } from '../api/filters'
-import { now, since } from '../utils/timing'
 
 export const useMediaStore = defineStore('media', () => {
   // Summary records only. Heavy AI-generation fields are absent from these
@@ -37,25 +36,11 @@ export const useMediaStore = defineStore('media', () => {
 
   async function loadAllMedia() {
     loading.value = true
-    const t0 = now()
     try {
-      const { data, phases } = await fetchAllMediaTimed(sortOrder.value)
-      const t1 = now()
+      const data = await fetchAllMedia(sortOrder.value)
       allMedia.value = data
       favoritePaths.value = new Set(
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
-      )
-      const t2 = now()
-      const browser = phases.queued !== undefined
-        ? ` queued=${phases.queued.toFixed(0)}ms connect=${phases.connect!.toFixed(0)}ms `
-          + `waiting=${phases.waiting!.toFixed(0)}ms download=${phases.download!.toFixed(0)}ms`
-        : ''
-      // eslint-disable-next-line no-console
-      console.info(
-        `[perf] loadAllMedia: ttfb=${phases.ttfb.toFixed(0)}ms `
-          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms${browser} `
-          + `assign=${(t2 - t1).toFixed(0)}ms total=${since(t0)} `
-          + `items=${data.length} bytes=${(phases.bytes / 1024).toFixed(0)}KB`,
       )
     } finally {
       loading.value = false
@@ -96,14 +81,11 @@ export const useMediaStore = defineStore('media', () => {
     // upgrade to the full record when it arrives.
     selectedMedia.value = summary
     detailLoading.value = true
-    const t0 = now()
     try {
       const detail = await fetchMediaDetails(summary.file_path)
       if (token === selectionToken) {
         selectedMedia.value = detail
       }
-      // eslint-disable-next-line no-console
-      console.info(`[perf] selectMedia: fetch=${since(t0)} path=${summary.file_path}`)
       return detail
     } catch (e) {
       console.error('Failed to fetch media details', e)

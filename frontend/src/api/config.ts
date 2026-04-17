@@ -1,15 +1,7 @@
-import { get, getWithPhases, put } from './client'
-import type { FetchPhases } from './client'
+import { get, put } from './client'
 
 export function fetchConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>('/config')
-}
-
-export function fetchConfigTimed(): Promise<{
-  data: Record<string, unknown>
-  phases: FetchPhases
-}> {
-  return getWithPhases<Record<string, unknown>>('/config')
 }
 
 export function updateConfig(updates: Record<string, unknown>): Promise<Record<string, unknown>> {
