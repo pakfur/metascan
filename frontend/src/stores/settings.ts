@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { fetchConfig, updateConfig } from '../api/config'
+import { fetchConfigTimed, updateConfig } from '../api/config'
 import { now, since } from '../utils/timing'
 
 export type ThumbnailSize = 'small' | 'medium' | 'large'
@@ -19,22 +19,24 @@ export const useSettingsStore = defineStore('settings', () => {
 
   async function loadConfig() {
     const t0 = now()
-    config.value = await fetchConfig()
+    const { data, phases } = await fetchConfigTimed()
     const t1 = now()
+    config.value = data
     const t = config.value.theme as string | undefined
     if (t) theme.value = t.replace('.xml', '')
     const ts = config.value.thumbnail_size as [number, number] | undefined
     if (ts) {
       thumbnailSize.value = ts
-      // Find closest label
       if (ts[0] <= 150) thumbnailSizeLabel.value = 'small'
       else if (ts[0] <= 250) thumbnailSizeLabel.value = 'medium'
       else thumbnailSizeLabel.value = 'large'
     }
     // eslint-disable-next-line no-console
     console.info(
-      `[perf] loadConfig: fetch+parse=${(t1 - t0).toFixed(0)}ms `
-        + `assign=${since(t1)}`,
+      `[perf] loadConfig: ttfb=${phases.ttfb.toFixed(0)}ms `
+        + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms `
+        + `assign=${since(t1)} total=${since(t0)} `
+        + `bytes=${(phases.bytes / 1024).toFixed(0)}KB`,
     )
   }
 
