@@ -65,9 +65,39 @@ def _wire_inference_client_status(client: InferenceClient) -> None:
     client.on_progress(on_progress)
 
 
+async def _event_loop_heartbeat() -> None:
+    """Warn when the asyncio loop stalls — a synchronous call on the loop
+    thread (CPU-bound work not wrapped in ``to_thread``, a blocking I/O
+    call, a GIL-holding C extension) will prevent this coroutine from
+    waking on schedule. We ask for a 1 s sleep and report whenever we
+    wake up >100 ms late.
+
+    Catches the class of problem that makes every incoming HTTP request
+    appear to hang for tens of seconds while the loop is frozen."""
+    interval = 1.0
+    threshold_ms = 100.0
+    last = time.perf_counter()
+    hb_logger = logging.getLogger(__name__ + ".heartbeat")
+    while True:
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+        now = time.perf_counter()
+        drift_ms = (now - last - interval) * 1000
+        if drift_ms > threshold_ms:
+            hb_logger.warning(
+                "event loop stalled: slept %.0fms (%.0fms late)",
+                (now - last) * 1000,
+                drift_ms,
+            )
+        last = now
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ws_manager.attach_loop(asyncio.get_running_loop())
+    heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
 
     app_config = load_app_config()
     models_cfg = get_models_config(app_config)
@@ -108,6 +138,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await upscale.shutdown_upscale_queue()
         await similarity.shutdown_embedding_queue()
         try:
