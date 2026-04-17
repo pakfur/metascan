@@ -58,3 +58,22 @@ def get_directories(config: dict) -> List[DirectoryConfig]:
         )
         for d in config.get("directories", [])
     ]
+
+
+def get_models_config(config: dict) -> dict:
+    """Return the ``models`` section with defaults filled in.
+
+    Shape:
+        {
+            "preload_at_startup": ["clip-large", ...],  # model ids
+            "huggingface_token": "<str>"                # "" if unset
+        }
+    """
+    raw = config.get("models", {}) or {}
+    preload = raw.get("preload_at_startup") or []
+    if not isinstance(preload, list):
+        preload = []
+    return {
+        "preload_at_startup": [str(x) for x in preload],
+        "huggingface_token": str(raw.get("huggingface_token") or ""),
+    }
