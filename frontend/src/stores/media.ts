@@ -46,10 +46,14 @@ export const useMediaStore = defineStore('media', () => {
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
       )
       const t2 = now()
+      const browser = phases.queued !== undefined
+        ? ` queued=${phases.queued.toFixed(0)}ms connect=${phases.connect!.toFixed(0)}ms `
+          + `waiting=${phases.waiting!.toFixed(0)}ms download=${phases.download!.toFixed(0)}ms`
+        : ''
       // eslint-disable-next-line no-console
       console.info(
         `[perf] loadAllMedia: ttfb=${phases.ttfb.toFixed(0)}ms `
-          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms `
+          + `body=${phases.body.toFixed(0)}ms parse=${phases.parse.toFixed(0)}ms${browser} `
           + `assign=${(t2 - t1).toFixed(0)}ms total=${since(t0)} `
           + `items=${data.length} bytes=${(phases.bytes / 1024).toFixed(0)}KB`,
       )
