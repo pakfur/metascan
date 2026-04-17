@@ -4,6 +4,7 @@ import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
 import { streamUrl } from '../../api/client'
 import VideoPlayer from './VideoPlayer.vue'
+import { fileName } from '../../utils/path'
 
 const props = defineProps<{
   mediaList: Media[]
@@ -296,7 +297,7 @@ watch(current, () => {
         <img
           v-else
           :src="streamUrl(current.file_path)"
-          :alt="current.file_name"
+          :alt="current.file_name ?? fileName(current.file_path)"
           class="slide-image"
         />
       </div>
