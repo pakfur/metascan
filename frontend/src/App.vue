@@ -22,6 +22,7 @@ import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from './components/dialogs/UpscaleDialog.vue'
 import UpscaleQueue from './components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from './components/dialogs/ConfigDialog.vue'
+import { now, since } from './utils/timing'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -41,11 +42,14 @@ const upscaleTargets = ref<Media[]>([])
 const configOpen = ref(false)
 
 onMounted(async () => {
+  const t0 = now()
   await Promise.all([
     settingsStore.loadConfig(),
     mediaStore.loadAllMedia(),
     filterStore.loadFilterData(),
   ])
+  // eslint-disable-next-line no-console
+  console.info(`[perf] App onMounted Promise.all: ${since(t0)}`)
 })
 
 // File watcher: auto-refresh when files change on disk
