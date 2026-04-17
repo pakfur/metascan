@@ -1,5 +1,24 @@
 const API_BASE = '/api'
 
+export class ApiError extends Error {
+  status: number
+  detail: unknown
+  constructor(status: number, detail: unknown, message: string) {
+    super(message)
+    this.status = status
+    this.detail = detail
+  }
+}
+
+function errorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object') {
+    const msg = (detail as { message?: unknown }).message
+    if (typeof msg === 'string') return msg
+  }
+  return fallback
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -15,7 +34,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(body.detail || `HTTP ${res.status}`)
+    const detail = (body as { detail?: unknown }).detail
+    throw new ApiError(res.status, detail, errorMessage(detail, `HTTP ${res.status}`))
   }
   return res.json()
 }

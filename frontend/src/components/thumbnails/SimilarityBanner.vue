@@ -1,12 +1,36 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useSimilarityStore } from '../../stores/similarity'
 
 const simStore = useSimilarityStore()
-const localThreshold = ref(simStore.threshold)
+
+// The slider is bound locally and debounced into the store so dragging
+// feels snappy even though updateThreshold may trigger a re-fetch for
+// image-similarity mode.
+const localThreshold = ref(simStore.isContentSearch ? simStore.contentThreshold : simStore.threshold)
 let debounce: ReturnType<typeof setTimeout> | null = null
 
-watch(() => simStore.threshold, (v) => { localThreshold.value = v })
+// Sync the slider when the store-side threshold changes (e.g. when the
+// user flips between content search and image similarity, or when the
+// content threshold is clamped).
+watch(
+  () => [simStore.isContentSearch, simStore.threshold, simStore.contentThreshold],
+  () => {
+    localThreshold.value = simStore.isContentSearch
+      ? simStore.contentThreshold
+      : simStore.threshold
+  },
+)
+
+// Range / step / format depend on which flavour of search we're in.
+// Text↔image scores don't reach past ~0.45 in practice, so a 0-1 slider
+// would leave most of the track useless; calibrate it to the real signal.
+const sliderMax = computed(() => (simStore.isContentSearch ? simStore.CONTENT_THRESHOLD_MAX : 1))
+const sliderStep = computed(() => (simStore.isContentSearch ? 0.01 : 0.05))
+const valueLabel = computed(() => {
+  if (simStore.isContentSearch) return localThreshold.value.toFixed(2)
+  return `${(localThreshold.value * 100).toFixed(0)}%`
+})
 
 function onThresholdInput(val: number) {
   localThreshold.value = val
@@ -38,12 +62,12 @@ function onThresholdInput(val: number) {
         type="range"
         class="threshold-slider"
         min="0"
-        max="1"
-        step="0.05"
+        :max="sliderMax"
+        :step="sliderStep"
         :value="localThreshold"
         @input="onThresholdInput(parseFloat(($event.target as HTMLInputElement).value))"
       />
-      <span class="threshold-value">{{ (localThreshold * 100).toFixed(0) }}%</span>
+      <span class="threshold-value">{{ valueLabel }}</span>
     </div>
 
     <button class="exit-btn" @click="simStore.exit()" title="Exit similarity mode (Esc)">

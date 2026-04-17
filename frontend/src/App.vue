@@ -8,8 +8,9 @@ import { useScanStore } from './stores/scan'
 import { useSimilarityStore } from './stores/similarity'
 import { useKeyboard } from './composables/useKeyboard'
 import { useWebSocket } from './composables/useWebSocket'
-import AppHeader from './components/layout/AppHeader.vue'
 import ThreePanel from './components/layout/ThreePanel.vue'
+import ContentSearchBar from './components/layout/ContentSearchBar.vue'
+import ViewMenubar from './components/layout/ViewMenubar.vue'
 import FilterPanel from './components/filters/FilterPanel.vue'
 import ThumbnailGrid from './components/thumbnails/ThumbnailGrid.vue'
 import MetadataPanel from './components/metadata/MetadataPanel.vue'
@@ -125,22 +126,26 @@ useKeyboard([
 
 <template>
   <div class="app-shell">
-    <AppHeader
-      @slideshow="openSlideshow"
-      @scan="openScan"
-      @similarity-settings="simSettingsOpen = true"
-      @find-duplicates="dupFinderOpen = true"
-      @upscale-queue="upscaleQueueOpen = true"
-      @config="configOpen = true"
-    />
-
     <ThreePanel>
       <template #left>
         <FilterPanel />
       </template>
 
       <template #center>
-        <ThumbnailGrid @open="openViewer" @upscale="openUpscale" />
+        <div class="center-stack">
+          <ContentSearchBar
+            @scan="openScan"
+            @refresh="mediaStore.loadAllMedia()"
+            @upscale-queue="upscaleQueueOpen = true"
+            @find-duplicates="dupFinderOpen = true"
+            @similarity-settings="simSettingsOpen = true"
+            @config="configOpen = true"
+          />
+          <ViewMenubar @slideshow="openSlideshow" />
+          <div class="grid-wrap">
+            <ThumbnailGrid @open="openViewer" @upscale="openUpscale" />
+          </div>
+        </div>
       </template>
 
       <template #right>
@@ -214,6 +219,19 @@ useKeyboard([
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+
+.center-stack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.grid-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .loading-overlay {
