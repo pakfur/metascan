@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -28,22 +27,11 @@ class MediaService:
     ) -> List[Dict[str, Any]]:
         """Lightweight list for the grid — all fields come from materialized
         columns so this stays sub-second regardless of sort."""
-        t_start = time.perf_counter()
         summaries = await asyncio.to_thread(
             self.db.get_all_media_summaries, favorites_only, sort
         )
-        t_db = time.perf_counter()
         if sort == "file_name":
             summaries.sort(key=lambda s: Path(s["file_path"]).name.lower())
-        t_end = time.perf_counter()
-        logger.info(
-            "service.get_all_media_summaries: db=%.1fms sort=%.1fms "
-            "total=%.1fms items=%d",
-            (t_db - t_start) * 1000,
-            (t_end - t_db) * 1000,
-            (t_end - t_start) * 1000,
-            len(summaries),
-        )
         return summaries
 
     async def get_media(self, file_path: str) -> Optional[Media]:

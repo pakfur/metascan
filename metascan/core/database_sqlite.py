@@ -1,5 +1,4 @@
 import sqlite3
-import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set
 from contextlib import contextmanager
@@ -441,13 +440,9 @@ class DatabaseManager:
         )
         out: List[Dict[str, Any]] = []
         video_exts = {".mp4", ".webm"}
-        t_start = time.perf_counter()
-        t_conn = t_fetch = t_start
         try:
             with self._get_connection() as conn:
-                t_conn = time.perf_counter()
                 rows = conn.execute(sql).fetchall()
-                t_fetch = time.perf_counter()
                 for row in rows:
                     file_path = to_native_path(row["file_path"])
                     ext = Path(file_path).suffix.lower()
@@ -469,18 +464,6 @@ class DatabaseManager:
                     )
         except Exception as e:
             logger.error(f"Failed to get media summaries: {e}")
-        t_end = time.perf_counter()
-        logger.info(
-            "db.get_all_media_summaries: open=%.1fms sql=%.1fms build=%.1fms "
-            "total=%.1fms rows=%d sort=%s favorites_only=%s",
-            (t_conn - t_start) * 1000,
-            (t_fetch - t_conn) * 1000,
-            (t_end - t_fetch) * 1000,
-            (t_end - t_start) * 1000,
-            len(out),
-            sort,
-            favorites_only,
-        )
         return out
 
     def get_media_with_details(self, file_path: Path) -> Optional[Media]:
@@ -737,12 +720,9 @@ class DatabaseManager:
     def get_filter_data(
         self, sort_order: str = "count"
     ) -> Dict[str, List[Dict[str, Any]]]:
-        t_start = time.perf_counter()
-        t_conn = t_query = t_start
         filter_data: Dict[str, List[Dict[str, Any]]] = {}
         try:
             with self._get_connection() as conn:
-                t_conn = time.perf_counter()
                 # Choose sort order
                 if sort_order == "alphabetical":
                     order_clause = "ORDER BY index_type, index_key ASC"
@@ -757,7 +737,6 @@ class DatabaseManager:
                 """
 
                 rows = conn.execute(query).fetchall()
-                t_query = time.perf_counter()
 
                 for row in rows:
                     index_type = row["index_type"]
@@ -769,18 +748,6 @@ class DatabaseManager:
                     )
         except Exception as e:
             logger.error(f"Failed to get filter data: {e}")
-        t_end = time.perf_counter()
-        total_rows = sum(len(v) for v in filter_data.values())
-        logger.info(
-            "db.get_filter_data: open=%.1fms sql=%.1fms build=%.1fms "
-            "total=%.1fms groups=%d rows=%d",
-            (t_conn - t_start) * 1000,
-            (t_query - t_conn) * 1000,
-            (t_end - t_query) * 1000,
-            (t_end - t_start) * 1000,
-            len(filter_data),
-            total_rows,
-        )
         return filter_data
 
     def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
