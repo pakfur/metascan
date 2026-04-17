@@ -3,9 +3,10 @@
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Dict, Any
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -115,6 +116,78 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Inference client shutdown raised")
 
 
+class _RequestTimingMiddleware:
+    """ASGI middleware that times every /api/ request at three points:
+
+    * arrive  — when uvicorn dispatches the request into the app,
+    * to_start — handler returns and first response byte is queued,
+    * flush   — response body fully written to the transport.
+
+    Logs are emitted as ``asgi arrive`` / ``asgi done`` so they line up
+    against the client-side ``[perf]`` timers. If ``to_start`` matches the
+    handler self-time but the client sees a much larger TTFB, the delay
+    is downstream (Vite proxy, WSL loopback, browser pool). If
+    ``to_start`` itself is huge, the event loop is stalled — something
+    synchronous is running on the asyncio thread.
+
+    Non-API routes (static assets, /ws, thumbnails) skip logging to keep
+    the signal/noise ratio high.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self._log = logging.getLogger(__name__ + ".timing")
+
+    async def __call__(
+        self,
+        scope: Dict[str, Any],
+        receive: Callable[[], Awaitable[Dict[str, Any]]],
+        send: Callable[[Dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        if not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        t_arrive = time.perf_counter()
+        method = str(scope.get("method", ""))
+        state: Dict[str, float] = {}
+
+        async def timed_send(message: Dict[str, Any]) -> None:
+            mtype = message.get("type")
+            if mtype == "http.response.start" and "start" not in state:
+                state["start"] = time.perf_counter()
+            elif mtype == "http.response.body" and not message.get("more_body", False):
+                state["end"] = time.perf_counter()
+            await send(message)
+
+        self._log.info("asgi arrive %s %s", method, path)
+        try:
+            await self.app(scope, receive, timed_send)
+        finally:
+            t_end = time.perf_counter()
+
+            def fmt(a: float, b: float) -> str:
+                return f"{(b - a) * 1000:.1f}ms"
+
+            start = state.get("start")
+            end = state.get("end")
+            to_start = fmt(t_arrive, start) if start else "n/a"
+            flush = fmt(start, end) if start and end else "n/a"
+            total = (t_end - t_arrive) * 1000
+            self._log.info(
+                "asgi done %s %s: to_start=%s flush=%s total=%.1fms",
+                method,
+                path,
+                to_start,
+                flush,
+                total,
+            )
+
+
 def create_app() -> FastAPI:
     server_config = get_server_config()
 
@@ -124,6 +197,10 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Request-phase timing (runs before other middleware so the `arrive`
+    # log is as close to uvicorn dispatch as we can get).
+    app.add_middleware(_RequestTimingMiddleware)
 
     # CORS
     app.add_middleware(
