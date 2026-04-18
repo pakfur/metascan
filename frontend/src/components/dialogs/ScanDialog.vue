@@ -8,7 +8,7 @@ const scanStore = useScanStore()
 const steps = [
   { key: 'preparing', label: 'Prepare' },
   { key: 'confirming', label: 'Confirm' },
-  { key: 'scanning', label: 'Scan' },
+  { key: 'scanning', label: 'Import' },
   { key: 'embedding', label: 'Embed' },
   { key: 'complete', label: 'Done' },
 ]
@@ -90,13 +90,13 @@ function handleClose() {
       </ol>
 
       <template v-if="scanStore.phase === 'preparing'">
-        <h3>Preparing Scan...</h3>
+        <h3>Preparing Import...</h3>
         <p class="muted">Counting files in configured directories</p>
         <div class="progress-bar indeterminate"><div class="progress-fill" /></div>
       </template>
 
       <template v-else-if="scanStore.phase === 'confirming' && scanStore.prepareResult">
-        <h3>Scan Directories</h3>
+        <h3>Directories</h3>
         <div class="dir-list">
           <div
             v-for="dir in scanStore.prepareResult.directories"
@@ -126,7 +126,7 @@ function handleClose() {
             <input type="radio" value="full_clean" v-model="scanStore.scanMode" />
             <span>
               <strong>Full clean &amp; rescan</strong>
-              <em>Wipe the database and rescan every file. Favorites are preserved.</em>
+              <em>Wipe the database and reimport every file. Favorites are preserved.</em>
             </span>
           </label>
         </fieldset>
@@ -137,7 +137,7 @@ function handleClose() {
         </label>
 
         <div class="dialog-actions">
-          <button class="btn-primary" @click="scanStore.start()">Start Scan</button>
+          <button class="btn-primary" @click="scanStore.start()">Start Import</button>
           <button class="btn-secondary" @click="handleClose">Cancel</button>
         </div>
       </template>
@@ -162,7 +162,7 @@ function handleClose() {
           {{ currentFileName }}
         </p>
         <div class="dialog-actions">
-          <button class="btn-danger" @click="scanStore.cancel()">Cancel Scan</button>
+          <button class="btn-danger" @click="scanStore.cancel()">Cancel Import</button>
         </div>
       </template>
 
