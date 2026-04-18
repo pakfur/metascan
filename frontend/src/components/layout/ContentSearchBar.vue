@@ -150,9 +150,16 @@ async function onRebuildIndex() {
       Queued: waiting for model…
     </div>
 
-    <Button label="Scan" class="scan-btn" @click="emit('scan')" />
-
     <div class="action-group">
+      <Button
+        v-tooltip.bottom="'Scan'"
+        icon="pi pi-file-import" 
+        severity="secondary"
+        text
+        rounded
+        aria-label="Scan"
+        @click="emit('scan')"
+      />
       <Button
         v-tooltip.bottom="'Refresh (F5)'"
         icon="pi pi-refresh"
@@ -164,7 +171,7 @@ async function onRebuildIndex() {
       />
       <Button
         v-tooltip.bottom="'Upscale Queue'"
-        icon="pi pi-list"
+        icon="pi pi-file-arrow-up"
         severity="secondary"
         text
         rounded
@@ -173,7 +180,7 @@ async function onRebuildIndex() {
       />
       <Button
         v-tooltip.bottom="'Find Duplicates (Ctrl+Shift+D)'"
-        icon="pi pi-clone"
+        icon="pi pi-copy"
         severity="secondary"
         text
         rounded
