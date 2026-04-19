@@ -179,6 +179,29 @@ function scrollIndexIntoView(idx: number) {
   }
 }
 
+// Called from App.vue when the MediaViewer closes — the user may have
+// navigated far from the initially-clicked thumbnail, so we center the
+// selected row in the viewport instead of just nudging to the edge.
+// No-op if the row is already fully visible.
+function scrollSelectedIntoView() {
+  const path = mediaStore.selectedMedia?.file_path
+  if (!path || !container.value) return
+  const list = displayList.value
+  const idx = list.findIndex((m) => m.file_path === path)
+  if (idx < 0) return
+  const row = Math.floor(idx / columns.value)
+  const rowTop = padding + row * cellSize.value
+  const rowBottom = rowTop + cellSize.value
+  const viewTop = container.value.scrollTop
+  const viewBottom = viewTop + containerHeight.value
+  if (rowTop >= viewTop && rowBottom <= viewBottom) return
+  const centered = rowTop - (containerHeight.value - cellSize.value) / 2
+  const maxTop = Math.max(0, totalHeight.value - containerHeight.value)
+  container.value.scrollTop = Math.max(0, Math.min(centered, maxTop))
+}
+
+defineExpose({ scrollSelectedIntoView })
+
 // Reset scroll on list change
 watch(() => displayList.value.length, () => {
   nextTick(() => {
