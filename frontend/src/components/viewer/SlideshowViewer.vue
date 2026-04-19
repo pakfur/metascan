@@ -293,6 +293,7 @@ watch(current, () => {
           ref="videoPlayerRef"
           :file-path="current.file_path"
           :playback-speed="current.playback_speed"
+          autoplay
         />
         <img
           v-else
