@@ -5,6 +5,7 @@ import { streamUrl } from '../../api/client'
 const props = defineProps<{
   filePath: string
   playbackSpeed?: number | null
+  autoplay?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -100,6 +101,10 @@ function onLoadedMetadata() {
   duration.value = videoEl.value.duration
   videoEl.value.volume = volume.value
   videoEl.value.playbackRate = speed.value
+  if (props.autoplay) {
+    // Browsers may reject play() when no user gesture has occurred; swallow.
+    videoEl.value.play().catch(() => {})
+  }
 }
 
 function onPlay() { playing.value = true }
@@ -129,6 +134,7 @@ watch(() => props.playbackSpeed, (s) => {
     <video
       ref="videoEl"
       :src="streamUrl(filePath)"
+      loop
       @timeupdate="onTimeUpdate"
       @loadedmetadata="onLoadedMetadata"
       @play="onPlay"
