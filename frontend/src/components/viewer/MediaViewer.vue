@@ -180,39 +180,42 @@ function formatSize(bytes: number): string {
 
       <!-- Main display area -->
       <div class="viewer-body">
-        <Galleria
-          v-model:activeIndex="currentIndex"
-          :value="mediaList"
-          :show-item-navigators="true"
-          :show-thumbnails="true"
-          :num-visible="7"
-          class="media-galleria"
-        >
-          <template #item="{ item }">
-            <div class="galleria-item">
-              <VideoPlayer
-                v-if="(item as Media).is_video"
-                ref="videoPlayerRef"
-                :file-path="(item as Media).file_path"
-                :playback-speed="(item as Media).playback_speed"
-                @speed-change="onSpeedChange"
+        <!-- Wrapper div carries the scoped class because Galleria has
+             inheritAttrs: false and drops class/style from its root. -->
+        <div class="media-galleria">
+          <Galleria
+            v-model:activeIndex="currentIndex"
+            :value="mediaList"
+            :show-item-navigators="true"
+            :show-thumbnails="true"
+            :num-visible="7"
+          >
+            <template #item="{ item }">
+              <div class="galleria-item">
+                <VideoPlayer
+                  v-if="(item as Media).is_video"
+                  ref="videoPlayerRef"
+                  :file-path="(item as Media).file_path"
+                  :playback-speed="(item as Media).playback_speed"
+                  @speed-change="onSpeedChange"
+                />
+                <ImageViewer
+                  v-else
+                  :file-path="(item as Media).file_path"
+                />
+              </div>
+            </template>
+            <template #thumbnail="{ item }">
+              <img
+                class="galleria-thumb"
+                :src="thumbnailUrl((item as Media).file_path)"
+                :alt="(item as Media).file_name ?? fileName((item as Media).file_path)"
+                loading="lazy"
+                decoding="async"
               />
-              <ImageViewer
-                v-else
-                :file-path="(item as Media).file_path"
-              />
-            </div>
-          </template>
-          <template #thumbnail="{ item }">
-            <img
-              class="galleria-thumb"
-              :src="thumbnailUrl((item as Media).file_path)"
-              :alt="(item as Media).file_name ?? fileName((item as Media).file_path)"
-              loading="lazy"
-              decoding="async"
-            />
-          </template>
-        </Galleria>
+            </template>
+          </Galleria>
+        </div>
       </div>
 
       <!-- Info bar -->
@@ -344,24 +347,25 @@ function formatSize(bytes: number): string {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
+  align-items: stretch;
   color: #fff;
+}
+
+.media-galleria :deep(.p-galleria) {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .media-galleria :deep(.p-galleria-content) {
   flex: 1;
-  display: flex;
-  flex-direction: column;
   min-height: 0;
 }
 
 .media-galleria :deep(.p-galleria-items-container) {
   flex: 1;
   min-height: 0;
-}
-
-.media-galleria :deep(.p-galleria-items) {
-  height: 100%;
 }
 
 .media-galleria :deep(.p-galleria-item) {
