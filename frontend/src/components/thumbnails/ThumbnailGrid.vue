@@ -7,6 +7,9 @@ import { useSimilarityStore } from '../../stores/similarity'
 import ThumbnailCard from './ThumbnailCard.vue'
 import SimilarityBanner from './SimilarityBanner.vue'
 import { fileName } from '../../utils/path'
+import { useFoldersStore } from '../../stores/folders'
+import { useFoldersUi } from '../../composables/useFoldersUi'
+import { useToast } from '../../composables/useToast'
 
 const emit = defineEmits<{
   open: [media: Media]
@@ -16,6 +19,9 @@ const emit = defineEmits<{
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
 const simStore = useSimilarityStore()
+const foldersStore = useFoldersStore()
+const foldersUi = useFoldersUi()
+const toast = useToast()
 
 const container = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
@@ -37,10 +43,23 @@ const padding = 12
 
 const cellSize = computed(() => settingsStore.thumbnailSize[0] + gap)
 
-// Use similarity results when active, otherwise normal media
+// Use similarity results when active; otherwise apply the current folder
+// scope. Similarity results are already a narrowed slice and shouldn't be
+// re-filtered by scope (the user is searching the library, not the folder).
 const displayList = computed(() =>
-  simStore.active ? simStore.filteredResults : mediaStore.displayedMedia
+  simStore.active ? simStore.filteredResults : mediaStore.scopedMedia,
 )
+
+// Set of file paths that belong to any manual folder — used to show the
+// little blue dot on thumbs that are members (when not already inside
+// that folder's scope).
+const manualMemberPaths = computed(() => {
+  const set = new Set<string>()
+  for (const f of foldersStore.manualFolders) {
+    for (const p of f.items) set.add(p)
+  }
+  return set
+})
 
 const columns = computed(() => {
   if (!container.value) return 4
@@ -246,6 +265,103 @@ function ctxDelete() {
     }
   }
 }
+
+// Paths targeted by the current context-menu action — if the right-clicked
+// media is already part of a multi-selection, all of them; otherwise just
+// the one under the cursor. We latch this at menu-open time so changing
+// selection via a subsequent click doesn't surprise the user mid-submenu.
+const contextTargetPaths = computed<string[]>(() => {
+  if (!contextMenu.value) return []
+  return [contextMenu.value.media.file_path]
+})
+
+const contextInsideManualFolder = computed(() =>
+  foldersStore.scope.kind === 'manual' ? foldersStore.scope.id : null,
+)
+
+function ctxAddToFolder(folderId: string) {
+  if (!contextMenu.value) return
+  const paths = contextTargetPaths.value
+  const f = foldersStore.manualFolders.find((x) => x.id === folderId)
+  if (!f) return
+  const added = foldersStore.addToManualFolder(folderId, paths)
+  closeContextMenu()
+  if (added > 0) {
+    toast.show(`${added} item${added === 1 ? '' : 's'} added to ${f.name}`)
+  } else {
+    toast.show(`Already in ${f.name}`, 'warn')
+  }
+}
+
+function ctxAddToNewFolder() {
+  if (!contextMenu.value) return
+  const paths = contextTargetPaths.value
+  foldersUi.openNewFolder(paths)
+  closeContextMenu()
+}
+
+function ctxNewSmartFromSelection() {
+  if (!contextMenu.value) return
+  const m = contextMenu.value.media
+  const modelName =
+    Array.isArray(m.model) && m.model.length > 0 ? m.model[0] : null
+  foldersUi.openSmartEditor(
+    'new',
+    modelName
+      ? { match: 'all', conditions: [{ field: 'model', op: 'is', value: modelName }] }
+      : { match: 'all', conditions: [{ field: 'favorite', op: 'is', value: true }] },
+  )
+  closeContextMenu()
+}
+
+function ctxRemoveFromCurrent() {
+  if (!contextMenu.value) return
+  const folderId = contextInsideManualFolder.value
+  if (!folderId) return
+  const paths = contextTargetPaths.value
+  const removed = foldersStore.removeFromManualFolder(folderId, paths)
+  const f = foldersStore.manualFolders.find((x) => x.id === folderId)
+  closeContextMenu()
+  if (removed > 0 && f) {
+    toast.show(`Removed from ${f.name}`)
+  }
+}
+
+// Drag source: broadcast the selected media paths so folder rows (drop
+// targets) can pick them up. If the dragged item is not in the current
+// selection, fall back to a single-item drag.
+const dragGhostCount = ref<number | null>(null)
+const dragGhostPos = ref({ x: 0, y: 0 })
+
+function onThumbDragStart(e: DragEvent, media: Media) {
+  if (!e.dataTransfer) return
+  const selected = mediaStore.selectedMedia
+  const paths =
+    selected && selected.file_path === media.file_path
+      ? [media.file_path]
+      : [media.file_path]
+  e.dataTransfer.setData('application/x-metascan-paths', JSON.stringify(paths))
+  e.dataTransfer.effectAllowed = 'copy'
+  dragGhostCount.value = paths.length
+
+  // Minimal, translucent drag image — the real visual cue is the pill.
+  const ghost = document.createElement('div')
+  ghost.style.cssText =
+    'width:80px;height:80px;background:#3b82f6;border-radius:6px;opacity:0.5;'
+  document.body.appendChild(ghost)
+  e.dataTransfer.setDragImage(ghost, 40, 40)
+  setTimeout(() => ghost.remove(), 0)
+}
+
+function onThumbDrag(e: DragEvent) {
+  if (e.clientX || e.clientY) {
+    dragGhostPos.value = { x: e.clientX, y: e.clientY }
+  }
+}
+
+function onThumbDragEnd() {
+  dragGhostCount.value = null
+}
 </script>
 
 <template>
@@ -278,9 +394,17 @@ function ctxDelete() {
             :size="settingsStore.thumbnailSize[0]"
             :selected="mediaStore.selectedMedia?.file_path === item.media.file_path"
             :defer-load="isScrolling"
+            :in-folder="
+              manualMemberPaths.has(item.media.file_path) &&
+              foldersStore.scope.kind !== 'manual'
+            "
+            draggable="true"
             @click="onSelect(item.media)"
             @dblclick="emit('open', item.media)"
             @contextmenu.prevent="onContextMenu(item.media, $event)"
+            @dragstart="onThumbDragStart($event, item.media)"
+            @drag="onThumbDrag"
+            @dragend="onThumbDragEnd"
           />
         </div>
       </div>
@@ -299,7 +423,55 @@ function ctxDelete() {
         <button @click="ctxFindSimilar">Find Similar</button>
         <button @click="ctxUpscale">Upscale</button>
         <hr />
+        <div class="context-sub-host">
+          <button type="button" class="sub-anchor">
+            <span>Add to folder</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="context-sub">
+            <button
+              v-for="f in foldersStore.manualFolders"
+              :key="f.id"
+              @click="ctxAddToFolder(f.id)"
+            >
+              <i class="pi pi-folder" /> {{ f.name }}
+            </button>
+            <div
+              v-if="foldersStore.manualFolders.length === 0"
+              class="sub-empty"
+            >
+              No folders yet
+            </div>
+            <hr />
+            <button @click="ctxAddToNewFolder">
+              <i class="pi pi-plus" /> New folder…
+            </button>
+          </div>
+        </div>
+        <button @click="ctxNewSmartFromSelection">
+          New smart folder from selection…
+        </button>
+        <template v-if="contextInsideManualFolder">
+          <hr />
+          <button @click="ctxRemoveFromCurrent">Remove from this folder</button>
+        </template>
+        <hr />
         <button class="danger" @click="ctxDelete">Delete</button>
+      </div>
+    </Teleport>
+
+    <!-- Drag-count pill: follows the cursor while a drag is active so the
+         user sees exactly how many items will land on the drop target. -->
+    <Teleport to="body">
+      <div
+        v-if="dragGhostCount !== null"
+        class="drag-count"
+        :style="{
+          left: dragGhostPos.x + 12 + 'px',
+          top: dragGhostPos.y + 12 + 'px',
+        }"
+      >
+        {{ dragGhostCount }} item{{ dragGhostCount === 1 ? '' : 's' }}
       </div>
     </Teleport>
   </div>
@@ -384,5 +556,100 @@ function ctxDelete() {
   border: none;
   border-top: 1px solid var(--surface-border, #e2e8f0);
   margin: 4px 0;
+}
+
+.context-menu button i.pi {
+  margin-right: 6px;
+  font-size: 12px;
+  color: var(--text-color-secondary, #64748b);
+}
+
+.context-sub-host {
+  position: relative;
+}
+
+.context-sub-host .sub-anchor {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-color, #1e293b);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.context-sub-host .sub-anchor:hover,
+.context-sub-host:hover > .sub-anchor {
+  background: var(--surface-hover, #f1f5f9);
+}
+
+.context-sub-host .arrow {
+  color: var(--text-color-secondary, #64748b);
+  font-size: 10px;
+}
+
+.context-sub {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  min-width: 220px;
+  background: var(--surface-section, #fff);
+  border: 1px solid var(--surface-border, #e2e8f0);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  padding: 4px;
+  z-index: 2001;
+}
+
+.context-sub-host:hover .context-sub {
+  display: block;
+}
+
+.context-sub button {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-color, #1e293b);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.context-sub button:hover {
+  background: var(--surface-hover, #f1f5f9);
+}
+
+.context-sub hr {
+  border: none;
+  border-top: 1px solid var(--surface-border, #e2e8f0);
+  margin: 4px 0;
+}
+
+.context-sub .sub-empty {
+  padding: 6px 12px;
+  color: var(--text-color-secondary, #64748b);
+  font-size: 12px;
+}
+
+.drag-count {
+  position: fixed;
+  z-index: 2000;
+  pointer-events: none;
+  background: var(--primary-color, #3b82f6);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
 }
 </style>

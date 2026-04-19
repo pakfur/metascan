@@ -11,8 +11,9 @@ const props = withDefaults(
     size: number
     selected: boolean
     deferLoad?: boolean
+    inFolder?: boolean
   }>(),
-  { deferLoad: false },
+  { deferLoad: false, inFolder: false },
 )
 
 const mediaStore = useMediaStore()
@@ -55,7 +56,7 @@ function onImgError(e: Event) {
 <template>
   <div
     class="thumbnail-card"
-    :class="{ selected }"
+    :class="{ selected, 'in-folder': inFolder }"
     :style="{ width: size + 'px', height: size + 'px' }"
   >
     <img
@@ -107,6 +108,23 @@ function onImgError(e: Event) {
 
 .thumbnail-card.selected {
   border-color: var(--primary-color);
+}
+
+/* In-folder indicator — little blue dot at the top-left. Only shown when
+   we're NOT currently inside that folder (otherwise every thumb would
+   wear it and it'd be noise). */
+.thumbnail-card.in-folder::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .thumb-img {
