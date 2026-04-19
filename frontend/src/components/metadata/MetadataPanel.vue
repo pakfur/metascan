@@ -1,12 +1,30 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useMediaStore } from '../../stores/media'
+import { useFoldersStore } from '../../stores/folders'
+import { useToast } from '../../composables/useToast'
 import MetadataField from './MetadataField.vue'
 import { fileName } from '../../utils/path'
 import { copyToClipboard } from '../../utils/clipboard'
+import type { AnyFolder } from '../../types/folders'
 
 const mediaStore = useMediaStore()
+const foldersStore = useFoldersStore()
+const toast = useToast()
 const media = computed(() => mediaStore.selectedMedia)
+
+const memberFolders = computed<AnyFolder[]>(() => {
+  if (!media.value) return []
+  return foldersStore.foldersContaining(media.value, mediaStore.allMedia)
+})
+
+function removeFromFolder(folderId: string) {
+  if (!media.value) return
+  const path = media.value.file_path
+  const removed = foldersStore.removeFromManualFolder(folderId, [path])
+  const f = foldersStore.manualFolders.find((x) => x.id === folderId)
+  if (removed > 0 && f) toast.show(`Removed from ${f.name}`)
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -35,6 +53,30 @@ async function copyAll() {
           Copy All
         </button>
       </div>
+
+      <!-- In Folders -->
+      <details v-if="memberFolders.length" class="meta-section" open>
+        <summary class="section-title">In folders</summary>
+        <div class="section-body">
+          <div class="in-folder-chips">
+            <span
+              v-for="f in memberFolders"
+              :key="f.id"
+              class="in-folder-chip"
+              :class="{ smart: f.kind === 'smart' }"
+            >
+              <i class="pi" :class="f.icon" />{{ f.name }}
+              <span
+                v-if="f.kind === 'manual'"
+                class="x"
+                @click="removeFromFolder(f.id)"
+                title="Remove from this folder"
+                >×</span
+              >
+            </span>
+          </div>
+        </div>
+      </details>
 
       <!-- File Information -->
       <details class="meta-section" open>
@@ -190,6 +232,42 @@ details[open] > .section-title::before {
   background: color-mix(in srgb, var(--primary-color) 15%, transparent);
   color: var(--primary-color);
   font-size: 11px;
+}
+
+.in-folder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.in-folder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary-color) 15%, transparent);
+  color: var(--primary-color);
+  font-size: 11px;
+}
+
+.in-folder-chip.smart {
+  background: color-mix(in srgb, #a855f7 15%, transparent);
+  color: #a855f7;
+}
+
+.in-folder-chip .pi {
+  font-size: 10px;
+}
+
+.in-folder-chip .x {
+  margin-left: 2px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.in-folder-chip .x:hover {
+  opacity: 1;
 }
 
 .no-selection {
