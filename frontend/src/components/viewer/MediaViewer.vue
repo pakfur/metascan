@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import Galleria from 'primevue/galleria'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
 import { updateMedia, deleteMedia } from '../../api/media'
+import { thumbnailUrl } from '../../api/client'
 import { fileName } from '../../utils/path'
 import ImageViewer from './ImageViewer.vue'
 import VideoPlayer from './VideoPlayer.vue'
@@ -178,40 +180,37 @@ function formatSize(bytes: number): string {
 
       <!-- Main display area -->
       <div class="viewer-body">
-        <!-- Prev button -->
-        <button
-          class="nav-btn nav-prev"
-          @click="goPrev"
-          :disabled="currentIndex <= 0"
+        <Galleria
+          v-model:activeIndex="currentIndex"
+          :value="mediaList"
+          :show-item-navigators="true"
+          :show-thumbnails="true"
+          :num-visible="7"
+          class="media-galleria"
         >
-          ‹
-        </button>
-
-        <!-- Content -->
-        <div class="viewer-content">
-          <template v-if="current">
-            <VideoPlayer
-              v-if="current.is_video"
-              ref="videoPlayerRef"
-              :file-path="current.file_path"
-              :playback-speed="current.playback_speed"
-              @speed-change="onSpeedChange"
-            />
-            <ImageViewer
-              v-else
-              :file-path="current.file_path"
+          <template #item="{ item }">
+            <div class="galleria-item">
+              <VideoPlayer
+                v-if="(item as Media).is_video"
+                ref="videoPlayerRef"
+                :file-path="(item as Media).file_path"
+                :playback-speed="(item as Media).playback_speed"
+                @speed-change="onSpeedChange"
+              />
+              <ImageViewer
+                v-else
+                :file-path="(item as Media).file_path"
+              />
+            </div>
+          </template>
+          <template #thumbnail="{ item }">
+            <img
+              class="galleria-thumb"
+              :src="thumbnailUrl((item as Media).file_path)"
+              :alt="(item as Media).file_name ?? fileName((item as Media).file_path)"
             />
           </template>
-        </div>
-
-        <!-- Next button -->
-        <button
-          class="nav-btn nav-next"
-          @click="goNext"
-          :disabled="currentIndex >= mediaList.length - 1"
-        >
-          ›
-        </button>
+        </Galleria>
       </div>
 
       <!-- Info bar -->
@@ -339,34 +338,52 @@ function formatSize(bytes: number): string {
   min-height: 0;
 }
 
-.viewer-content {
+.media-galleria {
   flex: 1;
   min-width: 0;
   display: flex;
-}
-
-.nav-btn {
-  width: 48px;
-  background: transparent;
-  border: none;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 48px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s;
-}
-
-.nav-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.05);
+  flex-direction: column;
   color: #fff;
 }
 
-.nav-btn:disabled {
-  opacity: 0.2;
-  cursor: default;
+.media-galleria :deep(.p-galleria-content) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.media-galleria :deep(.p-galleria-items-container) {
+  flex: 1;
+  min-height: 0;
+}
+
+.media-galleria :deep(.p-galleria-items) {
+  height: 100%;
+}
+
+.media-galleria :deep(.p-galleria-item) {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.galleria-item {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.galleria-thumb {
+  width: 96px;
+  height: 72px;
+  object-fit: cover;
+  display: block;
+  border-radius: 4px;
 }
 
 /* Info bar */
