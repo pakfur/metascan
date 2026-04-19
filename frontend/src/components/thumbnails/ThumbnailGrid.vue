@@ -108,13 +108,76 @@ onMounted(() => {
     resizeObserver.observe(container.value)
   }
   document.addEventListener('click', closeContextMenu)
+  window.addEventListener('keydown', onGridKeyDown)
 })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
   if (scrollSettleId) clearTimeout(scrollSettleId)
   document.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('keydown', onGridKeyDown)
 })
+
+// Arrow-key navigation over the grid. Suppressed while any overlay/dialog
+// is mounted — those own their own keyboard shortcuts.
+function onGridKeyDown(e: KeyboardEvent) {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+    return
+  }
+  const tag = (e.target as HTMLElement | null)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+  if (
+    document.querySelector(
+      '.media-viewer-overlay, .slideshow-overlay, .dialog-overlay',
+    )
+  ) {
+    return
+  }
+  const list = displayList.value
+  if (list.length === 0) return
+
+  e.preventDefault()
+
+  const curPath = mediaStore.selectedMedia?.file_path
+  let idx = curPath ? list.findIndex((m) => m.file_path === curPath) : -1
+
+  if (idx < 0) {
+    idx = 0
+  } else {
+    const cols = columns.value
+    switch (e.key) {
+      case 'ArrowLeft':
+        idx = Math.max(0, idx - 1)
+        break
+      case 'ArrowRight':
+        idx = Math.min(list.length - 1, idx + 1)
+        break
+      case 'ArrowUp':
+        idx = Math.max(0, idx - cols)
+        break
+      case 'ArrowDown':
+        idx = Math.min(list.length - 1, idx + cols)
+        break
+    }
+  }
+
+  mediaStore.selectMedia(list[idx])
+  scrollIndexIntoView(idx)
+}
+
+function scrollIndexIntoView(idx: number) {
+  if (!container.value) return
+  const row = Math.floor(idx / columns.value)
+  const rowTop = padding + row * cellSize.value
+  const rowBottom = rowTop + cellSize.value
+  const viewTop = container.value.scrollTop
+  const viewBottom = viewTop + containerHeight.value
+  if (rowTop < viewTop) {
+    container.value.scrollTop = rowTop - padding
+  } else if (rowBottom > viewBottom) {
+    container.value.scrollTop = rowBottom - containerHeight.value + padding
+  }
+}
 
 // Reset scroll on list change
 watch(() => displayList.value.length, () => {
