@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useMediaStore } from '../../stores/media'
 import MetadataField from './MetadataField.vue'
 import { fileName } from '../../utils/path'
+import { copyToClipboard } from '../../utils/clipboard'
 
 const mediaStore = useMediaStore()
 const media = computed(() => mediaStore.selectedMedia)
@@ -18,10 +19,10 @@ function formatDate(isoStr: string | null): string {
   return new Date(isoStr).toLocaleString()
 }
 
-function copyAll() {
+async function copyAll() {
   if (!media.value) return
   const json = JSON.stringify(media.value, null, 2)
-  navigator.clipboard.writeText(json)
+  await copyToClipboard(json)
 }
 </script>
 
