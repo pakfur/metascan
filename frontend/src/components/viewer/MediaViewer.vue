@@ -8,6 +8,7 @@ import { thumbnailUrl } from '../../api/client'
 import { fileName } from '../../utils/path'
 import ImageViewer from './ImageViewer.vue'
 import VideoPlayer from './VideoPlayer.vue'
+import LazyThumb from './LazyThumb.vue'
 
 const props = defineProps<{
   mediaList: Media[]
@@ -206,12 +207,9 @@ function formatSize(bytes: number): string {
               </div>
             </template>
             <template #thumbnail="{ item }">
-              <img
-                class="galleria-thumb"
+              <LazyThumb
                 :src="thumbnailUrl((item as Media).file_path)"
                 :alt="(item as Media).file_name ?? fileName((item as Media).file_path)"
-                loading="lazy"
-                decoding="async"
               />
             </template>
           </Galleria>
@@ -382,14 +380,6 @@ function formatSize(bytes: number): string {
   display: flex;
   align-items: stretch;
   justify-content: stretch;
-}
-
-.galleria-thumb {
-  width: 96px;
-  height: 72px;
-  object-fit: cover;
-  display: block;
-  border-radius: 4px;
 }
 
 /* Info bar */
