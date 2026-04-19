@@ -253,7 +253,7 @@ class InferenceClient:
         await self.shutdown()
         await self.start(model_key=model_key, device=device)
 
-    async def shutdown(self) -> None:
+    async def shutdown(self) -> None:  # noqa: C901
         """Request a clean exit and wait for the worker process to die."""
         self._stopping = True
         proc = self._proc
@@ -416,7 +416,7 @@ class InferenceClient:
         except Exception:
             logger.exception("inference stderr drainer crashed")
 
-    async def _reader_loop(self) -> None:
+    async def _reader_loop(self) -> None:  # noqa: C901
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         try:

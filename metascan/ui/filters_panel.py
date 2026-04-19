@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QToolButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
 from typing import Dict, List, Set, Any, Optional
 
 from metascan.ui.path_filter_tree import PathFilterTree
@@ -206,7 +205,7 @@ class FilterSection(QFrame):
         for checkbox in self.checkboxes.values():
             checkbox.setChecked(False)
 
-    def filter_items(self, filter_text: str):
+    def filter_items(self, filter_text: str):  # noqa: C901
         """Filter displayed items based on text."""
         # Filter items
         if filter_text:
@@ -425,7 +424,9 @@ class FiltersPanel(QWidget):
         # Add with stretch factor to expand proportionally
         main_layout.addWidget(self.scroll_area, 1)
 
-    def update_filters(self, filter_data: Dict[str, List[Dict[str, Any]]]):
+    def update_filters(
+        self, filter_data: Dict[str, List[Dict[str, Any]]]
+    ):  # noqa: C901
         """Update the filter sections with new data."""
         # Save current prompt filter text
         current_prompt_filter = (

@@ -179,7 +179,7 @@ class EmbeddingQueue:
 
         logger.info("Embedding indexing cancelled")
 
-    def poll_updates(self) -> None:
+    def poll_updates(self) -> None:  # noqa: C901
         """Read progress from the worker and emit callbacks.
 
         Should be called periodically (e.g. every 500ms) while indexing.

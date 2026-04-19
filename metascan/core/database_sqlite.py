@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from threading import Lock
 
-from metascan.utils.startup_profiler import log_startup, profile_phase
+from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
 from metascan.core.prompt_tokenizer import PromptTokenizer
@@ -667,9 +667,9 @@ class DatabaseManager:
             "VALUES ('tag', ?, ?, ?) "
             "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
             "source = CASE "
-            f"  WHEN indices.source = ? THEN 'both' "
-            f"  WHEN indices.source = 'both' THEN 'both' "
-            f"  ELSE excluded.source END"
+            "  WHEN indices.source = ? THEN 'both' "
+            "  WHEN indices.source = 'both' THEN 'both' "
+            "  ELSE excluded.source END"
         )
         rows = [(t.lower(), posix_path, source, other) for t in tags if t]
         try:

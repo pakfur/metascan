@@ -7,8 +7,7 @@ controls for building/rebuilding the embedding index.
 
 import json
 import logging
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from PyQt6.QtWidgets import (
     QDialog,

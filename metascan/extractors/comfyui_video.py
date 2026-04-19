@@ -350,7 +350,7 @@ class ComfyUIVideoExtractor(MetadataExtractor):
         metadata = self._get_video_metadata(media_path)
         return "prompt" in metadata or "workflow" in metadata
 
-    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:  # noqa: C901
         try:
             metadata = self._get_video_metadata(media_path)
 

@@ -20,7 +20,7 @@ import time
 import traceback
 import threading
 from pathlib import Path
-from typing import Any, Dict, IO, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 # Pre-load PyTorch c10.dll on Windows to prevent DLL loading errors
 if platform.system() == "Windows":
@@ -42,18 +42,19 @@ if platform.system() == "Windows":
 # Add the parent directory to sys.path so we can import metascan modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import portalocker
+import random  # noqa: E402
 
-import random
-
-from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
-from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.vocabulary import (
+from metascan.core.embedding_manager import (
+    EmbeddingManager,
+    FaissIndexManager,
+)  # noqa: E402
+from metascan.core.database_sqlite import DatabaseManager  # noqa: E402
+from metascan.core.vocabulary import (  # noqa: E402
     Vocabulary,
     build_vocabulary,
     select_tags,
 )
-from metascan.utils.app_paths import get_base_path, get_data_dir
+from metascan.utils.app_paths import get_base_path, get_data_dir  # noqa: E402
 
 
 # Maximum time to spend on a single file (seconds).
@@ -229,7 +230,7 @@ class EmbeddingWorker:
         except OSError:
             return -1.0
 
-    def run(self) -> None:
+    def run(self) -> None:  # noqa: C901
         """Main worker loop."""
         # Write initial progress immediately so the queue knows we're alive
         self._write_progress(0, 0, "starting")
