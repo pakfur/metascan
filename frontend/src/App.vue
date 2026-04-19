@@ -22,12 +22,19 @@ import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from './components/dialogs/UpscaleDialog.vue'
 import UpscaleQueue from './components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from './components/dialogs/ConfigDialog.vue'
+import ScopeBreadcrumb from './components/layout/ScopeBreadcrumb.vue'
+import NewFolderDialog from './components/dialogs/NewFolderDialog.vue'
+import SmartFolderEditor from './components/dialogs/SmartFolderEditor.vue'
+import FolderKebabMenu from './components/filters/FolderKebabMenu.vue'
+import ToastHost from './components/layout/ToastHost.vue'
+import { useFoldersUi } from './composables/useFoldersUi'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
 const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
+const foldersUi = useFoldersUi()
 
 const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
@@ -62,8 +69,10 @@ useWebSocket('watcher', () => {
 })
 
 function openViewer(media: Media) {
-  const idx = mediaStore.displayedMedia.findIndex(
-    (m) => m.file_path === media.file_path
+  // Viewer navigates within the active scope (library / manual / smart) so
+  // prev/next stays inside the folder the user just clicked into.
+  const idx = mediaStore.scopedMedia.findIndex(
+    (m) => m.file_path === media.file_path,
   )
   viewerIndex.value = idx >= 0 ? idx : 0
   viewerOpen.value = true
@@ -79,7 +88,7 @@ function closeViewer() {
 }
 
 function openSlideshow() {
-  if (mediaStore.displayedMedia.length > 0) {
+  if (mediaStore.scopedMedia.length > 0) {
     slideshowOpen.value = true
   }
 }
@@ -149,6 +158,7 @@ useKeyboard([
             @config="configOpen = true"
           />
           <ViewMenubar @slideshow="openSlideshow" />
+          <ScopeBreadcrumb />
           <div class="grid-wrap">
             <ThumbnailGrid
               ref="thumbnailGridRef"
@@ -173,7 +183,7 @@ useKeyboard([
     <!-- Media Viewer overlay -->
     <MediaViewer
       v-if="viewerOpen"
-      :media-list="mediaStore.displayedMedia"
+      :media-list="mediaStore.scopedMedia"
       :initial-index="viewerIndex"
       @close="closeViewer"
     />
@@ -181,7 +191,7 @@ useKeyboard([
     <!-- Slideshow overlay -->
     <SlideshowViewer
       v-if="slideshowOpen"
-      :media-list="mediaStore.displayedMedia"
+      :media-list="mediaStore.scopedMedia"
       @close="closeSlideshow"
     />
 
@@ -222,6 +232,17 @@ useKeyboard([
       v-if="configOpen"
       @close="configOpen = false"
     />
+
+    <!-- Folder dialogs — overlays that can be opened from anywhere via
+         useFoldersUi. -->
+    <NewFolderDialog
+      v-if="foldersUi.newFolderOpen.value || foldersUi.renameFolderId.value"
+    />
+    <SmartFolderEditor v-if="foldersUi.smartEditorOpen.value !== null" />
+    <FolderKebabMenu />
+
+    <!-- Toast host — single slot, non-blocking -->
+    <ToastHost />
   </div>
 </template>
 

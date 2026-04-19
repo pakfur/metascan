@@ -3,6 +3,7 @@ import { watch } from 'vue'
 import { useFilterStore } from '../../stores/filters'
 import { useMediaStore } from '../../stores/media'
 import FilterSection from './FilterSection.vue'
+import FoldersSection from './FoldersSection.vue'
 
 const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
@@ -31,6 +32,12 @@ function onClearAll() {
   <div class="filter-panel">
     <div class="app-title-block">
       <span class="app-title">Metascan</span>
+    </div>
+
+    <!-- Folders + Smart Folders ride above the standard filter list. -->
+    <div class="folders-stack">
+      <FoldersSection kind="manual" label="FOLDERS" />
+      <FoldersSection kind="smart" label="SMART FOLDERS" />
     </div>
 
     <div class="filter-header">
@@ -103,6 +110,11 @@ function onClearAll() {
 
 .clear-all-btn:hover {
   text-decoration: underline;
+}
+
+.folders-stack {
+  display: flex;
+  flex-direction: column;
 }
 
 .filter-sections {
