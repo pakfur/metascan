@@ -152,12 +152,12 @@ async function onRebuildIndex() {
 
     <div class="action-group">
       <Button
-        v-tooltip.bottom="'Scan'"
+        v-tooltip.bottom="'Import'"
         icon="pi pi-file-import" 
         severity="secondary"
         text
         rounded
-        aria-label="Scan"
+        aria-label="Import"
         @click="emit('scan')"
       />
       <Button
