@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Callable, Tuple, Dict, Any
+from typing import List, Optional, Callable, Tuple, Any
 from queue import Queue
 from threading import Thread
 import logging
@@ -8,8 +8,7 @@ from datetime import datetime
 import threading
 import queue
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from metascan.utils.startup_profiler import log_startup, profile_phase
+from metascan.utils.startup_profiler import log_startup
 from metascan.core.media import Media, LoRA
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
@@ -17,7 +16,7 @@ from metascan.core.phash_utils import compute_phash_for_file
 from metascan.cache.thumbnail import ThumbnailCache
 
 try:
-    import ffmpeg
+    import ffmpeg  # noqa: F401
 
     HAS_FFMPEG_PYTHON = True
 except ImportError:
@@ -38,7 +37,7 @@ class Scanner:
         self.extractor_manager = MetadataExtractorManager()
         self.thumbnail_cache = thumbnail_cache
 
-    def scan_directory(
+    def scan_directory(  # noqa: C901
         self,
         directory: str,
         recursive: bool = True,
@@ -131,7 +130,7 @@ class Scanner:
 
         return media_files
 
-    def _process_media_file(self, file_path: Path) -> Optional[Media]:
+    def _process_media_file(self, file_path: Path) -> Optional[Media]:  # noqa: C901
         """Process a single media file and extract metadata"""
         try:
             stat = file_path.stat()
@@ -477,7 +476,7 @@ class ThreadedScanner:
         )
         self.writer_thread.start()
 
-    def _producer_worker(self, media_files: List[Path]) -> None:
+    def _producer_worker(self, media_files: List[Path]) -> None:  # noqa: C901
         files_added = 0
         try:
             for file_path in media_files:
@@ -539,7 +538,7 @@ class ThreadedScanner:
         finally:
             logger.debug("Producer thread exiting")
 
-    def _file_worker(self) -> None:
+    def _file_worker(self) -> None:  # noqa: C901
         scanner = Scanner(self.db_manager, thumbnail_cache=self.thumbnail_cache)
         worker_id = threading.current_thread().name
         files_processed_by_worker = 0
@@ -625,7 +624,7 @@ class ThreadedScanner:
                 f"{worker_id} exiting, processed {files_processed_by_worker} files successfully"
             )
 
-    def _database_writer(self) -> None:
+    def _database_writer(self) -> None:  # noqa: C901
         batch = []
         last_write_time = time.time()
         batch_timeout = 2.0  # Write batch every 2 seconds even if not full
@@ -712,7 +711,8 @@ class ThreadedScanner:
                             time.sleep(2.0)
                             if self.result_queue.empty():
                                 logger.debug(
-                                    f"All workers finished and queue empty, database writer exiting (processed {results_processed} files)"
+                                    "All workers finished and queue empty, database writer exiting "
+                                    f"(processed {results_processed} files)"
                                 )
                                 break
 
@@ -747,7 +747,9 @@ class ThreadedScanner:
             self.stop_event.set()
         finally:
             logger.info(
-                f"Database writer exiting: processed={results_processed}, written={files_written}, failed={files_failed}, saved={self.files_saved}"
+                "Database writer exiting: "
+                f"processed={results_processed}, written={files_written}, "
+                f"failed={files_failed}, saved={self.files_saved}"
             )
 
     def _wait_for_completion(self) -> None:

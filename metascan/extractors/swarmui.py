@@ -23,12 +23,12 @@ class SwarmUIExtractor(MetadataExtractor):
                 comment = metadata["UserComment"]
                 if isinstance(comment, str) and "sui_image_params" in comment:
                     return True
-            except:
+            except Exception:
                 pass
 
         return False
 
-    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:  # noqa: C901
         try:
             metadata = self._get_exif_metadata(image_path)
 
@@ -132,7 +132,9 @@ class SwarmUIExtractor(MetadataExtractor):
             logger.error(f"Failed to extract SwarmUI metadata from {image_path}: {e}")
             return None
 
-    def _extract_from_sui_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_from_sui_params(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:  # noqa: C901
         extracted: Dict[str, Any] = {}
 
         extracted["prompt"] = params.get("prompt")
@@ -258,7 +260,7 @@ class SwarmUIExtractor(MetadataExtractor):
 
         return extracted
 
-    def _parse_parameter(
+    def _parse_parameter(  # noqa: C901
         self,
         key: str,
         value: str,
@@ -341,7 +343,9 @@ class SwarmUIExtractor(MetadataExtractor):
                 )
                 loras.append({"lora_name": lora_name_clean, "lora_weight": lora_weight})
 
-    def _repair_incomplete_json(self, json_str: str) -> Optional[Dict[str, Any]]:
+    def _repair_incomplete_json(
+        self, json_str: str
+    ) -> Optional[Dict[str, Any]]:  # noqa: C901
         try:
             import re
 

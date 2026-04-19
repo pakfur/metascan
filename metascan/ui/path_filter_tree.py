@@ -1,18 +1,14 @@
 from PyQt6.QtWidgets import (
-    QApplication,
     QFileIconProvider,
-    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QWidget,
     QVBoxLayout,
     QPushButton,
-    QHBoxLayout,
     QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QIcon
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Dict, List, Set, Optional
 from pathlib import Path
 import json
 

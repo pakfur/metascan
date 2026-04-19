@@ -526,8 +526,6 @@ def test_full_clean_restores_favorites_on_exception(monkeypatch):
     monkeypatch.setattr(scan_api, "get_directories", lambda c: [FakeDirCfg()])
 
     # Make the directory "exist" so we proceed past the if-not-exists check
-    import os
-
     monkeypatch.setattr(scan_api.Path, "exists", lambda self: True)
 
     async def fake_broadcast(channel, event, data=None):

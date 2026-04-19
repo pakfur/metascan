@@ -1,8 +1,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, Union
 from PIL import Image
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -199,7 +198,7 @@ class MetadataExtractor(ABC):
             logger.error(f"Failed to read PNG metadata from {image_path}: {e}")
             return {}
 
-    def _get_exif_metadata(self, image_path: Path) -> Dict[str, Any]:
+    def _get_exif_metadata(self, image_path: Path) -> Dict[str, Any]:  # noqa: C901
         """
         Extract metadata from image EXIF data and PNG text chunks.
 
@@ -255,11 +254,11 @@ class MetadataExtractor(ABC):
                                                 "utf-8", errors="ignore"
                                             )
                                             metadata[tag_name] = decoded
-                                    except:
+                                    except Exception:
                                         metadata[tag_name] = value
                                 else:
                                     metadata[tag_name] = value
-                    except:
+                    except Exception:
                         pass
 
                 return metadata

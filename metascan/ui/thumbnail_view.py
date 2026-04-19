@@ -4,15 +4,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
-    QFrame,
     QGridLayout,
     QProgressBar,
     QPushButton,
-    QSizeGrip,
     QMessageBox,
     QMenu,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPointF, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QPointF, QUrl
 from PyQt6.QtGui import (
     QPixmap,
     QFont,
@@ -20,7 +18,6 @@ from PyQt6.QtGui import (
     QPen,
     QColor,
     QBrush,
-    QPolygon,
     QPolygonF,
     QDesktopServices,
     QKeySequence,
@@ -442,7 +439,7 @@ class ThumbnailView(QWidget):
         space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         space_shortcut.activated.connect(self.open_selected_media)
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event):  # noqa: C901
         if not self.media_list:
             return super().keyPressEvent(event)
 
@@ -525,7 +522,7 @@ class ThumbnailView(QWidget):
             self.loader_thread.wait()
 
         while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
+            self.grid_layout.takeAt(0)
 
         for widget in self.thumbnail_widgets.values():
             widget.setVisible(False)  # Hide before deletion
@@ -712,7 +709,7 @@ class ThumbnailView(QWidget):
                 widget.setVisible(False)
 
             while self.grid_layout.count() > 0:
-                item = self.grid_layout.takeAt(0)
+                self.grid_layout.takeAt(0)
                 # Don't delete widgets, just remove from layout
 
             if not visible_widgets:
