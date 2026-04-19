@@ -75,6 +75,13 @@ def _get_faiss_manager() -> FaissIndexManager:
     return _faiss_manager
 
 
+def warm_faiss_index() -> None:
+    """Construct the FaissIndexManager singleton and load the on-disk
+    index. Blocking — must be called from a worker thread. Safe to invoke
+    multiple times; returns immediately once the singleton is populated."""
+    _get_faiss_manager()
+
+
 def _get_embedding_queue() -> EmbeddingQueue:
     """Lazily construct the embedding queue and bridge its callbacks to
     the WebSocket 'embedding' channel."""
