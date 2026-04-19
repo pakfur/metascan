@@ -42,10 +42,10 @@ if platform.system() == "Windows":
 # Add the parent directory to sys.path so we can import metascan modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from metascan.core.media_upscaler import MediaUpscaler
-from metascan.core.upscale_queue_process import UpscaleStatus
-from metascan.utils.app_paths import get_data_dir
-import portalocker
+from metascan.core.media_upscaler import MediaUpscaler  # noqa: E402
+from metascan.core.upscale_queue_process import UpscaleStatus  # noqa: E402
+from metascan.utils.app_paths import get_data_dir  # noqa: E402
+import portalocker  # noqa: E402
 
 
 class UpscaleWorker:
@@ -207,7 +207,7 @@ class UpscaleWorker:
             return task_data
 
         except TimeoutError:
-            self.logger.error(f"Failed to acquire lock for loading task (timeout)")
+            self.logger.error("Failed to acquire lock for loading task (timeout)")
             raise
         except Exception as e:
             self.logger.error(f"Failed to load task: {e}")
@@ -252,7 +252,7 @@ class UpscaleWorker:
             if self.debug:
                 self.logger.debug(f"Cleanup traceback: {traceback.format_exc()}")
 
-    def _update_task_status(
+    def _update_task_status(  # noqa: C901
         self,
         status: UpscaleStatus,
         error_message: Optional[str] = None,
@@ -297,7 +297,7 @@ class UpscaleWorker:
 
         except TimeoutError:
             self.logger.error(
-                f"Failed to acquire lock for updating task status (timeout)"
+                "Failed to acquire lock for updating task status (timeout)"
             )
             if self.debug:
                 self.logger.debug(f"Lock timeout traceback: {traceback.format_exc()}")
@@ -310,7 +310,7 @@ class UpscaleWorker:
             if lock_fh:
                 self._release_lock(lock_fh)
 
-    def run(self):
+    def run(self):  # noqa: C901
         """Run the upscaling task."""
         try:
             # Load task data
@@ -318,7 +318,7 @@ class UpscaleWorker:
 
             self.logger.info(f"Starting upscale task: {task_data['file_path']}")
             if self.debug:
-                self.logger.debug(f"Task parameters:")
+                self.logger.debug("Task parameters:")
                 self.logger.debug(f"  - File type: {task_data.get('file_type')}")
                 self.logger.debug(f"  - Scale: {task_data.get('scale')}")
                 self.logger.debug(f"  - Model: {task_data.get('model')}")
@@ -409,7 +409,8 @@ class UpscaleWorker:
                 # For videos with interpolation, we need to do upscaling and interpolation separately
                 if task_data.get("interpolate_frames", False):
                     self.logger.info(
-                        f"Processing video with scale={task_data['scale']}, model={task_data.get('model', 'general')}, interpolation=True"
+                        f"Processing video with scale={task_data['scale']}, "
+                        f"model={task_data.get('model', 'general')}, interpolation=True"
                     )
 
                     # Step 1: Upscale video to a temporary location (don't replace original yet)
@@ -465,7 +466,8 @@ class UpscaleWorker:
 
                     # Step 2: Interpolate frames using RIFE
                     self.logger.info(
-                        f"Interpolating frames: factor={task_data.get('interpolation_factor', 2)}, target_fps={task_data.get('fps_override')}"
+                        f"Interpolating frames: factor={task_data.get('interpolation_factor', 2)}, "
+                        f"target_fps={task_data.get('fps_override')}"
                     )
 
                     # Determine interpolation factor
@@ -478,7 +480,8 @@ class UpscaleWorker:
                         if interpolation_factor < 2:
                             interpolation_factor = 2
                         self.logger.info(
-                            f"Calculated interpolation factor: {interpolation_factor} (current: {original_fps} fps, target: {target_fps} fps)"
+                            f"Calculated interpolation factor: {interpolation_factor} "
+                            f"(current: {original_fps} fps, target: {target_fps} fps)"
                         )
                     else:
                         interpolation_factor = task_data.get("interpolation_factor", 2)

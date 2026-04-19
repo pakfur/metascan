@@ -195,7 +195,7 @@ class InferenceWorker:
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self) -> int:
+    def run(self) -> int:  # noqa: C901
         try:
             self._load_model()
         except Exception as e:

@@ -9,7 +9,7 @@ import logging
 import platform
 import subprocess
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QDialog,
@@ -444,7 +444,7 @@ class DuplicateFinderDialog(QDialog):
                 else:
                     child.setCheckState(0, Qt.CheckState.Checked)
 
-    def _select_keep_largest(self) -> None:
+    def _select_keep_largest(self) -> None:  # noqa: C901
         """Select all files except the largest in each group (keep largest unselected)."""
         for i in range(self.tree.topLevelItemCount()):
             group = self.tree.topLevelItem(i)

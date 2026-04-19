@@ -26,7 +26,7 @@ class DeleteRequest(BaseModel):
 
 
 @router.post("/find")
-async def find_duplicates(service: MediaService = Depends(_get_service)):
+async def find_duplicates(service: MediaService = Depends(_get_service)):  # noqa: C901
     """Find duplicate groups using perceptual hashing."""
     db = get_db()
     all_hashes = await asyncio.to_thread(db.get_all_phashes)

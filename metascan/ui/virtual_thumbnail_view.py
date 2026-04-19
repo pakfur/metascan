@@ -21,47 +21,28 @@ from PyQt6.QtWidgets import (
     QLabel,
     QScrollArea,
     QPushButton,
-    QProgressBar,
-    QMessageBox,
     QFrame,
     QButtonGroup,
     QSlider,
-    QSizePolicy,
 )
 from PyQt6.QtCore import (
     Qt,
-    QThread,
     pyqtSignal,
     QTimer,
-    QSize,
-    QRect,
-    QPoint,
     QPropertyAnimation,
     QEasingCurve,
-    QParallelAnimationGroup,
-    QObject,
 )
 from PyQt6.QtGui import (
     QPixmap,
-    QFont,
-    QPainter,
-    QPen,
-    QColor,
-    QBrush,
     QPalette,
-    QPolygon,
-    QPolygonF,
-    QDesktopServices,
     QKeySequence,
     QShortcut,
-    QPaintEvent,
     QResizeEvent,
     QShowEvent,
     QWheelEvent,
-    QMouseEvent,
 )
 from pathlib import Path
-from typing import List, Set, Optional, Dict, Tuple, Union, Deque
+from typing import List, Set, Optional, Dict, Tuple, Deque
 import logging
 import platform
 import subprocess
@@ -141,11 +122,10 @@ class WidgetPool:
 
     def _create_widgets(self, count: int) -> None:
         """Create new widgets and add them to the available pool."""
+        from datetime import datetime
+
         for _ in range(count):
             # Create a dummy media object for initialization
-            from metascan.core.media import Media
-            from datetime import datetime
-
             dummy_media = Media(
                 file_path=Path("dummy"),
                 file_size=0,
@@ -466,7 +446,8 @@ class VirtualScrollArea(QScrollArea):
         self.layout_metrics.rows = rows
 
         logger.debug(
-            f"Layout calculated: {columns}x{rows} grid for {item_count} items, width={scroll_area_width}, cell_width={self.layout_metrics.cell_width}"
+            f"Layout calculated: {columns}x{rows} grid for {item_count} items, "
+            f"width={scroll_area_width}, cell_width={self.layout_metrics.cell_width}"
         )
 
     def _update_scroll_range(self) -> None:
@@ -580,7 +561,7 @@ class VirtualScrollArea(QScrollArea):
             f"items {first_item}-{last_item}, {len(self.visible_widgets)} widgets visible"
         )
 
-    def _show_widget_at_index(self, index: int) -> None:
+    def _show_widget_at_index(self, index: int) -> None:  # noqa: C901
         """Show a widget for the media at the given index."""
         if index < 0 or index >= len(self.filtered_media):
             return
@@ -702,7 +683,7 @@ class VirtualScrollArea(QScrollArea):
                     widget.load_thumbnail(thumbnail_path)
                 # If not in cache, _render_visible_thumbnails will handle it
 
-    def _render_visible_thumbnails(self) -> None:
+    def _render_visible_thumbnails(self) -> None:  # noqa: C901
         """Synchronously render thumbnails for visible widgets that are missing them.
 
         Called after scroll stops or state changes. Checks cancel flag between each
@@ -1037,7 +1018,7 @@ class VirtualScrollArea(QScrollArea):
 
         event.accept()
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event) -> None:  # noqa: C901
         """Handle keyboard navigation."""
         if not self.filtered_media:
             return super().keyPressEvent(event)

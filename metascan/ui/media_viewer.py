@@ -20,14 +20,11 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QToolTip,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QSize, QPoint
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QPoint
 from PyQt6.QtGui import (
     QPixmap,
-    QFont,
     QKeyEvent,
     QPainter,
-    QImage,
-    QAction,
     QShortcut,
     QKeySequence,
 )
@@ -475,7 +472,9 @@ class VideoPlayer(QWidget):
         self.update_timer.timeout.connect(self.update_time_display)
         self.update_timer.start(100)
 
-    def load_video(self, file_path: Path, media: Optional[Media] = None) -> bool:
+    def load_video(
+        self, file_path: Path, media: Optional[Media] = None
+    ) -> bool:  # noqa: C901
         """Load and prepare a video file for playback.
 
         Args:
@@ -524,7 +523,7 @@ class VideoPlayer(QWidget):
                     and not format_supported
                 ):
                     logger.warning(
-                        f"Codec and format may not be supported, attempting fallback first"
+                        "Codec and format may not be supported, attempting fallback first"
                     )
                     self._attempt_fallback()
                     return False
@@ -912,7 +911,7 @@ class VideoPlayer(QWidget):
                         f"Saved playback speed {snapped_speed}x for {self.current_media.file_name}"
                     )
                 else:
-                    logger.warning(f"Failed to save playback speed to database")
+                    logger.warning("Failed to save playback speed to database")
 
             logger.info(f"Playback speed changed to {speed}x")
         except ValueError:

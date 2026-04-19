@@ -169,7 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Inference client shutdown raised")
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: C901
     server_config = get_server_config()
 
     app = FastAPI(

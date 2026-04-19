@@ -335,7 +335,7 @@ class ThumbnailCache:
             draw.polygon(points, fill=(255, 255, 255))
 
             img.save(thumbnail_path, "JPEG", quality=85)
-            logger.debug(f"Created video placeholder thumbnail")
+            logger.debug("Created video placeholder thumbnail")
             return thumbnail_path
 
         except Exception as e:
@@ -463,7 +463,7 @@ class ThumbnailCache:
         for thumbnail in self.cache_dir.glob("*.jpg"):
             try:
                 total += thumbnail.stat().st_size
-            except:
+            except Exception:
                 pass
         return total
 

@@ -1,6 +1,5 @@
 """Application path utilities for handling bundled and development environments."""
 
-import os
 import sys
 from pathlib import Path
 
@@ -75,7 +74,7 @@ def get_config_path() -> Path:
                 import shutil
 
                 shutil.copy2(example_config, config_path)
-                print(f"Created config.json from config_example.json")
+                print("Created config.json from config_example.json")
 
         return config_path
 

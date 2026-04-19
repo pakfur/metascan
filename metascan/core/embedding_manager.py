@@ -7,8 +7,6 @@ for duplicate detection, content search, and similarity search.
 import json
 import logging
 import os
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -172,11 +170,13 @@ class EmbeddingManager:
         self._model.eval()
 
         if needs_download:
-            logger.info(f"Model download complete")
+            logger.info("Model download complete")
         logger.info(f"CLIP model loaded successfully on {self._device}")
 
     @staticmethod
-    def _check_model_needs_download(model_name: str, pretrained: str) -> bool:
+    def _check_model_needs_download(
+        model_name: str, pretrained: str
+    ) -> bool:  # noqa: C901
         """Return True when the weights for (model_name, pretrained) are not
         available in any local cache and would be fetched from the network on
         the next load.
@@ -406,7 +406,9 @@ class EmbeddingManager:
             logger.error(f"Failed to compute video embedding for {video_path}: {e}")
             return None
 
-    def _extract_keyframes(self, video_path: str, num_frames: int) -> List[np.ndarray]:
+    def _extract_keyframes(
+        self, video_path: str, num_frames: int
+    ) -> List[np.ndarray]:  # noqa: C901
         """Extract evenly-spaced keyframes from a video using ffmpeg."""
         from metascan.utils.ffmpeg_utils import (
             probe_with_timeout,
