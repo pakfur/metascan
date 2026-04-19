@@ -208,6 +208,8 @@ function formatSize(bytes: number): string {
               class="galleria-thumb"
               :src="thumbnailUrl((item as Media).file_path)"
               :alt="(item as Media).file_name ?? fileName((item as Media).file_path)"
+              loading="lazy"
+              decoding="async"
             />
           </template>
         </Galleria>
