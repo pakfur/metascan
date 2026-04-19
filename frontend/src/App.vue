@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
@@ -28,6 +28,8 @@ const filterStore = useFilterStore()
 const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
+
+const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
 // Dialog state
 const viewerOpen = ref(false)
@@ -69,6 +71,11 @@ function openViewer(media: Media) {
 
 function closeViewer() {
   viewerOpen.value = false
+  // Wait for ThumbnailGrid to repaint (the overlay's v-if tears down first),
+  // then bring the last-viewed item into view.
+  nextTick(() => {
+    thumbnailGridRef.value?.scrollSelectedIntoView()
+  })
 }
 
 function openSlideshow() {
@@ -143,7 +150,11 @@ useKeyboard([
           />
           <ViewMenubar @slideshow="openSlideshow" />
           <div class="grid-wrap">
-            <ThumbnailGrid @open="openViewer" @upscale="openUpscale" />
+            <ThumbnailGrid
+              ref="thumbnailGridRef"
+              @open="openViewer"
+              @upscale="openUpscale"
+            />
           </div>
         </div>
       </template>
