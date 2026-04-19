@@ -4,6 +4,7 @@ import type { Media } from '../types/media'
 import type { ActiveFilters } from '../types/filters'
 import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
 import { applyFilters } from '../api/filters'
+import { useFoldersStore } from './folders'
 
 export const useMediaStore = defineStore('media', () => {
   // Summary records only. Heavy AI-generation fields are absent from these
@@ -32,6 +33,15 @@ export const useMediaStore = defineStore('media', () => {
     }
 
     return items
+  })
+
+  // scopedMedia narrows displayedMedia to the active folder/smart-folder
+  // scope. Grid, breadcrumb, and viewer all read this — any new surface
+  // that should respect the folder scope should use scopedMedia, not
+  // displayedMedia.
+  const scopedMedia = computed(() => {
+    const folders = useFoldersStore()
+    return folders.scopeMedia(displayedMedia.value)
   })
 
   async function loadAllMedia() {
@@ -116,6 +126,9 @@ export const useMediaStore = defineStore('media', () => {
     if (selectedMedia.value?.file_path === media.file_path) {
       selectedMedia.value = null
     }
+    // Keep manual folders consistent — a path that's been deleted from
+    // disk shouldn't linger as a dangling member.
+    useFoldersStore().purgePath(media.file_path)
   }
 
   function setSortOrder(order: string) {
@@ -129,6 +142,7 @@ export const useMediaStore = defineStore('media', () => {
   return {
     allMedia,
     displayedMedia,
+    scopedMedia,
     selectedMedia,
     selectedPaths,
     sortOrder,
