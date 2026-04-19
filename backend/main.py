@@ -150,6 +150,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload())
 
+        # Also warm the FAISS index in the main process. The first search
+        # call otherwise triggers a synchronous import of faiss + torch +
+        # open_clip + imagehash on the event loop thread (~20 s stall)
+        # plus a read of the on-disk index, duplicating work the user
+        # already opted into by enabling preload.
+        async def _preload_faiss() -> None:
+            try:
+                t1 = time.perf_counter()
+                await asyncio.to_thread(similarity.warm_faiss_index)
+                logger.info(
+                    "Warmed FAISS index in %.0fms",
+                    (time.perf_counter() - t1) * 1000,
+                )
+            except Exception:
+                logger.exception("FAISS index preload failed")
+
+        asyncio.create_task(_preload_faiss())
+
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
