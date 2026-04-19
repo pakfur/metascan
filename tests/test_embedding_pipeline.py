@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 from metascan.core.phash_utils import compute_phash_for_file

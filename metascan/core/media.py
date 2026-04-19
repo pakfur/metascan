@@ -3,7 +3,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses_json import dataclass_json, config
-from dataclasses_json.cfg import LetterCase
 
 from metascan.utils.path_utils import to_posix_path, to_native_path
 

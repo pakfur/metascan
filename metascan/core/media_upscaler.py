@@ -24,7 +24,7 @@ log_startup("media_upscaler.py: Module loading started")
 _heavy_imports_done = False
 
 
-def _ensure_heavy_imports() -> None:
+def _ensure_heavy_imports() -> None:  # noqa: C901
     """
     Lazily import heavy dependencies (torchvision, distutils compatibility).
     Called only when upscaling operations are actually needed.
@@ -37,7 +37,7 @@ def _ensure_heavy_imports() -> None:
 
     # Setup distutils compatibility
     try:
-        import distutils  # type: ignore
+        import distutils  # type: ignore  # noqa: F401
     except ImportError:
         try:
             import setuptools._distutils  # type: ignore
@@ -115,7 +115,7 @@ class MediaUpscaler:
         self.model_urls = {
             "RealESRGAN_x2plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
             "RealESRGAN_x4plus.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-            "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+            "RealESRGAN_x4plus_anime_6B.pth": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",  # noqa: E501
             "GFPGANv1.4.pth": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
             "rife_binary": rife_info["url"],
         }
@@ -134,17 +134,17 @@ class MediaUpscaler:
 
         if system == "Darwin":  # macOS
             return {
-                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-macos.zip",  # noqa: E501
                 "dir_name": "rife-ncnn-vulkan-20221029-macos",
             }
         elif system == "Linux":
             return {
-                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",  # noqa: E501
                 "dir_name": "rife-ncnn-vulkan-20221029-ubuntu",
             }
         elif system == "Windows":
             return {
-                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip",
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip",  # noqa: E501
                 "dir_name": "rife-ncnn-vulkan-20221029-windows",
             }
         else:
@@ -152,7 +152,7 @@ class MediaUpscaler:
                 f"Unsupported OS for RIFE: {system}, defaulting to Linux"
             )
             return {
-                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",
+                "url": "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-ubuntu.zip",  # noqa: E501
                 "dir_name": "rife-ncnn-vulkan-20221029-ubuntu",
             }
 
@@ -220,12 +220,12 @@ class MediaUpscaler:
     def _install_python_dependencies(self) -> bool:
         try:
             _ensure_heavy_imports()
-            import realesrgan
-            import basicsr
-            import cv2
-            import gfpgan
-            from PIL import Image
-            import piexif
+            import realesrgan  # noqa: F401
+            import basicsr  # noqa: F401
+            import cv2  # noqa: F401
+            import gfpgan  # noqa: F401
+            from PIL import Image  # noqa: F401
+            import piexif  # noqa: F401
 
             self.logger.info("Dependencies already installed")
             return True
@@ -320,7 +320,6 @@ class MediaUpscaler:
 
     def _download_rife(self) -> bool:
         import zipfile
-        import tarfile
 
         bin_dir = self.models_dir / "rife"
         # The actual binary is in the extracted subdirectory
@@ -368,7 +367,7 @@ class MediaUpscaler:
             self.logger.error(f"Failed to download RIFE: {e}")
             return False
 
-    def enhance_faces_gfpgan(
+    def enhance_faces_gfpgan(  # noqa: C901
         self,
         input_path: Path,
         output_path: Path,
@@ -491,7 +490,7 @@ class MediaUpscaler:
             self.logger.debug(f"Full traceback: {traceback.format_exc()}")
             return False
 
-    def process_image(
+    def process_image(  # noqa: C901
         self,
         input_path: Path,
         output_path: Path,
@@ -534,7 +533,6 @@ class MediaUpscaler:
         try:
             _ensure_heavy_imports()
             from realesrgan import RealESRGANer
-            from basicsr.archs.rrdbnet_arch import RRDBNet
             import cv2
 
             if progress_callback:
@@ -692,7 +690,7 @@ class MediaUpscaler:
             self.logger.debug(f"Full traceback: {traceback.format_exc()}")
             return False
 
-    def process_video(
+    def process_video(  # noqa: C901
         self,
         input_path: Path,
         output_path: Path,
@@ -740,7 +738,6 @@ class MediaUpscaler:
         try:
             _ensure_heavy_imports()
             from realesrgan import RealESRGANer
-            from basicsr.archs.rrdbnet_arch import RRDBNet
             import cv2
 
             # Create temp directory
@@ -916,7 +913,7 @@ class MediaUpscaler:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def interpolate_frames_rife(
+    def interpolate_frames_rife(  # noqa: C901
         self,
         input_path: Path,
         output_path: Path,
@@ -996,12 +993,7 @@ class MediaUpscaler:
 
         temp_dir = None
         try:
-            import torch
-            import torch.nn.functional as F
-            import numpy as np
-            import cv2
             from pathlib import Path
-            import sys
             import os
 
             # Create temp directory
@@ -1122,7 +1114,7 @@ class MediaUpscaler:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def _interpolate_frames_basic(
+    def _interpolate_frames_basic(  # noqa: C901
         self,
         frames_dir: Path,
         temp_path: Path,
@@ -1372,7 +1364,6 @@ class MediaUpscaler:
                 except ImportError:
                     # Fallback to cv2
                     import cv2
-                    import numpy as np
 
                     cv_img = cv2.imread(str(file_path))
                     if cv_img is not None:
@@ -1435,7 +1426,7 @@ class MediaUpscaler:
 
         return model, model_path
 
-    def _move_to_trash(self, file_path: Path) -> bool:
+    def _move_to_trash(self, file_path: Path) -> bool:  # noqa: C901
         """Move a file to platform-specific trash."""
         try:
             # Try send2trash first - it's cross-platform and most reliable

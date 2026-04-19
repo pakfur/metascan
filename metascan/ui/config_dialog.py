@@ -1,7 +1,6 @@
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
-    QHBoxLayout,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -11,7 +10,6 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon
 from metascan.utils.app_paths import get_config_path
 from metascan.utils.path_utils import to_posix_path, to_native_path
 import os

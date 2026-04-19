@@ -110,7 +110,7 @@ def _canonicalize_inputs(n_inputs: Any) -> Dict[str, Any]:
     return {}
 
 
-def _node_widgets(
+def _node_widgets(  # noqa: C901
     n: Dict[str, Any], widget_idx_map: Optional[Dict[str, Dict[str, int]]] = None
 ) -> Dict[str, Any]:
     widgets: Dict[str, Any] = {}
@@ -160,7 +160,7 @@ def _node_widgets(
     return widgets
 
 
-def _build_graph(workflow: Dict[str, Any]) -> _Graph:
+def _build_graph(workflow: Dict[str, Any]) -> _Graph:  # noqa: C901
     """Build a typed graph from ComfyUI JSON.
 
     Supports both legacy 'prompt' format (dict keyed by node-id strings) and
@@ -206,11 +206,11 @@ def _build_graph(workflow: Dict[str, Any]) -> _Graph:
         # Prefer explicit 'links' list when present
         links = workflow.get("links") or []
         if isinstance(links, list):
-            for l in links:
+            for link in links:
                 # Typical shapes: [id, src_id, src_slot_index, dst_id, dst_slot_index, label?]
-                if not isinstance(l, list) or len(l) < 5:
+                if not isinstance(link, list) or len(link) < 5:
                     continue
-                _, src_id, src_slot_idx, dst_id, dst_slot_idx, *rest = l
+                _, src_id, src_slot_idx, dst_id, dst_slot_idx, *rest = link
                 src_id = str(src_id)
                 dst_id = str(dst_id)
                 src_slot_name = None
@@ -419,7 +419,7 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
             return False
         return False
 
-    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:  # noqa: C901
         parsing_errors: List[Dict[str, Any]] = []
         try:
             payload, raw_meta = self._load_comfy_payload(media_path, parsing_errors)
@@ -514,7 +514,7 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
             return None
 
     # ------ Internal helpers ------
-    def _load_comfy_payload(
+    def _load_comfy_payload(  # noqa: C901
         self, media_path: Path, parsing_errors: List[Dict[str, Any]]
     ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """Load embedded ComfyUI workflow JSON from image/video. No sidecar usage."""
@@ -631,7 +631,7 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
                 return tid
         return terminals[0]
 
-    def _apply_known_adapters(
+    def _apply_known_adapters(  # noqa: C901
         self, node: _Node, sub: _Graph, state: Dict[str, Any]
     ) -> None:
         ntype = node.type.lower()
@@ -892,7 +892,7 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
         return "\n".join(parts)
 
     # ---- Video tag probing (embedded text -> workflow JSON) ----
-    def _probe_video_for_comfy_payload(
+    def _probe_video_for_comfy_payload(  # noqa: C901
         self, media_path: Path, return_tags: bool = False
     ):
         """Attempt to read ComfyUI workflow JSON from video container tags.
@@ -951,7 +951,9 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
             pass
         return (None, tags_meta) if return_tags else None
 
-    def _json_from_tag_dict(self, tags: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _json_from_tag_dict(
+        self, tags: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:  # noqa: C901
         # Search common tag keys
         candidates: List[str] = []
         for k, v in (tags or {}).items():
@@ -1005,7 +1007,7 @@ class ComfyUIMetadataExtractor(MetadataExtractor):
             return s
 
     # ---- Video probing (MP4/WEBM/MOV/MKV) ----
-    def _probe_video_metadata(self, media_path: Path) -> Dict[str, Any]:
+    def _probe_video_metadata(self, media_path: Path) -> Dict[str, Any]:  # noqa: C901
         """Best-effort probe to derive fps and frame count from a video.
         Tries ffprobe (if available), then OpenCV, then PyAV, then imageio. Returns empty dict on failure.
         """

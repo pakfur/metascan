@@ -8,21 +8,16 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QComboBox,
-    QRadioButton,
-    QButtonGroup,
     QPushButton,
     QGroupBox,
     QTableWidget,
     QTableWidgetItem,
-    QHeaderView,
     QDialogButtonBox,
     QMessageBox,
     QCheckBox,
-    QSpinBox,
     QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from pathlib import Path
 from typing import List, Dict, Any
 
 

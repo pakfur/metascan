@@ -175,9 +175,14 @@ class ProcessUpscaleQueue:
 
                 # Restore the worker count
                 self.max_workers = saved_worker_count
+                active_count = sum(
+                    1
+                    for t in queue_data.get("tasks", {}).values()
+                    if t.get("status") in ["pending", "processing", "paused"]
+                )
                 self.logger.info(
                     f"Restored worker_count from queue: {saved_worker_count} "
-                    f"(found {sum(1 for t in queue_data.get('tasks', {}).values() if t.get('status') in ['pending', 'processing', 'paused'])} active task(s))"
+                    f"(found {active_count} active task(s))"
                 )
             else:
                 self.logger.debug("No active tasks found, keeping default worker_count")
@@ -285,9 +290,9 @@ class ProcessUpscaleQueue:
                 self.logger.warning("")
                 self.logger.warning("To recover lost tasks:")
                 self.logger.warning(f"1. Fix the JSON syntax errors in: {backup_file}")
-                self.logger.warning(f"2. Stop the application")
+                self.logger.warning("2. Stop the application")
                 self.logger.warning(f"3. Replace {self.queue_file} with the fixed file")
-                self.logger.warning(f"4. Restart the application")
+                self.logger.warning("4. Restart the application")
                 self.logger.warning("=" * 80)
 
             # Return empty queue structure (always, whether we logged or not)
@@ -336,7 +341,7 @@ class ProcessUpscaleQueue:
             self.logger.error(f"Failed to write queue file: {e}")
             raise
 
-    def _cleanup_stale_state(self) -> None:
+    def _cleanup_stale_state(self) -> None:  # noqa: C901
         """Clean up any stale processes and files from previous runs."""
         try:
             # Clean up progress files
@@ -746,7 +751,7 @@ class ProcessUpscaleQueue:
             if lock_fh:
                 self._release_lock(lock_fh)
 
-    def pause_queue(self) -> int:
+    def pause_queue(self) -> int:  # noqa: C901
         """
         Pause the queue by changing all pending and processing tasks to paused status.
         This will kill all active worker processes with SIGKILL (-9) and update task statuses.

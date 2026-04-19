@@ -6,24 +6,20 @@ from metascan.utils.startup_profiler import log_startup, profile_phase
 log_startup("main_window.py: Module loading started")
 
 log_startup("  Importing PyQt6.QtWidgets...")
-from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import (  # noqa: E402
     QApplication,
     QMainWindow,
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
-    QListWidget,
     QLabel,
     QSplitter,
-    QScrollArea,
-    QGridLayout,
     QFrame,
     QPushButton,
     QToolBar,
     QMessageBox,
     QProgressBar,
     QDialog,
-    QDialogButtonBox,
     QCheckBox,
     QComboBox,
     QSizePolicy,
@@ -31,47 +27,48 @@ from PyQt6.QtWidgets import (
 )
 
 log_startup("  Importing PyQt6.QtCore...")
-from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
-from typing import Tuple, Dict, List, Optional
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer  # noqa: E402
+from typing import Tuple, Dict, List, Optional  # noqa: E402
 
 log_startup("  Importing PyQt6.QtGui...")
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup, QMovie
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QActionGroup  # noqa: E402
 
 log_startup("  Importing qt_material...")
-from qt_material import apply_stylesheet, list_themes
+from qt_material import apply_stylesheet, list_themes  # noqa: E402
 
 log_startup("  Importing UI components...")
-from metascan.ui.config_dialog import ConfigDialog
-from metascan.ui.duplicate_finder_dialog import DuplicateFinderDialog
-from metascan.ui.similarity_settings_dialog import SimilaritySettingsDialog
-from metascan.ui.filters_panel import FiltersPanel
-from metascan.ui.thumbnail_view import ThumbnailView
-from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView
-from metascan.ui.metadata_panel import MetadataPanel
-from metascan.ui.media_viewer import MediaViewer
-from metascan.ui.slideshow_viewer import SlideshowViewer
-from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog
-from metascan.ui.upscale_queue_window import UpscaleQueueWindow
+from metascan.ui.config_dialog import ConfigDialog  # noqa: E402
+from metascan.ui.duplicate_finder_dialog import DuplicateFinderDialog  # noqa: E402
+from metascan.ui.similarity_settings_dialog import (
+    SimilaritySettingsDialog,
+)  # noqa: E402
+from metascan.ui.filters_panel import FiltersPanel  # noqa: E402
+from metascan.ui.virtual_thumbnail_view import VirtualThumbnailView  # noqa: E402
+from metascan.ui.metadata_panel import MetadataPanel  # noqa: E402
+from metascan.ui.media_viewer import MediaViewer  # noqa: E402
+from metascan.ui.slideshow_viewer import SlideshowViewer  # noqa: E402
+from metascan.ui.upscale_dialog import UpscaleDialog, ModelSetupDialog  # noqa: E402
+from metascan.ui.upscale_queue_window import UpscaleQueueWindow  # noqa: E402
 
 log_startup("  Importing core components...")
-from metascan.core.scanner import Scanner, ThreadedScanner
-from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.media_upscaler import MediaUpscaler
-from metascan.core.upscale_queue_process import ProcessUpscaleQueue
-from metascan.cache.thumbnail import ThumbnailCache
-from metascan.utils.app_paths import (
+from metascan.core.scanner import ThreadedScanner  # noqa: E402
+from metascan.core.database_sqlite import DatabaseManager  # noqa: E402
+from metascan.core.media_upscaler import MediaUpscaler  # noqa: E402
+from metascan.core.upscale_queue_process import ProcessUpscaleQueue  # noqa: E402
+from metascan.cache.thumbnail import ThumbnailCache  # noqa: E402
+from metascan.utils.app_paths import (  # noqa: E402
     get_data_dir,
     get_config_path,
     get_thumbnail_cache_dir,
 )
-from metascan.utils.path_utils import to_native_path
-import os
-import json
-from pathlib import Path
-import shutil
-import platform
-import subprocess
-import logging
+from metascan.utils.path_utils import to_native_path  # noqa: E402
+import os  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+import shutil  # noqa: E402
+import platform  # noqa: E402
+import subprocess  # noqa: E402
+import logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -1298,23 +1295,18 @@ class MainWindow(QMainWindow):
                     ]
 
                     total = len(processing) + len(pending)
-                    current = len(completed) + 1 if processing else len(completed)
-
-                    if processing and processing[0].progress is not None:
-                        percent = int(processing[0].progress)
-                    else:
-                        percent = 0
 
                     # Always show text when spinner is active
                     spinner = self.spinner_frames[self.spinner_frame_index]
                     if total > 0:
                         self.upscaling_widget.setText(
-                            f"{spinner} Upscaling... Processing: {len(processing)} | Pending: {len(pending)} | Completed: {len(completed)}"
+                            f"{spinner} Upscaling... Processing: {len(processing)} | "
+                            f"Pending: {len(pending)} | Completed: {len(completed)}"
                         )
                     else:
                         # Fallback when total is 0 but spinner is active
                         self.upscaling_widget.setText(f"{spinner} Upscaling...")
-                except Exception as e:
+                except Exception:
                     # Fallback on error
                     self.upscaling_widget.setText(
                         f"{self.spinner_frames[self.spinner_frame_index]} Upscaling..."
@@ -1334,12 +1326,10 @@ class MainWindow(QMainWindow):
                 pending = [t for t in tasks if t.status.value == "pending"]
                 completed = [t for t in tasks if t.status.value == "completed"]
 
-                total = len(processing) + len(pending)
-                current = len(completed) + 1 if processing else len(completed)
-
                 spinner = self.spinner_frames[self.spinner_frame_index]
                 self.upscaling_widget.setText(
-                    f"{spinner} Upscaling in progress... Processing: {len(processing)} Pending: {len(pending)} Completed: {len(completed)}"
+                    f"{spinner} Upscaling in progress... Processing: {len(processing)} "
+                    f"Pending: {len(pending)} Completed: {len(completed)}"
                 )
             else:
                 self.upscaling_widget.setText(
@@ -1575,10 +1565,10 @@ class MainWindow(QMainWindow):
                     Path(self.config_file).parent / "config_example.json"
                 )
                 if config_example_file.exists():
-                    print(f"Creating config.json from config_example.json")
+                    print("Creating config.json from config_example.json")
                     shutil.copy(str(config_example_file), self.config_file)
                 else:
-                    print(f"Warning: Neither config.json nor config_example.json found")
+                    print("Warning: Neither config.json nor config_example.json found")
                     return {}
 
             # Load the config file
@@ -2615,7 +2605,6 @@ class MainWindow(QMainWindow):
             # Try alternative approach on Windows
             if platform.system() == "Windows":
                 try:
-                    import os
                     import subprocess
 
                     subprocess.run(
@@ -2656,7 +2645,6 @@ class MainWindow(QMainWindow):
         """Recreate the thumbnail view with new size."""
         # Get current media list and filters
         current_media = self.all_media
-        current_filters = self.current_filters
         current_filtered_paths = self.filtered_media_paths
 
         # Preserve selection state
@@ -2888,7 +2876,7 @@ class MainWindow(QMainWindow):
         if msg_box.exec() == QMessageBox.StandardButton.Ok:
             self._delete_multiple_media(media_list)
 
-    def _delete_media(self, media, from_viewer=False):
+    def _delete_media(self, media, from_viewer=False):  # noqa: C901
         """Delete media file and update all related components."""
         try:
             file_path = media.file_path
@@ -2966,7 +2954,7 @@ class MainWindow(QMainWindow):
             print(f"Error deleting media: {e}")
             QMessageBox.critical(self, "Delete Error", f"Failed to delete media: {e}")
 
-    def _delete_multiple_media(self, media_list):
+    def _delete_multiple_media(self, media_list):  # noqa: C901
         """Delete multiple media files and update all related components."""
         deleted_count = 0
         failed_files = []
@@ -3155,7 +3143,7 @@ class MainWindow(QMainWindow):
             file_path.unlink()
             return None
 
-    def _delete_with_undo(self, media):
+    def _delete_with_undo(self, media):  # noqa: C901
         """Delete media file with undo capability (no confirmation dialog)."""
         try:
             file_path = media.file_path
@@ -3209,7 +3197,6 @@ class MainWindow(QMainWindow):
             self.refresh_filters()
 
             # 6. Update media viewer's media list
-            current_index = self.media_viewer.current_index
             media_list = self.media_viewer.media_list
             media_list = [m for m in media_list if m.file_path != file_path]
             self.media_viewer.media_list = media_list
@@ -3251,7 +3238,7 @@ class MainWindow(QMainWindow):
                 shutil.move(str(file_trash_path), str(original_file_path))
                 print(f"Restored media file: {original_file_path}")
             else:
-                print(f"Warning: Cannot restore - file not found in trash")
+                print("Warning: Cannot restore - file not found in trash")
                 QMessageBox.warning(
                     self,
                     "Restore Failed",
@@ -3453,7 +3440,7 @@ class MainWindow(QMainWindow):
                 self, "Open Folder Error", f"Failed to open folder: {e}"
             )
 
-    def _open_directory_in_file_manager(self, directory_path: Path):
+    def _open_directory_in_file_manager(self, directory_path: Path):  # noqa: C901
         """Open a directory in the platform's default file manager."""
         try:
             system = platform.system()

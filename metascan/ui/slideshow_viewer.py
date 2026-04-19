@@ -5,7 +5,6 @@ Separate implementation from MediaViewer to avoid conditional logic.
 
 import random
 from typing import List, Optional
-from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -30,9 +29,8 @@ from PyQt6.QtCore import (
     QCoreApplication,
     QPropertyAnimation,
     QEasingCurve,
-    QRect,
 )
-from PyQt6.QtGui import QKeyEvent, QMouseEvent, QCursor, QCloseEvent
+from PyQt6.QtGui import QKeyEvent, QMouseEvent, QCloseEvent
 
 from metascan.core.media import Media
 from metascan.core.database_sqlite import DatabaseManager
@@ -551,7 +549,7 @@ class SlideshowViewer(QWidget):
         self.transition_animation.finished.connect(cleanup)
         self.transition_animation.start()
 
-    def _display_current_media(self):
+    def _display_current_media(self):  # noqa: C901
         """Display the current media item."""
         if not self.media_list or self.current_index >= len(self.media_list):
             return
@@ -560,9 +558,6 @@ class SlideshowViewer(QWidget):
 
         # Stop any existing timer
         self.advance_timer.stop()
-
-        # Capture the current widget before switching (for slide transition)
-        old_widget = self.stacked_widget.currentWidget()
 
         # Determine if video or image
         is_video = current_media.file_path.suffix.lower() in [
@@ -770,7 +765,7 @@ class SlideshowViewer(QWidget):
             self._show_ui()
         super().mouseMoveEvent(event)
 
-    def keyPressEvent(self, event: Optional[QKeyEvent]) -> None:
+    def keyPressEvent(self, event: Optional[QKeyEvent]) -> None:  # noqa: C901
         """Handle keyboard shortcuts."""
         if event is None:
             return
