@@ -12,6 +12,7 @@ import type {
   SmartRules,
 } from '../types/folders'
 import { fileName } from '../utils/path'
+import { fetchTagPaths } from '../api/filters'
 
 const STORAGE_KEY = 'metascan.folders.v1'
 
@@ -24,19 +25,48 @@ function randId(prefix: string): string {
   return prefix + '_' + Math.random().toString(36).slice(2, 8)
 }
 
+// Older smart folders were saved with the legacy tag operator names
+// ('contains' / 'contains_any' / 'does_not_contain'). The UI now offers
+// only 'all_of' / 'any_of' for tag conditions, so migrate on load.
+function migrateSmartFolder(s: SmartFolder): SmartFolder {
+  let dirty = false
+  const conditions = s.rules.conditions.map((c) => {
+    if (c.field !== 'tags') return c
+    if (c.op === 'contains' || c.op === 'does_not_contain') {
+      dirty = true
+      return { ...c, op: 'all_of' as RuleOp }
+    }
+    if (c.op === 'contains_any' as RuleOp) {
+      dirty = true
+      return { ...c, op: 'any_of' as RuleOp }
+    }
+    return c
+  })
+  return dirty ? { ...s, rules: { ...s.rules, conditions } } : s
+}
+
 function loadPersisted(): PersistedState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return { manual: [], smart: [] }
     const parsed = JSON.parse(raw) as PersistedState
+    const smart = Array.isArray(parsed.smart)
+      ? parsed.smart.map(migrateSmartFolder)
+      : []
     return {
       manual: Array.isArray(parsed.manual) ? parsed.manual : [],
-      smart: Array.isArray(parsed.smart) ? parsed.smart : [],
+      smart,
     }
   } catch {
     return { manual: [], smart: [] }
   }
 }
+
+// Module-level tag→paths cache. Populated by the store's loadTagPaths(), read
+// by the synchronous evaluateCondition(). Using a module-scoped map (rather
+// than threading context through every call) keeps matches()/evaluator
+// call sites unchanged.
+let tagPathSets: Record<string, Set<string>> = {}
 
 function normalizeModel(m: Media): string {
   // `model` is a string[] on details; take the first entry as the canonical
@@ -80,15 +110,20 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
       return false
     }
     case 'tags': {
-      const tags = m.tags ?? []
+      // Tag membership comes from the same inverted index the sidebar tag
+      // filter uses. We can't rely on m.tags — it's only populated on
+      // detail-loaded records. Summary rows have no tags field, so a naive
+      // m.tags.includes(v) would silently fail for most of the library.
       const vals = Array.isArray(value)
         ? value
         : value === undefined || value === null || value === ''
           ? []
           : [String(value)]
-      if (op === 'contains') return vals.every((v) => tags.includes(v))
-      if (op === 'contains_any') return vals.some((v) => tags.includes(v))
-      if (op === 'does_not_contain') return !vals.some((v) => tags.includes(v))
+      if (vals.length === 0) return false
+      const path = m.file_path
+      const hasTag = (v: string): boolean => tagPathSets[v]?.has(path) ?? false
+      if (op === 'all_of') return vals.every(hasTag)
+      if (op === 'any_of') return vals.some(hasTag)
       return false
     }
     case 'modified': {
@@ -127,6 +162,25 @@ export const useFoldersStore = defineStore('folders', () => {
   const manualFolders = ref<ManualFolder[]>(initial.manual)
   const smartFolders = ref<SmartFolder[]>(initial.smart)
   const scope = ref<FolderScope>({ kind: 'library' })
+  // Monotonic counter bumped whenever the tag→paths cache is refreshed. Any
+  // computed that depends on tag-based smart-folder membership reads this so
+  // Vue knows to recompute after an async reload.
+  const tagPathsVersion = ref(0)
+
+  async function loadTagPaths() {
+    try {
+      const raw = await fetchTagPaths()
+      const next: Record<string, Set<string>> = {}
+      for (const [key, paths] of Object.entries(raw)) {
+        next[key] = new Set(paths)
+      }
+      tagPathSets = next
+      tagPathsVersion.value++
+    } catch {
+      // Leave whatever we already have; a stale cache is better than wiping
+      // membership.
+    }
+  }
 
   watch(
     [manualFolders, smartFolders],
@@ -164,6 +218,9 @@ export const useFoldersStore = defineStore('folders', () => {
   }
 
   function scopeMedia(all: Media[]): Media[] {
+    // Touch the version counter so Vue invalidates callers on tag-path
+    // refresh.
+    void tagPathsVersion.value
     const s = scope.value
     if (s.kind === 'library') return all
     if (s.kind === 'manual') {
@@ -183,6 +240,7 @@ export const useFoldersStore = defineStore('folders', () => {
   // Count without materializing the full filtered list — cheaper for the
   // sidebar where every folder row wants its own count.
   function scopeCount(kind: 'library' | 'manual' | 'smart', id: string, all: Media[]): number {
+    void tagPathsVersion.value
     if (kind === 'library') return all.length
     if (kind === 'manual') {
       const f = manualFolders.value.find((x) => x.id === id)
@@ -320,6 +378,7 @@ export const useFoldersStore = defineStore('folders', () => {
     smartFolders,
     scope,
     isLibraryScope,
+    tagPathsVersion,
     activeFolder,
     setScope,
     scopeMedia,
@@ -334,6 +393,7 @@ export const useFoldersStore = defineStore('folders', () => {
     addToManualFolder,
     removeFromManualFolder,
     purgePath,
+    loadTagPaths,
   }
 })
 
@@ -345,7 +405,8 @@ export const OP_LABELS: Record<RuleOp, string> = {
   contains: 'contains',
   does_not_contain: 'does not contain',
   starts_with: 'starts with',
-  contains_any: 'contains any of',
+  all_of: 'all of',
+  any_of: 'any of',
   within_days: 'within last (days)',
   older_than_days: 'older than (days)',
 }
@@ -395,7 +456,7 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
   },
   tags: {
     label: 'Tags',
-    ops: ['contains', 'contains_any', 'does_not_contain'],
+    ops: ['all_of', 'any_of'],
     value: 'tags',
     defaultValue: () => [],
   },

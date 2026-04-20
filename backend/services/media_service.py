@@ -60,6 +60,9 @@ class MediaService:
     async def get_filter_data(self) -> Dict[str, List[Dict[str, Any]]]:
         return await asyncio.to_thread(self.db.get_filter_data)
 
+    async def get_tag_path_index(self) -> Dict[str, List[str]]:
+        return await asyncio.to_thread(self.db.get_tag_path_index)
+
     async def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
         return await asyncio.to_thread(self.db.get_filtered_media_paths, filters)
 
