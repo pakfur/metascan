@@ -25,24 +25,45 @@ function randId(prefix: string): string {
   return prefix + '_' + Math.random().toString(36).slice(2, 8)
 }
 
-// Older smart folders were saved with the legacy tag operator names
-// ('contains' / 'contains_any' / 'does_not_contain'). The UI now offers
-// only 'all_of' / 'any_of' for tag conditions, so migrate on load.
+// Migrate persisted smart folders in two ways:
+//   1. Legacy tag operators ('contains' / 'contains_any' / 'does_not_contain')
+//      get remapped to the current 'all_of' / 'any_of' vocabulary.
+//   2. Conditions whose field is no longer supported ('prompt', 'dimensions')
+//      are dropped — those rows would otherwise show as blank selects in the
+//      editor and the evaluator would silently reject their media.
+const DROPPED_FIELDS = new Set(['prompt', 'dimensions'])
+
 function migrateSmartFolder(s: SmartFolder): SmartFolder {
   let dirty = false
-  const conditions = s.rules.conditions.map((c) => {
-    if (c.field !== 'tags') return c
+  const conditions: SmartCondition[] = []
+  for (const c of s.rules.conditions) {
+    if (DROPPED_FIELDS.has(c.field as string)) {
+      dirty = true
+      continue
+    }
+    if (c.field !== 'tags') {
+      conditions.push(c)
+      continue
+    }
     if (c.op === 'contains' || c.op === 'does_not_contain') {
       dirty = true
-      return { ...c, op: 'all_of' as RuleOp }
+      conditions.push({ ...c, op: 'all_of' as RuleOp })
+      continue
     }
-    if (c.op === 'contains_any' as RuleOp) {
+    if ((c.op as RuleOp) === ('contains_any' as RuleOp)) {
       dirty = true
-      return { ...c, op: 'any_of' as RuleOp }
+      conditions.push({ ...c, op: 'any_of' as RuleOp })
+      continue
     }
-    return c
-  })
-  return dirty ? { ...s, rules: { ...s.rules, conditions } } : s
+    conditions.push(c)
+  }
+  if (!dirty) return s
+  // An editor opened against an empty-conditions folder would crash on the
+  // v-for key — seed a safe default that matches any favorite.
+  if (conditions.length === 0) {
+    conditions.push({ field: 'favorite', op: 'is', value: true })
+  }
+  return { ...s, rules: { ...s.rules, conditions } }
 }
 
 function loadPersisted(): PersistedState {
@@ -96,13 +117,8 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
         return model.toLowerCase().includes(v.toLowerCase())
       return false
     }
-    case 'prompt':
     case 'filename': {
-      const hay = (
-        field === 'prompt'
-          ? m.prompt ?? ''
-          : m.file_name ?? fileName(m.file_path)
-      ).toLowerCase()
+      const hay = (m.file_name ?? fileName(m.file_path)).toLowerCase()
       const needle = String(value ?? '').toLowerCase()
       if (op === 'contains') return hay.includes(needle)
       if (op === 'does_not_contain') return !hay.includes(needle)
@@ -126,26 +142,28 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
       if (op === 'any_of') return vals.some(hasTag)
       return false
     }
-    case 'modified': {
-      const iso = m.modified_at
-      if (!iso) return false
-      const t = Date.parse(iso)
+    case 'modified':
+    case 'added': {
+      // 'modified' reads the file's mtime; 'added' reads the row's
+      // created_at (when the scanner inserted it). Both columns carry two
+      // historical shapes: rows written after the summary-column migration
+      // hold an ISO/SQL-timestamp string, but rows back-filled from the
+      // pre-existing `data` JSON blob hold a stringified unix-epoch float
+      // (e.g. "1775691760.0"). Handle both.
+      const raw = field === 'modified' ? m.modified_at : m.created_at
+      if (!raw) return false
+      let t: number
+      const asNum = Number(raw)
+      if (Number.isFinite(asNum)) {
+        t = asNum * 1000
+      } else {
+        t = Date.parse(raw)
+      }
       if (Number.isNaN(t)) return false
       const days = Number(value) || 0
       const cutoff = Date.now() - days * 86400000
       if (op === 'within_days') return t >= cutoff
       if (op === 'older_than_days') return t < cutoff
-      return false
-    }
-    case 'dimensions': {
-      const isLandscape = m.width > m.height
-      const isPortrait = m.width < m.height
-      const isSquare = m.width === m.height
-      if (op === 'is') {
-        if (value === 'landscape') return isLandscape
-        if (value === 'portrait') return isPortrait
-        if (value === 'square') return isSquare
-      }
       return false
     }
   }
@@ -505,12 +523,6 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
     value: 'text',
     defaultValue: () => '',
   },
-  prompt: {
-    label: 'Prompt',
-    ops: ['contains', 'does_not_contain', 'starts_with'],
-    value: 'text',
-    defaultValue: () => '',
-  },
   filename: {
     label: 'Filename',
     ops: ['contains', 'does_not_contain', 'starts_with'],
@@ -529,15 +541,10 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
     value: 'days',
     defaultValue: () => 30,
   },
-  dimensions: {
-    label: 'Orientation',
-    ops: ['is'],
-    value: 'select',
-    options: [
-      ['landscape', 'Landscape'],
-      ['portrait', 'Portrait'],
-      ['square', 'Square'],
-    ],
-    defaultValue: () => 'landscape',
+  added: {
+    label: 'Added',
+    ops: ['within_days', 'older_than_days'],
+    value: 'days',
+    defaultValue: () => 30,
   },
 }
