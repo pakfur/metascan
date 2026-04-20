@@ -285,6 +285,44 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_hashes_phash ON media_hashes(phash)"
             )
 
+            # Folders (manual + smart) — persistent replacement for the
+            # localStorage-backed folders store. ``kind='manual'`` folders
+            # have explicit memberships in folder_items; ``kind='smart'``
+            # folders carry a JSON rules blob and compute membership live.
+            # sort_order exists so drag-to-reorder lands without another
+            # migration; the current UI writes 0 for everything.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS folders (
+                    id         TEXT PRIMARY KEY,
+                    kind       TEXT NOT NULL
+                               CHECK(kind IN ('manual','smart')),
+                    name       TEXT NOT NULL,
+                    icon       TEXT NOT NULL DEFAULT 'pi-folder',
+                    rules      TEXT,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS folder_items (
+                    folder_id TEXT NOT NULL
+                              REFERENCES folders(id) ON DELETE CASCADE,
+                    file_path TEXT NOT NULL
+                              REFERENCES media(file_path) ON DELETE CASCADE,
+                    added_at  REAL NOT NULL,
+                    PRIMARY KEY (folder_id, file_path)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_folder_items_by_file "
+                "ON folder_items(file_path)"
+            )
+
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
             # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
@@ -1362,3 +1400,295 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to truncate database: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Folders (manual + smart)
+    # ------------------------------------------------------------------
+    #
+    # Records use the exact shape the frontend already produces so the
+    # Pinia store can swap its persistence layer without reshaping the
+    # rest of the UI. ``rules`` is stored as a JSON string on disk and
+    # surfaced as a dict; ``items`` is resolved from folder_items on read
+    # (manual folders only). ``count`` is materialized server-side so the
+    # sidebar row count doesn't need a separate round-trip.
+
+    @staticmethod
+    def _row_to_folder(
+        row: sqlite3.Row,
+        items: Optional[List[str]] = None,
+        count: int = 0,
+    ) -> Dict[str, Any]:
+        kind = row["kind"]
+        record: Dict[str, Any] = {
+            "id": row["id"],
+            "kind": kind,
+            "name": row["name"],
+            "icon": row["icon"],
+            "sort_order": row["sort_order"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "count": count,
+        }
+        if kind == "smart":
+            import json as _json
+
+            rules_raw = row["rules"] or ""
+            try:
+                record["rules"] = _json.loads(rules_raw) if rules_raw else None
+            except Exception:
+                record["rules"] = None
+        else:
+            record["items"] = items if items is not None else []
+        return record
+
+    def list_folders(self) -> List[Dict[str, Any]]:
+        """Return all folders as a list of records.
+
+        Manual folders carry an ``items`` list; smart folders carry a
+        ``rules`` dict. Both carry a materialized ``count`` — for manual
+        it's the number of items, for smart it's left at 0 (membership
+        is computed client-side against in-memory Media; hydrating it
+        server-side would require applying the rule engine here too).
+        """
+        with self._get_connection() as conn:
+            folders = conn.execute(
+                "SELECT id, kind, name, icon, rules, sort_order, "
+                "created_at, updated_at "
+                "FROM folders ORDER BY kind, sort_order, created_at"
+            ).fetchall()
+            if not folders:
+                return []
+            # Pre-fetch items per manual folder in one pass.
+            items_by_folder: Dict[str, List[str]] = {}
+            counts: Dict[str, int] = {}
+            manual_ids = [f["id"] for f in folders if f["kind"] == "manual"]
+            if manual_ids:
+                placeholders = ",".join("?" for _ in manual_ids)
+                rows = conn.execute(
+                    "SELECT folder_id, file_path FROM folder_items "
+                    f"WHERE folder_id IN ({placeholders}) "
+                    "ORDER BY folder_id, added_at",
+                    manual_ids,
+                ).fetchall()
+                for r in rows:
+                    fid = r["folder_id"]
+                    items_by_folder.setdefault(fid, []).append(
+                        to_native_path(r["file_path"])
+                    )
+                for fid, paths in items_by_folder.items():
+                    counts[fid] = len(paths)
+            return [
+                self._row_to_folder(
+                    f,
+                    items=(
+                        items_by_folder.get(f["id"], [])
+                        if f["kind"] == "manual"
+                        else None
+                    ),
+                    count=counts.get(f["id"], 0),
+                )
+                for f in folders
+            ]
+
+    def get_folder(self, folder_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id, kind, name, icon, rules, sort_order, "
+                "created_at, updated_at FROM folders WHERE id = ?",
+                (folder_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            items: Optional[List[str]] = None
+            count = 0
+            if row["kind"] == "manual":
+                paths = conn.execute(
+                    "SELECT file_path FROM folder_items "
+                    "WHERE folder_id = ? ORDER BY added_at",
+                    (folder_id,),
+                ).fetchall()
+                items = [to_native_path(p["file_path"]) for p in paths]
+                count = len(items)
+            return self._row_to_folder(row, items=items, count=count)
+
+    def create_folder(
+        self,
+        folder_id: str,
+        kind: str,
+        name: str,
+        icon: str = "pi-folder",
+        rules: Optional[Dict[str, Any]] = None,
+        items: Optional[List[str]] = None,
+        sort_order: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """Create a folder and return the normalized record.
+
+        Returns None if the insert conflicts (duplicate id). Callers
+        should treat that as a client bug — ids are UUIDs generated by
+        the frontend.
+        """
+        if kind not in ("manual", "smart"):
+            raise ValueError(f"invalid folder kind: {kind!r}")
+        import json as _json
+        import time as _time
+
+        rules_blob = _json.dumps(rules) if kind == "smart" and rules else None
+        now = _time.time()
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    conn.execute(
+                        "INSERT INTO folders "
+                        "(id, kind, name, icon, rules, sort_order, "
+                        " created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            folder_id,
+                            kind,
+                            name,
+                            icon,
+                            rules_blob,
+                            sort_order,
+                            now,
+                            now,
+                        ),
+                    )
+                    if kind == "manual" and items:
+                        unique = list(dict.fromkeys(items))
+                        conn.executemany(
+                            "INSERT OR IGNORE INTO folder_items "
+                            "(folder_id, file_path, added_at) "
+                            "VALUES (?, ?, ?)",
+                            [(folder_id, to_posix_path(Path(p)), now) for p in unique],
+                        )
+                    conn.commit()
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Failed to create folder {folder_id}: {e}")
+            return None
+        return self.get_folder(folder_id)
+
+    def update_folder(
+        self,
+        folder_id: str,
+        name: Optional[str] = None,
+        icon: Optional[str] = None,
+        rules: Optional[Dict[str, Any]] = None,
+        sort_order: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Patch a folder record. Only fields passed as non-None are written.
+
+        Returns the updated record, or None if the folder doesn't exist.
+        Passing ``rules`` on a manual folder is silently ignored.
+        """
+        sets: List[str] = []
+        params: List[Any] = []
+        if name is not None:
+            sets.append("name = ?")
+            params.append(name)
+        if icon is not None:
+            sets.append("icon = ?")
+            params.append(icon)
+        if sort_order is not None:
+            sets.append("sort_order = ?")
+            params.append(int(sort_order))
+        if rules is not None:
+            import json as _json
+
+            sets.append("rules = ?")
+            params.append(_json.dumps(rules))
+        if not sets:
+            # No-op patch: still bump updated_at so the WS broadcast is
+            # truthful about "something changed".
+            return self.get_folder(folder_id)
+        import time as _time
+
+        sets.append("updated_at = ?")
+        params.append(_time.time())
+        params.append(folder_id)
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    f"UPDATE folders SET {', '.join(sets)} WHERE id = ?",
+                    params,
+                )
+                conn.commit()
+                if cur.rowcount == 0:
+                    return None
+        return self.get_folder(folder_id)
+
+    def delete_folder(self, folder_id: str) -> bool:
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+                conn.commit()
+                return int(cur.rowcount) > 0
+
+    def add_folder_items(self, folder_id: str, paths: List[str]) -> Optional[int]:
+        """Add paths to a manual folder. Returns the number actually added
+        (dedupes against existing membership), or None if the folder
+        doesn't exist or is a smart folder.
+        """
+        if not paths:
+            return 0
+        import time as _time
+
+        with self.lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT kind FROM folders WHERE id = ?", (folder_id,)
+                ).fetchone()
+                if row is None or row["kind"] != "manual":
+                    return None
+                now = _time.time()
+                unique = list(dict.fromkeys(paths))
+                before = conn.execute(
+                    "SELECT COUNT(*) AS n FROM folder_items " "WHERE folder_id = ?",
+                    (folder_id,),
+                ).fetchone()["n"]
+                conn.executemany(
+                    "INSERT OR IGNORE INTO folder_items "
+                    "(folder_id, file_path, added_at) VALUES (?, ?, ?)",
+                    [(folder_id, to_posix_path(Path(p)), now) for p in unique],
+                )
+                after = conn.execute(
+                    "SELECT COUNT(*) AS n FROM folder_items " "WHERE folder_id = ?",
+                    (folder_id,),
+                ).fetchone()["n"]
+                if after != before:
+                    conn.execute(
+                        "UPDATE folders SET updated_at = ? WHERE id = ?",
+                        (now, folder_id),
+                    )
+                conn.commit()
+                return int(after - before)
+
+    def remove_folder_items(self, folder_id: str, paths: List[str]) -> Optional[int]:
+        """Remove paths from a manual folder. Returns the number actually
+        removed, or None if the folder doesn't exist or is a smart folder.
+        """
+        if not paths:
+            return 0
+        import time as _time
+
+        with self.lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT kind FROM folders WHERE id = ?", (folder_id,)
+                ).fetchone()
+                if row is None or row["kind"] != "manual":
+                    return None
+                posix_paths = [to_posix_path(Path(p)) for p in paths]
+                placeholders = ",".join("?" for _ in posix_paths)
+                cur = conn.execute(
+                    f"DELETE FROM folder_items WHERE folder_id = ? "
+                    f"AND file_path IN ({placeholders})",
+                    [folder_id, *posix_paths],
+                )
+                removed = int(cur.rowcount)
+                if removed:
+                    conn.execute(
+                        "UPDATE folders SET updated_at = ? WHERE id = ?",
+                        (_time.time(), folder_id),
+                    )
+                conn.commit()
+                return removed
