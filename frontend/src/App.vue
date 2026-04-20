@@ -68,7 +68,7 @@ useWebSocket('watcher', () => {
   watcherDebounce = setTimeout(() => {
     mediaStore.loadAllMedia()
     filterStore.loadFilterData()
-    foldersStore.loadTagPaths()
+    foldersStore.loadTagPaths({ force: true })
   }, 2000)
 })
 
@@ -109,7 +109,7 @@ function closeScan() {
   if (scanStore.phase === 'complete' || scanStore.embeddingPhase === 'complete') {
     mediaStore.loadAllMedia()
     filterStore.loadFilterData()
-    foldersStore.loadTagPaths()
+    foldersStore.loadTagPaths({ force: true })
   }
   scanStore.reset()
   scanStore.resetEmbedding()

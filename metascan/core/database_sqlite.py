@@ -192,12 +192,29 @@ class DatabaseManager:
             # covering index holds every summary column at the leaf level,
             # letting the query planner answer list requests without
             # touching the main table — ~6 ms instead of ~25 s.
+            #
+            # Both indexes must include *every* column the summary SELECT
+            # projects. When a new column (e.g. ``modified_at``) is added to
+            # the summary response, the old covering index silently stops
+            # covering and each list request falls back to the main table —
+            # which is exactly the 20-second regression we're guarding
+            # against. Drop any pre-existing index whose DDL is missing the
+            # current column set so the CREATE below rebuilds it.
+            for idx_name in ("idx_media_summary_added", "idx_media_summary_modified"):
+                ddl_row = conn.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='index' AND name=?",
+                    (idx_name,),
+                ).fetchone()
+                if ddl_row and "modified_at" not in (ddl_row["sql"] or ""):
+                    conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_media_summary_added
                 ON media(
                     created_at, file_path, is_favorite, playback_speed,
-                    width, height, file_size, frame_rate, duration
+                    width, height, file_size, frame_rate, duration,
+                    modified_at
                 )
                 """
             )
@@ -435,7 +452,7 @@ class DatabaseManager:
         where = "WHERE is_favorite = 1" if favorites_only else ""
         sql = (
             "SELECT file_path, is_favorite, playback_speed, "
-            "width, height, file_size, frame_rate, duration "
+            "width, height, file_size, frame_rate, duration, modified_at "
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
@@ -460,6 +477,7 @@ class DatabaseManager:
                             "file_size": row["file_size"],
                             "frame_rate": row["frame_rate"],
                             "duration": row["duration"],
+                            "modified_at": row["modified_at"],
                         }
                     )
         except Exception as e:
@@ -576,27 +594,30 @@ class DatabaseManager:
             logger.error(f"Index search failed for {index_type}:{term}: {e}")
             return set()
 
-    def get_tag_path_index(self) -> Dict[str, List[str]]:
-        """Return ``{tag_key: [file_path, ...]}`` for every tag in the index.
+    def get_tag_path_index(self, keys: List[str]) -> Dict[str, List[str]]:
+        """Return ``{tag_key: [file_path, ...]}`` for the given tag keys only.
 
-        Used by smart-folder tag conditions so they evaluate against the same
-        inverted index the sidebar tag filter uses, rather than the sparse
-        per-record ``tags`` field (which is only populated on detail-loaded
-        Media records).
+        Smart folders usually reference a handful of tags, not the whole
+        universe. Fetching every tag row (``~100k+`` on real libraries) just
+        to populate a client-side cache put a multi-megabyte JSON blob
+        through the DB lock on every app refresh, blocking the media list
+        query behind it. The caller hands us the exact keys it needs.
         """
-        out: Dict[str, List[str]] = {}
+        if not keys:
+            return {}
+        out: Dict[str, List[str]] = {k: [] for k in keys}
         try:
             with self._get_connection() as conn:
+                placeholders = ",".join("?" for _ in keys)
                 rows = conn.execute(
-                    "SELECT index_key, file_path FROM indices "
-                    "WHERE index_type = 'tag'"
+                    f"SELECT index_key, file_path FROM indices "
+                    f"WHERE index_type = 'tag' AND index_key IN ({placeholders})",
+                    list(keys),
                 ).fetchall()
                 for row in rows:
-                    out.setdefault(row["index_key"], []).append(
-                        to_native_path(row["file_path"])
-                    )
+                    out[row["index_key"]].append(to_native_path(row["file_path"]))
         except Exception as e:
-            logger.error(f"Failed to build tag path index: {e}")
+            logger.error(f"Failed to fetch tag path index: {e}")
         return out
 
     def get_tags_for_file(self, file_path: Path) -> List[str]:

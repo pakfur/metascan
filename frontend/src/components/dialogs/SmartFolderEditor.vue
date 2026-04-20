@@ -82,6 +82,15 @@ function onOpChange(idx: number, op: RuleOp) {
 
 function onValueChange(idx: number, value: SmartCondition['value']) {
   rules.value.conditions[idx].value = value
+  // If the user just added a tag chip, make sure its path set is cached so
+  // the live match count reflects the new condition immediately.
+  if (
+    rules.value.conditions[idx].field === 'tags' &&
+    Array.isArray(value) &&
+    value.length
+  ) {
+    void foldersStore.ensureTagPathsFor(value as string[])
+  }
 }
 
 function addCondition() {
