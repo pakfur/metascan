@@ -166,21 +166,83 @@ export const useFoldersStore = defineStore('folders', () => {
   // computed that depends on tag-based smart-folder membership reads this so
   // Vue knows to recompute after an async reload.
   const tagPathsVersion = ref(0)
+  // Keys we've already fetched (including ones whose set turned up empty).
+  // Separate from `tagPathSets` so "no paths" and "not fetched yet" are
+  // distinguishable.
+  let cachedTagKeys = new Set<string>()
+  let inflightTagFetch: Promise<void> | null = null
 
-  async function loadTagPaths() {
-    try {
-      const raw = await fetchTagPaths()
-      const next: Record<string, Set<string>> = {}
-      for (const [key, paths] of Object.entries(raw)) {
-        next[key] = new Set(paths)
+  function referencedTagKeys(): Set<string> {
+    const keys = new Set<string>()
+    for (const f of smartFolders.value) {
+      for (const c of f.rules.conditions) {
+        if (c.field !== 'tags') continue
+        if (Array.isArray(c.value)) {
+          for (const v of c.value) keys.add(v)
+        } else if (typeof c.value === 'string' && c.value) {
+          keys.add(c.value)
+        }
       }
-      tagPathSets = next
-      tagPathsVersion.value++
-    } catch {
-      // Leave whatever we already have; a stale cache is better than wiping
-      // membership.
+    }
+    return keys
+  }
+
+  async function ensureTagPathsFor(keys: Iterable<string>): Promise<void> {
+    const needed: string[] = []
+    for (const k of keys) {
+      if (k && !cachedTagKeys.has(k)) needed.push(k)
+    }
+    if (needed.length === 0) return
+    // Coalesce concurrent calls — app init, scan-complete, and the
+    // smart-folder watcher can fire in the same tick. If an existing fetch
+    // already covers everything we need, piggy-back on it.
+    if (inflightTagFetch) {
+      await inflightTagFetch
+      const stillMissing = needed.filter((k) => !cachedTagKeys.has(k))
+      if (stillMissing.length === 0) return
+      needed.length = 0
+      needed.push(...stillMissing)
+    }
+    const task = (async () => {
+      try {
+        const raw = await fetchTagPaths(needed)
+        for (const k of needed) {
+          tagPathSets[k] = new Set(raw[k] ?? [])
+          cachedTagKeys.add(k)
+        }
+        tagPathsVersion.value++
+      } catch {
+        // Leave the cache as-is; callers evaluating against missing keys
+        // will just see no matches for those tags until the next refresh.
+      }
+    })()
+    inflightTagFetch = task
+    try {
+      await task
+    } finally {
+      if (inflightTagFetch === task) inflightTagFetch = null
     }
   }
+
+  async function loadTagPaths(options: { force?: boolean } = {}) {
+    if (options.force) {
+      cachedTagKeys = new Set()
+      tagPathSets = {}
+      tagPathsVersion.value++
+    }
+    await ensureTagPathsFor(referencedTagKeys())
+  }
+
+  // Whenever smart folders mutate (new/edited/deleted), pick up any newly
+  // referenced tag keys. Existing cached keys are reused; removed keys
+  // stay cached (cheap, no reason to evict).
+  watch(
+    smartFolders,
+    () => {
+      void ensureTagPathsFor(referencedTagKeys())
+    },
+    { deep: true },
+  )
 
   watch(
     [manualFolders, smartFolders],
@@ -394,6 +456,7 @@ export const useFoldersStore = defineStore('folders', () => {
     removeFromManualFolder,
     purgePath,
     loadTagPaths,
+    ensureTagPathsFor,
   }
 })
 
