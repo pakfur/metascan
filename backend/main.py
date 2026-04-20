@@ -21,6 +21,7 @@ from backend.config import (
 from backend.api import (
     media,
     filters,
+    folders,
     scan,
     similarity,
     duplicates,
@@ -242,6 +243,7 @@ def create_app() -> FastAPI:  # noqa: C901
     # Register routers
     app.include_router(media.router)
     app.include_router(filters.router)
+    app.include_router(folders.router)
     app.include_router(scan.router)
     app.include_router(similarity.router)
     app.include_router(duplicates.router)
