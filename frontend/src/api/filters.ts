@@ -9,6 +9,6 @@ export function applyFilters(filters: ActiveFilters): Promise<{ paths: string[] 
   return post<{ paths: string[] }>('/filters/apply', { filters })
 }
 
-export function fetchTagPaths(): Promise<Record<string, string[]>> {
-  return get<Record<string, string[]>>('/filters/tag_paths')
+export function fetchTagPaths(keys: string[]): Promise<Record<string, string[]>> {
+  return post<Record<string, string[]>>('/filters/tag_paths', { keys })
 }

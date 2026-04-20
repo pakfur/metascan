@@ -60,8 +60,8 @@ class MediaService:
     async def get_filter_data(self) -> Dict[str, List[Dict[str, Any]]]:
         return await asyncio.to_thread(self.db.get_filter_data)
 
-    async def get_tag_path_index(self) -> Dict[str, List[str]]:
-        return await asyncio.to_thread(self.db.get_tag_path_index)
+    async def get_tag_path_index(self, keys: List[str]) -> Dict[str, List[str]]:
+        return await asyncio.to_thread(self.db.get_tag_path_index, keys)
 
     async def get_filtered_media_paths(self, filters: Dict[str, List[str]]) -> Set[str]:
         return await asyncio.to_thread(self.db.get_filtered_media_paths, filters)
@@ -101,6 +101,7 @@ class MediaService:
             "file_size": media.file_size,
             "frame_rate": media.frame_rate,
             "duration": media.duration,
+            "modified_at": media.modified_at.isoformat() if media.modified_at else None,
         }
 
     def media_to_dict(self, media: Media) -> dict:

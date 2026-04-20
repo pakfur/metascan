@@ -35,7 +35,19 @@ async def apply_filters(
     return {"paths": list(paths)}
 
 
-@router.get("/filters/tag_paths")
-async def get_tag_paths(service: MediaService = Depends(_get_service)):
-    """Return ``{tag_key: [file_path, ...]}`` from the tag inverted index."""
-    return await service.get_tag_path_index()
+class TagPathsRequest(BaseModel):
+    keys: List[str]
+
+
+@router.post("/filters/tag_paths")
+async def get_tag_paths(
+    body: TagPathsRequest,
+    service: MediaService = Depends(_get_service),
+):
+    """Return ``{tag_key: [file_path, ...]}`` for the requested tag keys.
+
+    Callers pass only the keys their smart folders actually reference so we
+    don't serialize the whole (potentially multi-megabyte) inverted index on
+    every refresh.
+    """
+    return await service.get_tag_path_index(body.keys)
