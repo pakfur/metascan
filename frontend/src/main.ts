@@ -7,6 +7,7 @@ import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import InputGroup from 'primevue/inputgroup'
 import Menubar from 'primevue/menubar'
+import AutoComplete from 'primevue/autocomplete'
 import 'primeicons/primeicons.css'
 import './style.css'
 import App from './App.vue'
@@ -26,5 +27,6 @@ app.component('Button', Button)
 app.component('InputText', InputText)
 app.component('InputGroup', InputGroup)
 app.component('Menubar', Menubar)
+app.component('AutoComplete', AutoComplete)
 
 app.mount('#app')

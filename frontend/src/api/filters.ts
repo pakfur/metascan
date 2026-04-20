@@ -8,3 +8,7 @@ export function fetchFilterData(): Promise<FilterData> {
 export function applyFilters(filters: ActiveFilters): Promise<{ paths: string[] }> {
   return post<{ paths: string[] }>('/filters/apply', { filters })
 }
+
+export function fetchTagPaths(): Promise<Record<string, string[]>> {
+  return get<Record<string, string[]>>('/filters/tag_paths')
+}
