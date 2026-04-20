@@ -3,6 +3,7 @@ import { ref, onMounted, nextTick } from 'vue'
 import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
+import { useFoldersStore } from './stores/folders'
 import { useSettingsStore } from './stores/settings'
 import { useScanStore } from './stores/scan'
 import { useSimilarityStore } from './stores/similarity'
@@ -31,6 +32,7 @@ import { useFoldersUi } from './composables/useFoldersUi'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
+const foldersStore = useFoldersStore()
 const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
@@ -54,6 +56,7 @@ onMounted(async () => {
     settingsStore.loadConfig(),
     mediaStore.loadAllMedia(),
     filterStore.loadFilterData(),
+    foldersStore.loadTagPaths(),
   ])
 })
 
@@ -65,6 +68,7 @@ useWebSocket('watcher', () => {
   watcherDebounce = setTimeout(() => {
     mediaStore.loadAllMedia()
     filterStore.loadFilterData()
+    foldersStore.loadTagPaths()
   }, 2000)
 })
 
@@ -105,6 +109,7 @@ function closeScan() {
   if (scanStore.phase === 'complete' || scanStore.embeddingPhase === 'complete') {
     mediaStore.loadAllMedia()
     filterStore.loadFilterData()
+    foldersStore.loadTagPaths()
   }
   scanStore.reset()
   scanStore.resetEmbedding()
@@ -239,7 +244,7 @@ useKeyboard([
       v-if="foldersUi.newFolderOpen.value || foldersUi.renameFolderId.value"
     />
     <SmartFolderEditor v-if="foldersUi.smartEditorOpen.value !== null" />
-    <FolderKebabMenu />
+    <FolderKebabMenu v-if="foldersUi.kebabMenu.value" />
 
     <!-- Toast host — single slot, non-blocking -->
     <ToastHost />

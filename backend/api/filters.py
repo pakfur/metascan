@@ -33,3 +33,9 @@ async def apply_filters(
     """Apply filters and return matching file paths."""
     paths = await service.get_filtered_media_paths(body.filters)
     return {"paths": list(paths)}
+
+
+@router.get("/filters/tag_paths")
+async def get_tag_paths(service: MediaService = Depends(_get_service)):
+    """Return ``{tag_key: [file_path, ...]}`` from the tag inverted index."""
+    return await service.get_tag_path_index()

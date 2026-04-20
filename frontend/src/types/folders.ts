@@ -17,7 +17,8 @@ export type RuleOp =
   | 'contains'
   | 'does_not_contain'
   | 'starts_with'
-  | 'contains_any'
+  | 'all_of'
+  | 'any_of'
   | 'within_days'
   | 'older_than_days'
 

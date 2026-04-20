@@ -1,7 +1,7 @@
 ## Todo
 
 ### New Features
-- (MVP) Add configuration option tab to the configuration dialog to disable CLIP, pHash, and embedding.
+- (V1) Add configuration option tab to the configuration dialog to disable CLIP, pHash, and embedding.
   - When disabled, then any UI component that depends on CLIP, pHash or embedding will be disabled
 
 - (MVP) Refactor the search feature to (Content|Tag) to allow for searching by tag
@@ -15,18 +15,18 @@
   - Periodically scans for database/file system mismatches and cleans them up
   - A dialog box to show the state of the scanner (scanning, idle, history)
 
-- (MVP) Multi-select 
+- (V1) Multi-select 
   - Either "select mode" like old Metascan or shift/alt select conventions
 
 - (v1) Dockable right panel (docked, Floating (resizable), transparency setting)
 
-- (MVP) Different media viewer formats (compact, carousel)
+- (V1+) Different media viewer formats (compact, carousel)
   - Compact: metadata (favorite icon, file name, video/image icon) on the iumage, narrow padding between media (what it dies today)
   - Loose:  metadata (favorite icon, file name, video/image icon) on the iumage, larger padding between media (new)
   - Carousel: metadata below the media, card-like format (new)
   - Drop down icon menu to select. Selection choice is saved in config.json and preserved during a restart.
 
-- (MVp) PrimeVue Galleria below the media in the media viewer
+X (MVP) PrimeVue Galleria below the media in the media viewer
   - Galleria of previous and next thumbnails below the media  
 
 - (MVP) Filters
@@ -56,6 +56,6 @@ X (MVP) arrow keys are not changing the selected media
 
 
 #### Changes to existing features (Under consideration)
-- (MVP) load content search (CLIP) model at backend service start
+X (MVP) load content search (CLIP) model at backend service start
 - (v1+) Replace favorite with Ranking Tier (S, A, B, C, D) with UI and ranking choice. "S" == Favorite
 

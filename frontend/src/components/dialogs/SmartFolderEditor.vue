@@ -8,6 +8,7 @@ import {
 } from '../../stores/folders'
 import { useFoldersUi } from '../../composables/useFoldersUi'
 import { useMediaStore } from '../../stores/media'
+import { useFilterStore } from '../../stores/filters'
 import { useToast } from '../../composables/useToast'
 import type {
   RuleField,
@@ -18,6 +19,7 @@ import type {
 
 const foldersStore = useFoldersStore()
 const mediaStore = useMediaStore()
+const filterStore = useFilterStore()
 const ui = useFoldersUi()
 const toast = useToast()
 
@@ -54,6 +56,9 @@ const rules = ref<SmartRules>(
 )
 
 const matchCount = computed(() => {
+  // Touch the tag-path version so the count recomputes once the cache
+  // arrives — the evaluator reads that cache from module scope.
+  void foldersStore.tagPathsVersion
   const source = mediaStore.allMedia
   let n = 0
   for (const m of source) {
@@ -80,7 +85,7 @@ function onValueChange(idx: number, value: SmartCondition['value']) {
 }
 
 function addCondition() {
-  rules.value.conditions.push({ field: 'tags', op: 'contains', value: [] })
+  rules.value.conditions.push({ field: 'tags', op: 'all_of', value: [] })
 }
 
 function removeCondition(idx: number) {
@@ -90,39 +95,29 @@ function removeCondition(idx: number) {
   }
 }
 
-function addTag(idx: number, raw: string) {
-  const v = raw.trim()
-  if (!v) return
-  const c = rules.value.conditions[idx]
-  const arr = Array.isArray(c.value) ? c.value : []
-  if (!arr.includes(v)) arr.push(v)
-  c.value = arr
-}
+// Suggestions for the tag AutoComplete come from the globally known tag
+// universe (prompt + CLIP tags alike) that already powers the left-sidebar
+// filter list.
+const allTagKeys = computed<string[]>(() =>
+  (filterStore.filterData.tag ?? []).map((t) => t.key),
+)
 
-function removeTag(idx: number, tag: string) {
-  const c = rules.value.conditions[idx]
-  if (Array.isArray(c.value)) {
-    c.value = c.value.filter((t) => t !== tag)
-  }
-}
+// Per-row suggestion buffer — PrimeVue's AutoComplete reads this via
+// `:suggestions` and asks us to repopulate it via `@complete`.
+const tagSuggestions = ref<Record<number, string[]>>({})
 
-// Per-row tag input buffer — one string per condition index.
-const tagBuffers = ref<Record<number, string>>({})
-
-function onTagInputKey(idx: number, e: KeyboardEvent) {
-  const buf = tagBuffers.value[idx] ?? ''
-  if (e.key === 'Enter' && buf.trim()) {
-    e.preventDefault()
-    addTag(idx, buf)
-    tagBuffers.value[idx] = ''
-  } else if (e.key === 'Backspace' && !buf) {
-    const c = rules.value.conditions[idx]
-    if (Array.isArray(c.value) && c.value.length) {
-      const next = [...c.value]
-      next.pop()
-      c.value = next
-    }
-  }
+function onTagComplete(idx: number, query: string) {
+  const q = query.trim().toLowerCase()
+  const selected = new Set(
+    Array.isArray(rules.value.conditions[idx].value)
+      ? (rules.value.conditions[idx].value as string[])
+      : [],
+  )
+  const pool = allTagKeys.value
+  const matched = q
+    ? pool.filter((t) => t.toLowerCase().startsWith(q) && !selected.has(t))
+    : pool.filter((t) => !selected.has(t))
+  tagSuggestions.value[idx] = matched.slice(0, 50)
 }
 
 function close() {
@@ -329,27 +324,17 @@ const allFields = computed(() =>
                   />
 
                   <!-- tags -->
-                  <div v-else class="tags-input">
-                    <span
-                      v-for="t in Array.isArray(c.value) ? c.value : []"
-                      :key="t"
-                      class="chip"
-                    >
-                      {{ t }}
-                      <span class="x" @click="removeTag(idx, t)">×</span>
-                    </span>
-                    <input
-                      type="text"
-                      placeholder="add tag + Enter"
-                      :value="tagBuffers[idx] ?? ''"
-                      @input="
-                        tagBuffers[idx] = (
-                          $event.target as HTMLInputElement
-                        ).value
-                      "
-                      @keydown="onTagInputKey(idx, $event)"
-                    />
-                  </div>
+                  <AutoComplete
+                    v-else
+                    :model-value="Array.isArray(c.value) ? c.value : []"
+                    :suggestions="tagSuggestions[idx] ?? []"
+                    multiple
+                    :min-length="1"
+                    placeholder="Type to search tags…"
+                    class="tag-autocomplete"
+                    @complete="onTagComplete(idx, $event.query)"
+                    @update:model-value="onValueChange(idx, $event)"
+                  />
                 </div>
 
                 <button
@@ -619,53 +604,45 @@ const allFields = computed(() =>
   align-items: center;
 }
 
-.tags-input {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--surface-border);
-  border-radius: 4px;
-  background: var(--surface-card);
-  min-height: 30px;
-  align-items: center;
+.tag-autocomplete {
   width: 100%;
 }
 
-.tags-input:focus-within {
-  border-color: var(--primary-color);
+:deep(.tag-autocomplete .p-autocomplete-input-multiple) {
+  min-height: 30px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  background: var(--surface-card);
+  border-color: var(--surface-border);
+  font-size: 12.5px;
 }
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px 2px 8px;
-  border-radius: 999px;
+:deep(.tag-autocomplete .p-autocomplete-chip),
+:deep(.tag-autocomplete .p-autocomplete-token) {
   background: color-mix(in srgb, var(--primary-color) 15%, transparent);
   color: var(--primary-color);
+  padding: 2px 6px 2px 8px;
+  border-radius: 999px;
   font-size: 11.5px;
 }
 
-.chip .x {
-  cursor: pointer;
+:deep(.tag-autocomplete .p-autocomplete-chip-icon),
+:deep(.tag-autocomplete .p-autocomplete-token-icon) {
+  color: var(--primary-color);
   opacity: 0.7;
+  cursor: pointer;
 }
 
-.chip .x:hover {
+:deep(.tag-autocomplete .p-autocomplete-chip-icon:hover),
+:deep(.tag-autocomplete .p-autocomplete-token-icon:hover) {
   opacity: 1;
 }
 
-.tags-input input {
-  flex: 1;
-  min-width: 80px;
-  border: none !important;
-  outline: none;
+:deep(.tag-autocomplete .p-autocomplete-input) {
+  font-size: 12.5px;
+  padding: 2px 4px;
   background: transparent;
   color: var(--text-color);
-  font-size: 12.5px;
-  padding: 2px 4px !important;
-  font-family: inherit;
 }
 
 .add-rule-btn {

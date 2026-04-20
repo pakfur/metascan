@@ -576,6 +576,29 @@ class DatabaseManager:
             logger.error(f"Index search failed for {index_type}:{term}: {e}")
             return set()
 
+    def get_tag_path_index(self) -> Dict[str, List[str]]:
+        """Return ``{tag_key: [file_path, ...]}`` for every tag in the index.
+
+        Used by smart-folder tag conditions so they evaluate against the same
+        inverted index the sidebar tag filter uses, rather than the sparse
+        per-record ``tags`` field (which is only populated on detail-loaded
+        Media records).
+        """
+        out: Dict[str, List[str]] = {}
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT index_key, file_path FROM indices "
+                    "WHERE index_type = 'tag'"
+                ).fetchall()
+                for row in rows:
+                    out.setdefault(row["index_key"], []).append(
+                        to_native_path(row["file_path"])
+                    )
+        except Exception as e:
+            logger.error(f"Failed to build tag path index: {e}")
+        return out
+
     def get_tags_for_file(self, file_path: Path) -> List[str]:
         """Return every tag attached to ``file_path``, regardless of source.
 
