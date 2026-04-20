@@ -194,19 +194,20 @@ class DatabaseManager:
             # touching the main table — ~6 ms instead of ~25 s.
             #
             # Both indexes must include *every* column the summary SELECT
-            # projects. When a new column (e.g. ``modified_at``) is added to
-            # the summary response, the old covering index silently stops
-            # covering and each list request falls back to the main table —
-            # which is exactly the 20-second regression we're guarding
-            # against. Drop any pre-existing index whose DDL is missing the
-            # current column set so the CREATE below rebuilds it.
+            # projects. When a new column (e.g. ``modified_at`` /
+            # ``created_at``) is added to the summary response, the old
+            # covering index silently stops covering and each list request
+            # falls back to the main table — the 20-second regression we're
+            # guarding against. Drop any pre-existing index whose DDL is
+            # missing the current column set so the CREATE below rebuilds.
+            required_cols = ("modified_at", "created_at")
             for idx_name in ("idx_media_summary_added", "idx_media_summary_modified"):
                 ddl_row = conn.execute(
-                    "SELECT sql FROM sqlite_master "
-                    "WHERE type='index' AND name=?",
+                    "SELECT sql FROM sqlite_master " "WHERE type='index' AND name=?",
                     (idx_name,),
                 ).fetchone()
-                if ddl_row and "modified_at" not in (ddl_row["sql"] or ""):
+                ddl_sql = (ddl_row["sql"] or "") if ddl_row else ""
+                if ddl_row and any(col not in ddl_sql for col in required_cols):
                     conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
             conn.execute(
                 """
@@ -223,7 +224,8 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_media_summary_modified
                 ON media(
                     modified_at, file_path, is_favorite, playback_speed,
-                    width, height, file_size, frame_rate, duration
+                    width, height, file_size, frame_rate, duration,
+                    created_at
                 )
                 """
             )
@@ -283,6 +285,30 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_hashes_phash ON media_hashes(phash)"
             )
 
+            # One-shot backfill: ``created_at`` previously tracked the last
+            # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
+            # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
+            # rules now need first-ingest semantics; the upsert was fixed to
+            # preserve ``created_at`` on update, but existing rows already
+            # carry the collapsed rescan timestamp. Copy ``modified_at``
+            # (file mtime on disk) over as a reasonable proxy — it's the
+            # closest signal we have to when the row really became part of
+            # the library. Gated on ``PRAGMA user_version`` so it runs once.
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+            user_version = int(version_row[0]) if version_row else 0
+            if user_version < 1:
+                logger.info(
+                    "Backfilling created_at from modified_at (one-time; "
+                    "fixes 'Added' smart-folder rule collapsing onto the "
+                    "last rescan date)…"
+                )
+                cur = conn.execute(
+                    "UPDATE media SET created_at = modified_at "
+                    "WHERE modified_at IS NOT NULL"
+                )
+                logger.info(f"created_at backfill updated {cur.rowcount} row(s).")
+                conn.execute("PRAGMA user_version = 1")
+
             conn.commit()
 
     @contextmanager
@@ -311,12 +337,28 @@ class DatabaseManager:
                     logger.error(f"Batch write failed: {e}")
                     raise
 
+    # True upsert — preserves the row's original ``created_at`` on rescan.
+    # ``INSERT OR REPLACE`` is DELETE+INSERT under the hood, which fires the
+    # ``DEFAULT CURRENT_TIMESTAMP`` every time, making ``created_at`` track
+    # the most recent rescan rather than the first ingest. Smart folders
+    # keying off "Added" need that first-ingest semantic.
     _MEDIA_UPSERT_SQL = """
-        INSERT OR REPLACE INTO media (
+        INSERT INTO media (
             file_path, data, is_favorite, playback_speed,
             width, height, file_size, frame_rate, duration, modified_at,
             updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(file_path) DO UPDATE SET
+            data = excluded.data,
+            is_favorite = excluded.is_favorite,
+            playback_speed = excluded.playback_speed,
+            width = excluded.width,
+            height = excluded.height,
+            file_size = excluded.file_size,
+            frame_rate = excluded.frame_rate,
+            duration = excluded.duration,
+            modified_at = excluded.modified_at,
+            updated_at = CURRENT_TIMESTAMP
     """
 
     @staticmethod
@@ -452,7 +494,8 @@ class DatabaseManager:
         where = "WHERE is_favorite = 1" if favorites_only else ""
         sql = (
             "SELECT file_path, is_favorite, playback_speed, "
-            "width, height, file_size, frame_rate, duration, modified_at "
+            "width, height, file_size, frame_rate, duration, "
+            "modified_at, created_at "
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
@@ -478,6 +521,7 @@ class DatabaseManager:
                             "frame_rate": row["frame_rate"],
                             "duration": row["duration"],
                             "modified_at": row["modified_at"],
+                            "created_at": row["created_at"],
                         }
                     )
         except Exception as e:

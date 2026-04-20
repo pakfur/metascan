@@ -5,11 +5,10 @@ export type RuleField =
   | 'favorite'
   | 'type'
   | 'model'
-  | 'prompt'
   | 'filename'
   | 'tags'
   | 'modified'
-  | 'dimensions'
+  | 'added'
 
 export type RuleOp =
   | 'is'

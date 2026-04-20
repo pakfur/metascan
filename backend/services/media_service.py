@@ -102,6 +102,7 @@ class MediaService:
             "frame_rate": media.frame_rate,
             "duration": media.duration,
             "modified_at": media.modified_at.isoformat() if media.modified_at else None,
+            "created_at": media.created_at.isoformat() if media.created_at else None,
         }
 
     def media_to_dict(self, media: Media) -> dict:
