@@ -56,8 +56,33 @@ onMounted(async () => {
     settingsStore.loadConfig(),
     mediaStore.loadAllMedia(),
     filterStore.loadFilterData(),
+    foldersStore.loadFolders(),
     foldersStore.loadTagPaths(),
   ])
+})
+
+// Live-sync folder mutations from other tabs / sessions.
+useWebSocket('folders', (event, data) => {
+  const payload = data as Record<string, unknown>
+  if (event === 'folder_created') {
+    foldersStore.onFolderCreated(
+      payload as unknown as { folder: import('./api/folders').FolderRecord },
+    )
+  } else if (event === 'folder_updated') {
+    foldersStore.onFolderUpdated(
+      payload as unknown as { folder: import('./api/folders').FolderRecord },
+    )
+  } else if (event === 'folder_deleted') {
+    foldersStore.onFolderDeleted(payload as unknown as { id: string })
+  } else if (event === 'folder_items_changed') {
+    foldersStore.onFolderItemsChanged(
+      payload as unknown as {
+        folder_id: string
+        added: string[]
+        removed: string[]
+      },
+    )
+  }
 })
 
 // File watcher: auto-refresh when files change on disk
