@@ -1,6 +1,15 @@
 ## Todo
 
 ### New Features
+- (V1) Make a background worker to watch the directories and scan/import new files automatically
+  - Configurable, enable or disable
+
+- (V1) Worker Watcher - A worker watch that monitors all workers
+  - Tab that displays a list of workers
+  - Color dot for status - green running/healthy, yellow running/warn, red errors, white not running/healthy
+  - show current activity per worker
+  - show logs per worker, copy, scroll, clear, search
+
 - (V1) Add configuration option tab to the configuration dialog to disable CLIP, pHash, and embedding.
   - When disabled, then any UI component that depends on CLIP, pHash or embedding will be disabled
 
@@ -34,7 +43,7 @@ X (MVP) PrimeVue Galleria below the media in the media viewer
   - add "Sort A-Z", "Sort # (9-0)" icon buttons for the filter content
 
 
-- (v1) Folders and Smart folders
+X (v1) Folders and Smart folders
   - Virtual folders. Allows for manual organization of media into folders. Many to many relationship between media files and folders. Folders get names, and clicking on one acts like a filter
   - Smart folders. Associated with contentr search strings and/or tags. Files that meet the criteria automatically get added to the folder. Clicking on one acts like a filter. Content is scanned in the background and associated with a Smart folder.
 
@@ -50,6 +59,11 @@ X (MVP) Details panel copy to clipboard for individual or all does not work
 - (v1) Search by content
   - selected image is not preserved - can the selected image be scrolled to after viewing the content?
   - viewing searched for content exits the search mode. the search mode should be preserved until explicitly hitting exit
+- (MVP) Details screen
+  - The details panel needs to scroll
+  - Panel spacing can get squished if space is too small
+  - Detail panel title bars must be fixed height
+  - Detail panel content cards need scrolling content
 
 #### Main screen
 X (MVP) arrow keys are not changing the selected media
