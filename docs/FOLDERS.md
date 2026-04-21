@@ -181,9 +181,9 @@ detail that happened to be loaded); when we move the evaluator server-side
 
 ## Known scope limits (as of this commit)
 
-1. **No backend persistence.** Folders live in `localStorage` only — a user
-   who clears site data or switches browsers loses everything. This is the
-   largest item on the follow-up list.
+1. ~~**No backend persistence.**~~ **Done** — folders and smart folders now
+   persist via `/api/folders`. See the [Backend persistence API](#backend-persistence-api)
+   section below for the wire surface.
 2. **No `contentPrompt` / CLIP content-search rule field.** The prototype
    referenced one; it was dropped because the current `Media` schema does
    not expose a stable prompt-independent description, and running CLIP
@@ -201,75 +201,103 @@ detail that happened to be loaded); when we move the evaluator server-side
    file, it stays in smart folders until the next library refresh because
    `foldersStore.purgePath` only touches manual folders.
 
-## Future work
+## Backend persistence API
 
-### 1. Backend storage + API for manual folders
-
-**Goal.** Move manual folders off `localStorage` and onto the SQLite
-database so they are durable and shareable across clients.
-
-**Suggested schema** (additions to `metascan/core/database_sqlite.py`):
+Folders persist in SQLite via two tables:
 
 ```sql
 CREATE TABLE folders (
-    id          TEXT PRIMARY KEY,          -- UUID; matches current client id shape
-    name        TEXT NOT NULL,
-    icon        TEXT NOT NULL DEFAULT 'pi-folder',
-    created_at  REAL NOT NULL,              -- unix seconds
-    updated_at  REAL NOT NULL
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK(kind IN ('manual','smart')),
+    name       TEXT NOT NULL,
+    icon       TEXT NOT NULL DEFAULT 'pi-folder',
+    rules      TEXT,                             -- JSON, NULL on manual
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE TABLE folder_items (
-    folder_id   TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-    file_path   TEXT NOT NULL REFERENCES media(file_path) ON DELETE CASCADE,
-    added_at    REAL NOT NULL,
+    folder_id TEXT NOT NULL REFERENCES folders(id)       ON DELETE CASCADE,
+    file_path TEXT NOT NULL REFERENCES media(file_path)  ON DELETE CASCADE,
+    added_at  REAL NOT NULL,
     PRIMARY KEY (folder_id, file_path)
 );
-
 CREATE INDEX idx_folder_items_by_file ON folder_items(file_path);
 ```
 
-`folder_items.file_path` is the existing `media.file_path` natural key. The
-`ON DELETE CASCADE` on both sides makes `foldersStore.purgePath` redundant
-server-side — a file removal in `media` sweeps its folder memberships.
+One unified `folders` table with a `kind` discriminator keeps the surface
+small and matches the `AnyFolder` union on the client. `rules` is a JSON
+blob because `SmartRules` is written atomically. The `ON DELETE CASCADE`
+on both sides of `folder_items` handles the "file deleted from library"
+sweep — no client-side `purgePath` needed server-side.
 
-**Suggested REST surface** (add a new `backend/api/folders.py`,
-register in `backend/main.py`). Match the shape the frontend already
-produces so the `folders.ts` store can swap its persistence layer without
-changing the rest of the UI:
+### REST surface — `backend/api/folders.py`
 
 ```
-GET    /api/folders                         → [{id,name,icon,items:[path],
-                                                created_at,updated_at,
-                                                count}]
-POST   /api/folders                         body {name,icon?,items?:[path]}
-                                            → folder record
-PATCH  /api/folders/{id}                    body {name?,icon?} → folder record
-DELETE /api/folders/{id}                    → 204
-POST   /api/folders/{id}/items              body {paths:[path]}   → {added:int}
-DELETE /api/folders/{id}/items              body {paths:[path]}   → {removed:int}
+GET    /api/folders                 → FolderRecord[]
+POST   /api/folders                 body: {id,kind,name,icon?,items?,rules?,sort_order?}
+                                    → FolderRecord (201)
+                                    → 409 on duplicate id
+                                    → 422 if items set on a smart folder
+PATCH  /api/folders/{id}            body: {name?,icon?,rules?,sort_order?}
+                                    → FolderRecord
+                                    → 404 / 422 (rules on manual)
+DELETE /api/folders/{id}            → {status:"deleted"}   (404 on miss)
+POST   /api/folders/{id}/items      body: {paths:[path]}  → {added:int}
+DELETE /api/folders/{id}/items      body: {paths:[path]}  → {removed:int}
+                                    → 422 on smart folders, 404 on miss
 ```
 
-Authentication is already handled by the bearer-token middleware in
-`backend/main.py` — no changes needed. All DB work should go through
-`asyncio.to_thread`, matching the rest of the service layer.
+`FolderRecord`:
+```ts
+{ id, kind, name, icon, sort_order, created_at, updated_at, count,
+  items?: string[],     // manual only
+  rules?: SmartRules }  // smart only
+```
 
-**Frontend migration path.**
+### WebSocket channel `folders`
 
-1. Add an `api/folders.ts` wrapper (fetch + types mirror of today's store
-   shape).
-2. Replace the `localStorage` load/save in `stores/folders.ts` with calls
-   to the new API. Keep the existing store surface (`manualFolders`,
-   `addToManualFolder`, …) so every consumer keeps working unchanged.
-3. On startup, fetch `GET /api/folders` alongside `loadAllMedia`. Populate
-   `manualFolders.value` from the response. Drop the `watch` that writes to
-   `localStorage`; every mutation now funnels through the API.
-4. Broadcast changes on the `folders` WebSocket channel (see below) so
-   other tabs / clients stay in sync.
-5. Migration-of-existing-data: on first load after the backend lands, if
-   the server returns an empty list AND `localStorage` has entries, POST
-   them up, then clear `localStorage`. One-time helper; safe to remove in
-   a later release.
+Every mutation fires a broadcast on the `folders` channel so other tabs
+stay in sync. Handlers live in `stores/folders.ts` as `onFolder*`.
+
+| Event | Payload |
+|---|---|
+| `folder_created` | `{folder: FolderRecord}` |
+| `folder_updated` | `{folder: FolderRecord}` |
+| `folder_deleted` | `{id: string}` |
+| `folder_items_changed` | `{folder_id, added:[path], removed:[path]}` |
+
+### Frontend wiring
+
+- `frontend/src/api/folders.ts` — typed HTTP wrappers.
+- `stores/folders.ts` — `loadFolders()` runs at app init. Every mutation
+  does an optimistic local update, fires the matching API call, and
+  rolls back on error.
+- **One-shot legacy import:** on first successful `loadFolders()` when
+  the server returns an empty list, any `metascan.folders.v1`
+  localStorage payload gets POSTed up, then cleared. Guarded by
+  `metascan.folders.v1.imported` so it's at-most-once per browser.
+- `App.vue` subscribes to `useWebSocket('folders', …)` and routes each
+  event to the matching `onFolder*` store action.
+
+### Tests
+
+`tests/test_folders_db.py` — 16 DB-level unit tests covering CRUD, kind
+validation, dedupe, and the CASCADE-on-media-delete contract.
+`tests/test_folders_api.py` — 11 REST tests against a real FastAPI
+`TestClient` with an isolated temp DB.
+
+## Future work
+
+### 1. ~~Backend storage + API for manual folders~~ — shipped (see above)
+
+Follow-ups enabled by the new schema:
+
+- **Drag-to-reorder manual folders.** `sort_order` is already in the
+  schema; wire up a reorder UI and a `PATCH` payload.
+
+*(Legacy details retained below for historical context.)*
 
 **WebSocket channel.** Follow the existing `ws_manager.broadcast` pattern
 (already used for `scan`, `upscale`, `embedding`, `models`, `watcher`).
