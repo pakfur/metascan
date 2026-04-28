@@ -20,7 +20,10 @@ from metascan.core.hardware import (  # noqa: F401
     _try_cuda,
     _try_vulkan,
     classify_tier,
+    detect_hardware,
     feature_gates,
+    report_to_dict,
+    select_torch_device,
 )
 
 
@@ -329,3 +332,48 @@ def test_gate_dataclass_fields() -> None:
     assert g.available is True
     assert g.recommended is False
     assert g.reason == "testing"
+
+
+# ---------------------------------------------------------------------------
+# Aggregator tests (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_hardware_returns_populated_report() -> None:
+    detect_hardware.cache_clear()
+    rpt = detect_hardware()
+    assert rpt.os in {"Linux", "Darwin", "Windows"}
+    assert rpt.python.startswith("3.")
+
+
+def test_report_to_dict_is_json_safe() -> None:
+    import json
+
+    detect_hardware.cache_clear()
+    d = report_to_dict(detect_hardware())
+    json.dumps(d)
+
+
+def test_select_torch_device_explicit_preference() -> None:
+    assert select_torch_device("cpu") == "cpu"
+    assert select_torch_device("cuda") == "cuda"
+    assert select_torch_device("mps") == "mps"
+
+
+def test_select_torch_device_auto_picks_cuda_when_available() -> None:
+    detect_hardware.cache_clear()
+    fake = _make_report(cuda=CudaInfo(name="X", vram_gb=8.0, capability="8.6"))
+    with patch("metascan.core.hardware.detect_hardware", return_value=fake):
+        assert select_torch_device("auto") == "cuda"
+
+
+def test_select_torch_device_auto_picks_mps_on_apple_silicon() -> None:
+    fake = _make_report(os="Darwin", machine="arm64", mps=True)
+    with patch("metascan.core.hardware.detect_hardware", return_value=fake):
+        assert select_torch_device("auto") == "mps"
+
+
+def test_select_torch_device_auto_falls_back_to_cpu() -> None:
+    fake = _make_report()
+    with patch("metascan.core.hardware.detect_hardware", return_value=fake):
+        assert select_torch_device("auto") == "cpu"
