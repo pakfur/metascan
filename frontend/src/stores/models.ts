@@ -18,6 +18,7 @@ import {
   type InferenceStatusPayload,
   type ModelRow,
 } from '../api/models'
+import type { Gate, Tier } from '../types/hardware'
 import { useWebSocket } from '../composables/useWebSocket'
 
 export const useModelsStore = defineStore('models', () => {
@@ -26,6 +27,8 @@ export const useModelsStore = defineStore('models', () => {
   const hfTokenSet = ref(false)
   const currentClipModel = ref<string>('small')
   const currentClipDim = ref<number>(0)
+  const tier = ref<Tier>('cpu_only')
+  const gates = ref<Record<string, Gate>>({})
 
   // Per-model transient state for rows with an in-flight download.
   // Keyed by model id; cleared on download_complete or download_error.
@@ -106,6 +109,8 @@ export const useModelsStore = defineStore('models', () => {
     hfTokenSet.value = statusResp.hf_token_set
     currentClipModel.value = statusResp.current_clip_model
     currentClipDim.value = statusResp.current_clip_dim
+    tier.value = statusResp.tier
+    gates.value = statusResp.gates
     hardware.value = hw
     applyInferencePayload(infer)
   }
@@ -133,6 +138,10 @@ export const useModelsStore = defineStore('models', () => {
 
   async function verifyHfToken(): Promise<{ ok: boolean; name?: string; error?: string }> {
     return await testHfToken()
+  }
+
+  function gateFor(id: string): Gate | null {
+    return gates.value[id] ?? null
   }
 
   async function startDownload(id: string) {
@@ -183,6 +192,8 @@ export const useModelsStore = defineStore('models', () => {
     hfTokenSet,
     currentClipModel,
     currentClipDim,
+    tier,
+    gates,
     downloading,
     downloadErrors,
     inferenceState,
@@ -199,6 +210,7 @@ export const useModelsStore = defineStore('models', () => {
     saveHfToken,
     removeHfToken,
     verifyHfToken,
+    gateFor,
     startDownload,
     startDownloadAllMissing,
     startInferenceWorker,
