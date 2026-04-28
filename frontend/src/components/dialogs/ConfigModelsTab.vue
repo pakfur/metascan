@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useModelsStore } from '../../stores/models'
 import type { ModelGroup, ModelRow } from '../../api/models'
+import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
 
 const models = useModelsStore()
 
@@ -20,6 +21,9 @@ onMounted(async () => {
 })
 
 const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP']
+
+const tierLabel = computed(() => TIER_LABEL[models.tier])
+const tierColor = computed(() => TIER_COLOR[models.tier])
 
 const grouped = computed<Record<ModelGroup, ModelRow[]>>(() => {
   const out: Record<ModelGroup, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [] }
@@ -59,6 +63,38 @@ function statusLabel(row: ModelRow): { label: string; color: string } {
   if (row.status === 'available') return { label: 'ready', color: '#22c55e' }
   if (row.status === 'missing') return { label: 'missing', color: 'var(--text-color-secondary)' }
   return { label: row.status, color: 'var(--text-color-secondary)' }
+}
+
+function gateChip(row: ModelRow): string | null {
+  const g = models.gates[row.id]
+  if (!g) return null
+  if (!g.available) return 'unsupported'
+  if (g.recommended) return 'recommended'
+  return null
+}
+
+function gateChipClass(row: ModelRow): string {
+  const g = models.gates[row.id]
+  if (!g) return ''
+  if (!g.available) return 'gate-bad'
+  if (g.recommended) return 'gate-good'
+  return ''
+}
+
+function isModelDownloadable(row: ModelRow): boolean {
+  // We still allow downloading models the gate marks unavailable —
+  // sometimes the user wants the weights even though they can't run
+  // them efficiently. Only block downloads when the model has a
+  // hard environmental block (e.g. punkt vs punkt_tab on new NLTK).
+  const g = models.gates[row.id]
+  if (!g) return true
+  // Block only NLTK punkt variants where the registered id is wrong
+  // for the running NLTK version — downloading the wrong one is
+  // pointless.
+  if (row.id === 'nltk-punkt' || row.id === 'nltk-punkt-tab') {
+    return g.available
+  }
+  return true
 }
 
 async function onTogglePreload(row: ModelRow, ev: Event) {
@@ -163,14 +199,35 @@ async function onRebuildIndex() {
   <div v-if="loading" class="muted">Loading model status…</div>
   <template v-else>
     <section class="hw-block">
-      <div class="hw-label">Hardware</div>
-      <div class="hw-value" v-if="models.hardware">
-        <span>{{ models.hardware.platform }}</span>
-        <span>CPUs: {{ models.hardware.cpu_count ?? '—' }}</span>
-        <span v-if="models.hardware.cuda_available">
-          CUDA: {{ models.hardware.gpu_name }} ({{ models.hardware.vram_gb }} GB)
-        </span>
-        <span v-else>CUDA: not available</span>
+      <div class="hw-row">
+        <div class="hw-tier" :style="{ borderColor: tierColor, color: tierColor }">
+          {{ tierLabel }}
+        </div>
+        <div class="hw-value" v-if="models.hardware">
+          <span>{{ models.hardware.report.os }}</span>
+          <span>{{ models.hardware.report.machine }}</span>
+          <span>CPUs: {{ models.hardware.report.cpu_count ?? '—' }}</span>
+          <span v-if="models.hardware.report.ram_gb">
+            RAM: {{ models.hardware.report.ram_gb }} GB
+          </span>
+          <span v-if="models.hardware.report.cuda">
+            CUDA: {{ models.hardware.report.cuda.name }}
+            ({{ models.hardware.report.cuda.vram_gb }} GB)
+          </span>
+          <span v-else-if="models.hardware.report.mps">MPS available</span>
+          <span v-else>CPU only</span>
+          <span v-if="models.hardware.report.vulkan?.has_real_device">Vulkan ✓</span>
+          <span v-else-if="models.hardware.report.vulkan?.available" class="warn-inline">
+            Vulkan: software only
+          </span>
+        </div>
+      </div>
+      <div
+        v-for="(w, i) in (models.hardware?.report.warnings ?? [])"
+        :key="i"
+        class="hw-warning"
+      >
+        {{ w }}
       </div>
     </section>
 
@@ -243,6 +300,14 @@ async function onRebuildIndex() {
             <span class="chip" :style="{ color: statusLabel(row).color, borderColor: statusLabel(row).color }">
               {{ statusLabel(row).label }}
             </span>
+            <span
+              v-if="gateChip(row)"
+              class="chip gate-chip"
+              :class="gateChipClass(row)"
+              :title="row.id in models.gates ? models.gates[row.id].reason : ''"
+            >
+              {{ gateChip(row) }}
+            </span>
             <div v-if="models.downloadErrors[row.id]" class="err-text" :title="models.downloadErrors[row.id]">
               {{ models.downloadErrors[row.id] }}
             </div>
@@ -261,7 +326,7 @@ async function onRebuildIndex() {
           <div class="col actions">
             <button
               class="btn-small"
-              :disabled="row.status === 'available' || !!models.downloading[row.id]"
+              :disabled="row.status === 'available' || !!models.downloading[row.id] || !isModelDownloadable(row)"
               @click="onDownload(row)"
             >
               Download
@@ -321,7 +386,6 @@ section { margin-bottom: 14px; }
   font-size: 12.5px;
 }
 
-.hw-label { font-size: 12px; color: var(--text-color-secondary); margin-bottom: 4px; }
 .hw-value {
   display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--text-color);
 }
@@ -435,4 +499,36 @@ section { margin-bottom: 14px; }
 .empty-msg { padding: 10px; color: var(--text-color-secondary); font-size: 12px; text-align: center; }
 
 .preload-hint { font-size: 12px; color: var(--text-color-secondary); }
+
+.hw-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.hw-tier {
+  padding: 3px 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.hw-warning {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.08);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.warn-inline { color: #eab308; }
+
+.gate-chip { margin-left: 4px; }
+.gate-good { color: #22c55e; border-color: #22c55e; }
+.gate-bad { color: var(--danger-color); border-color: var(--danger-color); }
 </style>
