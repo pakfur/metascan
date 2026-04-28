@@ -229,3 +229,162 @@ def classify_tier(report: HardwareReport) -> Tier:
     if report.mps and report.os == "Darwin" and report.machine == "arm64":
         return Tier.APPLE_SILICON
     return Tier.CPU_ONLY
+
+
+@dataclass
+class Gate:
+    available: bool
+    recommended: bool
+    reason: str = ""
+
+
+# Per-model VRAM floors (GB) for "available". Below this, the model is
+# either unrunnable or unusably slow. Numbers from
+# docs/MODEL_HARDWARE_REQUIREMENTS.md.
+_CLIP_VRAM_MIN: dict = {
+    "clip-small": 1.0,
+    "clip-medium": 2.0,
+    "clip-large": 6.0,
+}
+
+
+def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
+    """Return per-model availability + recommendation gates.
+
+    Keys are the model ids surfaced by ``GET /api/models/status``:
+    ``clip-{small,medium,large}``, ``resr-{x2,x4,x4-anime}``, ``gfpgan-v1.4``,
+    ``rife``, ``nltk-punkt``, ``nltk-punkt-tab``, ``nltk-stopwords``.
+    """
+    tier = classify_tier(report)
+    gates: dict[str, Gate] = {}
+
+    # ---- CLIP ----
+    has_gpu = report.cuda is not None or (report.mps and report.os == "Darwin")
+    cuda_vram = report.cuda.vram_gb if report.cuda else 0.0
+
+    for key in ("clip-small", "clip-medium", "clip-large"):
+        min_vram = _CLIP_VRAM_MIN[key]
+        if report.cuda is not None:
+            available = cuda_vram >= min_vram
+            reason = (
+                ""
+                if available
+                else f"Requires {min_vram} GB VRAM; detected {cuda_vram} GB."
+            )
+        elif report.mps:
+            # ViT-H/14 on MPS hits allocator pressure at <= 16 GB unified RAM
+            available = key != "clip-large" or (report.ram_gb or 0.0) >= 24.0
+            reason = (
+                ""
+                if available
+                else "ViT-H/14 unstable on MPS with <24 GB unified memory."
+            )
+        else:
+            # CPU-only: small is fine, medium painful, large impractical
+            available = key != "clip-large"
+            reason = "" if available else "ViT-H/14 is too slow on CPU."
+
+        # Recommendation: pick the largest model the host can handle well
+        if not available:
+            recommended = False
+        elif tier is Tier.CUDA_WORKSTATION:
+            recommended = key == "clip-large"
+        elif tier is Tier.CUDA_MAINSTREAM:
+            recommended = key == "clip-medium"
+        elif tier is Tier.CUDA_ENTRY:
+            recommended = key == "clip-medium" and cuda_vram >= 2.0
+            if not recommended and key == "clip-small":
+                recommended = cuda_vram < 2.0
+        elif tier is Tier.APPLE_SILICON:
+            recommended = key == "clip-small"
+        else:  # CPU_ONLY
+            recommended = key == "clip-small"
+
+        gates[key] = Gate(available=available, recommended=recommended, reason=reason)
+
+    # ---- Real-ESRGAN ----
+    # x2 / x4-anime are light; x4 needs 4 GB CUDA for interactive 1080p
+    gates["resr-x2"] = Gate(
+        available=True,
+        recommended=has_gpu,
+        reason=("" if has_gpu else "Will run on CPU at 30-60 s per 1080p image."),
+    )
+    gates["resr-x4-anime"] = Gate(
+        available=True,
+        recommended=has_gpu,
+        reason="" if has_gpu else "Will run on CPU at 25-45 s per 1080p image.",
+    )
+    if report.cuda is not None:
+        x4_avail = cuda_vram >= 4.0
+        x4_reason = (
+            ""
+            if x4_avail
+            else f"Requires 4 GB VRAM for 1080p; detected {cuda_vram} GB."
+        )
+    else:
+        x4_avail = True  # CPU works, just very slow
+        x4_reason = "Will run on CPU at 90-180 s per 1080p image."
+    gates["resr-x4"] = Gate(
+        available=x4_avail,
+        recommended=tier in (Tier.CUDA_MAINSTREAM, Tier.CUDA_WORKSTATION),
+        reason=x4_reason,
+    )
+
+    # ---- GFPGAN ----
+    if report.cuda is not None:
+        gfp_avail = cuda_vram >= 3.0
+        gfp_reason = (
+            "" if gfp_avail else f"Requires 3 GB VRAM; detected {cuda_vram} GB."
+        )
+    else:
+        gfp_avail = True
+        gfp_reason = "Will run on CPU at 6-12 s per face."
+    gates["gfpgan-v1.4"] = Gate(
+        available=gfp_avail,
+        recommended=tier in (Tier.CUDA_MAINSTREAM, Tier.CUDA_WORKSTATION),
+        reason=gfp_reason,
+    )
+
+    # ---- RIFE (Vulkan-required) ----
+    vk = report.vulkan
+    if vk is None or not vk.has_real_device:
+        rife_reason = (
+            "vulkaninfo not detected; install Vulkan drivers."
+            if vk is None or not vk.available
+            else "Only llvmpipe (software) Vulkan device detected. "
+            "Install GPU Vulkan drivers."
+        )
+        gates["rife"] = Gate(available=False, recommended=False, reason=rife_reason)
+    else:
+        gates["rife"] = Gate(available=True, recommended=True, reason="")
+
+    # ---- NLTK punkt vs punkt_tab (CVE-2024-39705 / NLTK 3.8.2 break) ----
+    nltk_v = report.nltk_version or ""
+    needs_tab = bool(nltk_v) and _nltk_geq_3_8_2(nltk_v)
+    if needs_tab:
+        gates["nltk-punkt"] = Gate(
+            available=False,
+            recommended=False,
+            reason=f"NLTK {nltk_v} requires punkt_tab (CVE-2024-39705 fix).",
+        )
+        gates["nltk-punkt-tab"] = Gate(available=True, recommended=True, reason="")
+    else:
+        gates["nltk-punkt"] = Gate(available=True, recommended=True, reason="")
+        gates["nltk-punkt-tab"] = Gate(
+            available=False,
+            recommended=False,
+            reason=f"NLTK {nltk_v or '<unknown>'} uses legacy punkt.",
+        )
+    gates["nltk-stopwords"] = Gate(available=True, recommended=True, reason="")
+
+    return gates
+
+
+def _nltk_geq_3_8_2(version: str) -> bool:
+    try:
+        parts = [int(p) for p in version.split(".")[:3]]
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts) >= (3, 8, 2)
+    except ValueError:
+        return False

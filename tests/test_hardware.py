@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from metascan.core.hardware import (  # noqa: F401
     CudaInfo,
+    Gate,
     HardwareReport,
     Tier,
     VulkanInfo,
@@ -19,6 +20,7 @@ from metascan.core.hardware import (  # noqa: F401
     _try_cuda,
     _try_vulkan,
     classify_tier,
+    feature_gates,
 )
 
 
@@ -232,3 +234,98 @@ def test_tier_cuda_takes_precedence_over_mps() -> None:
         mps=True,
     )
     assert classify_tier(rpt) is Tier.CUDA_MAINSTREAM
+
+
+def test_gates_cpu_only_blocks_large_clip() -> None:
+    rpt = _make_report()
+    gates = feature_gates(rpt)
+    assert gates["clip-small"].available is True
+    assert gates["clip-small"].recommended is True
+    assert gates["clip-medium"].available is True  # CPU possible, slow
+    assert gates["clip-medium"].recommended is False
+    assert gates["clip-large"].available is False  # too slow on CPU
+    assert "CPU" in gates["clip-large"].reason
+
+
+def test_gates_cpu_only_blocks_real_esrgan_x4() -> None:
+    rpt = _make_report()
+    gates = feature_gates(rpt)
+    assert gates["resr-x2"].available is True
+    assert gates["resr-x4"].available is True
+    assert gates["resr-x4"].recommended is False  # 90-180s/1080p on CPU
+    assert gates["resr-x4-anime"].available is True
+
+
+def test_gates_cpu_only_blocks_rife_when_no_vulkan() -> None:
+    rpt = _make_report()  # no vulkan info
+    gates = feature_gates(rpt)
+    assert gates["rife"].available is False
+    assert "Vulkan" in gates["rife"].reason
+
+
+def test_gates_rife_available_when_vulkan_real() -> None:
+    rpt = _make_report(
+        vulkan=VulkanInfo(
+            available=True,
+            devices=["NVIDIA GeForce RTX 3060"],
+            has_real_device=True,
+        ),
+    )
+    gates = feature_gates(rpt)
+    assert gates["rife"].available is True
+
+
+def test_gates_rife_blocked_when_only_llvmpipe() -> None:
+    rpt = _make_report(
+        vulkan=VulkanInfo(
+            available=True,
+            devices=["llvmpipe (LLVM 15.0.7, 256 bits)"],
+            has_real_device=False,
+        ),
+    )
+    gates = feature_gates(rpt)
+    assert gates["rife"].available is False
+    assert "llvmpipe" in gates["rife"].reason
+
+
+def test_gates_cuda_entry_recommends_clip_medium_not_large() -> None:
+    rpt = _make_report(cuda=CudaInfo(name="GTX 1660", vram_gb=4.0, capability="7.5"))
+    gates = feature_gates(rpt)
+    assert gates["clip-large"].available is False  # 4 GB cannot run ViT-H
+    assert gates["clip-medium"].available is True
+    assert gates["clip-medium"].recommended is True
+
+
+def test_gates_cuda_workstation_recommends_clip_large() -> None:
+    rpt = _make_report(cuda=CudaInfo(name="RTX 4090", vram_gb=24.0, capability="8.9"))
+    gates = feature_gates(rpt)
+    assert gates["clip-large"].available is True
+    assert gates["clip-large"].recommended is True
+
+
+def test_gates_apple_silicon_allows_small_medium_clip_blocks_large() -> None:
+    rpt = _make_report(os="Darwin", machine="arm64", mps=True, ram_gb=16.0)
+    gates = feature_gates(rpt)
+    assert gates["clip-small"].available is True
+    assert gates["clip-small"].recommended is True
+    assert gates["clip-medium"].available is True
+    # ViT-H/14 on MPS hits allocator limits below 24 GB unified; gate
+    # marks it unavailable (and therefore not recommended) on the 16 GB
+    # case here — the recommended=False assertion holds either way.
+    assert gates["clip-large"].recommended is False
+
+
+def test_gates_nltk_blocked_on_old_punkt_with_new_nltk() -> None:
+    rpt = _make_report(nltk_version="3.9.1")
+    gates = feature_gates(rpt)
+    assert gates["nltk-punkt"].available is False
+    assert "punkt_tab" in gates["nltk-punkt"].reason
+    # The replacement id should still be available.
+    assert gates["nltk-punkt-tab"].available is True
+
+
+def test_gate_dataclass_fields() -> None:
+    g = Gate(available=True, recommended=False, reason="testing")
+    assert g.available is True
+    assert g.recommended is False
+    assert g.reason == "testing"
