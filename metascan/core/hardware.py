@@ -11,6 +11,7 @@ field at its default. This module never raises on import or on
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import platform
@@ -192,3 +193,39 @@ def _try_vulkan() -> VulkanInfo:
         devices=devices,
         has_real_device=has_real,
     )
+
+
+class Tier(str, enum.Enum):
+    """Hardware capability tiers. Drives feature gates and model recommendations.
+
+    Reference: docs/MODEL_HARDWARE_REQUIREMENTS.md "Suggested hardware tier model".
+    """
+
+    CPU_ONLY = "cpu_only"
+    APPLE_SILICON = "apple_silicon"
+    CUDA_ENTRY = "cuda_entry"
+    CUDA_MAINSTREAM = "cuda_mainstream"
+    CUDA_WORKSTATION = "cuda_workstation"
+
+
+# VRAM thresholds (GB) — keep in sync with docs/MODEL_HARDWARE_REQUIREMENTS.md
+_CUDA_MAINSTREAM_MIN_GB = 6.0
+_CUDA_WORKSTATION_MIN_GB = 12.0
+
+
+def classify_tier(report: HardwareReport) -> Tier:
+    """Classify a HardwareReport into one of five tiers.
+
+    Order of precedence: CUDA always wins over MPS (CUDA stack is more
+    feature-complete in PyTorch). MPS is only consulted on Apple Silicon
+    (arm64 Darwin); MPS on Intel macOS does not exist.
+    """
+    if report.cuda is not None:
+        if report.cuda.vram_gb >= _CUDA_WORKSTATION_MIN_GB:
+            return Tier.CUDA_WORKSTATION
+        if report.cuda.vram_gb >= _CUDA_MAINSTREAM_MIN_GB:
+            return Tier.CUDA_MAINSTREAM
+        return Tier.CUDA_ENTRY
+    if report.mps and report.os == "Darwin" and report.machine == "arm64":
+        return Tier.APPLE_SILICON
+    return Tier.CPU_ONLY
