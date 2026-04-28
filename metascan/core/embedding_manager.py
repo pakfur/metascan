@@ -92,29 +92,33 @@ class EmbeddingManager:
         return int(self.model_config["embedding_dim"])
 
     def _resolve_device(self) -> str:
-        """Resolve the device to use for computation."""
+        """Resolve the device to use for computation.
+
+        Delegates to :func:`metascan.core.hardware.select_torch_device` so the
+        same precedence (CUDA → MPS → CPU) is shared across CLIP and any
+        future PyTorch path.
+        """
+        from metascan.core.hardware import select_torch_device
+
         _ensure_heavy_imports()
         assert _torch is not None
 
-        cuda_available = _torch.cuda.is_available()
+        device = select_torch_device(self.device_preference)
+
         logger.info(
             f"Device selection: preference={self.device_preference}, "
-            f"torch.cuda.is_available()={cuda_available}, "
+            f"resolved={device}, "
             f"torch={_torch.__version__}, "
             f"cuda_built={_torch.version.cuda or 'none'}"
         )
 
-        if self.device_preference == "auto":
-            device = "cuda" if cuda_available else "cpu"
-        else:
-            device = self.device_preference
-
         if device == "cpu" and self.model_key in ("medium", "large"):
             logger.warning(
                 f"Running {self.model_config['name']} on CPU will be very slow. "
-                f"Consider using the 'small' model or a CUDA GPU. "
-                f"If you have a GPU, ensure PyTorch is installed with CUDA support: "
-                f"pip install torch --index-url https://download.pytorch.org/whl/cu124"
+                f"Consider using the 'small' model or a CUDA/MPS GPU. "
+                f"If you have an NVIDIA GPU, ensure PyTorch is installed with "
+                f"CUDA support: pip install torch --index-url "
+                f"https://download.pytorch.org/whl/cu124"
             )
         return device
 

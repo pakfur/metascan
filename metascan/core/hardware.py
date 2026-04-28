@@ -449,6 +449,6 @@ def select_torch_device(preference: str = "auto") -> str:
     rpt = detect_hardware()
     if rpt.cuda is not None:
         return "cuda"
-    if rpt.mps and rpt.os == "Darwin":
+    if rpt.mps and rpt.os == "Darwin" and rpt.machine == "arm64":
         return "mps"
     return "cpu"
