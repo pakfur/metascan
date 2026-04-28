@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import platform
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,6 +24,12 @@ from backend.api import similarity
 from backend.config import get_models_config, load_app_config, save_app_config
 from backend.ws.manager import ws_manager
 from metascan.core.embedding_manager import CLIP_MODELS, EmbeddingManager
+from metascan.core.hardware import (
+    classify_tier,
+    detect_hardware,
+    feature_gates,
+    report_to_dict,
+)
 from metascan.utils.app_paths import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -215,32 +220,23 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
 
 
 def _hardware_info() -> Dict[str, Any]:
-    """Inspect CUDA / GPU availability. Import torch lazily so the endpoint
-    doesn't pay the import cost on servers that never hit it."""
-    info: Dict[str, Any] = {
-        "platform": platform.system(),
-        "cpu_count": None,
-        "cuda_available": False,
-        "gpu_name": None,
-        "vram_gb": None,
+    """Detect hardware + tier; serialize to dict for the /hardware endpoint.
+
+    Legacy fields (platform, cpu_count, cuda_available, gpu_name, vram_gb) are
+    preserved for older clients during migration; new clients should read
+    ``report.*`` and ``tier``.
+    """
+    report = detect_hardware()
+    return {
+        "tier": classify_tier(report).value,
+        "report": report_to_dict(report),
+        # Legacy fields preserved for older clients during migration.
+        "platform": report.os,
+        "cpu_count": report.cpu_count,
+        "cuda_available": report.cuda is not None,
+        "gpu_name": report.cuda.name if report.cuda else None,
+        "vram_gb": report.cuda.vram_gb if report.cuda else None,
     }
-    try:
-        import os
-
-        info["cpu_count"] = os.cpu_count()
-    except Exception:
-        pass
-    try:
-        import torch
-
-        info["cuda_available"] = bool(torch.cuda.is_available())
-        if info["cuda_available"]:
-            info["gpu_name"] = torch.cuda.get_device_name(0)
-            props = torch.cuda.get_device_properties(0)
-            info["vram_gb"] = round(props.total_memory / (1024**3), 1)
-    except Exception as e:
-        logger.debug("hardware probe failed: %s", e)
-    return info
 
 
 # ----------------------------------------------------------------------
@@ -327,12 +323,23 @@ def _build_status_payload() -> Dict[str, Any]:
     current_clip = str(sim_cfg.get("clip_model") or "small")
     current_dim = int(CLIP_MODELS.get(current_clip, {}).get("embedding_dim") or 0)
 
-    return {
+    report = detect_hardware()
+    payload: Dict[str, Any] = {
         "models": rows,
         "hf_token_set": bool(models_cfg["huggingface_token"]),
         "current_clip_model": current_clip,
         "current_clip_dim": current_dim,
+        "tier": classify_tier(report).value,
+        "gates": {
+            k: {
+                "available": g.available,
+                "recommended": g.recommended,
+                "reason": g.reason,
+            }
+            for k, g in feature_gates(report).items()
+        },
     }
+    return payload
 
 
 @router.get("/status")

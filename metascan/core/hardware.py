@@ -18,8 +18,8 @@ import platform
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
-from functools import lru_cache  # noqa: F401  -- used by detect_hardware() in Task 6
+from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -240,8 +240,10 @@ class Gate:
 
 # Per-model VRAM floors (GB) for "available". Below this, the model is
 # either unrunnable or unusably slow. Numbers from
-# docs/MODEL_HARDWARE_REQUIREMENTS.md.
-_CLIP_VRAM_MIN: dict = {
+# docs/MODEL_HARDWARE_REQUIREMENTS.md. ViT-H/14's bs=1 FP32 footprint is
+# ~4 GB but interactive batch search needs ~5 GB headroom, so we set the
+# floor at 6 GB — aligning with the CUDA_MAINSTREAM tier threshold.
+_CLIP_VRAM_MIN: dict[str, float] = {
     "clip-small": 1.0,
     "clip-medium": 2.0,
     "clip-large": 6.0,
@@ -388,3 +390,65 @@ def _nltk_geq_3_8_2(version: str) -> bool:
         return tuple(parts) >= (3, 8, 2)
     except ValueError:
         return False
+
+
+@lru_cache(maxsize=1)
+def detect_hardware() -> HardwareReport:
+    """Run all probes once and return a populated HardwareReport.
+
+    Cached at module level — the result is stable across the lifetime of
+    the process. If hardware can change at runtime (e.g. plugging in an
+    eGPU), call :func:`detect_hardware.cache_clear`.
+    """
+    pinfo = _platform_info()
+    report = HardwareReport(
+        os=pinfo["os"],
+        machine=pinfo["machine"],
+        python=pinfo["python"],
+        is_wsl=pinfo["is_wsl"],
+        cpu_count=pinfo["cpu_count"],
+        ram_gb=_ram_gb(),
+        glibc=_glibc_version(),
+        cuda=_try_cuda(),
+        mps=_mps_available(),
+        vulkan=_try_vulkan(),
+        nltk_version=_nltk_version(),
+        torch_version=_torch_version(),
+    )
+    # Auto-warnings — surface gotchas the UI should show
+    if report.is_wsl and (report.vulkan is None or not report.vulkan.has_real_device):
+        report.warnings.append(
+            "WSL2 detected without GPU Vulkan; RIFE will not work. "
+            "Install GPU drivers in Windows host."
+        )
+    if report.os == "Linux" and report.glibc:
+        try:
+            major, minor = (int(x) for x in report.glibc.split(".")[:2])
+            if (major, minor) < (2, 29):
+                report.warnings.append(
+                    f"glibc {report.glibc} below 2.29; rife-ncnn-vulkan will fail to load."
+                )
+        except ValueError:
+            pass
+    return report
+
+
+def report_to_dict(report: HardwareReport) -> dict:
+    """JSON-serializable view of HardwareReport for API responses."""
+    return asdict(report)
+
+
+def select_torch_device(preference: str = "auto") -> str:
+    """Pick a torch device string given a preference.
+
+    Generalizes ``embedding_manager._resolve_device`` so other PyTorch
+    paths (Real-ESRGAN, GFPGAN if/when wired) can share the logic.
+    """
+    if preference != "auto":
+        return preference
+    rpt = detect_hardware()
+    if rpt.cuda is not None:
+        return "cuda"
+    if rpt.mps and rpt.os == "Darwin":
+        return "mps"
+    return "cpu"
