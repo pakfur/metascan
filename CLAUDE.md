@@ -12,7 +12,7 @@ source venv/bin/activate && python run_server.py   # Backend: http://localhost:8
 cd frontend && npm run dev                          # Frontend: http://localhost:5173
 
 # Quality checks (must pass before committing)
-make quality test     # flake8 + black --check + mypy + pytest (139 tests)
+make quality test     # flake8 + black --check + mypy + pytest (185 tests)
 
 # Frontend only
 cd frontend && npm run build    # Type-check + production build
@@ -45,6 +45,7 @@ metascan/
       prompt_tokenizer.py   # NLTK-based prompt keyword extraction
       vocabulary.py         # CLIP tagging vocabulary loader + encoder with .npz cache
       watcher.py            # File system monitoring (watchdog)
+      hardware.py           # Tier classification, feature gates, device picker (CUDA/MPS/Vulkan/glibc/NLTK probes)
     extractors/         # Metadata extractors (ComfyUI, SwarmUI, Fooocus)
     cache/              # Thumbnail cache (Pillow + FFmpeg)
     workers/            # Subprocess entry points
@@ -78,7 +79,8 @@ metascan/
                         # UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab),
                         # NewFolderDialog, SmartFolderEditor
       types/            # TypeScript interfaces (Media, FilterData, WsMessage,
-                        #   folders.ts: RuleField, RuleOp, SmartRules, AnyFolder)
+                        #   folders.ts: RuleField, RuleOp, SmartRules, AnyFolder,
+                        #   hardware.ts: Tier, Gate, HardwareReport, HardwarePayload)
 
   tests/                # pytest test suite
 ```
@@ -105,6 +107,8 @@ metascan/
 - **One-shot data migrations are gated on `PRAGMA user_version`.** e.g. `user_version = 1` is the "`created_at` backfilled from `modified_at` on existing rows" migration. Bump the version when adding new backfills; the gate prevents re-running and silently double-writing on every launch.
 - **DELETE endpoints return `{status: "deleted"}` (not 204).** The frontend `request<T>` wrapper in `api/client.ts` calls `res.json()` on every response; 204 No Content would fail the parse. If you need a DELETE with a body, use the `del(path, body)` helper added for `/api/folders/{id}/items`.
 - **Similarity threshold is bimodal.** Image↔image uses `similarityStore.threshold` (default 0.7, slider 0-1). Text↔image uses `similarityStore.contentThreshold` (default 0.0, slider 0-0.45 with step 0.01) because CLIP text/image cosine scores live on a much lower scale. `SimilarityBanner.vue` switches range + formatting based on `isContentSearch`.
+- **Hardware tier + per-model gates.** `metascan/core/hardware.py` runs probes once (`@lru_cache(maxsize=1)` on `detect_hardware()`) for CPU/RAM/CUDA/MPS/Vulkan/glibc/NLTK and classifies hosts into 5 tiers: `cpu_only`, `apple_silicon`, `cuda_entry` (<6 GB VRAM), `cuda_mainstream` (6–12 GB), `cuda_workstation` (≥12 GB). CUDA always wins over MPS. `feature_gates(report)` returns `{model_id: Gate(available, recommended, reason)}` per CLIP/Real-ESRGAN/GFPGAN/RIFE/NLTK model. Auto-warnings populate `report.warnings` for WSL2-without-real-Vulkan and Linux glibc < 2.29 (the latter blocks `rife-ncnn-vulkan`). RIFE is gated unavailable when only `llvmpipe` (software Vulkan) is detected. NLTK ≥ 3.8.2 forces `punkt_tab` over legacy `punkt` (CVE-2024-39705). Both `/api/models/hardware` (returns `{tier, report, ...legacy fields}`) and `/api/models/status` (adds `tier` + `gates`) consume the cached report. The frontend `useModelsStore` exposes `tier`, `gates`, `gateFor(id)`; `ConfigModelsTab.vue` renders a tier banner + per-row recommended/unsupported chips with reason tooltips.
+- **Shared torch device picker.** `select_torch_device(preference="auto")` in `hardware.py` is the single source of truth for CUDA → MPS (Darwin only) → CPU precedence. `EmbeddingManager._resolve_device` delegates to it; new PyTorch paths (Real-ESRGAN, GFPGAN if/when wired) should do the same. Explicit preferences (`"cpu"`, `"cuda"`, `"mps"`) are returned verbatim — only `"auto"` triggers detection. **Apple Silicon previously fell through to CPU** for CLIP because the old `_resolve_device` only checked `cuda.is_available()`; the shared picker fixes that gap.
 - **Vite proxy** forwards `/api/*` and `/ws` to the backend during development. The EPIPE error handler silences broken pipe from cancelled browser requests.
 - **FAISS test vectors must use dim >= 32** to avoid SIMD alignment crashes on ARM (Apple Silicon). Tests normalize all vectors for IndexFlatIP.
 - **`KMP_DUPLICATE_LIB_OK=TRUE`** is set in `tests/conftest.py` to prevent OpenMP duplicate library crash when torch + faiss-cpu both link libomp on macOS.
@@ -115,7 +119,7 @@ metascan/
 - **Formatter:** `black` (v25.11.0 — must match in both requirements.txt and requirements-dev.txt)
 - **Linter:** `flake8` on `metascan/ backend/ tests/` — fatal errors (E9, F63, F7, F82) must be zero; style warnings are non-fatal (`--exit-zero`)
 - **Type checker:** `mypy` with `python_version = 3.11`, strict on `metascan/core/*`, `ignore_errors` on `metascan/ui/*`
-- **Tests:** `pytest` — 139 tests, all must pass. UI-dependent tests are skipped via `@unittest.skipUnless(_HAS_PYQT_UI)` when PyQt6/qt_material aren't installed. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`.
+- **Tests:** `pytest` — 185 tests, all must pass. UI-dependent tests are skipped via `@unittest.skipUnless(_HAS_PYQT_UI)` when PyQt6/qt_material aren't installed. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
 - **Python version:** 3.11+ required (3.13 not supported)
 - **Imports in core/:** Never import from `metascan.ui`, `PyQt6`, or `qt_material`
 
@@ -155,7 +159,7 @@ Two parallel jobs:
 }
 ```
 
-Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|stopwords`.
+Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`. The same ids are keys in the `gates` map returned alongside the model rows; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — `feature_gates` marks exactly one available based on the installed NLTK version.
 
 ## Environment Variables
 
@@ -191,6 +195,13 @@ Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr
 1. Extend `inference_worker.py` with a new `_handle_<type>` method + dispatch in `run()`.
 2. Add a matching `async <name>(...)` helper on `InferenceClient` that calls `_request(...)`.
 3. Call it from `backend/api/similarity.py` (or a new router). Reuse `_ensure_worker_ready` to keep cold starts sane.
+
+### Adding a hardware probe / tier rule / feature gate
+1. **New probe:** add a `_<thing>()` helper in `metascan/core/hardware.py` that returns `Optional[<value>]` and never raises (catch-and-log at DEBUG). Add a field to the `HardwareReport` dataclass with a safe default. Wire it into `detect_hardware()`. Frontend `HardwareReport` interface in `frontend/src/types/hardware.ts` gets the matching field.
+2. **New auto-warning:** append to `report.warnings` inside `detect_hardware()` after probes run. Match the spec wording exactly — frontend renders the strings verbatim in `ConfigModelsTab.vue`'s warning banner.
+3. **New tier:** extend the `Tier` enum **and** the TS `Tier` union in `frontend/src/types/hardware.ts`, plus `TIER_LABEL` / `TIER_COLOR` maps. Update `classify_tier()` precedence carefully — CUDA must still win over MPS.
+4. **New gate / new model id:** add a key to `feature_gates()`'s returned dict; the model id must match the row id used by `_clip_status_rows` / `_upscale_status_rows` / `_nltk_status_rows` in `backend/api/models.py`. The frontend `gateChip()` / `gateChipClass()` helpers in `ConfigModelsTab.vue` will pick it up automatically.
+5. **Tests:** `tests/test_hardware.py` covers probe + tier + gate logic in isolation; `tests/test_models_hardware_api.py` covers the HTTP envelope. Both patch `detect_hardware` (or `backend.api.models.detect_hardware`) to inject a fake `HardwareReport` — never rely on the host's real hardware in tests. Call `detect_hardware.cache_clear()` in any test that mutates env vars before invoking the real probe.
 
 ### Adding a smart-folder rule field
 1. Add the field identifier to `RuleField` in `frontend/src/types/folders.ts`.
