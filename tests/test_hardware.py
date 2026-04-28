@@ -7,7 +7,9 @@ import sys
 from unittest.mock import MagicMock, patch
 
 from metascan.core.hardware import (  # noqa: F401
+    CudaInfo,
     HardwareReport,
+    Tier,
     VulkanInfo,
     _glibc_version,
     _mps_available,
@@ -16,6 +18,7 @@ from metascan.core.hardware import (  # noqa: F401
     _ram_gb,
     _try_cuda,
     _try_vulkan,
+    classify_tier,
 )
 
 
@@ -164,3 +167,68 @@ def test_vulkan_timeout() -> None:
         info = _try_vulkan()
     assert info is not None
     assert info.available is False
+
+
+def _make_report(**kwargs) -> HardwareReport:
+    base = HardwareReport(
+        os="Linux",
+        machine="x86_64",
+        python="3.11.7",
+        is_wsl=False,
+        cpu_count=8,
+        ram_gb=16.0,
+    )
+    for k, v in kwargs.items():
+        setattr(base, k, v)
+    return base
+
+
+def test_tier_cpu_only() -> None:
+    rpt = _make_report()
+    assert classify_tier(rpt) is Tier.CPU_ONLY
+
+
+def test_tier_apple_silicon() -> None:
+    rpt = _make_report(os="Darwin", machine="arm64", mps=True)
+    assert classify_tier(rpt) is Tier.APPLE_SILICON
+
+
+def test_tier_apple_silicon_without_mps_falls_back_to_cpu() -> None:
+    # MPS not built into torch yet → still CPU-only tier.
+    rpt = _make_report(os="Darwin", machine="arm64", mps=False)
+    assert classify_tier(rpt) is Tier.CPU_ONLY
+
+
+def test_tier_cuda_entry() -> None:
+    rpt = _make_report(cuda=CudaInfo(name="GTX 1660", vram_gb=4.0, capability="7.5"))
+    assert classify_tier(rpt) is Tier.CUDA_ENTRY
+
+
+def test_tier_cuda_mainstream() -> None:
+    rpt = _make_report(
+        cuda=CudaInfo(name="RTX 3060", vram_gb=8.0, capability="8.6"),
+    )
+    assert classify_tier(rpt) is Tier.CUDA_MAINSTREAM
+
+
+def test_tier_cuda_workstation() -> None:
+    rpt = _make_report(
+        cuda=CudaInfo(name="RTX 4090", vram_gb=24.0, capability="8.9"),
+    )
+    assert classify_tier(rpt) is Tier.CUDA_WORKSTATION
+
+
+def test_tier_cuda_below_4gb_is_entry_not_below() -> None:
+    # 2 GB VRAM — still CUDA_ENTRY (we don't have a sub-tier; the gates
+    # block large models below 4 GB, but the tier itself doesn't split).
+    rpt = _make_report(cuda=CudaInfo(name="GT 1030", vram_gb=2.0, capability="6.1"))
+    assert classify_tier(rpt) is Tier.CUDA_ENTRY
+
+
+def test_tier_cuda_takes_precedence_over_mps() -> None:
+    rpt = _make_report(
+        os="Darwin",
+        cuda=CudaInfo(name="RTX 3060", vram_gb=8.0, capability="8.6"),
+        mps=True,
+    )
+    assert classify_tier(rpt) is Tier.CUDA_MAINSTREAM
