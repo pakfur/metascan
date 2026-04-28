@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache  # noqa: F401  -- used by detect_hardware() in Task 6
@@ -150,3 +152,43 @@ def _mps_available() -> bool:
         )
     except Exception:
         return False
+
+
+_DEVICE_NAME_RE = re.compile(r"deviceName\s*=\s*(.+)")
+
+
+def _try_vulkan() -> VulkanInfo:
+    """Probe Vulkan via ``vulkaninfo --summary``.
+
+    Returns a VulkanInfo with ``available=False`` if vulkaninfo isn't
+    installed; ``has_real_device=False`` if only llvmpipe (software) is
+    present (typical of misconfigured WSL2). Never raises.
+    """
+    try:
+        proc = subprocess.run(
+            ["vulkaninfo", "--summary"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except FileNotFoundError:
+        return VulkanInfo(available=False, devices=[], has_real_device=False)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("vulkan probe failed: %s", e)
+        return VulkanInfo(available=False, devices=[], has_real_device=False)
+
+    if proc.returncode != 0:
+        return VulkanInfo(available=False, devices=[], has_real_device=False)
+
+    devices: List[str] = []
+    for m in _DEVICE_NAME_RE.finditer(proc.stdout):
+        name = m.group(1).strip()
+        if name:
+            devices.append(name)
+
+    has_real = any("llvmpipe" not in d.lower() for d in devices)
+    return VulkanInfo(
+        available=bool(devices),
+        devices=devices,
+        has_real_device=has_real,
+    )

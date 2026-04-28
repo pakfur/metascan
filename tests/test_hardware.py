@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
-from metascan.core.hardware import (
+from metascan.core.hardware import (  # noqa: F401
     HardwareReport,
+    VulkanInfo,
     _glibc_version,
     _mps_available,
     _nltk_version,
     _platform_info,
     _ram_gb,
     _try_cuda,
+    _try_vulkan,
 )
 
 
@@ -97,3 +100,67 @@ def test_mps_available_with_mock_torch() -> None:
     fake_torch.backends.mps.is_built.return_value = True
     with patch.dict(sys.modules, {"torch": fake_torch}):
         assert _mps_available() is True
+
+
+_VULKANINFO_REAL_GPU = """\
+VULKANINFO
+
+Devices:
+========
+GPU0:
+\tdeviceName         = NVIDIA GeForce RTX 3080
+\tdeviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+"""
+
+_VULKANINFO_LLVMPIPE_ONLY = """\
+VULKANINFO
+
+Devices:
+========
+GPU0:
+\tdeviceName         = llvmpipe (LLVM 15.0.7, 256 bits)
+\tdeviceType         = PHYSICAL_DEVICE_TYPE_CPU
+"""
+
+
+def test_vulkan_real_device(tmp_path) -> None:
+    fake = MagicMock()
+    fake.returncode = 0
+    fake.stdout = _VULKANINFO_REAL_GPU
+    with patch("subprocess.run", return_value=fake):
+        info = _try_vulkan()
+    assert info is not None
+    assert info.available is True
+    assert info.has_real_device is True
+    assert any("RTX 3080" in d for d in info.devices)
+
+
+def test_vulkan_llvmpipe_only_is_not_real() -> None:
+    fake = MagicMock()
+    fake.returncode = 0
+    fake.stdout = _VULKANINFO_LLVMPIPE_ONLY
+    with patch("subprocess.run", return_value=fake):
+        info = _try_vulkan()
+    assert info is not None
+    assert info.available is True
+    assert info.has_real_device is False  # llvmpipe is software fallback
+    assert any("llvmpipe" in d for d in info.devices)
+
+
+def test_vulkan_command_not_found() -> None:
+    with patch("subprocess.run", side_effect=FileNotFoundError("vulkaninfo")):
+        info = _try_vulkan()
+    assert info is not None
+    assert info.available is False
+    assert info.devices == []
+    assert info.has_real_device is False
+
+
+def test_vulkan_timeout() -> None:
+    with patch(
+        "subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="vulkaninfo", timeout=5.0),
+    ):
+        info = _try_vulkan()
+    assert info is not None
+    assert info.available is False
