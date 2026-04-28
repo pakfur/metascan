@@ -1,4 +1,10 @@
 import { del, get, post } from './client'
+import type { Gate, HardwarePayload, Tier } from '../types/hardware'
+
+// Re-export under the legacy name `HardwareInfo` for backwards-compat with
+// existing callers that imported it from this module.
+export type HardwareInfo = HardwarePayload
+export type { Gate, Tier }
 
 export type ModelStatus = 'available' | 'missing' | 'downloading' | 'error'
 export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP'
@@ -21,14 +27,8 @@ export interface ModelsStatusResponse {
   hf_token_set: boolean
   current_clip_model: string
   current_clip_dim: number
-}
-
-export interface HardwareInfo {
-  platform: string
-  cpu_count: number | null
-  cuda_available: boolean
-  gpu_name: string | null
-  vram_gb: number | null
+  tier: Tier
+  gates: Record<string, Gate>
 }
 
 export type InferenceState =
