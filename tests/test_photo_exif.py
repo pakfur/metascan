@@ -335,3 +335,70 @@ class TestExtractPhotoExif:
         assert photo is not None
         assert photo.exposure is not None
         assert photo.exposure.shutter_speed == "0.3"
+
+
+# ----------------------------------------------------------------------
+# Media.from_dict_fast round-trip with new photo fields
+# ----------------------------------------------------------------------
+
+
+def test_media_from_dict_fast_with_photo_exif():
+    from datetime import datetime
+    from pathlib import Path
+    from metascan.core.media import Media, PhotoExposure
+
+    data = {
+        "file_path": "/tmp/IMG_0001.HEIC",
+        "file_size": 1234567,
+        "width": 3024,
+        "height": 4032,
+        "format": "HEIF",
+        "created_at": "2026-04-12T15:24:31",
+        "modified_at": "2026-04-12T15:24:31",
+        "camera_make": "Apple",
+        "camera_model": "iPhone 15 Pro",
+        "lens_model": "iPhone 15 Pro back triple camera",
+        "datetime_original": "2026-04-12T15:24:31",
+        "gps_latitude": 37.775,
+        "gps_longitude": -122.4194,
+        "gps_altitude": 12.0,
+        "orientation": 6,
+        "photo_exposure": {
+            "shutter_speed": "1/250",
+            "aperture": 1.8,
+            "iso": 400,
+            "flash": "Auto, Fired",
+            "focal_length": 6.9,
+            "focal_length_35mm": 27,
+        },
+    }
+    m = Media.from_dict_fast(data)
+    assert m.camera_make == "Apple"
+    assert m.camera_model == "iPhone 15 Pro"
+    assert m.gps_latitude == 37.775
+    assert m.orientation == 6
+    assert isinstance(m.datetime_original, datetime)
+    assert m.datetime_original == datetime(2026, 4, 12, 15, 24, 31)
+    assert isinstance(m.photo_exposure, PhotoExposure)
+    assert m.photo_exposure.iso == 400
+    assert m.photo_exposure.shutter_speed == "1/250"
+
+
+def test_media_from_dict_fast_without_photo_exif():
+    """Existing AI-generated media without photo fields still loads."""
+    from metascan.core.media import Media
+
+    data = {
+        "file_path": "/tmp/ai.png",
+        "file_size": 100,
+        "width": 512,
+        "height": 512,
+        "format": "PNG",
+        "created_at": "2026-01-01T00:00:00",
+        "modified_at": "2026-01-01T00:00:00",
+    }
+    m = Media.from_dict_fast(data)
+    assert m.camera_make is None
+    assert m.gps_latitude is None
+    assert m.orientation is None
+    assert m.photo_exposure is None
