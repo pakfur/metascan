@@ -3,7 +3,7 @@ from typing import List, Optional, Callable, Tuple, Any
 from queue import Queue
 from threading import Thread
 import logging
-from PIL import Image
+from PIL import Image, ImageOps
 from datetime import datetime
 import threading
 import queue
@@ -14,6 +14,14 @@ from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 from metascan.core.phash_utils import compute_phash_for_file
 from metascan.cache.thumbnail import ThumbnailCache
+from metascan.utils.heic import register_heif_opener
+from metascan.core.photo_exif import (
+    PhotoExif,
+    PhotoExposure as PhotoExifExposure,
+    extract_photo_exif,
+)
+
+register_heif_opener()
 
 try:
     import ffmpeg  # noqa: F401
@@ -25,8 +33,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _photo_exposure_to_media(src: PhotoExifExposure) -> Any:
+    """Convert metascan.core.photo_exif.PhotoExposure -> metascan.core.media.PhotoExposure.
+
+    They have identical shape; lives in two modules so photo_exif stays pure
+    (no Media/dataclass-json dependency)."""
+    from metascan.core.media import PhotoExposure as MediaPhotoExposure
+
+    return MediaPhotoExposure(
+        shutter_speed=src.shutter_speed,
+        aperture=src.aperture,
+        iso=src.iso,
+        flash=src.flash,
+        focal_length=src.focal_length,
+        focal_length_35mm=src.focal_length_35mm,
+    )
+
+
 class Scanner:
-    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+    SUPPORTED_EXTENSIONS = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".mp4",
+        ".webm",
+    }
 
     def __init__(
         self,
@@ -130,6 +165,22 @@ class Scanner:
 
         return media_files
 
+    def _read_image_photo_exif(
+        self, file_path: Path
+    ) -> Tuple[Optional[PhotoExif], Optional[int]]:
+        """Open a still image once, return (photo_exif, orientation_tag).
+
+        Returns (None, None) for video files or on any read failure.
+        """
+        if file_path.suffix.lower() in {".mp4", ".webm"}:
+            return None, None
+        try:
+            with Image.open(file_path) as img:
+                return extract_photo_exif(img.getexif())
+        except Exception as exc:
+            logger.debug("Could not read EXIF from %s: %s", file_path, exc)
+            return None, None
+
     def _process_media_file(self, file_path: Path) -> Optional[Media]:  # noqa: C901
         """Process a single media file and extract metadata"""
         try:
@@ -138,6 +189,8 @@ class Scanner:
             width, height, format_name = self._get_media_info(file_path)
             if not width or not height:
                 return None
+
+            photo_exif, orientation_tag = self._read_image_photo_exif(file_path)
 
             # Create media object
             media = Media(
@@ -148,6 +201,22 @@ class Scanner:
                 format=format_name or "UNKNOWN",
                 created_at=datetime.fromtimestamp(stat.st_ctime),
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
+            )
+
+            media.camera_make = photo_exif.camera_make if photo_exif else None
+            media.camera_model = photo_exif.camera_model if photo_exif else None
+            media.lens_model = photo_exif.lens_model if photo_exif else None
+            media.datetime_original = (
+                photo_exif.datetime_original if photo_exif else None
+            )
+            media.gps_latitude = photo_exif.gps_latitude if photo_exif else None
+            media.gps_longitude = photo_exif.gps_longitude if photo_exif else None
+            media.gps_altitude = photo_exif.gps_altitude if photo_exif else None
+            media.orientation = orientation_tag
+            media.photo_exposure = (
+                _photo_exposure_to_media(photo_exif.exposure)
+                if photo_exif and photo_exif.exposure is not None
+                else None
             )
 
             metadata = self.extractor_manager.extract_metadata(file_path)
@@ -218,7 +287,8 @@ class Scanner:
                 return self._get_video_info(file_path)
             else:
                 with Image.open(file_path) as img:
-                    return img.width, img.height, img.format
+                    transposed = ImageOps.exif_transpose(img)
+                    return transposed.width, transposed.height, img.format
         except Exception as e:
             logger.error(f"Failed to get media info for {file_path}: {e}")
             return None, None, None
@@ -434,15 +504,7 @@ class ThreadedScanner:
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
         media_files: List[Path] = []
-        supported_extensions = {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".gif",
-            ".mp4",
-            ".webm",
-        }
+        supported_extensions = Scanner.SUPPORTED_EXTENSIONS
 
         if recursive:
             for ext in supported_extensions:
