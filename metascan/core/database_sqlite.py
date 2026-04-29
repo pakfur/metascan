@@ -451,6 +451,9 @@ class DatabaseManager:
                         "Thumbnail cache wipe (v2 migration) failed: %s",
                         exc,
                     )
+                # PRAGMA fires regardless of wipe success: a persistent failure
+                # in get_thumbnail_cache_dir would otherwise re-attempt every
+                # launch. The wipe is best-effort by design (spec §5).
                 conn.execute("PRAGMA user_version = 2")
 
             conn.commit()

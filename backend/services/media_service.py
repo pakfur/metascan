@@ -103,6 +103,14 @@ class MediaService:
             "duration": media.duration,
             "modified_at": media.modified_at.isoformat() if media.modified_at else None,
             "created_at": media.created_at.isoformat() if media.created_at else None,
+            "camera_make": media.camera_make,
+            "camera_model": media.camera_model,
+            "datetime_original": (
+                media.datetime_original.isoformat() if media.datetime_original else None
+            ),
+            "gps_latitude": media.gps_latitude,
+            "gps_longitude": media.gps_longitude,
+            "orientation": media.orientation,
         }
 
     def media_to_dict(self, media: Media) -> dict:
