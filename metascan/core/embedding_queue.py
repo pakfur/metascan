@@ -44,7 +44,6 @@ class EmbeddingQueue:
         self._start_time: float = 0.0
         self._last_progress_time: float = 0.0
 
-        # Callback-based signals (replace PyQt pyqtSignal)
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
         self.on_complete: Optional[Callable[[int], None]] = None
         self.on_error: Optional[Callable[[str], None]] = None
