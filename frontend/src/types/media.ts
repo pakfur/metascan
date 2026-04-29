@@ -3,6 +3,15 @@ export interface LoRA {
   lora_weight: number
 }
 
+export interface PhotoExposure {
+  shutter_speed?: string | null
+  aperture?: number | null
+  iso?: number | null
+  flash?: string | null
+  focal_length?: number | null
+  focal_length_35mm?: number | null
+}
+
 // `Media` carries every field any component might display. The list
 // endpoint returns only the "summary" fields (required, always present);
 // the detail endpoint additionally populates the fields below marked
@@ -20,6 +29,14 @@ export interface Media {
   frame_rate: number | null
   duration: number | null
   similarity_score?: number
+
+  // --- Photo summary fields (also returned by GET /api/media) ---
+  camera_make?: string | null
+  camera_model?: string | null
+  datetime_original?: string | null
+  gps_latitude?: number | null
+  gps_longitude?: number | null
+  orientation?: number | null
 
   // --- Detail-only fields (GET /api/media/{path}) ---
   file_name?: string
@@ -39,4 +56,7 @@ export interface Media {
   video_length?: number | null
   tags?: string[]
   loras?: LoRA[]
+  lens_model?: string | null
+  gps_altitude?: number | null
+  photo_exposure?: PhotoExposure | null
 }
