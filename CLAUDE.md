@@ -12,7 +12,7 @@ source venv/bin/activate && python run_server.py   # Backend: http://localhost:8
 cd frontend && npm run dev                          # Frontend: http://localhost:5173
 
 # Quality checks (must pass before committing)
-make quality test     # flake8 + black --check + mypy + pytest (185 tests)
+make quality test     # flake8 + black --check + mypy + pytest (175 tests)
 
 # Frontend only
 cd frontend && npm run build    # Type-check + production build
@@ -53,7 +53,6 @@ metascan/
                         #   inference_worker.py — long-running CLIP NDJSON server for live queries
                         #   upscale_worker.py   — Real-ESRGAN / GFPGAN / RIFE
     utils/              # App paths, FFmpeg utils, startup profiler
-    ui/                 # Legacy PyQt6 UI (not used by web stack, not type-checked)
 
   data/
     vocabulary/         # CLIP tagging inputs (oidv7 / imagenet / aesthetics / nsfw / excluded)
@@ -87,7 +86,7 @@ metascan/
 
 ## Key Technical Decisions
 
-- **Core modules must not import PyQt6 or any UI framework.** All UI deps were removed from core/. The legacy `metascan/ui/` still uses PyQt6 but is not part of the web stack.
+- **No UI framework in Python code.** The legacy PyQt6 desktop UI (`metascan/ui/`, `main.py`, `run.bat`, `build_app.py`, `metascan.spec`) was removed; the web stack (Vue 3 + FastAPI) is the only UI. Backend Python must never import `PyQt6` or `qt_material`.
 - **Database access is synchronous** — wrapped with `asyncio.to_thread()` in the service layer for FastAPI compatibility. The threading.Lock in DatabaseManager handles concurrency.
 - **Background workers use subprocesses** (not threads) for embedding generation and upscaling, communicating via JSON files. This avoids GIL issues with heavy AI workloads.
 - **Two separate CLIP subprocesses.** `embedding_worker.py` is one-shot batch (computes embeddings + CLIP tags for unembedded files and exits). `inference_worker.py` is long-running (NDJSON stdio — answers `encode_text` / `encode_image` / `encode_video` for live searches). Both load their own CLIP model; do not share state. The live path is supervised by `InferenceClient` (asyncio) installed on the FastAPI app via `lifespan`.
@@ -96,7 +95,7 @@ metascan/
 - **Similarity endpoints call `client.ensure_started`** before `encode_*` so a search request arriving before preload still triggers a spawn rather than blocking on a ready event that will never fire.
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
-- **Core modules use callbacks** (not PyQt signals) for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
+- **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
 - **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
@@ -118,10 +117,10 @@ metascan/
 ### Python
 - **Formatter:** `black` (v25.11.0 — must match in both requirements.txt and requirements-dev.txt)
 - **Linter:** `flake8` on `metascan/ backend/ tests/` — fatal errors (E9, F63, F7, F82) must be zero; style warnings are non-fatal (`--exit-zero`)
-- **Type checker:** `mypy` with `python_version = 3.11`, strict on `metascan/core/*`, `ignore_errors` on `metascan/ui/*`
-- **Tests:** `pytest` — 185 tests, all must pass. UI-dependent tests are skipped via `@unittest.skipUnless(_HAS_PYQT_UI)` when PyQt6/qt_material aren't installed. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
+- **Type checker:** `mypy` with `python_version = 3.11`, strict on `metascan/core/*`
+- **Tests:** `pytest` — 175 tests, all must pass. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
 - **Python version:** 3.11+ required (3.13 not supported)
-- **Imports in core/:** Never import from `metascan.ui`, `PyQt6`, or `qt_material`
+- **Imports in core/:** Never import any UI/desktop framework (`PyQt6`, `qt_material`, `tkinter`, etc.)
 
 ### Frontend
 - **Vue 3** with Composition API (`<script setup>` syntax)
@@ -132,7 +131,7 @@ metascan/
 
 ### CI (.github/workflows/python-package.yml)
 Two parallel jobs:
-1. **backend:** Install deps (including libegl1 for PyQt6 in tests), flake8, black --check, mypy, pytest
+1. **backend:** Install deps, flake8, black --check, mypy, pytest
 2. **frontend:** npm ci, vue-tsc --noEmit, npm run build
 
 `make quality test` locally matches the CI backend job exactly.
@@ -143,7 +142,7 @@ Two parallel jobs:
 |------|---------|
 | `config.json` | App config (directories, theme, thumbnail size, similarity settings, `models` section — see below) |
 | `mypy.ini` | Type checking config (python 3.11, strict core, ignore UI) |
-| `requirements.txt` | Production deps (FastAPI, torch, CLIP, FAISS, etc. — no PyQt6) |
+| `requirements.txt` | Production deps (FastAPI, torch, CLIP, FAISS, etc.) |
 | `requirements-dev.txt` | Dev deps (pytest, black, mypy — black version must match prod) |
 | `frontend/vite.config.ts` | Vite config with proxy to backend |
 | `frontend/tsconfig.app.json` | TypeScript config (noUnusedLocals/Params disabled for template refs) |

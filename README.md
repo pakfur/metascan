@@ -14,7 +14,7 @@
 
 Metascan now features a modern Vue.js web frontend with a FastAPI backend server, enabling remote access from any platform via a browser while keeping heavy AI/GPU processing on a powerful PC.
 
-- **Vue 3 + TypeScript frontend** replacing the PyQt6 desktop UI
+- **Vue 3 + TypeScript frontend** served by the FastAPI backend
 - **FastAPI backend** with REST API (35+ endpoints) and WebSocket for real-time updates
 - **Remote access** from Mac, Windows, Linux, or any device with a browser
 - **Three-panel responsive layout** with resizable splitter (filters, thumbnails, metadata)
@@ -29,7 +29,7 @@ Metascan now features a modern Vue.js web frontend with a FastAPI backend server
 - **Configuration dialog** for directory management
 - **File watcher** integration with auto-refresh via WebSocket
 - **Right-click context menu** on thumbnails (Open, Find Similar, Upscale, Delete)
-- **Keyboard shortcuts** matching the original desktop app (Esc, F5, Ctrl+S, Ctrl+D, arrows, Space, etc.)
+- **Keyboard shortcuts** for fast navigation (Esc, F5, Ctrl+S, Ctrl+D, arrows, Space, etc.)
 - **Dark/light mode** via system `prefers-color-scheme`
 - **API key authentication** for secure remote access
 
@@ -517,8 +517,8 @@ Hardware detection is per-process and cached for the server lifetime. Plugging i
 
 ```bash
 # Backend
-make run           # Run PyQt desktop app (legacy)
-python run_server.py  # Run FastAPI backend server
+make serve            # Run the FastAPI backend server
+python run_server.py  # Same, without make
 
 # Frontend
 cd frontend
