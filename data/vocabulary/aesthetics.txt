@@ -1,0 +1,364 @@
+golden hour
+blue hour
+harsh noon
+soft daylight
+overcast light
+diffused light
+backlit
+front lit
+side lit
+rim light
+edge light
+top light
+under lighting
+low key
+high key
+hard light
+soft light
+window light
+ambient light
+natural light
+artificial light
+studio strobe
+continuous light
+flash fill
+bounce light
+reflector fill
+split lighting
+butterfly lighting
+loop lighting
+Rembrandt lighting
+chiaroscuro
+spotlight
+stage light
+neon glow
+candlelight
+firelight
+street light
+mixed lighting
+color gel
+warm light
+cool light
+flat lighting
+dramatic lighting
+silhouette
+glare
+lens flare
+light leak
+dappled light
+filtered light
+foggy light
+hazy light
+volumetric light
+sun rays
+god rays
+shadow play
+deep shadows
+soft shadows
+cast shadow
+long shadows
+short shadows
+specular highlight
+highlight rolloff
+midtones emphasis
+low contrast light
+high contrast light
+35mm
+50mm
+85mm
+135mm
+200mm
+wide angle
+ultra wide
+telephoto
+macro
+fisheye
+tilt shift
+prime lens
+zoom lens
+vintage lens
+anamorphic
+portrait lens
+landscape lens
+street lens
+cinema lens
+fast lens
+slow lens
+manual focus
+autofocus
+focus pull
+rack focus
+in focus
+out of focus
+soft focus
+sharp focus
+tack sharp
+shallow depth
+deep depth
+bokeh
+creamy bokeh
+busy bokeh
+swirly bokeh
+cat eye bokeh
+foreground blur
+background blur
+motion blur
+freeze motion
+long exposure
+short exposure
+slow shutter
+fast shutter
+high ISO
+low ISO
+grainy
+noise free
+film grain
+digital noise
+HDR
+bracketing
+high resolution
+low resolution
+compressed
+raw capture
+overexposed
+underexposed
+proper exposure
+
+rule of thirds
+centered
+symmetrical
+asymmetrical
+balanced
+unbalanced
+leading lines
+diagonal lines
+horizontal lines
+vertical lines
+frame within frame
+natural framing
+tight crop
+loose crop
+close up
+extreme close up
+medium shot
+wide shot
+long shot
+over the shoulder
+point of view
+eye level
+high angle
+low angle
+bird eye
+worm eye
+tilted frame
+dutch angle
+negative space
+positive space
+minimalist
+maximalist
+layered composition
+depth layers
+foreground interest
+background context
+subject isolation
+environmental portrait
+candid framing
+posed framing
+dynamic composition
+static composition
+off center
+edge framing
+central focus
+rule of odds
+triangular composition
+spiral composition
+golden ratio
+symmetry break
+
+moody
+dreamy
+ethereal
+intimate
+cinematic
+documentary
+raw
+gritty
+nostalgic
+romantic
+melancholic
+somber
+dark
+bright
+uplifting
+playful
+whimsical
+serene
+calm
+tense
+dramatic
+mysterious
+surreal
+abstract
+realistic
+hyperreal
+fantastical
+epic
+quiet
+lonely
+crowded
+chaotic
+ordered
+elegant
+luxurious
+minimal
+natural
+organic
+industrial
+urban vibe
+rural vibe
+timeless
+fleeting
+emotional
+detached
+
+monochrome
+black and white
+sepia
+duotone
+warm tones
+cool tones
+neutral tones
+pastel
+muted colors
+vibrant colors
+saturated
+desaturated
+high contrast
+low contrast
+color pop
+color block
+earth tones
+neon colors
+complementary colors
+analogous colors
+split tone
+cross processed
+color cast
+blue tint
+orange tint
+green tint
+purple tint
+pink tint
+teal orange
+washed out
+faded colors
+rich tones
+deep colors
+light palette
+dark palette
+soft palette
+bold palette
+
+35mm film
+medium format
+large format
+instant film
+Polaroid
+Kodachrome
+Ektachrome
+Fujifilm
+Ilford
+Cinestill
+expired film
+film look
+analog look
+digital look
+clean digital
+film grain look
+retro look
+vintage look
+modern look
+HDR look
+matte finish
+glossy finish
+soft grading
+hard grading
+cinematic grade
+teal grade
+orange grade
+high clarity
+low clarity
+skin tones natural
+skin tones stylized
+
+1920s
+1930s
+1940s
+1950s
+1960s
+1970s
+1980s
+1990s
+early 2000s
+contemporary
+modern era
+retro era
+vintage era
+postmodern
+mid century
+y2k
+digital age
+film era
+
+indoor
+outdoor
+studio
+home interior
+kitchen
+bedroom
+office
+warehouse
+abandoned
+urban
+cityscape
+street
+alley
+rooftop
+suburban
+rural
+countryside
+farm
+industrial
+construction site
+park
+forest
+jungle
+desert
+mountains
+beach
+coast
+ocean
+lake
+river
+waterfall
+snow
+ice
+cave
+tunnel
+bridge
+highway
+market
+festival
+nightlife
+daytime
+night scene
+sunrise
+sunset
+twilight
+stormy weather
+rainy
+foggy
+misty
+windy
+clear sky
+
