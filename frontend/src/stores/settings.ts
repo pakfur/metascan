@@ -15,6 +15,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const thumbnailSizeLabel = ref<ThumbnailSize>('medium')
   const thumbnailSize = ref<[number, number]>([200, 200])
   const config = ref<Record<string, unknown>>({})
+  const mapTileUrl = ref('https://tiles.openfreemap.org/styles/liberty')
 
   async function loadConfig() {
     config.value = await fetchConfig()
@@ -27,6 +28,8 @@ export const useSettingsStore = defineStore('settings', () => {
       else if (ts[0] <= 250) thumbnailSizeLabel.value = 'medium'
       else thumbnailSizeLabel.value = 'large'
     }
+    const ui = config.value.ui as { map_tile_url?: string } | undefined
+    if (ui?.map_tile_url) mapTileUrl.value = ui.map_tile_url
   }
 
   function setThumbnailSize(label: ThumbnailSize) {
@@ -45,6 +48,7 @@ export const useSettingsStore = defineStore('settings', () => {
     thumbnailSizeLabel,
     thumbnailSize,
     config,
+    mapTileUrl,
     loadConfig,
     setThumbnailSize,
     setTheme,
