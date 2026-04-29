@@ -213,7 +213,6 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
         #   - the scan was not cancelled,
         #   - config has a similarity block with auto_index_after_scan true (default true),
         #   - at least one file is missing an embedding.
-        # Mirrors PyQt _auto_trigger_embeddings (metascan/ui/main_window.py:2231).
         sim = config.get("similarity") if isinstance(config, dict) else None
         if (
             not _cancel_requested

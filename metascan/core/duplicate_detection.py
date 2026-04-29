@@ -1,7 +1,6 @@
 """Pure duplicate detection logic using perceptual hashing.
 
-This module contains no UI dependencies and can be used by both the
-PyQt UI and the FastAPI backend.
+This module contains no UI dependencies — used by the FastAPI backend.
 """
 
 import logging

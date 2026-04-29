@@ -10,7 +10,6 @@ PYTEST := $(VENV_DIR)/bin/pytest
 BLACK := $(VENV_DIR)/bin/black
 MYPY := $(VENV_DIR)/bin/mypy --check-untyped-defs
 FLAKE8 := $(VENV_DIR)/bin/flake8
-PYINSTALLER := $(VENV_DIR)/bin/pyinstaller
 
 # Directories to lint/format
 PY_DIRS := metascan/ backend/ tests/
@@ -62,10 +61,6 @@ dev-install: venv  ## Install package in development mode
 	@echo "Development installation complete"
 
 # Running targets
-.PHONY: run
-run:  ## Run the legacy PyQt desktop app
-	QT_LOGGING_RULES="qt.multimedia.ffmpeg.libsymbolsresolver.debug=false" $(PYTHON) main.py
-
 .PHONY: serve
 serve:  ## Run the FastAPI backend server
 	$(PYTHON) run_server.py
@@ -74,10 +69,6 @@ serve:  ## Run the FastAPI backend server
 dev:  ## Run backend + frontend dev servers (use two terminals)
 	@echo "Terminal 1: make serve"
 	@echo "Terminal 2: cd frontend && npm run dev"
-
-.PHONY: run-installed
-run-installed:  ## Run the installed metascan command
-	$(VENV_DIR)/bin/metascan
 
 # Testing targets
 .PHONY: test
@@ -124,15 +115,6 @@ frontend-build:  ## Build the Vue frontend for production
 .PHONY: quality-all
 quality-all: quality frontend-typecheck  ## Run all quality checks (Python + frontend)
 
-# Build targets
-.PHONY: build
-build: venv  ## Build desktop application bundle/executable
-	$(PYTHON) build_app.py
-
-.PHONY: build-manual
-build-manual: venv  ## Manual PyInstaller build
-	$(PYINSTALLER) metascan.spec --clean
-
 # Local run targets
 .PHONY: start-frontend
 start-frontend:  venv
@@ -178,4 +160,4 @@ check-venv:
 	fi
 
 # Add dependency to targets that need venv
-deps nltk-setup dev-install test test-prompt-tokenizer test-coverage lint format format-check typecheck build build-manual: check-venv
+deps nltk-setup dev-install test test-prompt-tokenizer test-coverage lint format format-check typecheck: check-venv
