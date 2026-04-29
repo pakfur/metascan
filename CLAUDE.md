@@ -147,6 +147,18 @@ Two parallel jobs:
 | `frontend/vite.config.ts` | Vite config with proxy to backend |
 | `frontend/tsconfig.app.json` | TypeScript config (noUnusedLocals/Params disabled for template refs) |
 
+### `config.json` keys for the location panel
+
+```jsonc
+{
+  "ui": {
+    "map_tile_url": "https://tiles.openfreemap.org/styles/liberty"
+  }
+}
+```
+
+Defaults to OpenFreeMap liberty if absent. Override to point MapLibre GL at any compatible style URL, including a self-hosted one.
+
 ### `config.json` keys managed by the Models tab
 
 ```jsonc
