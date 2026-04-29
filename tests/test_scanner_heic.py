@@ -89,3 +89,24 @@ def test_scanner_handles_heic_when_pillow_heif_available(db):
     loaded = manager.get_media(heic_path)
     assert loaded is not None
     assert loaded.format in ("HEIF", "HEIC")
+
+
+def test_scanner_handles_png_with_no_exif(db):
+    """AI-generated PNG with no EXIF must not crash the scan and must
+    leave the new photo fields as None."""
+    manager, tmp = db
+    img_path = tmp / "ai.png"
+    Image.new("RGB", (512, 512), color=(50, 50, 50)).save(img_path, "PNG")
+
+    scanner = Scanner(manager)
+    scanner.scan_directory(str(tmp))
+
+    loaded = manager.get_media(img_path)
+    assert loaded is not None
+    assert loaded.width == 512
+    assert loaded.height == 512
+    assert loaded.camera_make is None
+    assert loaded.camera_model is None
+    assert loaded.gps_latitude is None
+    assert loaded.orientation is None
+    assert loaded.photo_exposure is None
