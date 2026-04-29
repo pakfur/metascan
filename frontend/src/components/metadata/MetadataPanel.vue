@@ -192,7 +192,7 @@ async function copyAll() {
   background: var(--surface-hover);
 }
 
-.meta-section {
+:deep(.meta-section) {
   border: 1px solid var(--surface-border);
   border-radius: 6px;
   overflow: hidden;
@@ -201,7 +201,7 @@ async function copyAll() {
   flex-direction: column;
 }
 
-.section-title {
+:deep(.section-title) {
   padding: 6px 10px;
   font-size: 13px;
   font-weight: 600;
@@ -215,17 +215,17 @@ async function copyAll() {
   flex: 0 0 auto;
 }
 
-.section-title::before {
+:deep(.section-title::before) {
   content: '▶';
   font-size: 9px;
   transition: transform 0.15s;
 }
 
-details[open] > .section-title::before {
+:deep(details[open] > .section-title::before) {
   transform: rotate(90deg);
 }
 
-.section-body {
+:deep(.section-body) {
   padding: 6px 10px;
   display: flex;
   flex-direction: column;
