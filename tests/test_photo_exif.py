@@ -344,8 +344,7 @@ class TestExtractPhotoExif:
 
 def test_media_from_dict_fast_with_photo_exif():
     from datetime import datetime
-    from pathlib import Path
-    from metascan.core.media import Media, PhotoExposure
+    from metascan.core.media import Media, PhotoExposure as MediaPhotoExposure
 
     data = {
         "file_path": "/tmp/IMG_0001.HEIC",
@@ -379,7 +378,7 @@ def test_media_from_dict_fast_with_photo_exif():
     assert m.orientation == 6
     assert isinstance(m.datetime_original, datetime)
     assert m.datetime_original == datetime(2026, 4, 12, 15, 24, 31)
-    assert isinstance(m.photo_exposure, PhotoExposure)
+    assert isinstance(m.photo_exposure, MediaPhotoExposure)
     assert m.photo_exposure.iso == 400
     assert m.photo_exposure.shutter_speed == "1/250"
 
@@ -402,3 +401,24 @@ def test_media_from_dict_fast_without_photo_exif():
     assert m.gps_latitude is None
     assert m.orientation is None
     assert m.photo_exposure is None
+
+
+def test_media_from_dict_fast_datetime_original_as_epoch():
+    """datetime_original parses from a unix-epoch float, matching the
+    historical two-shape pattern documented in CLAUDE.md for created_at /
+    modified_at."""
+    from datetime import datetime
+    from metascan.core.media import Media
+
+    data = {
+        "file_path": "/tmp/test.png",
+        "file_size": 100,
+        "width": 512,
+        "height": 512,
+        "format": "PNG",
+        "created_at": "2026-01-01T00:00:00",
+        "modified_at": "2026-01-01T00:00:00",
+        "datetime_original": 1744469071.0,
+    }
+    m = Media.from_dict_fast(data)
+    assert isinstance(m.datetime_original, datetime)
