@@ -17,7 +17,12 @@ class LoRA:
 @dataclass_json
 @dataclass
 class PhotoExposure:
-    """Exposure / lens settings — serialized to media.photo_exposure JSON column."""
+    """Exposure / lens settings — serialized to media.photo_exposure JSON column.
+
+    This is the JSON-serializable copy (carries ``@dataclass_json``).
+    The pure-parser sibling ``metascan.core.photo_exif.PhotoExposure`` is used
+    by ``extract_photo_exif`` and carries ``is_empty()`` but no JSON decorators.
+    """
 
     shutter_speed: Optional[str] = None
     aperture: Optional[float] = None
