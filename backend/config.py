@@ -60,6 +60,20 @@ def get_directories(config: dict) -> List[DirectoryConfig]:
     ]
 
 
+def get_ui_config(config: dict) -> dict:
+    """UI section of config.json. Currently exposes:
+    - map_tile_url: MapLibre GL style URL for the location panel.
+                    Defaults to OpenFreeMap liberty.
+    """
+    ui = config.get("ui") or {}
+    return {
+        "map_tile_url": ui.get(
+            "map_tile_url",
+            "https://tiles.openfreemap.org/styles/liberty",
+        ),
+    }
+
+
 def get_models_config(config: dict) -> dict:
     """Return the ``models`` section with defaults filled in.
 
