@@ -2,7 +2,7 @@
 
 Idempotent registration helper. Importers must call ``register_heif_opener()``
 at module load time before any ``Image.open`` calls. Calling it more than once
-is a no-op (pillow-heif keeps a single global registration).
+is a no-op — this module guards against repeated calls with a module-level flag.
 """
 
 from __future__ import annotations
