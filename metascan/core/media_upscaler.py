@@ -16,9 +16,32 @@ import urllib.request
 from tqdm import tqdm
 import logging
 
+import numpy as np
+from PIL import Image, ImageOps
+
+from metascan.utils.heic import register_heif_opener
 from metascan.utils.startup_profiler import log_startup
 
+register_heif_opener()
+
 log_startup("media_upscaler.py: Module loading started")
+
+
+def _imread_oriented_bgr(path):  # type: ignore[no-untyped-def]
+    """cv2.imread replacement that respects EXIF orientation and reads HEIC.
+
+    Returns a BGR numpy array (matching cv2.imread's convention) or None on
+    failure, so existing call sites that check ``if img is None`` keep
+    working without modification.
+    """
+    try:
+        with Image.open(path) as pil_img:
+            oriented = ImageOps.exif_transpose(pil_img).convert("RGB")
+            rgb = np.asarray(oriented)
+            return rgb[:, :, ::-1].copy()  # RGB -> BGR
+    except Exception:
+        return None
+
 
 # Flag to track if heavy imports have been done
 _heavy_imports_done = False
@@ -446,8 +469,8 @@ class MediaUpscaler:
             if progress_callback:
                 progress_callback(50)
 
-            # Read image
-            input_img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+            # Read image (Pillow-backed: respects EXIF orientation, accepts HEIC)
+            input_img = _imread_oriented_bgr(str(input_path))
             if input_img is None:
                 self.logger.error(f"Failed to read image: {input_path}")
                 return False
@@ -581,8 +604,8 @@ class MediaUpscaler:
                 if progress_callback:
                     progress_callback(50)
 
-                # Read image
-                img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+                # Read image (Pillow-backed: respects EXIF orientation, accepts HEIC)
+                img = _imread_oriented_bgr(str(input_path))
                 if img is None:
                     self.logger.error(f"Failed to read image: {input_path}")
                     return False
@@ -624,8 +647,8 @@ class MediaUpscaler:
                 if progress_callback:
                     progress_callback(30)
 
-                # Read image
-                img = cv2.imread(str(input_path), cv2.IMREAD_COLOR)
+                # Read image (Pillow-backed: respects EXIF orientation, accepts HEIC)
+                img = _imread_oriented_bgr(str(input_path))
                 if img is None:
                     self.logger.error(f"Failed to read image: {input_path}")
                     return False
@@ -1356,13 +1379,15 @@ class MediaUpscaler:
             else:
                 # Image file - use PIL or cv2
                 try:
-                    from PIL import Image
-
                     with Image.open(file_path) as img:
-                        width, height = img.size  # PIL returns (width, height)
+                        # Apply EXIF orientation so dims match the visually
+                        # rotated image (e.g. portrait phone photos).
+                        oriented = ImageOps.exif_transpose(img)
+                        width, height = oriented.size  # PIL returns (width, height)
                         return (int(width), int(height))
                 except ImportError:
-                    # Fallback to cv2
+                    # Fallback (Pillow unavailable — Pillow-backed helper would
+                    # also fail; try cv2 directly without orientation handling).
                     import cv2
 
                     cv_img = cv2.imread(str(file_path))
