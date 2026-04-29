@@ -4,6 +4,8 @@ import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
 import { useToast } from '../../composables/useToast'
 import MetadataField from './MetadataField.vue'
+import CameraSection from './CameraSection.vue'
+import LocationSection from './LocationSection.vue'
 import { fileName } from '../../utils/path'
 import { copyToClipboard } from '../../utils/clipboard'
 import type { AnyFolder } from '../../types/folders'
@@ -78,6 +80,16 @@ async function copyAll() {
         </div>
       </details>
 
+      <!-- Tags (merged prompt + CLIP from the indices table; unrelated to AI metadata) -->
+      <details v-if="media.tags?.length" class="meta-section">
+        <summary class="section-title">Tags ({{ media.tags.length }})</summary>
+        <div class="section-body">
+          <div class="tags-list">
+            <span v-for="tag in media.tags" :key="tag" class="tag-chip">{{ tag }}</span>
+          </div>
+        </div>
+      </details>
+
       <!-- File Information -->
       <details class="meta-section" open>
         <summary class="section-title">File Information</summary>
@@ -100,6 +112,9 @@ async function copyAll() {
           <MetadataField v-if="media.duration" label="Duration" :value="`${media.duration.toFixed(1)}s`" />
         </div>
       </details>
+
+      <CameraSection :media="media" />
+      <LocationSection :media="media" />
 
       <!-- AI Generation -->
       <details v-if="media.metadata_source" class="meta-section" open>
@@ -127,16 +142,6 @@ async function copyAll() {
             :label="lora.lora_name"
             :value="`weight: ${lora.lora_weight}`"
           />
-        </div>
-      </details>
-
-      <!-- Tags (merged prompt + CLIP from the indices table; unrelated to AI metadata) -->
-      <details v-if="media.tags?.length" class="meta-section">
-        <summary class="section-title">Tags ({{ media.tags.length }})</summary>
-        <div class="section-body">
-          <div class="tags-list">
-            <span v-for="tag in media.tags" :key="tag" class="tag-chip">{{ tag }}</span>
-          </div>
         </div>
       </details>
     </template>
