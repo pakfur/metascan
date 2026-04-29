@@ -16,6 +16,19 @@ class LoRA:
 
 @dataclass_json
 @dataclass
+class PhotoExposure:
+    """Exposure / lens settings — serialized to media.photo_exposure JSON column."""
+
+    shutter_speed: Optional[str] = None
+    aperture: Optional[float] = None
+    iso: Optional[int] = None
+    flash: Optional[str] = None
+    focal_length: Optional[float] = None
+    focal_length_35mm: Optional[int] = None
+
+
+@dataclass_json
+@dataclass
 class Media:
     file_path: Path = field(
         metadata=config(
@@ -47,6 +60,16 @@ class Media:
     video_length: Optional[int] = None  # Number of frames for ComfyUI videos
 
     tags: List[str] = field(default_factory=list)
+
+    camera_make: Optional[str] = None
+    camera_model: Optional[str] = None
+    lens_model: Optional[str] = None
+    datetime_original: Optional[datetime] = None
+    gps_latitude: Optional[float] = None
+    gps_longitude: Optional[float] = None
+    gps_altitude: Optional[float] = None
+    orientation: Optional[int] = None
+    photo_exposure: Optional[PhotoExposure] = None
 
     loras: List[LoRA] = field(default_factory=list)
 
@@ -120,10 +143,28 @@ class Media:
         elif isinstance(modified_at, (int, float)):
             modified_at = datetime.fromtimestamp(modified_at)
 
+        datetime_original = data.get("datetime_original")
+        if isinstance(datetime_original, str):
+            datetime_original = datetime.fromisoformat(datetime_original)
+        elif isinstance(datetime_original, (int, float)):
+            datetime_original = datetime.fromtimestamp(datetime_original)
+
         # Parse Path fields (convert from POSIX storage format to native)
         thumbnail_path = None
         if data.get("thumbnail_path"):
             thumbnail_path = Path(to_native_path(data["thumbnail_path"]))
+
+        photo_exposure = None
+        pe = data.get("photo_exposure")
+        if isinstance(pe, dict):
+            photo_exposure = PhotoExposure(
+                shutter_speed=pe.get("shutter_speed"),
+                aperture=pe.get("aperture"),
+                iso=pe.get("iso"),
+                flash=pe.get("flash"),
+                focal_length=pe.get("focal_length"),
+                focal_length_35mm=pe.get("focal_length_35mm"),
+            )
 
         return Media(
             file_path=Path(to_native_path(data["file_path"])),
@@ -147,6 +188,15 @@ class Media:
             duration=data.get("duration"),
             video_length=data.get("video_length"),
             tags=data.get("tags", []),
+            camera_make=data.get("camera_make"),
+            camera_model=data.get("camera_model"),
+            lens_model=data.get("lens_model"),
+            datetime_original=datetime_original,
+            gps_latitude=data.get("gps_latitude"),
+            gps_longitude=data.get("gps_longitude"),
+            gps_altitude=data.get("gps_altitude"),
+            orientation=data.get("orientation"),
+            photo_exposure=photo_exposure,
             loras=loras,
             is_favorite=data.get("is_favorite", False),
             playback_speed=data.get("playback_speed"),
