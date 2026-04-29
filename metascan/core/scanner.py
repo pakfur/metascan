@@ -9,7 +9,7 @@ import threading
 import queue
 import time
 from metascan.utils.startup_profiler import log_startup
-from metascan.core.media import Media, LoRA
+from metascan.core.media import Media, LoRA, PhotoExposure as MediaPhotoExposure
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 from metascan.core.phash_utils import compute_phash_for_file
@@ -33,13 +33,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _photo_exposure_to_media(src: PhotoExifExposure) -> Any:
+def _photo_exposure_to_media(src: PhotoExifExposure) -> "MediaPhotoExposure":
     """Convert metascan.core.photo_exif.PhotoExposure -> metascan.core.media.PhotoExposure.
 
     They have identical shape; lives in two modules so photo_exif stays pure
     (no Media/dataclass-json dependency)."""
-    from metascan.core.media import PhotoExposure as MediaPhotoExposure
-
     return MediaPhotoExposure(
         shutter_speed=src.shutter_speed,
         aperture=src.aperture,
@@ -165,32 +163,53 @@ class Scanner:
 
         return media_files
 
-    def _read_image_photo_exif(
-        self, file_path: Path
-    ) -> Tuple[Optional[PhotoExif], Optional[int]]:
-        """Open a still image once, return (photo_exif, orientation_tag).
-
-        Returns (None, None) for video files or on any read failure.
+    def _read_image_info_and_exif(self, file_path: Path) -> Tuple[
+        Tuple[Optional[int], Optional[int], Optional[str]],
+        Optional[PhotoExif],
+        Optional[int],
+    ]:
+        """Open a still image once. Returns ((width, height, format),
+        photo_exif, orientation_tag). Pixel decode is skipped unless EXIF
+        orientation requires it — keeps the AI-gen PNG hot path fast.
         """
         if file_path.suffix.lower() in {".mp4", ".webm"}:
-            return None, None
+            return (None, None, None), None, None
         try:
             with Image.open(file_path) as img:
-                return extract_photo_exif(img.getexif())
+                fmt = img.format
+                photo_exif, orientation = extract_photo_exif(img.getexif())
+                # Only call exif_transpose when there's actually a rotation
+                # to apply. Pillow's exif_transpose forces a full pixel
+                # decode on every call, which is wasteful for the common
+                # case (AI-gen PNGs with no orientation tag, or
+                # Orientation=1 which is the identity transform).
+                if orientation is not None and orientation in (2, 3, 4, 5, 6, 7, 8):
+                    transposed = ImageOps.exif_transpose(img)
+                    width, height = transposed.width, transposed.height
+                else:
+                    width, height = img.width, img.height
+                return (width, height, fmt), photo_exif, orientation
         except Exception as exc:
-            logger.debug("Could not read EXIF from %s: %s", file_path, exc)
-            return None, None
+            logger.error("Failed to read image info/EXIF for %s: %s", file_path, exc)
+            return (None, None, None), None, None
 
     def _process_media_file(self, file_path: Path) -> Optional[Media]:  # noqa: C901
         """Process a single media file and extract metadata"""
         try:
             stat = file_path.stat()
 
-            width, height, format_name = self._get_media_info(file_path)
+            # Single image open: dimensions, format, photo EXIF, and
+            # orientation all come back from one read.
+            if file_path.suffix.lower() in {".mp4", ".webm"}:
+                width, height, format_name = self._get_video_info(file_path)
+                photo_exif, orientation_tag = None, None
+            else:
+                (width, height, format_name), photo_exif, orientation_tag = (
+                    self._read_image_info_and_exif(file_path)
+                )
+
             if not width or not height:
                 return None
-
-            photo_exif, orientation_tag = self._read_image_photo_exif(file_path)
 
             # Create media object
             media = Media(
@@ -282,16 +301,14 @@ class Scanner:
     def _get_media_info(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        try:
-            if file_path.suffix.lower() in {".mp4", ".webm"}:
-                return self._get_video_info(file_path)
-            else:
-                with Image.open(file_path) as img:
-                    transposed = ImageOps.exif_transpose(img)
-                    return transposed.width, transposed.height, img.format
-        except Exception as e:
-            logger.error(f"Failed to get media info for {file_path}: {e}")
-            return None, None, None
+        """Video-only path. For images use ``_read_image_info_and_exif``."""
+        if file_path.suffix.lower() in {".mp4", ".webm"}:
+            return self._get_video_info(file_path)
+        # Fallback for callers that expect the legacy 3-tuple. Image callers
+        # in this module should prefer _read_image_info_and_exif which avoids
+        # a second image open.
+        info, _photo, _orient = self._read_image_info_and_exif(file_path)
+        return info
 
     def _get_video_info(
         self, file_path: Path
