@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
+
+from metascan.utils.heic import register_heif_opener
+
+register_heif_opener()
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +297,7 @@ class EmbeddingManager:
         to loading a 4096x4096 image. Downsizing first avoids excessive
         RAM usage and speeds up preprocessing significantly on CPU.
         """
-        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         w, h = image.size
         if max(w, h) > max_size:
             scale = max_size / max(w, h)
@@ -478,7 +482,7 @@ class EmbeddingManager:
             _ensure_heavy_imports()
             assert _imagehash is not None
 
-            image = Image.open(image_path).convert("RGB")
+            image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
             phash = _imagehash.phash(image)
             return str(phash)
         except Exception as e:
