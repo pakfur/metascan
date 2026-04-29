@@ -152,9 +152,11 @@ async function copyAll() {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
 }
 
 .meta-header {
@@ -162,6 +164,7 @@ async function copyAll() {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 4px;
+  flex: 0 0 auto;
 }
 
 .meta-title {
@@ -188,6 +191,9 @@ async function copyAll() {
   border: 1px solid var(--surface-border);
   border-radius: 6px;
   overflow: hidden;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .section-title {
@@ -201,6 +207,7 @@ async function copyAll() {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .section-title::before {
@@ -218,6 +225,10 @@ details[open] > .section-title::before {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 40px;
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .tags-list {
