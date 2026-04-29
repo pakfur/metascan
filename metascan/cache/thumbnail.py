@@ -1,5 +1,5 @@
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 from typing import Optional, Tuple, List, Dict, Set
 import hashlib
 import logging
@@ -15,6 +15,10 @@ try:
     HAS_FFMPEG_PYTHON = True
 except ImportError:
     HAS_FFMPEG_PYTHON = False
+
+from metascan.utils.heic import register_heif_opener
+
+register_heif_opener()
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,8 @@ class ThumbnailCache:
         ".webp",
         ".bmp",
         ".gif",
+        ".heic",
+        ".heif",
         ".mp4",
         ".webm",
     }
@@ -144,6 +150,7 @@ class ThumbnailCache:
         """Create a thumbnail for an image file"""
         try:
             with Image.open(image_path) as img:
+                img = ImageOps.exif_transpose(img)
                 # Convert RGBA to RGB if necessary
                 if img.mode in ("RGBA", "LA"):
                     background = Image.new("RGB", img.size, (255, 255, 255))
