@@ -320,3 +320,18 @@ class TestExtractPhotoExif:
         assert photo is not None
         assert photo.exposure is not None
         assert photo.exposure.shutter_speed == "1/4000"
+
+    def test_subsecond_non_unit_numerator_decimal_format(self):
+        """Spec §4: numerator != 1 -> decimal seconds rounded to 2 places.
+
+        Real cameras almost always write sub-second exposures as 1/N rationals
+        with numerator==1, but this case (e.g. Fraction(3, 10)) is in the
+        spec and must not be coerced to a misleading '1/3'.
+        """
+        from fractions import Fraction
+
+        exif = _make_exif(exif_ifd={0x829A: Fraction(3, 10)})
+        photo, _ = extract_photo_exif(exif)
+        assert photo is not None
+        assert photo.exposure is not None
+        assert photo.exposure.shutter_speed == "0.3"

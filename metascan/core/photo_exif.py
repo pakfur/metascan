@@ -235,15 +235,13 @@ def _shutter_speed(exif: Any) -> Optional[str]:
         f = float(v)
         if f <= 0:
             return None
-        # Sub-second exposures: prefer "1/N" form. Pillow returns IFDRational
-        # which exposes .numerator/.denominator; fall back to deriving N from
-        # 1/f when those attrs are absent.
+        # Sub-second exposures: prefer "1/N" form when the rational's
+        # numerator is exactly 1 (the universal camera-firmware convention).
+        # Anything else: decimal seconds rounded to 2 places per spec §4.
         num = getattr(v, "numerator", None)
         den = getattr(v, "denominator", None)
         if num == 1 and isinstance(den, int) and den > 1:
             return f"1/{den}"
-        if f < 1:
-            return f"1/{round(1.0 / f)}"
         # Long exposures: integer if exact, else 2-decimal float.
         if f == int(f):
             return str(int(f))
@@ -282,13 +280,14 @@ def _gps_altitude(value: Any, ref: Any) -> Optional[float]:
         return None
     try:
         alt = float(value)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to read GPS altitude: %s", exc)
         return None
     try:
         if ref is not None and int(ref) == 1:
             alt = -alt
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to apply GPS altitude ref: %s", exc)
     return alt
 
 
