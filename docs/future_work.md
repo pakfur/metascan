@@ -4,6 +4,7 @@
 - (V1) Make a background worker to watch the directories and scan/import new files automatically
   - Configurable, enable or disable
 
+
 - (V1) Worker Watcher - A worker watch that monitors all workers
   - Tab that displays a list of workers
   - Color dot for status - green running/healthy, yellow running/warn, red errors, white not running/healthy
@@ -44,8 +45,8 @@ X (MVP) PrimeVue Galleria below the media in the media viewer
 
 
 X (v1) Folders and Smart folders
-  - Virtual folders. Allows for manual organization of media into folders. Many to many relationship between media files and folders. Folders get names, and clicking on one acts like a filter
-  - Smart folders. Associated with contentr search strings and/or tags. Files that meet the criteria automatically get added to the folder. Clicking on one acts like a filter. Content is scanned in the background and associated with a Smart folder.
+  X Virtual folders. Allows for manual organization of media into folders. Many to many relationship between media files and folders. Folders get names, and clicking on one acts like a filter
+  X Smart folders. Associated with contentr search strings and/or tags. Files that meet the criteria automatically get added to the folder. Clicking on one acts like a filter. Content is scanned in the background and associated with a Smart folder.
 
 - (v1+) Geo metadata awareness. Support geo location of images on a global, zoomable map. Search for images associated with a geolocation. Can use metadata or manually assign a location to an image
 
@@ -64,6 +65,10 @@ X (MVP) Details panel copy to clipboard for individual or all does not work
   - Panel spacing can get squished if space is too small
   - Detail panel title bars must be fixed height
   - Detail panel content cards need scrolling content
+
+#### Configuration 
+ - Directories
+   - Missing a "Select folder" option (though how would that work remotely?)
 
 #### Main screen
 X (MVP) arrow keys are not changing the selected media
