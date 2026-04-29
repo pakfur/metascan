@@ -95,7 +95,6 @@ class ProcessUpscaleQueue:
 
         self.logger = logging.getLogger(__name__)
 
-        # Callback-based signals (replace PyQt pyqtSignal)
         self.on_task_added: Optional[Callable[[UpscaleTask], None]] = None
         self.on_task_updated: Optional[Callable[[UpscaleTask], None]] = None
         self.on_task_removed: Optional[Callable[[str], None]] = None
