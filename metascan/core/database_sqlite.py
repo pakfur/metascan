@@ -185,6 +185,62 @@ class DatabaseManager:
                 )
                 logger.info("Summary-column backfill complete.")
 
+            # Photo-EXIF columns (real-world photo support).
+            _idempotent_add_column(
+                conn,
+                "media",
+                "camera_make",
+                "ALTER TABLE media ADD COLUMN camera_make TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "camera_model",
+                "ALTER TABLE media ADD COLUMN camera_model TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "lens_model",
+                "ALTER TABLE media ADD COLUMN lens_model TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "datetime_original",
+                "ALTER TABLE media ADD COLUMN datetime_original TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "gps_latitude",
+                "ALTER TABLE media ADD COLUMN gps_latitude REAL",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "gps_longitude",
+                "ALTER TABLE media ADD COLUMN gps_longitude REAL",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "gps_altitude",
+                "ALTER TABLE media ADD COLUMN gps_altitude REAL",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "orientation",
+                "ALTER TABLE media ADD COLUMN orientation INTEGER",
+            )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "photo_exposure",
+                "ALTER TABLE media ADD COLUMN photo_exposure TEXT",
+            )
+
             # Covering indexes for the grid list endpoint. The `media` row
             # layout is `[file_path][data][is_favorite]...[width]...`, so
             # reading any column positioned after `data` would force SQLite
@@ -200,7 +256,16 @@ class DatabaseManager:
             # falls back to the main table — the 20-second regression we're
             # guarding against. Drop any pre-existing index whose DDL is
             # missing the current column set so the CREATE below rebuilds.
-            required_cols = ("modified_at", "created_at")
+            required_cols = (
+                "modified_at",
+                "created_at",
+                "camera_make",
+                "camera_model",
+                "datetime_original",
+                "gps_latitude",
+                "gps_longitude",
+                "orientation",
+            )
             for idx_name in ("idx_media_summary_added", "idx_media_summary_modified"):
                 ddl_row = conn.execute(
                     "SELECT sql FROM sqlite_master " "WHERE type='index' AND name=?",
@@ -215,7 +280,9 @@ class DatabaseManager:
                 ON media(
                     created_at, file_path, is_favorite, playback_speed,
                     width, height, file_size, frame_rate, duration,
-                    modified_at
+                    modified_at,
+                    camera_make, camera_model, datetime_original,
+                    gps_latitude, gps_longitude, orientation
                 )
                 """
             )
@@ -225,7 +292,9 @@ class DatabaseManager:
                 ON media(
                     modified_at, file_path, is_favorite, playback_speed,
                     width, height, file_size, frame_rate, duration,
-                    created_at
+                    created_at,
+                    camera_make, camera_model, datetime_original,
+                    gps_latitude, gps_longitude, orientation
                 )
                 """
             )
@@ -347,6 +416,43 @@ class DatabaseManager:
                 logger.info(f"created_at backfill updated {cur.rowcount} row(s).")
                 conn.execute("PRAGMA user_version = 1")
 
+            if user_version < 2:
+                # Photo-EXIF support landed: orientation is now applied at
+                # thumbnail-generation time. Existing thumbnails for sideways
+                # iPhone photos would stay cached forever (key is
+                # (path, mtime, size), and mtime hasn't changed). Wipe the
+                # cache directory contents once so they regenerate correctly
+                # on next view. Idempotent guard: only fire on first launch
+                # with the v2 schema.
+                from metascan.utils.app_paths import get_thumbnail_cache_dir
+
+                try:
+                    cache_dir = get_thumbnail_cache_dir()
+                    if cache_dir.exists():
+                        wiped = 0
+                        for entry in cache_dir.iterdir():
+                            if entry.is_file():
+                                try:
+                                    entry.unlink()
+                                    wiped += 1
+                                except OSError as exc:
+                                    logger.warning(
+                                        "Could not delete cached thumbnail " "%s: %s",
+                                        entry,
+                                        exc,
+                                    )
+                        logger.info(
+                            "Wiped %d cached thumbnail(s) for v2 migration "
+                            "(EXIF orientation handling).",
+                            wiped,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Thumbnail cache wipe (v2 migration) failed: %s",
+                        exc,
+                    )
+                conn.execute("PRAGMA user_version = 2")
+
             conn.commit()
 
     @contextmanager
@@ -384,8 +490,11 @@ class DatabaseManager:
         INSERT INTO media (
             file_path, data, is_favorite, playback_speed,
             width, height, file_size, frame_rate, duration, modified_at,
+            camera_make, camera_model, lens_model, datetime_original,
+            gps_latitude, gps_longitude, gps_altitude, orientation,
+            photo_exposure,
             updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(file_path) DO UPDATE SET
             data = excluded.data,
             is_favorite = excluded.is_favorite,
@@ -396,11 +505,34 @@ class DatabaseManager:
             frame_rate = excluded.frame_rate,
             duration = excluded.duration,
             modified_at = excluded.modified_at,
+            camera_make = excluded.camera_make,
+            camera_model = excluded.camera_model,
+            lens_model = excluded.lens_model,
+            datetime_original = excluded.datetime_original,
+            gps_latitude = excluded.gps_latitude,
+            gps_longitude = excluded.gps_longitude,
+            gps_altitude = excluded.gps_altitude,
+            orientation = excluded.orientation,
+            photo_exposure = excluded.photo_exposure,
             updated_at = CURRENT_TIMESTAMP
     """
 
     @staticmethod
     def _media_upsert_params(media: Media, posix_path: str) -> tuple:
+        import json as _json
+
+        expo_json = None
+        if media.photo_exposure is not None:
+            expo_json = _json.dumps(
+                {
+                    "shutter_speed": media.photo_exposure.shutter_speed,
+                    "aperture": media.photo_exposure.aperture,
+                    "iso": media.photo_exposure.iso,
+                    "flash": media.photo_exposure.flash,
+                    "focal_length": media.photo_exposure.focal_length,
+                    "focal_length_35mm": media.photo_exposure.focal_length_35mm,
+                }
+            )
         return (
             posix_path,
             media.to_json(),  # type: ignore[attr-defined]
@@ -412,6 +544,15 @@ class DatabaseManager:
             media.frame_rate,
             media.duration,
             media.modified_at.isoformat() if media.modified_at else None,
+            media.camera_make,
+            media.camera_model,
+            media.lens_model,
+            media.datetime_original.isoformat() if media.datetime_original else None,
+            media.gps_latitude,
+            media.gps_longitude,
+            media.gps_altitude,
+            media.orientation,
+            expo_json,
         )
 
     def save_media(self, media: Media) -> bool:
@@ -533,7 +674,9 @@ class DatabaseManager:
         sql = (
             "SELECT file_path, is_favorite, playback_speed, "
             "width, height, file_size, frame_rate, duration, "
-            "modified_at, created_at "
+            "modified_at, created_at, "
+            "camera_make, camera_model, datetime_original, "
+            "gps_latitude, gps_longitude, orientation "
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
@@ -560,6 +703,12 @@ class DatabaseManager:
                             "duration": row["duration"],
                             "modified_at": row["modified_at"],
                             "created_at": row["created_at"],
+                            "camera_make": row["camera_make"],
+                            "camera_model": row["camera_model"],
+                            "datetime_original": row["datetime_original"],
+                            "gps_latitude": row["gps_latitude"],
+                            "gps_longitude": row["gps_longitude"],
+                            "orientation": row["orientation"],
                         }
                     )
         except Exception as e:
@@ -822,6 +971,13 @@ class DatabaseManager:
                     indices.append(("model", model_name.lower(), None))
 
         indices.append(("ext", media.file_extension, None))
+
+        if media.camera_make:
+            indices.append(("camera_make", media.camera_make.strip().lower(), None))
+        if media.camera_model:
+            indices.append(("camera_model", media.camera_model.strip().lower(), None))
+        if media.gps_latitude is not None and media.gps_longitude is not None:
+            indices.append(("has_gps", "yes", None))
 
         # Add reverse index for the fully qualified file path (in POSIX format)
         path_str = to_posix_path(media.file_path).lower()
