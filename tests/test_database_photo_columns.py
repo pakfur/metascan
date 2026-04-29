@@ -70,6 +70,69 @@ class TestSchema:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
         assert v >= 2
 
+    def test_v1_to_v2_migration_adds_columns_and_advances_version(self, tmp_path):
+        """A pre-existing v1 DB (without EXIF columns) gets columns added
+        and user_version bumped to 2 on the next _init_database call."""
+        # DatabaseManager treats its argument as a directory and opens
+        # <arg>/metascan.db — build the v1 DB at that exact path.
+        db_dir = tmp_path / "v1migration"
+        db_dir.mkdir()
+        db_file = db_dir / "metascan.db"
+        with sqlite3.connect(str(db_file)) as conn:
+            conn.execute(
+                "CREATE TABLE media (file_path TEXT PRIMARY KEY, data TEXT, "
+                "is_favorite INTEGER, playback_speed REAL, "
+                "width INTEGER, height INTEGER, file_size INTEGER, "
+                "frame_rate REAL, duration REAL, modified_at TEXT, "
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "INSERT INTO media (file_path, data, is_favorite, playback_speed, "
+                "width, height, file_size) VALUES "
+                "('/tmp/legacy.jpg', '{}', 0, NULL, 100, 100, 1000)"
+            )
+            conn.execute("PRAGMA user_version = 1")
+            conn.commit()
+
+        # Now construct a DatabaseManager — _init_database runs and should
+        # add the EXIF columns + bump user_version to 2.
+        manager = DatabaseManager(db_dir)
+
+        with sqlite3.connect(str(manager.db_file)) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(media)")}
+            for c in (
+                "camera_make",
+                "camera_model",
+                "lens_model",
+                "datetime_original",
+                "gps_latitude",
+                "gps_longitude",
+                "gps_altitude",
+                "orientation",
+                "photo_exposure",
+            ):
+                assert c in cols, f"missing column {c}"
+            v = conn.execute("PRAGMA user_version").fetchone()[0]
+            assert v >= 2, f"expected user_version >= 2, got {v}"
+            # Pre-existing row preserved
+            row = conn.execute(
+                "SELECT file_path, width, height FROM media WHERE file_path = ?",
+                ("/tmp/legacy.jpg",),
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "/tmp/legacy.jpg"
+            assert row[1] == 100
+            # New EXIF columns are NULL on the pre-existing row
+            row = conn.execute(
+                "SELECT camera_make, gps_latitude FROM media WHERE file_path = ?",
+                ("/tmp/legacy.jpg",),
+            ).fetchone()
+            assert row[0] is None
+            assert row[1] is None
+
+        manager.close()
+
     def test_summary_indexes_include_new_columns(self, db):
         with sqlite3.connect(str(db.db_file)) as conn:
             for idx in ("idx_media_summary_added", "idx_media_summary_modified"):
