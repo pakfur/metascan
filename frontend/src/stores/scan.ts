@@ -41,11 +41,19 @@ export const useScanStore = defineStore('scan', () => {
   const embeddingTotal = ref(0)
   const embeddingError = ref('')
   const embeddingStatus = ref<
-    'idle' | 'starting' | 'downloading_model' | 'loading_model' | 'processing'
+    | 'idle'
+    | 'starting'
+    | 'downloading_model'
+    | 'loading_model'
+    | 'loading_vocab'
+    | 'encoding_vocab'
+    | 'processing'
   >('idle')
   const embeddingLabel = ref('')
   const embeddingCurrentFile = ref('')
   const embeddingErrorsCount = ref(0)
+  const embeddingVocabCurrent = ref(0)
+  const embeddingVocabTotal = ref(0)
 
   const isActive = computed(() =>
     phase.value !== 'idle' && phase.value !== 'complete' && phase.value !== 'error' && phase.value !== 'cancelled'
@@ -98,6 +106,8 @@ export const useScanStore = defineStore('scan', () => {
         embeddingCurrentFile.value = ''
         embeddingErrorsCount.value = 0
         embeddingError.value = ''
+        embeddingVocabCurrent.value = 0
+        embeddingVocabTotal.value = 0
         if (data.total !== undefined) {
           embeddingTotal.value = (data.total as number) || 0
         }
@@ -113,6 +123,12 @@ export const useScanStore = defineStore('scan', () => {
         }
         if (data.errors_count !== undefined) {
           embeddingErrorsCount.value = (data.errors_count as number) || 0
+        }
+        if (data.vocab_current !== undefined) {
+          embeddingVocabCurrent.value = (data.vocab_current as number) || 0
+        }
+        if (data.vocab_total !== undefined) {
+          embeddingVocabTotal.value = (data.vocab_total as number) || 0
         }
         break
       case 'complete':
@@ -191,6 +207,8 @@ export const useScanStore = defineStore('scan', () => {
     embeddingLabel.value = ''
     embeddingCurrentFile.value = ''
     embeddingErrorsCount.value = 0
+    embeddingVocabCurrent.value = 0
+    embeddingVocabTotal.value = 0
     embeddingError.value = ''
   }
 
@@ -216,6 +234,8 @@ export const useScanStore = defineStore('scan', () => {
     embeddingLabel,
     embeddingCurrentFile,
     embeddingErrorsCount,
+    embeddingVocabCurrent,
+    embeddingVocabTotal,
     isActive,
     prepare,
     start,
