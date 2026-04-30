@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-VIDEO_EXTENSIONS = {".mp4", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
 
 
 def _is_video_path(file_path: str) -> bool:

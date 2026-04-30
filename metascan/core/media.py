@@ -100,7 +100,7 @@ class Media:
 
     @property
     def is_video(self) -> bool:
-        return self.file_extension in {".mp4", ".webm"}
+        return self.file_extension in {".mp4", ".webm", ".mov"}
 
     @property
     def is_image(self) -> bool:

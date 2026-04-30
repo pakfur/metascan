@@ -90,6 +90,7 @@ class ThumbnailCache:
         ".heif",
         ".mp4",
         ".webm",
+        ".mov",
     }
 
     def __init__(self, cache_dir: Path, thumbnail_size: Tuple[int, int] = DEFAULT_SIZE):
@@ -136,7 +137,7 @@ class ThumbnailCache:
     ) -> Optional[Path]:
         """Create a thumbnail for the given media file"""
         try:
-            if media_path.suffix.lower() in {".mp4", ".webm"}:
+            if media_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
                 return self._create_video_thumbnail(media_path, thumbnail_path)
             else:
                 return self._create_image_thumbnail(media_path, thumbnail_path)

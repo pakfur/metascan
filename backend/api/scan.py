@@ -43,6 +43,7 @@ async def prepare_scan():
         ".gif",
         ".mp4",
         ".webm",
+        ".mov",
         ".bmp",
     }
     total_files = 0
