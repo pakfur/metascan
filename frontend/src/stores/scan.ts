@@ -82,7 +82,16 @@ export const useScanStore = defineStore('scan', () => {
         }
         break
       case 'complete':
-        phase.value = 'complete'
+        // Auto-index fires BEFORE scan/complete is broadcast, so an
+        // 'embedding/started' event has likely already arrived and put
+        // embeddingPhase into 'building'. In that case stay on the
+        // 'embedding' step so the worker's progress is visible — the
+        // 'embedding/complete' handler will move us to 'complete'.
+        if (embeddingPhase.value === 'building') {
+          phase.value = 'embedding'
+        } else {
+          phase.value = 'complete'
+        }
         processedCount.value = (data.processed as number) || 0
         staleRemoved.value = (data.stale_removed as number) || 0
         break

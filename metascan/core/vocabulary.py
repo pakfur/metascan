@@ -226,10 +226,15 @@ def _try_load_cache(
 def _save_cache(vocab: Vocabulary, vocab_dir: Path, fingerprint: str) -> None:
     path = _cache_path(vocab_dir, vocab.model_key)
     try:
+        # Use unicode arrays (auto-sized to longest term) rather than
+        # ``dtype=object`` — object arrays require ``allow_pickle=True`` at
+        # load time, which numpy refuses by default for security reasons.
+        # That mismatch caused the cache to be unreadable on every load,
+        # so the 20-60s encode ran every single reindex.
         np.savez_compressed(
             path,
-            terms=np.array(vocab.terms, dtype=object),
-            axes=np.array(vocab.axes, dtype=object),
+            terms=np.asarray(vocab.terms),
+            axes=np.asarray(vocab.axes),
             embeddings=vocab.embeddings,
             fingerprint=np.array(fingerprint),
             model_key=np.array(vocab.model_key),
