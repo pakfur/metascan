@@ -252,3 +252,35 @@ class TestSummaryEndpoint:
         assert r["orientation"] == 6
         # datetime_original surfaced as ISO string
         assert "2026-04-12" in (r["datetime_original"] or "")
+
+
+class TestMediaToDictPhotoFields:
+    def test_media_to_dict_includes_photo_exif_fields(self):
+        """media_to_dict must mirror media_to_summary_dict's photo-EXIF
+        coverage, plus the 3 detail-only fields. Without this, the detail
+        endpoint silently drops camera/lens/exposure/GPS data, and the
+        frontend's Camera and Location sections vanish when
+        fetchMediaDetails resolves."""
+        from backend.services.media_service import MediaService
+
+        # media_to_dict only touches the Media argument — no DB/cache calls.
+        service = MediaService(db=None, thumbnail_cache=None)  # type: ignore[arg-type]
+
+        m = _make_photo_media("/tmp/regtest.HEIC")
+        out = service.media_to_dict(m)
+
+        assert out["camera_make"] == "Apple"
+        assert out["camera_model"] == "iPhone 15 Pro"
+        assert out["lens_model"] == "iPhone 15 Pro back triple camera"
+        assert out["datetime_original"] == "2026-04-12T15:24:31"
+        assert out["gps_latitude"] == pytest.approx(37.775)
+        assert out["gps_longitude"] == pytest.approx(-122.4194)
+        assert out["gps_altitude"] == 12.0
+        assert out["orientation"] == 6
+        assert isinstance(out["photo_exposure"], dict)
+        assert out["photo_exposure"]["iso"] == 400
+        assert out["photo_exposure"]["shutter_speed"] == "1/250"
+        assert out["photo_exposure"]["aperture"] == pytest.approx(1.8)
+        assert out["photo_exposure"]["flash"] == "Auto, Fired"
+        assert out["photo_exposure"]["focal_length"] == pytest.approx(6.9)
+        assert out["photo_exposure"]["focal_length_35mm"] == 27
