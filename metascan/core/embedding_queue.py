@@ -299,6 +299,12 @@ class EmbeddingQueue:
                 self._emit_complete(current)
                 self._cleanup()
                 return
+            elif status not in ("", "error"):
+                # Forward unknown statuses to the UI rather than silently
+                # dropping them — this keeps the parent forward-compatible
+                # with new worker statuses added later.
+                label = current_file or status
+                self._emit_progress(current, total, label)
             elif status == "error":
                 self._emit_error(error)
                 self._cleanup()
