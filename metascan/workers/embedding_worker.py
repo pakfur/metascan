@@ -186,8 +186,15 @@ class EmbeddingWorker:
         status: str,
         current_file: str = "",
         error: str = "",
+        vocab_current: int = 0,
+        vocab_total: int = 0,
     ) -> None:
         """Write progress to a JSON file for the main process to read.
+
+        ``vocab_current`` / ``vocab_total`` carry term-level counts during
+        ``loading_vocab`` / ``encoding_vocab`` so the UI can render a
+        determinate progress bar against the term count rather than the
+        file count (which is still ``current`` / ``total``).
 
         Uses a retry loop to handle Windows file locking race conditions
         where the main process may have the file open for reading.
@@ -200,6 +207,8 @@ class EmbeddingWorker:
             "error": error,
             "errors_count": self.errors_count,
             "last_error": self.last_error,
+            "vocab_current": vocab_current,
+            "vocab_total": vocab_total,
             "timestamp": time.time(),
         }
         temp_file = self.progress_file.with_suffix(".tmp")
@@ -306,11 +315,49 @@ class EmbeddingWorker:
             vocab_dir = get_base_path() / "data" / "vocabulary"
             self.logger.info(f"Loading tagging vocabulary from {vocab_dir}")
             self._write_progress(
-                0, total, "loading_model", current_file="Encoding tag vocabulary..."
+                0, total, "loading_vocab", current_file="Reading vocabulary files..."
             )
+
+            def _on_vocab_progress(phase: str, cur: int, tot: int) -> None:
+                # Phase → status. ``current`` / ``total`` stay tied to the
+                # file count (so the file-progress fields don't briefly go
+                # backwards); term counts are reported in vocab_*.
+                if phase == "loading":
+                    self._write_progress(
+                        0,
+                        total,
+                        "loading_vocab",
+                        current_file="Reading vocabulary files...",
+                    )
+                elif phase == "encoding":
+                    label = (
+                        f"Encoding tag vocabulary ({cur:,} / {tot:,})"
+                        if tot
+                        else "Encoding tag vocabulary..."
+                    )
+                    self._write_progress(
+                        0,
+                        total,
+                        "encoding_vocab",
+                        current_file=label,
+                        vocab_current=cur,
+                        vocab_total=tot,
+                    )
+                elif phase == "cache_hit":
+                    self._write_progress(
+                        0,
+                        total,
+                        "loading_vocab",
+                        current_file="Loaded cached vocabulary",
+                        vocab_current=cur,
+                        vocab_total=tot,
+                    )
+
             vocab: Optional[Vocabulary] = None
             try:
-                vocab = build_vocabulary(vocab_dir, embedding_mgr)
+                vocab = build_vocabulary(
+                    vocab_dir, embedding_mgr, progress_callback=_on_vocab_progress
+                )
                 if vocab is not None:
                     self.logger.info(
                         f"Tagging vocabulary ready: {len(vocab.terms)} terms "

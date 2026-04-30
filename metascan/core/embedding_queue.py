@@ -231,8 +231,15 @@ class EmbeddingQueue:
                 stale_seconds = time.time() - self._last_progress_time
                 if stale_seconds > WORKER_STALE_TIMEOUT:
                     status = data.get("status", "")
-                    # loading_model and downloading_model can take a long time
-                    if status not in ("loading_model", "downloading_model"):
+                    # Long-running phases (model load / download / vocab
+                    # encode) should not trigger a staleness warning even
+                    # when the cadence between updates exceeds the timeout.
+                    if status not in (
+                        "loading_model",
+                        "downloading_model",
+                        "loading_vocab",
+                        "encoding_vocab",
+                    ):
                         logger.warning(
                             f"Worker progress stale for {stale_seconds:.0f}s "
                             f"(status={status})"
@@ -261,6 +268,18 @@ class EmbeddingQueue:
                 self._emit_progress(0, total, f"Downloading model... {dl_file}")
             elif status == "loading_model":
                 self._emit_progress(0, total, "Loading CLIP model...")
+            elif status == "loading_vocab":
+                label = current_file or "Loading tag vocabulary..."
+                self._emit_progress(0, total, label)
+            elif status == "encoding_vocab":
+                vc = data.get("vocab_current", 0)
+                vt = data.get("vocab_total", 0)
+                if vt:
+                    self._emit_progress(
+                        0, total, f"Encoding tag vocabulary {vc:,} / {vt:,}"
+                    )
+                else:
+                    self._emit_progress(0, total, "Encoding tag vocabulary...")
             elif status == "processing":
                 label = f"Indexing {current}/{total}"
                 if current_file:

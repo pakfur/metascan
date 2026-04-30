@@ -108,6 +108,8 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
                 "status": raw.get("status", ""),
                 "current_file": raw.get("current_file", ""),
                 "errors_count": raw.get("errors_count", 0),
+                "vocab_current": raw.get("vocab_current", 0),
+                "vocab_total": raw.get("vocab_total", 0),
             },
         )
 
