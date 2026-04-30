@@ -115,6 +115,16 @@ class MediaService:
 
     def media_to_dict(self, media: Media) -> dict:
         """Convert a Media object to a JSON-serializable dict for the API."""
+        photo_exposure_dict: Optional[Dict[str, Any]] = None
+        if media.photo_exposure is not None:
+            photo_exposure_dict = {
+                "shutter_speed": media.photo_exposure.shutter_speed,
+                "aperture": media.photo_exposure.aperture,
+                "iso": media.photo_exposure.iso,
+                "flash": media.photo_exposure.flash,
+                "focal_length": media.photo_exposure.focal_length,
+                "focal_length_35mm": media.photo_exposure.focal_length_35mm,
+            }
         return {
             "file_path": str(media.file_path),
             "file_name": media.file_name,
@@ -145,4 +155,15 @@ class MediaService:
             "is_video": media.is_video,
             "media_type": media.media_type,
             "playback_speed": media.playback_speed,
+            "camera_make": media.camera_make,
+            "camera_model": media.camera_model,
+            "lens_model": media.lens_model,
+            "datetime_original": (
+                media.datetime_original.isoformat() if media.datetime_original else None
+            ),
+            "gps_latitude": media.gps_latitude,
+            "gps_longitude": media.gps_longitude,
+            "gps_altitude": media.gps_altitude,
+            "orientation": media.orientation,
+            "photo_exposure": photo_exposure_dict,
         }
