@@ -70,6 +70,14 @@ X (MVP) Details panel copy to clipboard for individual or all does not work
  - Directories
    - Missing a "Select folder" option (though how would that work remotely?)
 
+#### Upscale processing dialog
+  - Percent is orders of magnitude off (100 -> 4000%)
+
+#### Upscaling 
+  - after upscaling, the database metadata is not updated.
+    - or it is not visible in the ui, even after a page refresh. should be updated in the ui via a /ws event
+
+
 #### Main screen
 X (MVP) arrow keys are not changing the selected media
 
@@ -77,4 +85,10 @@ X (MVP) arrow keys are not changing the selected media
 #### Changes to existing features (Under consideration)
 X (MVP) load content search (CLIP) model at backend service start
 - (v1+) Replace favorite with Ranking Tier (S, A, B, C, D) with UI and ranking choice. "S" == Favorite
+
+- Similarity dialog
+  - What is the effect of the pHash and threshold values during scan?
+  - should auto save on change, not by hitting a save button
+- Tagging
+  - Set a fixed value of tags, can we instead have a threshold so the proper number of relevant tags are extracted. 20 may be to many and too few for some pics
 
