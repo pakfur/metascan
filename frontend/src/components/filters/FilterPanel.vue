@@ -9,6 +9,9 @@ const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
 
 const filterSections = [
+  { type: 'camera_make', label: 'Camera Make' },
+  { type: 'camera_model', label: 'Camera Model' },
+  { type: 'has_gps', label: 'Has Location' },
   { type: 'model', label: 'Model' },
   { type: 'lora', label: 'LoRA' },
   { type: 'tag', label: 'Tags' },
