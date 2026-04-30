@@ -6,7 +6,7 @@ import { useMediaStore } from './media'
 
 export type ViewPreset = 'home' | 'video' | 'images' | 'favorites'
 
-export const VIDEO_EXTENSIONS = ['.mp4', '.webm']
+export const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov']
 export const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
 
 export const useFilterStore = defineStore('filters', () => {
