@@ -683,7 +683,7 @@ class DatabaseManager:
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
-        video_exts = {".mp4", ".webm"}
+        video_exts = {".mp4", ".webm", ".mov"}
         try:
             with self._get_connection() as conn:
                 rows = conn.execute(sql).fetchall()

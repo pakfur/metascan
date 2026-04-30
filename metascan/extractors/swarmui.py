@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class SwarmUIExtractor(MetadataExtractor):
     def can_extract(self, media_path: Path) -> bool:
-        if media_path.suffix.lower() in {".mp4", ".webm"}:
+        if media_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return False
 
         metadata = self._get_exif_metadata(media_path)
