@@ -148,7 +148,7 @@ class WatchdogTimer:
 class EmbeddingWorker:
     """Worker process for computing embeddings."""
 
-    VIDEO_EXTENSIONS = {".mp4", ".webm"}
+    VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
 
     def __init__(self, queue_dir: Path):
         self.queue_dir = Path(queue_dir)

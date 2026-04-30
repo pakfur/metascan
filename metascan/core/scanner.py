@@ -59,6 +59,7 @@ class Scanner:
         ".heif",
         ".mp4",
         ".webm",
+        ".mov",
     }
 
     def __init__(
@@ -172,7 +173,7 @@ class Scanner:
         photo_exif, orientation_tag). Pixel decode is skipped unless EXIF
         orientation requires it — keeps the AI-gen PNG hot path fast.
         """
-        if file_path.suffix.lower() in {".mp4", ".webm"}:
+        if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return (None, None, None), None, None
         try:
             with Image.open(file_path) as img:
@@ -200,7 +201,7 @@ class Scanner:
 
             # Single image open: dimensions, format, photo EXIF, and
             # orientation all come back from one read.
-            if file_path.suffix.lower() in {".mp4", ".webm"}:
+            if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
                 width, height, format_name = self._get_video_info(file_path)
                 photo_exif, orientation_tag = None, None
             else:
@@ -302,7 +303,7 @@ class Scanner:
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
         """Video-only path. For images use ``_read_image_info_and_exif``."""
-        if file_path.suffix.lower() in {".mp4", ".webm"}:
+        if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return self._get_video_info(file_path)
         # Fallback for callers that expect the legacy 3-tuple. Image callers
         # in this module should prefer _read_image_info_and_exif which avoids
