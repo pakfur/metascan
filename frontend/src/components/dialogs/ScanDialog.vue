@@ -39,6 +39,23 @@ const embeddingProgressPct = computed(() =>
     : 0,
 )
 
+const vocabProgressPct = computed(() =>
+  scanStore.embeddingVocabTotal > 0
+    ? Math.round(
+        (scanStore.embeddingVocabCurrent / scanStore.embeddingVocabTotal) * 100,
+      )
+    : 0,
+)
+
+const isVocabEncoding = computed(
+  () => scanStore.embeddingStatus === 'encoding_vocab',
+)
+const isIndeterminateEmbedPhase = computed(() =>
+  ['downloading_model', 'loading_model', 'loading_vocab', 'starting'].includes(
+    scanStore.embeddingStatus,
+  ),
+)
+
 const currentFileName = computed(() => {
   const f = scanStore.currentFile
   if (!f) return ''
@@ -57,6 +74,15 @@ const embedHumanLabel = computed(() => {
   switch (scanStore.embeddingStatus) {
     case 'downloading_model': return 'Downloading CLIP model...'
     case 'loading_model': return 'Loading CLIP model...'
+    case 'loading_vocab': return 'Loading tag vocabulary...'
+    case 'encoding_vocab': {
+      const vc = scanStore.embeddingVocabCurrent
+      const vt = scanStore.embeddingVocabTotal
+      if (vt > 0) {
+        return `Encoding tag vocabulary ${vc.toLocaleString()} / ${vt.toLocaleString()}`
+      }
+      return 'Encoding tag vocabulary...'
+    }
     case 'starting': return 'Starting...'
     case 'processing':
       return `Indexing ${scanStore.embeddingCurrent} / ${scanStore.embeddingTotal}` +
@@ -66,6 +92,19 @@ const embedHumanLabel = computed(() => {
           : '')
     default: return scanStore.embeddingLabel || ''
   }
+})
+
+const embedSubLabel = computed(() => {
+  if (scanStore.embeddingStatus === 'encoding_vocab') {
+    return 'CLIP-encoding the tag vocabulary. This is a one-time step per model — the result is cached for future scans.'
+  }
+  if (scanStore.embeddingStatus === 'loading_model') {
+    return 'Loading model weights into memory.'
+  }
+  if (scanStore.embeddingStatus === 'downloading_model') {
+    return 'Downloading model weights from Hugging Face. This only happens the first time you use this CLIP model.'
+  }
+  return ''
 })
 
 function handleClose() {
@@ -175,20 +214,18 @@ function handleClose() {
       <template v-else-if="scanStore.phase === 'embedding'">
         <h3>Building Embeddings...</h3>
         <p class="muted">{{ embedHumanLabel }}</p>
+        <p v-if="embedSubLabel" class="sub-muted">{{ embedSubLabel }}</p>
         <div class="progress-section">
           <div
             class="progress-bar"
-            :class="{
-              indeterminate:
-                scanStore.embeddingStatus === 'downloading_model' ||
-                scanStore.embeddingStatus === 'loading_model' ||
-                scanStore.embeddingStatus === 'starting',
-            }"
+            :class="{ indeterminate: isIndeterminateEmbedPhase }"
           >
             <div
               class="progress-fill"
               :style="
-                scanStore.embeddingStatus === 'processing'
+                isVocabEncoding
+                  ? { width: vocabProgressPct + '%' }
+                  : scanStore.embeddingStatus === 'processing'
                   ? { width: embeddingProgressPct + '%' }
                   : undefined
               "
@@ -199,6 +236,9 @@ function handleClose() {
             class="progress-text"
           >
             {{ embeddingProgressPct }}%
+          </span>
+          <span v-else-if="isVocabEncoding" class="progress-text">
+            {{ vocabProgressPct }}%
           </span>
         </div>
         <div class="dialog-actions">
@@ -288,6 +328,7 @@ function handleClose() {
 
 h3 { margin: 0 0 12px; font-size: 18px; color: var(--text-color); }
 .muted { color: var(--text-color-secondary); font-size: 13px; margin-bottom: 12px; }
+.sub-muted { color: var(--text-color-secondary); font-size: 11px; line-height: 1.4; margin: -8px 0 12px; opacity: 0.75; }
 
 .dir-list {
   display: flex; flex-direction: column; gap: 6px;

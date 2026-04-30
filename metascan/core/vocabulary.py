@@ -26,7 +26,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -244,15 +244,30 @@ def _save_cache(vocab: Vocabulary, vocab_dir: Path, fingerprint: str) -> None:
         logger.error("Failed to write vocabulary cache %s: %s", path, e)
 
 
+VocabProgress = Callable[[str, int, int], None]
+"""Progress callback: ``(phase, current, total)``.
+
+``phase`` is one of:
+* ``"loading"`` — reading source files (current/total are 0).
+* ``"cache_hit"`` — cached vocab matched, no encoding needed.
+* ``"encoding"`` — CLIP-encoding terms (current = encoded so far).
+"""
+
+
 def build_vocabulary(
     vocab_dir: Path,
     mgr: Any,  # duck-typed EmbeddingManager (model_key, embedding_dim, compute_text_embedding)
+    progress_callback: Optional[VocabProgress] = None,
 ) -> Optional[Vocabulary]:
     """Load, encode, and cache the full tagging vocabulary.
 
     ``mgr`` must expose ``model_key: str``, ``embedding_dim: int``, and
     ``compute_text_embedding(text: str) -> np.ndarray | None``. In
     practice this is a ``metascan.core.embedding_manager.EmbeddingManager``.
+
+    ``progress_callback`` (optional) is invoked at coarse milestones so a
+    long encode run can be surfaced to a parent process. See
+    ``VocabProgress`` for the phase contract.
 
     Returns None when the vocabulary dir is missing or empty — caller can
     treat this as "tagging disabled for this run".
@@ -263,6 +278,8 @@ def build_vocabulary(
             vocab_dir,
         )
         return None
+    if progress_callback is not None:
+        progress_callback("loading", 0, 0)
     terms, axes, fingerprint = load_vocabulary(vocab_dir)
     if not terms:
         logger.warning(
@@ -278,6 +295,8 @@ def build_vocabulary(
             len(cached.terms),
             model_key,
         )
+        if progress_callback is not None:
+            progress_callback("cache_hit", len(cached.terms), len(cached.terms))
         return cached
 
     logger.info(
@@ -285,19 +304,24 @@ def build_vocabulary(
         len(terms),
         model_key,
     )
-    embeddings = _encode_terms(mgr, terms)
+    if progress_callback is not None:
+        progress_callback("encoding", 0, len(terms))
+    embeddings = _encode_terms(mgr, terms, progress_callback=progress_callback)
     if embeddings is None:
         return None
     vocab = Vocabulary(
         terms=terms, axes=axes, embeddings=embeddings, model_key=model_key
     )
     _save_cache(vocab, vocab_dir, fingerprint)
+    if progress_callback is not None:
+        progress_callback("encoding", len(terms), len(terms))
     return vocab
 
 
 def _encode_terms(
     mgr: Any,
     terms: List[str],
+    progress_callback: Optional[VocabProgress] = None,
 ) -> Optional[np.ndarray]:
     """Encode each term with CLIP and stack into a ``(N, D)`` float32 matrix.
 
@@ -323,7 +347,10 @@ def _encode_terms(
             continue
         out[i] = vec.astype(np.float32, copy=False)
         # Log progress at coarse milestones; CLIP ViT-H-14 on CPU takes a
-        # meaningful fraction of a second per term.
+        # meaningful fraction of a second per term. Callback fires more
+        # often so the UI can render a moving progress bar.
+        if progress_callback is not None and (i + 1) % 100 == 0:
+            progress_callback("encoding", i + 1, len(terms))
         if (i + 1) % 1000 == 0:
             logger.info("  encoded %d / %d terms", i + 1, len(terms))
     if failed:
