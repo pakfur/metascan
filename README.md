@@ -62,21 +62,20 @@ Metascan is an open source application for browsing, organizing, and upscaling A
 
 The application uses a client-server architecture: a Python backend handles scanning, AI processing, and database management, while a Vue.js web frontend provides the browsing interface. This enables running the backend on a powerful GPU machine and accessing it remotely from any device.
 
-<img src="/assets/screenshot.png" alt="Metascan Main Interface" width="600">
+<img src="/assets/screenshot.jpg" alt="Metascan Main Interface" width="600">
 
 ## Screenshots
 
 <div align="center">
-  <img src="/assets/media_viewer.png" alt="Media Viewer" width="256">
-  <img src="/assets/context_menu.png" alt="Context Menu" width="256">
+  <img src="/assets/media_viewer.jpg" alt="Media Viewer" width="256">
 </div>
-<p align="center"><em>Media viewer with zoom controls and right-click context menu</em></p>
+<p align="center"><em>Media viewer/em></p>
 
 <div align="center">
-  <img src="/assets/upscale.png" alt="Upscale Dialog" width="256">
-  <img src="/assets/upscale_queue.png" alt="Upscale Queue" width="256">
+  <img src="/assets/model_management.jpg" alt="Model Management Dialog" width="256">
+  <img src="/assets/smartfolder_create.jpg" alt="SmartFolder Creation" width="256">
 </div>
-<p align="center"><em>Upscaling configuration dialog and queue management window</em></p>
+<p align="center"><em>Complete Model Management and Smart Folders</em></p>
 
 ## Quick Start
 
