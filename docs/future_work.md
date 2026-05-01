@@ -60,11 +60,11 @@ X (MVP) Details panel copy to clipboard for individual or all does not work
 - (v1) Search by content
   - selected image is not preserved - can the selected image be scrolled to after viewing the content?
   - viewing searched for content exits the search mode. the search mode should be preserved until explicitly hitting exit
-- (MVP) Details screen
-  - The details panel needs to scroll
-  - Panel spacing can get squished if space is too small
-  - Detail panel title bars must be fixed height
-  - Detail panel content cards need scrolling content
+X (MVP) Details screen
+  X The details panel needs to scroll
+  X Panel spacing can get squished if space is too small
+  X Detail panel title bars must be fixed height
+  X Detail panel content cards need scrolling content
 
 #### Configuration 
  - Directories
@@ -85,6 +85,19 @@ X (MVP) arrow keys are not changing the selected media
 #### Changes to existing features (Under consideration)
 X (MVP) load content search (CLIP) model at backend service start
 - (v1+) Replace favorite with Ranking Tier (S, A, B, C, D) with UI and ranking choice. "S" == Favorite
+
+- support HEIC image files
+
+- Scan / Import
+  - a full reindex appears to freeze while the embedding worker vocabulary is scanning. update the scan dialog to show what is happening and give a status update since this takes several minutes
+
+X Collect additional exif metadata
+ - Device Info: Camera make (e.g., Apple, Canon) and model (e.g., iPhone 15, EOS R5).
+ - Exposure Settings: Shutter speed, Aperture (-stop), ISO, and flash usage.
+ - Lens Data: Focal length and lens model.
+ - Timing: Exact date and time (DateTimeOriginal) the photo was taken.
+ - Location: GPS coordinates (latitude, longitude, altitude) if location services are enabled.
+ - Orientation: Whether the camera was held vertically or horizontally
 
 - Similarity dialog
   - What is the effect of the pHash and threshold values during scan?
