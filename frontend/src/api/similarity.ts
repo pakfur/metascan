@@ -3,8 +3,6 @@ import { get, post, put } from './client'
 export interface SimilaritySettings {
   clip_model: string
   device: string
-  phash_threshold: number
-  clip_threshold: number
   search_results_count: number
   video_keyframes: number
   compute_phash_during_scan: boolean
