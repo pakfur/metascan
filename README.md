@@ -85,6 +85,8 @@ The library organizes itself two ways. Static folders are manually curated colle
 
 ## Quick Start
 
+> **First time on this machine?** Start with the [First-Time Setup guide](docs/first_time_setup.md) — it walks through Python 3.11, Node.js, FFmpeg, virtualenv creation, and dependency installation per platform. The steps below assume that's already done.
+
 ### Running the Application
 
 1. **Start the backend server:**
@@ -127,6 +129,7 @@ Detailed documentation lives in [`docs/`](docs/):
 
 - **[Features](docs/features.md)** — full feature list, including media browsing, viewer, slideshow, similarity search, duplicates, upscaling, filtering, folders, and keyboard shortcuts
 - **[Tech Stack](docs/tech-stack.md)** — backend, frontend, AI/media processing, infrastructure, and dev tooling
+- **[First-Time Setup](docs/first_time_setup.md)** — step-by-step, per-platform install of Python, Node, FFmpeg, virtualenv, and all dependencies
 - **[Installation](docs/installation.md)** — prerequisites, end-user setup, contributor setup, environment variables
 - **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, and `models` sections
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
