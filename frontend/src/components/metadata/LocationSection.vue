@@ -33,6 +33,7 @@ const lat = computed(() => props.media.gps_latitude as number)
 const lng = computed(() => props.media.gps_longitude as number)
 
 const coordsLabel = computed(() => {
+  if (!hasGps.value) return ''
   const ns = lat.value >= 0 ? 'N' : 'S'
   const ew = lng.value >= 0 ? 'E' : 'W'
   return `${Math.abs(lat.value).toFixed(4)}° ${ns}, ${Math.abs(lng.value).toFixed(4)}° ${ew}`
@@ -46,6 +47,7 @@ const altitudeLabel = computed(() => {
 })
 
 const osmUrl = computed(() => {
+  if (!hasGps.value) return ''
   const lat4 = lat.value.toFixed(5)
   const lng4 = lng.value.toFixed(5)
   return `https://www.openstreetmap.org/?mlat=${lat4}&mlon=${lng4}#map=15/${lat4}/${lng4}`
@@ -94,11 +96,12 @@ async function ensureMap() {
   return initPromise
 }
 
-// We keep the map's container in the DOM at all times via v-show (instead of
-// v-if). Recreating the Map across GPS/no-GPS toggles led to an unrecoverable
-// state where the freshly-built map's tile source never woke up, leaving a
-// blank gray div with zero network activity on the next flyTo. With v-show,
-// the same Map instance and WebGL context survives every toggle.
+// The map's container must NEVER hit `display: none`. When it does, browsers
+// pause its requestAnimationFrame and MapLibre's render loop ends up wedged:
+// the next flyTo updates camera state but no tiles ever fetch, leaving a
+// permanently blank gray canvas. Instead we keep the wrapper in normal flow
+// when GPS is present and shove it offscreen with position:absolute when not,
+// which keeps the canvas painted and the rAF loop alive.
 watch(
   () => [hasGps.value, lat.value, lng.value, mapEl.value] as const,
   async ([gpsOk, la, lo, el]) => {
@@ -107,9 +110,9 @@ watch(
       await ensureMap()
       return
     }
-    // The container was display:none while hasGps was false; the canvas size
-    // is stale. Resize before moving so MapLibre re-evaluates the viewport
-    // and actually fetches tiles for the new center.
+    // Wait for the browser to flush layout for the offscreen→onscreen flip
+    // before resizing, so clientWidth/Height reflect the visible size.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()))
     map.resize()
     map.flyTo({ center: [lo as number, la as number], zoom: 13, duration: 600 })
     if (marker) marker.setLngLat([lo as number, la as number])
@@ -125,16 +128,20 @@ async function copyCoords() {
 </script>
 
 <template>
-  <details v-show="hasGps" class="meta-section" open>
+  <details
+    class="meta-section"
+    :class="{ 'meta-section--offscreen': !hasGps }"
+    open
+  >
     <summary class="section-title">Location</summary>
     <div class="section-body location-body">
       <div v-show="!mapLoadFailed" ref="mapEl" class="map-canvas" />
       <div v-if="mapLoadFailed" class="map-fallback">
         Map unavailable — showing coordinates only.
       </div>
-      <MetadataField label="Coordinates" :value="coordsLabel" />
+      <MetadataField v-if="hasGps" label="Coordinates" :value="coordsLabel" />
       <MetadataField v-if="altitudeLabel" label="Altitude" :value="altitudeLabel" />
-      <div class="map-actions">
+      <div v-if="hasGps" class="map-actions">
         <a class="map-link" :href="osmUrl" target="_blank" rel="noopener">
           Open in OpenStreetMap ↗
         </a>
@@ -145,6 +152,18 @@ async function copyCoords() {
 </template>
 
 <style scoped>
+/* When the current media has no GPS we yank the section out of layout flow
+ * but keep its DOM rendered so the MapLibre canvas inside doesn't get hit by
+ * display:none (which freezes the render loop and breaks the next flyTo). */
+.meta-section--offscreen {
+  position: absolute;
+  top: -10000px;
+  left: 0;
+  width: 320px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .location-body {
   display: flex;
   flex-direction: column;
