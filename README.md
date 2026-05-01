@@ -64,7 +64,11 @@ A FastAPI backend handles scanning, the SQLite database, CLIP/FAISS similarity s
 
 The library organizes itself two ways. Static folders are manually curated collections you fill by right-clicking items; smart folders are saved rule sets — over tags, model, source, dates, favorite status — that re-resolve as content changes, so a folder like "high-step photoreal generations from last month" stays current without maintenance. Folder mutations broadcast over the WebSocket so multiple browser tabs stay in sync.
 
-<img src="/assets/screenshot.jpg" alt="Metascan Main Interface" width="600">
+<div align="left">
+  <img src="/assets/screenshot.jpg" alt="Metascan Main Interface" width="600">
+  <img src="/assets/screenshot_map.jpg" alt="OpenMap support for photos" width="600">
+</div>
+<p align="left"><em>Supports AI Generate and Photos</em></p>
 
 ## Screenshots
 
