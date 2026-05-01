@@ -16,6 +16,14 @@ const mapLoadFailed = ref(false)
 let map: import('maplibre-gl').Map | null = null
 let marker: import('maplibre-gl').Marker | null = null
 let maplibre: MaplibreModule | null = null
+let initPromise: Promise<void> | null = null
+
+function destroyMap() {
+  marker?.remove()
+  map?.remove()
+  marker = null
+  map = null
+}
 
 const hasGps = computed(() =>
   props.media.gps_latitude != null && props.media.gps_longitude != null
@@ -44,30 +52,58 @@ const osmUrl = computed(() => {
 })
 
 async function ensureMap() {
+  if (map) return
+  if (initPromise) return initPromise
   if (!mapEl.value || !hasGps.value) return
-  if (map) return // already initialised
-  try {
-    if (!maplibre) {
-      maplibre = await import('maplibre-gl')
-      // Side-effect import for default styles
-      await import('maplibre-gl/dist/maplibre-gl.css')
+  initPromise = (async () => {
+    try {
+      if (!maplibre) {
+        maplibre = await import('maplibre-gl')
+        await import('maplibre-gl/dist/maplibre-gl.css')
+      }
+      // Container or GPS may have disappeared while we awaited the import.
+      const el = mapEl.value
+      if (!el || !hasGps.value) return
+      const m = new maplibre.Map({
+        container: el,
+        style: settings.mapTileUrl,
+        center: [lng.value, lat.value],
+        zoom: 13,
+        attributionControl: { compact: true },
+      })
+      m.scrollZoom.disable()
+      el.addEventListener('mouseenter', () => m.scrollZoom.enable())
+      el.addEventListener('mouseleave', () => m.scrollZoom.disable())
+      // Surface fatal style/tile errors so the user gets the fallback
+      // instead of a permanently blank gray canvas.
+      m.on('error', (ev: { error?: { status?: number; message?: string } }) => {
+        const err = ev?.error
+        const msg = err?.message ?? String(err)
+        if (err?.status === 404) return // missing tile, not fatal
+        console.warn('MapLibre error:', msg)
+      })
+      map = m
+      marker = new maplibre.Marker().setLngLat([lng.value, lat.value]).addTo(m)
+    } catch (e) {
+      console.warn('MapLibre failed to load:', e)
+      mapLoadFailed.value = true
+    } finally {
+      initPromise = null
     }
-    map = new maplibre.Map({
-      container: mapEl.value,
-      style: settings.mapTileUrl,
-      center: [lng.value, lat.value],
-      zoom: 13,
-      attributionControl: { compact: true },
-    })
-    map.scrollZoom.disable()
-    mapEl.value.addEventListener('mouseenter', () => map?.scrollZoom.enable())
-    mapEl.value.addEventListener('mouseleave', () => map?.scrollZoom.disable())
-    marker = new maplibre.Marker().setLngLat([lng.value, lat.value]).addTo(map)
-  } catch (e) {
-    console.warn('MapLibre failed to load:', e)
-    mapLoadFailed.value = true
-  }
+  })()
+  return initPromise
 }
+
+// Tear the map down when its container disappears (e.g. user clicks a
+// media without GPS, which unmounts the <details> wrapper). Without this,
+// the Map keeps a detached canvas + WebGL context — the context leak that
+// makes the panel go permanently blank after ~16 toggles.
+watch(
+  () => mapEl.value,
+  (el) => {
+    if (!el) destroyMap()
+  },
+)
 
 watch(
   () => [hasGps.value, lat.value, lng.value, mapEl.value] as const,
@@ -83,12 +119,7 @@ watch(
   { immediate: true },
 )
 
-onBeforeUnmount(() => {
-  marker?.remove()
-  map?.remove()
-  marker = null
-  map = null
-})
+onBeforeUnmount(destroyMap)
 
 async function copyCoords() {
   await copyToClipboard(`${lat.value},${lng.value}`)
