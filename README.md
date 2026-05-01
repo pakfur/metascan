@@ -66,16 +66,16 @@ The application uses a client-server architecture: a Python backend handles scan
 
 ## Screenshots
 
-<div align="center">
+<div align="left">
   <img src="/assets/media_viewer.jpg" alt="Media Viewer" width="256">
 </div>
-<p align="center"><em>Media viewer/em></p>
+<p align="left"><em>Media viewer</em></p>
 
-<div align="center">
+<div align="left">
   <img src="/assets/model_management.jpg" alt="Model Management Dialog" width="256">
-  <img src="/assets/smartfolder_create.jpg" alt="SmartFolder Creation" width="256">
+  <img src="/assets/smartfolder-create.jpg" alt="SmartFolder Creation" width="256">
 </div>
-<p align="center"><em>Complete Model Management and Smart Folders</em></p>
+<p align="left"><em>Complete Model Management and Smart Folders</em></p>
 
 ## Quick Start
 
