@@ -16,8 +16,6 @@ class TestSimilarityConfig(unittest.TestCase):
         default = {
             "clip_model": "small",
             "device": "auto",
-            "phash_threshold": 10,
-            "clip_threshold": 0.7,
             "search_results_count": 100,
             "video_keyframes": 4,
             "compute_phash_during_scan": True,
@@ -25,10 +23,6 @@ class TestSimilarityConfig(unittest.TestCase):
 
         self.assertIn(default["clip_model"], CLIP_MODELS)
         self.assertIn(default["device"], ["auto", "cpu", "cuda"])
-        self.assertGreaterEqual(default["phash_threshold"], 0)
-        self.assertLessEqual(default["phash_threshold"], 20)
-        self.assertGreaterEqual(default["clip_threshold"], 0.0)
-        self.assertLessEqual(default["clip_threshold"], 1.0)
         self.assertGreaterEqual(default["search_results_count"], 10)
         self.assertGreaterEqual(default["video_keyframes"], 1)
 
@@ -38,8 +32,6 @@ class TestSimilarityConfig(unittest.TestCase):
             "similarity": {
                 "clip_model": "medium",
                 "device": "cuda",
-                "phash_threshold": 5,
-                "clip_threshold": 0.85,
                 "search_results_count": 200,
                 "video_keyframes": 8,
                 "compute_phash_during_scan": False,
@@ -52,8 +44,6 @@ class TestSimilarityConfig(unittest.TestCase):
         sim = loaded["similarity"]
         self.assertEqual(sim["clip_model"], "medium")
         self.assertEqual(sim["device"], "cuda")
-        self.assertEqual(sim["phash_threshold"], 5)
-        self.assertAlmostEqual(sim["clip_threshold"], 0.85)
         self.assertEqual(sim["search_results_count"], 200)
         self.assertEqual(sim["video_keyframes"], 8)
         self.assertFalse(sim["compute_phash_during_scan"])
@@ -68,8 +58,6 @@ class TestSimilarityConfig(unittest.TestCase):
         sim = config["similarity"]
         self.assertIn("clip_model", sim)
         self.assertIn("device", sim)
-        self.assertIn("phash_threshold", sim)
-        self.assertIn("clip_threshold", sim)
         self.assertIn("search_results_count", sim)
         self.assertIn("video_keyframes", sim)
         self.assertIn("compute_phash_during_scan", sim)
