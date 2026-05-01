@@ -18,8 +18,6 @@ const loading = ref(true)
 // Local form state
 const clipModel = ref('small')
 const device = ref('auto')
-const phashThreshold = ref(10)
-const clipThreshold = ref(0.7)
 const searchResultsCount = ref(100)
 const videoKeyframes = ref(4)
 
@@ -41,8 +39,6 @@ async function refreshSettings() {
     settings.value = await fetchSimilaritySettings()
     clipModel.value = settings.value.clip_model
     device.value = settings.value.device
-    phashThreshold.value = settings.value.phash_threshold
-    clipThreshold.value = settings.value.clip_threshold
     searchResultsCount.value = settings.value.search_results_count
     videoKeyframes.value = settings.value.video_keyframes
   } finally {
@@ -73,8 +69,6 @@ async function save() {
   await updateSimilaritySettings({
     clip_model: clipModel.value,
     device: device.value,
-    phash_threshold: phashThreshold.value,
-    clip_threshold: clipThreshold.value,
     search_results_count: searchResultsCount.value,
     video_keyframes: videoKeyframes.value,
   })
@@ -139,28 +133,6 @@ async function rebuildAll() {
               {{ opt.label }}
             </option>
           </select>
-        </div>
-
-        <!-- pHash Threshold -->
-        <div class="form-group">
-          <label>pHash Threshold (0-20)</label>
-          <div class="slider-row">
-            <input type="range" min="0" max="20" step="1" v-model.number="phashThreshold" />
-            <span class="slider-value">{{ phashThreshold }}</span>
-          </div>
-        </div>
-
-        <!-- CLIP Threshold -->
-        <div class="form-group">
-          <label>CLIP Similarity Threshold</label>
-          <div class="slider-row">
-            <input type="range" min="0" max="1" step="0.05" v-model.number="clipThreshold" />
-            <span class="slider-value">{{ (clipThreshold * 100).toFixed(0) }}%</span>
-          </div>
-          <div class="slider-labels">
-            <span>Least Similar</span>
-            <span>Most Similar</span>
-          </div>
         </div>
 
         <!-- Search Results Count -->
