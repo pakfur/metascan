@@ -194,8 +194,6 @@ class ContentSearchRequest(BaseModel):
 class SimilaritySettingsUpdate(BaseModel):
     clip_model: Optional[str] = None
     device: Optional[str] = None
-    phash_threshold: Optional[int] = None
-    clip_threshold: Optional[float] = None
     search_results_count: Optional[int] = None
     video_keyframes: Optional[int] = None
     compute_phash_during_scan: Optional[bool] = None
@@ -326,8 +324,6 @@ async def get_similarity_settings():
     return {
         "clip_model": sim_config.get("clip_model", "small"),
         "device": sim_config.get("device", "auto"),
-        "phash_threshold": sim_config.get("phash_threshold", 10),
-        "clip_threshold": sim_config.get("clip_threshold", 0.7),
         "search_results_count": sim_config.get("search_results_count", 100),
         "video_keyframes": sim_config.get("video_keyframes", 4),
         "compute_phash_during_scan": sim_config.get("compute_phash_during_scan", True),
