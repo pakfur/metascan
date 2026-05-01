@@ -32,7 +32,7 @@ def compute_phash_for_file(file_path: Path) -> Optional[str]:
     Returns the hex string representation, or None on error.
     """
     ext = file_path.suffix.lower()
-    if ext in {".mp4", ".webm"}:
+    if ext in {".mp4", ".webm", ".mov"}:
         return _compute_video_phash(file_path)
     else:
         return _compute_image_phash(file_path)

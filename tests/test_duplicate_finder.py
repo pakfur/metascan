@@ -2,7 +2,7 @@
 
 import unittest
 
-from metascan.ui.duplicate_finder_dialog import find_phash_duplicate_groups
+from metascan.core.duplicate_detection import find_phash_duplicate_groups
 
 
 class TestFindPhashDuplicateGroups(unittest.TestCase):

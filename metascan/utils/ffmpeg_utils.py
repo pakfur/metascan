@@ -6,7 +6,7 @@ to prevent hangs on corrupted or incomplete media files.
 
 import logging
 import subprocess
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def probe_with_timeout(
     Returns the probe result dict, or None if the probe fails or times out.
     """
     try:
-        import ffmpeg
+        import ffmpeg  # noqa: F401
 
         # ffmpeg.probe() internally uses subprocess. We can't pass timeout
         # to it directly, so we call ffprobe ourselves with a timeout.

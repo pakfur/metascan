@@ -58,8 +58,6 @@
   "similarity": {
     "clip_model": "small",
     "device": "auto",
-    "phash_threshold": 10,
-    "clip_threshold": 0.7,
     "search_results_count": 100,
     "video_keyframes": 4,
     "compute_phash_during_scan": true

@@ -7,12 +7,11 @@ iniconfig==2.1.0
 packaging==25.0
 pluggy==1.6.0
 
-# Code Formatting
-black==23.12.1
+# Code Formatting (version must match requirements.txt)
+black==25.11.0
 click==8.2.2
 pathspec==0.12.1
 platformdirs==4.3.8
-yapf==0.43.0
 
 # Type Checking
 mypy==1.8.0
@@ -23,4 +22,4 @@ build==1.2.2.post1
 pyproject_hooks==1.2.0
 
 # Additional development utilities
-typing-inspection==0.4.1
+typing-inspection==0.4.2

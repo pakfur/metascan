@@ -259,13 +259,13 @@ class ComfyUIVideoExtractorImproved(MetadataExtractor):
         ]
 
     def can_extract(self, media_path: Path) -> bool:
-        if media_path.suffix.lower() not in {".mp4", ".webm"}:
+        if media_path.suffix.lower() not in {".mp4", ".webm", ".mov"}:
             return False
 
         metadata = self._get_video_metadata(media_path)
         return "prompt" in metadata or "workflow" in metadata
 
-    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, media_path: Path) -> Optional[Dict[str, Any]]:  # noqa: C901
         try:
             metadata = self._get_video_metadata(media_path)
 

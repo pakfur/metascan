@@ -46,7 +46,7 @@ def _ensure_nltk_initialized() -> Set[str]:
         try:
             log_startup("prompt_tokenizer.py: Downloading NLTK stopwords...")
             nltk.download("stopwords", quiet=True)
-        except:
+        except Exception:
             # If download fails in bundled app, use empty set
             logger.warning("Could not download NLTK stopwords, using empty set")
 

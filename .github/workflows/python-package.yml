@@ -1,7 +1,5 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Package
+# CI: lint, type-check, and test the Python backend and Vue frontend
+name: CI
 
 on:
   push:
@@ -10,8 +8,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-
+  backend:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,27 +16,67 @@ jobs:
         python-version: ["3.11"]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
         cache-dependency-path: 'requirements.txt'
-    - name: Install dependencies
+
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Set up NLTK data and models
-      run: |
-        python setup_models.py
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install flake8
+
+    - name: Set up NLTK data
+      run: python setup_models.py
+
     - name: Lint with flake8
       run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
+        # Syntax errors and undefined names (fatal)
+        flake8 metascan/ backend/ tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Style warnings (non-fatal)
+        flake8 metascan/ backend/ tests/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Format check with black
       run: |
-        pytest
+        black --check metascan/ backend/ tests/
+
+    - name: Type check with mypy
+      run: |
+        mypy --check-untyped-defs metascan/
+
+    - name: Test with pytest
+      run: pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: 'frontend/package-lock.json'
+
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+
+    - name: Type check
+      run: |
+        cd frontend
+        npx vue-tsc --noEmit
+
+    - name: Build
+      run: |
+        cd frontend
+        npm run build

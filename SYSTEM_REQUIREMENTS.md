@@ -64,7 +64,6 @@ python setup_models.py
 - Recommended: 1920x1080 or higher
 - Color depth: 24-bit or higher
 
-## Qt Platform Notes
-- The application uses PyQt6 which includes its own Qt runtime
-- No additional Qt installation is required
-- Graphics drivers should be up to date for best performance
+## Browser Notes
+- The UI is a Vue 3 SPA served by the FastAPI backend; access via any modern browser (Chromium, Firefox, Safari).
+- Graphics drivers should be up to date for best performance.
