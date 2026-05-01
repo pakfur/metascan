@@ -185,6 +185,33 @@ Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr
 | `METASCAN_API_KEY` | (none) | Bearer token for API auth |
 | `METASCAN_CORS_ORIGINS` | `*` | Comma-separated CORS origins |
 
+## Documentation Layout
+
+User-facing documentation is split between a thin `README.md` and per-topic files under `docs/`:
+
+```
+README.md                       # Overview (3 paragraphs), Latest Release, Quick Start, links
+CONTRIBUTING.md                 # Contributor workflow (links to docs/)
+docs/
+  features.md                   # Full feature list + keyboard shortcuts
+  tech-stack.md                 # Backend / frontend / AI / infra deps
+  installation.md               # Prerequisites, setup, env vars
+  configuration.md              # config.json reference
+  api-reference.md              # Endpoints, WS envelope, error shapes
+  architecture.md               # Client–server layout, DB schema, key decisions
+  hardware-detection.md         # Probes, tiers, gates, auto-warnings
+  developer-guidelines.md       # Build / style / test / CI
+```
+
+**README.md is the index, not a kitchen sink.** It carries the overview, screenshots, release notes, Quick Start, and a Documentation section that links to every `docs/*.md` file. New top-level sections that grow past a screen or two should be moved into `docs/` and linked, not appended to README.
+
+**`CLAUDE.md` is the canonical rule set.** When `docs/developer-guidelines.md` would duplicate a project-rule list (commit conventions, project rules, common-task patterns), it links here instead — keep the rules in one place to avoid drift.
+
+When adding new user-facing documentation:
+1. Drop a new file under `docs/<topic>.md` (kebab-case, lowercase). Start with a `[← Back to README](../README.md)` link.
+2. Add a one-line entry to README.md's **Documentation** section.
+3. If the topic has codebase rules engineers must follow, also add them to `CLAUDE.md` and link from the docs page (don't duplicate).
+
 ## Common Tasks
 
 ### Adding a new API endpoint
