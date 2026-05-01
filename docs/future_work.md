@@ -1,6 +1,9 @@
 ## Todo
 
 ### New Features
+- (V1) Docker support
+  - Docker files
+  
 - (V1) Make a background worker to watch the directories and scan/import new files automatically
   - Configurable, enable or disable
 
