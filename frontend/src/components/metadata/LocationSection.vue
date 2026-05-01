@@ -94,17 +94,11 @@ async function ensureMap() {
   return initPromise
 }
 
-// Tear the map down when its container disappears (e.g. user clicks a
-// media without GPS, which unmounts the <details> wrapper). Without this,
-// the Map keeps a detached canvas + WebGL context — the context leak that
-// makes the panel go permanently blank after ~16 toggles.
-watch(
-  () => mapEl.value,
-  (el) => {
-    if (!el) destroyMap()
-  },
-)
-
+// We keep the map's container in the DOM at all times via v-show (instead of
+// v-if). Recreating the Map across GPS/no-GPS toggles led to an unrecoverable
+// state where the freshly-built map's tile source never woke up, leaving a
+// blank gray div with zero network activity on the next flyTo. With v-show,
+// the same Map instance and WebGL context survives every toggle.
 watch(
   () => [hasGps.value, lat.value, lng.value, mapEl.value] as const,
   async ([gpsOk, la, lo, el]) => {
@@ -113,10 +107,14 @@ watch(
       await ensureMap()
       return
     }
+    // The container was display:none while hasGps was false; the canvas size
+    // is stale. Resize before moving so MapLibre re-evaluates the viewport
+    // and actually fetches tiles for the new center.
+    map.resize()
     map.flyTo({ center: [lo as number, la as number], zoom: 13, duration: 600 })
     if (marker) marker.setLngLat([lo as number, la as number])
   },
-  { immediate: true },
+  { immediate: true, flush: 'post' },
 )
 
 onBeforeUnmount(destroyMap)
@@ -127,11 +125,11 @@ async function copyCoords() {
 </script>
 
 <template>
-  <details v-if="hasGps" class="meta-section" open>
+  <details v-show="hasGps" class="meta-section" open>
     <summary class="section-title">Location</summary>
     <div class="section-body location-body">
-      <div v-if="!mapLoadFailed" ref="mapEl" class="map-canvas" />
-      <div v-else class="map-fallback">
+      <div v-show="!mapLoadFailed" ref="mapEl" class="map-canvas" />
+      <div v-if="mapLoadFailed" class="map-fallback">
         Map unavailable — showing coordinates only.
       </div>
       <MetadataField label="Coordinates" :value="coordsLabel" />
