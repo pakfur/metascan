@@ -1,5 +1,5 @@
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 from typing import Optional, Tuple, List, Dict, Set
 import hashlib
 import logging
@@ -15,6 +15,10 @@ try:
     HAS_FFMPEG_PYTHON = True
 except ImportError:
     HAS_FFMPEG_PYTHON = False
+
+from metascan.utils.heic import register_heif_opener
+
+register_heif_opener()
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +86,11 @@ class ThumbnailCache:
         ".webp",
         ".bmp",
         ".gif",
+        ".heic",
+        ".heif",
         ".mp4",
         ".webm",
+        ".mov",
     }
 
     def __init__(self, cache_dir: Path, thumbnail_size: Tuple[int, int] = DEFAULT_SIZE):
@@ -130,7 +137,7 @@ class ThumbnailCache:
     ) -> Optional[Path]:
         """Create a thumbnail for the given media file"""
         try:
-            if media_path.suffix.lower() in {".mp4", ".webm"}:
+            if media_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
                 return self._create_video_thumbnail(media_path, thumbnail_path)
             else:
                 return self._create_image_thumbnail(media_path, thumbnail_path)
@@ -144,6 +151,7 @@ class ThumbnailCache:
         """Create a thumbnail for an image file"""
         try:
             with Image.open(image_path) as img:
+                img = ImageOps.exif_transpose(img)
                 # Convert RGBA to RGB if necessary
                 if img.mode in ("RGBA", "LA"):
                     background = Image.new("RGB", img.size, (255, 255, 255))
@@ -335,7 +343,7 @@ class ThumbnailCache:
             draw.polygon(points, fill=(255, 255, 255))
 
             img.save(thumbnail_path, "JPEG", quality=85)
-            logger.debug(f"Created video placeholder thumbnail")
+            logger.debug("Created video placeholder thumbnail")
             return thumbnail_path
 
         except Exception as e:
@@ -463,7 +471,7 @@ class ThumbnailCache:
         for thumbnail in self.cache_dir.glob("*.jpg"):
             try:
                 total += thumbnail.stat().st_size
-            except:
+            except Exception:
                 pass
         return total
 

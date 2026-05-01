@@ -13,9 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-
-from PyQt6.QtCore import QObject, pyqtSignal
+from typing import Optional, List, Dict, Any, Callable
 
 from metascan.utils.app_paths import get_data_dir
 
@@ -25,20 +23,19 @@ logger = logging.getLogger(__name__)
 WORKER_STALE_TIMEOUT = 120.0
 
 
-class EmbeddingQueue(QObject):
+class EmbeddingQueue:
     """Process-based embedding queue manager.
 
     Spawns a subprocess worker to compute embeddings, and polls for
-    progress updates via JSON files. Owns its own poll timer so that
-    progress monitoring continues even when the settings dialog is closed.
+    progress updates via JSON files.
+
+    Connect callbacks to receive updates:
+        eq.on_progress = lambda current, total, status: ...
+        eq.on_complete = lambda total: ...
+        eq.on_error = lambda msg: ...
     """
 
-    progress_updated = pyqtSignal(int, int, str)  # current, total, status_text
-    indexing_complete = pyqtSignal(int)  # total files indexed
-    indexing_error = pyqtSignal(str)  # error message
-
-    def __init__(self, parent: Optional[QObject] = None) -> None:
-        super().__init__(parent)
+    def __init__(self) -> None:
         self._queue_dir = get_data_dir() / "similarity"
         self._queue_dir.mkdir(parents=True, exist_ok=True)
 
@@ -47,12 +44,21 @@ class EmbeddingQueue(QObject):
         self._start_time: float = 0.0
         self._last_progress_time: float = 0.0
 
-        # Self-owned poll timer — runs as long as the queue object lives
-        from PyQt6.QtCore import QTimer
+        self.on_progress: Optional[Callable[[int, int, str], None]] = None
+        self.on_complete: Optional[Callable[[int], None]] = None
+        self.on_error: Optional[Callable[[str], None]] = None
 
-        self._poll_timer = QTimer(self)
-        self._poll_timer.timeout.connect(self.poll_updates)
-        self._poll_timer.setInterval(500)
+    def _emit_progress(self, current: int, total: int, status: str) -> None:
+        if self.on_progress:
+            self.on_progress(current, total, status)
+
+    def _emit_complete(self, total: int) -> None:
+        if self.on_complete:
+            self.on_complete(total)
+
+    def _emit_error(self, msg: str) -> None:
+        if self.on_error:
+            self.on_error(msg)
 
     @property
     def index_dir(self) -> Path:
@@ -92,7 +98,7 @@ class EmbeddingQueue(QObject):
             return False
 
         if not file_paths:
-            self.indexing_complete.emit(0)
+            self._emit_complete(0)
             return True
 
         # Clean up old signal/progress files
@@ -147,12 +153,11 @@ class EmbeddingQueue(QObject):
                 f"Started embedding worker (PID={self._process.pid}, "
                 f"files={len(file_paths)}, model={clip_model_key})"
             )
-            self._poll_timer.start()
             return True
 
         except Exception as e:
             logger.error(f"Failed to start embedding worker: {e}")
-            self.indexing_error.emit(str(e))
+            self._emit_error(str(e))
             return False
 
     def cancel_indexing(self) -> None:
@@ -173,13 +178,20 @@ class EmbeddingQueue(QObject):
 
         logger.info("Embedding indexing cancelled")
 
-    def poll_updates(self) -> None:
-        """Read progress from the worker and emit signals.
+    def poll_updates(self) -> None:  # noqa: C901
+        """Read progress from the worker and emit callbacks.
 
-        Called periodically by a QTimer in the main window.
+        Should be called periodically (e.g. every 500ms) while indexing.
         """
+        # No active worker to monitor. Bail before re-reading the stale
+        # progress file left on disk by the previous run; otherwise the
+        # stale-progress branch below fires a warning (and a spurious
+        # 'progress' callback) on every tick forever.
+        if self._process is None:
+            return
+
         # First check: did the process exit?
-        process_exited = self._process is not None and self._process.poll() is not None
+        process_exited = self._process.poll() is not None
 
         progress_file = self._queue_dir / "progress_embedding.json"
 
@@ -187,11 +199,11 @@ class EmbeddingQueue(QObject):
             # No progress file yet — check for early process death
             if process_exited:
                 stderr_text = self._read_process_stderr()
-                error_msg = f"Worker exited before writing progress"
+                error_msg = "Worker exited before writing progress"
                 if stderr_text:
                     error_msg += f": {stderr_text[:500]}"
                 logger.error(error_msg)
-                self.indexing_error.emit(error_msg)
+                self._emit_error(error_msg)
                 self._cleanup()
                 return
 
@@ -201,9 +213,7 @@ class EmbeddingQueue(QObject):
                 logger.warning(
                     f"No progress file after {elapsed:.0f}s — worker may have crashed"
                 )
-                self.progress_updated.emit(
-                    0, 0, f"Waiting for worker ({elapsed:.0f}s)..."
-                )
+                self._emit_progress(0, 0, f"Waiting for worker ({elapsed:.0f}s)...")
             return
 
         # Read progress file
@@ -221,13 +231,20 @@ class EmbeddingQueue(QObject):
                 stale_seconds = time.time() - self._last_progress_time
                 if stale_seconds > WORKER_STALE_TIMEOUT:
                     status = data.get("status", "")
-                    # loading_model and downloading_model can take a long time
-                    if status not in ("loading_model", "downloading_model"):
+                    # Long-running phases (model load / download / vocab
+                    # encode) should not trigger a staleness warning even
+                    # when the cadence between updates exceeds the timeout.
+                    if status not in (
+                        "loading_model",
+                        "downloading_model",
+                        "loading_vocab",
+                        "encoding_vocab",
+                    ):
                         logger.warning(
                             f"Worker progress stale for {stale_seconds:.0f}s "
                             f"(status={status})"
                         )
-                        self.progress_updated.emit(
+                        self._emit_progress(
                             data.get("current", 0),
                             data.get("total", 0),
                             f"Worker may be stuck ({stale_seconds:.0f}s no update)...",
@@ -245,33 +262,51 @@ class EmbeddingQueue(QObject):
             errors_count = data.get("errors_count", 0)
 
             if status == "starting":
-                self.progress_updated.emit(0, total, "Worker starting...")
+                self._emit_progress(0, total, "Worker starting...")
             elif status == "downloading_model":
                 dl_file = data.get("current_file", "")
-                self.progress_updated.emit(0, total, f"Downloading model... {dl_file}")
+                self._emit_progress(0, total, f"Downloading model... {dl_file}")
             elif status == "loading_model":
-                self.progress_updated.emit(0, total, "Loading CLIP model...")
+                self._emit_progress(0, total, "Loading CLIP model...")
+            elif status == "loading_vocab":
+                label = current_file or "Loading tag vocabulary..."
+                self._emit_progress(0, total, label)
+            elif status == "encoding_vocab":
+                vc = data.get("vocab_current", 0)
+                vt = data.get("vocab_total", 0)
+                if vt:
+                    self._emit_progress(
+                        0, total, f"Encoding tag vocabulary {vc:,} / {vt:,}"
+                    )
+                else:
+                    self._emit_progress(0, total, "Encoding tag vocabulary...")
             elif status == "processing":
                 label = f"Indexing {current}/{total}"
                 if current_file:
                     label += f" — {current_file}"
                 if errors_count > 0:
                     label += f" ({errors_count} errors)"
-                self.progress_updated.emit(current, total, label)
+                self._emit_progress(current, total, label)
             elif status == "complete":
-                self.progress_updated.emit(total, total, "Indexing complete")
-                self.indexing_complete.emit(current)
+                self._emit_progress(total, total, "Indexing complete")
+                self._emit_complete(current)
                 self._cleanup()
                 return
             elif status == "cancelled":
-                self.progress_updated.emit(
+                self._emit_progress(
                     current, total, f"Indexing cancelled at {current}/{total}"
                 )
-                self.indexing_complete.emit(current)
+                self._emit_complete(current)
                 self._cleanup()
                 return
+            elif status not in ("", "error"):
+                # Forward unknown statuses to the UI rather than silently
+                # dropping them — this keeps the parent forward-compatible
+                # with new worker statuses added later.
+                label = current_file or status
+                self._emit_progress(current, total, label)
             elif status == "error":
-                self.indexing_error.emit(error)
+                self._emit_error(error)
                 self._cleanup()
                 return
 
@@ -289,7 +324,7 @@ class EmbeddingQueue(QObject):
                     # Take last 500 chars of stderr (most useful part)
                     error_msg += f"\n{stderr_text[-500:]}"
                 logger.error(error_msg)
-                self.indexing_error.emit(error_msg)
+                self._emit_error(error_msg)
                 self._cleanup()
 
     def _read_process_stderr(self) -> str:
@@ -302,15 +337,11 @@ class EmbeddingQueue(QObject):
             return ""
 
     def get_last_progress(self) -> Dict[str, Any]:
-        """Return the last progress data read from the worker.
-
-        Used by the settings dialog to restore UI state on reopen.
-        """
+        """Return the last progress data read from the worker."""
         return dict(self._last_progress)
 
     def _cleanup(self) -> None:
         """Clean up after the worker finishes."""
-        self._poll_timer.stop()
         self._process = None
         self._start_time = 0.0
         # Clean up task file but leave progress for debugging

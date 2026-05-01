@@ -7,13 +7,15 @@ for duplicate detection, content search, and similarity search.
 import json
 import logging
 import os
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
+
+from metascan.utils.heic import register_heif_opener
+
+register_heif_opener()
 
 logger = logging.getLogger(__name__)
 
@@ -94,29 +96,33 @@ class EmbeddingManager:
         return int(self.model_config["embedding_dim"])
 
     def _resolve_device(self) -> str:
-        """Resolve the device to use for computation."""
+        """Resolve the device to use for computation.
+
+        Delegates to :func:`metascan.core.hardware.select_torch_device` so the
+        same precedence (CUDA → MPS → CPU) is shared across CLIP and any
+        future PyTorch path.
+        """
+        from metascan.core.hardware import select_torch_device
+
         _ensure_heavy_imports()
         assert _torch is not None
 
-        cuda_available = _torch.cuda.is_available()
+        device = select_torch_device(self.device_preference)
+
         logger.info(
             f"Device selection: preference={self.device_preference}, "
-            f"torch.cuda.is_available()={cuda_available}, "
+            f"resolved={device}, "
             f"torch={_torch.__version__}, "
             f"cuda_built={_torch.version.cuda or 'none'}"
         )
 
-        if self.device_preference == "auto":
-            device = "cuda" if cuda_available else "cpu"
-        else:
-            device = self.device_preference
-
         if device == "cpu" and self.model_key in ("medium", "large"):
             logger.warning(
                 f"Running {self.model_config['name']} on CPU will be very slow. "
-                f"Consider using the 'small' model or a CUDA GPU. "
-                f"If you have a GPU, ensure PyTorch is installed with CUDA support: "
-                f"pip install torch --index-url https://download.pytorch.org/whl/cu124"
+                f"Consider using the 'small' model or a CUDA/MPS GPU. "
+                f"If you have an NVIDIA GPU, ensure PyTorch is installed with "
+                f"CUDA support: pip install torch --index-url "
+                f"https://download.pytorch.org/whl/cu124"
             )
         return device
 
@@ -150,67 +156,101 @@ class EmbeddingManager:
         # Enable huggingface_hub download progress logging
         self._enable_download_logging()
 
-        self._model, _, self._preprocess = _open_clip.create_model_and_transforms(
-            config["name"],
-            pretrained=config["pretrained"],
-            device=self._device,
-        )
+        # When weights are already cached, force huggingface_hub offline so it
+        # skips the etag HEAD probe to huggingface.co on every load.
+        prev_offline = os.environ.get("HF_HUB_OFFLINE")
+        if not needs_download:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            self._model, _, self._preprocess = _open_clip.create_model_and_transforms(
+                config["name"],
+                pretrained=config["pretrained"],
+                device=self._device,
+            )
+        finally:
+            if not needs_download:
+                if prev_offline is None:
+                    os.environ.pop("HF_HUB_OFFLINE", None)
+                else:
+                    os.environ["HF_HUB_OFFLINE"] = prev_offline
         self._tokenizer = _open_clip.get_tokenizer(config["name"])
         assert self._model is not None
         self._model.eval()
 
         if needs_download:
-            logger.info(f"Model download complete")
+            logger.info("Model download complete")
         logger.info(f"CLIP model loaded successfully on {self._device}")
 
     @staticmethod
-    def _check_model_needs_download(model_name: str, pretrained: str) -> bool:
-        """Check if model weights are already cached locally."""
-        try:
-            from huggingface_hub import try_to_load_from_cache
+    def _check_model_needs_download(
+        model_name: str, pretrained: str
+    ) -> bool:  # noqa: C901
+        """Return True when the weights for (model_name, pretrained) are not
+        available in any local cache and would be fetched from the network on
+        the next load.
 
-            # open_clip stores pretrained configs that map to HF repos.
-            # We check the HF cache for common repo patterns.
-            # If the check fails, assume download is needed.
-            return False  # Conservative: only log if we positively detect a download
-        except ImportError:
-            pass
-
+        Used to (a) log a user-facing download notice and (b) decide whether
+        it's safe to set HF_HUB_OFFLINE during load to suppress an etag
+        revalidation HEAD request.
+        """
         try:
-            # Fallback: check open_clip's local cache directory
             import open_clip
+        except ImportError:
+            return True
 
-            # open_clip uses ~/.cache/clip or torch hub cache
+        try:
             pretrained_cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
-            if pretrained_cfg and "url" in pretrained_cfg:
+        except Exception as e:
+            logger.debug(f"open_clip.get_pretrained_cfg failed: {e}")
+            return True
+
+        if not pretrained_cfg:
+            return True
+
+        # HF-hosted model — check the huggingface_hub cache for any plausible
+        # weights filename. open_clip has used different filenames historically
+        # across model versions.
+        if "hf_hub" in pretrained_cfg:
+            try:
+                from huggingface_hub import try_to_load_from_cache
+            except ImportError:
+                return True
+
+            hf_hub = pretrained_cfg["hf_hub"]
+            repo_id = hf_hub.split("@")[0] if "@" in hf_hub else hf_hub
+            repo_id = repo_id.rstrip("/")
+            for filename in (
+                "open_clip_pytorch_model.safetensors",
+                "open_clip_model.safetensors",
+                "open_clip_pytorch_model.bin",
+            ):
+                try:
+                    result = try_to_load_from_cache(repo_id, filename)
+                except Exception:
+                    continue
+                # try_to_load_from_cache returns a str path on hit,
+                # None on miss, or the sentinel _CACHED_NO_EXIST on known-missing.
+                if isinstance(result, str):
+                    return False
+            return True
+
+        # Legacy URL-based weights (torch.hub checkpoints dir).
+        if "url" in pretrained_cfg:
+            try:
                 import torch
 
-                cache_dir = torch.hub.get_dir()
-                # Check if any file matching the model exists in cache
-                from pathlib import Path
+                hub_cache = Path(torch.hub.get_dir()) / "checkpoints"
+                url = pretrained_cfg["url"]
+                filename = url.split("/")[-1]
+                if (hub_cache / filename).exists():
+                    return False
+            except Exception as e:
+                logger.debug(f"Could not check torch hub cache: {e}")
+            return True
 
-                hub_cache = Path(cache_dir) / "checkpoints"
-                if hub_cache.exists():
-                    url = pretrained_cfg["url"]
-                    filename = url.split("/")[-1]
-                    if (hub_cache / filename).exists():
-                        return False
-                return True
-            # HF-hosted model — check huggingface cache
-            if pretrained_cfg and "hf_hub" in pretrained_cfg:
-                from huggingface_hub import try_to_load_from_cache
-                from huggingface_hub.utils import EntryNotFoundError
-
-                hf_hub = pretrained_cfg["hf_hub"]
-                repo_id = hf_hub.split("@")[0] if "@" in hf_hub else hf_hub
-                result = try_to_load_from_cache(
-                    repo_id, "open_clip_pytorch_model.safetensors"
-                )
-                return result is None
-        except Exception as e:
-            logger.debug(f"Could not check model cache: {e}")
-
-        return False
+        # Unknown source — conservatively assume download is needed so we
+        # don't wrongly suppress the network check.
+        return True
 
     @staticmethod
     def _enable_download_logging() -> None:
@@ -257,7 +297,7 @@ class EmbeddingManager:
         to loading a 4096x4096 image. Downsizing first avoids excessive
         RAM usage and speeds up preprocessing significantly on CPU.
         """
-        image = Image.open(image_path).convert("RGB")
+        image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
         w, h = image.size
         if max(w, h) > max_size:
             scale = max_size / max(w, h)
@@ -374,7 +414,9 @@ class EmbeddingManager:
             logger.error(f"Failed to compute video embedding for {video_path}: {e}")
             return None
 
-    def _extract_keyframes(self, video_path: str, num_frames: int) -> List[np.ndarray]:
+    def _extract_keyframes(
+        self, video_path: str, num_frames: int
+    ) -> List[np.ndarray]:  # noqa: C901
         """Extract evenly-spaced keyframes from a video using ffmpeg."""
         from metascan.utils.ffmpeg_utils import (
             probe_with_timeout,
@@ -440,7 +482,7 @@ class EmbeddingManager:
             _ensure_heavy_imports()
             assert _imagehash is not None
 
-            image = Image.open(image_path).convert("RGB")
+            image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")
             phash = _imagehash.phash(image)
             return str(phash)
         except Exception as e:

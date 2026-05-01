@@ -29,7 +29,9 @@ class MetadataExtractorManager:
         self.parsing_logger = MetadataParsingLogger() if enable_logging else None
         log_startup("      MetadataExtractorManager.__init__: Complete")
 
-    def extract_metadata(self, media_path: Path) -> Optional[Dict[str, Any]]:
+    def extract_metadata(
+        self, media_path: Path
+    ) -> Optional[Dict[str, Any]]:  # noqa: C901
         """Extract metadata using the appropriate extractor"""
         for extractor in self.extractors:
             extractor_name = extractor.__class__.__name__
@@ -42,7 +44,7 @@ class MetadataExtractorManager:
                         # Attempt to read raw metadata for debugging
                         if hasattr(extractor, "_read_raw_metadata"):
                             raw_data = extractor._read_raw_metadata(media_path)
-                    except:
+                    except Exception:
                         pass  # Ignore errors getting raw data
 
                     metadata = extractor.extract(media_path)
