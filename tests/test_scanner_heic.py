@@ -1,5 +1,6 @@
 """End-to-end scanner tests for HEIC + EXIF orientation handling."""
 
+import base64
 import tempfile
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from PIL import Image
 # Module under test will register pillow-heif on import.
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.scanner import Scanner
+from metascan.utils.heic import _heif_decode_probe, _HEIF_1X1_B64
 
 
 def _write_jpeg_with_orientation(
@@ -76,12 +78,19 @@ def test_scanner_applies_exif_orientation_to_dimensions(db):
     assert loaded.orientation == 6
 
 
+@pytest.mark.skipif(
+    not _heif_decode_probe(), reason="pillow-heif unavailable or decode crashes"
+)
 def test_scanner_handles_heic_when_pillow_heif_available(db):
-    pytest.importorskip("pillow_heif")
+    """Write a pre-built minimal HEIF to disk and scan it.
+
+    We deliberately avoid ``Image.save(..., 'HEIF')`` here because the
+    pillow-heif *encoder* segfaults on some ARM macOS builds.  The scanner
+    only *decodes* HEIC files, so the test should exercise only that path.
+    """
     manager, tmp = db
     heic_path = tmp / "shot.heic"
-    img = Image.new("RGB", (40, 40), color=(10, 20, 30))
-    img.save(heic_path, "HEIF")
+    heic_path.write_bytes(base64.b64decode(_HEIF_1X1_B64))
 
     scanner = Scanner(manager)
     scanner.scan_directory(str(tmp))
