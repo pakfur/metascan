@@ -33,7 +33,6 @@ def init_startup_profiler() -> float:
     if not _logger.handlers:
         handler = logging.StreamHandler()
         handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter("[STARTUP %(elapsed).3fs] %(message)s")
         handler.setFormatter(_StartupFormatter())
         _logger.addHandler(handler)
 
@@ -56,8 +55,6 @@ def log_startup(message: str) -> None:
     Args:
         message: The message to log.
     """
-    global _logger, _startup_time
-
     if _logger is None or _startup_time is None:
         # Fallback if profiler not initialized
         print(f"[STARTUP] {message}")

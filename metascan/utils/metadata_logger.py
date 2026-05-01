@@ -165,7 +165,7 @@ class MetadataParsingLogger:
                         raw_metadata_str = json.dumps(raw_data, default=str)[:500]
                     else:
                         raw_metadata_str = str(raw_data)[:500]
-                except:
+                except Exception:
                     raw_metadata_str = "Error serializing raw data"
 
             # Get concise stack trace
@@ -351,7 +351,7 @@ class MetadataLogAnalyzer:
         finally:
             manager.parsing_logger = original_logger
 
-    def print_report(self, file_path: Optional[Path] = None):
+    def print_report(self, file_path: Optional[Path] = None):  # noqa: C901
         """
         Print a formatted report to console.
 
@@ -367,7 +367,7 @@ class MetadataLogAnalyzer:
             print(f"Total Errors: {result['error_count']}")
 
             if result["error_count"] > 0:
-                print(f"\nError Types:")
+                print("\nError Types:")
                 for error_type, count in result.get("error_types", {}).items():
                     print(f"  - {error_type}: {count}")
 
@@ -376,7 +376,7 @@ class MetadataLogAnalyzer:
                 )
 
                 if result.get("latest_error"):
-                    print(f"\nLatest Error:")
+                    print("\nLatest Error:")
                     error = result["latest_error"]
                     print(f"  Timestamp: {error.get('timestamp')}")
                     print(f"  Extractor: {error.get('extractor')}")
@@ -384,18 +384,18 @@ class MetadataLogAnalyzer:
         else:
             result = self.analyze_all()
             print(f"\n{'='*60}")
-            print(f"Metadata Parsing Analysis - All Errors")
+            print("Metadata Parsing Analysis - All Errors")
             print(f"{'='*60}")
             print(f"Total Errors: {result['total_errors']}")
 
             if result["total_errors"] > 0:
                 print(f"Unique Files with Errors: {result['unique_files_with_errors']}")
 
-                print(f"\nError Type Distribution:")
+                print("\nError Type Distribution:")
                 for error_type, count in result.get("error_types", {}).items():
                     print(f"  - {error_type}: {count}")
 
-                print(f"\nExtractor Failure Count:")
+                print("\nExtractor Failure Count:")
                 for extractor, count in result.get("extractor_failures", {}).items():
                     print(f"  - {extractor}: {count}")
 
@@ -411,7 +411,7 @@ class MetadataLogAnalyzer:
                         f"Most Failing Extractor: {most_failing[0]} ({most_failing[1]} failures)"
                     )
 
-                print(f"\nRecent Errors:")
+                print("\nRecent Errors:")
                 for error in result.get("recent_errors", [])[-5:]:
                     print(
                         f"  - {error.get('file_name')} | {error.get('extractor')} | {error.get('error_type')}"

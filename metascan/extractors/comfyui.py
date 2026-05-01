@@ -13,7 +13,7 @@ class ComfyUIExtractor(MetadataExtractor):
 
     def can_extract(self, media_path: Path) -> bool:
         """Check if image contains ComfyUI metadata"""
-        if media_path.suffix.lower() in {".mp4", ".webm"}:
+        if media_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return False
 
         metadata = self._get_exif_metadata(media_path)
@@ -53,7 +53,9 @@ class ComfyUIExtractor(MetadataExtractor):
             logger.error(f"Failed to extract ComfyUI metadata from {media_path}: {e}")
             return None
 
-    def _extract_parameters(self, prompt_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_parameters(
+        self, prompt_data: Dict[str, Any]
+    ) -> Dict[str, Any]:  # noqa: C901
         extracted: Dict[str, Any] = {}
         loras: List[Dict[str, Any]] = []
 

@@ -1,23 +1,30 @@
 from pathlib import Path
-from typing import List, Optional, Callable, Tuple, Dict, Any
+from typing import List, Optional, Callable, Tuple, Any
 from queue import Queue
 from threading import Thread
 import logging
-from PIL import Image
+from PIL import Image, ImageOps
 from datetime import datetime
 import threading
 import queue
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from metascan.utils.startup_profiler import log_startup, profile_phase
-from metascan.core.media import Media, LoRA
+from metascan.utils.startup_profiler import log_startup
+from metascan.core.media import Media, LoRA, PhotoExposure as MediaPhotoExposure
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 from metascan.core.phash_utils import compute_phash_for_file
 from metascan.cache.thumbnail import ThumbnailCache
+from metascan.utils.heic import register_heif_opener
+from metascan.core.photo_exif import (
+    PhotoExif,
+    PhotoExposure as PhotoExifExposure,
+    extract_photo_exif,
+)
+
+register_heif_opener()
 
 try:
-    import ffmpeg
+    import ffmpeg  # noqa: F401
 
     HAS_FFMPEG_PYTHON = True
 except ImportError:
@@ -26,8 +33,34 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _photo_exposure_to_media(src: PhotoExifExposure) -> "MediaPhotoExposure":
+    """Convert metascan.core.photo_exif.PhotoExposure -> metascan.core.media.PhotoExposure.
+
+    They have identical shape; lives in two modules so photo_exif stays pure
+    (no Media/dataclass-json dependency)."""
+    return MediaPhotoExposure(
+        shutter_speed=src.shutter_speed,
+        aperture=src.aperture,
+        iso=src.iso,
+        flash=src.flash,
+        focal_length=src.focal_length,
+        focal_length_35mm=src.focal_length_35mm,
+    )
+
+
 class Scanner:
-    SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm"}
+    SUPPORTED_EXTENSIONS = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".mp4",
+        ".webm",
+        ".mov",
+    }
 
     def __init__(
         self,
@@ -38,7 +71,7 @@ class Scanner:
         self.extractor_manager = MetadataExtractorManager()
         self.thumbnail_cache = thumbnail_cache
 
-    def scan_directory(
+    def scan_directory(  # noqa: C901
         self,
         directory: str,
         recursive: bool = True,
@@ -131,12 +164,51 @@ class Scanner:
 
         return media_files
 
-    def _process_media_file(self, file_path: Path) -> Optional[Media]:
+    def _read_image_info_and_exif(self, file_path: Path) -> Tuple[
+        Tuple[Optional[int], Optional[int], Optional[str]],
+        Optional[PhotoExif],
+        Optional[int],
+    ]:
+        """Open a still image once. Returns ((width, height, format),
+        photo_exif, orientation_tag). Pixel decode is skipped unless EXIF
+        orientation requires it — keeps the AI-gen PNG hot path fast.
+        """
+        if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
+            return (None, None, None), None, None
+        try:
+            with Image.open(file_path) as img:
+                fmt = img.format
+                photo_exif, orientation = extract_photo_exif(img.getexif())
+                # Only call exif_transpose when there's actually a rotation
+                # to apply. Pillow's exif_transpose forces a full pixel
+                # decode on every call, which is wasteful for the common
+                # case (AI-gen PNGs with no orientation tag, or
+                # Orientation=1 which is the identity transform).
+                if orientation is not None and orientation in (2, 3, 4, 5, 6, 7, 8):
+                    transposed = ImageOps.exif_transpose(img)
+                    width, height = transposed.width, transposed.height
+                else:
+                    width, height = img.width, img.height
+                return (width, height, fmt), photo_exif, orientation
+        except Exception as exc:
+            logger.error("Failed to read image info/EXIF for %s: %s", file_path, exc)
+            return (None, None, None), None, None
+
+    def _process_media_file(self, file_path: Path) -> Optional[Media]:  # noqa: C901
         """Process a single media file and extract metadata"""
         try:
             stat = file_path.stat()
 
-            width, height, format_name = self._get_media_info(file_path)
+            # Single image open: dimensions, format, photo EXIF, and
+            # orientation all come back from one read.
+            if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
+                width, height, format_name = self._get_video_info(file_path)
+                photo_exif, orientation_tag = None, None
+            else:
+                (width, height, format_name), photo_exif, orientation_tag = (
+                    self._read_image_info_and_exif(file_path)
+                )
+
             if not width or not height:
                 return None
 
@@ -149,6 +221,22 @@ class Scanner:
                 format=format_name or "UNKNOWN",
                 created_at=datetime.fromtimestamp(stat.st_ctime),
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
+            )
+
+            media.camera_make = photo_exif.camera_make if photo_exif else None
+            media.camera_model = photo_exif.camera_model if photo_exif else None
+            media.lens_model = photo_exif.lens_model if photo_exif else None
+            media.datetime_original = (
+                photo_exif.datetime_original if photo_exif else None
+            )
+            media.gps_latitude = photo_exif.gps_latitude if photo_exif else None
+            media.gps_longitude = photo_exif.gps_longitude if photo_exif else None
+            media.gps_altitude = photo_exif.gps_altitude if photo_exif else None
+            media.orientation = orientation_tag
+            media.photo_exposure = (
+                _photo_exposure_to_media(photo_exif.exposure)
+                if photo_exif and photo_exif.exposure is not None
+                else None
             )
 
             metadata = self.extractor_manager.extract_metadata(file_path)
@@ -192,6 +280,19 @@ class Scanner:
                             )
                             media.loras.append(lora)
 
+            # Populate tag set from the prompt so it shows up in the Tags
+            # filter. Previously PromptTokenizer ran only during index
+            # generation and wrote to indices(index_type='prompt', ...),
+            # never to indices(index_type='tag', ...), which is why the
+            # Tags facet was empty in the UI.
+            if media.prompt:
+                try:
+                    media.tags = sorted(
+                        self.db_manager.prompt_tokenizer.tokenize(media.prompt)
+                    )
+                except Exception as e:
+                    logger.debug(f"Prompt tokenization failed for {file_path}: {e}")
+
             return media
 
         except Exception as e:
@@ -201,15 +302,14 @@ class Scanner:
     def _get_media_info(
         self, file_path: Path
     ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-        try:
-            if file_path.suffix.lower() in {".mp4", ".webm"}:
-                return self._get_video_info(file_path)
-            else:
-                with Image.open(file_path) as img:
-                    return img.width, img.height, img.format
-        except Exception as e:
-            logger.error(f"Failed to get media info for {file_path}: {e}")
-            return None, None, None
+        """Video-only path. For images use ``_read_image_info_and_exif``."""
+        if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
+            return self._get_video_info(file_path)
+        # Fallback for callers that expect the legacy 3-tuple. Image callers
+        # in this module should prefer _read_image_info_and_exif which avoids
+        # a second image open.
+        info, _photo, _orient = self._read_image_info_and_exif(file_path)
+        return info
 
     def _get_video_info(
         self, file_path: Path
@@ -422,15 +522,7 @@ class ThreadedScanner:
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
         media_files: List[Path] = []
-        supported_extensions = {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".gif",
-            ".mp4",
-            ".webm",
-        }
+        supported_extensions = Scanner.SUPPORTED_EXTENSIONS
 
         if recursive:
             for ext in supported_extensions:
@@ -464,7 +556,7 @@ class ThreadedScanner:
         )
         self.writer_thread.start()
 
-    def _producer_worker(self, media_files: List[Path]) -> None:
+    def _producer_worker(self, media_files: List[Path]) -> None:  # noqa: C901
         files_added = 0
         try:
             for file_path in media_files:
@@ -526,7 +618,7 @@ class ThreadedScanner:
         finally:
             logger.debug("Producer thread exiting")
 
-    def _file_worker(self) -> None:
+    def _file_worker(self) -> None:  # noqa: C901
         scanner = Scanner(self.db_manager, thumbnail_cache=self.thumbnail_cache)
         worker_id = threading.current_thread().name
         files_processed_by_worker = 0
@@ -612,7 +704,7 @@ class ThreadedScanner:
                 f"{worker_id} exiting, processed {files_processed_by_worker} files successfully"
             )
 
-    def _database_writer(self) -> None:
+    def _database_writer(self) -> None:  # noqa: C901
         batch = []
         last_write_time = time.time()
         batch_timeout = 2.0  # Write batch every 2 seconds even if not full
@@ -699,7 +791,8 @@ class ThreadedScanner:
                             time.sleep(2.0)
                             if self.result_queue.empty():
                                 logger.debug(
-                                    f"All workers finished and queue empty, database writer exiting (processed {results_processed} files)"
+                                    "All workers finished and queue empty, database writer exiting "
+                                    f"(processed {results_processed} files)"
                                 )
                                 break
 
@@ -734,7 +827,9 @@ class ThreadedScanner:
             self.stop_event.set()
         finally:
             logger.info(
-                f"Database writer exiting: processed={results_processed}, written={files_written}, failed={files_failed}, saved={self.files_saved}"
+                "Database writer exiting: "
+                f"processed={results_processed}, written={files_written}, "
+                f"failed={files_failed}, saved={self.files_saved}"
             )
 
     def _wait_for_completion(self) -> None:

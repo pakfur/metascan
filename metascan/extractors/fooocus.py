@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class FooocusExtractor(MetadataExtractor):
-    def can_extract(self, media_path: Path) -> bool:
+    def can_extract(self, media_path: Path) -> bool:  # noqa: C901
         """Check if image contains Fooocus metadata"""
-        if media_path.suffix.lower() in {".mp4", ".webm"}:
+        if media_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return False
 
         metadata = self._get_exif_metadata(media_path)
@@ -29,7 +29,7 @@ class FooocusExtractor(MetadataExtractor):
                         "fooocus" in str(data).lower() or "metadata_scheme" in data
                     ):
                         return True
-            except:
+            except Exception:
                 pass
 
         # 2. Check for fooocus_scheme field
@@ -46,7 +46,7 @@ class FooocusExtractor(MetadataExtractor):
 
         return False
 
-    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:
+    def extract(self, image_path: Path) -> Optional[Dict[str, Any]]:  # noqa: C901
         try:
             metadata = self._get_exif_metadata(image_path)
 
@@ -146,7 +146,7 @@ class FooocusExtractor(MetadataExtractor):
             re.search(r"(Steps|Sampler|CFG scale|Seed|Size|Model|LoRAs?):", line)
         )
 
-    def _parse_parameter_line(
+    def _parse_parameter_line(  # noqa: C901
         self,
         line: str,
         extracted: Dict[str, Any],
@@ -230,7 +230,7 @@ class FooocusExtractor(MetadataExtractor):
 
                 loras.append({"lora_name": lora_name_clean, "lora_weight": lora_weight})
 
-    def _extract_from_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_from_json(self, data: Dict[str, Any]) -> Dict[str, Any]:  # noqa: C901
         extracted: Dict[str, Any] = {}
 
         # Direct field mappings
