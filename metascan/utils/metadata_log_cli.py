@@ -14,7 +14,6 @@ import argparse
 import sys
 from pathlib import Path
 import json
-from typing import Optional
 
 from metascan.utils.metadata_logger import MetadataLogAnalyzer, MetadataParsingLogger
 
@@ -72,14 +71,14 @@ def retest_file(args):
     else:
         # Print formatted result
         if result["success"]:
-            print(f"✓ Extraction successful")
+            print("✓ Extraction successful")
             if result.get("metadata"):
                 print("\nExtracted Metadata:")
                 print(json.dumps(result["metadata"], indent=2, default=str))
             else:
                 print("No metadata found in file")
         else:
-            print(f"✗ Extraction failed")
+            print("✗ Extraction failed")
             print(f"Error: {result.get('error', 'Unknown error')}")
             if result.get("stack_trace") and args.verbose:
                 print("\nStack Trace:")
@@ -185,19 +184,19 @@ def main():
 Examples:
   # Analyze all errors
   %(prog)s analyze-all
-  
+
   # Analyze errors for a specific file
   %(prog)s analyze-file /path/to/image.png
-  
+
   # Re-test metadata extraction
   %(prog)s retest /path/to/image.png --verbose
-  
+
   # Show statistics
   %(prog)s stats
-  
+
   # Export errors as CSV
   %(prog)s csv > errors.csv
-  
+
   # Clear all logs
   %(prog)s clear-logs --force
         """,
@@ -245,7 +244,7 @@ Examples:
     )
 
     # Show statistics
-    stats_parser = subparsers.add_parser("stats", help="Show statistics about the logs")
+    subparsers.add_parser("stats", help="Show statistics about the logs")
 
     args = parser.parse_args()
 

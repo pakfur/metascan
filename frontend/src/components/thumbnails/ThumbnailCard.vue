@@ -1,0 +1,210 @@
+<script setup lang="ts">
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import type { Media } from '../../types/media'
+import { thumbnailUrl } from '../../api/client'
+import { useMediaStore } from '../../stores/media'
+import { fileName } from '../../utils/path'
+
+const props = withDefaults(
+  defineProps<{
+    media: Media
+    size: number
+    selected: boolean
+    deferLoad?: boolean
+    inFolder?: boolean
+  }>(),
+  { deferLoad: false, inFolder: false },
+)
+
+const mediaStore = useMediaStore()
+const imgEl = ref<HTMLImageElement | null>(null)
+
+// Latch: once we've started loading the thumbnail, keep showing it even if
+// the user resumes scrolling. deferLoad only prevents STARTING a new load.
+const hasStartedLoading = ref(!props.deferLoad)
+watch(
+  () => props.deferLoad,
+  (defer) => {
+    if (!defer) hasStartedLoading.value = true
+  },
+)
+
+const imgSrc = computed(() =>
+  hasStartedLoading.value ? thumbnailUrl(props.media.file_path) : '',
+)
+const displayName = computed(() => props.media.file_name ?? fileName(props.media.file_path))
+
+onBeforeUnmount(() => {
+  // Cancel any in-flight fetch for this thumbnail before the element is
+  // removed. Chrome usually cancels on DOM removal, but belt-and-suspenders:
+  // clearing src guarantees the connection slot is freed.
+  const el = imgEl.value
+  if (el) el.removeAttribute('src')
+})
+
+function onFavoriteClick(e: MouseEvent) {
+  e.stopPropagation()
+  mediaStore.toggleFavorite(props.media)
+}
+
+function onImgError(e: Event) {
+  const img = e.target as HTMLImageElement
+  img.style.display = 'none'
+}
+</script>
+
+<template>
+  <div
+    class="thumbnail-card"
+    :class="{ selected, 'in-folder': inFolder }"
+    :style="{ width: size + 'px', height: size + 'px' }"
+  >
+    <img
+      v-if="hasStartedLoading"
+      ref="imgEl"
+      :src="imgSrc"
+      :alt="displayName"
+      class="thumb-img"
+      loading="lazy"
+      @error="onImgError"
+    />
+    <div v-else class="thumb-placeholder" aria-hidden="true" />
+
+    <button
+      class="fav-btn"
+      :class="{ active: media.is_favorite }"
+      @click="onFavoriteClick"
+      title="Toggle favorite"
+    >
+      {{ media.is_favorite ? '★' : '☆' }}
+    </button>
+
+    <span v-if="media.is_video" class="video-badge">▶</span>
+
+    <div class="filename-overlay" :title="displayName">
+      {{ displayName }}
+    </div>
+
+    <div v-if="media.similarity_score != null" class="similarity-badge">
+      {{ (media.similarity_score * 100).toFixed(0) }}%
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.thumbnail-card {
+  position: relative;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-card);
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.thumbnail-card:hover {
+  border-color: color-mix(in srgb, var(--primary-color) 50%, transparent);
+}
+
+.thumbnail-card.selected {
+  border-color: var(--primary-color);
+}
+
+/* In-folder indicator — little blue dot at the top-left. Only shown when
+   we're NOT currently inside that folder (otherwise every thumb would
+   wear it and it'd be noise). */
+.thumbnail-card.in-folder::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-placeholder {
+  width: 100%;
+  height: 100%;
+  background: var(--surface-ground);
+}
+
+.fav-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  border: none;
+  color: #ccc;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.thumbnail-card:hover .fav-btn,
+.fav-btn.active {
+  opacity: 1;
+}
+
+.fav-btn.active {
+  color: #fbbf24;
+}
+
+.video-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.filename-overlay {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 4px 6px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.thumbnail-card:hover .filename-overlay {
+  opacity: 1;
+}
+
+.similarity-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #4ade80;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+</style>

@@ -20,7 +20,7 @@ import time
 import traceback
 import threading
 from pathlib import Path
-from typing import Any, IO, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # Pre-load PyTorch c10.dll on Windows to prevent DLL loading errors
 if platform.system() == "Windows":
@@ -42,11 +42,19 @@ if platform.system() == "Windows":
 # Add the parent directory to sys.path so we can import metascan modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import portalocker
+import random  # noqa: E402
 
-from metascan.core.embedding_manager import EmbeddingManager, FaissIndexManager
-from metascan.core.database_sqlite import DatabaseManager
-from metascan.utils.app_paths import get_data_dir
+from metascan.core.embedding_manager import (
+    EmbeddingManager,
+    FaissIndexManager,
+)  # noqa: E402
+from metascan.core.database_sqlite import DatabaseManager  # noqa: E402
+from metascan.core.vocabulary import (  # noqa: E402
+    Vocabulary,
+    build_vocabulary,
+    select_tags,
+)
+from metascan.utils.app_paths import get_base_path, get_data_dir  # noqa: E402
 
 
 # Maximum time to spend on a single file (seconds).
@@ -57,6 +65,14 @@ PER_FILE_TIMEOUT = 120
 
 # Threshold for logging a slow-file warning
 SLOW_FILE_THRESHOLD = 10.0
+
+# CLIP-tagging parameters — user-chosen during design.
+TAG_TOP_K = 20
+TAG_THRESHOLD = 0.22
+# Number of randomly-sampled images whose top-K tags are dumped to
+# clip_tag_samples.json for visual validation. Deterministic across a run
+# because we seed the RNG from the file list.
+TAG_SAMPLE_COUNT = 3
 
 
 def _write_progress_fatal(queue_dir: Path, error: str) -> None:
@@ -132,7 +148,7 @@ class WatchdogTimer:
 class EmbeddingWorker:
     """Worker process for computing embeddings."""
 
-    VIDEO_EXTENSIONS = {".mp4", ".webm"}
+    VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov"}
 
     def __init__(self, queue_dir: Path):
         self.queue_dir = Path(queue_dir)
@@ -170,8 +186,15 @@ class EmbeddingWorker:
         status: str,
         current_file: str = "",
         error: str = "",
+        vocab_current: int = 0,
+        vocab_total: int = 0,
     ) -> None:
         """Write progress to a JSON file for the main process to read.
+
+        ``vocab_current`` / ``vocab_total`` carry term-level counts during
+        ``loading_vocab`` / ``encoding_vocab`` so the UI can render a
+        determinate progress bar against the term count rather than the
+        file count (which is still ``current`` / ``total``).
 
         Uses a retry loop to handle Windows file locking race conditions
         where the main process may have the file open for reading.
@@ -184,6 +207,8 @@ class EmbeddingWorker:
             "error": error,
             "errors_count": self.errors_count,
             "last_error": self.last_error,
+            "vocab_current": vocab_current,
+            "vocab_total": vocab_total,
             "timestamp": time.time(),
         }
         temp_file = self.progress_file.with_suffix(".tmp")
@@ -214,7 +239,7 @@ class EmbeddingWorker:
         except OSError:
             return -1.0
 
-    def run(self) -> None:
+    def run(self) -> None:  # noqa: C901
         """Main worker loop."""
         # Write initial progress immediately so the queue knows we're alive
         self._write_progress(0, 0, "starting")
@@ -283,6 +308,69 @@ class EmbeddingWorker:
             self.logger.info("CLIP model ready")
             self._write_progress(0, total, "loading_model")
 
+            # Load + encode the CLIP tagging vocabulary. Cached to
+            # data/vocabulary/vocab.<model_key>.npz so subsequent runs
+            # skip the ~20-60s encode step. If the vocabulary dir is
+            # missing we simply skip tagging for this run.
+            vocab_dir = get_base_path() / "data" / "vocabulary"
+            self.logger.info(f"Loading tagging vocabulary from {vocab_dir}")
+            self._write_progress(
+                0, total, "loading_vocab", current_file="Reading vocabulary files..."
+            )
+
+            def _on_vocab_progress(phase: str, cur: int, tot: int) -> None:
+                # Phase → status. ``current`` / ``total`` stay tied to the
+                # file count (so the file-progress fields don't briefly go
+                # backwards); term counts are reported in vocab_*.
+                if phase == "loading":
+                    self._write_progress(
+                        0,
+                        total,
+                        "loading_vocab",
+                        current_file="Reading vocabulary files...",
+                    )
+                elif phase == "encoding":
+                    label = (
+                        f"Encoding tag vocabulary ({cur:,} / {tot:,})"
+                        if tot
+                        else "Encoding tag vocabulary..."
+                    )
+                    self._write_progress(
+                        0,
+                        total,
+                        "encoding_vocab",
+                        current_file=label,
+                        vocab_current=cur,
+                        vocab_total=tot,
+                    )
+                elif phase == "cache_hit":
+                    self._write_progress(
+                        0,
+                        total,
+                        "loading_vocab",
+                        current_file="Loaded cached vocabulary",
+                        vocab_current=cur,
+                        vocab_total=tot,
+                    )
+
+            vocab: Optional[Vocabulary] = None
+            try:
+                vocab = build_vocabulary(
+                    vocab_dir, embedding_mgr, progress_callback=_on_vocab_progress
+                )
+                if vocab is not None:
+                    self.logger.info(
+                        f"Tagging vocabulary ready: {len(vocab.terms)} terms "
+                        f"(dim={vocab.embeddings.shape[1]})"
+                    )
+                else:
+                    self.logger.warning(
+                        "Tagging vocabulary unavailable; CLIP tagging disabled."
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to load tagging vocabulary: {e}")
+                vocab = None
+
             self.logger.info("Initializing FAISS index...")
             faiss_mgr = FaissIndexManager(Path(index_dir))
             db_mgr = DatabaseManager(Path(db_path))
@@ -304,6 +392,19 @@ class EmbeddingWorker:
             hash_batch = []
             skipped_paths = []
             batch_start_time = time.time()
+
+            # Random sample of file indices whose generated tags will be
+            # dumped to data/clip_tag_samples.json for visual validation.
+            sample_size = min(TAG_SAMPLE_COUNT, total) if vocab is not None else 0
+            sample_indices: Set[int] = (
+                set(random.sample(range(total), sample_size)) if sample_size else set()
+            )
+            sample_records: List[Dict[str, Any]] = []
+            if sample_indices:
+                self.logger.info(
+                    f"Will dump tags for {sample_size} sampled files to "
+                    f"clip_tag_samples.json (indices={sorted(sample_indices)})"
+                )
 
             # Watchdog kills the process if a single file takes too long.
             # This is the only reliable way to interrupt CPU-bound PyTorch
@@ -373,6 +474,38 @@ class EmbeddingWorker:
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
                         embedded_count += 1
+
+                        # CLIP tagging — one matmul against the pre-encoded
+                        # vocabulary + an INSERT OR UPDATE into the tag
+                        # inverted index. Roughly free compared to the
+                        # embedding computation itself.
+                        if vocab is not None:
+                            tags = select_tags(
+                                embedding,
+                                vocab,
+                                top_k=TAG_TOP_K,
+                                threshold=TAG_THRESHOLD,
+                            )
+                            if tags:
+                                db_mgr.add_tag_indices(
+                                    Path(file_path),
+                                    [term for term, _axis, _score in tags],
+                                    source="clip",
+                                )
+                            if i in sample_indices:
+                                sample_records.append(
+                                    {
+                                        "file_path": file_path,
+                                        "tags": [
+                                            {
+                                                "term": term,
+                                                "axis": axis,
+                                                "score": round(score, 4),
+                                            }
+                                            for term, axis, score in tags
+                                        ],
+                                    }
+                                )
                     else:
                         skipped_paths.append(file_path)
                         skipped_count += 1
@@ -425,6 +558,32 @@ class EmbeddingWorker:
                 db_mgr.mark_embedded(batch_paths, model_key)
             if skipped_paths:
                 db_mgr.mark_embedding_skipped(skipped_paths)
+
+            # Dump CLIP-tag samples for visual validation before unloading
+            # the model in case we need to re-encode anything. Lives under
+            # data/ (not data/vocabulary/) per the user's spec.
+            if sample_records:
+                samples_path = vocab_dir.parent / "clip_tag_samples.json"
+                try:
+                    samples_path.write_text(
+                        json.dumps(
+                            {
+                                "model_key": model_key,
+                                "top_k": TAG_TOP_K,
+                                "threshold": TAG_THRESHOLD,
+                                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                "samples": sample_records,
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.logger.info(
+                        f"Wrote {len(sample_records)} CLIP-tag samples to "
+                        f"{samples_path}"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to write tag samples: {e}")
 
             # Unload model to free GPU memory
             embedding_mgr.unload_model()

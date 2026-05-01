@@ -11,9 +11,4 @@ setup(
     packages=find_packages(),
     install_requires=requirements,
     python_requires=">=3.11,<3.13",
-    entry_points={
-        "console_scripts": [
-            "metascan=metascan.ui.main_window:main",
-        ],
-    },
 )

@@ -1,233 +1,264 @@
 # Metascan
 
-**Media browser with metadata extraction and intelligent indexing**
+**AI media browser with metadata extraction, similarity search, and web-based remote access**
 
 [![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
-[![PyQt6](https://img.shields.io/badge/PyQt6-GUI-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
+[![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
 
-# Latest Release v0.2.5
+# Latest Release v0.3.0
 
-### New Features
+### Web UI Migration
 
-## Slideshow
- - New Slideshow feature
+Metascan now features a modern Vue.js web frontend with a FastAPI backend server, enabling remote access from any platform via a browser while keeping heavy AI/GPU processing on a powerful PC.
 
-## Volume Control
-  - Volume slider with real-time adjustment (0-100%)
+- **Vue 3 + TypeScript frontend** served by the FastAPI backend
+- **FastAPI backend** with REST API (35+ endpoints) and WebSocket for real-time updates
+- **Remote access** from Mac, Windows, Linux, or any device with a browser
+- **Three-panel responsive layout** with resizable splitter (filters, thumbnails, metadata)
+- **Virtual-scrolling thumbnail grid** for smooth browsing of large collections (12,000+ items)
+- **Full-screen media viewer** with image zoom/pan, video player (speed control, frame stepping, volume)
+- **Slideshow** with ordered/random modes, fade transitions, configurable timing
+- **Multi-phase scan dialog** with real-time WebSocket progress (file-by-file updates)
+- **CLIP-powered content search** (text-to-image) and FAISS similarity search with threshold slider
+- **Duplicate finder** with pHash grouping, thumbnail previews, and batch deletion
+- **Upscale queue** with Real-ESRGAN options, GFPGAN face enhancement, RIFE frame interpolation, pause/resume
+- **Similarity settings** dialog with CLIP model/device selection, embedding index build with live progress
+- **Configuration dialog** for directory management
+- **File watcher** integration with auto-refresh via WebSocket
+- **Right-click context menu** on thumbnails (Open, Find Similar, Upscale, Delete)
+- **Keyboard shortcuts** for fast navigation (Esc, F5, Ctrl+S, Ctrl+D, arrows, Space, etc.)
+- **Dark/light mode** via system `prefers-color-scheme`
+- **API key authentication** for secure remote access
 
-## Playback Speed Control
-  - UI dropdown selector with preset speeds: 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 2x
-  - Per-file speed persistence - each video remembers its playback speed in the database
+### Previous Releases
 
-## Frame-by-Frame Navigation
-  - Previous/Next frame buttons (◀◀ / ▶▶) in the control bar
-  - Help overlay (press H or ?) displays all available keyboard shortcuts
-  - Shows for 5 seconds with formatted shortcut list
-    
-## UI Improvements
-  - Reduced internal padding on speed dropdown and mute button for better icon visibility
-  - All controls include tooltips showing keyboard shortcuts
-  - Control bar now displays: frame nav, play/pause, timeline, time display, speed, volume, and help
+<details>
+<summary>v0.2.5 - Slideshow, Volume Control, Frame Stepping</summary>
 
-  ---
-##  Keyboard Shortcuts Quick Reference:
+- Slideshow feature with ordered/random modes and transition effects
+- Volume slider with real-time adjustment (0-100%)
+- Playback speed presets (0.25x-2x) with per-file persistence
+- Frame-by-frame navigation (comma/period keys)
+- Keyboard shortcuts help overlay (H or ?)
+</details>
 
-```
-  - Space: Play/Pause
-  - , / . : Previous/Next Frame
-  - ↑ / ↓: Volume Up/Down
-  - M: Mute
-  - ← / →: Previous/Next Media
-  - F: Toggle Favorite
-  - Ctrl+D: Delete
-  - H or ?: Show Shortcuts
-  - Esc: Close Viewer
- ```
+<details>
+<summary>v0.2.0 - Upscale Queue, Multi-worker, Frame Interpolation</summary>
 
-## Version v0.2.0
+- Queue pause/resume for batch processing control
+- 1-4 concurrent upscale workers
+- RIFE frame interpolation for video upscaling
+- Process-safe file locking, corruption detection and recovery
+- Metadata preservation after upscaling
+- Fixed race conditions, FFmpeg deprecation warnings
+</details>
 
-### New Features
-
-#### Queue Pause/Resume
-  - The upscaler queue can now be paused and resumed, giving you full control over batch processing
-  - Perfect for when you need to free up system resources temporarily
-
-#### Multi-worker Processing
-  - Support for 1-4 concurrent upscale workers to maximize hardware utilization
-  - Worker count is preserved across application restarts when there are pending tasks
-
-#### Interactive Queue Management
-  - Double-click any queue item to open the upscaled file
-  - Cmd/Ctrl+double-click to open the file's containing folder
-  - Quick access to your upscaled media right from the queue window
-
-#### Frame Interpolation
-  - RIFE frame interpolation is now fully functional for video upscaling
-  - Smoothly increase frame rates while upscaling (e.g., 24fps → 48fps)
-  - Configurable interpolation factors
-
-### Improvements
-
-#### Queue Management
-  - Process-safe file locking prevents corruption when multiple instances run
-  - Automatic corruption detection and recovery with backup creation
-  - Better error handling and recovery from failed tasks
-
-#### Metadata Preservation
-  - All AI generation metadata (prompts, models, seeds, LoRAs, etc.) is now preserved correctly after upscaling
-  - Only technical properties (dimensions, file size, timestamps) are updated
-  - More reliable metadata handling for both images and videos
-
-#### Better User Feedback
-  - Improved status messages and progress reporting
-  - Clearer error messages when operations fail
-  - Enhanced logging for troubleshooting
-
-####  Video Processing
-  - Modern FFmpeg parameter usage (fps_mode instead of deprecated vsync)
-  - More reliable frame extraction and video compilation
-  - Better handling of various video formats and frame rates
-
-#### Bug Fixes
-
-  - Fixed race conditions in queue processing that could cause tasks to be skipped or duplicated
-  - Fixed frame interpolation not being applied to videos
-  - Fixed metadata being lost after upscaling operations
-  - Fixed FFmpeg deprecation warnings
-  - Fixed various edge cases in queue state management
-  - Removed error-prone metadata copying code
-
-### Dependencies
-
-  New dependencies added:
-  - portalocker - Cross-platform file locking for queue safety
-  - psutil - Better process management and monitoring
-  - Pillow - Image processing utilities
-
-#### Upgrade Notes
-
-  No manual migration required. Existing queue files will be automatically upgraded to the new format. If corruption is detected, a backup will be created before recovery.
-
-  
 ## Overview
 
-Metascan is an open source desktop application for browsing, organizing, and upscaling AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing a comprehensive interface to manage your media collection with advanced filtering and upscaling capabilities.
+Metascan is an open source application for browsing, organizing, and upscaling AI-generated images and videos. It automatically extracts metadata from AI generation tools like ComfyUI, SwarmUI, and Fooocus, providing a comprehensive interface to manage your media collection with advanced filtering, similarity search, and upscaling capabilities.
 
-<img src="/assets/screenshot.png" alt="Metascan Main Interface" width="600">
+The application uses a client-server architecture: a Python backend handles scanning, AI processing, and database management, while a Vue.js web frontend provides the browsing interface. This enables running the backend on a powerful GPU machine and accessing it remotely from any device.
+
+<img src="/assets/screenshot.jpg" alt="Metascan Main Interface" width="600">
 
 ## Screenshots
 
-<div align="center">
-  <img src="/assets/media_viewer.png" alt="Media Viewer" width="256">
-  <img src="/assets/context_menu.png" alt="Context Menu" width="256">
+<div align="left">
+  <img src="/assets/media_viewer.jpg" alt="Media Viewer" width="256">
 </div>
-<p align="center"><em>Media viewer with zoom controls and right-click context menu</em></p>
+<p align="left"><em>Media viewer</em></p>
 
-<div align="center">
-  <img src="/assets/upscale.png" alt="Upscale Dialog" width="256">
-  <img src="/assets/upscale_queue.png" alt="Upscale Queue" width="256">
+<div align="left">
+  <img src="/assets/model_management.jpg" alt="Model Management Dialog" width="256">
+  <img src="/assets/smartfolder-create.jpg" alt="SmartFolder Creation" width="256">
 </div>
-<p align="center"><em>Upscaling configuration dialog and queue management window</em></p>
+<p align="left"><em>Complete Model Management and Smart Folders</em></p>
 
-<div align="center">
-  <img src="/assets/upscaling_progress.png" alt="Upscaling Progress" width="256">
-</div>
-<p align="center"><em>Real-time upscaling progress indicator in toolbar</em></p>
+## Quick Start
 
-## Quick Start Guide
+### Running the Application
 
-**First-time setup in 5 easy steps:**
+1. **Start the backend server:**
+   ```bash
+   source venv/bin/activate
+   python run_server.py
+   ```
+   The API server starts at `http://localhost:8700` with auto-generated docs at `/docs`.
 
-1. **Add Directories**: Click the **Config** button in the toolbar to add folders containing your AI-generated images and videos
+2. **Start the frontend dev server:**
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+   Open `http://localhost:5173` in your browser.
 
-2. **Scan Media**: Click the **Scan** button to index your media files and extract metadata (this may take a few minutes for large collections)
+3. **Add directories:** Click **Config** in the toolbar to add folders containing your AI-generated media.
 
-3. **Browse Images**: Use the **S/M/L** thumbnail size buttons in the toolbar to adjust thumbnail size for comfortable browsing
+4. **Scan media:** Click **Scan** to index files and extract metadata.
 
-4. **Filter Content**: Use the left panel to filter by:
-   - **Paths** - Filter by directory and sub-directory
-   - **Prompts** - Filter text prompts keywords used in generation
-   - **Models** - Filter by AI models used
-   - **LoRAs** - Filter by specific LoRA models
-   - **File Extension** - Filter by file type
+5. **Browse and filter:** Use the left panel filters, double-click thumbnails to view full-size, right-click for context menu actions.
 
-6. **Upscale Media**: Right-click any image or video and select "Upscale" to enhance quality using Real-ESRGAN models
+### Remote Access
 
-**Pro Tips**: Double-click any thumbnail to view full-size media with zoom controls. Mark favorites by clicking the star icon or pressing "F". Access scanning and theme selection from the **Tools** menu.
+To access Metascan from another device on your network:
+
+```bash
+# Start the backend (binds to all interfaces by default)
+python run_server.py
+
+# Optionally set an API key for security
+METASCAN_API_KEY=your-secret-key python run_server.py
+```
+
+Then open `http://<server-ip>:8700` from any browser. For the dev frontend, run `cd frontend && npm run dev -- --host` and access port 5173.
 
 ## Features
 
-### Media Support
-- Image formats: PNG, JPG, WEBP with embedded metadata
-- Video formats: MP4, AVI, MOV with metadata extraction
-- Thumbnail generation with FFMPEG integration
+### Media Browsing
+- Virtual-scrolling thumbnail grid for large collections (12,000+ items)
+- Three-panel resizable layout: filters, thumbnails, metadata
+- Thumbnail size presets (S/M/L)
+- Sorting by file name, date added, or date modified
+- Favorites system with star toggle
+- Dark/light mode following system preference
+
+### Media Viewer
+- Full-screen overlay with image zoom (mouse wheel) and pan (click-drag)
+- Video player with play/pause, seek bar, volume, playback speed (0.25x-2x)
+- Frame-by-frame stepping (comma/period keys)
+- Previous/next navigation with keyboard arrows
+- Per-file playback speed persistence
+- Keyboard shortcuts help overlay
+
+### Slideshow
+- Ordered or random (shuffled) playback
+- Configurable image duration (3-30 seconds)
+- Fade transition with adjustable duration
+- Auto-hide controls after 3 seconds
+- Video support (no auto-advance, manual navigation)
+
+### Similarity & Content Search
+- CLIP-powered text-to-image content search (type a description, find matching media)
+- FAISS-based visual similarity search (right-click any thumbnail, "Find Similar")
+- Similarity banner with adjustable threshold slider
+- Multiple CLIP model sizes (Small/Medium/Large)
+- Device selection (Auto/CPU/CUDA)
+- Embedding index build/rebuild with live progress
+
+### Hardware Detection & Feature Gating
+- Auto-detects CPU / RAM / CUDA / MPS / Vulkan / glibc / NLTK at startup
+- Classifies the host into one of five tiers (CPU only, Apple Silicon, CUDA entry/mainstream/workstation)
+- Per-model availability + recommendation chips in the Models config tab — green "recommended" picks the right CLIP/upscaler for your tier; red "unsupported" explains *why* on hover (insufficient VRAM, no real Vulkan device, glibc too old, etc.)
+- Surfaces actionable warnings: WSL2 without GPU Vulkan blocks RIFE, Linux glibc < 2.29 breaks `rife-ncnn-vulkan`, NLTK ≥ 3.8.2 needs `punkt_tab` instead of legacy `punkt`
+- Shared device picker (CUDA → MPS → CPU) so Apple Silicon Macs now use MPS for CLIP inference automatically
+
+### Duplicate Detection
+- pHash-based perceptual duplicate grouping
+- Side-by-side comparison with thumbnails
+- Checkbox selection for batch deletion
+- Files moved to trash (recoverable)
 
 ### Media Upscaling
-- Real-ESRGAN powered upscaling for images and videos
-- Multiple model options: General, Anime, Face enhancement
-- Scale factors: 2x, 4x, 8x upscaling
-- Face enhancement option for portrait images
-- Frame interpolation for smoother video playback
-- Metadata preservation during upscaling
-- Process-based queue system for reliable operation
-- Real-time progress tracking with cancellation support
+- Real-ESRGAN upscaling (2x/4x) with General and Anime models
+- GFPGAN face enhancement
+- RIFE video frame interpolation (2x/4x/8x FPS multiplier)
+- 1-4 concurrent workers
+- Queue management with pause/resume, clear completed
+- Real-time progress tracking via WebSocket
+
+### Scanning & Indexing
+- Multi-phase scan with real-time progress (file-by-file WebSocket updates)
+- Stale entry cleanup for deleted files
+- Automatic thumbnail generation
+- pHash computation during scan
+- File system watcher with auto-refresh
 
 ### Metadata Extraction
 - ComfyUI workflow extraction with enhanced parsing
-- SwarmUI parameter parsing  
-- Fooocus metadata support with improved detection
-- Custom prompt tokenization with NLTK
-- Enhanced extractor system for better metadata detection
+- SwarmUI parameter parsing
+- Fooocus metadata support
+- Extracts: prompt, negative prompt, model, sampler, scheduler, steps, CFG scale, seed, LoRAs
+- Custom prompt tokenization with NLTK for searchable keywords
 
-### Filtering & Search
-- Filter by file directories, prompt keywords, models, LoRAs, and file extensions, 
-- Inverted index for fast search across large collections
-- Real-time filter updates
-- Favorites system for organizing preferred media
+### Filtering
+- Filter by directory path (with subfolder support)
+- Filter by AI source, model, LoRA, file extension, tags, prompt keywords
+- Collapsible filter sections with item counts
+- AND logic between filter types, OR within same type
+- Favorites-only toggle
 
-### User Interface
-- Virtualized thumbnail grid for performance with large collections
-- Three-panel layout: filters, thumbnails, metadata
-- Flexible thumbnail sorting (File Name, Date Added, Date Modified)
-- Resizable panels with persistent layout
-- Full-size media viewer with zoom capabilities
-- Tools menu with centralized access to scanning and themes
-- Configurable mouse wheel sensitivity
-- Material design theme support with multiple color schemes
+### Context Menu
+- Open (full-screen viewer)
+- Find Similar (enter similarity mode)
+- Upscale (open upscale dialog)
+- Delete (move to trash with confirmation)
 
-### Upscaling Interface
-- Dedicated upscaling dialog with model selection
-- Queue management window for monitoring operations
-- Progress indicators with detailed status information
-- Task cancellation and removal capabilities
-- Support for batch operations
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| F5 | Refresh media list |
+| Ctrl+S | Open scan dialog |
+| Ctrl+Shift+S | Open slideshow |
+| Ctrl+Shift+D | Open duplicate finder |
+| Ctrl+U | Upscale selected media |
+| Esc | Close viewer / exit similarity mode |
+| Space | Play/Pause (video) |
+| Left/Right | Previous/Next media (in viewer) |
+| Up/Down | Volume up/down (video) |
+| , / . | Previous/Next frame (video) |
+| F | Toggle favorite |
+| M | Mute/Unmute (video) |
+| Ctrl+D | Delete file |
+| H or ? | Show shortcuts help (in viewer) |
 
 ## Tech Stack
 
-**Core Technologies:**
-- **Python 3.11** - Core application language (required for package compatibility)
-- **PyQt6** - Cross-platform GUI framework
-- **SQLite** - Local database for metadata storage
-- **NLTK** - Natural language processing for prompt analysis
+### Backend
+- **Python 3.11** - Core application language
+- **FastAPI** - Async REST API and WebSocket server
+- **Uvicorn** - ASGI server
+- **SQLite** - Local database with WAL mode for concurrency
+- **NLTK** - Prompt tokenization and keyword extraction
 
-**Media Processing:**
+### Frontend
+- **Vue 3** - Composition API with `<script setup>` syntax
+- **TypeScript** - Type-safe frontend code
+- **Vite** - Build tool with hot module replacement
+- **Pinia** - State management (media, filters, settings, scan, similarity, upscale stores)
+- **PrimeVue** - UI component library (Aura theme)
+
+### AI / Media Processing
+- **open_clip_torch** - CLIP embeddings for content search and similarity
+- **faiss-cpu** - Vector similarity index for fast nearest-neighbor search
+- **imagehash** - Perceptual hashing for duplicate detection
+- **Real-ESRGAN** - AI image/video upscaling
+- **GFPGAN** - Face enhancement
+- **RIFE** - Video frame interpolation
 - **Pillow** - Image processing and thumbnail generation
-- **FFMPEG-Python** - Video processing and thumbnail extraction
-- **Real-ESRGAN** - AI-powered upscaling models
-- **Watchdog** - File system monitoring for real-time updates
+- **ffmpeg-python** - Video processing and thumbnail extraction
 
-**Development Tools:**
-- **pytest** - Unit testing framework
+### Infrastructure
+- **Watchdog** - File system monitoring for real-time updates
+- **send2trash** - Safe file deletion (recoverable)
+- **portalocker** - Cross-platform file locking for queue safety
+- **orjson** - Fast JSON parsing for media deserialization
+
+### Development
+- **pytest** - Unit testing
 - **black** - Code formatting
 - **mypy** - Static type checking
+- **vue-tsc** - TypeScript checking for Vue
 
-## Installation 
+## Installation
 
 ### Prerequisites
 
 - **Python 3.11** (required for package compatibility)
+- **Node.js 18+** (for the Vue frontend)
 - **FFMPEG** - Required for video thumbnail generation and upscaling
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
@@ -241,23 +272,21 @@ Metascan is an open source desktop application for browsing, organizing, and ups
    cd metascan
    ```
 
-2. **Set up virtual environment:**
+2. **Set up Python backend:**
    ```bash
    python3.11 -m venv venv
-   
+
    # Activate virtual environment:
    # On macOS/Linux:
    source venv/bin/activate
    # On Windows:
    venv\Scripts\activate
-   ```
 
-3. **Install production dependencies:**
-   ```bash
+   # Install all dependencies (backend + server)
    pip install -r requirements.txt
    ```
 
-4. **Set up NLTK data and AI models (first time only):**
+3. **Set up NLTK data and AI models (first time only):**
    ```bash
    python setup_models.py
    ```
@@ -266,134 +295,55 @@ Metascan is an open source desktop application for browsing, organizing, and ups
    - AI upscaling models: RealESRGAN, GFPGAN, RIFE (~915 MB total)
    - Models can be downloaded later when first using upscaling features
 
+4. **Set up Vue frontend:**
+   ```bash
+   cd frontend
+   npm install
+   cd ..
+   ```
+
 5. **Run the application:**
    ```bash
-   python main.py
+   # Terminal 1: Start backend
+   source venv/bin/activate
+   python run_server.py
+
+   # Terminal 2: Start frontend
+   cd frontend
+   npm run dev
    ```
+   Open `http://localhost:5173` in your browser.
 
 ### Development Setup (Contributors)
 
 For local development with all dev tools:
 
-1. **Follow steps 1-2 above, then:**
+1. **Follow steps 1-4 above, then:**
    ```bash
-   # Install production dependencies
-   pip install -r requirements.txt
-   
-   # Install development dependencies (testing, formatting, type checking)
+   # Install development dependencies
    pip install -r requirements-dev.txt
-   
-   # Set up NLTK data and AI models
-   python setup_models.py
    ```
 
 2. **Verify development setup:**
    ```bash
-   # Run tests
+   # Run Python tests
    pytest
-   
-   # Check code formatting and type checking
+
+   # Check Python code quality
    make quality
+
+   # Check frontend types
+   cd frontend && npx vue-tsc --noEmit
    ```
 
-### Alternative Installation (Editable)
+### Environment Variables
 
-For development with editable installation:
-
-```bash
-pip install -e .
-metascan  # Run from anywhere after installation
-```
-
-## Usage
-
-### First Launch
-
-1. **Configure scan directories:**
-   - Click the "Configure" button in the toolbar
-   - Add directories containing your AI-generated media
-   - Click "Save" to apply settings
-
-2. **Scan your media:**
-   - Use **Tools > Scan** or click "Scan" to index your media files
-   - The scanning process will extract metadata and generate thumbnails
-   - Progress is shown in the status bar
-
-3. **Browse and filter:**
-   - Use the left panel to filter by directory paths, prompt keywords, models, LoRAs, and file extensions
-   - View thumbnails in the center panel
-   - See detailed metadata in the right panel
-   - Double-click thumbnails to view full-size media
-
-### Media Upscaling
-
-1. **Single File Upscaling:**
-   - Right-click any image or video in the thumbnail view
-   - Select "Upscale" from the context menu
-   - Choose upscaling options (model, scale factor, enhancements)
-   - Click "Start Upscaling" to begin processing
-
-2. **Queue Management:**
-   - Access the upscaling queue via the main menu
-   - Monitor progress of active upscaling tasks
-   - Cancel or remove tasks as needed
-   - View detailed status and error information
-
-3. **Upscaling Options:**
-   - **Model Type**: General (photos), Anime (illustrations), Face (portraits)
-   - **Scale Factor**: 2x, 4x, or 8x magnification
-   - **Face Enhancement**: Improve facial details (images only)
-   - **Frame Interpolation**: Smooth video playback (videos only)
-   - **Metadata Preservation**: Retain original metadata in upscaled files
-
-### Key Features
-
-- **Sorting:** Organize your media collection with flexible sorting options
-  - Access via **View > Sort by** menu with three options:
-    - **File Name** - Alphabetical sorting (default)
-    - **Date Added** - Sort by creation/scan date
-    - **Date Modified** - Sort by file modification date
-  - Sort order persists across all operations (filtering, scanning, app restart)
-  - Current sort selection shown with checkmark in menu
-
-- **Filtering:** Click filter items in the left panel to refine your view
-
-- **Favorites:** Mark media as favorites for quick access
-  - In media viewer: Click the star icon in the title bar or press `F` key
-  - Star icon shows hollow for non-favorites, filled gold for favorites
-  - Use the Favorites filter in the left panel to show only favorite media
-
-- **Search:** Use text filters to search across prompts and metadata
-
-- **Viewer:** Double-click images/videos for full-size viewing with zoom controls
-
-- **Delete Media:** Press `Cmd+D` (macOS) or `Ctrl+D` (Windows/Linux) to delete selected media
-  - Works from both the thumbnail view and media viewer
-  - Shows confirmation dialog with OK button focused
-  - Moves files to system trash/recycle bin (recoverable)
-  - Automatically updates database and refreshes views
-  - In viewer: navigates to next media (or previous if at end)
-
-- **Theme Selection:** Access multiple material design themes via **Tools > Themes**
-
-- **Mouse Sensitivity:** Configure scroll wheel sensitivity in the configuration dialog
-
-## Menu Reference
-
-### File Menu
-- **Open** - Open selected media in system default application
-- **Open Folder** - Open containing folder in file manager
-- **Delete file** (Ctrl+D) - Delete selected media file
-- **Configuration** - Open settings dialog
-- **Exit** (Ctrl+Q) - Close application
-
-### View Menu
-- **Refresh** (F5) - Reload media collection
-- **Sort by** - Choose sorting method (File Name, Date Added, Date Modified)
-
-### Tools Menu
-- **Scan** (Ctrl+S) - Scan directories for new media
-- **Themes** - Select application theme
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `METASCAN_HOST` | `0.0.0.0` | Backend server bind address |
+| `METASCAN_PORT` | `8700` | Backend server port |
+| `METASCAN_API_KEY` | (none) | API key for authenticated access (optional) |
+| `METASCAN_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins |
 
 ## Configuration
 
@@ -401,106 +351,213 @@ Configuration is stored in `config.json` in the application directory:
 
 ```json
 {
-  "scan_directories": [
-    "/path/to/your/ai/images",
-    "/path/to/your/ai/videos"
+  "directories": [
+    {
+      "filepath": "/path/to/your/ai/images",
+      "search_subfolders": true
+    }
   ],
   "watch_directories": true,
-  "thumbnail_size": [300, 300],
+  "thumbnail_size": [200, 200],
   "cache_size_mb": 500,
-  "sort_order": "file_name",
-  "scroll_wheel_step": 120,
-  "theme": "dark_teal.xml"
+  "sort_order": "date_added",
+  "theme": "light_blue_500.xml",
+  "similarity": {
+    "clip_model": "small",
+    "device": "auto",
+    "phash_threshold": 10,
+    "clip_threshold": 0.7,
+    "search_results_count": 100,
+    "video_keyframes": 4,
+    "compute_phash_during_scan": true
+  }
 }
 ```
 
 ### Configuration Options
 
-- **`scan_directories`**: List of directories to scan for media files
+- **`directories`**: List of scan directories with subfolder toggle
 - **`watch_directories`**: Enable real-time directory monitoring
 - **`thumbnail_size`**: Thumbnail dimensions `[width, height]` in pixels
 - **`cache_size_mb`**: Maximum thumbnail cache size in megabytes
-- **`sort_order`**: Default thumbnail sorting method
-  - `"file_name"` - Alphabetical by filename (default)
-  - `"date_added"` - Sort by creation/scan date
-  - `"date_modified"` - Sort by file modification date
-- **`scroll_wheel_step`**: Mouse wheel scroll sensitivity (pixels per notch)
-- **`theme`**: Selected UI theme file
+- **`sort_order`**: Default sorting (`"date_added"`, `"file_name"`, `"date_modified"`)
+- **`theme`**: Selected UI theme
+- **`similarity.clip_model`**: CLIP model size (`"small"`, `"medium"`, `"large"`)
+- **`similarity.device`**: Compute device (`"auto"`, `"cpu"`, `"cuda"`)
+- **`similarity.clip_threshold`**: Similarity search threshold (0-1)
+- **`similarity.search_results_count`**: Max similarity search results
+- **`similarity.compute_phash_during_scan`**: Compute perceptual hashes during scan
+
+## API Reference
+
+The backend exposes a REST API at `http://localhost:8700`. Full interactive documentation is available at `/docs` (Swagger UI) or `/redoc`.
+
+### Key Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/media` | List all media (with sort/filter params) |
+| GET | `/api/media/{path}` | Get single media record |
+| DELETE | `/api/media/{path}` | Delete media (move to trash) |
+| PATCH | `/api/media/{path}` | Update favorite/playback speed |
+| GET | `/api/stream/{path}` | Stream file with Range support |
+| GET | `/api/thumbnails/{path}` | Serve cached thumbnail |
+| GET | `/api/filters` | Get filter groups with counts |
+| POST | `/api/filters/apply` | Apply filters, return matching paths |
+| POST | `/api/scan/prepare` | Count files for scan confirmation |
+| POST | `/api/scan/start` | Begin scan (progress via WebSocket) |
+| POST | `/api/similarity/search` | Find similar media |
+| POST | `/api/similarity/content-search` | CLIP text-to-image search |
+| POST | `/api/duplicates/find` | Find duplicate groups |
+| POST | `/api/upscale` | Submit upscale tasks |
+| GET | `/api/upscale/queue` | List queue tasks |
+| WS | `/ws` | Multiplexed WebSocket (scan, upscale, embedding, watcher channels) |
+
+## Architecture
+
+### Client-Server Architecture
+
+```
+Browser (Vue 3 SPA)           Backend (FastAPI)
+  ├── Pinia stores    ←REST→  ├── API routes
+  ├── WebSocket       ←WS──→  ├── WebSocket manager
+  └── Components              ├── Services (async wrappers)
+                              ├── Core modules (scanner, DB, embeddings)
+                              ├── Workers (subprocess: upscale, embedding)
+                              └── SQLite database
+```
+
+- **Frontend** is a thin client handling display and user interaction
+- **Backend** handles all heavy processing: scanning, AI embeddings, upscaling
+- **WebSocket** provides real-time progress for scans, upscaling, and file watcher events
+- **Subprocess workers** isolate long-running AI tasks (embedding generation, upscaling) from the main server process
+
+### Database Structure
+
+Media metadata is stored in a SQLite database with WAL mode:
+
+- **media**: Serialized Media objects as JSON with favorite status and playback speed
+- **indices**: Inverted index for fast filtering (source, model, extension, path, tag, prompt, lora)
+- **media_hashes**: Perceptual hashes and CLIP embedding status
+
+## Hardware Detection & Feature Gating
+
+Metascan ships a wide range of AI features (CLIP embeddings, Real-ESRGAN, GFPGAN, RIFE, NLTK), and each one has different host requirements. To avoid silent failures and "why is this so slow" surprises, the backend probes the machine on first request and reports a **tier** plus a **gate** for every model. The Models tab in the config dialog renders this as a tier badge and per-row chips.
+
+### What gets probed
+
+`metascan/core/hardware.py` runs the following probes once per process (cached via `@lru_cache`):
+
+| Probe | What it reads | Why |
+|---|---|---|
+| Platform / WSL | `platform.system()`, `platform.machine()`, `/proc/version` | Selects MPS path on Apple Silicon, surfaces WSL2 warnings |
+| RAM | `psutil.virtual_memory()` (falls back to `/proc/meminfo`) | Gates ViT-H/14 on Apple Silicon (needs ≥ 24 GB unified) |
+| CUDA | `torch.cuda.is_available()`, device props | Tier classification, per-model VRAM gates |
+| MPS | `torch.backends.mps.is_available()` + `is_built()` | Apple Silicon device selection |
+| Vulkan | `vulkaninfo --summary` | Required by RIFE; distinguishes real GPU from `llvmpipe` software fallback |
+| glibc | `os.confstr("CS_GNU_LIBC_VERSION")` | `rife-ncnn-vulkan` needs glibc ≥ 2.29 |
+| NLTK | `nltk.__version__` | NLTK ≥ 3.8.2 requires `punkt_tab` (CVE-2024-39705 fix) |
+
+All probes are best-effort: a probe that fails leaves its field at the dataclass default, never raises, and never blocks startup.
+
+### Tier classification
+
+Hosts are bucketed into one of five tiers based on the strongest GPU detected (CUDA always wins over MPS):
+
+| Tier | Trigger | Typical hardware |
+|---|---|---|
+| `cpu_only` | No CUDA, no MPS | Generic Linux/Windows server, older Intel Macs |
+| `apple_silicon` | MPS available on `arm64` Darwin | M1 / M2 / M3 / M4 Macs |
+| `cuda_entry` | CUDA present, < 6 GB VRAM | GTX 1060, GTX 1660, RTX 3050 |
+| `cuda_mainstream` | CUDA present, 6–12 GB VRAM | RTX 3060, RTX 3070, RTX 4070 |
+| `cuda_workstation` | CUDA present, ≥ 12 GB VRAM | RTX 3090, RTX 4090, A4000+ |
+
+### What each model is gated on
+
+| Model | Gated unavailable when… | Recommended on… |
+|---|---|---|
+| `clip-small` (ViT-B/32) | Never — runs on anything | All tiers as fallback; default on CPU/Apple Silicon |
+| `clip-medium` (ViT-L/14) | CUDA with < 2 GB VRAM | `cuda_entry` (≥ 2 GB) and `cuda_mainstream` |
+| `clip-large` (ViT-H/14) | CPU-only, CUDA < 6 GB, or Apple Silicon < 24 GB unified RAM | `cuda_workstation` |
+| `resr-x2` | Never (CPU runs at 30–60 s / 1080p) | Any GPU host |
+| `resr-x4` | CUDA with < 4 GB VRAM (CPU is "available but slow") | `cuda_mainstream` and `cuda_workstation` |
+| `resr-x4-anime` | Never | Any GPU host |
+| `gfpgan-v1.4` | CUDA with < 3 GB VRAM | `cuda_mainstream` and `cuda_workstation` |
+| `rife` | No Vulkan, or only `llvmpipe` (software) device — typical of WSL2 without GPU drivers | Any host with a real Vulkan device |
+| `nltk-punkt` | NLTK ≥ 3.8.2 (replaced by `punkt_tab`) | NLTK < 3.8.2 |
+| `nltk-punkt-tab` | NLTK < 3.8.2 (legacy uses `punkt`) | NLTK ≥ 3.8.2 |
+| `nltk-stopwords` | Never | Always |
+
+`clip-small` / `clip-medium` are also marked "available but not recommended" on CPU-only hosts — they'll run, just very slowly. The chip tooltip surfaces the reason ("ViT-H/14 is too slow on CPU.", "Requires 4 GB VRAM for 1080p; detected 2 GB.", etc.).
+
+### Auto-warnings
+
+The hardware report ships a `warnings` array surfaced as yellow banners in the Models tab:
+
+- **WSL2 without GPU Vulkan** — *"WSL2 detected without GPU Vulkan; RIFE will not work. Install GPU drivers in Windows host."* WSL2 ships an llvmpipe-only Vulkan loader by default; real GPU access requires updated NVIDIA / AMD drivers on the Windows host.
+- **Old glibc on Linux** — *"glibc {version} below 2.29; rife-ncnn-vulkan will fail to load."* The bundled `rife-ncnn-vulkan` binary links against glibc 2.29 symbols (Ubuntu 18.04 LTS and older won't work).
+
+### Shared torch device picker
+
+`select_torch_device(preference="auto")` is the single source of truth for "which device should this PyTorch path run on?". `EmbeddingManager._resolve_device` delegates to it, and any future PyTorch path (Real-ESRGAN, GFPGAN if/when wired) should do the same. Precedence: explicit preference (`"cpu"` / `"cuda"` / `"mps"`) is returned verbatim; `"auto"` picks CUDA → MPS (Darwin only) → CPU. **Apple Silicon Macs previously fell through to CPU** for CLIP because the old resolver only checked `cuda.is_available()`; the shared picker fixes that.
+
+### API surface
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/models/hardware` | `{tier, report, ...legacy fields}` — `report` carries every probe field |
+| `GET /api/models/status` | Existing model rows + `tier` + `gates: {model_id: {available, recommended, reason}}` |
+
+Hardware detection is per-process and cached for the server lifetime. Plugging in an eGPU at runtime requires a server restart — call `detect_hardware.cache_clear()` if you need to re-probe in tests or scripts.
 
 ## Development
 
 ### Build Commands
 
-The project includes a Makefile for common development tasks:
-
 ```bash
-# Set up development environment
-make setup
+# Backend
+make serve            # Run the FastAPI backend server
+python run_server.py  # Same, without make
 
-# Run the application
-make run
+# Frontend
+cd frontend
+npm run dev        # Development server with HMR
+npm run build      # Production build (vue-tsc + vite)
+npx vue-tsc --noEmit  # Type check only
 
-# Run tests
-make test
-
-# Code quality checks (formatting and type checking)
-make quality
-
-# Install package in development mode
-make install-dev
+# Quality
+make test          # Run Python tests
+make quality       # Black formatting + mypy type checking
 ```
 
 ### Code Style
 
-The project uses `black` for code formatting and `mypy` for type checking:
+**Python:** `black` for formatting, `mypy` for type checking
+**TypeScript/Vue:** `vue-tsc` for type checking, Vite for building
 
 ```bash
-# Format code
-black metascan/ tests/
-
-# Type checking
+# Python
+black metascan/ tests/ backend/
 mypy metascan/
 
-# Run both (via Makefile)
-make quality
+# Frontend
+cd frontend && npx vue-tsc --noEmit
 ```
 
 ### Testing
 
-Run the test suite:
-
 ```bash
-# Run all tests
+# Python tests
 pytest
-
-# Run with coverage
 pytest --cov=metascan
-
-# Run specific test file
 pytest tests/test_prompt_tokenizer.py
+
+# Frontend type checking
+cd frontend && npx vue-tsc --noEmit
+
+# Frontend production build verification
+cd frontend && npm run build
 ```
-
-## Architecture
-
-### Process-Based Upscaling
-
-The application uses a robust process-based architecture for upscaling operations:
-
-- **Worker Processes**: Upscaling runs in isolated subprocess for stability
-- **JSON Communication**: Inter-process communication via atomic JSON file operations
-- **Queue Management**: Centralized queue with real-time status updates
-- **Signal Handling**: Graceful cancellation via SIGTERM signals
-- **Progress Tracking**: Real-time progress updates with detailed status information
-
-### Database Structure
-
-Media metadata is stored in a SQLite database with the following key tables:
-
-- **media**: Core media file information and metadata
-- **prompts**: Tokenized prompt data for search indexing
-- **models**: AI model information extracted from metadata
-- **loras**: LoRA model references
-- **tags**: User-defined and extracted tags
 
 ## Contributing
 
@@ -514,62 +571,38 @@ We welcome contributions to Metascan! Here's how to get started:
    cd metascan
    ```
 
-2. **Set up development environment:**
+2. **Set up both backend and frontend:**
    ```bash
-   make setup
-   ```
+   # Backend
+   python3.11 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
+   python setup_models.py
 
-3. **Install pre-commit hooks (optional but recommended):**
-   ```bash
-   pip install pre-commit
-   pre-commit install
+   # Frontend
+   cd frontend && npm install && cd ..
    ```
 
 ### Development Guidelines
 
 **Code Standards:**
-- Follow PEP 8 style guidelines
-- Use `black` for code formatting
+- Follow PEP 8 style guidelines for Python
+- Use TypeScript for all frontend code
+- Use `black` for Python formatting, `vue-tsc` for frontend type checking
 - Add type hints where appropriate
 - Write docstrings for public functions and classes
-- Maintain mypy type checking compliance
 
 **Testing:**
 - Write tests for new features using `pytest`
 - Maintain or improve test coverage
-- Test UI changes manually across different screen sizes
-- Include tests for metadata extraction with sample files
-- Test upscaling functionality with various media formats
+- Verify frontend builds cleanly (`npm run build`)
+- Test both backend API endpoints and frontend components
 
 **Commit Guidelines:**
-- Use clear, descriptive commit messages
+- Use clear, descriptive commit messages with conventional prefixes (`feat:`, `fix:`, `refactor:`)
 - Reference issues in commits when applicable
 - Keep commits atomic and focused on single changes
-
-### Areas for Contribution
-
-**Bug Reports & Fixes**
-- Report bugs with detailed steps to reproduce
-- Include system information and error messages
-- Fix existing issues marked as "good first issue"
-
-**Feature Requests & Implementation**
-- New metadata extractors for additional AI tools
-- Additional file format support
-- UI/UX improvements and accessibility features
-- Performance optimizations for large media collections
-- Enhanced upscaling models and options
-
-**Documentation**
-- Improve code documentation and docstrings
-- Create tutorials and usage examples
-- Translate documentation to other languages
-
-**Testing & Quality Assurance**
-- Add test coverage for untested code
-- Create integration tests
-- Test on different operating systems
-- Performance testing with large datasets
 
 ### Submitting Changes
 
@@ -582,28 +615,17 @@ We welcome contributions to Metascan! Here's how to get started:
    ```bash
    make test
    make quality
+   cd frontend && npm run build
    ```
 
 3. **Commit and push:**
    ```bash
    git add .
-   git commit -m "Add your descriptive commit message"
+   git commit -m "feat: add your descriptive commit message"
    git push origin feature/your-feature-name
    ```
 
-4. **Create a pull request:**
-   - Describe your changes clearly
-   - Reference any related issues
-   - Include screenshots for UI changes
-   - Ensure all tests pass
-
-### Getting Help
-
-- **Issues**: Use GitHub Issues for bug reports and feature requests
-- **Discussions**: Use GitHub Discussions for general questions
-- **Code Review**: All contributions go through code review process
-
-Thank you for contributing to Metascan!
+4. **Create a pull request** with a clear description, related issues, and screenshots for UI changes.
 
 ## License
 
@@ -613,6 +635,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 - Thanks to the creators of ComfyUI, SwarmUI, and Fooocus for their amazing AI generation tools
 - Real-ESRGAN team for the upscaling models
-- Built with PyQt6 for cross-platform desktop GUI
+- OpenCLIP for CLIP model implementations
+- Built with Vue 3 and FastAPI for modern web architecture
 - Powered by SQLite for efficient local data storage
 - Uses FFMPEG for robust video processing capabilities
