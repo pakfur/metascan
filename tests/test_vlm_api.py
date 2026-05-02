@@ -104,3 +104,19 @@ def test_retag_cancel_endpoint(app_with_stub_vlm, tmp_path: Path):
         r2 = c.delete(f"/api/vlm/retag/{job_id}")
     assert r2.status_code == 200
     assert r2.json()["status"] == "cancelled"
+
+
+async def test_active_endpoint_calls_swap(app_with_stub_vlm):
+    app, stub = app_with_stub_vlm
+    stub.swap_model = AsyncMock()
+    with TestClient(app) as c:
+        r = c.post("/api/vlm/active", json={"model_id": "qwen3vl-8b"})
+    assert r.status_code == 200
+    stub.swap_model.assert_awaited_with("qwen3vl-8b")
+
+
+def test_active_endpoint_400_on_unknown_model(app_with_stub_vlm):
+    app, _ = app_with_stub_vlm
+    with TestClient(app) as c:
+        r = c.post("/api/vlm/active", json={"model_id": "qwen3vl-bogus"})
+    assert r.status_code == 400
