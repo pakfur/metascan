@@ -18,6 +18,7 @@ import {
   type InferenceStatusPayload,
   type ModelRow,
 } from '../api/models'
+import { fetchVlmStatus, setActiveVlm, type VlmState, type VlmStatus } from '../api/vlm'
 import type { Gate, Tier } from '../types/hardware'
 import { useWebSocket } from '../composables/useWebSocket'
 
@@ -50,6 +51,27 @@ export const useModelsStore = defineStore('models', () => {
     () =>
       inferenceState.value === 'loading' || inferenceState.value === 'spawning',
   )
+
+  // VLM (Qwen3-VL tagging) state — bootstrapped from /api/vlm/status, kept
+  // live by the 'models' WS channel's vlm_status events.
+  const vlmState = ref<VlmState>('idle')
+  const vlmModelId = ref<string | null>(null)
+  const vlmBaseUrl = ref<string | null>(null)
+  const vlmError = ref<string | null>(null)
+  const vlmProgress = ref<Record<string, unknown>>({})
+
+  const isVlmReady = computed(() => vlmState.value === 'ready')
+  const isVlmLoading = computed(
+    () => vlmState.value === 'loading' || vlmState.value === 'spawning',
+  )
+
+  function applyVlmPayload(p: Partial<VlmStatus>) {
+    if (p.state) vlmState.value = p.state
+    if ('model_id' in p) vlmModelId.value = p.model_id ?? null
+    if ('base_url' in p) vlmBaseUrl.value = p.base_url ?? null
+    if ('error' in p) vlmError.value = p.error ?? null
+    if (p.progress) vlmProgress.value = p.progress
+  }
 
   useWebSocket('models', (event, data) => {
     switch (event) {
@@ -87,6 +109,13 @@ export const useModelsStore = defineStore('models', () => {
         downloadErrors.value[p.id] = p.error || 'download failed'
         break
       }
+      case 'vlm_status':
+        applyVlmPayload(data as unknown as VlmStatus)
+        break
+      case 'vlm_progress':
+        // Generic VLM progress events from retag jobs etc.
+        vlmProgress.value = data as Record<string, unknown>
+        break
     }
   })
 
@@ -100,10 +129,11 @@ export const useModelsStore = defineStore('models', () => {
   }
 
   async function loadStatus() {
-    const [statusResp, hw, infer] = await Promise.all([
+    const [statusResp, hw, infer, vlm] = await Promise.all([
       fetchModelsStatus(),
       fetchHardware(),
       fetchInferenceStatus(),
+      fetchVlmStatus(),
     ])
     models.value = statusResp.models
     hfTokenSet.value = statusResp.hf_token_set
@@ -113,6 +143,7 @@ export const useModelsStore = defineStore('models', () => {
     gates.value = statusResp.gates
     hardware.value = hw
     applyInferencePayload(infer)
+    applyVlmPayload(vlm)
   }
 
   async function refreshHfToken() {
@@ -172,6 +203,20 @@ export const useModelsStore = defineStore('models', () => {
     await rebuildEmbeddingIndex()
   }
 
+  async function setActiveVlmModel(modelId: string): Promise<void> {
+    // Optimistic UI: flip the loading state immediately; the real state will
+    // arrive on the WS channel once the swap completes.
+    vlmState.value = 'spawning'
+    vlmModelId.value = modelId
+    try {
+      const snap = await setActiveVlm(modelId)
+      applyVlmPayload(snap)
+    } catch (e) {
+      vlmError.value = e instanceof Error ? e.message : String(e)
+      vlmState.value = 'error'
+    }
+  }
+
   async function startInferenceWorker(): Promise<void> {
     // Optimistically flip to spawning so the UI chip updates immediately;
     // the real state will arrive on the 'models' WS channel once the
@@ -204,6 +249,14 @@ export const useModelsStore = defineStore('models', () => {
     inferenceError,
     isInferenceReady,
     isInferenceLoading,
+    vlmState,
+    vlmModelId,
+    vlmBaseUrl,
+    vlmError,
+    vlmProgress,
+    isVlmReady,
+    isVlmLoading,
+    setActiveVlmModel,
     loadStatus,
     refreshHfToken,
     togglePreload,
