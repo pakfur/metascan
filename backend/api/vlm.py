@@ -188,6 +188,25 @@ async def cancel_retag(job_id: str) -> Dict[str, str]:
     return {"status": "cancelled"}
 
 
+class ActiveBody(BaseModel):
+    model_id: str
+
+
+@router.post("/active")
+async def set_active(body: ActiveBody) -> Dict[str, Any]:
+    from metascan.core.vlm_models import REGISTRY
+
+    client = _vlm_client
+    if client is None:
+        raise HTTPException(status_code=503, detail="vlm client not initialized")
+    if body.model_id not in REGISTRY:
+        raise HTTPException(status_code=400, detail=f"unknown model: {body.model_id}")
+    for job in _jobs.values():
+        job.cancelled = True
+    await client.swap_model(body.model_id)
+    return client.snapshot()
+
+
 def _list_paths_for_retag(db: Any, *, force: bool) -> List[str]:
     """SELECT paths whose tag rows are pure clip/both. With force=True also
     include vlm-tagged files."""
