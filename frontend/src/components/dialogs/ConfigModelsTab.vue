@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useModelsStore } from '../../stores/models'
 import type { ModelGroup, ModelRow } from '../../api/models'
 import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
+import { startRetag } from '../../api/vlm'
 
 const models = useModelsStore()
 
@@ -193,6 +194,33 @@ async function onRebuildIndex() {
     alert(e instanceof Error ? e.message : String(e))
   }
 }
+
+async function onActivate(row: ModelRow) {
+  if (!confirm(`Switch active VLM to ${row.name}? Current model will be unloaded.`)) {
+    return
+  }
+  await models.setActiveVlmModel(row.id)
+}
+
+const retagInFlight = ref(false)
+const lastRetagTotal = ref<number | null>(null)
+
+async function onRetagLibrary() {
+  if (!confirm(
+    'Re-tag every CLIP-tagged file with Qwen3-VL? This may take hours on large libraries.'
+  )) {
+    return
+  }
+  retagInFlight.value = true
+  try {
+    const job = await startRetag({ scope: 'all_clip' })
+    lastRetagTotal.value = job.total
+  } catch (e) {
+    alert(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    retagInFlight.value = false
+  }
+}
 </script>
 
 <template>
@@ -339,6 +367,19 @@ async function onRebuildIndex() {
             >
               Delete
             </button>
+            <button
+              v-if="row.id.startsWith('qwen3vl-')"
+              class="btn-small"
+              :disabled="row.status !== 'available' || models.vlmModelId === row.id"
+              :title="row.status !== 'available'
+                ? 'Download the model first.'
+                : models.vlmModelId === row.id
+                  ? 'This is the active VLM.'
+                  : 'Switch the loaded VLM to this model.'"
+              @click="onActivate(row)"
+            >
+              {{ models.vlmModelId === row.id ? 'Active' : 'Activate' }}
+            </button>
           </div>
         </div>
         <div v-if="grouped[group].length === 0" class="empty-msg">No models in this group.</div>
@@ -350,6 +391,34 @@ async function onRebuildIndex() {
         Current CLIP model: <b>{{ models.currentClipModel }}</b> (dim {{ indexDim }}).
         Inference worker state: <b>{{ models.inferenceState }}</b>
         <span v-if="models.inferenceDevice"> on {{ models.inferenceDevice }}</span>.
+      </div>
+    </section>
+
+    <section class="preload-hint vlm-status-block">
+      <div v-if="models.vlmState !== 'idle'" class="vlm-current">
+        <b>VLM tagger:</b>
+        <span v-if="models.vlmState === 'ready'">
+          Active — <b>{{ models.vlmModelId }}</b>
+        </span>
+        <span v-else-if="models.isVlmLoading">
+          Loading <b>{{ models.vlmModelId }}</b>…
+        </span>
+        <span v-else-if="models.vlmState === 'error'" class="err-text">
+          Error: {{ models.vlmError ?? 'unknown' }}
+        </span>
+        <span v-else>{{ models.vlmState }}</span>
+      </div>
+      <div class="vlm-retag">
+        <button
+          class="btn-small"
+          :disabled="!models.isVlmReady || retagInFlight"
+          @click="onRetagLibrary"
+        >
+          {{ retagInFlight ? 'Re-tagging library…' : 'Re-tag library with VLM' }}
+        </button>
+        <span v-if="lastRetagTotal !== null" class="muted">
+          Started {{ lastRetagTotal }} files; track progress in scan logs.
+        </span>
       </div>
     </section>
   </template>
@@ -531,4 +600,8 @@ section { margin-bottom: 14px; }
 .gate-chip { margin-left: 4px; }
 .gate-good { color: #22c55e; border-color: #22c55e; }
 .gate-bad { color: var(--danger-color); border-color: var(--danger-color); }
+
+.vlm-status-block { display: flex; flex-direction: column; gap: 8px; }
+.vlm-current { font-size: 14px; }
+.vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>
