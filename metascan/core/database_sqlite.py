@@ -930,33 +930,124 @@ class DatabaseManager:
     ) -> None:
         """Add or merge tag rows sourced from ``source`` for ``file_path``.
 
-        Called by the embedding worker after CLIP-based tag generation. If a
-        tag already exists for the file from the *other* source (typically
-        ``prompt``), the row is upgraded to ``both`` rather than duplicated.
+        Sources:
+          - ``prompt`` — extracted from generation metadata.
+          - ``clip``   — CLIP retrieval over the vocabulary.
+          - ``vlm``    — generative tagger (Qwen3-VL).
+
+        Merge rules (spec §7.4):
+          - vlm × clip → preserve vlm (CLIP cannot overwrite VLM).
+          - clip × vlm → replace clip rows with vlm.
+          - vlm × prompt or prompt × vlm → upsert to ``vlm+prompt``.
+          - clip × prompt or prompt × clip → upsert to ``both`` (legacy name
+            for ``clip+prompt``).
+          - vlm × vlm → wholesale replace existing vlm tags.
         """
+        if source not in ("prompt", "clip", "vlm"):
+            raise ValueError(
+                f"tag source must be one of prompt/clip/vlm, got {source!r}"
+            )
         if not tags:
             return
-        if source not in ("prompt", "clip"):
-            raise ValueError(f"tag source must be 'prompt' or 'clip', got {source!r}")
         posix_path = to_posix_path(file_path)
-        other = "prompt" if source == "clip" else "clip"
-        sql = (
-            "INSERT INTO indices (index_type, index_key, file_path, source) "
-            "VALUES ('tag', ?, ?, ?) "
-            "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
-            "source = CASE "
-            "  WHEN indices.source = ? THEN 'both' "
-            "  WHEN indices.source = 'both' THEN 'both' "
-            "  ELSE excluded.source END"
-        )
-        rows = [(t.lower(), posix_path, source, other) for t in tags if t]
+
         try:
             with self.lock:
                 with self._get_connection() as conn:
-                    conn.executemany(sql, rows)
+                    if source == "vlm":
+                        self._add_vlm_tags(conn, posix_path, tags)
+                    elif source == "clip":
+                        self._add_clip_tags(conn, posix_path, tags)
+                    else:  # prompt
+                        self._add_prompt_tags(conn, posix_path, tags)
                     conn.commit()
         except Exception as e:
             logger.error(f"Failed to add {source} tag indices for {file_path}: {e}")
+
+    def _add_vlm_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Replace clip-source tags wholesale; merge with prompt-source.
+
+        VLM is the authoritative tagger when it runs, so existing
+        clip / clip+prompt rows are downgraded — clip rows are deleted, and
+        the prompt half of ``both`` rows is preserved by demoting to prompt.
+        Existing vlm / vlm+prompt rows are wholesale replaced (re-tag).
+        """
+        conn.execute(
+            "DELETE FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source IN ('vlm', 'vlm+prompt')",
+            (posix_path,),
+        )
+        conn.execute(
+            "DELETE FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source='clip'",
+            (posix_path,),
+        )
+        conn.execute(
+            "UPDATE indices SET source='prompt' "
+            "WHERE file_path=? AND index_type='tag' AND source='both'",
+            (posix_path,),
+        )
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'vlm') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'prompt' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
+
+    def _add_clip_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Insert clip-source tags. Skipped if any vlm row exists for this
+        file (vlm wins). Merges with prompt-source rows to ``both``."""
+        row = conn.execute(
+            "SELECT 1 FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source IN ('vlm', 'vlm+prompt') LIMIT 1",
+            (posix_path,),
+        ).fetchone()
+        if row is not None:
+            return
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'clip') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'prompt' THEN 'both' "
+                "  WHEN indices.source = 'both' THEN 'both' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
+
+    def _add_prompt_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Insert prompt-source tags. Merges with both clip and vlm rows."""
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'prompt') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'clip' THEN 'both' "
+                "  WHEN indices.source = 'both' THEN 'both' "
+                "  WHEN indices.source = 'vlm' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
 
     def _generate_indices(self, media: Media) -> List[tuple]:
         """Returns ``(index_type, index_key, source)`` triples. ``source`` is
