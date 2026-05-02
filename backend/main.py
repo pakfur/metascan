@@ -29,6 +29,7 @@ from backend.api import (
     config,
     embeddings,
     models,
+    vlm,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
@@ -251,6 +252,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(config.router)
     app.include_router(embeddings.router)
     app.include_router(models.router)
+    app.include_router(vlm.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
