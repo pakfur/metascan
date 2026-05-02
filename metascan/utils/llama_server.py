@@ -39,6 +39,11 @@ def pick_release_asset(report: HardwareReport) -> str:
     """
     rel = LLAMA_CPP_RELEASE
     if report.os == "Darwin":
+        if report.machine != "arm64":
+            raise NotImplementedError(
+                "macOS Intel (x86_64) llama-server builds are not published "
+                "by upstream; only macOS arm64 is supported."
+            )
         return f"llama-{rel}-bin-macos-arm64.zip"
     if report.os == "Windows":
         if report.cuda is not None:

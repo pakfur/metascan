@@ -1,14 +1,17 @@
 """Path resolution for the bundled llama-server binary.
 
-Download is exercised in test_setup_models (Task 23); this file only covers
-the path/build-name logic which is pure and easy to assert."""
+Download is exercised in test_setup_models_qwen3vl (Task 23); this file only
+covers the path/build-name logic which is pure and easy to assert."""
 
+import pytest
 from unittest.mock import patch
 
 from metascan.utils.llama_server import (
+    LLAMA_CPP_RELEASE,
     binary_filename,
-    pick_release_asset,
     binary_path,
+    pick_release_asset,
+    release_url,
 )
 
 
@@ -71,3 +74,17 @@ def test_pick_release_asset_linux_cpu_fallback():
 def test_binary_path_lives_in_data_dir():
     p = binary_path()
     assert "bin" in p.parts
+
+
+def test_pick_release_asset_macos_intel_raises():
+    rpt = _report(os_="Darwin", machine="x86_64")
+    with pytest.raises(NotImplementedError, match="Intel"):
+        pick_release_asset(rpt)
+
+
+def test_release_url_format():
+    url = release_url("llama-x-bin-linux-cuda-x64.zip")
+    assert url.startswith(
+        f"https://github.com/ggerganov/llama.cpp/releases/download/{LLAMA_CPP_RELEASE}/"
+    )
+    assert url.endswith("llama-x-bin-linux-cuda-x64.zip")
