@@ -278,6 +278,23 @@ class VlmClient:
                 pass
             await asyncio.sleep(0.1)
 
+    async def swap_model(
+        self,
+        new_model_id: str,
+        *,
+        ready_timeout: float = 300.0,
+    ) -> None:
+        """Tear down the current llama-server and bring up a new one.
+
+        Caller is responsible for cancelling/draining any in-flight tagging
+        jobs before calling — this method does not preserve a request queue
+        across the swap.
+        """
+        if new_model_id == self._model_id and self._state == STATE_READY:
+            return
+        await self.shutdown()
+        await self.start(new_model_id, wait_ready=True, ready_timeout=ready_timeout)
+
     async def shutdown(self) -> None:
         self._stopping = True
         proc = self._proc
@@ -341,6 +358,9 @@ class VlmClient:
         except Exception:
             logger.exception("vlm stderr drainer crashed")
 
+    # NOTE: real-binary crash recovery is exercised by manual testing during
+    # Phase 5/6 integration, not unit tests — the fake-server fixture uses
+    # spawn_override which bypasses the subprocess we'd need to crash.
     async def _wait_exit(self) -> None:
         proc = self._proc
         if proc is None:
