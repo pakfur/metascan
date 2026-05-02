@@ -105,3 +105,39 @@ def test_add_clip_tags_with_existing_prompt_unchanged_by_design(db):
     db.add_tag_indices(p, ["red"], source="clip")
     rows = dict(_read_tag_rows(db, p))
     assert rows["red"] == "both"
+
+
+def _make_minimal_media(p: Path, prompt_text: str = "") -> Media:
+    return Media(
+        file_path=p,
+        file_size=100,
+        width=10,
+        height=10,
+        format="JPEG",
+        created_at=datetime(2026, 1, 1),
+        modified_at=datetime(2026, 1, 1),
+        prompt=prompt_text if prompt_text else None,
+    )
+
+
+def test_rescan_preserves_vlm_tags_when_prompt_unchanged(db):
+    p = Path("/img/r.jpg")
+    db.save_media(_make_minimal_media(p))
+    db.add_tag_indices(p, ["unique-vlm-tag"], source="vlm")
+    db.save_media(_make_minimal_media(p))  # rescan
+    rows = dict(_read_tag_rows(db, p))
+    assert rows.get("unique-vlm-tag") == "vlm"
+
+
+def test_rescan_with_prompt_change_demotes_vlm_prompt_back_to_vlm(db):
+    p = Path("/img/r.jpg")
+    db.save_media(_make_minimal_media(p, prompt_text="red flower"))
+    db.add_tag_indices(p, ["red", "flower"], source="prompt")
+    db.add_tag_indices(p, ["red", "vase"], source="vlm")
+    pre = dict(_read_tag_rows(db, p))
+    assert pre["red"] == "vlm+prompt"
+    db.save_media(_make_minimal_media(p, prompt_text=""))  # rescan with empty prompt
+    post = dict(_read_tag_rows(db, p))
+    assert post.get("red") == "vlm"
+    assert "flower" not in post
+    assert post.get("vase") == "vlm"

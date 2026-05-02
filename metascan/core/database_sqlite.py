@@ -878,22 +878,34 @@ class DatabaseManager:
             return []
 
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
-        # Use POSIX path for consistency with storage format
+        """Refresh non-tag indices and prompt-source tag rows for ``media``.
+
+        VLM-source tag rows survive a rescan unchanged (the embedding/VLM
+        worker writes them separately via ``add_tag_indices``). Prompt-source
+        rows are torn down and rebuilt from the freshly-parsed metadata.
+        """
         posix_path = to_posix_path(media.file_path)
-        # Preserve tag rows contributed by CLIP so a rescan / metadata update
-        # doesn't blow away the embedding-derived tags. A `both` row had
-        # contributions from prompt AND clip; we're about to rewrite the
-        # prompt half, so temporarily demote those to `clip`-only — the
-        # UPSERT below will upgrade back to `both` for tags the new prompt
-        # still contains.
+
+        # Drop non-tag rows (we'll rebuild them) and pure prompt-tag rows.
+        # Tag rows with source IN ('clip', 'vlm', 'both', 'vlm+prompt') are
+        # preserved across this DELETE — but the 'both' / 'vlm+prompt' rows
+        # need their prompt half rewritten below.
         conn.execute(
             "DELETE FROM indices WHERE file_path = ? AND "
             "(index_type != 'tag' OR source IS NULL OR source = 'prompt')",
             (posix_path,),
         )
+        # Demote 'both' (clip+prompt) → 'clip' so the upsert below can
+        # promote back to 'both' for tags the new prompt still contains.
         conn.execute(
             "UPDATE indices SET source = 'clip' "
             "WHERE file_path = ? AND index_type = 'tag' AND source = 'both'",
+            (posix_path,),
+        )
+        # Demote 'vlm+prompt' → 'vlm' for the same reason.
+        conn.execute(
+            "UPDATE indices SET source = 'vlm' "
+            "WHERE file_path = ? AND index_type = 'tag' AND source = 'vlm+prompt'",
             (posix_path,),
         )
 
@@ -911,8 +923,9 @@ class DatabaseManager:
                 "VALUES (?, ?, ?, ?)",
                 non_tag_rows,
             )
-        # Prompt-sourced tags may collide with pre-existing clip rows — merge
-        # via ON CONFLICT so the resulting row records both sources.
+        # Re-insert prompt-source tags. Collisions promote to the merged
+        # source name (both / vlm+prompt) per the same case ladder used in
+        # _add_prompt_tags.
         for key in prompt_tag_keys:
             conn.execute(
                 "INSERT INTO indices (index_type, index_key, file_path, source) "
@@ -921,6 +934,8 @@ class DatabaseManager:
                 "source = CASE "
                 "  WHEN indices.source = 'clip' THEN 'both' "
                 "  WHEN indices.source = 'both' THEN 'both' "
+                "  WHEN indices.source = 'vlm' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
                 "  ELSE 'prompt' END",
                 (key, posix_path),
             )
