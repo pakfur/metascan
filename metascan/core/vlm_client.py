@@ -17,6 +17,7 @@ import asyncio
 import logging
 import socket
 import subprocess
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -358,6 +359,72 @@ class VlmClient:
         logger.error(self._last_error)
         self._ready_event.set()
         self._set_state(STATE_ERROR, error=self._last_error)
+
+    # ---- Inference methods -------------------------------------------
+
+    async def generate_tags(
+        self,
+        image_path: Path,
+        *,
+        timeout: float = 60.0,
+    ) -> list[str]:
+        """Tag a single image. Returns a normalized, deduped tag list.
+
+        On parse / HTTP error returns an empty list rather than raising —
+        the scan loop calls this for every image and we don't want a single
+        bad response to crash the batch.
+        """
+        from metascan.core.vlm_prompts import (
+            TAGGING_GRAMMAR,
+            TAGGING_SYSTEM_PROMPT,
+            TAGGING_USER_PROMPT,
+            parse_tags_response,
+        )
+
+        if self._http is None or self._state != STATE_READY:
+            raise RuntimeError(
+                f"VlmClient not ready (state={self._state}); "
+                "call ensure_started() first"
+            )
+
+        image_b64 = await asyncio.to_thread(self._encode_image_b64, image_path)
+        body = {
+            "messages": [
+                {"role": "system", "content": TAGGING_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": TAGGING_USER_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                        },
+                    ],
+                },
+            ],
+            "grammar": TAGGING_GRAMMAR,
+            "max_tokens": 512,
+            "temperature": 0.2,
+        }
+        try:
+            r = await self._http.post(
+                "/v1/chat/completions", json=body, timeout=timeout
+            )
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            logger.warning("VLM tag request failed for %s: %s", image_path, e)
+            return []
+
+        return parse_tags_response(content)
+
+    @staticmethod
+    def _encode_image_b64(path: Path) -> str:
+        """Base64-encode an image file for inline submission to llama-server."""
+        import base64
+
+        return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 __all__ = [
