@@ -2,7 +2,7 @@
 
 import pytest
 
-from metascan.core.vlm_models import REGISTRY, VlmModelSpec, get_spec
+from metascan.core.vlm_models import REGISTRY, VlmModelSpec, get_spec, resolve_repo
 
 
 def test_all_four_sizes_present():
@@ -36,3 +36,26 @@ def test_get_spec_returns_spec():
 def test_get_spec_raises_on_unknown():
     with pytest.raises(KeyError):
         get_spec("qwen3vl-bogus")
+
+
+def test_resolve_repo_returns_default_when_no_override():
+    assert resolve_repo("qwen3vl-2b") == REGISTRY["qwen3vl-2b"].hf_repo
+
+
+def test_resolve_repo_returns_default_when_override_misses():
+    assert (
+        resolve_repo("qwen3vl-2b", {"qwen3vl-99b": "x"})
+        == REGISTRY["qwen3vl-2b"].hf_repo
+    )
+
+
+def test_resolve_repo_applies_override_when_key_matches():
+    assert (
+        resolve_repo("qwen3vl-2b", {"qwen3vl-2b": "user/custom-repo"})
+        == "user/custom-repo"
+    )
+
+
+def test_resolve_repo_raises_on_unknown_id_without_override():
+    with pytest.raises(KeyError):
+        resolve_repo("qwen3vl-bogus")

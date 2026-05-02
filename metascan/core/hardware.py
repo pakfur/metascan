@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import List, Optional
 
+from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+
 logger = logging.getLogger(__name__)
 
 
@@ -249,13 +251,6 @@ _CLIP_VRAM_MIN: dict[str, float] = {
     "clip-large": 6.0,
 }
 
-_QWEN3VL_VRAM_MIN: dict[str, float] = {
-    "qwen3vl-2b": 3.0,
-    "qwen3vl-4b": 5.0,
-    "qwen3vl-8b": 9.0,
-    "qwen3vl-30b-a3b": 20.0,
-}
-
 
 def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     """Return per-model availability + recommendation gates.
@@ -392,7 +387,8 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     is_apple = report.mps and report.os == "Darwin" and report.machine == "arm64"
     ram_gb = report.ram_gb or 0.0
 
-    for key, min_vram in _QWEN3VL_VRAM_MIN.items():
+    for key, _spec in _VLM_REGISTRY.items():
+        min_vram = _spec.min_vram_gb
         if report.cuda is not None:
             if key == "qwen3vl-30b-a3b":
                 # 30B is gated on cuda_workstation >= 24 GB only.
