@@ -73,3 +73,34 @@ def test_tag_endpoint_503_when_no_client():
     with TestClient(app) as c:
         r = c.post("/api/vlm/tag", json={"path": "/x.jpg"})
     assert r.status_code == 503
+
+
+def test_retag_returns_job_id(app_with_stub_vlm, tmp_path: Path):
+    app, _ = app_with_stub_vlm
+    a = tmp_path / "a.jpg"
+    a.write_bytes(b"\xff\xd8\xff\xd9")
+    b = tmp_path / "b.jpg"
+    b.write_bytes(b"\xff\xd8\xff\xd9")
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/vlm/retag",
+            json={"scope": "paths", "paths": [str(a), str(b)]},
+        )
+    assert r.status_code == 202
+    assert "job_id" in r.json()
+    assert r.json()["total"] == 2
+
+
+def test_retag_cancel_endpoint(app_with_stub_vlm, tmp_path: Path):
+    app, _ = app_with_stub_vlm
+    a = tmp_path / "a.jpg"
+    a.write_bytes(b"\xff\xd8\xff\xd9")
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/vlm/retag",
+            json={"scope": "paths", "paths": [str(a)]},
+        )
+        job_id = r.json()["job_id"]
+        r2 = c.delete(f"/api/vlm/retag/{job_id}")
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "cancelled"
