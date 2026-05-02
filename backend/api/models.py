@@ -219,6 +219,33 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
+    """Status rows for the four Qwen3-VL Abliterated variants."""
+    from metascan.core.vlm_models import REGISTRY
+
+    rows: List[Dict[str, Any]] = []
+    vlm_dir = get_data_dir() / "models" / "vlm"
+    for mid, spec in REGISTRY.items():
+        gguf = vlm_dir / spec.gguf_filename
+        mmproj = vlm_dir / spec.mmproj_filename
+        present = gguf.exists() and mmproj.exists()
+        size = (gguf.stat().st_size + mmproj.stat().st_size) if present else 0
+        rows.append(
+            {
+                "id": mid,
+                "group": "Tagging (Qwen3-VL)",
+                "name": spec.display_name,
+                "description": f"{spec.quant} GGUF, ~{spec.approx_vram_gb:.1f} GB VRAM",
+                "status": "available" if present else "missing",
+                "size_bytes": size or None,
+                "cache_path": str(gguf) if present else None,
+                "required_vram_mb": int(spec.min_vram_gb * 1024),
+                "preload_at_startup": mid in preload,
+            }
+        )
+    return rows
+
+
 def _hardware_info() -> Dict[str, Any]:
     """Detect hardware + tier; serialize to dict for the /hardware endpoint.
 
@@ -316,6 +343,7 @@ def _build_status_payload() -> Dict[str, Any]:
         _clip_status_rows(preload)
         + _upscale_status_rows(preload)
         + _nltk_status_rows(preload)
+        + _vlm_status_rows(preload)
     )
 
     # Surface the currently-selected CLIP model + dim so the UI can render
