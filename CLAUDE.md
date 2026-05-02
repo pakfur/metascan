@@ -115,6 +115,14 @@ metascan/
 - **Vite proxy** forwards `/api/*` and `/ws` to the backend during development. The EPIPE error handler silences broken pipe from cancelled browser requests.
 - **FAISS test vectors must use dim >= 32** to avoid SIMD alignment crashes on ARM (Apple Silicon). Tests normalize all vectors for IndexFlatIP.
 - **`KMP_DUPLICATE_LIB_OK=TRUE`** is set in `tests/conftest.py` to prevent OpenMP duplicate library crash when torch + faiss-cpu both link libomp on macOS.
+- **Qwen3-VL VLM tagging.** A long-running `VlmClient`
+  (`metascan/core/vlm_client.py`) supervises a `llama-server` subprocess for
+  generative tagging on hardware tiers where it's viable. CLIP tagging
+  remains the fallback for `cpu_only` and `cuda_entry`. The DB layer
+  arbitrates merging via `_update_indices` and `add_tag_indices` —
+  VLM-source tag rows survive CLIP rescans (the demote-on-rescan logic in
+  `database_sqlite._update_indices` preserves them). Engine choice rationale
+  is in `docs/superpowers/specs/2026-05-02-qwen3vl-tagging-design.md` §11.
 
 ## Development Rules
 
@@ -244,6 +252,11 @@ When adding new user-facing documentation:
 3. **New tier:** extend the `Tier` enum **and** the TS `Tier` union in `frontend/src/types/hardware.ts`, plus `TIER_LABEL` / `TIER_COLOR` maps. Update `classify_tier()` precedence carefully — CUDA must still win over MPS.
 4. **New gate / new model id:** add a key to `feature_gates()`'s returned dict; the model id must match the row id used by `_clip_status_rows` / `_upscale_status_rows` / `_nltk_status_rows` in `backend/api/models.py`. The frontend `gateChip()` / `gateChipClass()` helpers in `ConfigModelsTab.vue` will pick it up automatically.
 5. **Tests:** `tests/test_hardware.py` covers probe + tier + gate logic in isolation; `tests/test_models_hardware_api.py` covers the HTTP envelope. Both patch `detect_hardware` (or `backend.api.models.detect_hardware`) to inject a fake `HardwareReport` — never rely on the host's real hardware in tests. Call `detect_hardware.cache_clear()` in any test that mutates env vars before invoking the real probe.
+6. **VLM model gate.** Qwen3-VL gates live alongside CLIP gates; their
+   `recommended` decision is what `backend/services/scan_dispatch.py:should_tag_with_vlm`
+   reads to choose between VLM and CLIP tagging on a scan. Per-model VRAM
+   floors come from `metascan/core/vlm_models.REGISTRY`'s `min_vram_gb` field
+   (single source of truth — `feature_gates` reads from there).
 
 ### Adding a smart-folder rule field
 1. Add the field identifier to `RuleField` in `frontend/src/types/folders.ts`.
@@ -252,6 +265,12 @@ When adding new user-facing documentation:
 4. If the rule reads a column not already on the `/api/media` summary, add it to the SELECT in `get_all_media_summaries` **and** to every covering index (`idx_media_summary_added`, `idx_media_summary_modified`) — otherwise `/api/media` falls back to the main-table scan. `Media` frontend type gets the new field too.
 5. If conditions carry server-resolved references (e.g. tag keys, later CLIP queries), add an endpoint that takes an explicit key list and cache responses in the store keyed by referenced values. Don't bulk-GET the whole universe.
 6. Extend `migrateSmartFolder` in `stores/folders.ts` if you're removing/renaming an existing field so persisted rules don't crash the editor.
+
+### Adding a new VLM caption style
+1. Add the style key to `CAPTION_STYLE_PROMPTS` in `metascan/core/vlm_prompts.py`.
+2. The style picker in the (future) UI reads keys directly; backend doesn't need a registry change.
+3. The style template should be deterministic, single-image, and produce parseable output if the consumer requires structured fields.
+4. Wire it into `VlmClient.generate_caption(image_path, style)` once the future captioning feature lands.
 
 ### Running after clean checkout
 ```bash
