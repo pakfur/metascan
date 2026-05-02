@@ -40,13 +40,16 @@ def test_build_endpoint_calls_start_indexing(monkeypatch):
         def is_indexing(self):
             return self._indexing
 
-        def start_indexing(self, paths, model, device, db_path, compute_phash, kf):
+        def start_indexing(
+            self, paths, model, device, db_path, compute_phash, kf, tag_with_vlm=False
+        ):
             captured["paths"] = paths
             captured["model"] = model
             captured["device"] = device
             captured["db_path"] = db_path
             captured["compute_phash"] = compute_phash
             captured["video_keyframes"] = kf
+            captured["tag_with_vlm"] = tag_with_vlm
             self._indexing = True
             return True
 
