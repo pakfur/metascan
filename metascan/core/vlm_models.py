@@ -13,6 +13,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class VlmModelSpec:
+    """Static metadata for one Qwen3-VL Abliterated GGUF variant.
+
+    Field units:
+      - ``approx_vram_gb`` / ``min_vram_gb``: gigabytes (GB).
+      - ``parallel_slots``: integer count passed to llama-server's
+        ``--parallel`` flag.
+      - ``hf_repo``: HuggingFace repo id; can be overridden at runtime
+        via ``config.models.qwen3vl_repos.<model_id>``.
+    """
+
     model_id: str
     display_name: str
     hf_repo: str
