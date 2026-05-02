@@ -1,7 +1,7 @@
 """Gate tests for Qwen3-VL VLM tagging across all hardware tiers.
 
-Each test patches detect_hardware() (via cache_clear + a dataclass instance)
-and asserts the recommended/available decisions per the design spec table.
+Each test constructs a HardwareReport directly and calls feature_gates()
+so no real hardware probes or detect_hardware() caching are involved.
 """
 
 from metascan.core.hardware import (

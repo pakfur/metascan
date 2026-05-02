@@ -249,13 +249,21 @@ _CLIP_VRAM_MIN: dict[str, float] = {
     "clip-large": 6.0,
 }
 
+_QWEN3VL_VRAM_MIN: dict[str, float] = {
+    "qwen3vl-2b": 3.0,
+    "qwen3vl-4b": 5.0,
+    "qwen3vl-8b": 9.0,
+    "qwen3vl-30b-a3b": 20.0,
+}
+
 
 def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     """Return per-model availability + recommendation gates.
 
     Keys are the model ids surfaced by ``GET /api/models/status``:
     ``clip-{small,medium,large}``, ``resr-{x2,x4,x4-anime}``, ``gfpgan-v1.4``,
-    ``rife``, ``nltk-punkt``, ``nltk-punkt-tab``, ``nltk-stopwords``.
+    ``rife``, ``nltk-punkt``, ``nltk-punkt-tab``, ``nltk-stopwords``,
+    ``qwen3vl-{2b,4b,8b,30b-a3b}``, ``llama-server``.
     """
     tier = classify_tier(report)
     gates: dict[str, Gate] = {}
@@ -381,16 +389,10 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
 
     # ---- Qwen3-VL Abliterated tagging ----
     # min_vram_gb is the gate floor; recommended = the tier's default size.
-    _QWEN3VL_MIN_VRAM = {
-        "qwen3vl-2b": 3.0,
-        "qwen3vl-4b": 5.0,
-        "qwen3vl-8b": 9.0,
-        "qwen3vl-30b-a3b": 20.0,
-    }
     is_apple = report.mps and report.os == "Darwin" and report.machine == "arm64"
     ram_gb = report.ram_gb or 0.0
 
-    for key, min_vram in _QWEN3VL_MIN_VRAM.items():
+    for key, min_vram in _QWEN3VL_VRAM_MIN.items():
         if report.cuda is not None:
             if key == "qwen3vl-30b-a3b":
                 # 30B is gated on cuda_workstation >= 24 GB only.
@@ -442,7 +444,9 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     # ---- llama-server binary gate ----
     # The binary is downloaded by setup_models.py / Models tab; the gate
     # records presence so the UI can render an actionable prompt.
-    from metascan.utils.llama_server import binary_path  # local import — late
+    # TODO Task 3: hoist this to module-level imports once the full
+    # implementation lands and we've confirmed it doesn't pull heavy deps.
+    from metascan.utils.llama_server import binary_path
 
     has_binary = binary_path().exists()
     gates["llama-server"] = Gate(
