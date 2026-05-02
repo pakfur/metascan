@@ -140,6 +140,14 @@ class VlmClient:
     # ---- Lifecycle -----------------------------------------------------
 
     async def ensure_started(self, model_id: str) -> None:
+        """Bring the worker to STATE_READY; idempotent.
+
+        Holds ``_start_lock`` for the duration of the call, including any
+        wait for the server to become ready. Concurrent callers serialize
+        — acceptable for the singleton FastAPI pattern but worth knowing
+        if a hot path could fan out: prefer one ``ensure_started`` from the
+        coordinator and have other callers await the resulting state.
+        """
         async with self._start_lock:
             if (
                 self._state in (STATE_LOADING, STATE_READY)
@@ -236,6 +244,11 @@ class VlmClient:
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as e:
+            # Cancel the background /health probe — otherwise it keeps polling
+            # for up to 600s after the caller has already given up, holding
+            # the httpx client open.
+            if self._health_task is not None and not self._health_task.done():
+                self._health_task.cancel()
             raise TimeoutError(
                 f"llama-server did not become ready within {timeout:.0f}s"
             ) from e
@@ -268,13 +281,20 @@ class VlmClient:
         self._stopping = True
         proc = self._proc
         if proc is not None and proc.poll() is None:
+            # Wrap the blocking proc.wait() calls in run_in_executor so the
+            # asyncio event loop stays free during shutdown — otherwise an
+            # uncooperative llama-server can freeze the entire FastAPI server
+            # for up to 5s on SIGTERM (and longer if SIGKILL is needed).
+            loop = asyncio.get_running_loop()
             try:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5.0)
-                except subprocess.TimeoutExpired:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, proc.wait), timeout=5.0
+                    )
+                except asyncio.TimeoutError:
                     proc.kill()
-                    proc.wait()
+                    await loop.run_in_executor(None, proc.wait)
             except Exception:
                 logger.exception("error terminating llama-server")
         self._proc = None
