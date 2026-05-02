@@ -263,6 +263,7 @@ class EmbeddingWorker:
             index_dir = task.get("index_dir", "")
             num_keyframes = task.get("video_keyframes", 4)
             compute_phash = task.get("compute_phash", True)
+            tag_with_vlm = bool(task.get("tag_with_vlm", False))
 
             if not file_paths:
                 self.logger.info("No files to process")
@@ -272,7 +273,8 @@ class EmbeddingWorker:
             total = len(file_paths)
             self.logger.info(
                 f"Task: {total} files, model={model_key}, device={device}, "
-                f"phash={compute_phash}, keyframes={num_keyframes}"
+                f"phash={compute_phash}, keyframes={num_keyframes}, "
+                f"tag_with_vlm={tag_with_vlm}"
             )
             self.logger.info(f"DB path: {db_path}")
             self.logger.info(f"Index dir: {index_dir}")
@@ -479,7 +481,9 @@ class EmbeddingWorker:
                         # vocabulary + an INSERT OR UPDATE into the tag
                         # inverted index. Roughly free compared to the
                         # embedding computation itself.
-                        if vocab is not None:
+                        # Skipped when tag_with_vlm=True; VlmTagPump drains
+                        # vlm_pending.jsonl instead (Task 17).
+                        if vocab is not None and not tag_with_vlm:
                             tags = select_tags(
                                 embedding,
                                 vocab,
@@ -506,6 +510,12 @@ class EmbeddingWorker:
                                         ],
                                     }
                                 )
+
+                        # VLM-tagging path: enqueue the file for VlmTagPump.
+                        if tag_with_vlm:
+                            pending_path = self.queue_dir / "vlm_pending.jsonl"
+                            with open(pending_path, "a", encoding="utf-8") as fp:
+                                fp.write(json.dumps({"path": str(file_path)}) + "\n")
                     else:
                         skipped_paths.append(file_path)
                         skipped_count += 1
