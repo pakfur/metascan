@@ -392,6 +392,41 @@ class DatabaseManager:
                 "ON folder_items(file_path)"
             )
 
+            # Saved prompts. Side-channel storage for the Prompt Playground
+            # feature (TA-10): named, persisted prompts associated with an
+            # image. NOT linked to the inverted `indices` table — these are
+            # user-curated experimental prompts, NOT canonical metadata, and
+            # must not affect tag search.
+            # CASCADE on file_path so deleting a media row clears its saved
+            # prompts.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_prompts (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path     TEXT NOT NULL
+                                  REFERENCES media(file_path) ON DELETE CASCADE,
+                    name          TEXT NOT NULL,
+                    prompt        TEXT NOT NULL,
+                    negative      TEXT,
+                    target_model  TEXT NOT NULL,
+                    architecture  TEXT NOT NULL,
+                    styles        TEXT NOT NULL DEFAULT '[]',
+                    temperature   REAL,
+                    max_tokens    INTEGER,
+                    source_prompt TEXT,
+                    mode          TEXT NOT NULL
+                                  CHECK(mode IN ('generate','transform','clean')),
+                    vlm_model_id  TEXT,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_saved_prompts_file "
+                "ON saved_prompts(file_path)"
+            )
+
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
             # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
@@ -575,6 +610,105 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to save media {media.file_path}: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Saved-prompt CRUD (Prompt Playground — side-channel, never touches
+    # the inverted `indices` table).
+    # ------------------------------------------------------------------
+
+    def save_prompt(
+        self,
+        *,
+        file_path: str,
+        name: str,
+        prompt: str,
+        target_model: str,
+        architecture: str,
+        styles: List[str],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        source_prompt: Optional[str],
+        mode: str,
+        negative: Optional[str],
+        vlm_model_id: Optional[str],
+    ) -> int:
+        """Insert a saved prompt; return its new auto-incremented id."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO saved_prompts (
+                        file_path, name, prompt, negative,
+                        target_model, architecture, styles,
+                        temperature, max_tokens, source_prompt,
+                        mode, vlm_model_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_path,
+                        name,
+                        prompt,
+                        negative,
+                        target_model,
+                        architecture,
+                        _json.dumps(list(styles)),
+                        temperature,
+                        max_tokens,
+                        source_prompt,
+                        mode,
+                        vlm_model_id,
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+
+    def list_saved_prompts(self, file_path: str) -> List[Dict[str, Any]]:
+        """All saved prompts for a media file_path, newest first."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM saved_prompts WHERE file_path=? " "ORDER BY id DESC",
+                    (file_path,),
+                ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["styles"] = _json.loads(d["styles"]) if d.get("styles") else []
+            except (TypeError, ValueError):
+                d["styles"] = []
+            out.append(d)
+        return out
+
+    def get_saved_prompt(self, prompt_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch a single saved prompt by id, or None if not found."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM saved_prompts WHERE id=?", (prompt_id,)
+                ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["styles"] = _json.loads(d["styles"]) if d.get("styles") else []
+        except (TypeError, ValueError):
+            d["styles"] = []
+        return d
+
+    def delete_saved_prompt(self, prompt_id: int) -> bool:
+        """Delete a saved prompt by id. Return True if deleted, False if missing."""
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute("DELETE FROM saved_prompts WHERE id=?", (prompt_id,))
+                conn.commit()
+                return int(cur.rowcount) > 0
 
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0
