@@ -512,7 +512,9 @@ class EmbeddingWorker:
                                 )
 
                         # VLM-tagging path: enqueue the file for VlmTagPump.
-                        if tag_with_vlm:
+                        # Qwen3-VL is image-only — videos would send raw mp4
+                        # bytes as ``data:image/jpeg`` and fail with 400.
+                        if tag_with_vlm and not is_video:
                             pending_path = self.queue_dir / "vlm_pending.jsonl"
                             with open(pending_path, "a", encoding="utf-8") as fp:
                                 fp.write(json.dumps({"path": str(file_path)}) + "\n")

@@ -27,9 +27,14 @@ TAGGING_USER_PROMPT = "Tag this image."
 TAGGING_GRAMMAR = r"""
 root ::= "[" ws tag (ws "," ws tag)* ws "]"
 tag  ::= "\"" char+ "\""
-char ::= [a-z0-9 \-_'/]
+char ::= [a-z0-9 _'/-]
 ws   ::= [ \t\n]*
 """
+# NOTE: GBNF rejects ``\-`` as an unknown escape; the hyphen must be literal,
+# which means placing it at the start or end of the character class. The
+# previous form ``[a-z0-9 \-_'/]`` caused llama-server to crash with SIGSEGV
+# inside ``llama_grammar_init_impl`` on every tag request, triggering an
+# infinite respawn loop during scans.
 
 
 CAPTION_STYLE_PROMPTS: dict[str, str] = {

@@ -220,16 +220,26 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
 
 
 def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
-    """Status rows for the four Qwen3-VL Abliterated variants."""
+    """Status rows for the four Qwen3-VL Abliterated variants.
+
+    A row is ``available`` only when GGUF, mmproj, AND the shared
+    llama-server binary all exist — without the binary the weights can't
+    be served, so the Download button must remain enabled to retry the
+    binary fetch (``_ensure_target`` skips files already on disk)."""
     from metascan.core.vlm_models import REGISTRY
+    from metascan.utils.llama_server import binary_path
 
     rows: List[Dict[str, Any]] = []
     vlm_dir = get_data_dir() / "models" / "vlm"
+    binary_present = binary_path().exists()
     for mid, spec in REGISTRY.items():
         gguf = vlm_dir / spec.gguf_filename
         mmproj = vlm_dir / spec.mmproj_filename
-        present = gguf.exists() and mmproj.exists()
-        size = (gguf.stat().st_size + mmproj.stat().st_size) if present else 0
+        weights_present = gguf.exists() and mmproj.exists()
+        present = weights_present and binary_present
+        # Report whatever weights are on disk regardless of binary status, so
+        # the user can see partial-download progress in the size column.
+        size = sum(f.stat().st_size for f in (gguf, mmproj) if f.exists())
         rows.append(
             {
                 "id": mid,
@@ -238,7 +248,7 @@ def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
                 "description": f"{spec.quant} GGUF, ~{spec.approx_vram_gb:.1f} GB VRAM",
                 "status": "available" if present else "missing",
                 "size_bytes": size or None,
-                "cache_path": str(gguf) if present else None,
+                "cache_path": str(gguf) if weights_present else None,
                 "required_vram_mb": int(spec.min_vram_gb * 1024),
                 "preload_at_startup": mid in preload,
             }
@@ -625,14 +635,13 @@ async def _download_vlm(mid: str) -> None:
 
         targets = resolve_qwen3vl_targets(mid)
         for i, target in enumerate(targets):
-            label = target.filename if target.filename else target.dest.name
             ws_manager.broadcast_sync(
                 "models",
                 "download_progress",
                 {
                     "id": mid,
-                    "stage": f"{label} ({i + 1}/{len(targets)})",
-                    "percent": i / len(targets),
+                    "stage": f"downloading ({i + 1}/{len(targets)})",
+                    "percent": 0.0,
                 },
             )
             _ensure_target(target)

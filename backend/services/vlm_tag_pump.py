@@ -13,10 +13,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _format_eta(seconds: float) -> str:
+    """Render an ETA in seconds as ``HH:MM:SS`` (or ``--:--:--`` for inf)."""
+    if seconds == float("inf") or seconds != seconds:  # NaN check
+        return "--:--:--"
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 class VlmTagPump:
@@ -65,15 +76,88 @@ class VlmTagPump:
 
         await self._client.ensure_started(self._model_id)
 
+        total = len(paths)
+        ok = 0
+        fail = 0
+        empty = 0  # tags returned but list was empty (parser/grammar miss)
+        start = time.monotonic()
+        last_summary = start
+        progress_lock = asyncio.Lock()
+        SUMMARY_EVERY_N = 25
+        SUMMARY_INTERVAL_S = 30.0
+
+        logger.info(
+            "VLM tagging batch start: %d images, model=%s, concurrency=%d",
+            total,
+            self._model_id,
+            self._sem._value,
+        )
+
         async def _one(p: str) -> None:
+            nonlocal ok, fail, empty, last_summary
             if self._cancelled:
                 return
             async with self._sem:
                 try:
                     tags = await self._client.generate_tags(Path(p))
-                    self._db.add_tag_indices(Path(p), tags, source="vlm")
+                    # Move the sync DB write off the event loop — see
+                    # the matching note in backend/api/vlm.py.
+                    await asyncio.to_thread(
+                        self._db.add_tag_indices, Path(p), tags, "vlm"
+                    )
+                    if tags:
+                        ok_local = True
+                        empty_local = False
+                    else:
+                        ok_local = True
+                        empty_local = True
                 except Exception as e:
                     logger.warning("VLM tag failed for %s: %s", p, e)
+                    ok_local = False
+                    empty_local = False
+
+            async with progress_lock:
+                if ok_local:
+                    ok += 1
+                    if empty_local:
+                        empty += 1
+                else:
+                    fail += 1
+                done = ok + fail
+                now = time.monotonic()
+                if (
+                    done % SUMMARY_EVERY_N == 0
+                    or (now - last_summary) >= SUMMARY_INTERVAL_S
+                ):
+                    last_summary = now
+                    elapsed = now - start
+                    rate = done / elapsed if elapsed > 0 else 0.0
+                    remaining = total - done
+                    eta_s = remaining / rate if rate > 0 else float("inf")
+                    logger.info(
+                        "VLM tagging [%d/%d] ok=%d (empty=%d) fail=%d  "
+                        "rate=%.2f img/s  ETA=%s",
+                        done,
+                        total,
+                        ok,
+                        empty,
+                        fail,
+                        rate,
+                        _format_eta(eta_s),
+                    )
 
         await asyncio.gather(*[_one(p) for p in paths])
-        return len(paths)
+
+        elapsed = time.monotonic() - start
+        rate = total / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "VLM tagging batch done: %d images in %ds (%.2f img/s) — "
+            "ok=%d (empty=%d) fail=%d",
+            total,
+            int(elapsed),
+            rate,
+            ok,
+            empty,
+            fail,
+        )
+        return total

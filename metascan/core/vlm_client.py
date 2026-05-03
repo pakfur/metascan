@@ -336,7 +336,14 @@ class VlmClient:
     async def _stderr_loop(self) -> None:
         """Drain llama-server stderr — DO NOT remove. The pipe buffer fills
         within seconds during model load and the process hangs silently
-        otherwise. Mirrors InferenceClient._stderr_loop."""
+        otherwise. Mirrors InferenceClient._stderr_loop.
+
+        Routine lines (per-request slot/health chatter, the chat-template
+        dump on load, JSON metadata) go to DEBUG so a 10k-image scan doesn't
+        bury the server log. Lines that look like errors are promoted to
+        WARNING so they remain visible at the default level. The full ring
+        buffer is still attached to crash reports by ``_wait_exit``.
+        """
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
@@ -352,7 +359,16 @@ class VlmClient:
                 self._stderr_ring.append(text)
                 if len(self._stderr_ring) > self._stderr_ring_max:
                     self._stderr_ring = self._stderr_ring[-self._stderr_ring_max :]
-                logger.info("llama-server: %s", text)
+                lower = text.lower()
+                if (
+                    "error" in lower
+                    or "failed" in lower
+                    or "fatal" in lower
+                    or "abort" in lower
+                ):
+                    logger.warning("llama-server: %s", text)
+                else:
+                    logger.debug("llama-server: %s", text)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -407,6 +423,13 @@ class VlmClient:
                 "call ensure_started() first"
             )
 
+        if not self.is_image_path(image_path):
+            # Videos, text files, archives etc. — Qwen3-VL is image-only.
+            # Returning empty here keeps the caller's success/fail accounting
+            # honest: this isn't a model failure, it's an unsupported input.
+            logger.debug("skipping non-image %s", image_path)
+            return []
+
         image_b64 = await asyncio.to_thread(self._encode_image_b64, image_path)
         body = {
             "messages": [
@@ -433,18 +456,89 @@ class VlmClient:
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            # llama-server returns the real reason in the JSON body — surface
+            # it so callers don't have to grep stderr for the matching
+            # ``srv send_error`` line.
+            detail = ""
+            try:
+                payload = e.response.json()
+                detail = payload.get("error", {}).get("message") or str(payload)
+            except Exception:
+                detail = (e.response.text or "")[:300]
+            logger.warning(
+                "VLM tag request failed for %s: HTTP %d %s",
+                image_path,
+                e.response.status_code,
+                detail,
+            )
+            return []
         except (httpx.HTTPError, KeyError, ValueError) as e:
             logger.warning("VLM tag request failed for %s: %s", image_path, e)
             return []
 
-        return parse_tags_response(content)
+        tags = parse_tags_response(content)
+        logger.debug("VLM tagged %s -> %d tags", image_path, len(tags))
+        return tags
 
-    @staticmethod
-    def _encode_image_b64(path: Path) -> str:
-        """Base64-encode an image file for inline submission to llama-server."""
+    # Cap the longest edge sent to the VLM. Qwen3-VL's vision encoder emits
+    # roughly (W*H)/(28*28) tokens per image plane × n_deepstack_layers; a
+    # 2K SDXL render at full res can exceed 8K context. 1024px keeps tagging
+    # accuracy high (the model isn't reading fine print) while comfortably
+    # fitting the 8192-token context budget set in ``_build_command``.
+    _IMAGE_MAX_EDGE = 1024
+    _IMAGE_JPEG_QUALITY = 85
+
+    # Extensions the VLM will accept. Anything else (videos, text, archives)
+    # short-circuits ``generate_tags`` with an empty result rather than
+    # forwarding raw bytes to the model where they'd either 400 or worse.
+    _SUPPORTED_IMAGE_EXTS = frozenset(
+        {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".heic",
+            ".heif",
+            ".avif",
+        }
+    )
+
+    @classmethod
+    def is_image_path(cls, path: Path) -> bool:
+        return path.suffix.lower() in cls._SUPPORTED_IMAGE_EXTS
+
+    @classmethod
+    def _encode_image_b64(cls, path: Path) -> str:
+        """Resize + base64-encode an image for inline submission to llama-server.
+
+        Reads with Pillow (so HEIC/AVIF/WebP all work via the project's
+        existing decoders), downscales to ``_IMAGE_MAX_EDGE``, and re-encodes
+        as JPEG. Animated/multi-frame inputs collapse to the first frame.
+        """
         import base64
+        import io
 
-        return base64.b64encode(path.read_bytes()).decode("ascii")
+        from PIL import Image
+
+        with Image.open(path) as im:
+            im.load()
+            if im.mode not in ("RGB", "L"):
+                im = im.convert("RGB")
+            w, h = im.size
+            max_edge = max(w, h)
+            if max_edge > cls._IMAGE_MAX_EDGE:
+                scale = cls._IMAGE_MAX_EDGE / max_edge
+                im = im.resize(
+                    (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
+                )
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=cls._IMAGE_JPEG_QUALITY)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 __all__ = [
