@@ -123,6 +123,94 @@ metascan/
   VLM-source tag rows survive CLIP rescans (the demote-on-rescan logic in
   `database_sqlite._update_indices` preserves them). Engine choice rationale
   is in `docs/superpowers/specs/2026-05-02-qwen3vl-tagging-design.md` §11.
+- **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
+  `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
+  the scan-time enqueuer (`embedding_worker.py`) and the retag job
+  (`backend/api/vlm.py:_run_retag_job`) filter videos upfront so progress
+  totals are honest. Use `VlmClient.is_image_path(path)` from new call
+  sites instead of duplicating the extension list.
+- **VLM image resize.** `_encode_image_b64` decodes via Pillow and
+  resizes to `_IMAGE_MAX_EDGE = 1024` before JPEG-encoding. Skipping the
+  resize previously blew past the 8K context budget on 2K SDXL renders
+  (`HTTP 400 the request exceeds the available context size`). Tagging
+  doesn't need fine-print readability — bumping the cap only makes sense
+  alongside a `--ctx-size` bump in `_build_command`.
+- **GBNF grammar gotcha.** `\-` is not a valid GBNF escape; bad
+  grammars crash `llama-server` with SIGSEGV inside
+  `llama_grammar_init_impl`, triggering an infinite respawn loop on every
+  tag request. Hyphens must be literal (place at the start or end of a
+  character class). The tagging grammar lives in
+  `metascan/core/vlm_prompts.py:TAGGING_GRAMMAR`.
+- **`llama-server` local override.** `binary_path()` returns
+  `data/bin/local/<name>` when present, else the bundled
+  `data/bin/<name>`. `scripts/build_llama_server.sh` populates the
+  override (Linux + NVIDIA CUDA is the most common reason — upstream
+  ships no Linux CUDA prebuilt). The override naturally suppresses the
+  bundled-asset download because both `_vlm_status_rows` and the
+  downloader check `binary_path().exists()`. See
+  `docs/build-llama-server.md`.
+- **llama.cpp release zip extraction must flatten `bin/`.** The release
+  archives ship the binary plus its sister shared libraries
+  (`libllama.so`, `libmtmd.so`, `libggml*.so`, …) under `build/bin/`.
+  `llama-server`'s `RUNPATH` is `$ORIGIN`, so every `.so` must land in
+  the same directory as the binary or it dies at startup with `error
+  while loading shared libraries`. b7400+ archives also include
+  symlinked SONAME chains (`libllama.so` → `libllama.so.0` →
+  `libllama.so.0.0.7400`) — preserve them via `os.symlink` (zip stores
+  the link target as the file content with `S_IFLNK` in
+  `external_attr`). Logic lives in `setup_models.py:_ensure_target`.
+- **Local llama.cpp builds need explicit RPATH + flat output.**
+  `cmake` by default places shared libs alongside their target's
+  source dir (`build/tools/mtmd/libmtmd.so`, `build/src/libllama.so`,
+  …) and does not bake `$ORIGIN`-relative `RUNPATH` into the build-tree
+  binary. Either of those alone is enough to leave the binary unable
+  to find its libs after we copy it. The build script forces both:
+  `-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=build/bin
+  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=build/bin
+  -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
+  -DCMAKE_INSTALL_RPATH='$ORIGIN'`, then verifies the result by
+  invoking `--version` before declaring success.
+- **Qwen3-VL pipeline DB writes must run in a worker thread.**
+  Both `_run_retag_job` (`backend/api/vlm.py`) and `VlmTagPump.drain_once`
+  (`backend/services/vlm_tag_pump.py`) wrap `db.add_tag_indices` with
+  `asyncio.to_thread`. WSL2 `/mnt/<drive>` mounts and slow disks
+  produce SQLite fsyncs of 50–100 ms+; running that on the event loop
+  serializes concurrent tagging tasks and triggers the `heartbeat:
+  event loop stalled` warnings.
+- **Per-request VLM concurrency must match `parallel_slots`.** Both
+  pipelines use a `Semaphore(spec.parallel_slots)` keyed off the
+  registry entry for the active model id (`REGISTRY[mid].parallel_slots`).
+  Going below it leaves GPU slots idle in `llama-server`'s
+  `--parallel`; going above it forces the server to queue requests and
+  removes the overlap benefit.
+- **VLM status row requires the binary too.** `_vlm_status_rows` in
+  `backend/api/models.py` only flips a row to `available` when GGUF +
+  mmproj + `binary_path()` are all present. A partial download (weights
+  on disk, binary missing) keeps the row at `missing` so the Download
+  button stays enabled — `_ensure_target` short-circuits on existing
+  files, so retrying only fetches the missing pieces. `size_bytes` is
+  reported from whichever weight files exist regardless of binary
+  status, so the user still sees partial-download progress.
+- **VLM download stage label.** `_download_vlm` broadcasts
+  `download_progress` with `stage="downloading (n/3)"` and
+  `percent=0.0`. Don't put the GGUF filename in the stage — it's
+  several characters longer than the chip can render. The frontend
+  `statusLabel` only appends `${pct}%` when `percent > 0`, so keeping
+  the percent at 0 avoids the misleading "33%" / "66%" suffix that
+  reflects step count, not byte progress.
+- **`httpx` / `httpcore` loggers are pinned to WARNING.** Set in
+  `backend/main.py` at module load. `VlmClient`'s `/health` probe
+  hits the server up to 10×/sec during model load (~30–60 s on CPU),
+  and httpx's default INFO-per-request logging dumped hundreds of
+  `503 Service Unavailable` lines per spawn. Don't relax this without
+  also rate-limiting or quieting the probe.
+- **`VlmClient` stderr drainer logs at DEBUG, errors at WARNING.**
+  llama-server stderr includes the entire chat-template dump on each
+  load (~150 lines) plus per-request slot chatter. Routine lines go to
+  DEBUG; lines containing `error`/`failed`/`fatal`/`abort` are
+  promoted to WARNING. The 200-line ring buffer (`_stderr_ring`) is
+  attached to crash reports by `_wait_exit` so debugging info still
+  reaches the user on a real failure.
 
 ## Development Rules
 

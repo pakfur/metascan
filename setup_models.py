@@ -88,7 +88,12 @@ def _ensure_target(t: DownloadTarget) -> bool:
 
     if t.url:
         # Direct URL target. The llama.cpp release URLs are .zip archives
-        # that contain the llama-server binary; extract it.
+        # whose ``build/bin/`` folder holds the server binary AND its sister
+        # shared libraries (libllama.so, libmtmd.so, libggml*.so, …).
+        # ``llama-server`` is linked with RUNPATH=$ORIGIN, so every .so must
+        # land next to the binary or it fails at startup with
+        # "error while loading shared libraries". Extract the whole bin
+        # folder into ``t.dest.parent``.
         from metascan.utils.llama_server import binary_filename
 
         print(f"  ⇣ Downloading {t.url}…")
@@ -97,7 +102,8 @@ def _ensure_target(t: DownloadTarget) -> bool:
             urllib.request.urlretrieve(t.url, tmp)
             with zipfile.ZipFile(tmp, "r") as zf:
                 target_name = binary_filename()
-                # The archive layout varies; find the entry whose basename matches.
+                # Locate the binary entry to learn the archive's bin-folder
+                # prefix; everything sharing that prefix is a runtime payload.
                 member = next(
                     (
                         n
@@ -108,8 +114,43 @@ def _ensure_target(t: DownloadTarget) -> bool:
                 )
                 if member is None:
                     raise RuntimeError(f"{target_name} not found inside {t.url}")
-                with zf.open(member) as src, open(t.dest, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                bin_prefix = member[: -len(target_name)]  # "" or "build/bin/"
+                # Two passes: extract regular files first so the symlink
+                # targets exist on disk; then materialize the symlinks. The
+                # archive uses SONAME chains like
+                # libllama.so → libllama.so.0 → libllama.so.0.0.7400.
+                deferred_links: list[tuple[Path, str]] = []
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename
+                    if not name.startswith(bin_prefix):
+                        continue
+                    rel = name[len(bin_prefix) :]
+                    if not rel or "/" in rel:
+                        # Skip nested files; we only want flat bin/* contents.
+                        continue
+                    mode = (info.external_attr >> 16) & 0xFFFF
+                    is_symlink = (mode & 0o170000) == 0o120000
+                    out_path = t.dest.parent / rel
+                    if out_path.is_symlink() or out_path.exists():
+                        out_path.unlink()
+                    if is_symlink:
+                        # zip stores the link target as the file contents.
+                        link_target = zf.read(info).decode("utf-8")
+                        deferred_links.append((out_path, link_target))
+                        continue
+                    with zf.open(info) as src, open(out_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    # Preserve executable bits from the archive's external
+                    # attributes (lower 9 bits of the unix mode).
+                    perm = mode & 0o777
+                    if perm:
+                        out_path.chmod(perm)
+                for link_path, link_target in deferred_links:
+                    os.symlink(link_target, link_path)
+            # Ensure the server binary is executable even if the archive's
+            # mode bits were stripped (e.g. some Windows zip producers).
             t.dest.chmod(0o755)
             print(f"    → {t.dest}")
             return True

@@ -42,6 +42,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# httpx logs every outbound request at INFO. Our VlmClient polls
+# llama-server's /health endpoint up to 10×/sec during model load, which
+# floods the log with several hundred 503 lines per spawn. Promote to
+# WARNING so only genuine HTTP problems show up at the default level.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

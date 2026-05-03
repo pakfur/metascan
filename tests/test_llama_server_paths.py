@@ -42,11 +42,23 @@ def test_binary_filename_windows():
         assert binary_filename() == "llama-server.exe"
 
 
-def test_pick_release_asset_linux_cuda():
-    rpt = _report(cuda=True)
+def test_pick_release_asset_linux_cuda_falls_back_to_vulkan():
+    # Upstream ships no Linux CUDA prebuilt, so Linux+CUDA hosts with a real
+    # Vulkan device get the Vulkan build.
+    rpt = _report(cuda=True, has_real_vk=True)
     asset = pick_release_asset(rpt)
-    assert "linux" in asset.lower()
-    assert "cuda" in asset.lower()
+    assert "ubuntu-vulkan" in asset.lower()
+    assert "cuda" not in asset.lower()
+
+
+def test_pick_release_asset_linux_cuda_no_vulkan_falls_back_to_cpu():
+    # Linux+CUDA without Vulkan (e.g. WSL2 with no real Vulkan device) falls
+    # back to the CPU ubuntu build.
+    rpt = _report(cuda=True, has_real_vk=False)
+    asset = pick_release_asset(rpt)
+    assert "ubuntu" in asset.lower()
+    assert "cuda" not in asset.lower()
+    assert "vulkan" not in asset.lower()
 
 
 def test_pick_release_asset_macos_arm64():
@@ -65,7 +77,7 @@ def test_pick_release_asset_linux_vulkan_no_cuda():
 def test_pick_release_asset_linux_cpu_fallback():
     rpt = _report()
     asset = pick_release_asset(rpt)
-    assert "linux" in asset.lower()
+    assert "ubuntu" in asset.lower()
     # CPU build identifier varies; just assert it's the non-cuda non-vulkan path
     assert "cuda" not in asset.lower()
     assert "vulkan" not in asset.lower()
@@ -76,6 +88,30 @@ def test_binary_path_lives_in_data_dir():
     assert "bin" in p.parts
 
 
+def test_binary_path_prefers_local_override(tmp_path, monkeypatch):
+    # When data/bin/local/<binary> exists, binary_path() returns that
+    # path instead of the bundled data/bin/<binary>. This is how a
+    # user-built llama-server (via scripts/build_llama_server.sh) takes
+    # precedence over the upstream prebuilt.
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    bundled = tmp_path / "bin" / "llama-server"
+    local = tmp_path / "bin" / "local" / "llama-server"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    bundled.write_bytes(b"bundled")
+
+    with patch(
+        "metascan.utils.llama_server.detect_hardware",
+        return_value=_report(),
+    ):
+        # Bundled-only: returns bundled path.
+        assert binary_path() == bundled
+
+        # With local override present, returns local.
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(b"local")
+        assert binary_path() == local
+
+
 def test_pick_release_asset_macos_intel_raises():
     rpt = _report(os_="Darwin", machine="x86_64")
     with pytest.raises(NotImplementedError, match="Intel"):
@@ -83,8 +119,8 @@ def test_pick_release_asset_macos_intel_raises():
 
 
 def test_release_url_format():
-    url = release_url("llama-x-bin-linux-cuda-x64.zip")
+    url = release_url("llama-x-bin-ubuntu-x64.zip")
     assert url.startswith(
-        f"https://github.com/ggerganov/llama.cpp/releases/download/{LLAMA_CPP_RELEASE}/"
+        f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_RELEASE}/"
     )
-    assert url.endswith("llama-x-bin-linux-cuda-x64.zip")
+    assert url.endswith("llama-x-bin-ubuntu-x64.zip")
