@@ -11,13 +11,16 @@ active the endpoints return 503. Use POST /api/vlm/active first.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+from backend.dependencies import get_db
 
 from backend.api import vlm as vlm_api
 from metascan.core.prompt_templates import (
@@ -88,6 +91,39 @@ def _require_existing_file(path_str: str) -> Path:
     return p
 
 
+async def _run_generation(
+    client: Any,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    image_path: Optional[Path],
+    temperature: float,
+    max_tokens: int,
+) -> GenerateResponse:
+    """Common timing + error-mapping wrapper around VlmClient.generate_text.
+
+    Maps VlmError -> HTTP 502; returns wall-clock elapsed_ms and echoes
+    the active model id for the response.
+    """
+    start = time.monotonic()
+    try:
+        text = await client.generate_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_path=image_path,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except VlmError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    elapsed = int((time.monotonic() - start) * 1000)
+    return GenerateResponse(
+        prompt=text,
+        vlm_model_id=client.model_id or "",
+        elapsed_ms=elapsed,
+    )
+
+
 # ---- Generation endpoints ------------------------------------------------
 
 
@@ -101,23 +137,13 @@ async def generate(body: GenerateRequest) -> GenerateResponse:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    start = time.monotonic()
-    try:
-        text = await client.generate_text(
-            system_prompt=system,
-            user_prompt=user,
-            image_path=p,
-            temperature=body.temperature,
-            max_tokens=body.max_tokens,
-        )
-    except VlmError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    elapsed = int((time.monotonic() - start) * 1000)
-    return GenerateResponse(
-        prompt=text,
-        vlm_model_id=client.model_id or "",
-        elapsed_ms=elapsed,
+    return await _run_generation(
+        client,
+        system_prompt=system,
+        user_prompt=user,
+        image_path=p,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
     )
 
 
@@ -128,22 +154,13 @@ async def transform(body: TransformRequest) -> GenerateResponse:
     system, user = compose_transform_prompts(
         body.source_prompt, body.target_model, body.architecture
     )
-    start = time.monotonic()
-    try:
-        text = await client.generate_text(
-            system_prompt=system,
-            user_prompt=user,
-            image_path=image_path,
-            temperature=body.temperature,
-            max_tokens=body.max_tokens,
-        )
-    except VlmError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    elapsed = int((time.monotonic() - start) * 1000)
-    return GenerateResponse(
-        prompt=text,
-        vlm_model_id=client.model_id or "",
-        elapsed_ms=elapsed,
+    return await _run_generation(
+        client,
+        system_prompt=system,
+        user_prompt=user,
+        image_path=image_path,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
     )
 
 
@@ -151,20 +168,91 @@ async def transform(body: TransformRequest) -> GenerateResponse:
 async def clean(body: CleanRequest) -> GenerateResponse:
     client = _require_ready_client()
     system, user = compose_clean_prompts(body.source_prompt)
-    start = time.monotonic()
+    return await _run_generation(
+        client,
+        system_prompt=system,
+        user_prompt=user,
+        image_path=None,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
+    )
+
+
+# ---- Saved-prompt CRUD ---------------------------------------------------
+
+
+class SaveRequest(BaseModel):
+    file_path: str
+    name: str
+    prompt: str
+    target_model: str
+    architecture: str
+    styles: List[str] = Field(default_factory=list)
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    source_prompt: Optional[str] = None
+    mode: Literal["generate", "transform", "clean"]
+    negative: Optional[str] = None
+    vlm_model_id: Optional[str] = None
+
+
+class SavedPromptOut(BaseModel):
+    id: int
+    file_path: str
+    name: str
+    prompt: str
+    negative: Optional[str]
+    target_model: str
+    architecture: str
+    styles: List[str]
+    temperature: Optional[float]
+    max_tokens: Optional[int]
+    source_prompt: Optional[str]
+    mode: str
+    vlm_model_id: Optional[str]
+    created_at: str
+    updated_at: str
+
+
+@router.post("/save")
+async def save_prompt(body: SaveRequest) -> Dict[str, int]:
+    db = get_db()
     try:
-        text = await client.generate_text(
-            system_prompt=system,
-            user_prompt=user,
-            image_path=None,
+        new_id = await asyncio.to_thread(
+            db.save_prompt,
+            file_path=body.file_path,
+            name=body.name,
+            prompt=body.prompt,
+            target_model=body.target_model,
+            architecture=body.architecture,
+            styles=list(body.styles),
             temperature=body.temperature,
             max_tokens=body.max_tokens,
+            source_prompt=body.source_prompt,
+            mode=body.mode,
+            negative=body.negative,
+            vlm_model_id=body.vlm_model_id,
         )
-    except VlmError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    elapsed = int((time.monotonic() - start) * 1000)
-    return GenerateResponse(
-        prompt=text,
-        vlm_model_id=client.model_id or "",
-        elapsed_ms=elapsed,
-    )
+    except Exception as e:
+        # Most likely an FK violation (file_path not in media). Surface it.
+        logger.warning("save_prompt failed: %s", e)
+        raise HTTPException(status_code=400, detail=f"save failed: {e}")
+    return {"id": new_id}
+
+
+@router.get("/by-image", response_model=List[SavedPromptOut])
+async def list_by_image(file_path: str) -> List[SavedPromptOut]:
+    db = get_db()
+    rows = await asyncio.to_thread(db.list_saved_prompts, file_path)
+    return [SavedPromptOut(**r) for r in rows]
+
+
+@router.delete("/{prompt_id}")
+async def delete_prompt(prompt_id: int) -> Dict[str, str]:
+    db = get_db()
+    deleted = await asyncio.to_thread(db.delete_saved_prompt, prompt_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"saved prompt {prompt_id} not found"
+        )
+    return {"status": "deleted"}
