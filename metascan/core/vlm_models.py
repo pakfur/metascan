@@ -21,6 +21,16 @@ class VlmModelSpec:
         ``--parallel`` flag.
       - ``hf_repo``: HuggingFace repo id; can be overridden at runtime
         via ``config.models.qwen3vl_repos.<model_id>``.
+
+    Filename fields:
+      - ``gguf_filename``: identical upstream + local (each repo's GGUF
+        is uniquely named, so no collision on disk).
+      - ``mmproj_filename``: the LOCAL filename. Model-specific (e.g.
+        ``mmproj-qwen3vl-4b-F16.gguf``) so multiple VLM weights can
+        coexist under ``data/models/vlm/`` without clobbering.
+      - ``mmproj_repo_filename``: the filename inside the HF repo. All
+        noctrex requantizations name it ``mmproj-F16.gguf``; the
+        downloader renames on write to the local form.
     """
 
     model_id: str
@@ -32,18 +42,21 @@ class VlmModelSpec:
     approx_vram_gb: float
     min_vram_gb: float
     parallel_slots: int
+    mmproj_repo_filename: str = "mmproj-F16.gguf"
 
 
-# Repo / filename strings are the current best-known abliterated publishers.
-# Verify these resolve at first download; a user override via
-# config.models.qwen3vl_repos can replace the repo for any id.
+# Source weights live under the ``huihui-ai`` namespace as safetensors;
+# noctrex publishes consistent GGUF requantizations of the four sizes we
+# target. Verified May 2026. A user override via
+# ``config.models.qwen3vl_repos.<model_id>`` can replace the repo for any
+# id (drop-in remix expected to keep matching filenames).
 REGISTRY: dict[str, VlmModelSpec] = {
     "qwen3vl-2b": VlmModelSpec(
         model_id="qwen3vl-2b",
         display_name="Qwen3-VL 2B (Abliterated)",
-        hf_repo="huihui-ai/Qwen3-VL-2B-Instruct-abliterated-GGUF",
-        gguf_filename="Qwen3-VL-2B-Instruct-abliterated-Q4_K_M.gguf",
-        mmproj_filename="mmproj-Qwen3-VL-2B-Instruct-abliterated-f16.gguf",
+        hf_repo="noctrex/Huihui-Qwen3-VL-2B-Instruct-abliterated-GGUF",
+        gguf_filename="Huihui-Qwen3-VL-2B-Instruct-abliterated-Q4_K_M.gguf",
+        mmproj_filename="mmproj-qwen3vl-2b-F16.gguf",
         quant="Q4_K_M",
         approx_vram_gb=3.5,
         min_vram_gb=3.0,
@@ -52,9 +65,9 @@ REGISTRY: dict[str, VlmModelSpec] = {
     "qwen3vl-4b": VlmModelSpec(
         model_id="qwen3vl-4b",
         display_name="Qwen3-VL 4B (Abliterated)",
-        hf_repo="huihui-ai/Qwen3-VL-4B-Instruct-abliterated-GGUF",
-        gguf_filename="Qwen3-VL-4B-Instruct-abliterated-Q4_K_M.gguf",
-        mmproj_filename="mmproj-Qwen3-VL-4B-Instruct-abliterated-f16.gguf",
+        hf_repo="noctrex/Huihui-Qwen3-VL-4B-Instruct-abliterated-GGUF",
+        gguf_filename="Huihui-Qwen3-VL-4B-Instruct-abliterated-Q4_K_M.gguf",
+        mmproj_filename="mmproj-qwen3vl-4b-F16.gguf",
         quant="Q4_K_M",
         approx_vram_gb=6.0,
         min_vram_gb=5.0,
@@ -63,9 +76,9 @@ REGISTRY: dict[str, VlmModelSpec] = {
     "qwen3vl-8b": VlmModelSpec(
         model_id="qwen3vl-8b",
         display_name="Qwen3-VL 8B (Abliterated)",
-        hf_repo="huihui-ai/Qwen3-VL-8B-Instruct-abliterated-GGUF",
-        gguf_filename="Qwen3-VL-8B-Instruct-abliterated-Q5_K_M.gguf",
-        mmproj_filename="mmproj-Qwen3-VL-8B-Instruct-abliterated-f16.gguf",
+        hf_repo="noctrex/Huihui-Qwen3-VL-8B-Instruct-abliterated-GGUF",
+        gguf_filename="Huihui-Qwen3-VL-8B-Instruct-abliterated-Q5_K_M.gguf",
+        mmproj_filename="mmproj-qwen3vl-8b-F16.gguf",
         quant="Q5_K_M",
         approx_vram_gb=9.5,
         min_vram_gb=9.0,
@@ -74,9 +87,9 @@ REGISTRY: dict[str, VlmModelSpec] = {
     "qwen3vl-30b-a3b": VlmModelSpec(
         model_id="qwen3vl-30b-a3b",
         display_name="Qwen3-VL 30B-A3B (Abliterated, MoE)",
-        hf_repo="huihui-ai/Qwen3-VL-30B-A3B-Instruct-abliterated-GGUF",
-        gguf_filename="Qwen3-VL-30B-A3B-Instruct-abliterated-Q4_K_M.gguf",
-        mmproj_filename="mmproj-Qwen3-VL-30B-A3B-Instruct-abliterated-f16.gguf",
+        hf_repo="noctrex/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated-GGUF",
+        gguf_filename="Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated-Q4_K_M.gguf",
+        mmproj_filename="mmproj-qwen3vl-30b-a3b-F16.gguf",
         quant="Q4_K_M",
         approx_vram_gb=22.0,
         min_vram_gb=20.0,
