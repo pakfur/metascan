@@ -481,6 +481,80 @@ class VlmClient:
         logger.debug("VLM tagged %s -> %d tags", image_path, len(tags))
         return tags
 
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[Path] = None,
+        temperature: float = 0.6,
+        max_tokens: int = 250,
+        timeout: float = 120.0,
+    ) -> str:
+        """Free-form text generation (image-grounded or text-only).
+
+        Sends a single chat completion to llama-server. Unlike
+        :meth:`generate_tags`, this raises :class:`VlmError` on failure rather
+        than swallowing it — playground / API callers want to surface errors
+        to the user instead of silently returning empty.
+
+        When ``image_path`` is provided, the file is base64-encoded as JPEG
+        and attached as an ``image_url`` part. When ``None``, the request is
+        text-only — Qwen3-VL handles text-only inference fine, no model swap
+        is needed.
+        """
+        if self._http is None or self._state != STATE_READY:
+            raise VlmError(
+                f"VlmClient not ready (state={self._state}); "
+                "call ensure_started() first"
+            )
+
+        user_content: Any
+        if image_path is not None:
+            if not self.is_image_path(image_path):
+                raise VlmError(f"unsupported image type: {image_path.suffix}")
+            image_b64 = await asyncio.to_thread(self._encode_image_b64, image_path)
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_b64}",
+                    },
+                },
+            ]
+        else:
+            user_content = user_prompt
+
+        body = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        try:
+            r = await self._http.post(
+                "/v1/chat/completions", json=body, timeout=timeout
+            )
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                payload = e.response.json()
+                detail = payload.get("error", {}).get("message") or str(payload)
+            except Exception:
+                detail = (e.response.text or "")[:300]
+            raise VlmError(
+                f"llama-server returned HTTP {e.response.status_code}: {detail}"
+            ) from e
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            raise VlmError(f"llama-server request failed: {e}") from e
+        return str(content).strip()
+
     # Cap the longest edge sent to the VLM. Qwen3-VL's vision encoder emits
     # roughly (W*H)/(28*28) tokens per image plane × n_deepstack_layers; a
     # 2K SDXL render at full res can exceed 8K context. 1024px keeps tagging
