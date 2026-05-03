@@ -164,12 +164,23 @@ metascan/
   source dir (`build/tools/mtmd/libmtmd.so`, `build/src/libllama.so`,
   …) and does not bake `$ORIGIN`-relative `RUNPATH` into the build-tree
   binary. Either of those alone is enough to leave the binary unable
-  to find its libs after we copy it. The build script forces both:
-  `-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=build/bin
-  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=build/bin
-  -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
-  -DCMAKE_INSTALL_RPATH='$ORIGIN'`, then verifies the result by
-  invoking `--version` before declaring success.
+  to find its libs after we copy it. The build script forces output
+  consolidation (`-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=build/bin
+  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=build/bin`) for both platforms, then
+  applies a per-OS rpath strategy. **Linux / ELF:**
+  `-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON -DCMAKE_INSTALL_RPATH='$ORIGIN'`.
+  **macOS / Mach-O:** `-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+  -DCMAKE_INSTALL_RPATH='@loader_path'` plus a post-copy
+  `install_name_tool -delete_rpath` / `-add_rpath '@loader_path'` /
+  `codesign --force --sign -` pass on the binary and every dylib —
+  cmake's ELF-only `BUILD_RPATH_USE_ORIGIN` flag is ignored on Mach-O,
+  and `CMAKE_INSTALL_RPATH` only fires on `cmake --install` (we just
+  `cp`), so without the post-process pass the binary keeps cmake's
+  default absolute build-tree rpath and dies the moment the temp dir
+  goes away. The verify step (`--version`) now runs **after**
+  `rm -rf "${WORK_DIR}"` so any reliance on the build-tree rpath
+  surfaces immediately rather than passing verify and failing on first
+  user activation.
 - **Qwen3-VL pipeline DB writes must run in a worker thread.**
   Both `_run_retag_job` (`backend/api/vlm.py`) and `VlmTagPump.drain_once`
   (`backend/services/vlm_tag_pump.py`) wrap `db.add_tag_indices` with

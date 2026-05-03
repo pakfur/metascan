@@ -278,15 +278,29 @@ CMAKE_FLAGS=(
   # writes shared libs alongside their target's source dir
   # (libmtmd → build/tools/mtmd/, libllama → build/src/, libggml* →
   # build/ggml/src/, …). The prebuilt release zip flattens them next to
-  # the binary; we mirror that so RUNPATH=$ORIGIN finds everything.
+  # the binary; we mirror that so $ORIGIN/@loader_path finds everything.
   -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${WORK_DIR}/build/bin"
   -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="${WORK_DIR}/build/bin"
   -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="${WORK_DIR}/build/bin"
-  # Use $ORIGIN-relative RPATH at build time so the binary's RUNPATH is
-  # the same in the build tree and after we copy it elsewhere.
-  -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
-  -DCMAKE_INSTALL_RPATH='$ORIGIN'
 )
+if [[ "${UNAME_S}" == "Darwin" ]]; then
+  # macOS / Mach-O. CMAKE_BUILD_RPATH_USE_ORIGIN is ELF-only and
+  # CMAKE_INSTALL_RPATH only fires on `cmake --install` (we just `cp`),
+  # so neither protects us here. Bake @loader_path as the build-tree
+  # rpath via BUILD_WITH_INSTALL_RPATH=ON; install_name_tool below is
+  # the belt-and-suspenders that handles whatever cmake didn't set.
+  CMAKE_FLAGS+=(
+    -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+    -DCMAKE_INSTALL_RPATH='@loader_path'
+  )
+else
+  # Linux / ELF. $ORIGIN-relative RUNPATH so the binary's lib search is
+  # the same in the build tree and after we copy it elsewhere.
+  CMAKE_FLAGS+=(
+    -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON
+    -DCMAKE_INSTALL_RPATH='$ORIGIN'
+  )
+fi
 case "${ACCEL}" in
   cuda)   CMAKE_FLAGS+=(-DGGML_CUDA=ON) ;;
   metal)  CMAKE_FLAGS+=(-DGGML_METAL=ON) ;;
@@ -338,6 +352,21 @@ case "${UNAME_S}" in
     # output-dir override (some targets set their own location).
     find "${WORK_DIR}/build" -name 'lib*.dylib' -not -path "${src_bin_dir}/*" \
       -exec cp -P {} "${DEST_DIR}/" \; 2>/dev/null || true
+    # Strip every absolute build-tree LC_RPATH cmake baked into the
+    # Mach-O binary + dylibs and replace it with @loader_path so they
+    # resolve sister libs in the same directory regardless of where
+    # we installed them. Re-sign ad-hoc because mutating load commands
+    # invalidates the existing signature on Apple Silicon.
+    for f in "${DEST_DIR}/llama-server" "${DEST_DIR}"/lib*.dylib; do
+      [[ -L "${f}" ]] && continue
+      [[ -f "${f}" ]] || continue
+      while IFS= read -r rp; do
+        [[ -n "${rp}" ]] || continue
+        install_name_tool -delete_rpath "${rp}" "${f}" >/dev/null 2>&1 || true
+      done < <(otool -l "${f}" | awk '/LC_RPATH/{getline; getline; print $2}')
+      install_name_tool -add_rpath '@loader_path' "${f}" >/dev/null 2>&1 || true
+      codesign --force --sign - "${f}" >/dev/null 2>&1 || true
+    done
     ;;
   *)
     find "${src_bin_dir}" -maxdepth 1 -name 'lib*.so*' \
@@ -349,15 +378,25 @@ case "${UNAME_S}" in
 esac
 chmod +x "${DEST_DIR}/llama-server"
 
+# Drop the build tree NOW, before verify, so any lingering reliance on
+# absolute build-tree rpaths surfaces immediately rather than passing
+# verify and then breaking the moment the EXIT trap fires. This was a
+# real bug on macOS: cmake's default build-tree rpath was the temp dir,
+# verify ran with it intact, then the trap deleted the dir and every
+# subsequent llama-server launch died with "@rpath/libmtmd not found".
+VERIFY_ERR="$(mktemp -t llama-cpp-verify.XXXXXX)"
+trap 'rm -f "${VERIFY_ERR}"' EXIT
+rm -rf "${WORK_DIR}"
+
 # Verify the binary actually loads — catches missing-lib problems now
 # instead of when the user clicks Activate and gets a 500 from the
 # backend. ``--version`` is a cheap way to trigger the dynamic linker.
 echo
 echo "==> Verifying binary..."
-if ! "${DEST_DIR}/llama-server" --version >/dev/null 2>"${WORK_DIR}/verify.err"; then
+if ! "${DEST_DIR}/llama-server" --version >/dev/null 2>"${VERIFY_ERR}"; then
   echo "error: llama-server failed to start. Linker error follows:" >&2
   echo >&2
-  cat "${WORK_DIR}/verify.err" >&2
+  cat "${VERIFY_ERR}" >&2
   echo >&2
   if [[ "${UNAME_S}" != "Darwin" ]] && command -v ldd >/dev/null 2>&1; then
     echo "ldd output (missing libs marked 'not found'):" >&2
@@ -367,11 +406,10 @@ if ! "${DEST_DIR}/llama-server" --version >/dev/null 2>"${WORK_DIR}/verify.err";
   echo "Files present in ${DEST_DIR}:" >&2
   ls -1 "${DEST_DIR}" >&2
   echo >&2
-  echo "If a 'lib*.so' file from llama.cpp's build is missing, please file" >&2
-  echo "an issue — the build script's output-consolidation flags should have" >&2
-  echo "caught this. Workaround: copy missing libs from ${WORK_DIR}/build/" >&2
-  echo "(the temp build dir has been cleaned up by now; rebuild and inspect" >&2
-  echo "before the script's trap fires by editing the trap command)." >&2
+  echo "If a lib*.so / lib*.dylib file from llama.cpp's build is missing," >&2
+  echo "please file an issue — the build script's output-consolidation flags" >&2
+  echo "should have caught this. The temp build dir has already been cleaned" >&2
+  echo "up; to inspect, comment out 'rm -rf \"\${WORK_DIR}\"' above and rebuild." >&2
   exit 1
 fi
 
