@@ -479,6 +479,14 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
         asyncio.create_task(_download_nltk(mid))
         return {"status": "started", "id": mid}
 
+    if mid.startswith("qwen3vl-"):
+        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+
+        if mid not in _VLM_REGISTRY:
+            raise HTTPException(status_code=404, detail=f"unknown VLM model: {mid}")
+        asyncio.create_task(_download_vlm(mid))
+        return {"status": "started", "id": mid}
+
     raise HTTPException(status_code=404, detail=f"unknown model id: {mid}")
 
 
@@ -506,6 +514,21 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
             if path.exists():
                 await asyncio.to_thread(path.unlink)
             return {"ok": True}
+    if model_id.startswith("qwen3vl-"):
+        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+        from metascan.utils.app_paths import get_data_dir
+
+        if model_id not in _VLM_REGISTRY:
+            raise HTTPException(
+                status_code=404, detail=f"unknown VLM model: {model_id}"
+            )
+        spec = _VLM_REGISTRY[model_id]
+        vlm_dir = get_data_dir() / "models" / "vlm"
+        for filename in (spec.gguf_filename, spec.mmproj_filename):
+            target = vlm_dir / filename
+            if target.exists():
+                await asyncio.to_thread(target.unlink)
+        return {"ok": True}
     raise HTTPException(status_code=404, detail=f"unknown model id: {model_id}")
 
 
@@ -585,6 +608,39 @@ async def _download_nltk(mid: str) -> None:
         await asyncio.to_thread(_download)
     except Exception as e:
         logger.exception("NLTK download for %s failed", mid)
+        _broadcast_download(mid, "download_error", error=str(e))
+        return
+    _broadcast_download(mid, "download_complete")
+
+
+async def _download_vlm(mid: str) -> None:
+    """Fetch a Qwen3-VL GGUF + mmproj from HuggingFace and the llama-server
+    binary from the pinned llama.cpp release. Reuses the resolver and
+    downloader from ``setup_models`` so the CLI and the Models tab agree on
+    target paths and archive layout."""
+    _broadcast_download(mid, "download_progress", stage="starting", percent=0.0)
+
+    def _run() -> None:
+        from setup_models import _ensure_target, resolve_qwen3vl_targets
+
+        targets = resolve_qwen3vl_targets(mid)
+        for i, target in enumerate(targets):
+            label = target.filename if target.filename else target.dest.name
+            ws_manager.broadcast_sync(
+                "models",
+                "download_progress",
+                {
+                    "id": mid,
+                    "stage": f"{label} ({i + 1}/{len(targets)})",
+                    "percent": i / len(targets),
+                },
+            )
+            _ensure_target(target)
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.exception("VLM download for %s failed", mid)
         _broadcast_download(mid, "download_error", error=str(e))
         return
     _broadcast_download(mid, "download_complete")
