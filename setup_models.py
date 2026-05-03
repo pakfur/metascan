@@ -33,6 +33,7 @@ else:
 class DownloadTarget:
     """One file to fetch. ``url`` is for HTTP GET; ``repo``+``filename`` are
     for HuggingFace Hub. Exactly one shape is set per target."""
+
     dest: Path
     url: Optional[str] = None
     repo: Optional[str] = None
@@ -57,7 +58,7 @@ def resolve_qwen3vl_targets(model_id: str) -> list[DownloadTarget]:
         ),
         DownloadTarget(
             repo=spec.hf_repo,
-            filename=spec.mmproj_filename,
+            filename=spec.mmproj_repo_filename,
             dest=vlm_dir / spec.mmproj_filename,
         ),
         DownloadTarget(
@@ -106,9 +107,7 @@ def _ensure_target(t: DownloadTarget) -> bool:
                     None,
                 )
                 if member is None:
-                    raise RuntimeError(
-                        f"{target_name} not found inside {t.url}"
-                    )
+                    raise RuntimeError(f"{target_name} not found inside {t.url}")
                 with zf.open(member) as src, open(t.dest, "wb") as dst:
                     shutil.copyfileobj(src, dst)
             t.dest.chmod(0o755)
@@ -147,11 +146,11 @@ def download_nltk_data():
     print("=" * 60)
 
     # Download required data
-    packages = ['stopwords', 'punkt']
+    packages = ["stopwords", "punkt"]
 
     for package in packages:
         try:
-            nltk.data.find(f'tokenizers/{package}')
+            nltk.data.find(f"tokenizers/{package}")
             print(f"✓ {package} already downloaded")
         except LookupError:
             print(f"Downloading {package}...")
@@ -170,10 +169,7 @@ def download_upscaling_models():
 
     # Initialize upscaler
     upscaler = MediaUpscaler(
-        models_dir=models_dir,
-        device="auto",
-        tile_size=512,
-        debug=False
+        models_dir=models_dir, device="auto", tile_size=512, debug=False
     )
 
     if upscaler.models_available:
@@ -212,13 +208,13 @@ def download_upscaling_models():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Metascan setup — downloads NLTK data, AI upscaling models, "
-                    "and (optionally) Qwen3-VL tagging weights."
+        "and (optionally) Qwen3-VL tagging weights."
     )
     parser.add_argument(
         "--qwen3vl",
         metavar="MODEL_ID",
         help="Also download the chosen Qwen3-VL GGUF + mmproj + llama-server binary "
-             "(e.g. qwen3vl-2b, qwen3vl-4b, qwen3vl-8b, qwen3vl-30b-a3b)",
+        "(e.g. qwen3vl-2b, qwen3vl-4b, qwen3vl-8b, qwen3vl-30b-a3b)",
     )
     parser.add_argument(
         "--skip-nltk",
@@ -246,7 +242,9 @@ if __name__ == "__main__":
         try:
             models_success = download_upscaling_models()
             if not models_success:
-                print("\nWarning: AI model setup failed. Upscaling features will not work.")
+                print(
+                    "\nWarning: AI model setup failed. Upscaling features will not work."
+                )
                 print("You can try running this script again later or download models")
                 print("automatically when you first attempt to upscale media.")
         except Exception as e:
@@ -257,7 +255,9 @@ if __name__ == "__main__":
         try:
             ok = download_qwen3vl(args.qwen3vl)
             if not ok:
-                print(f"\nWarning: Qwen3-VL setup did not fully complete for {args.qwen3vl}.")
+                print(
+                    f"\nWarning: Qwen3-VL setup did not fully complete for {args.qwen3vl}."
+                )
         except Exception as e:
             print(f"✗ Qwen3-VL setup failed: {e}")
 
