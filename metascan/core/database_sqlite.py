@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Tuple
 from contextlib import contextmanager
 import logging
 from datetime import datetime
@@ -854,25 +854,24 @@ class DatabaseManager:
             logger.error(f"Failed to fetch tag path index: {e}")
         return out
 
-    def get_tags_for_file(self, file_path: Path) -> List[str]:
-        """Return every tag attached to ``file_path``, regardless of source.
+    def get_tags_for_file(self, file_path: Path) -> List[Tuple[str, str]]:
+        """Return every tag attached to ``file_path`` with its source.
 
         Tags are stored in ``indices`` with ``index_type='tag'`` and a
-        ``source`` of ``'prompt'``, ``'clip'``, or ``'both'``. The UI wants
-        the union, so callers merge by querying this single view instead of
-        relying on the prompt-only ``media.tags`` field that lives inside the
-        serialized ``media.data`` blob.
+        ``source`` of ``'prompt'``, ``'clip'``, ``'vlm'``, ``'both'``
+        (prompt+clip), or ``'vlm+prompt'``. Returns ``(name, source)``
+        tuples so the UI can render per-source styling.
         """
         try:
             with self._get_connection() as conn:
                 posix_path = to_posix_path(file_path)
                 rows = conn.execute(
-                    "SELECT index_key FROM indices "
+                    "SELECT index_key, source FROM indices "
                     "WHERE file_path = ? AND index_type = 'tag' "
                     "ORDER BY index_key",
                     (posix_path,),
                 )
-                return [row["index_key"] for row in rows]
+                return [(row["index_key"], row["source"] or "prompt") for row in rows]
         except Exception as e:
             logger.error(f"Failed to get tags for {file_path}: {e}")
             return []

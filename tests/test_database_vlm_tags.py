@@ -129,6 +129,26 @@ def test_rescan_preserves_vlm_tags_when_prompt_unchanged(db):
     assert rows.get("unique-vlm-tag") == "vlm"
 
 
+def test_get_tags_for_file_returns_name_source_tuples(db):
+    """get_tags_for_file must surface the merged source label per tag so
+    the UI can render per-source styling on chips."""
+    p = Path("/img/g.jpg")
+    _register_path(db, p)
+    db.add_tag_indices(p, ["red", "blue"], source="prompt")
+    db.add_tag_indices(p, ["red", "green"], source="clip")  # red → 'both'
+    rows = db.get_tags_for_file(p)
+    assert rows == [("blue", "prompt"), ("green", "clip"), ("red", "both")]
+
+
+def test_get_tags_for_file_surfaces_vlm_and_vlm_prompt(db):
+    p = Path("/img/h.jpg")
+    _register_path(db, p)
+    db.add_tag_indices(p, ["overlap"], source="prompt")
+    db.add_tag_indices(p, ["overlap", "solo"], source="vlm")
+    by_name = dict(db.get_tags_for_file(p))
+    assert by_name == {"overlap": "vlm+prompt", "solo": "vlm"}
+
+
 def test_rescan_with_prompt_change_demotes_vlm_prompt_back_to_vlm(db):
     p = Path("/img/r.jpg")
     db.save_media(_make_minimal_media(p, prompt_text="red flower"))
