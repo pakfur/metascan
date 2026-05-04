@@ -21,6 +21,7 @@ import ScanDialog from './components/dialogs/ScanDialog.vue'
 import SimilaritySettings from './components/dialogs/SimilaritySettings.vue'
 import DuplicateFinder from './components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from './components/dialogs/UpscaleDialog.vue'
+import PromptPlayground from './components/dialogs/PromptPlayground.vue'
 import UpscaleQueue from './components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from './components/dialogs/ConfigDialog.vue'
 import ScopeBreadcrumb from './components/layout/ScopeBreadcrumb.vue'
@@ -49,6 +50,7 @@ const dupFinderOpen = ref(false)
 const upscaleDialogOpen = ref(false)
 const upscaleQueueOpen = ref(false)
 const upscaleTargets = ref<Media[]>([])
+const playgroundMedia = ref<Media | null>(null)
 const configOpen = ref(false)
 
 onMounted(async () => {
@@ -145,6 +147,13 @@ function openUpscale(items: Media[]) {
   upscaleDialogOpen.value = true
 }
 
+function openPlayground(m: Media) {
+  playgroundMedia.value = m
+}
+function closePlayground() {
+  playgroundMedia.value = null
+}
+
 function handleUpscaleFromSelected() {
   if (mediaStore.selectedMedia) {
     openUpscale([mediaStore.selectedMedia])
@@ -194,6 +203,7 @@ useKeyboard([
               ref="thumbnailGridRef"
               @open="openViewer"
               @upscale="openUpscale"
+              @playground="openPlayground"
             />
           </div>
         </div>
@@ -255,6 +265,13 @@ useKeyboard([
     <UpscaleQueue
       v-if="upscaleQueueOpen"
       @close="upscaleQueueOpen = false"
+    />
+
+    <!-- Prompt Playground dialog -->
+    <PromptPlayground
+      v-if="playgroundMedia"
+      :media="playgroundMedia"
+      @close="closePlayground"
     />
 
     <!-- Config dialog -->

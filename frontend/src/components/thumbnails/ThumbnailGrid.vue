@@ -16,6 +16,7 @@ import { tagOne } from '../../api/vlm'
 const emit = defineEmits<{
   open: [media: Media]
   upscale: [items: Media[]]
+  playground: [media: Media]
 }>()
 
 const mediaStore = useMediaStore()
@@ -271,6 +272,13 @@ async function ctxRetagWithVlm() {
   }
 }
 
+function ctxPlayground() {
+  if (!contextMenu.value) return
+  const target = contextMenu.value.media
+  closeContextMenu()
+  emit('playground', target)
+}
+
 function ctxDelete() {
   if (contextMenu.value) {
     const media = contextMenu.value.media
@@ -442,6 +450,12 @@ function onThumbDragEnd() {
           @click="ctxRetagWithVlm"
         >
           Re-tag with Qwen3-VL
+        </button>
+        <button
+          v-if="modelsStore.isVlmReady"
+          @click="ctxPlayground"
+        >
+          Prompt Playground…
         </button>
         <hr />
         <div class="context-sub-host">
