@@ -29,6 +29,7 @@ from backend.api import (
     config,
     embeddings,
     models,
+    prompt as prompt_api,
     vlm,
     websocket,
 )
@@ -295,6 +296,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(embeddings.router)
     app.include_router(models.router)
     app.include_router(vlm.router)
+    app.include_router(prompt_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
