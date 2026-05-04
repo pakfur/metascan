@@ -15,11 +15,22 @@ def _report(cuda_gb=None):
     )
 
 
-def test_workstation_returns_true_only_with_binary_and_weights_present():
+def test_workstation_returns_true_only_with_binary_and_weights_present(
+    monkeypatch, tmp_path
+):
     """Without the binary or weights on disk, should_tag_with_vlm is False
     even on a workstation. Real-world precondition: setup_models.py hasn't
-    run yet."""
+    run yet.
+
+    Point all data-dir lookups at an empty tmp_path so this test is
+    independent of host state (a dev box may have llama-server +
+    GGUF weights installed from prior `setup_models.py` runs).
+    """
+    from backend.services import scan_dispatch
     from backend.services.scan_dispatch import should_tag_with_vlm
+
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(scan_dispatch, "get_data_dir", lambda: tmp_path)
 
     assert should_tag_with_vlm(_report(cuda_gb=16.0)) is False
 

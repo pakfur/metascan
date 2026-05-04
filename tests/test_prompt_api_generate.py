@@ -70,9 +70,10 @@ def test_generate_returns_prompt_and_metadata(stub_vlm, img_file):
             "/api/prompt/generate",
             json={
                 "file_path": str(img_file),
-                "target_model": "sdxl",
+                "target_model": "sd",
                 "architecture": "t2i",
-                "styles": [],
+                "extras": [],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
@@ -84,23 +85,42 @@ def test_generate_returns_prompt_and_metadata(stub_vlm, img_file):
     assert "elapsed_ms" in body
 
 
-def test_generate_passes_styles_into_system_prompt(stub_vlm, img_file):
+def test_generate_passes_extras_into_system_prompt(stub_vlm, img_file):
     with TestClient(_build_app()) as c:
         c.post(
             "/api/prompt/generate",
             json={
                 "file_path": str(img_file),
-                "target_model": "pony",
+                "target_model": "flux1",
                 "architecture": "t2i",
-                "styles": ["anime", "cinematic"],
+                "extras": ["includeLighting", "includeCameraAngle"],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
         )
     assert len(stub_vlm.calls) == 1
     sys_prompt = stub_vlm.calls[0]["system_prompt"]
-    assert "anime" in sys_prompt
-    assert "cinematic" in sys_prompt
+    assert "precise lighting details" in sys_prompt
+    assert "exact camera angle" in sys_prompt
+
+
+def test_generate_caption_length_drives_short_clause_for_tag_target(stub_vlm, img_file):
+    with TestClient(_build_app()) as c:
+        c.post(
+            "/api/prompt/generate",
+            json={
+                "file_path": str(img_file),
+                "target_model": "sd",
+                "architecture": "t2i",
+                "extras": [],
+                "caption_length": "Short",
+                "temperature": 0.6,
+                "max_tokens": 250,
+            },
+        )
+    sys_prompt = stub_vlm.calls[0]["system_prompt"]
+    assert "Use 5-15 tags." in sys_prompt
 
 
 def test_generate_404_when_file_missing(stub_vlm):
@@ -109,9 +129,10 @@ def test_generate_404_when_file_missing(stub_vlm):
             "/api/prompt/generate",
             json={
                 "file_path": "/nonexistent/x.jpg",
-                "target_model": "sdxl",
+                "target_model": "sd",
                 "architecture": "t2i",
-                "styles": [],
+                "extras": [],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
@@ -127,9 +148,10 @@ def test_generate_503_when_vlm_not_installed(img_file):
             "/api/prompt/generate",
             json={
                 "file_path": str(img_file),
-                "target_model": "sdxl",
+                "target_model": "sd",
                 "architecture": "t2i",
-                "styles": [],
+                "extras": [],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
@@ -151,9 +173,10 @@ def test_generate_503_when_vlm_idle(img_file):
                 "/api/prompt/generate",
                 json={
                     "file_path": str(img_file),
-                    "target_model": "sdxl",
+                    "target_model": "sd",
                     "architecture": "t2i",
-                    "styles": [],
+                    "extras": [],
+                    "caption_length": "Medium",
                     "temperature": 0.6,
                     "max_tokens": 250,
                 },
@@ -163,23 +186,21 @@ def test_generate_503_when_vlm_idle(img_file):
         vlm_api.set_vlm_client(None)
 
 
-def test_generate_400_when_too_many_styles(stub_vlm, img_file):
+def test_generate_422_on_invalid_extra(stub_vlm, img_file):
     with TestClient(_build_app()) as c:
         r = c.post(
             "/api/prompt/generate",
             json={
                 "file_path": str(img_file),
-                "target_model": "sdxl",
+                "target_model": "sd",
                 "architecture": "t2i",
-                "styles": ["anime", "cinematic", "watercolor", "comic"],
+                "extras": ["notAnOption"],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
         )
-    # Pydantic Literal validation runs before our handler — invalid styles
-    # produce a 422 from FastAPI, but a too-large valid-styles list reaches
-    # _style_clause and returns 400. Both are acceptable for "too many".
-    assert r.status_code in (400, 422)
+    assert r.status_code == 422
 
 
 def test_generate_502_when_vlm_raises(stub_vlm, img_file):
@@ -189,9 +210,10 @@ def test_generate_502_when_vlm_raises(stub_vlm, img_file):
             "/api/prompt/generate",
             json={
                 "file_path": str(img_file),
-                "target_model": "sdxl",
+                "target_model": "sd",
                 "architecture": "t2i",
-                "styles": [],
+                "extras": [],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
@@ -206,8 +228,10 @@ def test_transform_passes_source_prompt_through(stub_vlm):
             "/api/prompt/transform",
             json={
                 "source_prompt": "old prompt here",
-                "target_model": "flux-chroma",
+                "target_model": "chroma",
                 "architecture": "t2i",
+                "extras": [],
+                "caption_length": "Medium",
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
@@ -215,6 +239,25 @@ def test_transform_passes_source_prompt_through(stub_vlm):
     assert r.status_code == 200
     user = stub_vlm.calls[0]["user_prompt"]
     assert "old prompt here" in user
+
+
+def test_transform_extras_reach_system_prompt(stub_vlm):
+    with TestClient(_build_app()) as c:
+        c.post(
+            "/api/prompt/transform",
+            json={
+                "source_prompt": "subject in a forest",
+                "target_model": "qwen",
+                "architecture": "t2i",
+                "extras": ["includeAestheticQuality"],
+                "caption_length": "Long",
+                "temperature": 0.6,
+                "max_tokens": 250,
+            },
+        )
+    sys_prompt = stub_vlm.calls[0]["system_prompt"]
+    assert "subjective aesthetic quality" in sys_prompt
+    assert "Rewrite the supplied prompt" in sys_prompt
 
 
 def test_clean_uses_clean_template(stub_vlm):

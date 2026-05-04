@@ -19,10 +19,14 @@ type Mode = 'generate' | 'transform' | 'clean'
 const mode = ref<Mode>('generate')
 const target = ref<promptApi.TargetModel>(promptStore.settings.target_model)
 const architecture = ref<promptApi.Architecture>(promptStore.settings.architecture)
-const styles = ref<promptApi.StyleEnhancement[]>([...promptStore.settings.styles])
+const extras = ref<promptApi.ExtraOption[]>([...promptStore.settings.extras])
+const captionLength = ref<promptApi.CaptionLength>(promptStore.settings.caption_length)
 const temperature = ref(promptStore.settings.temperature)
 const maxTokens = ref(promptStore.settings.max_tokens)
+const prefix = ref(promptStore.settings.prefix)
+const suffix = ref(promptStore.settings.suffix)
 const sourcePrompt = ref(props.media.prompt ?? '')
+const showExtras = ref(true)
 
 const generated = ref('')
 const generating = ref(false)
@@ -32,25 +36,62 @@ const dirty = ref(false)  // generated text modified since last save / clear
 
 let abortCtrl: AbortController | null = null
 
-const STYLE_OPTIONS: promptApi.StyleEnhancement[] = [
-  'anime', 'photorealistic', 'cinematic', 'cartoon',
-  'watercolor', 'oil-painting', 'comic',
-  'hyperdetailed', 'minimalist', 'moody-lighting',
-]
-const TARGET_OPTIONS: promptApi.TargetModel[] = [
-  'sdxl', 'flux-chroma', 'qwen-t2i', 'pony',
-]
+const TARGET_OPTIONS: promptApi.TargetModel[] = [...promptApi.TARGET_MODEL_ORDER]
 
 const hasExistingPrompt = computed(() => sourcePrompt.value.trim().length > 0)
 const transformDisabled = computed(() => !hasExistingPrompt.value)
 const cleanDisabled = computed(() => !hasExistingPrompt.value)
-const stylesAtMax = computed(() => styles.value.length >= 3)
+
+const currentPreset = computed(() => promptApi.TARGET_PRESETS[target.value])
+const allowedLengths = computed(() => currentPreset.value.allowedLengths)
+const showTargetControls = computed(() => mode.value !== 'clean')
+const showExtrasControls = computed(() => mode.value !== 'clean')
 
 const fullImageUrl = computed(() => streamUrl(props.media.file_path))
 
 const savedPrompts = computed(() =>
   promptStore.savedByPath[props.media.file_path] ?? [],
 )
+
+const assembledPrompt = computed(() => {
+  const body = generated.value
+  if (!body.trim()) return ''
+  return `${prefix.value}${body}${suffix.value}`
+})
+
+function isExtraDisabled(_key: promptApi.ExtraOption): boolean {
+  // All targets currently support all 16 options. The hook is here so future
+  // targets can opt out by narrowing TARGET_PRESETS.supportedOptions.
+  return false
+}
+
+function counterpartFor(key: promptApi.ExtraOption): promptApi.ExtraOption | null {
+  for (const [a, b] of promptApi.MUTEX_PAIRS) {
+    if (key === a) return b
+    if (key === b) return a
+  }
+  return null
+}
+
+function isExtraChecked(key: promptApi.ExtraOption): boolean {
+  return extras.value.includes(key)
+}
+
+function toggleExtra(key: promptApi.ExtraOption) {
+  if (isExtraDisabled(key)) return
+  const idx = extras.value.indexOf(key)
+  if (idx >= 0) {
+    extras.value.splice(idx, 1)
+    return
+  }
+  // Adding — drop the mutex counterpart if it's currently checked.
+  const counter = counterpartFor(key)
+  if (counter) {
+    const cidx = extras.value.indexOf(counter)
+    if (cidx >= 0) extras.value.splice(cidx, 1)
+  }
+  extras.value.push(key)
+}
 
 onMounted(() => {
   promptStore.loadSavedPrompts(props.media.file_path).catch(() => {/* non-fatal */})
@@ -61,29 +102,36 @@ onBeforeUnmount(() => {
   if (abortCtrl) abortCtrl.abort()
 })
 
+// When target changes, refill prefix/suffix to its defaults and clamp the
+// caption length to the target's allowed list. Matches the reference panel's
+// _apply_preset behavior.
+watch(target, (next, prev) => {
+  if (next === prev) return
+  const preset = promptApi.TARGET_PRESETS[next]
+  prefix.value = preset.prefix
+  suffix.value = preset.suffix
+  if (!preset.allowedLengths.includes(captionLength.value)) {
+    captionLength.value = preset.allowedLengths.includes('Medium')
+      ? 'Medium'
+      : preset.allowedLengths[0]
+  }
+})
+
 watch(
-  [mode, target, architecture, styles, temperature, maxTokens],
+  [mode, target, architecture, extras, captionLength, temperature, maxTokens, prefix, suffix],
   () => {
     promptStore.settings.target_model = target.value
     promptStore.settings.architecture = architecture.value
-    promptStore.settings.styles = [...styles.value]
+    promptStore.settings.extras = [...extras.value]
+    promptStore.settings.caption_length = captionLength.value
     promptStore.settings.temperature = temperature.value
     promptStore.settings.max_tokens = maxTokens.value
+    promptStore.settings.prefix = prefix.value
+    promptStore.settings.suffix = suffix.value
     promptStore.persistSettings()
   },
   { deep: true },
 )
-
-function toggleStyle(s: promptApi.StyleEnhancement) {
-  const idx = styles.value.indexOf(s)
-  if (idx >= 0) {
-    styles.value.splice(idx, 1)
-  } else if (!stylesAtMax.value) {
-    styles.value.push(s)
-  } else {
-    toast.show('Up to 3 styles', 'warn')
-  }
-}
 
 async function run() {
   if (generating.value) return
@@ -99,7 +147,8 @@ async function run() {
           file_path: props.media.file_path,
           target_model: target.value,
           architecture: architecture.value,
-          styles: [...styles.value],
+          extras: [...extras.value],
+          caption_length: captionLength.value,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
         },
@@ -111,6 +160,8 @@ async function run() {
           source_prompt: sourcePrompt.value,
           target_model: target.value,
           architecture: architecture.value,
+          extras: [...extras.value],
+          caption_length: captionLength.value,
           file_path: props.media.file_path,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
@@ -146,9 +197,9 @@ function stop() {
   if (abortCtrl) abortCtrl.abort()
 }
 
-async function copyGenerated() {
-  if (!generated.value) return
-  await copyToClipboard(generated.value)
+async function copyAssembled() {
+  if (!assembledPrompt.value) return
+  await copyToClipboard(assembledPrompt.value)
   toast.show('Copied to clipboard', 'success')
 }
 
@@ -158,17 +209,17 @@ async function regenerate() {
 }
 
 async function saveCurrent() {
-  if (!generated.value.trim()) return
+  if (!assembledPrompt.value.trim()) return
   const name = window.prompt('Name this prompt:')
   if (!name) return
   try {
     await promptStore.savePrompt({
       file_path: props.media.file_path,
       name,
-      prompt: generated.value,
+      prompt: assembledPrompt.value,
       target_model: target.value,
       architecture: architecture.value,
-      styles: [...styles.value],
+      styles: [],
       temperature: temperature.value,
       max_tokens: maxTokens.value,
       source_prompt: mode.value !== 'generate' ? sourcePrompt.value : null,
@@ -189,6 +240,10 @@ function tryClose() {
     if (!window.confirm('Discard unsaved generated prompt?')) return
   }
   emit('close')
+}
+
+function targetLabel(t: promptApi.TargetModel): string {
+  return promptApi.TARGET_MODEL_LABELS[t]
 }
 </script>
 
@@ -219,28 +274,22 @@ function tryClose() {
               </label>
             </div>
 
-            <div class="ctrl-row" v-if="mode !== 'clean'">
+            <div class="ctrl-row" v-if="showTargetControls">
               <span class="ctrl-label">Target model</span>
               <select v-model="target">
                 <option v-for="t in TARGET_OPTIONS" :key="t" :value="t">
-                  {{ promptApi.TARGET_MODEL_LABELS[t] }}
+                  {{ targetLabel(t) }}
                 </option>
               </select>
             </div>
 
-            <div class="ctrl-row" v-if="mode === 'generate'">
-              <span class="ctrl-label">Styles ({{ styles.length }}/3)</span>
-              <div class="style-chips">
-                <button
-                  v-for="s in STYLE_OPTIONS"
-                  :key="s"
-                  type="button"
-                  class="chip"
-                  :class="{ active: styles.includes(s), disabled: !styles.includes(s) && stylesAtMax }"
-                  :aria-pressed="styles.includes(s)"
-                  @click="toggleStyle(s)"
-                >{{ promptApi.STYLE_LABELS[s] }}</button>
-              </div>
+            <div class="ctrl-row" v-if="showTargetControls">
+              <span class="ctrl-label">Caption length</span>
+              <select v-model="captionLength">
+                <option v-for="len in allowedLengths" :key="len" :value="len">
+                  {{ len }}
+                </option>
+              </select>
             </div>
 
             <div class="ctrl-row">
@@ -254,6 +303,53 @@ function tryClose() {
               <input type="range" min="50" max="1000" step="10" v-model.number="maxTokens" />
               <span class="ctrl-value">{{ maxTokens }}</span>
             </div>
+          </div>
+        </div>
+
+        <!-- Extra options -->
+        <div class="section" v-if="showExtrasControls">
+          <button class="extras-toggle" type="button" @click="showExtras = !showExtras">
+            <span class="chevron">{{ showExtras ? '▼' : '▶' }}</span>
+            <span class="section-label">Extra options ({{ extras.length }})</span>
+          </button>
+          <div v-if="showExtras" class="extras-grid">
+            <label
+              v-for="opt in promptApi.EXTRA_OPTIONS"
+              :key="opt.key"
+              class="extra-row"
+              :class="{ disabled: isExtraDisabled(opt.key) }"
+              :title="opt.full"
+            >
+              <input
+                type="checkbox"
+                :disabled="isExtraDisabled(opt.key)"
+                :checked="isExtraChecked(opt.key)"
+                @change="toggleExtra(opt.key)"
+              />
+              <span>{{ opt.short }}</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Prefix / suffix -->
+        <div class="section" v-if="showTargetControls">
+          <div class="ctrl-row prefix-row">
+            <span class="ctrl-label">Prefix</span>
+            <input
+              type="text"
+              v-model="prefix"
+              class="affix-input"
+              placeholder="(prepended on copy / save)"
+            />
+          </div>
+          <div class="ctrl-row prefix-row">
+            <span class="ctrl-label">Suffix</span>
+            <input
+              type="text"
+              v-model="suffix"
+              class="affix-input"
+              placeholder="(appended on copy / save)"
+            />
           </div>
         </div>
 
@@ -290,9 +386,13 @@ function tryClose() {
             rows="6"
             placeholder="(generated prompt will appear here)"
           />
+          <div v-if="generated.trim() && (prefix || suffix)" class="assembled-preview">
+            <span class="assembled-label">With prefix/suffix:</span>
+            <code>{{ assembledPrompt }}</code>
+          </div>
           <div class="action-row">
-            <button :disabled="!generated.trim()" @click="copyGenerated">Copy</button>
-            <button :disabled="!generated.trim()" @click="saveCurrent">Save…</button>
+            <button :disabled="!assembledPrompt.trim()" @click="copyAssembled">Copy</button>
+            <button :disabled="!assembledPrompt.trim()" @click="saveCurrent">Save…</button>
             <button :disabled="!generated.trim()" @click="regenerate">Regenerate</button>
           </div>
         </div>
@@ -343,14 +443,22 @@ function tryClose() {
 .ctrl-value { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; opacity: 0.8; }
 .ctrl-row label.disabled { opacity: 0.4; }
 
-.style-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.chip { font-size: 11px; padding: 3px 8px; border-radius: 12px; border: 1px solid var(--surface-border); background: transparent; color: inherit; cursor: pointer; }
-.chip.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
-.chip.disabled { opacity: 0.35; cursor: not-allowed; }
-
 .section { display: flex; flex-direction: column; gap: 4px; }
 .section-label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
 .prompt-area { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; padding: 8px; background: var(--surface-card); color: inherit; border: 1px solid var(--surface-border); border-radius: 4px; }
+
+.extras-toggle { background: none; border: none; padding: 0; display: flex; align-items: center; gap: 6px; cursor: pointer; color: inherit; }
+.extras-toggle .chevron { font-size: 10px; opacity: 0.6; }
+.extras-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; padding: 8px 4px 0 16px; }
+.extra-row { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.extra-row.disabled { opacity: 0.4; cursor: not-allowed; }
+.extra-row input[type="checkbox"] { margin: 0; }
+
+.prefix-row .affix-input { flex: 1; min-width: 200px; padding: 4px 8px; background: var(--surface-card); color: inherit; border: 1px solid var(--surface-border); border-radius: 4px; font-family: inherit; font-size: 12px; }
+
+.assembled-preview { margin-top: 4px; padding: 6px 8px; background: var(--surface-card); border: 1px dashed var(--surface-border); border-radius: 4px; font-size: 11px; opacity: 0.85; word-break: break-word; }
+.assembled-preview .assembled-label { display: block; opacity: 0.6; margin-bottom: 2px; }
+.assembled-preview code { font-family: inherit; }
 
 .run-row { display: flex; align-items: center; gap: 12px; }
 .run-row .primary { padding: 6px 14px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; }

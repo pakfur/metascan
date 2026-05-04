@@ -26,7 +26,8 @@ from backend.dependencies import get_db
 from backend.api import vlm as vlm_api
 from metascan.core.prompt_templates import (
     Architecture,
-    StyleEnhancement,
+    CaptionLength,
+    ExtraOption,
     TargetModel,
     compose_clean_prompts,
     compose_generate_prompts,
@@ -46,7 +47,8 @@ class GenerateRequest(BaseModel):
     file_path: str
     target_model: TargetModel
     architecture: Architecture
-    styles: List[StyleEnhancement] = Field(default_factory=list)
+    extras: List[ExtraOption] = Field(default_factory=list)
+    caption_length: CaptionLength = "Medium"
     temperature: float = 0.6
     max_tokens: int = 250
 
@@ -55,6 +57,8 @@ class TransformRequest(BaseModel):
     source_prompt: str
     target_model: TargetModel
     architecture: Architecture
+    extras: List[ExtraOption] = Field(default_factory=list)
+    caption_length: CaptionLength = "Medium"
     file_path: Optional[str] = None  # optional image grounding
     temperature: float = 0.6
     max_tokens: int = 250
@@ -132,12 +136,12 @@ async def _run_generation(
 async def generate(body: GenerateRequest) -> GenerateResponse:
     client = _require_ready_client()
     p = _require_existing_file(body.file_path)
-    try:
-        system, user = compose_generate_prompts(
-            body.target_model, body.architecture, list(body.styles)
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    system, user = compose_generate_prompts(
+        body.target_model,
+        body.architecture,
+        list(body.extras),
+        body.caption_length,
+    )
     return await _run_generation(
         client,
         system_prompt=system,
@@ -153,7 +157,11 @@ async def transform(body: TransformRequest) -> GenerateResponse:
     client = _require_ready_client()
     image_path = _require_existing_file(body.file_path) if body.file_path else None
     system, user = compose_transform_prompts(
-        body.source_prompt, body.target_model, body.architecture
+        body.source_prompt,
+        body.target_model,
+        body.architecture,
+        list(body.extras),
+        body.caption_length,
     )
     return await _run_generation(
         client,
