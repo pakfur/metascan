@@ -14,7 +14,10 @@ async def test_health_returns_ok_after_load_delay():
     async with FakeLlamaServer(load_ms=50) as fake:
         async with httpx.AsyncClient() as client:
             r = None
-            for _ in range(40):
+            # 200 × 25ms = 5s — generous budget for subprocess spawn +
+            # aiohttp import on slower hosts (e.g. WSL2 with /mnt/c paths).
+            # Old 1s budget was too tight and flaked under load.
+            for _ in range(200):
                 try:
                     r = await client.get(f"{fake.base_url}/health")
                     if r.status_code == 200:
