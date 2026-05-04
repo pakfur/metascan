@@ -6,6 +6,7 @@ import { useToast } from '../../composables/useToast'
 import MetadataField from './MetadataField.vue'
 import CameraSection from './CameraSection.vue'
 import LocationSection from './LocationSection.vue'
+import SavedPromptsSection from './SavedPromptsSection.vue'
 import { fileName } from '../../utils/path'
 import { copyToClipboard } from '../../utils/clipboard'
 import type { AnyFolder } from '../../types/folders'
@@ -115,6 +116,7 @@ async function copyAll() {
 
       <CameraSection :media="media" />
       <LocationSection :media="media" />
+      <SavedPromptsSection />
 
       <!-- AI Generation -->
       <details v-if="media.metadata_source" class="meta-section" open>
