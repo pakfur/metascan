@@ -214,8 +214,19 @@ class Media:
 
         Combines orjson's fast parsing with direct object construction
         for optimal deserialization performance.
+
+        Falls back to stdlib ``json.loads`` if orjson rejects the payload —
+        rows written via ``dataclasses_json`` (which uses stdlib ``json.dumps``)
+        can contain bare ``NaN``/``Infinity`` literals (e.g. ComfyUI node
+        ``is_changed`` hashes inside ``generation_data``) that orjson treats
+        as invalid JSON.
         """
         import orjson
 
-        data = orjson.loads(json_str)
+        try:
+            data = orjson.loads(json_str)
+        except orjson.JSONDecodeError:
+            import json as _stdlib_json
+
+            data = _stdlib_json.loads(json_str)
         return Media.from_dict_fast(data)
