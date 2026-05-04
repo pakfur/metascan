@@ -12,6 +12,7 @@ const emit = defineEmits<{ close: [] }>()
 
 const promptStore = usePromptStore()
 const toast = useToast()
+const cardRef = ref<HTMLElement | null>(null)
 
 type Mode = 'generate' | 'transform' | 'clean'
 
@@ -53,6 +54,7 @@ const savedPrompts = computed(() =>
 
 onMounted(() => {
   promptStore.loadSavedPrompts(props.media.file_path).catch(() => {/* non-fatal */})
+  cardRef.value?.focus()
 })
 
 onBeforeUnmount(() => {
@@ -192,10 +194,10 @@ function tryClose() {
 
 <template>
   <div class="dialog-overlay" @click.self="tryClose">
-    <div class="dialog-card playground-card">
+    <div class="dialog-card playground-card" tabindex="-1" @keydown.esc.stop="tryClose" ref="cardRef">
       <div class="dialog-header">
         <h3>Prompt Playground</h3>
-        <button class="close-btn" @click="tryClose" title="Close">×</button>
+        <button class="close-btn" @click="tryClose" title="Close" aria-label="Close">×</button>
       </div>
 
       <div class="playground-body">
@@ -235,6 +237,7 @@ function tryClose() {
                   type="button"
                   class="chip"
                   :class="{ active: styles.includes(s), disabled: !styles.includes(s) && stylesAtMax }"
+                  :aria-pressed="styles.includes(s)"
                   @click="toggleStyle(s)"
                 >{{ promptApi.STYLE_LABELS[s] }}</button>
               </div>
@@ -310,8 +313,24 @@ function tryClose() {
 </template>
 
 <style scoped>
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dialog-card {
+  background: var(--surface-section);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
 .playground-card { width: min(960px, 95vw); max-height: 90vh; display: flex; flex-direction: column; }
-.dialog-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border, #2a2a2a); }
+.dialog-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--surface-border); }
 .dialog-header h3 { margin: 0; }
 .close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: inherit; }
 .playground-body { padding: 12px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
@@ -325,27 +344,27 @@ function tryClose() {
 .ctrl-row label.disabled { opacity: 0.4; }
 
 .style-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.chip { font-size: 11px; padding: 3px 8px; border-radius: 12px; border: 1px solid var(--border, #444); background: transparent; color: inherit; cursor: pointer; }
-.chip.active { background: var(--primary, #3b82f6); color: white; border-color: var(--primary, #3b82f6); }
+.chip { font-size: 11px; padding: 3px 8px; border-radius: 12px; border: 1px solid var(--surface-border); background: transparent; color: inherit; cursor: pointer; }
+.chip.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
 .chip.disabled { opacity: 0.35; cursor: not-allowed; }
 
 .section { display: flex; flex-direction: column; gap: 4px; }
 .section-label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
-.prompt-area { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; padding: 8px; background: var(--bg-2, #1a1a1a); color: inherit; border: 1px solid var(--border, #2a2a2a); border-radius: 4px; }
+.prompt-area { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; padding: 8px; background: var(--surface-card); color: inherit; border: 1px solid var(--surface-border); border-radius: 4px; }
 
 .run-row { display: flex; align-items: center; gap: 12px; }
-.run-row .primary { padding: 6px 14px; background: var(--primary, #3b82f6); color: white; border: none; border-radius: 4px; cursor: pointer; }
+.run-row .primary { padding: 6px 14px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; }
 .run-row .primary:disabled { opacity: 0.6; cursor: not-allowed; }
-.run-row .secondary { padding: 6px 14px; background: transparent; border: 1px solid var(--border, #444); color: inherit; border-radius: 4px; cursor: pointer; }
+.run-row .secondary { padding: 6px 14px; background: transparent; border: 1px solid var(--surface-border); color: inherit; border-radius: 4px; cursor: pointer; }
 .run-row .elapsed { font-size: 12px; opacity: 0.7; }
-.run-row .error { color: var(--danger, #ef4444); font-size: 12px; }
+.run-row .error { color: var(--danger-color); font-size: 12px; }
 .action-row { display: flex; gap: 8px; margin-top: 4px; }
-.action-row button { padding: 4px 10px; background: transparent; border: 1px solid var(--border, #444); color: inherit; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.action-row button { padding: 4px 10px; background: transparent; border: 1px solid var(--surface-border); color: inherit; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .action-row button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.saved-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border, #2a2a2a); }
+.saved-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--surface-border); }
 .saved-name { font-weight: 600; flex: 1; }
 .saved-meta { font-size: 11px; opacity: 0.7; }
-.link-btn { background: none; border: none; color: var(--primary, #3b82f6); cursor: pointer; font-size: 12px; }
-.link-btn.danger { color: var(--danger, #ef4444); }
+.link-btn { background: none; border: none; color: var(--primary-color); cursor: pointer; font-size: 12px; }
+.link-btn.danger { color: var(--danger-color); }
 </style>
