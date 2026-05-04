@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -182,6 +183,15 @@ async def clean(body: CleanRequest) -> GenerateResponse:
 
 
 class SaveRequest(BaseModel):
+    """Persist a generated/transformed prompt against an image.
+
+    target_model / architecture / styles are intentionally typed as plain
+    str / List[str] rather than the Literal types from prompt_templates,
+    so saved rows survive future enum extensions without a migration.
+    `mode` stays Literal because it's also enforced by the DB CHECK
+    constraint (extending it requires a coordinated DB + Pydantic edit).
+    """
+
     file_path: str
     name: str
     prompt: str
@@ -233,10 +243,14 @@ async def save_prompt(body: SaveRequest) -> Dict[str, int]:
             negative=body.negative,
             vlm_model_id=body.vlm_model_id,
         )
-    except Exception as e:
-        # Most likely an FK violation (file_path not in media). Surface it.
-        logger.warning("save_prompt failed: %s", e)
-        raise HTTPException(status_code=400, detail=f"save failed: {e}")
+    except sqlite3.IntegrityError as e:
+        # FK violation: file_path doesn't exist in media. Other operational
+        # failures fall through to FastAPI's default 500 handler.
+        logger.warning("save_prompt FK violation for %s: %s", body.file_path, e)
+        raise HTTPException(
+            status_code=400,
+            detail=f"saved prompt requires file_path to exist in media: {body.file_path}",
+        )
     return {"id": new_id}
 
 
