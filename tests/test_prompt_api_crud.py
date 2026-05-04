@@ -110,3 +110,27 @@ def test_delete_removes_row(client_with_db):
 
     r2 = c.delete(f"/api/prompt/{new_id}")
     assert r2.status_code == 404
+
+
+def test_save_returns_400_when_file_path_missing_from_media(client_with_db):
+    """FK violation: file_path doesn't exist in media."""
+    c, _ = client_with_db
+    r = c.post(
+        "/api/prompt/save",
+        json={
+            "file_path": "/never/seen/this/before.jpg",
+            "name": "x",
+            "prompt": "p",
+            "target_model": "sdxl",
+            "architecture": "t2i",
+            "styles": [],
+            "temperature": 0.6,
+            "max_tokens": 250,
+            "source_prompt": None,
+            "mode": "generate",
+            "negative": None,
+            "vlm_model_id": None,
+        },
+    )
+    assert r.status_code == 400
+    assert "file_path" in r.json()["detail"]
