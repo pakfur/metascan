@@ -11,9 +11,11 @@ from pydantic import BaseModel
 from backend.config import load_app_config, save_app_config
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
+from backend.services.scan_dispatch import recommended_vlm_model_id, should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.embedding_queue import EmbeddingQueue
+from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
 
@@ -27,6 +29,10 @@ _embedding_queue: Optional[EmbeddingQueue] = None
 _embed_poll_task: Optional[asyncio.Task] = None
 _inference_client: Optional[InferenceClient] = None
 _EMBED_POLL_INTERVAL_SECONDS = 0.5
+
+# Tracks whether the *current* (or most recent) scan was started with VLM
+# tagging enabled.  Set by build_index; read by the on_complete callback.
+_current_scan_tag_with_vlm: bool = False
 
 
 def _get_service() -> MediaService:
@@ -120,6 +126,8 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
         except Exception as e:
             logger.exception(f"Failed to reload FAISS after index build: {e}")
         ws_manager.broadcast_sync("embedding", "complete", {"total": total})
+        if _current_scan_tag_with_vlm:
+            _schedule_vlm_drain_after_complete(eq)
 
     def on_error(msg: str) -> None:
         ws_manager.broadcast_sync("embedding", "error", {"message": msg})
@@ -134,6 +142,46 @@ def _reload_faiss_after_index_build() -> None:
     fresh data from disk."""
     global _faiss_manager
     _faiss_manager = None
+
+
+def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
+    """Schedule a VlmTagPump.drain_once() coroutine on the running event loop.
+
+    Called from the ``on_complete`` sync callback after a scan that was
+    started with ``tag_with_vlm=True``.  Uses ``get_running_loop`` so that
+    test code without an event loop silently skips rather than crashing.
+    """
+
+    async def _drain() -> None:
+        from backend.api.vlm import get_vlm_client
+        from backend.services.vlm_tag_pump import VlmTagPump
+
+        client = get_vlm_client()
+        if client is None:
+            logger.debug("VLM drain skipped: no VlmClient installed")
+            return
+        mid = recommended_vlm_model_id(detect_hardware())
+        if not mid:
+            logger.debug("VLM drain skipped: no recommended VLM model for this host")
+            return
+        pump = VlmTagPump(
+            queue_dir=eq.index_dir,
+            client=client,
+            db=get_db(),
+            model_id=mid,
+        )
+        try:
+            drained = await pump.drain_once()
+            logger.info(f"VLM drain after scan: tagged {drained} file(s)")
+        except Exception:
+            logger.exception("VLM drain after scan failed")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_drain())
+    except RuntimeError:
+        # No running event loop — skip rather than block (hit by sync test paths).
+        logger.debug("VLM drain skipped: no running event loop")
 
 
 async def _embed_poll_loop() -> None:
@@ -372,6 +420,8 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 @router.post("/index/build")
 async def build_index(rebuild: bool = False) -> Dict[str, Any]:
     """Start an embedding worker subprocess for unembedded (or all) files."""
+    global _current_scan_tag_with_vlm
+
     eq = _get_embedding_queue()
     if eq.is_indexing():
         raise HTTPException(status_code=409, detail="Index build already in progress")
@@ -389,6 +439,9 @@ async def build_index(rebuild: bool = False) -> Dict[str, Any]:
         await ws_manager.broadcast("embedding", "complete", {"total": 0})
         return {"status": "noop", "total": 0}
 
+    tag_with_vlm = should_tag_with_vlm(detect_hardware())
+    _current_scan_tag_with_vlm = tag_with_vlm
+
     started = await asyncio.to_thread(
         eq.start_indexing,
         paths,
@@ -397,6 +450,7 @@ async def build_index(rebuild: bool = False) -> Dict[str, Any]:
         str(get_data_dir()),
         bool(sim.get("compute_phash_during_scan", True)) and not rebuild,
         int(sim.get("video_keyframes", 4)),
+        tag_with_vlm,
     )
     if not started:
         raise HTTPException(status_code=409, detail="Embedding worker did not start")

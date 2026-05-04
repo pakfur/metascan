@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Tuple
 from contextlib import contextmanager
 import logging
 from datetime import datetime
@@ -392,6 +392,41 @@ class DatabaseManager:
                 "ON folder_items(file_path)"
             )
 
+            # Saved prompts. Side-channel storage for the Prompt Playground
+            # feature (TA-10): named, persisted prompts associated with an
+            # image. NOT linked to the inverted `indices` table — these are
+            # user-curated experimental prompts, NOT canonical metadata, and
+            # must not affect tag search.
+            # CASCADE on file_path so deleting a media row clears its saved
+            # prompts.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_prompts (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path     TEXT NOT NULL
+                                  REFERENCES media(file_path) ON DELETE CASCADE,
+                    name          TEXT NOT NULL,
+                    prompt        TEXT NOT NULL,
+                    negative      TEXT,
+                    target_model  TEXT NOT NULL,
+                    architecture  TEXT NOT NULL,
+                    styles        TEXT NOT NULL DEFAULT '[]',
+                    temperature   REAL,
+                    max_tokens    INTEGER,
+                    source_prompt TEXT,
+                    mode          TEXT NOT NULL
+                                  CHECK(mode IN ('generate','transform','clean')),
+                    vlm_model_id  TEXT,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_saved_prompts_file "
+                "ON saved_prompts(file_path)"
+            )
+
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
             # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
@@ -575,6 +610,105 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to save media {media.file_path}: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Saved-prompt CRUD (Prompt Playground — side-channel, never touches
+    # the inverted `indices` table).
+    # ------------------------------------------------------------------
+
+    def save_prompt(
+        self,
+        *,
+        file_path: str,
+        name: str,
+        prompt: str,
+        target_model: str,
+        architecture: str,
+        styles: List[str],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        source_prompt: Optional[str],
+        mode: str,
+        negative: Optional[str],
+        vlm_model_id: Optional[str],
+    ) -> int:
+        """Insert a saved prompt; return its new auto-incremented id."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO saved_prompts (
+                        file_path, name, prompt, negative,
+                        target_model, architecture, styles,
+                        temperature, max_tokens, source_prompt,
+                        mode, vlm_model_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_path,
+                        name,
+                        prompt,
+                        negative,
+                        target_model,
+                        architecture,
+                        _json.dumps(list(styles)),
+                        temperature,
+                        max_tokens,
+                        source_prompt,
+                        mode,
+                        vlm_model_id,
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+
+    def list_saved_prompts(self, file_path: str) -> List[Dict[str, Any]]:
+        """All saved prompts for a media file_path, newest first."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM saved_prompts WHERE file_path=? " "ORDER BY id DESC",
+                    (file_path,),
+                ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["styles"] = _json.loads(d["styles"]) if d.get("styles") else []
+            except (TypeError, ValueError):
+                d["styles"] = []
+            out.append(d)
+        return out
+
+    def get_saved_prompt(self, prompt_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch a single saved prompt by id, or None if not found."""
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM saved_prompts WHERE id=?", (prompt_id,)
+                ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["styles"] = _json.loads(d["styles"]) if d.get("styles") else []
+        except (TypeError, ValueError):
+            d["styles"] = []
+        return d
+
+    def delete_saved_prompt(self, prompt_id: int) -> bool:
+        """Delete a saved prompt by id. Return True if deleted, False if missing."""
+        with self.lock:
+            with self._get_connection() as conn:
+                cur = conn.execute("DELETE FROM saved_prompts WHERE id=?", (prompt_id,))
+                conn.commit()
+                return int(cur.rowcount) > 0
 
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0
@@ -854,46 +988,57 @@ class DatabaseManager:
             logger.error(f"Failed to fetch tag path index: {e}")
         return out
 
-    def get_tags_for_file(self, file_path: Path) -> List[str]:
-        """Return every tag attached to ``file_path``, regardless of source.
+    def get_tags_for_file(self, file_path: Path) -> List[Tuple[str, str]]:
+        """Return every tag attached to ``file_path`` with its source.
 
         Tags are stored in ``indices`` with ``index_type='tag'`` and a
-        ``source`` of ``'prompt'``, ``'clip'``, or ``'both'``. The UI wants
-        the union, so callers merge by querying this single view instead of
-        relying on the prompt-only ``media.tags`` field that lives inside the
-        serialized ``media.data`` blob.
+        ``source`` of ``'prompt'``, ``'clip'``, ``'vlm'``, ``'both'``
+        (prompt+clip), or ``'vlm+prompt'``. Returns ``(name, source)``
+        tuples so the UI can render per-source styling.
         """
         try:
             with self._get_connection() as conn:
                 posix_path = to_posix_path(file_path)
                 rows = conn.execute(
-                    "SELECT index_key FROM indices "
+                    "SELECT index_key, source FROM indices "
                     "WHERE file_path = ? AND index_type = 'tag' "
                     "ORDER BY index_key",
                     (posix_path,),
                 )
-                return [row["index_key"] for row in rows]
+                return [(row["index_key"], row["source"] or "prompt") for row in rows]
         except Exception as e:
             logger.error(f"Failed to get tags for {file_path}: {e}")
             return []
 
     def _update_indices(self, conn: sqlite3.Connection, media: Media) -> None:
-        # Use POSIX path for consistency with storage format
+        """Refresh non-tag indices and prompt-source tag rows for ``media``.
+
+        VLM-source tag rows survive a rescan unchanged (the embedding/VLM
+        worker writes them separately via ``add_tag_indices``). Prompt-source
+        rows are torn down and rebuilt from the freshly-parsed metadata.
+        """
         posix_path = to_posix_path(media.file_path)
-        # Preserve tag rows contributed by CLIP so a rescan / metadata update
-        # doesn't blow away the embedding-derived tags. A `both` row had
-        # contributions from prompt AND clip; we're about to rewrite the
-        # prompt half, so temporarily demote those to `clip`-only — the
-        # UPSERT below will upgrade back to `both` for tags the new prompt
-        # still contains.
+
+        # Drop non-tag rows (we'll rebuild them) and pure prompt-tag rows.
+        # Tag rows with source IN ('clip', 'vlm', 'both', 'vlm+prompt') are
+        # preserved across this DELETE — but the 'both' / 'vlm+prompt' rows
+        # need their prompt half rewritten below.
         conn.execute(
             "DELETE FROM indices WHERE file_path = ? AND "
             "(index_type != 'tag' OR source IS NULL OR source = 'prompt')",
             (posix_path,),
         )
+        # Demote 'both' (clip+prompt) → 'clip' so the upsert below can
+        # promote back to 'both' for tags the new prompt still contains.
         conn.execute(
             "UPDATE indices SET source = 'clip' "
             "WHERE file_path = ? AND index_type = 'tag' AND source = 'both'",
+            (posix_path,),
+        )
+        # Demote 'vlm+prompt' → 'vlm' for the same reason.
+        conn.execute(
+            "UPDATE indices SET source = 'vlm' "
+            "WHERE file_path = ? AND index_type = 'tag' AND source = 'vlm+prompt'",
             (posix_path,),
         )
 
@@ -911,8 +1056,9 @@ class DatabaseManager:
                 "VALUES (?, ?, ?, ?)",
                 non_tag_rows,
             )
-        # Prompt-sourced tags may collide with pre-existing clip rows — merge
-        # via ON CONFLICT so the resulting row records both sources.
+        # Re-insert prompt-source tags. Collisions promote to the merged
+        # source name (both / vlm+prompt) per the same case ladder used in
+        # _add_prompt_tags.
         for key in prompt_tag_keys:
             conn.execute(
                 "INSERT INTO indices (index_type, index_key, file_path, source) "
@@ -921,6 +1067,8 @@ class DatabaseManager:
                 "source = CASE "
                 "  WHEN indices.source = 'clip' THEN 'both' "
                 "  WHEN indices.source = 'both' THEN 'both' "
+                "  WHEN indices.source = 'vlm' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
                 "  ELSE 'prompt' END",
                 (key, posix_path),
             )
@@ -930,33 +1078,124 @@ class DatabaseManager:
     ) -> None:
         """Add or merge tag rows sourced from ``source`` for ``file_path``.
 
-        Called by the embedding worker after CLIP-based tag generation. If a
-        tag already exists for the file from the *other* source (typically
-        ``prompt``), the row is upgraded to ``both`` rather than duplicated.
+        Sources:
+          - ``prompt`` — extracted from generation metadata.
+          - ``clip``   — CLIP retrieval over the vocabulary.
+          - ``vlm``    — generative tagger (Qwen3-VL).
+
+        Merge rules (spec §7.4):
+          - vlm × clip → preserve vlm (CLIP cannot overwrite VLM).
+          - clip × vlm → replace clip rows with vlm.
+          - vlm × prompt or prompt × vlm → upsert to ``vlm+prompt``.
+          - clip × prompt or prompt × clip → upsert to ``both`` (legacy name
+            for ``clip+prompt``).
+          - vlm × vlm → wholesale replace existing vlm tags.
         """
+        if source not in ("prompt", "clip", "vlm"):
+            raise ValueError(
+                f"tag source must be one of prompt/clip/vlm, got {source!r}"
+            )
         if not tags:
             return
-        if source not in ("prompt", "clip"):
-            raise ValueError(f"tag source must be 'prompt' or 'clip', got {source!r}")
         posix_path = to_posix_path(file_path)
-        other = "prompt" if source == "clip" else "clip"
-        sql = (
-            "INSERT INTO indices (index_type, index_key, file_path, source) "
-            "VALUES ('tag', ?, ?, ?) "
-            "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
-            "source = CASE "
-            "  WHEN indices.source = ? THEN 'both' "
-            "  WHEN indices.source = 'both' THEN 'both' "
-            "  ELSE excluded.source END"
-        )
-        rows = [(t.lower(), posix_path, source, other) for t in tags if t]
+
         try:
             with self.lock:
                 with self._get_connection() as conn:
-                    conn.executemany(sql, rows)
+                    if source == "vlm":
+                        self._add_vlm_tags(conn, posix_path, tags)
+                    elif source == "clip":
+                        self._add_clip_tags(conn, posix_path, tags)
+                    else:  # prompt
+                        self._add_prompt_tags(conn, posix_path, tags)
                     conn.commit()
         except Exception as e:
             logger.error(f"Failed to add {source} tag indices for {file_path}: {e}")
+
+    def _add_vlm_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Replace clip-source tags wholesale; merge with prompt-source.
+
+        VLM is the authoritative tagger when it runs, so existing
+        clip / clip+prompt rows are downgraded — clip rows are deleted, and
+        the prompt half of ``both`` rows is preserved by demoting to prompt.
+        Existing vlm / vlm+prompt rows are wholesale replaced (re-tag).
+        """
+        conn.execute(
+            "DELETE FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source IN ('vlm', 'vlm+prompt')",
+            (posix_path,),
+        )
+        conn.execute(
+            "DELETE FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source='clip'",
+            (posix_path,),
+        )
+        conn.execute(
+            "UPDATE indices SET source='prompt' "
+            "WHERE file_path=? AND index_type='tag' AND source='both'",
+            (posix_path,),
+        )
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'vlm') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'prompt' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
+
+    def _add_clip_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Insert clip-source tags. Skipped if any vlm row exists for this
+        file (vlm wins). Merges with prompt-source rows to ``both``."""
+        row = conn.execute(
+            "SELECT 1 FROM indices WHERE file_path=? AND index_type='tag' "
+            "AND source IN ('vlm', 'vlm+prompt') LIMIT 1",
+            (posix_path,),
+        ).fetchone()
+        if row is not None:
+            return
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'clip') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'prompt' THEN 'both' "
+                "  WHEN indices.source = 'both' THEN 'both' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
+
+    def _add_prompt_tags(
+        self, conn: sqlite3.Connection, posix_path: str, tags: List[str]
+    ) -> None:
+        """Insert prompt-source tags. Merges with both clip and vlm rows."""
+        for t in tags:
+            if not t:
+                continue
+            conn.execute(
+                "INSERT INTO indices (index_type, index_key, file_path, source) "
+                "VALUES ('tag', ?, ?, 'prompt') "
+                "ON CONFLICT(index_type, index_key, file_path) DO UPDATE SET "
+                "source = CASE "
+                "  WHEN indices.source = 'clip' THEN 'both' "
+                "  WHEN indices.source = 'both' THEN 'both' "
+                "  WHEN indices.source = 'vlm' THEN 'vlm+prompt' "
+                "  WHEN indices.source = 'vlm+prompt' THEN 'vlm+prompt' "
+                "  ELSE excluded.source END",
+                (t.lower(), posix_path),
+            )
 
     def _generate_indices(self, media: Media) -> List[tuple]:
         """Returns ``(index_type, index_key, source)`` triples. ``source`` is

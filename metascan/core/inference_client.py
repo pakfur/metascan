@@ -481,13 +481,26 @@ class InferenceClient:
             return
         if self._stopping:
             return
+        # Give the reader loop a brief window to drain a final "error"
+        # event from the worker's stdout — without this we race the
+        # reader and clobber a more-specific worker-reported error
+        # ("forced failure", etc.) with the generic "worker exited
+        # unexpectedly" message below. The reader_loop returns naturally
+        # on EOF (the pipe closes when the process is reaped), so this
+        # wait is bounded.
+        if self._reader_task is not None and not self._reader_task.done():
+            try:
+                await asyncio.wait({self._reader_task}, timeout=1.0)
+            except Exception:
+                pass
         # stderr is already being drained into ``_stderr_ring`` by
         # ``_stderr_loop``. Grab its tail for the error string so
         # diagnostics survive the process exit.
-        tail = "\n".join(self._stderr_ring[-20:])
-        self._last_error = f"worker exited unexpectedly (rc={rc})" + (
-            f": {tail[-1000:]}" if tail else ""
-        )
+        if not self._last_error:
+            tail = "\n".join(self._stderr_ring[-20:])
+            self._last_error = f"worker exited unexpectedly (rc={rc})" + (
+                f": {tail[-1000:]}" if tail else ""
+            )
         logger.error(self._last_error)
         self._fail_pending(self._last_error)
         self._ready_event.set()

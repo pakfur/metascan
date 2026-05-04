@@ -135,6 +135,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
 - **[Hardware Detection](docs/hardware-detection.md)** — what gets probed, tier classification, per-model gates, auto-warnings
+- **[Building llama-server](docs/build-llama-server.md)** — when and how to build llama.cpp from source for accelerators upstream doesn't ship (notably Linux + CUDA)
 - **[Developer Guidelines](docs/developer-guidelines.md)** — build commands, code style, testing, CI
 
 Contributors should also read [`CONTRIBUTING.md`](CONTRIBUTING.md). The canonical, exhaustive rule set for the codebase lives in [`CLAUDE.md`](CLAUDE.md).

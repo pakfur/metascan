@@ -219,6 +219,43 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
+    """Status rows for the four Qwen3-VL Abliterated variants.
+
+    A row is ``available`` only when GGUF, mmproj, AND the shared
+    llama-server binary all exist — without the binary the weights can't
+    be served, so the Download button must remain enabled to retry the
+    binary fetch (``_ensure_target`` skips files already on disk)."""
+    from metascan.core.vlm_models import REGISTRY
+    from metascan.utils.llama_server import binary_path
+
+    rows: List[Dict[str, Any]] = []
+    vlm_dir = get_data_dir() / "models" / "vlm"
+    binary_present = binary_path().exists()
+    for mid, spec in REGISTRY.items():
+        gguf = vlm_dir / spec.gguf_filename
+        mmproj = vlm_dir / spec.mmproj_filename
+        weights_present = gguf.exists() and mmproj.exists()
+        present = weights_present and binary_present
+        # Report whatever weights are on disk regardless of binary status, so
+        # the user can see partial-download progress in the size column.
+        size = sum(f.stat().st_size for f in (gguf, mmproj) if f.exists())
+        rows.append(
+            {
+                "id": mid,
+                "group": "Tagging (Qwen3-VL)",
+                "name": spec.display_name,
+                "description": f"{spec.quant} GGUF, ~{spec.approx_vram_gb:.1f} GB VRAM",
+                "status": "available" if present else "missing",
+                "size_bytes": size or None,
+                "cache_path": str(gguf) if weights_present else None,
+                "required_vram_mb": int(spec.min_vram_gb * 1024),
+                "preload_at_startup": mid in preload,
+            }
+        )
+    return rows
+
+
 def _hardware_info() -> Dict[str, Any]:
     """Detect hardware + tier; serialize to dict for the /hardware endpoint.
 
@@ -316,6 +353,7 @@ def _build_status_payload() -> Dict[str, Any]:
         _clip_status_rows(preload)
         + _upscale_status_rows(preload)
         + _nltk_status_rows(preload)
+        + _vlm_status_rows(preload)
     )
 
     # Surface the currently-selected CLIP model + dim so the UI can render
@@ -451,6 +489,14 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
         asyncio.create_task(_download_nltk(mid))
         return {"status": "started", "id": mid}
 
+    if mid.startswith("qwen3vl-"):
+        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+
+        if mid not in _VLM_REGISTRY:
+            raise HTTPException(status_code=404, detail=f"unknown VLM model: {mid}")
+        asyncio.create_task(_download_vlm(mid))
+        return {"status": "started", "id": mid}
+
     raise HTTPException(status_code=404, detail=f"unknown model id: {mid}")
 
 
@@ -478,6 +524,21 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
             if path.exists():
                 await asyncio.to_thread(path.unlink)
             return {"ok": True}
+    if model_id.startswith("qwen3vl-"):
+        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+        from metascan.utils.app_paths import get_data_dir
+
+        if model_id not in _VLM_REGISTRY:
+            raise HTTPException(
+                status_code=404, detail=f"unknown VLM model: {model_id}"
+            )
+        spec = _VLM_REGISTRY[model_id]
+        vlm_dir = get_data_dir() / "models" / "vlm"
+        for filename in (spec.gguf_filename, spec.mmproj_filename):
+            target = vlm_dir / filename
+            if target.exists():
+                await asyncio.to_thread(target.unlink)
+        return {"ok": True}
     raise HTTPException(status_code=404, detail=f"unknown model id: {model_id}")
 
 
@@ -557,6 +618,38 @@ async def _download_nltk(mid: str) -> None:
         await asyncio.to_thread(_download)
     except Exception as e:
         logger.exception("NLTK download for %s failed", mid)
+        _broadcast_download(mid, "download_error", error=str(e))
+        return
+    _broadcast_download(mid, "download_complete")
+
+
+async def _download_vlm(mid: str) -> None:
+    """Fetch a Qwen3-VL GGUF + mmproj from HuggingFace and the llama-server
+    binary from the pinned llama.cpp release. Reuses the resolver and
+    downloader from ``setup_models`` so the CLI and the Models tab agree on
+    target paths and archive layout."""
+    _broadcast_download(mid, "download_progress", stage="starting", percent=0.0)
+
+    def _run() -> None:
+        from setup_models import _ensure_target, resolve_qwen3vl_targets
+
+        targets = resolve_qwen3vl_targets(mid)
+        for i, target in enumerate(targets):
+            ws_manager.broadcast_sync(
+                "models",
+                "download_progress",
+                {
+                    "id": mid,
+                    "stage": f"downloading ({i + 1}/{len(targets)})",
+                    "percent": 0.0,
+                },
+            )
+            _ensure_target(target)
+
+    try:
+        await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.exception("VLM download for %s failed", mid)
         _broadcast_download(mid, "download_error", error=str(e))
         return
     _broadcast_download(mid, "download_complete")
