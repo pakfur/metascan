@@ -220,6 +220,15 @@ class VlmClient:
         models_dir = get_data_dir() / "models" / "vlm"
         gguf = models_dir / spec.gguf_filename
         mmproj = models_dir / spec.mmproj_filename
+        # ``--ctx-size`` is the TOTAL context window split across
+        # ``--parallel`` slots — each slot sees ctx_size / parallel_slots
+        # tokens. The 8B and 30B-A3B specs use 4 slots, so a 32768 budget
+        # gives 8192 per slot; 2B / 4B (2 slots) get 16384 per slot.
+        # The Qwen3-VL meta-prompts in ``meta_prompt_templates`` can run
+        # ~1300 tokens (Pony, longest) plus 1-2k for the image embedding
+        # plus the user-tunable max_tokens output (up to 1000), so the
+        # prior 8192 budget collapsed under parallel_slots=4 with
+        # "request exceeds the available context size" errors.
         cmd = [
             str(binary_path()),
             "--model",
@@ -233,7 +242,7 @@ class VlmClient:
             "--parallel",
             str(spec.parallel_slots),
             "--ctx-size",
-            "8192",
+            "32768",
             "--n-gpu-layers",
             "99",
         ]
@@ -559,7 +568,9 @@ class VlmClient:
     # roughly (W*H)/(28*28) tokens per image plane × n_deepstack_layers; a
     # 2K SDXL render at full res can exceed 8K context. 1024px keeps tagging
     # accuracy high (the model isn't reading fine print) while comfortably
-    # fitting the 8192-token context budget set in ``_build_command``.
+    # fitting the per-slot context budget set in ``_build_command``
+    # (``--ctx-size`` is divided across ``--parallel`` slots — see that
+    # method for the math).
     _IMAGE_MAX_EDGE = 1024
     _IMAGE_JPEG_QUALITY = 85
 
