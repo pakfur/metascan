@@ -24,13 +24,20 @@ from pydantic import BaseModel, Field
 from backend.dependencies import get_db
 
 from backend.api import vlm as vlm_api
-from metascan.core.prompt_templates import (
+from metascan.core.meta_prompt_templates import (
     Architecture,
-    CaptionLength,
     ExtraOption,
     TargetModel,
-    compose_clean_prompts,
     compose_generate_prompts,
+    parse_output,
+)
+
+# Legacy module — still consulted by transform / clean. Keep this import
+# even though unused for ``generate``: the meta-prompts only redesign
+# image-to-prompt generation.
+from metascan.core.prompt_templates import (
+    ExtraOption as _LegacyExtraOption,
+    compose_clean_prompts,
     compose_transform_prompts,
 )
 from metascan.core.vlm_client import STATE_READY, VlmError
@@ -48,7 +55,6 @@ class GenerateRequest(BaseModel):
     target_model: TargetModel
     architecture: Architecture
     extras: List[ExtraOption] = Field(default_factory=list)
-    caption_length: CaptionLength = "Medium"
     temperature: float = 0.6
     max_tokens: int = 250
 
@@ -58,7 +64,6 @@ class TransformRequest(BaseModel):
     target_model: TargetModel
     architecture: Architecture
     extras: List[ExtraOption] = Field(default_factory=list)
-    caption_length: CaptionLength = "Medium"
     file_path: Optional[str] = None  # optional image grounding
     temperature: float = 0.6
     max_tokens: int = 250
@@ -74,6 +79,28 @@ class GenerateResponse(BaseModel):
     prompt: str
     vlm_model_id: str
     elapsed_ms: int
+    # Populated for SDXL / Pony / Chroma / Qwen-Image when the meta-prompt
+    # asks Qwen3 to emit a "Negative:" block. ``None`` for Flux.1 / Flux.2 /
+    # Z-Image, whose meta-prompts do not request a negative.
+    negative: Optional[str] = None
+
+
+# Map the new two-option vocabulary onto legacy ExtraOption strings used
+# by ``prompt_templates`` for transform / clean. Anything not in the
+# table is dropped silently — the legacy builders ignore unknown keys.
+_NEW_TO_LEGACY_EXTRA: Dict[ExtraOption, _LegacyExtraOption] = {
+    "includeSafety": "keepPG",
+    "includeUncensored": "includeUncensored",
+}
+
+
+def _to_legacy_extras(extras: List[ExtraOption]) -> List[_LegacyExtraOption]:
+    out: List[_LegacyExtraOption] = []
+    for x in extras:
+        legacy = _NEW_TO_LEGACY_EXTRA.get(x)
+        if legacy is not None:
+            out.append(legacy)
+    return out
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -104,8 +131,16 @@ async def _run_generation(
     image_path: Optional[Path],
     temperature: float,
     max_tokens: int,
+    target_model: Optional[TargetModel] = None,
 ) -> GenerateResponse:
     """Common timing + error-mapping wrapper around VlmClient.generate_text.
+
+    When ``target_model`` is supplied, the response is run through
+    :func:`metascan.core.meta_prompt_templates.parse_output` to peel off
+    the ``Negative:`` block (if any). Without ``target_model`` the raw
+    text becomes the prompt and ``negative`` stays ``None`` — the legacy
+    transform / clean paths use this mode since their builders don't ask
+    for a negative.
 
     Maps VlmError -> HTTP 502; returns wall-clock elapsed_ms and echoes
     the active model id for the response.
@@ -122,10 +157,17 @@ async def _run_generation(
     except VlmError as e:
         raise HTTPException(status_code=502, detail=str(e))
     elapsed = int((time.monotonic() - start) * 1000)
+
+    if target_model is not None:
+        positive, negative = parse_output(target_model, text)
+    else:
+        positive, negative = text, None
+
     return GenerateResponse(
-        prompt=text,
+        prompt=positive,
         vlm_model_id=client.model_id or "",
         elapsed_ms=elapsed,
+        negative=negative,
     )
 
 
@@ -140,7 +182,6 @@ async def generate(body: GenerateRequest) -> GenerateResponse:
         body.target_model,
         body.architecture,
         list(body.extras),
-        body.caption_length,
     )
     return await _run_generation(
         client,
@@ -149,6 +190,7 @@ async def generate(body: GenerateRequest) -> GenerateResponse:
         image_path=p,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        target_model=body.target_model,
     )
 
 
@@ -156,12 +198,15 @@ async def generate(body: GenerateRequest) -> GenerateResponse:
 async def transform(body: TransformRequest) -> GenerateResponse:
     client = _require_ready_client()
     image_path = _require_existing_file(body.file_path) if body.file_path else None
+    # Caption-length was removed from the public API. The legacy transform
+    # builder still accepts it; pin to "Medium" for parity with the old
+    # default, since the new UI no longer surfaces a control.
     system, user = compose_transform_prompts(
         body.source_prompt,
         body.target_model,
         body.architecture,
-        list(body.extras),
-        body.caption_length,
+        _to_legacy_extras(list(body.extras)),
+        "Medium",
     )
     return await _run_generation(
         client,

@@ -8,7 +8,6 @@ export interface PlaygroundSettings {
   target_model: api.TargetModel
   architecture: api.Architecture
   extras: api.ExtraOption[]
-  caption_length: api.CaptionLength
   temperature: number
   max_tokens: number
   prefix: string
@@ -21,7 +20,6 @@ const DEFAULTS: PlaygroundSettings = {
   target_model: DEFAULT_TARGET,
   architecture: 't2i',
   extras: [],
-  caption_length: 'Medium',
   temperature: 0.6,
   max_tokens: 250,
   prefix: api.TARGET_PRESETS[DEFAULT_TARGET].prefix,
@@ -29,7 +27,6 @@ const DEFAULTS: PlaygroundSettings = {
 }
 
 const _validTargets = new Set<string>(api.TARGET_MODEL_ORDER)
-const _validLengths = new Set<string>(api.CAPTION_LENGTH_ORDER)
 const _validExtras = new Set<string>(api.EXTRA_OPTIONS.map((e) => e.key))
 
 function _coerce(parsed: Record<string, unknown>): PlaygroundSettings {
@@ -38,22 +35,16 @@ function _coerce(parsed: Record<string, unknown>): PlaygroundSettings {
     out.target_model = parsed.target_model as api.TargetModel
   }
   if (Array.isArray(parsed.extras)) {
+    // Stale extras from the previous (16-option) playground are silently
+    // dropped — _validExtras now contains only the two surviving keys.
     out.extras = (parsed.extras as unknown[]).filter(
       (x): x is api.ExtraOption => typeof x === 'string' && _validExtras.has(x),
     )
-  }
-  if (typeof parsed.caption_length === 'string' && _validLengths.has(parsed.caption_length)) {
-    out.caption_length = parsed.caption_length as api.CaptionLength
   }
   if (typeof parsed.temperature === 'number') out.temperature = parsed.temperature
   if (typeof parsed.max_tokens === 'number') out.max_tokens = parsed.max_tokens
   if (typeof parsed.prefix === 'string') out.prefix = parsed.prefix
   if (typeof parsed.suffix === 'string') out.suffix = parsed.suffix
-  // Final validation: caption_length must be allowed for target.
-  const allowed = api.TARGET_PRESETS[out.target_model].allowedLengths
-  if (!allowed.includes(out.caption_length)) {
-    out.caption_length = allowed.includes('Medium') ? 'Medium' : allowed[0]
-  }
   return out
 }
 

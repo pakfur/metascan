@@ -20,7 +20,6 @@ const mode = ref<Mode>('generate')
 const target = ref<promptApi.TargetModel>(promptStore.settings.target_model)
 const architecture = ref<promptApi.Architecture>(promptStore.settings.architecture)
 const extras = ref<promptApi.ExtraOption[]>([...promptStore.settings.extras])
-const captionLength = ref<promptApi.CaptionLength>(promptStore.settings.caption_length)
 const temperature = ref(promptStore.settings.temperature)
 const maxTokens = ref(promptStore.settings.max_tokens)
 const prefix = ref(promptStore.settings.prefix)
@@ -29,6 +28,7 @@ const sourcePrompt = ref(props.media.prompt ?? '')
 const showExtras = ref(true)
 
 const generated = ref('')
+const generatedNegative = ref('')
 const generating = ref(false)
 const error = ref<string | null>(null)
 const elapsedMs = ref<number | null>(null)
@@ -43,9 +43,14 @@ const transformDisabled = computed(() => !hasExistingPrompt.value)
 const cleanDisabled = computed(() => !hasExistingPrompt.value)
 
 const currentPreset = computed(() => promptApi.TARGET_PRESETS[target.value])
-const allowedLengths = computed(() => currentPreset.value.allowedLengths)
 const showTargetControls = computed(() => mode.value !== 'clean')
 const showExtrasControls = computed(() => mode.value !== 'clean')
+// Negative-prompt textarea is only relevant for generate-mode targets
+// whose meta-prompts ask Qwen3 for a Negative block (sd / pony /
+// chroma / qwen). Hidden for Flux.1, Flux.2, Z-Image, transform, clean.
+const showNegative = computed(
+  () => mode.value === 'generate' && currentPreset.value.hasNegative,
+)
 
 const fullImageUrl = computed(() => streamUrl(props.media.file_path))
 
@@ -102,28 +107,28 @@ onBeforeUnmount(() => {
   if (abortCtrl) abortCtrl.abort()
 })
 
-// When target changes, refill prefix/suffix to its defaults and clamp the
-// caption length to the target's allowed list. Matches the reference panel's
-// _apply_preset behavior.
+// When target changes, refill prefix/suffix to the new preset defaults.
+// Caption-length clamping is gone — the meta-prompts embed their own
+// length guidance and the dropdown was removed.
 watch(target, (next, prev) => {
   if (next === prev) return
   const preset = promptApi.TARGET_PRESETS[next]
   prefix.value = preset.prefix
   suffix.value = preset.suffix
-  if (!preset.allowedLengths.includes(captionLength.value)) {
-    captionLength.value = preset.allowedLengths.includes('Medium')
-      ? 'Medium'
-      : preset.allowedLengths[0]
+  // A negative produced for the previous target won't apply to the new
+  // target's UI (different model conventions); clear it to avoid stale
+  // negatives leaking into a save.
+  if (!preset.hasNegative) {
+    generatedNegative.value = ''
   }
 })
 
 watch(
-  [mode, target, architecture, extras, captionLength, temperature, maxTokens, prefix, suffix],
+  [mode, target, architecture, extras, temperature, maxTokens, prefix, suffix],
   () => {
     promptStore.settings.target_model = target.value
     promptStore.settings.architecture = architecture.value
     promptStore.settings.extras = [...extras.value]
-    promptStore.settings.caption_length = captionLength.value
     promptStore.settings.temperature = temperature.value
     promptStore.settings.max_tokens = maxTokens.value
     promptStore.settings.prefix = prefix.value
@@ -148,7 +153,6 @@ async function run() {
           target_model: target.value,
           architecture: architecture.value,
           extras: [...extras.value],
-          caption_length: captionLength.value,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
         },
@@ -161,7 +165,6 @@ async function run() {
           target_model: target.value,
           architecture: architecture.value,
           extras: [...extras.value],
-          caption_length: captionLength.value,
           file_path: props.media.file_path,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
@@ -179,6 +182,10 @@ async function run() {
       )
     }
     generated.value = resp.prompt
+    // resp.negative is populated only for generate mode against negative-
+    // bearing targets; transform/clean leave it null. Clear stale values
+    // so repeat runs don't carry an old negative from a prior target.
+    generatedNegative.value = resp.negative ?? ''
     elapsedMs.value = resp.elapsed_ms
     dirty.value = true
   } catch (e) {
@@ -205,6 +212,7 @@ async function copyAssembled() {
 
 async function regenerate() {
   generated.value = ''
+  generatedNegative.value = ''
   await run()
 }
 
@@ -212,6 +220,12 @@ async function saveCurrent() {
   if (!assembledPrompt.value.trim()) return
   const name = window.prompt('Name this prompt:')
   if (!name) return
+  // Only persist a negative if (a) the target supports one and (b) the
+  // user actually has text in the box. Empty strings save as null so
+  // listeners can rely on truthiness without trimming.
+  const trimmedNegative = generatedNegative.value.trim()
+  const negativeToSave =
+    showNegative.value && trimmedNegative ? trimmedNegative : null
   try {
     await promptStore.savePrompt({
       file_path: props.media.file_path,
@@ -224,7 +238,7 @@ async function saveCurrent() {
       max_tokens: maxTokens.value,
       source_prompt: mode.value !== 'generate' ? sourcePrompt.value : null,
       mode: mode.value,
-      negative: null,
+      negative: negativeToSave,
       vlm_model_id: null,
     })
     dirty.value = false
@@ -279,15 +293,6 @@ function targetLabel(t: promptApi.TargetModel): string {
               <select v-model="target">
                 <option v-for="t in TARGET_OPTIONS" :key="t" :value="t">
                   {{ targetLabel(t) }}
-                </option>
-              </select>
-            </div>
-
-            <div class="ctrl-row" v-if="showTargetControls">
-              <span class="ctrl-label">Caption length</span>
-              <select v-model="captionLength">
-                <option v-for="len in allowedLengths" :key="len" :value="len">
-                  {{ len }}
                 </option>
               </select>
             </div>
@@ -397,13 +402,25 @@ function targetLabel(t: promptApi.TargetModel): string {
           </div>
         </div>
 
+        <!-- Negative prompt (only for sd / pony / chroma / qwen in generate mode) -->
+        <div class="section" v-if="showNegative">
+          <label class="section-label">Negative prompt</label>
+          <textarea
+            v-model="generatedNegative"
+            @input="dirty = true"
+            class="prompt-area"
+            rows="3"
+            placeholder="(negative prompt will appear here when the target supports one)"
+          />
+        </div>
+
         <!-- Saved list -->
         <div class="section" v-if="savedPrompts.length">
           <label class="section-label">Saved for this image</label>
           <div v-for="p in savedPrompts" :key="p.id" class="saved-row">
             <span class="saved-name">{{ p.name }}</span>
             <span class="saved-meta">{{ p.target_model }} · {{ p.architecture }}</span>
-            <button class="link-btn" @click="generated = p.prompt; dirty = false">Load</button>
+            <button class="link-btn" @click="generated = p.prompt; generatedNegative = p.negative ?? ''; dirty = false">Load</button>
             <button class="link-btn danger" @click="promptStore.deleteSavedPrompt(p.id, media.file_path)">Delete</button>
           </div>
         </div>
