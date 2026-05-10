@@ -116,10 +116,39 @@ class FakeLlamaServer:
             return None
         return self._proc.poll()
 
+    def _raise_if_subprocess_died(self, phase: str) -> None:
+        """If the subprocess has exited, raise with its captured stderr.
+
+        Without this, a subprocess that dies at import time (e.g.
+        ``ModuleNotFoundError: No module named 'aiohttp'``) is invisible:
+        every /health probe raises ``ConnectionRefused`` which the polling
+        loops below swallow, and the test eventually times out with a
+        generic "did not become ready" message that hides the real cause.
+        """
+        if self._proc is None:
+            return
+        rc = self._proc.poll()
+        if rc is None:
+            return
+        stderr = b""
+        if self._proc.stderr is not None:
+            try:
+                stderr = self._proc.stderr.read() or b""
+            except Exception:
+                pass
+        raise RuntimeError(
+            f"fake llama-server subprocess exited with rc={rc} during {phase}. "
+            f"stderr:\n{stderr.decode(errors='replace')}"
+        )
+
     async def wait_ready(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=1.0) as client:
             while time.monotonic() < deadline:
+                # Catch subprocess death BEFORE issuing another /health probe —
+                # otherwise we silently consume the whole timeout polling a
+                # process that's already exited.
+                self._raise_if_subprocess_died("readiness wait")
                 try:
                     r = await client.get(f"{self.base_url}/health")
                     if r.status_code == 200:
@@ -127,6 +156,9 @@ class FakeLlamaServer:
                 except httpx.HTTPError:
                     pass
                 await asyncio.sleep(0.05)
+        # Final check at the timeout boundary — surfaces a death that
+        # happened in the last polling slot.
+        self._raise_if_subprocess_died("readiness wait")
         raise TimeoutError("fake llama-server did not become ready")
 
     async def __aenter__(self) -> "FakeLlamaServer":
@@ -153,6 +185,15 @@ class FakeLlamaServer:
         self._proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
         )
+        # Brief startup-death check. An import-time failure (e.g. missing
+        # aiohttp in the venv) kills the subprocess in ~10 ms; without
+        # this, tests that bypass ``wait_ready`` and probe /health
+        # directly would consume their entire poll budget waiting for a
+        # process that's already gone.
+        for _ in range(6):  # ~30 ms total — well under typical aiohttp import time
+            await asyncio.sleep(0.005)
+            if self._proc.poll() is not None:
+                self._raise_if_subprocess_died("startup")
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
