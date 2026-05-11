@@ -110,7 +110,7 @@ You are an expert Flux.1 prompt engineer. Analyze the provided image and output 
 4. Lighting — direction, quality (hard/soft), color temperature, time of day, key/fill/rim, character of shadows and highlights
 5. Color palette — dominant hues, accents, saturation, contrast
 6. Camera & medium — photography (with lens / film stock if so)
-7. Style - illustration, oil painting, 3D render, etc.
+7. Style — illustration, oil painting, 3D render, etc.
 8. Mood & atmosphere — emotional register, weather, particles in air (dust, fog, mist, bokeh)
 9. Technical finish — depth of field, grain, texture, sharpness, post-processing feel
 
@@ -146,7 +146,7 @@ You are an expert Flux.2 prompt engineer. Analyze the provided image and output 
 5. Lighting — direction, quality (hard/soft/diffuse), color temperature, key/fill/rim, shadow character
 6. Color palette — dominant hues with HEX where useful, accents, saturation level, contrast level
 7. Camera & medium — photography (lens, aperture, film stock if relevant)
-8. Style - illustration style, 3D render, oil paint, etc.
+8. Style — illustration style, 3D render, oil paint, etc.
 9. Mood & atmosphere — emotional register, weather, particulates (haze, dust, bokeh)
 10. Technical finish — depth of field, grain, texture, sharpness
 
@@ -299,7 +299,7 @@ You are an expert SDXL prompt engineer. Analyze the provided image and output an
 7. Composition tags — shot type (close-up, medium shot, wide shot, full body), angle, framing
 8. Color/palette tags — dominant hues, saturation, contrast cues
 9. Technical/style tags — lens info if photo, brushwork if painting, render style, fidelity cues
-10. Optional weighted emphasis on 1-3 critical attributes
+10. Optional weighted emphasis — on 1–3 critical attributes
 
 # Negative prompt structure
 Standard quality block first, then anatomy/artifacts, then image-specific exclusions:
@@ -351,7 +351,7 @@ You are an expert Pony Diffusion v6 XL (and Pony-derivative checkpoint) prompt e
 9. Lighting — sunlight, moonlight, backlighting, rim_lighting, dramatic_lighting, soft_lighting
 10. Composition — shot type tags: portrait, upper_body, cowboy_shot (mid-thigh up), full_body, close-up; angle tags: from_above, from_below, dutch_angle
 11. Style modifiers — detailed_background, intricate_details, cinematic, film_grain, depth_of_field
-12. Optional booru artist/style tags ONLY if you can identify a recognized style (rare; skip if unsure)
+12. Optional booru artist/style tags — ONLY if you can identify a recognized style (rare; skip if unsure)
 
 # Negative prompt
 The standard Pony negative leads with the inverse score tags plus quality terms, then anatomy:
@@ -477,6 +477,154 @@ TARGET_PRESETS: Final[dict[TargetModel, TargetPreset]] = {
 }
 
 
+# --- Numbered-element parsing --------------------------------------------
+#
+# Each meta-prompt contains one (or for Pony, two contiguous) numbered list
+# describing the components Qwen3 should cover. The Prompt Playground UI
+# surfaces these in an editable table so the user can tune individual
+# elements without rewriting the whole meta-prompt. The parser below
+# extracts (title, default_body) pairs plus the byte spans where each
+# body lives in the source string — re-assembly works by slicing the
+# meta-prompt around those spans and substituting user-supplied bodies.
+
+
+class MetaElement(NamedTuple):
+    """One numbered list item from a target's meta-prompt.
+
+    ``title`` is the text between ``N. `` and ` — `; ``default_body`` is
+    everything after the em-dash, including any indented continuation
+    lines folded in with newlines.
+    """
+
+    title: str
+    default_body: str
+
+
+# Numbered-line head: ``N. title — first body line``. Em-dash with a
+# surrounding space is the canonical separator across every _META_*
+# string; hyphens never appear as the title/body separator. Title and
+# body are captured non-greedily so the em-dash always anchors the split.
+_NUMBERED_LINE_RX: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<num>\d+)\.\s+(?P<title>.+?)\s+—\s+(?P<body>.+)$"
+)
+
+
+def _parse_elements(
+    meta: str,
+) -> tuple[list[MetaElement], list[tuple[int, int]]]:
+    """Walk ``meta`` line-by-line; return parsed elements + body spans.
+
+    Body span ``(start, end)`` is an offset pair into ``meta`` that the
+    composer replaces with the user's override. Continuation lines (lines
+    that start with whitespace and are not themselves numbered items)
+    are folded into the body and their offsets are included in the span,
+    so substituting a new body cleanly replaces the original first line
+    *and* any continuation lines beneath it.
+    """
+    elements: list[MetaElement] = []
+    spans: list[tuple[int, int]] = []
+
+    # Pre-compute line start offsets so we can map (line, col) -> byte
+    # without recomputing for every match.
+    lines = meta.split("\n")
+    line_starts: list[int] = []
+    cursor = 0
+    for line in lines:
+        line_starts.append(cursor)
+        cursor += len(line) + 1  # +1 for the trailing \n we split on
+
+    i = 0
+    while i < len(lines):
+        m = _NUMBERED_LINE_RX.match(lines[i])
+        if not m:
+            i += 1
+            continue
+
+        title = m.group("title").strip()
+        body_col = m.start("body")
+        body_start = line_starts[i] + body_col
+        body_end = line_starts[i] + len(lines[i])
+        body_text = lines[i][body_col:]
+
+        # Fold any indented continuation lines into the same body. Stop on
+        # a blank line (paragraph break), another numbered item, or any
+        # line that doesn't start with whitespace (heading, plain text).
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if not nxt:
+                break
+            if _NUMBERED_LINE_RX.match(nxt):
+                break
+            if not nxt.startswith((" ", "\t")):
+                break
+            body_text = f"{body_text}\n{nxt}"
+            body_end = line_starts[j] + len(nxt)
+            j += 1
+
+        elements.append(MetaElement(title=title, default_body=body_text))
+        spans.append((body_start, body_end))
+        i = j
+
+    return elements, spans
+
+
+def _elements_with_spans(
+    target: TargetModel,
+) -> tuple[list[MetaElement], list[tuple[int, int]]]:
+    """Cache wrapper around :func:`_parse_elements` — meta strings are
+    immutable, so parsing once per target per process is enough."""
+    cached = _ELEMENTS_CACHE.get(target)
+    if cached is None:
+        cached = _parse_elements(_META_BY_TARGET[target])
+        _ELEMENTS_CACHE[target] = cached
+    return cached
+
+
+_ELEMENTS_CACHE: dict[TargetModel, tuple[list[MetaElement], list[tuple[int, int]]]] = {}
+
+
+def elements_for(target_model: TargetModel) -> list[MetaElement]:
+    """Return the editable numbered-list elements for a target model.
+
+    Order matches the order they appear in the meta-prompt; for Pony
+    this concatenates the "Mandatory leading block" (1-3) and the "Tag
+    body structure" (4-12) into a single 12-item list because the
+    numbering is contiguous and the UI surfaces them as one table.
+    """
+    return list(_elements_with_spans(target_model)[0])
+
+
+def _apply_element_overrides(
+    target_model: TargetModel, overrides: list[str | None] | None
+) -> str:
+    """Return the target's meta-prompt with override bodies substituted.
+
+    ``overrides`` is index-aligned with :func:`elements_for`; entries
+    that are ``None`` or missing fall back to the default body. The
+    span of each element's body in the source meta-prompt is replaced
+    in-place, so surrounding text (section headings, output rules,
+    reference examples) is preserved verbatim.
+    """
+    meta = _META_BY_TARGET[target_model]
+    if not overrides:
+        return meta
+
+    _, spans = _elements_with_spans(target_model)
+    out: list[str] = []
+    last = 0
+    for i, (start, end) in enumerate(spans):
+        out.append(meta[last:start])
+        replacement = overrides[i] if i < len(overrides) else None
+        if replacement is None:
+            out.append(meta[start:end])
+        else:
+            out.append(replacement)
+        last = end
+    out.append(meta[last:])
+    return "".join(out)
+
+
 # --- Composer -------------------------------------------------------------
 
 
@@ -501,16 +649,21 @@ def compose_generate_prompts(
     target_model: TargetModel,
     architecture: Architecture,  # noqa: ARG001 — t2i is the only supported value today
     extras: list[ExtraOption],
+    element_overrides: list[str | None] | None = None,
 ) -> tuple[str, str]:
     """Return ``(system_prompt, user_prompt)`` for image-to-prompt generation.
 
-    The system prompt is the target's full meta-prompt body plus a
+    The system prompt is the target's meta-prompt — with any per-element
+    body overrides from ``element_overrides`` substituted in — plus a
     safety / uncensored directive when one of those extras is active.
     The user prompt is a short fixed instruction that, with the image
     attached by ``VlmClient.generate_text``, asks the model to produce
     the prompt.
+
+    ``element_overrides`` is index-aligned with :func:`elements_for`;
+    pass ``None`` (or omit) to use the meta-prompt's built-in defaults.
     """
-    meta = _META_BY_TARGET[target_model]
+    meta = _apply_element_overrides(target_model, element_overrides)
     enabled = _enabled(extras)
     if enabled.get("includeSafety"):
         meta = meta + _SAFETY_DIRECTIVE
@@ -597,8 +750,10 @@ __all__ = [
     "MODELS_WITH_NEGATIVE",
     "MUTEX_PAIRS",
     "EXTRA_OPTION_LABELS",
+    "MetaElement",
     "TargetPreset",
     "TARGET_PRESETS",
     "compose_generate_prompts",
+    "elements_for",
     "parse_output",
 ]

@@ -77,8 +77,23 @@ export interface GenerateBody {
   target_model: TargetModel
   architecture: Architecture
   extras: ExtraOption[]
+  // Per-element body overrides from the playground's editable table.
+  // Index-aligned with the elements returned by getElements(); a null
+  // (or missing tail) means "use the default for that row". Send an
+  // empty array (or omit) to skip the override pass entirely.
+  element_overrides?: (string | null)[]
   temperature: number
   max_tokens: number
+}
+
+export interface MetaElement {
+  title: string
+  default_body: string
+}
+
+export interface ElementsResponse {
+  target_model: TargetModel
+  elements: MetaElement[]
 }
 
 export interface TransformBody {
@@ -171,4 +186,8 @@ export function listByImage(filePath: string): Promise<SavedPrompt[]> {
 
 export function deleteSavedPrompt(id: number): Promise<{ status: string }> {
   return del<{ status: string }>(`/prompt/${id}`)
+}
+
+export function getElements(target: TargetModel): Promise<ElementsResponse> {
+  return get<ElementsResponse>(`/prompt/elements?target_model=${encodeURIComponent(target)}`)
 }
