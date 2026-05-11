@@ -14,7 +14,9 @@ from metascan.core.meta_prompt_templates import (
     MODELS_WITH_NEGATIVE,
     MUTEX_PAIRS,
     TARGET_PRESETS,
+    _META_BY_TARGET,
     compose_generate_prompts,
+    elements_for,
     parse_output,
 )
 
@@ -268,3 +270,153 @@ def test_parse_output_returns_empty_negative_as_none():
     pos, neg = parse_output("sd", raw)
     assert pos == "positive"
     assert neg is None
+
+
+# --- Element parser + override composer -----------------------------------
+
+
+# The expected counts are pinned because the numbered lists are the
+# authoring contract for the playground's element table. A drift here
+# means either the table fell out of sync with the meta-prompts or
+# someone introduced an unescaped " - " / dropped em-dash on a numbered
+# line, both of which silently break the parser.
+_EXPECTED_ELEMENT_COUNTS = {
+    "sd": 10,
+    "pony": 12,
+    "flux1": 9,
+    "flux2": 10,
+    "zimage": 7,
+    "chroma": 8,
+    "qwen": 9,
+}
+
+
+@pytest.mark.parametrize("target", list(_EXPECTED_ELEMENT_COUNTS))
+def test_elements_for_returns_expected_count(target):
+    assert len(elements_for(target)) == _EXPECTED_ELEMENT_COUNTS[target]
+
+
+def test_elements_for_pony_includes_both_lists_contiguously():
+    """Pony has two numbered lists ("Mandatory leading block" 1-3 and
+    "Tag body structure" 4-12) that the parser walks as one sequence."""
+    pony = elements_for("pony")
+    titles = [e.title for e in pony]
+    # Items from the leading block
+    assert "Score tags" in titles
+    assert "Source tag" in titles
+    assert "Rating tag" in titles
+    # Items from the tag-body structure
+    assert "Subject count" in titles
+    assert "Style modifiers" in titles
+
+
+def test_elements_for_folds_continuation_into_body():
+    """Pony's element 1 has an indented parenthetical continuation that
+    must be folded into the editable body — option (c) per the spec."""
+    pony = elements_for("pony")
+    score_tags = pony[0]
+    assert score_tags.title == "Score tags"
+    assert "score_9" in score_tags.default_body
+    # The continuation is the parenthetical line beneath the first row.
+    assert "each tag does work" in score_tags.default_body
+    # And it shows up as a newline-separated line, not a space-joined one.
+    assert "\n" in score_tags.default_body
+
+
+def test_elements_titles_are_stripped_clean():
+    """No stray whitespace on either side of the em-dash."""
+    for tid in _EXPECTED_ELEMENT_COUNTS:
+        for e in elements_for(tid):
+            assert e.title == e.title.strip()
+            assert (
+                e.default_body == e.default_body.strip()
+                or e.default_body.startswith(e.default_body.lstrip().split("\n", 1)[0])
+            )
+
+
+def test_compose_with_no_overrides_matches_raw_meta():
+    """No-op pass: passing ``element_overrides=None`` (or omitting it)
+    must return the meta-prompt unchanged so the live behaviour from
+    before the table was added is preserved."""
+    for tid in TARGET_PRESETS:
+        sys_default, _ = compose_generate_prompts(tid, "t2i", [])
+        assert sys_default == _META_BY_TARGET[tid]
+
+
+def test_compose_with_empty_overrides_matches_raw_meta():
+    """Empty-list overrides (the playground's "no edits" state) skip the
+    substitution pass — equivalent to passing ``None``."""
+    sys_a, _ = compose_generate_prompts("flux1", "t2i", [], element_overrides=None)
+    sys_b, _ = compose_generate_prompts("flux1", "t2i", [], element_overrides=[])
+    assert sys_a == sys_b == _META_BY_TARGET["flux1"]
+
+
+def test_compose_override_replaces_only_named_element():
+    """Replacing element 0's body must not perturb any other element."""
+    target = "sd"
+    els = elements_for(target)
+    overrides: list[str | None] = [None] * len(els)
+    overrides[0] = "CUSTOM OPENER TEXT"
+    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
+    assert "CUSTOM OPENER TEXT" in sys
+    # Element 1's default body must still be present verbatim.
+    assert els[1].default_body in sys
+    # And the original element-0 default must NOT appear anymore (its
+    # span got replaced wholesale, not appended to).
+    assert els[0].default_body not in sys
+
+
+def test_compose_override_with_none_uses_default():
+    """A ``None`` slot in ``element_overrides`` keeps that row's default."""
+    target = "flux1"
+    els = elements_for(target)
+    overrides: list[str | None] = [None] * len(els)
+    # Touch only element 2.
+    overrides[2] = "REPLACEMENT"
+    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
+    assert "REPLACEMENT" in sys
+    assert els[0].default_body in sys
+    assert els[1].default_body in sys
+
+
+def test_compose_override_preserves_section_headings_and_examples():
+    """Surrounding meta-prompt text (headings, reference examples,
+    output rules) must remain intact after a substitution."""
+    target = "chroma"
+    els = elements_for(target)
+    overrides = [None] * len(els)
+    overrides[0] = "different art direction text"
+    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
+    # The "# Output format" heading is structural metadata downstream
+    # of the numbered list and must survive the substitution.
+    assert "# Output format" in sys
+    # And the trailing reference example must too.
+    assert "Reference example" in sys
+
+
+def test_compose_excess_overrides_are_ignored():
+    """Overrides longer than the element list must not crash or leak."""
+    target = "zimage"
+    els = elements_for(target)
+    overrides: list[str | None] = [None] * len(els) + [
+        "leak-1",
+        "leak-2",
+        "leak-3",
+    ]
+    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
+    for leak in ("leak-1", "leak-2", "leak-3"):
+        assert leak not in sys
+
+
+def test_compose_override_works_alongside_safety_directive():
+    """The safety directive is appended AFTER override substitution, so
+    both can apply in the same request."""
+    target = "sd"
+    els = elements_for(target)
+    overrides = [None] * len(els)
+    overrides[0] = "OVERRIDE"
+    sys, _ = compose_generate_prompts(
+        target, "t2i", ["includeSafety"], element_overrides=overrides
+    )
+    assert "OVERRIDE" in sys
+    assert "Content constraint" in sys  # safety directive header

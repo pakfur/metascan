@@ -371,3 +371,77 @@ def test_clean_uses_clean_template(stub_vlm):
     assert r.status_code == 200
     sys = stub_vlm.calls[0]["system_prompt"]
     assert "clean" in sys.lower()
+
+
+# --- /elements + element_overrides ----------------------------------------
+
+
+def test_list_elements_returns_target_specific_rows():
+    """GET /api/prompt/elements should return the parsed numbered list
+    in the meta-prompt's authored order. No VLM stub needed — the
+    endpoint is pure parsing."""
+    with TestClient(_build_app()) as c:
+        r = c.get("/api/prompt/elements", params={"target_model": "flux1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["target_model"] == "flux1"
+    # Flux.1's numbered list has 9 items; the first is the Subject row.
+    assert len(body["elements"]) == 9
+    assert body["elements"][0]["title"] == "Subject"
+    assert "who/what" in body["elements"][0]["default_body"]
+
+
+def test_list_elements_404_or_422_on_unknown_target():
+    """Unknown target falls into FastAPI's Literal validation -> 422."""
+    with TestClient(_build_app()) as c:
+        r = c.get("/api/prompt/elements", params={"target_model": "nonsense"})
+    assert r.status_code == 422
+
+
+def test_generate_element_overrides_replace_meta_body(stub_vlm, img_file):
+    """Element overrides should land inside the system prompt at the
+    spot where the corresponding row's default body lives — so the
+    Qwen3 server sees the user's edited wording, not the default."""
+    with TestClient(_build_app()) as c:
+        r = c.post(
+            "/api/prompt/generate",
+            json={
+                "file_path": str(img_file),
+                "target_model": "flux1",
+                "architecture": "t2i",
+                "extras": [],
+                # Replace element 0 (Subject) and leave the rest at default.
+                "element_overrides": ["MY CUSTOM SUBJECT TEXT", None, None],
+                "temperature": 0.6,
+                "max_tokens": 250,
+            },
+        )
+    assert r.status_code == 200
+    sys_prompt = stub_vlm.calls[0]["system_prompt"]
+    assert "MY CUSTOM SUBJECT TEXT" in sys_prompt
+    # The default Subject body should be GONE; the rest of the
+    # meta-prompt's structure must still be present.
+    assert "who/what, with distinguishing details" not in sys_prompt
+    # And later element (Lighting) defaults should still be intact.
+    assert "direction, quality (hard/soft)" in sys_prompt
+
+
+def test_generate_empty_element_overrides_uses_defaults(stub_vlm, img_file):
+    """The frontend sends ``[]`` when the table never populated; the
+    backend must treat that as "use defaults" — equivalent to omitting
+    the field entirely."""
+    with TestClient(_build_app()) as c:
+        c.post(
+            "/api/prompt/generate",
+            json={
+                "file_path": str(img_file),
+                "target_model": "flux1",
+                "architecture": "t2i",
+                "extras": [],
+                "element_overrides": [],
+                "temperature": 0.6,
+                "max_tokens": 250,
+            },
+        )
+    sys_prompt = stub_vlm.calls[0]["system_prompt"]
+    assert "who/what, with distinguishing details" in sys_prompt
