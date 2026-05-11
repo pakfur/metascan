@@ -29,6 +29,7 @@ from metascan.core.meta_prompt_templates import (
     ExtraOption,
     TargetModel,
     compose_generate_prompts,
+    elements_for,
     parse_output,
 )
 
@@ -55,8 +56,25 @@ class GenerateRequest(BaseModel):
     target_model: TargetModel
     architecture: Architecture
     extras: List[ExtraOption] = Field(default_factory=list)
+    # Per-element body overrides from the playground's editable table.
+    # Index-aligned with ``elements_for(target_model)``; a ``None`` (or a
+    # missing tail) means "use the default for that row". The legacy
+    # behaviour — no table edits at all — is the empty list.
+    element_overrides: List[Optional[str]] = Field(default_factory=list)
     temperature: float = 0.6
     max_tokens: int = 250
+
+
+class MetaElementOut(BaseModel):
+    """Shape returned by ``GET /api/prompt/elements``."""
+
+    title: str
+    default_body: str
+
+
+class ElementsResponse(BaseModel):
+    target_model: TargetModel
+    elements: List[MetaElementOut]
 
 
 class TransformRequest(BaseModel):
@@ -178,10 +196,15 @@ async def _run_generation(
 async def generate(body: GenerateRequest) -> GenerateResponse:
     client = _require_ready_client()
     p = _require_existing_file(body.file_path)
+    # An empty ``element_overrides`` list is the "no edits" default and
+    # is normalised to ``None`` so :func:`compose_generate_prompts`
+    # short-circuits the substitution pass.
+    overrides = list(body.element_overrides) if body.element_overrides else None
     system, user = compose_generate_prompts(
         body.target_model,
         body.architecture,
         list(body.extras),
+        element_overrides=overrides,
     )
     return await _run_generation(
         client,
@@ -192,6 +215,23 @@ async def generate(body: GenerateRequest) -> GenerateResponse:
         max_tokens=body.max_tokens,
         target_model=body.target_model,
     )
+
+
+@router.get("/elements", response_model=ElementsResponse)
+async def list_elements(target_model: TargetModel) -> ElementsResponse:
+    """Return the editable numbered-list elements for a target model.
+
+    The playground's element table populates from this endpoint and
+    refreshes whenever the user picks a different target. The response
+    order matches the order returned by
+    :func:`metascan.core.meta_prompt_templates.elements_for` so that
+    indices line up with ``GenerateRequest.element_overrides``.
+    """
+    elements = [
+        MetaElementOut(title=e.title, default_body=e.default_body)
+        for e in elements_for(target_model)
+    ]
+    return ElementsResponse(target_model=target_model, elements=elements)
 
 
 @router.post("/transform", response_model=GenerateResponse)
