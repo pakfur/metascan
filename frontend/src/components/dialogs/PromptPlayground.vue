@@ -52,6 +52,30 @@ const showNegative = computed(
   () => mode.value === 'generate' && currentPreset.value.hasNegative,
 )
 
+// Editable rows for the meta-prompt's numbered list. Title is read-only;
+// body is fully editable. Reset to server defaults on every target
+// change — per spec, edits do not survive switching models. Only used
+// in generate mode; transform/clean use the legacy builders.
+type ElementRow = { title: string; body: string }
+const elementRows = ref<ElementRow[]>([])
+const showElementTable = computed(
+  () => mode.value === 'generate' && elementRows.value.length > 0,
+)
+
+async function loadElementsForTarget(t: promptApi.TargetModel) {
+  try {
+    const resp = await promptApi.getElements(t)
+    elementRows.value = resp.elements.map((e) => ({
+      title: e.title,
+      body: e.default_body,
+    }))
+  } catch {
+    // Non-fatal: the table just stays empty and the meta-prompt's
+    // built-in defaults are used. Generate still works.
+    elementRows.value = []
+  }
+}
+
 const fullImageUrl = computed(() => streamUrl(props.media.file_path))
 
 const savedPrompts = computed(() =>
@@ -100,6 +124,9 @@ function toggleExtra(key: promptApi.ExtraOption) {
 
 onMounted(() => {
   promptStore.loadSavedPrompts(props.media.file_path).catch(() => {/* non-fatal */})
+  // Populate the element table for the initially-selected target.
+  // Fire-and-forget; the table just stays empty if the request fails.
+  void loadElementsForTarget(target.value)
   cardRef.value?.focus()
 })
 
@@ -121,6 +148,10 @@ watch(target, (next, prev) => {
   if (!preset.hasNegative) {
     generatedNegative.value = ''
   }
+  // Per spec: edits to the element table are scoped to the current
+  // target. Switching models refreshes from defaults; any in-progress
+  // edits from the previous target are dropped.
+  void loadElementsForTarget(next)
 })
 
 watch(
@@ -147,12 +178,17 @@ async function run() {
   try {
     let resp: promptApi.GenerateResponse
     if (mode.value === 'generate') {
+      // Send the current row bodies as element_overrides. If the table
+      // didn't populate (e.g. /elements failed at mount), the array is
+      // empty and the backend falls back to the meta-prompt defaults.
+      const overrides = elementRows.value.map((r) => r.body)
       resp = await promptApi.generatePrompt(
         {
           file_path: props.media.file_path,
           target_model: target.value,
           architecture: architecture.value,
           extras: [...extras.value],
+          element_overrides: overrides,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
         },
@@ -358,6 +394,29 @@ function targetLabel(t: promptApi.TargetModel): string {
           </div>
         </div>
 
+        <!-- Element table: editable rows from the meta-prompt's numbered list.
+             Refreshes on every target change; defaults to the model's
+             built-in body text and any edits flow through to /generate
+             via element_overrides. Generate mode only. -->
+        <div class="section" v-if="showElementTable">
+          <label class="section-label">Prompt elements ({{ elementRows.length }})</label>
+          <div class="element-table">
+            <div
+              v-for="(row, idx) in elementRows"
+              :key="idx"
+              class="element-row"
+            >
+              <div class="element-title" :title="row.title">{{ row.title }}</div>
+              <textarea
+                v-model="row.body"
+                class="element-body"
+                rows="2"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+        </div>
+
         <!-- Existing prompt (for transform/clean mode) -->
         <div class="section" v-if="mode !== 'generate'">
           <label class="section-label">Existing prompt</label>
@@ -492,4 +551,10 @@ function targetLabel(t: promptApi.TargetModel): string {
 .saved-meta { font-size: 11px; opacity: 0.7; }
 .link-btn { background: none; border: none; color: var(--primary-color); cursor: pointer; font-size: 12px; }
 .link-btn.danger { color: var(--danger-color); }
+
+.element-table { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--surface-border); border-radius: 4px; padding: 4px; background: var(--surface-card); max-height: 320px; overflow-y: auto; }
+.element-row { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: start; padding: 4px; border-bottom: 1px solid var(--surface-border); }
+.element-row:last-child { border-bottom: none; }
+.element-title { font-weight: 600; font-size: 12px; padding-top: 6px; overflow: hidden; text-overflow: ellipsis; word-break: break-word; }
+.element-body { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 12px; padding: 6px 8px; background: var(--surface-section); color: inherit; border: 1px solid var(--surface-border); border-radius: 3px; }
 </style>
