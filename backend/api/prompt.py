@@ -396,3 +396,42 @@ async def delete_prompt(prompt_id: int) -> Dict[str, str]:
             status_code=404, detail=f"saved prompt {prompt_id} not found"
         )
     return {"status": "deleted"}
+
+
+# ---- Saved-prompt search --------------------------------------------------
+
+
+class PromptSearchRequest(BaseModel):
+    """Filters for POST /api/prompt/search.
+
+    All three filter fields are nullable; null = no filter. ``folder_id``
+    must point to a ``kind='manual'`` folder — smart folders return 400
+    because the rule engine lives in the frontend (see ``DatabaseManager.
+    search_saved_prompts`` for the rationale). ``limit`` is bounded by
+    Pydantic so out-of-range values fail fast with 422.
+    """
+
+    folder_id: Optional[str] = None
+    target_model: Optional[str] = None
+    name: Optional[str] = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class PromptSearchResponse(BaseModel):
+    prompts: List[SavedPromptOut]
+
+
+@router.post("/search", response_model=PromptSearchResponse)
+async def search_prompts(body: PromptSearchRequest) -> PromptSearchResponse:
+    db = get_db()
+    try:
+        rows = await asyncio.to_thread(
+            db.search_saved_prompts,
+            folder_id=body.folder_id,
+            target_model=body.target_model,
+            name=body.name,
+            limit=body.limit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return PromptSearchResponse(prompts=[SavedPromptOut(**r) for r in rows])
