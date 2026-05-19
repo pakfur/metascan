@@ -8,6 +8,12 @@ export type Architecture = 't2i'
 // both off to let Qwen3 decide based on the image.
 export type ExtraOption = 'includeUncensored' | 'includeSafety'
 
+// Per-element policy. Mirrors meta_prompt_templates.Policy on the
+// backend. ``auto`` is reserved for rows whose semantics are fixed by
+// the meta-prompt (Pony's score/source/rating block); the playground
+// renders those rows as locked.
+export type Policy = 'extract' | 'override' | 'auto'
+
 export type PromptMode = 'generate' | 'transform' | 'clean'
 
 export const TARGET_MODEL_LABELS: Record<TargetModel, string> = {
@@ -77,10 +83,12 @@ export interface GenerateBody {
   target_model: TargetModel
   architecture: Architecture
   extras: ExtraOption[]
-  // Per-element body overrides from the playground's editable table.
-  // Index-aligned with the elements returned by getElements(); a null
-  // (or missing tail) means "use the default for that row". Send an
-  // empty array (or omit) to skip the override pass entirely.
+  // Per-element policy + override value from the playground's table.
+  // Both are index-aligned with the elements returned by getElements().
+  // Empty arrays mean "use defaults" (every row EXTRACT, except locked
+  // AUTO rows). element_overrides[i] is consulted only when the
+  // corresponding policy is "override".
+  element_policies?: Policy[]
   element_overrides?: (string | null)[]
   temperature: number
   max_tokens: number
@@ -89,6 +97,7 @@ export interface GenerateBody {
 export interface MetaElement {
   title: string
   default_body: string
+  default_policy: Policy
 }
 
 export interface ElementsResponse {
