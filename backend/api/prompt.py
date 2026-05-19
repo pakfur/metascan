@@ -16,7 +16,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Final, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -435,3 +435,28 @@ async def search_prompts(body: PromptSearchRequest) -> PromptSearchResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return PromptSearchResponse(prompts=[SavedPromptOut(**r) for r in rows])
+
+
+# ---- TargetModel enum --------------------------------------------------------
+
+
+class TargetModelsResponse(BaseModel):
+    target_models: List[str]
+
+
+# The seven values of metascan.core.prompt_templates.TargetModel literal.
+# Kept in lockstep with that module — if the enum grows, update here too.
+_TARGET_MODELS_LIST: Final[List[str]] = [
+    "sd", "pony", "flux1", "flux2", "zimage", "chroma", "qwen"
+]
+
+
+@router.get("/target-models", response_model=TargetModelsResponse)
+async def list_target_models() -> TargetModelsResponse:
+    """Return the canonical TargetModel literal values used by saved_prompts.
+
+    Clients use this to populate UI dropdowns; the metscan-nodes load
+    node appends a virtual 'any' option client-side that maps to
+    target_model=null in search requests.
+    """
+    return TargetModelsResponse(target_models=list(_TARGET_MODELS_LIST))
