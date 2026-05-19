@@ -52,22 +52,43 @@ const showNegative = computed(
   () => mode.value === 'generate' && currentPreset.value.hasNegative,
 )
 
-// Editable rows for the meta-prompt's numbered list. Title is read-only;
-// body is fully editable. Reset to server defaults on every target
-// change — per spec, edits do not survive switching models. Only used
-// in generate mode; transform/clean use the legacy builders.
-type ElementRow = { title: string; body: string }
+// Per-element policy table. Each row carries the row's read-only title,
+// the user-selected policy (Extract / Override / Auto), and an override
+// value used only when policy === 'override'. ``defaultPolicy`` controls
+// whether the row is locked (AUTO rows from the meta-prompt's structural
+// elements like Pony's score/source/rating block). ``defaultBody`` is
+// shown as placeholder/help text — it's the meta-prompt's instruction
+// for the row, useful as a hint when typing an override value.
+//
+// Reset on every target change — per spec, edits do not survive
+// switching models. Only used in generate mode; transform/clean use the
+// legacy builders.
+type ElementRow = {
+  title: string
+  defaultBody: string
+  defaultPolicy: promptApi.Policy
+  policy: promptApi.Policy
+  body: string
+}
 const elementRows = ref<ElementRow[]>([])
 const showElementTable = computed(
   () => mode.value === 'generate' && elementRows.value.length > 0,
 )
+
+function setRowPolicy(row: ElementRow, next: promptApi.Policy) {
+  if (row.defaultPolicy === 'auto') return  // locked
+  row.policy = next
+}
 
 async function loadElementsForTarget(t: promptApi.TargetModel) {
   try {
     const resp = await promptApi.getElements(t)
     elementRows.value = resp.elements.map((e) => ({
       title: e.title,
-      body: e.default_body,
+      defaultBody: e.default_body,
+      defaultPolicy: e.default_policy,
+      policy: e.default_policy,
+      body: '',
     }))
   } catch {
     // Non-fatal: the table just stays empty and the meta-prompt's
@@ -178,16 +199,22 @@ async function run() {
   try {
     let resp: promptApi.GenerateResponse
     if (mode.value === 'generate') {
-      // Send the current row bodies as element_overrides. If the table
-      // didn't populate (e.g. /elements failed at mount), the array is
-      // empty and the backend falls back to the meta-prompt defaults.
-      const overrides = elementRows.value.map((r) => r.body)
+      // Send per-row policy + override value. element_overrides[i] is
+      // null for non-override rows so the backend can ignore them
+      // cleanly. If the table didn't populate (e.g. /elements failed at
+      // mount), both arrays are empty and the backend falls back to
+      // per-row defaults.
+      const policies = elementRows.value.map((r) => r.policy)
+      const overrides = elementRows.value.map((r) =>
+        r.policy === 'override' ? r.body : null,
+      )
       resp = await promptApi.generatePrompt(
         {
           file_path: props.media.file_path,
           target_model: target.value,
           architecture: architecture.value,
           extras: [...extras.value],
+          element_policies: policies,
           element_overrides: overrides,
           temperature: temperature.value,
           max_tokens: maxTokens.value,
@@ -394,10 +421,11 @@ function targetLabel(t: promptApi.TargetModel): string {
           </div>
         </div>
 
-        <!-- Element table: editable rows from the meta-prompt's numbered list.
-             Refreshes on every target change; defaults to the model's
-             built-in body text and any edits flow through to /generate
-             via element_overrides. Generate mode only. -->
+        <!-- Per-element policy table. Each row picks Extract (pull from
+             the image), Override (use the textarea value), or — for
+             rows the meta-prompt structurally fixes (Pony's score/
+             source/rating block) — Auto (locked, model-managed).
+             Refreshes on every target change. Generate mode only. -->
         <div class="section" v-if="showElementTable">
           <label class="section-label">Prompt elements ({{ elementRows.length }})</label>
           <div class="element-table">
@@ -405,14 +433,43 @@ function targetLabel(t: promptApi.TargetModel): string {
               v-for="(row, idx) in elementRows"
               :key="idx"
               class="element-row"
+              :class="{ 'is-locked': row.defaultPolicy === 'auto' }"
             >
               <div class="element-title" :title="row.title">{{ row.title }}</div>
-              <textarea
-                v-model="row.body"
-                class="element-body"
-                rows="2"
-                spellcheck="false"
-              />
+
+              <div class="element-policy">
+                <template v-if="row.defaultPolicy === 'auto'">
+                  <span class="policy-locked" title="This element is structurally fixed by the meta-prompt and cannot be overridden.">Auto · model-managed</span>
+                </template>
+                <template v-else>
+                  <div class="policy-toggle" role="radiogroup" :aria-label="`Policy for ${row.title}`">
+                    <button
+                      type="button"
+                      class="policy-btn"
+                      :class="{ active: row.policy === 'extract' }"
+                      :aria-pressed="row.policy === 'extract'"
+                      @click="setRowPolicy(row, 'extract')"
+                      title="Pull this element from the image"
+                    >Extract</button>
+                    <button
+                      type="button"
+                      class="policy-btn"
+                      :class="{ active: row.policy === 'override' }"
+                      :aria-pressed="row.policy === 'override'"
+                      @click="setRowPolicy(row, 'override')"
+                      title="Replace this element with the value below"
+                    >Override</button>
+                  </div>
+                  <textarea
+                    v-if="row.policy === 'override'"
+                    v-model="row.body"
+                    class="element-body"
+                    rows="2"
+                    spellcheck="false"
+                    :placeholder="row.defaultBody"
+                  />
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -552,9 +609,17 @@ function targetLabel(t: promptApi.TargetModel): string {
 .link-btn { background: none; border: none; color: var(--primary-color); cursor: pointer; font-size: 12px; }
 .link-btn.danger { color: var(--danger-color); }
 
-.element-table { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--surface-border); border-radius: 4px; padding: 4px; background: var(--surface-card); max-height: 320px; overflow-y: auto; }
-.element-row { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: start; padding: 4px; border-bottom: 1px solid var(--surface-border); }
+.element-table { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--surface-border); border-radius: 4px; padding: 4px; background: var(--surface-card); max-height: 360px; overflow-y: auto; }
+.element-row { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: start; padding: 6px 4px; border-bottom: 1px solid var(--surface-border); }
 .element-row:last-child { border-bottom: none; }
+.element-row.is-locked { opacity: 0.7; }
 .element-title { font-weight: 600; font-size: 12px; padding-top: 6px; overflow: hidden; text-overflow: ellipsis; word-break: break-word; }
-.element-body { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 12px; padding: 6px 8px; background: var(--surface-section); color: inherit; border: 1px solid var(--surface-border); border-radius: 3px; }
+.element-policy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.policy-toggle { display: inline-flex; gap: 0; border: 1px solid var(--surface-border); border-radius: 4px; overflow: hidden; align-self: flex-start; }
+.policy-btn { background: transparent; border: none; color: inherit; font-size: 11px; padding: 3px 10px; cursor: pointer; font-family: inherit; }
+.policy-btn + .policy-btn { border-left: 1px solid var(--surface-border); }
+.policy-btn.active { background: var(--primary-color); color: white; }
+.policy-btn:not(.active):hover { background: var(--surface-section); }
+.policy-locked { font-size: 11px; opacity: 0.75; padding-top: 4px; font-style: italic; }
+.element-body { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 12px; padding: 6px 8px; background: var(--surface-section); color: inherit; border: 1px solid var(--surface-border); border-radius: 3px; min-height: 40px; }
 </style>

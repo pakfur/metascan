@@ -32,11 +32,16 @@ def test_every_target_has_a_meta_prompt():
         assert usr.strip()
 
 
-def test_user_prompt_is_short_and_image_directed():
+def test_user_prompt_is_image_directed_and_carries_policy_block():
     _, usr = compose_generate_prompts("flux1", "t2i", [])
     assert "analyze the attached image" in usr.lower()
-    # Keep the user prompt short — the heavy lifting belongs in system.
-    assert len(usr) < 200
+    # Policy block is always present so OVERRIDE rows have somewhere to
+    # surface their values; the closing instruction tells the model to
+    # apply them when generating the prompt body.
+    assert usr.startswith("POLICY:\n")
+    # Default policy with no overrides → every flux1 row marked EXTRACT.
+    assert "1. Subject: EXTRACT" in usr
+    assert "apply" in usr.lower() and "override" in usr.lower()
 
 
 def test_flux1_meta_prompt_is_prose_oriented():
@@ -334,89 +339,147 @@ def test_elements_titles_are_stripped_clean():
             )
 
 
-def test_compose_with_no_overrides_matches_raw_meta():
-    """No-op pass: passing ``element_overrides=None`` (or omitting it)
-    must return the meta-prompt unchanged so the live behaviour from
-    before the table was added is preserved."""
+def test_system_prompt_is_meta_wrapped_in_policy_preamble():
+    """System = policy preamble + verbatim meta-prompt. The wrapper must
+    be present and the meta body must be byte-identical so a caching
+    layer in front of the model sees a stable system string regardless
+    of per-call policy choices."""
     for tid in TARGET_PRESETS:
         sys_default, _ = compose_generate_prompts(tid, "t2i", [])
-        assert sys_default == _META_BY_TARGET[tid]
+        assert sys_default.startswith("# Extraction policy")
+        meta_start = sys_default.find(_META_BY_TARGET[tid])
+        preamble = sys_default[:meta_start]
+        assert "EXTRACT" in preamble and "OVERRIDE" in preamble
+        # Preamble must NOT ask for a JSON commit header — Qwen3 was
+        # interpreting that as license to emit the header alone and stop
+        # before the prompt body, leaving the playground textarea empty.
+        # (Some meta-prompts mention JSON in their own output rules — the
+        # ban is on the preamble only.)
+        assert "JSON" not in preamble
+        # And the model must be told not to echo the policy block back.
+        assert "do NOT echo" in preamble
+        # The original meta body lives verbatim downstream of the preamble.
+        assert _META_BY_TARGET[tid] in sys_default
 
 
-def test_compose_with_empty_overrides_matches_raw_meta():
-    """Empty-list overrides (the playground's "no edits" state) skip the
-    substitution pass — equivalent to passing ``None``."""
-    sys_a, _ = compose_generate_prompts("flux1", "t2i", [], element_overrides=None)
-    sys_b, _ = compose_generate_prompts("flux1", "t2i", [], element_overrides=[])
-    assert sys_a == sys_b == _META_BY_TARGET["flux1"]
+def test_default_policies_per_target():
+    """Pony's mandatory leading block (rows 1-3) defaults to AUTO; every
+    other row across every target defaults to EXTRACT."""
+    pony = elements_for("pony")
+    assert [e.default_policy for e in pony[:3]] == ["auto", "auto", "auto"]
+    assert all(e.default_policy == "extract" for e in pony[3:])
+    for tid in ("sd", "flux1", "flux2", "zimage", "chroma", "qwen"):
+        assert all(e.default_policy == "extract" for e in elements_for(tid))
 
 
-def test_compose_override_replaces_only_named_element():
-    """Replacing element 0's body must not perturb any other element."""
-    target = "sd"
-    els = elements_for(target)
-    overrides: list[str | None] = [None] * len(els)
-    overrides[0] = "CUSTOM OPENER TEXT"
-    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
-    assert "CUSTOM OPENER TEXT" in sys
-    # Element 1's default body must still be present verbatim.
-    assert els[1].default_body in sys
-    # And the original element-0 default must NOT appear anymore (its
-    # span got replaced wholesale, not appended to).
-    assert els[0].default_body not in sys
-
-
-def test_compose_override_with_none_uses_default():
-    """A ``None`` slot in ``element_overrides`` keeps that row's default."""
+def test_user_policy_block_marks_overrides_with_value():
+    """An OVERRIDE row in the user POLICY block carries the supplied
+    value after `→ `; EXTRACT/AUTO rows are bare."""
     target = "flux1"
     els = elements_for(target)
+    policies: list = ["extract"] * len(els)
     overrides: list[str | None] = [None] * len(els)
-    # Touch only element 2.
-    overrides[2] = "REPLACEMENT"
-    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
-    assert "REPLACEMENT" in sys
-    assert els[0].default_body in sys
-    assert els[1].default_body in sys
-
-
-def test_compose_override_preserves_section_headings_and_examples():
-    """Surrounding meta-prompt text (headings, reference examples,
-    output rules) must remain intact after a substitution."""
-    target = "chroma"
-    els = elements_for(target)
-    overrides = [None] * len(els)
-    overrides[0] = "different art direction text"
-    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
-    # The "# Output format" heading is structural metadata downstream
-    # of the numbered list and must survive the substitution.
-    assert "# Output format" in sys
-    # And the trailing reference example must too.
-    assert "Reference example" in sys
-
-
-def test_compose_excess_overrides_are_ignored():
-    """Overrides longer than the element list must not crash or leak."""
-    target = "zimage"
-    els = elements_for(target)
-    overrides: list[str | None] = [None] * len(els) + [
-        "leak-1",
-        "leak-2",
-        "leak-3",
-    ]
-    sys, _ = compose_generate_prompts(target, "t2i", [], element_overrides=overrides)
-    for leak in ("leak-1", "leak-2", "leak-3"):
-        assert leak not in sys
-
-
-def test_compose_override_works_alongside_safety_directive():
-    """The safety directive is appended AFTER override substitution, so
-    both can apply in the same request."""
-    target = "sd"
-    els = elements_for(target)
-    overrides = [None] * len(els)
-    overrides[0] = "OVERRIDE"
-    sys, _ = compose_generate_prompts(
-        target, "t2i", ["includeSafety"], element_overrides=overrides
+    policies[0] = "override"
+    overrides[0] = "a silver tabby cat sitting upright"
+    _, usr = compose_generate_prompts(
+        target,
+        "t2i",
+        [],
+        element_policies=policies,
+        element_overrides=overrides,
     )
-    assert "OVERRIDE" in sys
+    assert "1. Subject: OVERRIDE → a silver tabby cat sitting upright" in usr
+    assert "2. Composition & framing: EXTRACT" in usr
+
+
+def test_user_policy_block_falls_back_when_override_value_missing():
+    """An OVERRIDE row with no value should not emit a bare arrow — the
+    composer asks the model to fall back to the image instead."""
+    els = elements_for("flux1")
+    policies: list = ["extract"] * len(els)
+    policies[0] = "override"
+    _, usr = compose_generate_prompts("flux1", "t2i", [], element_policies=policies)
+    assert "1. Subject: OVERRIDE → (no value supplied; use the image)" in usr
+
+
+def test_pony_auto_rows_cannot_be_overridden_by_caller():
+    """Even if the API is asked to mark Pony row 1 as OVERRIDE, the
+    composer keeps it AUTO — the row is structurally locked."""
+    els = elements_for("pony")
+    policies: list = ["override"] * len(els)
+    overrides: list[str | None] = ["bogus"] * len(els)
+    _, usr = compose_generate_prompts(
+        "pony",
+        "t2i",
+        [],
+        element_policies=policies,
+        element_overrides=overrides,
+    )
+    assert "1. Score tags: AUTO" in usr
+    assert "2. Source tag: AUTO" in usr
+    assert "3. Rating tag: AUTO" in usr
+    # The non-locked rows DID accept the OVERRIDE.
+    assert "4. Subject count: OVERRIDE → bogus" in usr
+
+
+def test_compose_excess_policies_or_overrides_are_ignored():
+    """Tail entries past the element count must not crash or leak."""
+    els = elements_for("zimage")
+    policies: list = ["extract"] * len(els) + ["override", "override"]
+    overrides: list[str | None] = [None] * len(els) + ["leak-a", "leak-b"]
+    sys, usr = compose_generate_prompts(
+        "zimage",
+        "t2i",
+        [],
+        element_policies=policies,
+        element_overrides=overrides,
+    )
+    for leak in ("leak-a", "leak-b"):
+        assert leak not in sys
+        assert leak not in usr
+
+
+def test_compose_safety_directive_still_applies_with_policies():
+    """The safety directive sits at the end of the meta body inside the
+    wrapped system prompt, regardless of per-element policies."""
+    els = elements_for("sd")
+    policies: list = ["extract"] * len(els)
+    policies[0] = "override"
+    overrides: list[str | None] = [None] * len(els)
+    overrides[0] = "OVERRIDE OPENER"
+    sys, usr = compose_generate_prompts(
+        "sd",
+        "t2i",
+        ["includeSafety"],
+        element_policies=policies,
+        element_overrides=overrides,
+    )
     assert "Content constraint" in sys  # safety directive header
+    assert "OVERRIDE OPENER" in usr  # in user, not system
+
+
+def test_parse_output_strips_json_commit_header_for_prose_target():
+    raw = '{"extracted":[1,2,3],"overridden":[],"auto":[]}\n\nPositive prompt body.'
+    pos, neg = parse_output("flux1", raw)
+    assert pos == "Positive prompt body."
+    assert neg is None
+
+
+def test_parse_output_strips_json_commit_header_then_negative_split():
+    raw = (
+        '{"extracted":[2,3],"overridden":[1],"auto":[]}\n'
+        "\n"
+        "positive prompt body\n"
+        "\n"
+        "Negative: low quality, blurry"
+    )
+    pos, neg = parse_output("sd", raw)
+    assert pos == "positive prompt body"
+    assert neg == "low quality, blurry"
+
+
+def test_parse_output_leaves_text_alone_when_first_line_is_not_json():
+    raw = "no header here\n\nNegative: x"
+    pos, neg = parse_output("sd", raw)
+    assert pos == "no header here"
+    assert neg == "x"

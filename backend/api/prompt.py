@@ -27,6 +27,7 @@ from backend.api import vlm as vlm_api
 from metascan.core.meta_prompt_templates import (
     Architecture,
     ExtraOption,
+    Policy,
     TargetModel,
     compose_generate_prompts,
     elements_for,
@@ -56,10 +57,12 @@ class GenerateRequest(BaseModel):
     target_model: TargetModel
     architecture: Architecture
     extras: List[ExtraOption] = Field(default_factory=list)
-    # Per-element body overrides from the playground's editable table.
-    # Index-aligned with ``elements_for(target_model)``; a ``None`` (or a
-    # missing tail) means "use the default for that row". The legacy
-    # behaviour — no table edits at all — is the empty list.
+    # Per-element policy + override value from the playground's table.
+    # Both are index-aligned with ``elements_for(target_model)``. Missing
+    # (or empty) lists fall back to per-row defaults — every row EXTRACT
+    # except locked AUTO rows. ``element_overrides[i]`` is consulted only
+    # when ``element_policies[i] == "override"``.
+    element_policies: List[Policy] = Field(default_factory=list)
     element_overrides: List[Optional[str]] = Field(default_factory=list)
     temperature: float = 0.6
     max_tokens: int = 250
@@ -70,6 +73,7 @@ class MetaElementOut(BaseModel):
 
     title: str
     default_body: str
+    default_policy: Policy
 
 
 class ElementsResponse(BaseModel):
@@ -181,6 +185,30 @@ async def _run_generation(
     else:
         positive, negative = text, None
 
+    # When ``positive`` ends up empty the playground shows a blank text
+    # area with no error chip, which is genuinely confusing. Log the raw
+    # model response so operators can see what came back without having
+    # to add code. Trimmed to keep server logs readable; raise to DEBUG
+    # if you want the whole thing.
+    if not positive.strip():
+        logger.warning(
+            "VLM returned %d chars but parse_output produced empty prompt"
+            " (target=%s, raw[:300]=%r)",
+            len(text),
+            target_model,
+            text[:300],
+        )
+    else:
+        logger.info(
+            "VLM generation ok (target=%s, raw_len=%d, prompt_len=%d,"
+            " negative=%s, elapsed_ms=%d)",
+            target_model,
+            len(text),
+            len(positive),
+            "yes" if negative else "no",
+            elapsed,
+        )
+
     return GenerateResponse(
         prompt=positive,
         vlm_model_id=client.model_id or "",
@@ -196,14 +224,15 @@ async def _run_generation(
 async def generate(body: GenerateRequest) -> GenerateResponse:
     client = _require_ready_client()
     p = _require_existing_file(body.file_path)
-    # An empty ``element_overrides`` list is the "no edits" default and
-    # is normalised to ``None`` so :func:`compose_generate_prompts`
-    # short-circuits the substitution pass.
+    # Empty lists are the "no edits" default — normalised to ``None`` so
+    # :func:`compose_generate_prompts` falls back to per-row defaults.
+    policies = list(body.element_policies) if body.element_policies else None
     overrides = list(body.element_overrides) if body.element_overrides else None
     system, user = compose_generate_prompts(
         body.target_model,
         body.architecture,
         list(body.extras),
+        element_policies=policies,
         element_overrides=overrides,
     )
     return await _run_generation(
@@ -228,7 +257,11 @@ async def list_elements(target_model: TargetModel) -> ElementsResponse:
     indices line up with ``GenerateRequest.element_overrides``.
     """
     elements = [
-        MetaElementOut(title=e.title, default_body=e.default_body)
+        MetaElementOut(
+            title=e.title,
+            default_body=e.default_body,
+            default_policy=e.default_policy,
+        )
         for e in elements_for(target_model)
     ]
     return ElementsResponse(target_model=target_model, elements=elements)

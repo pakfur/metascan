@@ -376,19 +376,28 @@ def test_clean_uses_clean_template(stub_vlm):
 # --- /elements + element_overrides ----------------------------------------
 
 
-def test_list_elements_returns_target_specific_rows():
-    """GET /api/prompt/elements should return the parsed numbered list
-    in the meta-prompt's authored order. No VLM stub needed — the
-    endpoint is pure parsing."""
+def test_list_elements_returns_rows_with_default_policy():
+    """GET /api/prompt/elements returns the parsed numbered list in
+    authored order plus a default policy per row (extract for normal
+    rows, auto for Pony's locked leading block)."""
     with TestClient(_build_app()) as c:
         r = c.get("/api/prompt/elements", params={"target_model": "flux1"})
     assert r.status_code == 200
     body = r.json()
     assert body["target_model"] == "flux1"
-    # Flux.1's numbered list has 9 items; the first is the Subject row.
     assert len(body["elements"]) == 9
     assert body["elements"][0]["title"] == "Subject"
     assert "who/what" in body["elements"][0]["default_body"]
+    assert body["elements"][0]["default_policy"] == "extract"
+
+
+def test_list_elements_marks_pony_leading_block_as_auto():
+    with TestClient(_build_app()) as c:
+        r = c.get("/api/prompt/elements", params={"target_model": "pony"})
+    assert r.status_code == 200
+    elements = r.json()["elements"]
+    assert [e["default_policy"] for e in elements[:3]] == ["auto", "auto", "auto"]
+    assert all(e["default_policy"] == "extract" for e in elements[3:])
 
 
 def test_list_elements_404_or_422_on_unknown_target():
@@ -398,10 +407,9 @@ def test_list_elements_404_or_422_on_unknown_target():
     assert r.status_code == 422
 
 
-def test_generate_element_overrides_replace_meta_body(stub_vlm, img_file):
-    """Element overrides should land inside the system prompt at the
-    spot where the corresponding row's default body lives — so the
-    Qwen3 server sees the user's edited wording, not the default."""
+def test_generate_override_lands_in_user_policy_block(stub_vlm, img_file):
+    """OVERRIDE rows surface in the user POLICY block (not the system
+    prompt) so the cached system text stays stable across calls."""
     with TestClient(_build_app()) as c:
         r = c.post(
             "/api/prompt/generate",
@@ -410,26 +418,25 @@ def test_generate_element_overrides_replace_meta_body(stub_vlm, img_file):
                 "target_model": "flux1",
                 "architecture": "t2i",
                 "extras": [],
-                # Replace element 0 (Subject) and leave the rest at default.
-                "element_overrides": ["MY CUSTOM SUBJECT TEXT", None, None],
+                "element_policies": ["override"] + ["extract"] * 8,
+                "element_overrides": ["MY CUSTOM SUBJECT", None, None],
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
         )
     assert r.status_code == 200
     sys_prompt = stub_vlm.calls[0]["system_prompt"]
-    assert "MY CUSTOM SUBJECT TEXT" in sys_prompt
-    # The default Subject body should be GONE; the rest of the
-    # meta-prompt's structure must still be present.
-    assert "who/what, with distinguishing details" not in sys_prompt
-    # And later element (Lighting) defaults should still be intact.
-    assert "direction, quality (hard/soft)" in sys_prompt
+    user_prompt = stub_vlm.calls[0]["user_prompt"]
+    # Override appears in the user POLICY block, not the system body.
+    assert "MY CUSTOM SUBJECT" not in sys_prompt
+    assert "1. Subject: OVERRIDE → MY CUSTOM SUBJECT" in user_prompt
+    # The meta-prompt's Subject default text is still in the system body.
+    assert "who/what, with distinguishing details" in sys_prompt
 
 
-def test_generate_empty_element_overrides_uses_defaults(stub_vlm, img_file):
-    """The frontend sends ``[]`` when the table never populated; the
-    backend must treat that as "use defaults" — equivalent to omitting
-    the field entirely."""
+def test_generate_empty_policies_and_overrides_use_defaults(stub_vlm, img_file):
+    """Empty lists from the frontend mean "no edits" — every row
+    defaults to EXTRACT (or AUTO for locked rows)."""
     with TestClient(_build_app()) as c:
         c.post(
             "/api/prompt/generate",
@@ -438,10 +445,44 @@ def test_generate_empty_element_overrides_uses_defaults(stub_vlm, img_file):
                 "target_model": "flux1",
                 "architecture": "t2i",
                 "extras": [],
+                "element_policies": [],
                 "element_overrides": [],
                 "temperature": 0.6,
                 "max_tokens": 250,
             },
         )
-    sys_prompt = stub_vlm.calls[0]["system_prompt"]
-    assert "who/what, with distinguishing details" in sys_prompt
+    user_prompt = stub_vlm.calls[0]["user_prompt"]
+    # Scope the OVERRIDE check to the POLICY block — the closing
+    # instruction mentions OVERRIDE generically, which is fine.
+    policy_block = user_prompt.split("\n\n", 1)[0]
+    assert "1. Subject: EXTRACT" in policy_block
+    assert "OVERRIDE" not in policy_block
+
+
+def test_generate_strips_json_commit_header_from_response(stub_vlm, img_file):
+    """The composer asks Qwen3 to emit a JSON commit header before the
+    prompt; the parser must strip it so callers see only the prompt."""
+    stub_vlm.next_response = (
+        '{"extracted":[2,3],"overridden":[1],"auto":[]}\n'
+        "\n"
+        "a young woman in a red sweater\n"
+        "\n"
+        "Negative: low quality, blurry"
+    )
+    with TestClient(_build_app()) as c:
+        r = c.post(
+            "/api/prompt/generate",
+            json={
+                "file_path": str(img_file),
+                "target_model": "sd",
+                "architecture": "t2i",
+                "extras": [],
+                "temperature": 0.6,
+                "max_tokens": 250,
+            },
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert "extracted" not in body["prompt"]
+    assert body["prompt"].startswith("a young woman")
+    assert body["negative"] == "low quality, blurry"
