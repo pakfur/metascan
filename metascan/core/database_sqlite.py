@@ -710,6 +710,86 @@ class DatabaseManager:
                 conn.commit()
                 return int(cur.rowcount) > 0
 
+    def search_saved_prompts(
+        self,
+        folder_id: Optional[str],
+        target_model: Optional[str],
+        name: Optional[str],
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Search the saved_prompts table by optional folder / model / name.
+
+        When ``folder_id`` is supplied, the folder must be ``kind='manual'`` —
+        smart folders raise ``ValueError`` because their membership rule
+        engine lives in the frontend (Pinia store) and would need a Python
+        port before this method could resolve them. The companion
+        ``POST /api/prompt/search`` route catches the ValueError and
+        returns 400.
+
+        Returns rows in the same dict shape as ``list_saved_prompts`` so
+        ``SavedPromptOut`` Pydantic parsing works unchanged (styles
+        deserialized from JSON string to Python list).
+        """
+        import json as _json
+
+        # Hard cap to match the API contract.
+        capped_limit = max(1, min(limit, 500))
+
+        with self.lock:
+            with self._get_connection() as conn:
+                if folder_id is not None:
+                    row = conn.execute(
+                        "SELECT kind FROM folders WHERE id = ?", (folder_id,)
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(f"folder not found: {folder_id}")
+                    if row["kind"] == "smart":
+                        raise ValueError(
+                            f"smart folders are not supported by search_saved_prompts "
+                            f"(folder_id={folder_id}); manual folders only"
+                        )
+
+                sql_parts = ["SELECT saved_prompts.* FROM saved_prompts"]
+                params: List[Any] = []
+                wheres: List[str] = []
+
+                if folder_id is not None:
+                    sql_parts.append("JOIN folder_items USING (file_path)")
+                    wheres.append("folder_items.folder_id = ?")
+                    params.append(folder_id)
+
+                if target_model is not None:
+                    wheres.append("saved_prompts.target_model = ?")
+                    params.append(target_model)
+
+                if name is not None:
+                    wheres.append("saved_prompts.name = ?")
+                    params.append(name)
+
+                if wheres:
+                    sql_parts.append("WHERE " + " AND ".join(wheres))
+
+                sql_parts.append("ORDER BY saved_prompts.created_at DESC")
+                sql_parts.append("LIMIT ?")
+                params.append(capped_limit)
+
+                sql = " ".join(sql_parts)
+                rows = conn.execute(sql, params).fetchall()
+
+        # Mirror list_saved_prompts row shape: deserialize styles JSON
+        # for caller convenience. (See list_saved_prompts in this file
+        # for the canonical row-shaping logic.)
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            styles_raw = d.get("styles") or "[]"
+            try:
+                d["styles"] = _json.loads(styles_raw)
+            except (ValueError, TypeError):
+                d["styles"] = []
+            out.append(d)
+        return out
+
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0
         with self.batch_writer() as conn:
