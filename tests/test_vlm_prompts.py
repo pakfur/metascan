@@ -3,8 +3,6 @@
 import json
 
 from metascan.core.vlm_prompts import (
-    CAPTION_STYLE_PROMPTS,
-    PROMPT_EXTRACTION_PROMPT,
     TAGGING_GRAMMAR,
     TAGGING_SYSTEM_PROMPT,
     TAGGING_USER_PROMPT,
@@ -35,15 +33,6 @@ def test_tagging_user_prompt_is_short():
 def test_tagging_grammar_is_valid_gbnf():
     assert "::=" in TAGGING_GRAMMAR
     assert "string" in TAGGING_GRAMMAR or "tag" in TAGGING_GRAMMAR
-
-
-def test_caption_style_prompts_have_all_four_styles():
-    assert set(CAPTION_STYLE_PROMPTS.keys()) == {"sdxl", "flux", "pony", "natural"}
-
-
-def test_prompt_extraction_prompt_present():
-    assert isinstance(PROMPT_EXTRACTION_PROMPT, str)
-    assert len(PROMPT_EXTRACTION_PROMPT) > 20
 
 
 def test_parse_tags_response_extracts_array():

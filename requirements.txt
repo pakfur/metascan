@@ -34,6 +34,9 @@ tqdm==4.67.1
 # File Watching
 watchdog==3.0.0
 
+# Config / prompt-template loading
+PyYAML>=6.0
+
 # File Operations (cross-platform)
 portalocker==2.8.2
 send2trash==1.8.3
