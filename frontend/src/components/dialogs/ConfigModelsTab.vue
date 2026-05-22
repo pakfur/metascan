@@ -195,11 +195,44 @@ async function onRebuildIndex() {
   }
 }
 
-async function onActivate(row: ModelRow) {
+async function onLoad(row: ModelRow) {
   if (!confirm(`Switch active VLM to ${row.name}? Current model will be unloaded.`)) {
     return
   }
   await models.setActiveVlmModel(row.id)
+}
+
+async function onUnload(row: ModelRow) {
+  if (!confirm(`Unload ${row.name} from VRAM?`)) {
+    return
+  }
+  await models.unloadVlmModel(row.id)
+}
+
+function isVlmLoaded(row: ModelRow): boolean {
+  return (
+    models.vlmModelId === row.id &&
+    models.vlmState !== 'idle' &&
+    models.vlmState !== 'stopped'
+  )
+}
+
+function isClipLoaded(row: ModelRow): boolean {
+  // Row ids are `clip-<key>` while the inference worker reports the bare
+  // model key (e.g. "small" / "large"). Trim the prefix to compare.
+  const key = row.id.startsWith('clip-') ? row.id.slice('clip-'.length) : row.id
+  return (
+    models.inferenceModelKey === key &&
+    models.inferenceState !== 'idle' &&
+    models.inferenceState !== 'stopped'
+  )
+}
+
+async function onUnloadClip(row: ModelRow) {
+  if (!confirm(`Unload ${row.name} from VRAM?`)) {
+    return
+  }
+  await models.stopInferenceWorker()
 }
 
 const retagInFlight = ref(false)
@@ -370,15 +403,37 @@ async function onRetagLibrary() {
             <button
               v-if="row.id.startsWith('qwen3vl-')"
               class="btn-small"
-              :disabled="row.status !== 'available' || models.vlmModelId === row.id"
+              :disabled="row.status !== 'available' || isVlmLoaded(row)"
               :title="row.status !== 'available'
                 ? 'Download the model first.'
-                : models.vlmModelId === row.id
+                : isVlmLoaded(row)
                   ? 'This is the active VLM.'
-                  : 'Switch the loaded VLM to this model.'"
-              @click="onActivate(row)"
+                  : 'Load this model into VRAM.'"
+              @click="onLoad(row)"
             >
-              {{ models.vlmModelId === row.id ? 'Active' : 'Activate' }}
+              {{ isVlmLoaded(row) ? 'Loaded' : 'Load' }}
+            </button>
+            <button
+              v-if="row.id.startsWith('qwen3vl-')"
+              class="btn-small"
+              :disabled="!isVlmLoaded(row)"
+              :title="isVlmLoaded(row)
+                ? 'Unload this model from VRAM.'
+                : 'Model is not currently loaded.'"
+              @click="onUnload(row)"
+            >
+              Unload
+            </button>
+            <button
+              v-if="row.id.startsWith('clip-')"
+              class="btn-small"
+              :disabled="!isClipLoaded(row)"
+              :title="isClipLoaded(row)
+                ? 'Unload the CLIP inference worker. It will respawn on the next content search.'
+                : 'This CLIP model is not currently loaded.'"
+              @click="onUnloadClip(row)"
+            >
+              Unload
             </button>
           </div>
         </div>

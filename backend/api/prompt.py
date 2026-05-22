@@ -447,7 +447,13 @@ class TargetModelsResponse(BaseModel):
 # The seven values of metascan.core.prompt_templates.TargetModel literal.
 # Kept in lockstep with that module — if the enum grows, update here too.
 _TARGET_MODELS_LIST: Final[List[str]] = [
-    "sd", "pony", "flux1", "flux2", "zimage", "chroma", "qwen"
+    "sd",
+    "pony",
+    "flux1",
+    "flux2",
+    "zimage",
+    "chroma",
+    "qwen",
 ]
 
 

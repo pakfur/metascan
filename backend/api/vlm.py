@@ -330,6 +330,26 @@ async def set_active(body: ActiveBody) -> Dict[str, Any]:
     return client.snapshot()
 
 
+@router.post("/unload")
+async def unload(body: ActiveBody) -> Dict[str, Any]:
+    """Unload the active VLM and free its VRAM.
+
+    The body's ``model_id`` is required for symmetry with ``/active`` and to
+    guard against unloading a model the caller didn't intend (e.g. another
+    tab swapped models in between). If ``model_id`` doesn't match the
+    currently-loaded model, the request is a no-op.
+    """
+    client = _vlm_client
+    if client is None:
+        raise HTTPException(status_code=503, detail="vlm client not initialized")
+    if client.model_id != body.model_id:
+        return client.snapshot()
+    for job in _jobs.values():
+        job.cancelled = True
+    await client.shutdown()
+    return client.snapshot()
+
+
 def _list_paths_for_retag(db: Any, *, force: bool) -> List[str]:
     """SELECT paths whose tag rows are pure clip/both. With force=True also
     include vlm-tagged files."""
