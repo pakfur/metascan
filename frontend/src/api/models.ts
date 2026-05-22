@@ -64,6 +64,10 @@ export function startInference(): Promise<InferenceStatusPayload> {
   return post<InferenceStatusPayload>('/models/inference/start')
 }
 
+export function stopInference(): Promise<InferenceStatusPayload> {
+  return post<InferenceStatusPayload>('/models/inference/stop')
+}
+
 export function setPreload(id: string, enabled: boolean): Promise<{ preload_at_startup: string[] }> {
   return post('/models/preload', { id, enabled })
 }

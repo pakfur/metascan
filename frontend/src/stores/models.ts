@@ -12,13 +12,20 @@ import {
   setHfToken,
   setPreload,
   startInference,
+  stopInference,
   testHfToken,
   type HardwareInfo,
   type InferenceState,
   type InferenceStatusPayload,
   type ModelRow,
 } from '../api/models'
-import { fetchVlmStatus, setActiveVlm, type VlmState, type VlmStatus } from '../api/vlm'
+import {
+  fetchVlmStatus,
+  setActiveVlm,
+  unloadVlm,
+  type VlmState,
+  type VlmStatus,
+} from '../api/vlm'
 import type { Gate, Tier } from '../types/hardware'
 import { useWebSocket } from '../composables/useWebSocket'
 
@@ -217,6 +224,16 @@ export const useModelsStore = defineStore('models', () => {
     }
   }
 
+  async function unloadVlmModel(modelId: string): Promise<void> {
+    try {
+      const snap = await unloadVlm(modelId)
+      applyVlmPayload(snap)
+    } catch (e) {
+      vlmError.value = e instanceof Error ? e.message : String(e)
+      vlmState.value = 'error'
+    }
+  }
+
   async function startInferenceWorker(): Promise<void> {
     // Optimistically flip to spawning so the UI chip updates immediately;
     // the real state will arrive on the 'models' WS channel once the
@@ -224,6 +241,16 @@ export const useModelsStore = defineStore('models', () => {
     inferenceState.value = 'spawning'
     try {
       const snap = await startInference()
+      applyInferencePayload(snap)
+    } catch (e) {
+      inferenceError.value = e instanceof Error ? e.message : String(e)
+      inferenceState.value = 'error'
+    }
+  }
+
+  async function stopInferenceWorker(): Promise<void> {
+    try {
+      const snap = await stopInference()
       applyInferencePayload(snap)
     } catch (e) {
       inferenceError.value = e instanceof Error ? e.message : String(e)
@@ -257,6 +284,7 @@ export const useModelsStore = defineStore('models', () => {
     isVlmReady,
     isVlmLoading,
     setActiveVlmModel,
+    unloadVlmModel,
     loadStatus,
     refreshHfToken,
     togglePreload,
@@ -267,6 +295,7 @@ export const useModelsStore = defineStore('models', () => {
     startDownload,
     startDownloadAllMissing,
     startInferenceWorker,
+    stopInferenceWorker,
     removeCache,
     rebuildIndex,
   }

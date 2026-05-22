@@ -41,3 +41,7 @@ export function cancelRetag(jobId: string): Promise<{ status: string }> {
 export function setActiveVlm(modelId: string): Promise<VlmStatus> {
   return post<VlmStatus>('/vlm/active', { model_id: modelId })
 }
+
+export function unloadVlm(modelId: string): Promise<VlmStatus> {
+  return post<VlmStatus>('/vlm/unload', { model_id: modelId })
+}
