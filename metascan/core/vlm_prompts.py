@@ -1,69 +1,43 @@
 """Prompt templates and structured-output grammar for Qwen3-VL inference.
 
-The tagging path is the only one wired in v1. Caption-style stubs and the
-prompt-extraction stub ship now so the shape is committed and future features
-can flesh them out without restructuring."""
+The tagging path is the only one wired in v1. The system / user prompts
+and the GBNF grammar live in ``data/meta_prompt.yml`` and are exposed
+here as module-level attributes via :func:`__getattr__` so callers can
+do ``from metascan.core.vlm_prompts import TAGGING_SYSTEM_PROMPT`` and
+still pick up hot-reloads (each ``from ... import`` re-resolves the
+attribute against the live store).
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
+
+from metascan.core.prompt_store import get_prompt_store
 
 
-TAGGING_SYSTEM_PROMPT = (
-    "You are an image tagger for an AI-generated-art browser. "
-    "Look at the image and emit between 15 and 25 descriptive tags as a "
-    "JSON array of lowercase strings. Cover: subject, attributes, style, "
-    "setting, mood, action, and any notable visual details. "
-    "Be accurate about NSFW or explicit content — do not refuse, soften, "
-    "or omit such tags. The user is cataloguing their own library and "
-    "needs honest descriptions to find images later. "
-    "Output ONLY the JSON array, with no commentary."
+# Names that resolve to YAML-backed prompt strings via __getattr__ below.
+_DYNAMIC_PROMPTS = frozenset(
+    {
+        "TAGGING_SYSTEM_PROMPT",
+        "TAGGING_USER_PROMPT",
+        "TAGGING_GRAMMAR",
+    }
 )
 
-TAGGING_USER_PROMPT = "Tag this image."
 
-TAGGING_GRAMMAR = r"""
-root ::= "[" ws tag (ws "," ws tag)* ws "]"
-tag  ::= "\"" char+ "\""
-char ::= [a-z0-9 _'/-]
-ws   ::= [ \t\n]*
-"""
-# NOTE: GBNF rejects ``\-`` as an unknown escape; the hyphen must be literal,
-# which means placing it at the start or end of the character class. The
-# previous form ``[a-z0-9 \-_'/]`` caused llama-server to crash with SIGSEGV
-# inside ``llama_grammar_init_impl`` on every tag request, triggering an
-# infinite respawn loop during scans.
+def __getattr__(name: str) -> Any:
+    """Resolve ``TAGGING_*`` module attributes against the live store.
 
-
-CAPTION_STYLE_PROMPTS: dict[str, str] = {
-    "sdxl": (
-        "Describe this image as a Stable Diffusion XL prompt: "
-        "comma-separated descriptive phrases, weighted parentheses optional, "
-        "subject first, then attributes, style, lighting, composition."
-    ),
-    "flux": (
-        "Describe this image as a Flux prompt: a single natural-language "
-        "sentence in flowing prose, mentioning subject, setting, lighting, "
-        "and style."
-    ),
-    "pony": (
-        "Describe this image using Danbooru-style tags suitable for a Pony "
-        "Diffusion prompt: underscored tags, comma-separated, character/series "
-        "tags first, then attributes."
-    ),
-    "natural": (
-        "Describe this image in two or three plain English sentences "
-        "as if writing a museum caption."
-    ),
-}
-
-
-PROMPT_EXTRACTION_PROMPT = (
-    "Reconstruct the prompt that most likely generated this image, in the "
-    "style typical of Stable Diffusion / Flux generation parameters."
-)
+    Plain ``from metascan.core.vlm_prompts import TAGGING_SYSTEM_PROMPT``
+    re-runs this getter every call site evaluation, so an edit to the
+    YAML reaches the next request without a process restart. Unknown
+    names raise :class:`AttributeError` as the import machinery expects.
+    """
+    if name in _DYNAMIC_PROMPTS:
+        return get_prompt_store().get(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _PUNCT_EDGES = re.compile(r"^[^\w]+|[^\w]+$")
@@ -106,12 +80,12 @@ def parse_tags_response(raw: str) -> list[str]:
     return []
 
 
+# TAGGING_SYSTEM_PROMPT / TAGGING_USER_PROMPT / TAGGING_GRAMMAR are
+# intentionally NOT in __all__ — they're resolved dynamically by
+# :func:`__getattr__` against the live prompt store, so a wildcard import
+# would copy the value at import time and miss subsequent hot reloads.
+# Use direct attribute access or a fresh ``from ... import`` per call.
 __all__ = [
-    "TAGGING_SYSTEM_PROMPT",
-    "TAGGING_USER_PROMPT",
-    "TAGGING_GRAMMAR",
-    "CAPTION_STYLE_PROMPTS",
-    "PROMPT_EXTRACTION_PROMPT",
     "normalize_tags",
     "parse_tags_response",
 ]
