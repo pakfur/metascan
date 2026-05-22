@@ -36,6 +36,7 @@ from backend.api import (
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
+from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmClient
 from backend.api.vlm import set_vlm_client
 
@@ -123,6 +124,19 @@ async def _event_loop_heartbeat() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ws_manager.attach_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
+
+    # Load the YAML-backed prompt store eagerly and start a watcher so
+    # edits to data/meta_prompt.yml hot-reload into the running process.
+    # Tolerate a missing or malformed file so dev environments without
+    # the YAML still boot; the first generate request will surface the
+    # error if a prompt key is missing.
+    prompt_store = None
+    try:
+        prompt_store = get_prompt_store()
+        prompt_store.start_watching()
+        logger.info("prompt-store loaded %d entries", len(prompt_store.keys()))
+    except Exception:
+        logger.exception("Failed to initialize prompt store; prompt endpoints may 500")
 
     # Warm the singletons before we start accepting requests. Both do
     # synchronous work (SQLite schema migration + index builds for the
@@ -230,6 +244,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await vlm_client.shutdown()
         except Exception:
             logger.exception("VLM client shutdown raised")
+        if prompt_store is not None:
+            try:
+                prompt_store.stop_watching()
+            except Exception:
+                logger.exception("prompt-store shutdown raised")
 
 
 def create_app() -> FastAPI:  # noqa: C901
