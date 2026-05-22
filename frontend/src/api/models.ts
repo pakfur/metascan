@@ -7,7 +7,7 @@ export type HardwareInfo = HardwarePayload
 export type { Gate, Tier }
 
 export type ModelStatus = 'available' | 'missing' | 'downloading' | 'error'
-export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP'
+export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP' | 'Tagging (Qwen3-VL)'
 
 export interface ModelRow {
   id: string
@@ -62,6 +62,10 @@ export function fetchInferenceStatus(): Promise<InferenceStatusPayload> {
 
 export function startInference(): Promise<InferenceStatusPayload> {
   return post<InferenceStatusPayload>('/models/inference/start')
+}
+
+export function stopInference(): Promise<InferenceStatusPayload> {
+  return post<InferenceStatusPayload>('/models/inference/stop')
 }
 
 export function setPreload(id: string, enabled: boolean): Promise<{ preload_at_startup: string[] }> {

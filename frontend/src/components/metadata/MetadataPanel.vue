@@ -6,9 +6,37 @@ import { useToast } from '../../composables/useToast'
 import MetadataField from './MetadataField.vue'
 import CameraSection from './CameraSection.vue'
 import LocationSection from './LocationSection.vue'
+import SavedPromptsSection from './SavedPromptsSection.vue'
 import { fileName } from '../../utils/path'
 import { copyToClipboard } from '../../utils/clipboard'
 import type { AnyFolder } from '../../types/folders'
+import type { TagSource } from '../../types/media'
+
+const TAG_SOURCE_LABEL: Record<TagSource, string> = {
+  prompt: 'Prompt',
+  clip: 'CLIP',
+  vlm: 'VLM',
+  both: 'Prompt + CLIP',
+  'vlm+prompt': 'VLM + Prompt',
+}
+
+function tagSourceClass(src: string): string {
+  switch (src) {
+    case 'prompt':
+    case 'clip':
+    case 'vlm':
+    case 'both':
+      return `tag-chip--${src}`
+    case 'vlm+prompt':
+      return 'tag-chip--vlm-prompt'
+    default:
+      return 'tag-chip--prompt'
+  }
+}
+
+function tagSourceTitle(src: string): string {
+  return TAG_SOURCE_LABEL[src as TagSource] ?? src
+}
 
 const mediaStore = useMediaStore()
 const foldersStore = useFoldersStore()
@@ -85,7 +113,14 @@ async function copyAll() {
         <summary class="section-title">Tags ({{ media.tags.length }})</summary>
         <div class="section-body">
           <div class="tags-list">
-            <span v-for="tag in media.tags" :key="tag" class="tag-chip">{{ tag }}</span>
+            <span
+              v-for="tag in media.tags"
+              :key="tag.name + '|' + tag.source"
+              class="tag-chip"
+              :class="tagSourceClass(tag.source)"
+              :title="tagSourceTitle(tag.source)"
+              >{{ tag.name }}</span
+            >
           </div>
         </div>
       </details>
@@ -115,6 +150,7 @@ async function copyAll() {
 
       <CameraSection :media="media" />
       <LocationSection :media="media" />
+      <SavedPromptsSection />
 
       <!-- AI Generation -->
       <details v-if="media.metadata_source" class="meta-section" open>
@@ -243,11 +279,54 @@ async function copyAll() {
 }
 
 .tag-chip {
-  padding: 2px 8px;
+  --tag-stripe: var(--tag-source-prompt);
+  position: relative;
+  padding: 2px 8px 2px 10px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--primary-color) 15%, transparent);
   color: var(--primary-color);
   font-size: 11px;
+  overflow: hidden;
+}
+.tag-chip::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tag-stripe);
+}
+/* Source palette — kept local so the stripe colors are one-source-of-truth. */
+.tag-chip--prompt {
+  --tag-source-prompt: #4f8bff;
+  --tag-stripe: var(--tag-source-prompt);
+}
+.tag-chip--clip {
+  --tag-source-clip: #5cd0ff;
+  --tag-stripe: var(--tag-source-clip);
+}
+.tag-chip--vlm {
+  --tag-source-vlm: #ffd24a;
+  --tag-stripe: var(--tag-source-vlm);
+}
+.tag-chip--both {
+  --tag-source-prompt: #4f8bff;
+  --tag-source-clip: #5cd0ff;
+  --tag-stripe: linear-gradient(
+    to bottom,
+    var(--tag-source-prompt) 0 50%,
+    var(--tag-source-clip) 50% 100%
+  );
+}
+.tag-chip--vlm-prompt {
+  --tag-source-vlm: #ffd24a;
+  --tag-source-prompt: #4f8bff;
+  --tag-stripe: linear-gradient(
+    to bottom,
+    var(--tag-source-vlm) 0 50%,
+    var(--tag-source-prompt) 50% 100%
+  );
 }
 
 .in-folder-chips {
