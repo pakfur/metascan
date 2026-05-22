@@ -80,8 +80,9 @@ class MediaService:
     async def get_embedding_stats(self) -> Dict[str, Any]:
         return await asyncio.to_thread(self.db.get_embedding_stats)
 
-    async def get_tags_for_file(self, file_path: str) -> List[str]:
-        return await asyncio.to_thread(self.db.get_tags_for_file, Path(file_path))
+    async def get_tags_for_file(self, file_path: str) -> List[Dict[str, str]]:
+        rows = await asyncio.to_thread(self.db.get_tags_for_file, Path(file_path))
+        return [{"name": name, "source": source} for name, source in rows]
 
     def media_to_summary_dict(self, media: Media) -> dict:
         """Light payload for list-style responses (grid + viewer).

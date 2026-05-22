@@ -7,6 +7,8 @@
 data/*
 !data/vocabulary/
 
+.claude/
+
 # Other runtime artifacts
 logs/
 # Anchored so it only matches the root-level cache dir, not
@@ -15,6 +17,7 @@ logs/
 models/
 gfpgan/
 assets/media/
+data/vocabulary/*.npz
 
 # Local config (config_example.json is tracked)
 config.json

@@ -10,10 +10,13 @@ import { fileName } from '../../utils/path'
 import { useFoldersStore } from '../../stores/folders'
 import { useFoldersUi } from '../../composables/useFoldersUi'
 import { useToast } from '../../composables/useToast'
+import { useModelsStore } from '../../stores/models'
+import { tagOne } from '../../api/vlm'
 
 const emit = defineEmits<{
   open: [media: Media]
   upscale: [items: Media[]]
+  playground: [media: Media]
 }>()
 
 const mediaStore = useMediaStore()
@@ -22,6 +25,7 @@ const simStore = useSimilarityStore()
 const foldersStore = useFoldersStore()
 const foldersUi = useFoldersUi()
 const toast = useToast()
+const modelsStore = useModelsStore()
 
 const container = ref<HTMLElement | null>(null)
 const scrollTop = ref(0)
@@ -256,6 +260,25 @@ function ctxUpscale() {
   }
 }
 
+async function ctxRetagWithVlm() {
+  if (!contextMenu.value) return
+  const target = contextMenu.value.media
+  closeContextMenu()
+  try {
+    const { tags } = await tagOne(target.file_path)
+    toast.show(`Re-tagged with ${tags.length} tag${tags.length !== 1 ? 's' : ''}`, 'success')
+  } catch (e) {
+    toast.show(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`, 'warn')
+  }
+}
+
+function ctxPlayground() {
+  if (!contextMenu.value) return
+  const target = contextMenu.value.media
+  closeContextMenu()
+  emit('playground', target)
+}
+
 function ctxDelete() {
   if (contextMenu.value) {
     const media = contextMenu.value.media
@@ -422,6 +445,18 @@ function onThumbDragEnd() {
         </button>
         <button @click="ctxFindSimilar">Find Similar</button>
         <button @click="ctxUpscale">Upscale</button>
+        <button
+          v-if="modelsStore.isVlmReady"
+          @click="ctxRetagWithVlm"
+        >
+          Re-tag with Qwen3-VL
+        </button>
+        <button
+          v-if="modelsStore.isVlmReady"
+          @click="ctxPlayground"
+        >
+          Prompt Playground…
+        </button>
         <hr />
         <div class="context-sub-host">
           <button type="button" class="sub-anchor">

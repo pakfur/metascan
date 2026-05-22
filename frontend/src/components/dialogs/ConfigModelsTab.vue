@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useModelsStore } from '../../stores/models'
 import type { ModelGroup, ModelRow } from '../../api/models'
 import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
+import { startRetag } from '../../api/vlm'
 
 const models = useModelsStore()
 
@@ -20,13 +21,13 @@ onMounted(async () => {
   }
 })
 
-const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP']
+const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (Qwen3-VL)']
 
 const tierLabel = computed(() => TIER_LABEL[models.tier])
 const tierColor = computed(() => TIER_COLOR[models.tier])
 
 const grouped = computed<Record<ModelGroup, ModelRow[]>>(() => {
-  const out: Record<ModelGroup, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [] }
+  const out: Record<ModelGroup, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [], 'Tagging (Qwen3-VL)': [] }
   for (const row of models.models) out[row.group].push(row)
   return out
 })
@@ -193,6 +194,66 @@ async function onRebuildIndex() {
     alert(e instanceof Error ? e.message : String(e))
   }
 }
+
+async function onLoad(row: ModelRow) {
+  if (!confirm(`Switch active VLM to ${row.name}? Current model will be unloaded.`)) {
+    return
+  }
+  await models.setActiveVlmModel(row.id)
+}
+
+async function onUnload(row: ModelRow) {
+  if (!confirm(`Unload ${row.name} from VRAM?`)) {
+    return
+  }
+  await models.unloadVlmModel(row.id)
+}
+
+function isVlmLoaded(row: ModelRow): boolean {
+  return (
+    models.vlmModelId === row.id &&
+    models.vlmState !== 'idle' &&
+    models.vlmState !== 'stopped'
+  )
+}
+
+function isClipLoaded(row: ModelRow): boolean {
+  // Row ids are `clip-<key>` while the inference worker reports the bare
+  // model key (e.g. "small" / "large"). Trim the prefix to compare.
+  const key = row.id.startsWith('clip-') ? row.id.slice('clip-'.length) : row.id
+  return (
+    models.inferenceModelKey === key &&
+    models.inferenceState !== 'idle' &&
+    models.inferenceState !== 'stopped'
+  )
+}
+
+async function onUnloadClip(row: ModelRow) {
+  if (!confirm(`Unload ${row.name} from VRAM?`)) {
+    return
+  }
+  await models.stopInferenceWorker()
+}
+
+const retagInFlight = ref(false)
+const lastRetagTotal = ref<number | null>(null)
+
+async function onRetagLibrary() {
+  if (!confirm(
+    'Re-tag every CLIP-tagged file with Qwen3-VL? This may take hours on large libraries.'
+  )) {
+    return
+  }
+  retagInFlight.value = true
+  try {
+    const job = await startRetag({ scope: 'all_clip' })
+    lastRetagTotal.value = job.total
+  } catch (e) {
+    alert(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
+  } finally {
+    retagInFlight.value = false
+  }
+}
 </script>
 
 <template>
@@ -339,6 +400,41 @@ async function onRebuildIndex() {
             >
               Delete
             </button>
+            <button
+              v-if="row.id.startsWith('qwen3vl-')"
+              class="btn-small"
+              :disabled="row.status !== 'available' || isVlmLoaded(row)"
+              :title="row.status !== 'available'
+                ? 'Download the model first.'
+                : isVlmLoaded(row)
+                  ? 'This is the active VLM.'
+                  : 'Load this model into VRAM.'"
+              @click="onLoad(row)"
+            >
+              {{ isVlmLoaded(row) ? 'Loaded' : 'Load' }}
+            </button>
+            <button
+              v-if="row.id.startsWith('qwen3vl-')"
+              class="btn-small"
+              :disabled="!isVlmLoaded(row)"
+              :title="isVlmLoaded(row)
+                ? 'Unload this model from VRAM.'
+                : 'Model is not currently loaded.'"
+              @click="onUnload(row)"
+            >
+              Unload
+            </button>
+            <button
+              v-if="row.id.startsWith('clip-')"
+              class="btn-small"
+              :disabled="!isClipLoaded(row)"
+              :title="isClipLoaded(row)
+                ? 'Unload the CLIP inference worker. It will respawn on the next content search.'
+                : 'This CLIP model is not currently loaded.'"
+              @click="onUnloadClip(row)"
+            >
+              Unload
+            </button>
           </div>
         </div>
         <div v-if="grouped[group].length === 0" class="empty-msg">No models in this group.</div>
@@ -350,6 +446,34 @@ async function onRebuildIndex() {
         Current CLIP model: <b>{{ models.currentClipModel }}</b> (dim {{ indexDim }}).
         Inference worker state: <b>{{ models.inferenceState }}</b>
         <span v-if="models.inferenceDevice"> on {{ models.inferenceDevice }}</span>.
+      </div>
+    </section>
+
+    <section class="preload-hint vlm-status-block">
+      <div v-if="models.vlmState !== 'idle'" class="vlm-current">
+        <b>VLM tagger:</b>
+        <span v-if="models.vlmState === 'ready'">
+          Active — <b>{{ models.vlmModelId }}</b>
+        </span>
+        <span v-else-if="models.isVlmLoading">
+          Loading <b>{{ models.vlmModelId }}</b>…
+        </span>
+        <span v-else-if="models.vlmState === 'error'" class="err-text">
+          Error: {{ models.vlmError ?? 'unknown' }}
+        </span>
+        <span v-else>{{ models.vlmState }}</span>
+      </div>
+      <div class="vlm-retag">
+        <button
+          class="btn-small"
+          :disabled="!models.isVlmReady || retagInFlight"
+          @click="onRetagLibrary"
+        >
+          {{ retagInFlight ? 'Re-tagging library…' : 'Re-tag library with VLM' }}
+        </button>
+        <span v-if="lastRetagTotal !== null" class="muted">
+          Started {{ lastRetagTotal }} files; track progress in scan logs.
+        </span>
       </div>
     </section>
   </template>
@@ -531,4 +655,8 @@ section { margin-bottom: 14px; }
 .gate-chip { margin-left: 4px; }
 .gate-good { color: #22c55e; border-color: #22c55e; }
 .gate-bad { color: var(--danger-color); border-color: var(--danger-color); }
+
+.vlm-status-block { display: flex; flex-direction: column; gap: 8px; }
+.vlm-current { font-size: 14px; }
+.vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>

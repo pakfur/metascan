@@ -74,3 +74,20 @@ The Vite proxy forwards `/api/*` and `/ws` to the backend during development.
 - **FastAPI uses `lifespan`** (not the deprecated `@app.on_event`). The lifespan constructs the `InferenceClient` singleton, injects `HF_TOKEN`, and optionally preloads CLIP for the current model.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in the Pinia store. Tag conditions fetch only the referenced tag keys via `POST /api/filters/tag_paths` — never bulk-GET the entire inverted index.
 - **DELETE endpoints return `{status: "deleted"}` (not 204).** The frontend `request<T>` wrapper calls `res.json()` on every response.
+
+## Qwen3-VL VLM tagger
+
+`VlmClient` (`metascan/core/vlm_client.py`) is an asyncio supervisor that
+manages a `llama-server` subprocess running an Abliterated Qwen3-VL GGUF.
+It mirrors `InferenceClient`'s state machine (idle → spawning → loading
+→ ready → error/stopped) but talks HTTP to llama-server instead of NDJSON
+to a Python worker. Tag generation goes through `generate_tags(image_path)`
+which POSTs to `/v1/chat/completions` with a JSON-array grammar.
+
+The `models` WebSocket channel carries two new event types:
+- `vlm_status`: full snapshot when the supervisor's state changes.
+- `vlm_progress`: progress payloads from background retag jobs
+  (`{job_id, current, total}`).
+
+The full design rationale (engine choice, hardware tier mapping, tag-merge
+matrix) is in `docs/superpowers/specs/2026-05-02-qwen3vl-tagging-design.md`.

@@ -3,6 +3,16 @@ export interface LoRA {
   lora_weight: number
 }
 
+// `source` mirrors the `indices.source` column for tag rows: 'prompt'
+// (parsed from generation metadata), 'clip' (CLIP zero-shot), 'vlm'
+// (Qwen3-VL), or the merged forms 'both' (prompt+clip) and 'vlm+prompt'.
+export type TagSource = 'prompt' | 'clip' | 'vlm' | 'both' | 'vlm+prompt'
+
+export interface TagWithSource {
+  name: string
+  source: TagSource
+}
+
 export interface PhotoExposure {
   shutter_speed?: string | null
   aperture?: number | null
@@ -54,7 +64,7 @@ export interface Media {
   cfg_scale?: number | null
   seed?: number | null
   video_length?: number | null
-  tags?: string[]
+  tags?: TagWithSource[]
   loras?: LoRA[]
   lens_model?: string | null
   gps_altitude?: number | null

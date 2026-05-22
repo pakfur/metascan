@@ -43,10 +43,11 @@ export function get<T>(path: string): Promise<T> {
   return request<T>(path)
 }
 
-export function post<T>(path: string, body?: unknown): Promise<T> {
+export function post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   return request<T>(path, {
     method: 'POST',
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   })
 }
 

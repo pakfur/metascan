@@ -79,6 +79,7 @@ class EmbeddingQueue:
         db_path: str = "",
         compute_phash: bool = True,
         video_keyframes: int = 4,
+        tag_with_vlm: bool = False,
     ) -> bool:
         """Start the embedding worker subprocess.
 
@@ -89,6 +90,10 @@ class EmbeddingQueue:
             db_path: Path to the database directory.
             compute_phash: Whether to compute perceptual hashes.
             video_keyframes: Number of keyframes to extract from videos.
+            tag_with_vlm: When True, skip CLIP tagging and instead append
+                each successfully-embedded file path to
+                ``<queue_dir>/vlm_pending.jsonl`` for the VlmTagPump to
+                drain (Task 17).
 
         Returns:
             True if the worker was started, False if already running.
@@ -131,6 +136,7 @@ class EmbeddingQueue:
             "index_dir": str(self._queue_dir),
             "compute_phash": compute_phash,
             "video_keyframes": video_keyframes,
+            "tag_with_vlm": tag_with_vlm,
         }
         task_file = self._queue_dir / "embedding_task.json"
         temp_task = task_file.with_suffix(".tmp")

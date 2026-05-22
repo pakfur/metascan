@@ -29,16 +29,26 @@ from backend.api import (
     config,
     embeddings,
     models,
+    prompt as prompt_api,
+    vlm,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
+from metascan.core.vlm_client import VlmClient
+from backend.api.vlm import set_vlm_client
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# httpx logs every outbound request at INFO. Our VlmClient polls
+# llama-server's /health endpoint up to 10×/sec during model load, which
+# floods the log with several hundred 503 lines per spawn. Promote to
+# WARNING so only genuine HTTP problems show up at the default level.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +60,19 @@ def _inject_huggingface_token(token: str) -> None:
         return
     os.environ["HF_TOKEN"] = token
     os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+
+
+def _wire_vlm_client_status(client: VlmClient) -> None:
+    """Bridge VlmClient state transitions onto the ``models`` WS channel."""
+
+    def on_status(_state: str, payload: Dict[str, Any]) -> None:
+        ws_manager.broadcast_sync("models", "vlm_status", payload)
+
+    def on_progress(payload: Dict[str, Any]) -> None:
+        ws_manager.broadcast_sync("models", "vlm_progress", payload)
+
+    client.on_status(on_status)
+    client.on_progress(on_progress)
 
 
 def _wire_inference_client_status(client: InferenceClient) -> None:
@@ -130,6 +153,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _wire_inference_client_status(client)
     similarity.set_inference_client(client)
 
+    vlm_client = VlmClient()
+    _wire_vlm_client_status(vlm_client)
+    set_vlm_client(vlm_client)
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -169,6 +196,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_faiss())
 
+    for preload_id in preload_list:
+        if preload_id.startswith("qwen3vl-"):
+            logger.info("Preloading VLM at startup: %s", preload_id)
+
+            async def _preload_vlm(mid: str = preload_id) -> None:
+                try:
+                    await vlm_client.start(mid, wait_ready=False)
+                except Exception:
+                    logger.exception("VLM preload failed")
+
+            asyncio.create_task(_preload_vlm())
+            break  # only one VLM at a time
+
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
@@ -186,6 +226,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await client.shutdown()
         except Exception:
             logger.exception("Inference client shutdown raised")
+        try:
+            await vlm_client.shutdown()
+        except Exception:
+            logger.exception("VLM client shutdown raised")
 
 
 def create_app() -> FastAPI:  # noqa: C901
@@ -251,6 +295,8 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(config.router)
     app.include_router(embeddings.router)
     app.include_router(models.router)
+    app.include_router(vlm.router)
+    app.include_router(prompt_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
