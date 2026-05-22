@@ -16,7 +16,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Final, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -396,3 +396,73 @@ async def delete_prompt(prompt_id: int) -> Dict[str, str]:
             status_code=404, detail=f"saved prompt {prompt_id} not found"
         )
     return {"status": "deleted"}
+
+
+# ---- Saved-prompt search --------------------------------------------------
+
+
+class PromptSearchRequest(BaseModel):
+    """Filters for POST /api/prompt/search.
+
+    All three filter fields are nullable; null = no filter. ``folder_id``
+    must point to a ``kind='manual'`` folder — smart folders return 400
+    because the rule engine lives in the frontend (see ``DatabaseManager.
+    search_saved_prompts`` for the rationale). ``limit`` is bounded by
+    Pydantic so out-of-range values fail fast with 422.
+    """
+
+    folder_id: Optional[str] = None
+    target_model: Optional[str] = None
+    name: Optional[str] = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class PromptSearchResponse(BaseModel):
+    prompts: List[SavedPromptOut]
+
+
+@router.post("/search", response_model=PromptSearchResponse)
+async def search_prompts(body: PromptSearchRequest) -> PromptSearchResponse:
+    db = get_db()
+    try:
+        rows = await asyncio.to_thread(
+            db.search_saved_prompts,
+            folder_id=body.folder_id,
+            target_model=body.target_model,
+            name=body.name,
+            limit=body.limit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return PromptSearchResponse(prompts=[SavedPromptOut(**r) for r in rows])
+
+
+# ---- TargetModel enum --------------------------------------------------------
+
+
+class TargetModelsResponse(BaseModel):
+    target_models: List[str]
+
+
+# The seven values of metascan.core.prompt_templates.TargetModel literal.
+# Kept in lockstep with that module — if the enum grows, update here too.
+_TARGET_MODELS_LIST: Final[List[str]] = [
+    "sd",
+    "pony",
+    "flux1",
+    "flux2",
+    "zimage",
+    "chroma",
+    "qwen",
+]
+
+
+@router.get("/target-models", response_model=TargetModelsResponse)
+async def list_target_models() -> TargetModelsResponse:
+    """Return the canonical TargetModel literal values used by saved_prompts.
+
+    Clients use this to populate UI dropdowns; the metscan-nodes load
+    node appends a virtual 'any' option client-side that maps to
+    target_model=null in search requests.
+    """
+    return TargetModelsResponse(target_models=list(_TARGET_MODELS_LIST))
