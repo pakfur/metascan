@@ -329,6 +329,21 @@ async def start_inference() -> Dict[str, Any]:
     return client.snapshot()
 
 
+@router.post("/inference/stop")
+async def stop_inference() -> Dict[str, Any]:
+    """Shut down the CLIP inference worker to free VRAM.
+
+    The next content-search request will respawn it via
+    ``_ensure_worker_ready`` — same path used when the server boots cold,
+    so we don't need an "are you sure" guard against accidental shutdown.
+    """
+    client = similarity._inference_client
+    if client is None:
+        raise HTTPException(status_code=503, detail="inference client not initialized")
+    await client.shutdown()
+    return client.snapshot()
+
+
 def _build_status_payload() -> Dict[str, Any]:
     """Synchronous worker that builds the models-status snapshot.
 
