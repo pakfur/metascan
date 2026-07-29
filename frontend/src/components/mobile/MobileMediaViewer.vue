@@ -132,6 +132,25 @@ function endPointer(e: PointerEvent) {
   pointers.delete(e.pointerId)
 
   if (pointers.size < 2) pinchStart = null
+
+  if (pointers.size === 1) {
+    // Collapsed from a two-finger gesture (or a stray second touch) down to one
+    // finger — re-arm single-pointer tracking for the survivor so pan/swipe
+    // continues without requiring a full release.
+    const [survivor] = pointsArray()
+    if (zoom.value > 1) {
+      panStart = {
+        pan: { x: panX.value, y: panY.value },
+        pointer: { x: survivor.x, y: survivor.y },
+      }
+      swipeStart = null
+    } else {
+      swipeStart = { x: survivor.x, y: survivor.y }
+      panStart = null
+    }
+    return
+  }
+
   if (pointers.size === 0) panStart = null
 
   // Snap an almost-reset zoom back to exactly 1 so swipe re-enables cleanly.
@@ -142,7 +161,6 @@ function endPointer(e: PointerEvent) {
       hMin: SWIPE_H_MIN,
       vMin: SWIPE_V_MIN,
     })
-    swipeStart = null
     if (action === 'next') navigate(1)
     else if (action === 'prev') navigate(-1)
     else if (action === 'close') emit('close')
