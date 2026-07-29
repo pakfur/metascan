@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
@@ -30,6 +30,9 @@ import SmartFolderEditor from './components/dialogs/SmartFolderEditor.vue'
 import FolderKebabMenu from './components/filters/FolderKebabMenu.vue'
 import ToastHost from './components/layout/ToastHost.vue'
 import { useFoldersUi } from './composables/useFoldersUi'
+import { useViewport } from './composables/useViewport'
+import MobileShell from './components/mobile/MobileShell.vue'
+import MobileMediaViewer from './components/mobile/MobileMediaViewer.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -38,6 +41,13 @@ const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
 const foldersUi = useFoldersUi()
+const { isMobile } = useViewport()
+
+// The list the mobile grid shows, and the list the mobile viewer navigates:
+// content-search results when a search is active, otherwise the folder scope.
+const gridList = computed(() =>
+  simStore.active ? simStore.filteredResults : mediaStore.scopedMedia,
+)
 
 const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
@@ -102,9 +112,8 @@ useWebSocket('watcher', () => {
 function openViewer(media: Media) {
   // Viewer navigates within the active scope (library / manual / smart) so
   // prev/next stays inside the folder the user just clicked into.
-  const idx = mediaStore.scopedMedia.findIndex(
-    (m) => m.file_path === media.file_path,
-  )
+  const list = isMobile.value ? gridList.value : mediaStore.scopedMedia
+  const idx = list.findIndex((m) => m.file_path === media.file_path)
   viewerIndex.value = idx >= 0 ? idx : 0
   viewerOpen.value = true
 }
@@ -129,6 +138,7 @@ function closeSlideshow() {
 }
 
 function openScan() {
+  if (isMobile.value) return
   scanStore.prepare()
 }
 
@@ -155,6 +165,7 @@ function closePlayground() {
 }
 
 function handleUpscaleFromSelected() {
+  if (isMobile.value) return
   if (mediaStore.selectedMedia) {
     openUpscale([mediaStore.selectedMedia])
   }
@@ -174,14 +185,22 @@ useKeyboard([
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 's', ctrl: true, handler: openScan },
-  { key: 'd', ctrl: true, shift: true, handler: () => { dupFinderOpen.value = true } },
+  { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
   { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
+
+// When the viewport crosses the mobile/desktop breakpoint, the viewer and
+// slideshow swap between components bound to different media lists. Close any
+// open overlay on the flip so a stale index can't surface the wrong item.
+watch(isMobile, () => {
+  if (viewerOpen.value) closeViewer()
+  if (slideshowOpen.value) closeSlideshow()
+})
 </script>
 
 <template>
   <div class="app-shell">
-    <ThreePanel>
+    <ThreePanel v-if="!isMobile">
       <template #left>
         <FilterPanel />
       </template>
@@ -214,16 +233,30 @@ useKeyboard([
       </template>
     </ThreePanel>
 
+    <MobileShell
+      v-else
+      @open="openViewer"
+      @slideshow="openSlideshow"
+    />
+
     <!-- Loading overlay -->
     <div v-if="mediaStore.loading" class="loading-overlay">
       <div class="loading-spinner" />
       <span>Loading media...</span>
     </div>
 
-    <!-- Media Viewer overlay -->
+    <!-- Media Viewer overlay (desktop) -->
     <MediaViewer
-      v-if="viewerOpen"
+      v-if="viewerOpen && !isMobile"
       :media-list="mediaStore.scopedMedia"
+      :initial-index="viewerIndex"
+      @close="closeViewer"
+    />
+
+    <!-- Media Viewer overlay (mobile, touch-first) -->
+    <MobileMediaViewer
+      v-if="viewerOpen && isMobile"
+      :media-list="gridList"
       :initial-index="viewerIndex"
       @close="closeViewer"
     />
@@ -232,6 +265,7 @@ useKeyboard([
     <SlideshowViewer
       v-if="slideshowOpen"
       :media-list="mediaStore.scopedMedia"
+      :auto-start="isMobile"
       @close="closeSlideshow"
     />
 
