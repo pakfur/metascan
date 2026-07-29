@@ -133,6 +133,10 @@ function endPointer(e: PointerEvent) {
 
   if (pointers.size < 2) pinchStart = null
 
+  // Snap an almost-reset zoom back to exactly 1 BEFORE deciding how to re-arm
+  // or classify, so a jittered pinch that ended near 1x is treated as zoom==1.
+  if (zoom.value <= 1.02) resetView()
+
   if (pointers.size === 1) {
     // Collapsed from a two-finger gesture (or a stray second touch) down to one
     // finger — re-arm single-pointer tracking for the survivor so pan/swipe
@@ -152,9 +156,6 @@ function endPointer(e: PointerEvent) {
   }
 
   if (pointers.size === 0) panStart = null
-
-  // Snap an almost-reset zoom back to exactly 1 so swipe re-enables cleanly.
-  if (zoom.value <= 1.02) resetView()
 
   if (start && pointers.size === 0 && zoom.value <= 1) {
     const action = classifySwipe(e.clientX - start.x, e.clientY - start.y, {
