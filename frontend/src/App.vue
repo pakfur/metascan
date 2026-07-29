@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
@@ -138,6 +138,7 @@ function closeSlideshow() {
 }
 
 function openScan() {
+  if (isMobile.value) return
   scanStore.prepare()
 }
 
@@ -164,6 +165,7 @@ function closePlayground() {
 }
 
 function handleUpscaleFromSelected() {
+  if (isMobile.value) return
   if (mediaStore.selectedMedia) {
     openUpscale([mediaStore.selectedMedia])
   }
@@ -183,9 +185,17 @@ useKeyboard([
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 's', ctrl: true, handler: openScan },
-  { key: 'd', ctrl: true, shift: true, handler: () => { dupFinderOpen.value = true } },
+  { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
   { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
+
+// When the viewport crosses the mobile/desktop breakpoint, the viewer and
+// slideshow swap between components bound to different media lists. Close any
+// open overlay on the flip so a stale index can't surface the wrong item.
+watch(isMobile, () => {
+  if (viewerOpen.value) closeViewer()
+  if (slideshowOpen.value) closeSlideshow()
+})
 </script>
 
 <template>
