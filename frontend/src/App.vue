@@ -30,6 +30,7 @@ import SmartFolderEditor from './components/dialogs/SmartFolderEditor.vue'
 import FolderKebabMenu from './components/filters/FolderKebabMenu.vue'
 import ToastHost from './components/layout/ToastHost.vue'
 import { useFoldersUi } from './composables/useFoldersUi'
+import { useViewport } from './composables/useViewport'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -38,6 +39,7 @@ const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
 const simStore = useSimilarityStore()
 const foldersUi = useFoldersUi()
+const { isMobile } = useViewport()
 
 const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
@@ -181,7 +183,7 @@ useKeyboard([
 
 <template>
   <div class="app-shell">
-    <ThreePanel>
+    <ThreePanel v-if="!isMobile">
       <template #left>
         <FilterPanel />
       </template>
@@ -213,6 +215,9 @@ useKeyboard([
         <MetadataPanel />
       </template>
     </ThreePanel>
+
+    <!-- Mobile shell placeholder (replaced in Task 3) -->
+    <div v-else class="mobile-placeholder">Mobile mode</div>
 
     <!-- Loading overlay -->
     <div v-if="mediaStore.loading" class="loading-overlay">
@@ -311,6 +316,15 @@ useKeyboard([
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.mobile-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-color-secondary);
+  font-size: 16px;
 }
 
 .loading-overlay {
