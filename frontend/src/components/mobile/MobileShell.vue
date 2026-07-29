@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import type { Media } from '../../types/media'
 import { useFoldersStore } from '../../stores/folders'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore, type ThumbnailSize } from '../../stores/settings'
+import { useModelsStore } from '../../stores/models'
 import { useContentSearch } from '../../composables/useContentSearch'
 import ThumbnailGrid from '../thumbnails/ThumbnailGrid.vue'
 import MobileFolderMenu from './MobileFolderMenu.vue'
@@ -16,6 +17,7 @@ const emit = defineEmits<{
 const foldersStore = useFoldersStore()
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
+const modelsStore = useModelsStore()
 
 const optionsOpen = ref(false)
 const folderMenuOpen = ref(false)
@@ -51,6 +53,13 @@ function toggleSearch() {
   searchOpen.value = !searchOpen.value
   if (!searchOpen.value) clearSearch()
 }
+
+onMounted(() => {
+  // Bootstrap model status so the first content search reflects a warm worker
+  // instead of paying a redundant spawn round-trip (desktop ContentSearchBar
+  // does the same in its own onMounted).
+  void modelsStore.loadStatus().catch(() => {})
+})
 </script>
 
 <template>

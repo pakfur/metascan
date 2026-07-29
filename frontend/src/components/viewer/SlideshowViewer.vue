@@ -74,6 +74,7 @@ function shuffleArray(n: number): number[] {
 function startSlideshow() {
   if (props.mediaList.length === 0) return
   started.value = true
+  paused.value = false
   currentIndex.value = 0
 
   if (orderMode.value === 'random') {
