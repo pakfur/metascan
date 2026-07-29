@@ -4,6 +4,7 @@ import type { Media } from '../../types/media'
 import { useFoldersStore } from '../../stores/folders'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore, type ThumbnailSize } from '../../stores/settings'
+import { useContentSearch } from '../../composables/useContentSearch'
 import ThumbnailGrid from '../thumbnails/ThumbnailGrid.vue'
 import MobileFolderMenu from './MobileFolderMenu.vue'
 
@@ -18,6 +19,8 @@ const settingsStore = useSettingsStore()
 
 const optionsOpen = ref(false)
 const folderMenuOpen = ref(false)
+const searchOpen = ref(false)
+const { query: searchQuery, submit: submitSearch, clear: clearSearch } = useContentSearch()
 
 const scopeLabel = computed(() => {
   if (foldersStore.isLibraryScope) return 'Library'
@@ -40,6 +43,14 @@ function onSlideshow() {
   optionsOpen.value = false
   emit('slideshow')
 }
+
+function onSearchKeydown(e: KeyboardEvent) {
+  if (e.key === 'Enter') submitSearch()
+}
+function toggleSearch() {
+  searchOpen.value = !searchOpen.value
+  if (!searchOpen.value) clearSearch()
+}
 </script>
 
 <template>
@@ -52,7 +63,14 @@ function onSlideshow() {
       </button>
 
       <div class="m-topbar-actions">
-        <!-- Search toggle is added in Task 5 -->
+        <button
+          class="m-icon-btn"
+          type="button"
+          aria-label="Search"
+          @click="toggleSearch"
+        >
+          <i class="pi pi-search" />
+        </button>
         <button
           class="m-icon-btn"
           type="button"
@@ -63,6 +81,27 @@ function onSlideshow() {
         </button>
       </div>
     </header>
+
+    <div v-if="searchOpen" class="m-search-row">
+      <i class="pi pi-search m-search-icon" />
+      <input
+        v-model="searchQuery"
+        class="m-search-input"
+        type="search"
+        placeholder="Search by content…"
+        @keydown="onSearchKeydown"
+      />
+      <button
+        v-if="searchQuery"
+        class="m-icon-btn"
+        type="button"
+        aria-label="Clear"
+        @click="clearSearch"
+      >
+        <i class="pi pi-times" />
+      </button>
+      <button class="m-search-go" type="button" @click="submitSearch">Search</button>
+    </div>
 
     <!-- Options sheet: sort, thumbnail size, slideshow -->
     <div v-if="optionsOpen" class="m-sheet-backdrop" @click.self="optionsOpen = false">
@@ -169,6 +208,42 @@ function onSlideshow() {
 
 .m-icon-btn:active {
   background: var(--surface-hover);
+}
+
+.m-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--surface-border);
+  background: var(--surface-section);
+  flex-shrink: 0;
+}
+
+.m-search-icon {
+  color: var(--text-color-secondary);
+  font-size: 14px;
+}
+
+.m-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 16px; /* 16px avoids iOS Safari zoom-on-focus */
+}
+
+.m-search-go {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .m-sheet-backdrop {
