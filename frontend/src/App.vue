@@ -32,6 +32,7 @@ import ToastHost from './components/layout/ToastHost.vue'
 import { useFoldersUi } from './composables/useFoldersUi'
 import { useViewport } from './composables/useViewport'
 import MobileShell from './components/mobile/MobileShell.vue'
+import MobileMediaViewer from './components/mobile/MobileMediaViewer.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -234,10 +235,18 @@ useKeyboard([
       <span>Loading media...</span>
     </div>
 
-    <!-- Media Viewer overlay -->
+    <!-- Media Viewer overlay (desktop) -->
     <MediaViewer
-      v-if="viewerOpen"
+      v-if="viewerOpen && !isMobile"
       :media-list="mediaStore.scopedMedia"
+      :initial-index="viewerIndex"
+      @close="closeViewer"
+    />
+
+    <!-- Media Viewer overlay (mobile, touch-first) -->
+    <MobileMediaViewer
+      v-if="viewerOpen && isMobile"
+      :media-list="gridList"
       :initial-index="viewerIndex"
       @close="closeViewer"
     />
