@@ -19,6 +19,13 @@ const emit = defineEmits<{
   playground: [media: Media]
 }>()
 
+const props = withDefaults(
+  defineProps<{
+    mobile?: boolean
+  }>(),
+  { mobile: false },
+)
+
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
 const simStore = useSimilarityStore()
@@ -235,9 +242,14 @@ watch(() => displayList.value.length, () => {
 
 function onSelect(media: Media) {
   mediaStore.selectMedia(media)
+  // On touch there is no dblclick affordance — a single tap opens the viewer.
+  if (props.mobile) emit('open', media)
 }
 
 function onContextMenu(media: Media, e: MouseEvent) {
+  // The desktop right-click menu (folders, upscale, delete…) is out of scope
+  // on mobile; a long-press must not surface it.
+  if (props.mobile) return
   mediaStore.selectMedia(media)
   contextMenu.value = { x: e.clientX, y: e.clientY, media }
 }
@@ -421,7 +433,7 @@ function onThumbDragEnd() {
               manualMemberPaths.has(item.media.file_path) &&
               foldersStore.scope.kind !== 'manual'
             "
-            draggable="true"
+            :draggable="!mobile"
             @click="onSelect(item.media)"
             @dblclick="emit('open', item.media)"
             @contextmenu.prevent="onContextMenu(item.media, $event)"
