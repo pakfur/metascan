@@ -205,6 +205,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
         :src="streamUrl(current.file_path)"
         controls
         playsinline
+        loop
       />
       <div
         v-else-if="current"
