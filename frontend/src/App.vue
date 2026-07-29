@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import type { Media } from './types/media'
 import { useMediaStore } from './stores/media'
 import { useFilterStore } from './stores/filters'
@@ -31,6 +31,7 @@ import FolderKebabMenu from './components/filters/FolderKebabMenu.vue'
 import ToastHost from './components/layout/ToastHost.vue'
 import { useFoldersUi } from './composables/useFoldersUi'
 import { useViewport } from './composables/useViewport'
+import MobileShell from './components/mobile/MobileShell.vue'
 
 const mediaStore = useMediaStore()
 const filterStore = useFilterStore()
@@ -40,6 +41,12 @@ const scanStore = useScanStore()
 const simStore = useSimilarityStore()
 const foldersUi = useFoldersUi()
 const { isMobile } = useViewport()
+
+// The list the mobile grid shows, and the list the mobile viewer navigates:
+// content-search results when a search is active, otherwise the folder scope.
+const gridList = computed(() =>
+  simStore.active ? simStore.filteredResults : mediaStore.scopedMedia,
+)
 
 const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
@@ -104,9 +111,8 @@ useWebSocket('watcher', () => {
 function openViewer(media: Media) {
   // Viewer navigates within the active scope (library / manual / smart) so
   // prev/next stays inside the folder the user just clicked into.
-  const idx = mediaStore.scopedMedia.findIndex(
-    (m) => m.file_path === media.file_path,
-  )
+  const list = isMobile.value ? gridList.value : mediaStore.scopedMedia
+  const idx = list.findIndex((m) => m.file_path === media.file_path)
   viewerIndex.value = idx >= 0 ? idx : 0
   viewerOpen.value = true
 }
@@ -216,8 +222,11 @@ useKeyboard([
       </template>
     </ThreePanel>
 
-    <!-- Mobile shell placeholder (replaced in Task 3) -->
-    <div v-else class="mobile-placeholder">Mobile mode</div>
+    <MobileShell
+      v-else
+      @open="openViewer"
+      @slideshow="openSlideshow"
+    />
 
     <!-- Loading overlay -->
     <div v-if="mediaStore.loading" class="loading-overlay">
@@ -316,15 +325,6 @@ useKeyboard([
   flex: 1;
   min-height: 0;
   overflow: hidden;
-}
-
-.mobile-placeholder {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-color-secondary);
-  font-size: 16px;
 }
 
 .loading-overlay {
