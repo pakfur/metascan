@@ -5,6 +5,7 @@ import { useFoldersStore } from '../../stores/folders'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore, type ThumbnailSize } from '../../stores/settings'
 import ThumbnailGrid from '../thumbnails/ThumbnailGrid.vue'
+import MobileFolderMenu from './MobileFolderMenu.vue'
 
 const emit = defineEmits<{
   open: [media: Media]
@@ -16,6 +17,7 @@ const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
 
 const optionsOpen = ref(false)
+const folderMenuOpen = ref(false)
 
 const scopeLabel = computed(() => {
   if (foldersStore.isLibraryScope) return 'Library'
@@ -43,7 +45,7 @@ function onSlideshow() {
 <template>
   <div class="mobile-shell">
     <header class="m-topbar">
-      <button class="m-folder-btn" type="button">
+      <button class="m-folder-btn" type="button" @click="folderMenuOpen = true">
         <i class="pi pi-folder" />
         <span class="m-folder-name">{{ scopeLabel }}</span>
         <i class="pi pi-chevron-down" />
@@ -102,6 +104,8 @@ function onSlideshow() {
     <div class="m-grid-wrap">
       <ThumbnailGrid :mobile="true" @open="emit('open', $event)" />
     </div>
+
+    <MobileFolderMenu v-model="folderMenuOpen" />
   </div>
 </template>
 
