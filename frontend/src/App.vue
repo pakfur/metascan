@@ -246,6 +246,7 @@ useKeyboard([
     <SlideshowViewer
       v-if="slideshowOpen"
       :media-list="mediaStore.scopedMedia"
+      :auto-start="isMobile"
       @close="closeSlideshow"
     />
 

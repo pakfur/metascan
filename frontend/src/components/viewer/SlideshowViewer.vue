@@ -6,9 +6,13 @@ import { streamUrl } from '../../api/client'
 import VideoPlayer from './VideoPlayer.vue'
 import { fileName } from '../../utils/path'
 
-const props = defineProps<{
-  mediaList: Media[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    mediaList: Media[]
+    autoStart?: boolean
+  }>(),
+  { autoStart: false },
+)
 
 const emit = defineEmits<{
   close: []
@@ -160,6 +164,15 @@ function onMouseMove() {
   if (started.value) resetHideControls()
 }
 
+function onPointerReveal() {
+  if (started.value) resetHideControls()
+}
+
+function reopenSetup() {
+  clearAdvanceTimer()
+  started.value = false
+}
+
 // Keyboard shortcuts
 function onKeyDown(e: KeyboardEvent) {
   if (!started.value) return
@@ -200,6 +213,9 @@ function onKeyDown(e: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('mousemove', onMouseMove)
+  if (props.autoStart && props.mediaList.length > 0) {
+    startSlideshow()
+  }
 })
 
 onUnmounted(() => {
@@ -218,7 +234,11 @@ watch(current, () => {
 </script>
 
 <template>
-  <div class="slideshow-overlay" :class="{ 'hide-cursor': !controlsVisible && started }">
+  <div
+    class="slideshow-overlay"
+    :class="{ 'hide-cursor': !controlsVisible && started }"
+    @pointerdown="onPointerReveal"
+  >
     <!-- Setup panel (before start) -->
     <div v-if="!started" class="setup-panel">
       <h2>Slideshow</h2>
@@ -317,6 +337,7 @@ watch(current, () => {
         >
           {{ current.is_favorite ? '★' : '☆' }}
         </button>
+        <button class="ss-btn" @click="reopenSetup" title="Slideshow settings">⚙</button>
         <button class="ss-btn exit" @click="emit('close')">✕</button>
       </div>
     </template>
