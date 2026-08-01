@@ -1,6 +1,27 @@
 ## Todo
 
 ### New Features
+
+- (V1) Improved propme editor
+  - view, edit prompts for image
+  - create, update, delete prompts
+  - default name to model target 
+
+- (V1) Prompt all images in folder
+  - Select folder, select "Prompt..." from folder context menu
+  - select model, add/replace existing prompts for selected images
+
+- (V1=) Captioning
+  - Dataset captioning for LoRA trainers
+  - Workflow: throw images in a folder -> select "Caption..." from folder context menu
+  - Caption options: 
+    - select target model
+    - character / style
+    - offer options to select what to exclude in the caption, what to include
+    - select target dir
+    - select target name
+    - caption and export originals copies + txt files to the output dir (optional rename)
+
 - (V1) Docker support
   - Docker files
   
@@ -47,6 +68,10 @@
 
 
 ### Bugs
+
+#### Import
+  - dialog should not be dismissable by clicking, only vi "close"
+  - closing and reopening should reconstruct state of import accurately
 
 #### Media viewer
 - (v1) Search by content

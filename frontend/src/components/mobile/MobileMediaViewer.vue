@@ -214,6 +214,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeyDown))
         @pointermove="onPointerMove"
         @pointerup="endPointer"
         @pointercancel="endPointer"
+        @touchmove.prevent
       >
         <img
           class="mv-image"
