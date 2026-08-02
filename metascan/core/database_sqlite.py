@@ -1029,13 +1029,17 @@ class DatabaseManager:
     # ---- ComfyUI generation jobs ----------------------------------------
 
     def create_generation_job(
-        self, preset_id: int, params: str, panel_id: Optional[int] = None
+        self,
+        preset_id: int,
+        params: str,
+        panel_id: Optional[int] = None,
+        output_dir: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO generation_jobs (preset_id, params, panel_id) "
-                "VALUES (?, ?, ?)",
-                (preset_id, params, panel_id),
+                "INSERT INTO generation_jobs (preset_id, params, panel_id, output_dir) "
+                "VALUES (?, ?, ?, ?)",
+                (preset_id, params, panel_id, output_dir),
             )
             conn.commit()
             return int(cur.lastrowid)
