@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -96,6 +97,40 @@ def test_delete_storyboard_cascades(db):
 
 def test_delete_storyboard_missing_returns_false(db):
     assert db.delete_storyboard(999) is False
+
+
+def test_create_subject_converts_reference_path_to_posix(db):
+    """storyboard_subjects.reference_path FKs media(file_path), which is
+    always stored POSIX -- a native-style path must be converted before
+    the INSERT or it can never match an existing media row."""
+    sb, *_ = _build_tree(db)
+    db.save_media(_media("/mnt/c/pics/ref.png"))
+    su2 = db.create_subject(
+        sb, name="X", description="d", reference_path="C:\\pics\\ref.png"
+    )
+    tree = db.get_storyboard_tree(sb)
+    subj = next(s for s in tree["subjects"] if s["id"] == su2)
+    assert subj["reference_path"] == "/mnt/c/pics/ref.png"
+
+
+def test_update_subject_converts_reference_path_to_posix(db):
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/mnt/c/pics/ref2.png"))
+    db.update_subject(su, reference_path="C:\\pics\\ref2.png")
+    tree = db.get_storyboard_tree(sb)
+    assert tree["subjects"][0]["reference_path"] == "/mnt/c/pics/ref2.png"
+
+
+def test_create_subject_unknown_reference_path_raises_integrity_error(db):
+    sb, *_ = _build_tree(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_subject(sb, name="X", description="d", reference_path="/nope.png")
+
+
+def test_update_subject_unknown_reference_path_raises_integrity_error(db):
+    sb, su, sc, pa = _build_tree(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.update_subject(su, reference_path="/nope.png")
 
 
 def test_update_subject_and_delete(db):
@@ -237,6 +272,77 @@ def test_delete_panel_missing_returns_false(db):
     assert db.delete_panel(999) is False
 
 
+def _hidden_by_path(db) -> dict:
+    return {
+        r["file_path"]: r["hidden"]
+        for r in db.get_all_media_summaries(include_hidden=True)
+    }
+
+
+def test_delete_panel_unhides_media_and_purges_jobs(db):
+    """Every ingested storyboard variant is hidden=1; select_panel_image is
+    the only unhide path and needs a live panel. delete_panel destroys the
+    panel (cascading panel_images) -- it must unhide the affected media
+    first, or those files are hidden forever. It must also purge
+    generation_jobs for the panel so a restart can't re-adopt a job for a
+    panel that no longer exists."""
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", panel_id=pa)
+
+    assert db.delete_panel(pa) is True
+
+    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert db.get_generation_job(jid) is None
+
+
+def test_delete_scene_unhides_media_and_purges_jobs(db):
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", panel_id=pa)
+
+    assert db.delete_scene(sc) is True
+
+    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert db.get_generation_job(jid) is None
+
+
+def test_delete_storyboard_unhides_media_and_purges_jobs(db):
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", panel_id=pa)
+
+    assert db.delete_storyboard(sb) is True
+
+    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert db.get_generation_job(jid) is None
+
+
+def test_replace_structure_unhides_media_and_purges_jobs(db):
+    """A re-parse (replace_storyboard_structure) destroys the old
+    scene/panel tree exactly like a delete does -- same requirement."""
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", panel_id=pa)
+
+    db.replace_storyboard_structure(sb, {"subjects": [], "scenes": []})
+
+    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert db.get_generation_job(jid) is None
+
+
 def test_update_panel_whitelist_rejects_unknown(db):
     sb, su, sc, pa = _build_tree(db)
     with pytest.raises(ValueError):
@@ -304,6 +410,34 @@ def test_latest_jobs_for_panels_empty_list(db):
     assert db.latest_jobs_for_panels([]) == {}
 
 
+def test_get_storyboard_tree_and_list_panel_images_convert_paths(db, monkeypatch):
+    """panel_images.file_path is stored POSIX; get_storyboard_tree and
+    list_panel_images must return it through to_native_path, mirroring
+    get_folder's precedent -- GET /api/storyboard/{id} and GET /api/media
+    have to agree on path shape. Patch to_native_path with a
+    distinguishable transform so the assertion can't pass merely because
+    POSIX-in/POSIX-out looks like a no-op on a Linux test host."""
+    calls = []
+
+    def fake_to_native(p):
+        calls.append(p)
+        return f"NATIVE::{p}"
+
+    monkeypatch.setattr("metascan.core.database_sqlite.to_native_path", fake_to_native)
+
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.create_panel_image(pa, file_path="/pics/a.png")
+
+    tree = db.get_storyboard_tree(sb)
+    img = tree["scenes"][0]["panels"][0]["images"][0]
+    assert img["file_path"] == "NATIVE::/pics/a.png"
+
+    images = db.list_panel_images(pa)
+    assert images[0]["file_path"] == "NATIVE::/pics/a.png"
+    assert "/pics/a.png" in calls
+
+
 def test_storyboard_id_for_panel(db):
     sb, su, sc, pa = _build_tree(db)
     assert db.storyboard_id_for_panel(pa) == sb
@@ -311,3 +445,74 @@ def test_storyboard_id_for_panel(db):
 
 def test_storyboard_id_for_panel_missing_returns_none(db):
     assert db.storyboard_id_for_panel(999) is None
+
+
+# ---- folder_id type migration -------------------------------------------
+
+
+def test_storyboards_folder_id_column_migrates_int_to_text(tmp_path):
+    """storyboards.folder_id must be TEXT -- folders.id is a uuid4 string,
+    and a numeric-looking uuid stored against an INTEGER column would
+    silently coerce and corrupt add_folder_items lookups. A dev DB created
+    from an earlier commit on this branch would still have the old
+    INTEGER column; DatabaseManager must detect and rebuild it (preserving
+    data) rather than requiring a fresh DB."""
+    db_dir = tmp_path / "migrate_db"
+    db_dir.mkdir()
+    db_file = db_dir / "metascan.db"
+
+    raw = sqlite3.connect(str(db_file))
+    try:
+        raw.execute(
+            """
+            CREATE TABLE storyboards (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                source_text   TEXT,
+                aspect_ratio  TEXT NOT NULL DEFAULT '16:9',
+                style_block   TEXT,
+                negative      TEXT,
+                target_model  TEXT NOT NULL,
+                architecture  TEXT NOT NULL,
+                preset_id     INTEGER,
+                base_seed     INTEGER NOT NULL,
+                batch_size    INTEGER NOT NULL DEFAULT 4,
+                folder_id     INTEGER,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        raw.execute(
+            "INSERT INTO storyboards (id, name, target_model, architecture, "
+            "base_seed) VALUES (1, 'Old', 'sd', 't2i', 42)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    mgr = DatabaseManager(db_dir)
+    try:
+        with mgr.lock, mgr._get_connection() as conn:
+            ddl_row = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='storyboards'"
+            ).fetchone()
+        ddl = ddl_row["sql"]
+        assert re.search(r"folder_id\s+TEXT", ddl)
+        assert not re.search(r"folder_id\s+INTEGER", ddl)
+
+        # Pre-existing data survived the rebuild.
+        row = mgr.get_storyboard(1)
+        assert row is not None
+        assert row["name"] == "Old"
+        assert row["base_seed"] == 42
+
+        # And the table is fully functional post-migration.
+        folder = mgr.create_folder(
+            "11111111-1111-1111-1111-111111111111", "manual", "F"
+        )
+        mgr.update_storyboard(1, folder_id=folder["id"])
+        assert mgr.get_storyboard(1)["folder_id"] == folder["id"]
+    finally:
+        mgr.close()
