@@ -11,7 +11,12 @@ import pytest
 from PIL import Image
 
 from metascan.core.comfy_bindings import BindingError, GenerationParams
-from metascan.core.comfy_client import ComfyClient, ComfyError, _next_backoff
+from metascan.core.comfy_client import (
+    ComfyClient,
+    ComfyError,
+    PresetNotFoundError,
+    _next_backoff,
+)
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.scanner import Scanner
 from tests._fake_comfy_server import fake_comfy  # noqa: F401
@@ -335,6 +340,32 @@ def test_next_backoff_escalates_when_the_server_keeps_dropping_instantly():
 
 
 # ---- Task 8: queue discipline, cancellation, priority ---------------------
+
+
+async def test_submit_raises_for_a_missing_preset_without_enqueuing(client):
+    # Regression test for the real ComfyClient.submit(), not the router or
+    # the tests/test_comfy_api.py stub: this must fail if the
+    # PresetNotFoundError raise in _load_preset (used by submit()) is ever
+    # removed or weakened, independent of anything backend/api/comfy.py
+    # does with the exception.
+    with pytest.raises(PresetNotFoundError) as exc:
+        await client.submit(9999, params())
+    assert "9999" in str(exc.value)
+    assert client.queue_depth() == 0
+    assert client.db.list_generation_jobs() == []
+
+
+async def test_submit_raises_for_an_unbindable_parameter_without_enqueuing(client):
+    # Regression test for ComfyClient.submit()'s eager apply_overrides()
+    # call: a negative prompt against a workflow with no MS_NEGATIVE node
+    # must raise BindingError synchronously and enqueue nothing, rather
+    # than succeeding here and failing later inside _dispatch.
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+    with pytest.raises(BindingError) as exc:
+        await client.submit(pid, params(negative="blurry"))
+    assert "MS_NEGATIVE" in str(exc.value)
+    assert client.queue_depth() == 0
+    assert client.db.list_generation_jobs() == []
 
 
 async def test_submit_enqueues_and_returns_immediately(
