@@ -5,6 +5,7 @@ Uses an isolated temp DB, following tests/test_folders_db.py.
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -128,5 +129,22 @@ def test_list_jobs_filters_by_state(db):
 def test_deleting_a_preset_is_blocked_while_jobs_reference_it(db):
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     db.create_generation_job(pid, "{}")
-    with pytest.raises(Exception):
+    # Specifically an IntegrityError, so callers can distinguish "this
+    # preset has history" from any other DB failure and answer 409.
+    with pytest.raises(sqlite3.IntegrityError):
         db.delete_workflow_preset(pid)
+    assert db.get_workflow_preset(pid) is not None  # nothing was cascaded
+
+
+def test_count_jobs_for_preset(db):
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    other = db.create_workflow_preset("q", "t2i", "{}", "{}")
+    assert db.count_jobs_for_preset(pid) == 0
+
+    db.create_generation_job(pid, "{}")
+    db.create_generation_job(pid, "{}")
+    db.create_generation_job(other, "{}")
+
+    assert db.count_jobs_for_preset(pid) == 2
+    assert db.count_jobs_for_preset(other) == 1
+    assert db.count_jobs_for_preset(9999) == 0

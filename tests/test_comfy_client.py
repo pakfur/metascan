@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -425,14 +426,22 @@ async def test_cancel_a_running_job_interrupts_comfyui(
     pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await started_client.submit(pid, params())
 
-    for _ in range(50):
+    for _ in range(100):
         await asyncio.sleep(0.02)
-        if started_client.db.get_generation_job(job_id)["state"] == "running":
+        if (
+            started_client.db.get_generation_job(job_id)["state"] == "running"
+            and fake_comfy.running_prompt
+        ):
             break
 
+    prompt_id = started_client.db.get_generation_job(job_id)["comfy_prompt_id"]
     await started_client.cancel(job_id)
 
     assert fake_comfy.interrupted == 1
+    # Scoped, not global: the interrupt named this prompt, and because it
+    # really was the running one, ComfyUI acted on it.
+    assert fake_comfy.interrupt_requests == [prompt_id]
+    assert fake_comfy.interrupted_prompts == [prompt_id]
     assert started_client.db.get_generation_job(job_id)["state"] == "cancelled"
 
 
@@ -445,11 +454,19 @@ async def test_cancel_all_clears_the_queue(started_client, fake_comfy):  # noqa:
     await started_client.cancel_all()
 
     assert started_client.queue_depth() == 0
-    states = {started_client.db.get_generation_job(j)["state"] for j in job_ids}
-    # Tightened: cancel_all() must resolve every job it touches -- including
-    # ones mid-dispatch when it runs -- before returning. "running" would
-    # mean cancel_all() missed a job (see the _cancelled handshake in
-    # cancel()/_dispatch); "queued" would mean the queue wasn't drained.
+
+    # cancel_all() does NOT resolve every job before returning: a job
+    # whose _dispatch is parked mid-POST is left flagged in `_cancelled`
+    # and finishes slightly later, when _dispatch observes the flag (see
+    # the handshake in cancel()/_dispatch). What it does guarantee is
+    # that no job is *missed* -- every one reaches a terminal state
+    # shortly after, and none is left running or queued indefinitely.
+    for _ in range(200):
+        states = {started_client.db.get_generation_job(j)["state"] for j in job_ids}
+        if states <= {"cancelled", "done", "failed"}:
+            break
+        await asyncio.sleep(0.02)
+
     assert states <= {"cancelled", "done"}
     assert "queued" not in states
     assert "running" not in states
@@ -696,7 +713,7 @@ async def test_a_cancelled_job_does_not_download_or_ingest_its_outputs(
     with this test's manual steps, downloading the images for real before
     `_cancelled` is even set. That raced this test intermittently. With no
     socket connected, fake_comfy has nothing to broadcast to, so the only
-    `_on_executed` call is the explicit one below.
+    `_on_prompt_end` call is the explicit one below.
     """
     db = DatabaseManager(workspace / "db")
     c = ComfyClient(
@@ -713,7 +730,7 @@ async def test_a_cancelled_job_does_not_download_or_ingest_its_outputs(
 
         c._cancelled.add(job_id)
 
-        await c._on_executed(job_id, {"prompt_id": prompt_id})
+        await c._on_prompt_end(job_id, {"prompt_id": prompt_id})
         for task in list(c._collect_tasks):
             await task
 
@@ -731,7 +748,7 @@ async def test_a_cancel_landing_mid_download_leaves_no_images_ingested(
 ):
     """Regression guard for review BLOCKING 1.
 
-    The reviewer's own probe (gate `_download_image`, fire `_on_executed`,
+    The reviewer's own probe (gate `_download_image`, fire `_on_prompt_end`,
     then `cancel()` mid-download) found the pre-fix code resurrected the
     job to "done" with both images written *and* ingested, because the
     only guard at the time was a check against `_cancelled` -- and
@@ -774,7 +791,7 @@ async def test_a_cancel_landing_mid_download_leaves_no_images_ingested(
 
         c._download_image = gated_download  # type: ignore[method-assign]
 
-        await c._on_executed(job_id, {"prompt_id": prompt_id})
+        await c._on_prompt_end(job_id, {"prompt_id": prompt_id})
         # Let the freshly-scheduled _complete_job task actually run and
         # reach (and block on) the gate before cancelling.
         await asyncio.sleep(0.1)
@@ -793,27 +810,27 @@ async def test_a_cancel_landing_mid_download_leaves_no_images_ingested(
         await c.aclose()
 
 
-async def test_duplicate_executed_frames_produce_exactly_one_collection(
+async def test_duplicate_end_of_prompt_frames_produce_exactly_one_collection(
     ingesting_client, fake_comfy  # noqa: F811
 ):
     """Regression guard for review BLOCKING 2.
 
-    ComfyUI emits one `executed` per output-producing node, not one per
-    prompt -- a workflow with e.g. both MS_SAVE and a PreviewImage node
-    fires two frames for the same job, often microseconds apart. Because
-    collection now runs as a fire-and-forget task rather than an inline
-    await, `_finish_job`'s prompt-map eviction (which used to make a
-    second frame resolve to no job at all) doesn't happen until the first
-    frame's download/ingest finishes -- long after a fast second frame
-    has already resolved to the same job_id. The reviewer reproduced two
-    full collection passes (two `job_outputs`, two `job_update`
-    done-events, double downloads/ingests) through the real reader loop
-    this way.
+    ComfyUI signals end-of-prompt twice for every prompt:
+    `execution_success` from inside execute(), then `executing
+    {node: null}` immediately after task_done(). Both reach
+    `_on_prompt_end`, microseconds apart. Because collection runs as a
+    fire-and-forget task rather than an inline await, `_finish_job`'s
+    prompt-map eviction (which used to make a second frame resolve to no
+    job at all) doesn't happen until the first frame's download/ingest
+    finishes -- long after a fast second frame has already resolved to
+    the same job_id. The reviewer reproduced two full collection passes
+    (two `job_outputs`, two `job_update` done-events, double
+    downloads/ingests) through the real reader loop this way.
 
     Slows the download so the window is wide open, then broadcasts a
-    second `executed` for the same prompt_id while the first collection
-    is confirmed still in flight (via `_collecting`). The `_collecting`
-    guard added in `_on_executed` must make the second frame a no-op.
+    third end-of-prompt frame for the same prompt_id while the first
+    collection is confirmed still in flight (via `_collecting`). The
+    `_collecting` guard in `_on_prompt_end` must make the extras no-ops.
     """
     seen = []
     ingesting_client.on_job_event(lambda event, payload: seen.append((event, payload)))
@@ -837,9 +854,12 @@ async def test_duplicate_executed_frames_produce_exactly_one_collection(
     assert ingesting_client._collecting, "collection never started"
 
     await fake_comfy.broadcast(
-        {"type": "executed", "data": {"prompt_id": prompt_id, "node": "extra"}}
+        {"type": "execution_success", "data": {"prompt_id": prompt_id}}
     )
-    await asyncio.sleep(0.05)  # let the reader loop actually process it
+    await fake_comfy.broadcast(
+        {"type": "executing", "data": {"prompt_id": prompt_id, "node": None}}
+    )
+    await asyncio.sleep(0.05)  # let the reader loop actually process them
 
     job = await ingesting_client.wait_for_job(job_id, timeout=10.0)
     assert job["state"] == "done"
@@ -911,3 +931,375 @@ async def test_a_reference_workflow_receives_the_uploaded_name(
 
     sent = fake_comfy.submitted[-1]["body"]["prompt"]
     assert sent["11"]["inputs"]["image"] == name
+
+
+# ---- Final review: protocol-fidelity regressions ---------------------------
+
+
+async def test_cancelling_a_pending_job_leaves_a_running_sibling_untouched(
+    started_client, fake_comfy  # noqa: F811
+):
+    """Regression guard for final-review C1.
+
+    `cancel()` used to POST a *bodyless* `/interrupt`, which ComfyUI
+    documents (server.py::post_interrupt) as a GLOBAL interrupt: it calls
+    nodes.interrupt_processing() on whatever prompt happens to be
+    running. With the default in_flight=2 the cancelled job is routinely
+    the *pending* one inside ComfyUI while a sibling is mid-generation,
+    so the `/queue delete` correctly drops the target and the interrupt
+    then destroys the bystander.
+
+    ComfyUI answers an interrupt with `execution_interrupted` (not
+    `execution_error`), which the client did not handle at all, so the
+    collateral-damaged sibling never reached a terminal state: its row
+    stayed "running" and its id stayed in `_running` forever.
+    """
+    fake_comfy.execution_delay = 1.5
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+
+    await started_client.submit(pid, params(positive="runner"))
+    await started_client.submit(pid, params(positive="victim"))
+
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if fake_comfy.running_prompt and fake_comfy.pending_prompts:
+            break
+    running_prompt = fake_comfy.running_prompt
+    pending_prompt = fake_comfy.pending_prompts[0]
+    assert running_prompt and pending_prompt
+
+    running_job = started_client._prompt_to_job[running_prompt]
+    pending_job = started_client._prompt_to_job[pending_prompt]
+
+    await started_client.cancel(pending_job)
+
+    # The interrupt must have been scoped to the pending prompt, which
+    # ComfyUI then declines to act on because it isn't the running one.
+    assert fake_comfy.interrupted_prompts == []
+    assert started_client.db.get_generation_job(pending_job)["state"] == "cancelled"
+
+    # And the bystander still finishes normally.
+    sibling = await started_client.wait_for_job(running_job, timeout=15.0)
+    assert sibling["state"] == "done"
+    assert running_job not in started_client._running
+
+
+async def test_an_external_interrupt_marks_the_job_cancelled(
+    started_client, fake_comfy  # noqa: F811
+):
+    """`execution_interrupted` is a terminal signal and must be handled.
+
+    Someone hitting Cancel in ComfyUI's own web UI (or any other client
+    posting a global `/interrupt`) produces exactly this frame. Without a
+    branch for it the job sits at "running" forever and permanently
+    consumes one of the `in_flight` admission slots.
+    """
+    fake_comfy.execution_delay = 1.5
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if fake_comfy.running_prompt:
+            break
+    assert fake_comfy.running_prompt
+
+    # A *global* interrupt, as ComfyUI's own UI issues it.
+    await started_client._http.post(f"{fake_comfy.base_url}/interrupt")
+
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "cancelled"
+    assert job_id not in started_client._running
+
+
+async def test_outputs_are_collected_when_the_save_node_is_not_last(
+    ingesting_client, fake_comfy  # noqa: F811
+):
+    """Regression guard for final-review C2.
+
+    Collection used to fire on the first `executed` frame, but ComfyUI
+    writes `/history` only in `PromptQueue.task_done()`, after the whole
+    prompt finishes. For any workflow where MS_SAVE is not the last node
+    to execute -- a preview or upscale branch continuing afterwards --
+    the read is deterministically too early: `/history` returns {}, which
+    flowed all the way to `_finish_job(job_id, "done")` with zero files
+    and no error anywhere.
+    """
+    fake_comfy.post_save_delay = 0.4
+    fake_comfy.trailing_output_node = True
+
+    seen = []
+    ingesting_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+
+    job = await ingesting_client.wait_for_job(job_id, timeout=15.0)
+    assert job["state"] == "done"
+
+    files = sorted(ingesting_client.output_dir_for(job_id).glob("*.png"))
+    assert len(files) == 2
+    for f in files:
+        assert ingesting_client.db.get_media(str(f)) is not None
+
+    outputs = [p for e, p in seen if e == "job_outputs"]
+    assert len(outputs) == 1
+    assert len(outputs[0]["files"]) == 2
+
+
+async def test_an_empty_history_entry_fails_the_job(
+    ingesting_client, fake_comfy  # noqa: F811
+):
+    """A prompt that ends with no history entry is a failure, not a
+    silent success. Previously this produced state="done", files=[]."""
+
+    async def empty_history(prompt_id):
+        return {}
+
+    ingesting_client.fetch_history = empty_history  # type: ignore[method-assign]
+
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+
+    job = await ingesting_client.wait_for_job(job_id, timeout=20.0)
+    assert job["state"] == "failed"
+    assert "history" in (job["error"] or "").lower()
+
+
+async def test_an_error_during_the_running_write_does_not_resurrect_the_job(
+    fake_comfy, workspace  # noqa: F811
+):
+    """Regression guard for final-review I1.
+
+    Both `submit_now` and `_dispatch` publish `_prompt_to_job[prompt_id]`
+    and *then* write state="running" through a to_thread hop. The map
+    entry is live for the whole of that await, so an `execution_error`
+    arriving in the window resolves to the job, `_finish_job` correctly
+    writes "failed", and then the pending "running" write lands on top --
+    leaving a permanently "running" row that carries an error message and
+    a finished_at, with its admission slot already released.
+
+    "checkpoint not found" errors within milliseconds of dispatch and a
+    SQLite write on a WSL2 /mnt mount is 50-100ms, so the window is real.
+    Reproduced deterministically here by gating the "running" write.
+    """
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+    )
+    try:
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+
+        gate = threading.Event()
+        original_update = db.update_generation_job
+
+        def gated_update(job_id, **fields):
+            if fields.get("state") == "running":
+                gate.wait(10)
+            return original_update(job_id, **fields)
+
+        db.update_generation_job = gated_update  # type: ignore[method-assign]
+
+        submit = asyncio.create_task(c.submit_now(pid, params()))
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            if c._prompt_to_job:
+                break
+        prompt_id = next(iter(c._prompt_to_job))
+
+        error_frame = asyncio.create_task(
+            c._handle_event(
+                {
+                    "type": "execution_error",
+                    "data": {
+                        "prompt_id": prompt_id,
+                        "node_type": "CheckpointLoaderSimple",
+                        "exception_message": "checkpoint not found",
+                    },
+                }
+            )
+        )
+        await asyncio.sleep(0.05)
+        gate.set()
+        await error_frame
+        job_id = await submit
+
+        job = db.get_generation_job(job_id)
+        assert job["state"] == "failed"
+        assert "checkpoint not found" in job["error"]
+    finally:
+        await c.aclose()
+
+
+async def test_queued_jobs_are_re_enqueued_after_a_restart(
+    fake_comfy, workspace  # noqa: F811
+):
+    """Regression guard for final-review I3.
+
+    The module docstring promises "state survives a restart", but nothing
+    re-enqueued `state='queued'` rows: `_rehydrate_prompt_map` only reads
+    `running` rows, and only into the prompt map. A restart with queued
+    work left it queued forever, invisible to the pump.
+    """
+    db = DatabaseManager(workspace / "db")
+    first = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        in_flight=2,
+    )
+    pid = await first.register_preset("sdxl", "t2i", t2i_workflow())
+    job_ids = [await first.submit(pid, params()) for _ in range(3)]
+    await first.aclose()  # never started -> nothing was ever dispatched
+    assert all(db.get_generation_job(j)["state"] == "queued" for j in job_ids)
+
+    second = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        in_flight=2,
+    )
+    await second.start()
+    try:
+        for job_id in job_ids:
+            assert (await second.wait_for_job(job_id, timeout=20.0))["state"] == "done"
+    finally:
+        await second.shutdown()
+
+
+async def test_running_jobs_are_reconciled_after_a_restart(
+    fake_comfy, workspace  # noqa: F811
+):
+    """A row left at "running" by a killed process would otherwise
+    over-subscribe `in_flight` forever, since no event will ever arrive
+    for it. Marking it failed is honest and frees the slot."""
+    db = DatabaseManager(workspace / "db")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    orphan = db.create_generation_job(pid, "{}")
+    db.update_generation_job(orphan, state="running", comfy_prompt_id="gone")
+
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+    )
+    await c.start()
+    try:
+        job = db.get_generation_job(orphan)
+        assert job["state"] == "failed"
+        assert "restart" in job["error"].lower()
+        assert job["finished_at"]
+    finally:
+        await c.shutdown()
+
+
+async def test_cancelling_an_orphaned_queued_job_marks_it_cancelled(
+    fake_comfy, workspace  # noqa: F811
+):
+    """A queued row this process never put in `_queue` (e.g. left by a
+    previous run) must still be cancellable. `cancel()` used to hit
+    ValueError on `self._queue.remove(...)`, return, and leave the row
+    queued -- while `POST /jobs/{id}/cancel` reported success and leaked
+    a `_cancelled` entry."""
+    db = DatabaseManager(workspace / "db")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    orphan = db.create_generation_job(pid, "{}")
+
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+    )
+    try:
+        await c.cancel(orphan)
+        assert db.get_generation_job(orphan)["state"] == "cancelled"
+        assert orphan not in c._cancelled
+    finally:
+        await c.aclose()
+
+
+async def test_a_traversing_filename_cannot_escape_the_output_root(
+    fake_comfy, workspace  # noqa: F811
+):
+    """`collect_outputs` joined ComfyUI's `filename` onto the target dir
+    verbatim, so a name containing `../` wrote outside output_root."""
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+    )
+    try:
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+        job_id = await c.submit_now(pid, params())
+        prompt_id = db.get_generation_job(job_id)["comfy_prompt_id"]
+
+        async def evil_history(_prompt_id):
+            return {
+                "outputs": {
+                    "9": {
+                        "images": [
+                            {
+                                "filename": "../../../escaped.png",
+                                "subfolder": "",
+                                "type": "output",
+                            }
+                        ]
+                    }
+                }
+            }
+
+        c.fetch_history = evil_history  # type: ignore[method-assign]
+        written = await c.collect_outputs(job_id, prompt_id)
+
+        assert written
+        out_root = (workspace / "out").resolve()
+        for path in written:
+            assert path.resolve().is_relative_to(out_root)
+        assert not (workspace / "escaped.png").exists()
+        assert not (workspace.parent / "escaped.png").exists()
+    finally:
+        await c.aclose()
+
+
+async def test_a_cancelled_job_emits_no_job_outputs_event(
+    fake_comfy, workspace  # noqa: F811
+):
+    """When `collect_outputs` bails because the job went terminal, the
+    empty result must not be published as this job's outputs."""
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        scanner=Scanner(db),
+    )
+    seen = []
+    c.on_job_event(lambda event, payload: seen.append((event, payload)))
+    try:
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+        job_id = await c.submit_now(pid, params())
+        prompt_id = db.get_generation_job(job_id)["comfy_prompt_id"]
+
+        gate = asyncio.Event()
+        original_download = c._download_image
+
+        async def gated_download(entry, target):
+            await gate.wait()
+            await original_download(entry, target)
+
+        c._download_image = gated_download  # type: ignore[method-assign]
+
+        await c._on_prompt_end(job_id, {"prompt_id": prompt_id})
+        await asyncio.sleep(0.2)
+        await c.cancel(job_id)
+        gate.set()
+        for task in list(c._collect_tasks):
+            await task
+
+        assert db.get_generation_job(job_id)["state"] == "cancelled"
+        assert [p for e, p in seen if e == "job_outputs"] == []
+    finally:
+        await c.aclose()

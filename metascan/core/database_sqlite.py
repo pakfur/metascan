@@ -876,12 +876,30 @@ class DatabaseManager:
             return [dict(r) for r in rows]
 
     def delete_workflow_preset(self, preset_id: int) -> bool:
+        """Delete a preset.
+
+        Raises ``sqlite3.IntegrityError`` when generation_jobs rows still
+        reference it: ``generation_jobs.preset_id`` is NOT NULL with no
+        ``ON DELETE`` clause and ``PRAGMA foreign_keys = ON``. That is
+        deliberate — cascading would silently destroy job history, and
+        making the column nullable would orphan it. Callers should report
+        the conflict; see ``count_jobs_for_preset``.
+        """
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "DELETE FROM workflow_presets WHERE id = ?", (preset_id,)
             )
             conn.commit()
             return int(cur.rowcount) > 0
+
+    def count_jobs_for_preset(self, preset_id: int) -> int:
+        """How many generation_jobs rows reference a preset."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_jobs WHERE preset_id = ?",
+                (preset_id,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
 
     # ---- ComfyUI generation jobs ----------------------------------------
 
