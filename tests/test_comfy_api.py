@@ -188,6 +188,51 @@ def test_delete_a_missing_preset_is_404(client):
     assert client.delete("/api/comfy/presets/9999").status_code == 404
 
 
+def test_deleting_a_preset_that_has_jobs_is_409(client):
+    """Regression guard for final-review I2.
+
+    `generation_jobs.preset_id` is NOT NULL REFERENCES
+    workflow_presets(id) with PRAGMA foreign_keys = ON and no ON DELETE
+    clause, so the DELETE raises sqlite3.IntegrityError the moment any
+    job row exists — and nothing caught it, so the route 500'd for any
+    preset that had ever been used.
+
+    Task 3 tested deletion on a bare DB and Task 11 tested the route
+    with a stub that created no jobs, so this combination -- a preset
+    with real job rows, deleted through the real route -- never existed
+    in one test before.
+    """
+    pid = client.post(
+        "/api/comfy/presets",
+        json={"name": "sdxl", "kind": "t2i", "workflow": t2i_workflow()},
+    ).json()["id"]
+
+    for _ in range(2):
+        assert (
+            client.post(
+                "/api/comfy/submit",
+                json={
+                    "preset_id": pid,
+                    "positive": "a cat",
+                    "seed": 1,
+                    "width": 512,
+                    "height": 512,
+                    "batch_size": 1,
+                },
+            ).status_code
+            == 200
+        )
+
+    r = client.delete(f"/api/comfy/presets/{pid}")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "2" in detail  # names how many jobs are in the way
+    assert str(pid) in detail
+    # And the preset (with its history) is still there.
+    assert any(row["id"] == pid for row in client.get("/api/comfy/presets").json())
+    assert len(client.get("/api/comfy/jobs").json()) == 2
+
+
 def test_submit_returns_a_job_id(client):
     pid = client.post(
         "/api/comfy/presets",

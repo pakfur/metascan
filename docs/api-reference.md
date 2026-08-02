@@ -134,7 +134,13 @@ Body: `{name: string, kind: "t2i" | "ref", workflow: object}`, where
 doesn't satisfy the `MS_*` binding contract (`BindingError`).
 
 ### `DELETE /api/comfy/presets/{id}`
-Returns `{status: "deleted"}`. 404 if the preset doesn't exist.
+Returns `{status: "deleted"}`.
+- **404** if the preset doesn't exist.
+- **409** if generation jobs still reference it. Job history is never
+  cascaded away, so a preset that has ever been used cannot be deleted
+  while its jobs remain; the detail names how many are in the way, e.g.
+  `Preset 3 still has 12 generation job(s) referencing it. Delete those
+  jobs first; preset history is never removed automatically.`
 
 ### `POST /api/comfy/submit`
 Body:

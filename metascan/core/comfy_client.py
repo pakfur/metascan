@@ -6,7 +6,9 @@ network state for the subsystem.
 
 This module talks to a ComfyUI that already exists — it never spawns
 one. All job bookkeeping lives in the generation_jobs table so state
-survives a restart.
+survives a restart: ``start()`` re-enqueues every ``queued`` row into the
+pump and reconciles rows left at ``running`` by a previous process (see
+``_rehydrate_jobs``).
 """
 
 from __future__ import annotations
@@ -42,12 +44,29 @@ _RECONNECT_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
 # submitted during that window) -- see _next_backoff.
 _STABLE_CONNECTION_SECONDS = 2.0
 
-# Event kinds that structurally never carry a job we need to resolve.
+# Event kinds that structurally never carry a job we need to act on.
 # Dispatched on before touching _resolve_job_id so a shared ComfyUI's
 # broadcast traffic for *other* clients' jobs never pays for a lookup.
+#
+# NOTE: `executing` is deliberately NOT in here. ComfyUI overloads it:
+# `{node: <id>}` is a per-node progress ping (many per prompt, ignorable)
+# but `{node: null}` is the end-of-prompt signal, emitted by main.py
+# immediately after `PromptQueue.task_done()` — the only frame guaranteed
+# to arrive *after* the history entry exists. _handle_event filters the
+# node-carrying variant explicitly so the fast path is preserved.
 _EVENT_KINDS_WITHOUT_JOB_ID: FrozenSet[str] = frozenset(
-    {"execution_start", "execution_cached", "executing", "status"}
+    {"execution_start", "execution_cached", "status", "progress_state"}
 )
+
+# How long collect_outputs will wait for ComfyUI to publish a history
+# entry after signalling end-of-prompt. `execution_success` is emitted
+# from *inside* PromptExecutor.execute() (execution.py), while the
+# history entry is only recorded by PromptQueue.task_done() after
+# execute() returns — so a client that reacts to the earlier of the two
+# end-of-prompt signals can legitimately arrive a few milliseconds
+# early. These delays sum to ~2.2s, orders of magnitude more than that
+# gap, after which an absent entry is a real failure rather than a race.
+_HISTORY_POLL_DELAYS: Tuple[float, ...] = (0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.5, 0.5)
 
 JobEventCb = Callable[[str, Dict[str, Any]], None]
 
@@ -141,22 +160,23 @@ class ComfyClient:
         # right before and right after its POST, can never miss a
         # cancellation that lands in that window. See cancel()/_dispatch.
         self._cancelled: "set[int]" = set()
-        # Output-collection tasks spawned by _on_executed. A bare
+        # Output-collection tasks spawned by _on_prompt_end. A bare
         # asyncio.create_task result is only weakly referenced by the
         # event loop and can be garbage-collected mid-flight; holding a
         # strong reference here (and self-evicting once done) keeps them
         # alive, and shutdown() cancels any still outstanding.
         self._collect_tasks: "set[asyncio.Task[None]]" = set()
-        # Job ids with an in-flight _complete_job task. ComfyUI emits one
-        # `executed` per output-producing node, not one per prompt, so a
-        # workflow with two such nodes (MS_SAVE plus e.g. a PreviewImage)
-        # fires two frames for the same job, often microseconds apart.
+        # Job ids with an in-flight _complete_job task. ComfyUI signals
+        # end-of-prompt twice for every prompt -- `execution_success`
+        # from inside execute(), then `executing {node: null}` right
+        # after task_done() -- so two frames reach _on_prompt_end for the
+        # same job, microseconds apart.
         # Collection runs as a fire-and-forget task rather than an inline
         # await, so `_finish_job`'s prompt-map eviction -- which used to
         # be what made a second frame resolve to no job at all -- doesn't
         # happen until the first frame's download/ingest finishes, well
         # after a fast second frame has already resolved to this job_id.
-        # `_on_executed` checks this set (and _complete_job discards from
+        # `_on_prompt_end` checks this set (and _complete_job discards from
         # it in a finally) so only the first frame spawns a task.
         self._collecting: "set[int]" = set()
         # Serializes _finish_job's read-then-write of a job's state so two
@@ -285,14 +305,50 @@ class ComfyClient:
             raise ComfyError(message) from exc
 
         self._prompt_to_job[str(prompt_id)] = job_id
-        await asyncio.to_thread(
-            self.db.update_generation_job,
-            job_id,
-            state="running",
-            comfy_prompt_id=prompt_id,
-            started_at=_now(),
-        )
+        await self._mark_running(job_id, prompt_id)
         return job_id
+
+    async def _mark_running(self, job_id: int, prompt_id: str) -> bool:
+        """Write state="running", but never *out* of a terminal state.
+
+        The prompt-map entry has to be published before this write (an
+        `execution_start` for a fast prompt can beat a to_thread DB hop),
+        which means an `execution_error` — "checkpoint not found" fires
+        within milliseconds of dispatch — can resolve to this job and
+        drive `_finish_job` to "failed" while this write is still on the
+        worker thread. Unguarded, the "running" write then lands on top,
+        leaving a permanently-running row carrying an error message and a
+        finished_at, with its `_running` slot already released.
+
+        Shares `_finish_lock` with `_finish_job` so the read-then-write
+        pair here and there are serialized against each other rather than
+        merely each being individually atomic. Returns False when the job
+        was already terminal, in which case only `comfy_prompt_id` is
+        recorded (useful for debugging, and not a state transition).
+        """
+        async with self._finish_lock:
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is not None and current["state"] in _TERMINAL_STATES:
+                logger.debug(
+                    "Job %s went terminal (%r) while its 'running' write was "
+                    "in flight; not resurrecting it",
+                    job_id,
+                    current["state"],
+                )
+                await asyncio.to_thread(
+                    self.db.update_generation_job,
+                    job_id,
+                    comfy_prompt_id=prompt_id,
+                )
+                return False
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="running",
+                comfy_prompt_id=prompt_id,
+                started_at=_now(),
+            )
+            return True
 
     # ---- reference images ---------------------------------------------
 
@@ -455,22 +511,16 @@ class ComfyClient:
             # the worker thread, and an event that arrives before the map
             # entry exists is dropped as unrecognised.
             self._prompt_to_job[str(prompt_id)] = job_id
-            await asyncio.to_thread(
-                self.db.update_generation_job,
-                job_id,
-                state="running",
-                comfy_prompt_id=prompt_id,
-                started_at=_now(),
-            )
+            if not await self._mark_running(job_id, prompt_id):
+                # An execution_error (or a cancel) already took this job
+                # terminal while the "running" write was in flight. The
+                # row is correct as it stands; just stop owning it.
+                self._cancelled.discard(job_id)
+                self._prompt_to_job.pop(str(prompt_id), None)
+                return
             if job_id in self._cancelled:
                 self._cancelled.discard(job_id)
-                try:
-                    await self._http.post(
-                        f"{self.base_url}/queue", json={"delete": [prompt_id]}
-                    )
-                    await self._http.post(f"{self.base_url}/interrupt")
-                except Exception as exc:
-                    logger.warning("Could not interrupt ComfyUI: %s", exc)
+                await self._stop_prompt(prompt_id)
                 self._prompt_to_job.pop(str(prompt_id), None)
                 await self._finish_job(job_id, "cancelled")
                 return
@@ -482,6 +532,38 @@ class ComfyClient:
             logger.warning(message)
             self._cancelled.discard(job_id)
             await self._finish_job(job_id, "failed", error=message)
+
+    async def _stop_prompt(self, prompt_id: Optional[str]) -> None:
+        """Remove one prompt from ComfyUI, wherever it currently sits.
+
+        `/queue {delete: [...]}` drops it if it is still *pending*;
+        `/interrupt {prompt_id: ...}` kills it if it is *running*.
+
+        The prompt_id in the interrupt body is load-bearing, not
+        decorative. ComfyUI's `post_interrupt` (server.py) treats a body
+        with no `prompt_id` as an explicit **global** interrupt -- it
+        logs "Global interrupt (no prompt_id specified)" and calls
+        `nodes.interrupt_processing()` on whatever prompt happens to be
+        executing. Since ComfyUI runs one prompt at a time and metascan
+        keeps `in_flight` (default 2) of them there, the job a user
+        cancels is routinely the *pending* one while a sibling is
+        mid-generation: a bodyless interrupt destroyed that sibling's
+        work every time. With the id present, ComfyUI no-ops unless the
+        named prompt is the running one. Older ComfyUI builds that
+        predate the scoping simply ignore the unknown key and behave as
+        before, so this is backwards-safe.
+        """
+        if not prompt_id:
+            return
+        try:
+            await self._http.post(
+                f"{self.base_url}/queue", json={"delete": [prompt_id]}
+            )
+            await self._http.post(
+                f"{self.base_url}/interrupt", json={"prompt_id": prompt_id}
+            )
+        except Exception as exc:
+            logger.warning("Could not interrupt ComfyUI: %s", exc)
 
     async def cancel(self, job_id: int) -> None:
         """Cancel a queued or running job.
@@ -505,10 +587,22 @@ class ComfyClient:
             try:
                 self._queue.remove(job_id)
             except ValueError:
-                # Already popped by _pump_loop: a _dispatch for this job
-                # is in flight (or about to be). Leave _cancelled set --
-                # _dispatch will discover it and finish the job itself.
-                # Finishing it here too would race _dispatch's own write.
+                if job_id in self._running:
+                    # Already popped by _pump_loop: a _dispatch for this
+                    # job is in flight (or about to be). Leave _cancelled
+                    # set -- _dispatch will discover it and finish the job
+                    # itself. Finishing it here too would race _dispatch's
+                    # own write.
+                    return
+                # Not in _queue and not in _running: nothing in this
+                # process owns the row. That's a job orphaned by a
+                # restart (or one already drained by cancel_all). It has
+                # never reached ComfyUI, so finishing it here is the only
+                # way it can ever leave "queued" -- previously this path
+                # returned silently, leaving the row queued forever while
+                # POST /jobs/{id}/cancel reported success.
+                self._cancelled.discard(job_id)
+                await self._finish_job(job_id, "cancelled")
                 return
             self._cancelled.discard(job_id)
             await self._finish_job(job_id, "cancelled")
@@ -519,20 +613,21 @@ class ComfyClient:
         # there's no in-flight _dispatch left to observe _cancelled.
         self._cancelled.discard(job_id)
         prompt_id = job["comfy_prompt_id"]
-        try:
-            if prompt_id:
-                await self._http.post(
-                    f"{self.base_url}/queue", json={"delete": [prompt_id]}
-                )
-            await self._http.post(f"{self.base_url}/interrupt")
-        except Exception as exc:
-            logger.warning("Could not interrupt ComfyUI: %s", exc)
+        await self._stop_prompt(prompt_id)
         if prompt_id:
             self._prompt_to_job.pop(str(prompt_id), None)
         await self._finish_job(job_id, "cancelled")
 
     async def cancel_all(self) -> None:
-        """Drop every queued job and interrupt anything running."""
+        """Drop every queued job and interrupt anything running.
+
+        Not every job is resolved by the time this returns: a job whose
+        `_dispatch` is parked mid-POST is left flagged in `_cancelled`
+        and reaches its terminal state slightly later, when `_dispatch`
+        observes the flag (see the handshake in `cancel`/`_dispatch`).
+        Everything else -- queued rows this process owns, and jobs
+        already running in ComfyUI -- is finished before returning.
+        """
         queued = list(self._queue)
         self._queue.clear()
         for job_id in queued:
@@ -554,6 +649,7 @@ class ComfyClient:
         if self._ws_task is not None:
             return
         self._stopping = False
+        await self._rehydrate_jobs()
         ready = asyncio.Event()
         self._ws_task = asyncio.create_task(self._reader_loop(ready))
         if self._pump_task is None:
@@ -632,6 +728,69 @@ class ComfyClient:
             attempt, delay = _next_backoff(attempt, got_frame, survived)
             await asyncio.sleep(delay)
 
+    async def _rehydrate_jobs(self) -> None:
+        """Reconcile the generation_jobs table with a fresh process.
+
+        Runs exactly once, from `start()`, before the reader and pump
+        tasks exist. Two halves:
+
+        * Rows left at "running" belonged to a process that is gone. No
+          event will ever arrive for them, so they would sit "running"
+          forever *and* — worse — a naive re-adoption would let them
+          over-subscribe `in_flight`. We cannot reconcile against
+          ComfyUI reliably (its history is capped and a restart of
+          ComfyUI itself loses the queue), so they are marked failed with
+          an explicit reason. Honest, and it frees the slot.
+
+        * Rows still at "queued" are re-enqueued into `_queue` in id
+          order so the pump picks them up. Without this the module's own
+          promise that "state survives a restart" was false: a restart
+          with queued work left it queued forever, invisible to the pump.
+
+        Deliberately NOT done on websocket reconnect — mid-session,
+        "running" rows are live jobs whose events are still coming, and
+        `_rehydrate_prompt_map` exists to re-adopt exactly those.
+        """
+        try:
+            stale = await asyncio.to_thread(
+                self.db.list_generation_jobs, ["running"], 10000
+            )
+        except Exception:
+            logger.debug("could not read running comfy jobs", exc_info=True)
+            stale = []
+        for row in stale:
+            await self._finish_job(
+                int(row["id"]),
+                "failed",
+                error="Interrupted by a metascan restart while running; "
+                "resubmit it to try again.",
+            )
+        if stale:
+            logger.info(
+                "Marked %d in-flight ComfyUI job(s) failed after a restart",
+                len(stale),
+            )
+
+        try:
+            pending = await asyncio.to_thread(
+                self.db.list_generation_jobs, ["queued"], 10000
+            )
+        except Exception:
+            logger.debug("could not read queued comfy jobs", exc_info=True)
+            return
+        requeued = 0
+        for row in pending:
+            job_id = int(row["id"])
+            if job_id in self._queue or job_id in self._running:
+                continue
+            self._queue.append(job_id)
+            requeued += 1
+        if requeued:
+            logger.info(
+                "Re-enqueued %d queued ComfyUI job(s) after a restart", requeued
+            )
+            self._pump_wake.set()
+
     async def _rehydrate_prompt_map(self) -> None:
         """Rebuild prompt_id -> job_id after a reconnect.
 
@@ -696,6 +855,17 @@ class ComfyClient:
         if kind in _EVENT_KINDS_WITHOUT_JOB_ID:
             return  # never carries a job to resolve; skip before any lookup
         data = msg.get("data") or {}
+        if kind == "executing" and data.get("node") is not None:
+            # Per-node progress ping, many per prompt. Only the
+            # `{node: null}` variant is end-of-prompt (see
+            # _EVENT_KINDS_WITHOUT_JOB_ID); bail before any lookup so the
+            # common case stays as cheap as it was.
+            return
+        if kind == "executed":
+            # One per output-producing node, emitted from *inside*
+            # execute() while the prompt is still running. Informational
+            # only: /history does not exist yet (see _on_prompt_end).
+            return
         job_id = await self._resolve_job_id(data.get("prompt_id"))
         if job_id is None:
             return  # an event for someone else's client, or a stale prompt
@@ -719,26 +889,52 @@ class ComfyClient:
             await self._finish_job(job_id, "failed", error=error)
             return
 
-        if kind == "executed":
-            await self._on_executed(job_id, data)
+        if kind == "execution_interrupted":
+            # ComfyUI reports an *interrupted* prompt with this, not with
+            # execution_error (execution.py::handle_execution_error
+            # branches on InterruptProcessingException). Without a branch
+            # here the job never reaches a terminal state: its row stays
+            # "running" and its id stays in `_running` forever, so a
+            # couple of incidents permanently stall the pump. The
+            # terminal-state guard in `_finish_job` makes this a no-op
+            # for jobs metascan cancelled itself.
+            await self._finish_job(job_id, "cancelled")
+            return
+
+        if kind == "execution_success" or kind == "executing":
+            # Both are end-of-prompt signals (`executing` has already
+            # been narrowed to node=None above). Whichever lands first
+            # starts collection; `_collecting` makes the other a no-op.
+            await self._on_prompt_end(job_id, data)
 
     def output_dir_for(self, job_id: int) -> Path:
         """Where a job's images land. Flat per-job in Phase A; Phase B
         overrides this with a storyboard/scene/panel tree."""
         return self.output_root / f"job_{job_id:06d}"
 
-    async def _on_executed(self, job_id: int, data: Dict[str, Any]) -> None:
+    async def _on_prompt_end(self, job_id: int, data: Dict[str, Any]) -> None:
         """Kick off output collection; the job stays 'running' until the
         files are on disk and ingested.
 
+        Driven by ComfyUI's *end-of-prompt* signals — `execution_success`
+        and `executing {node: null}` — never by `executed`. `executed`
+        fires per output-producing node from inside `execute()`, while
+        the history entry that collection reads is only written by
+        `PromptQueue.task_done()` after the whole prompt finishes. Any
+        workflow whose MS_SAVE is not the last node to execute (a second
+        output node, a preview or upscale branch continuing after the
+        save) therefore lost its images deterministically: the read
+        returned {}, which flowed to `files: []` and `_finish_job(...,
+        "done")` with no retry and no error.
+
         Spawned as a task rather than awaited so downloading one job's
         images never blocks the reader from seeing another job's events.
-        Guarded by `_collecting` (see __init__) so a second `executed`
-        frame for a job whose first frame is still being collected is a
-        no-op rather than a second, concurrent collection of the same
-        images. The task is held in `_collect_tasks` (see __init__) so it
-        isn't garbage-collected mid-flight, and self-evicts (via
-        `add_done_callback`) once done.
+        Guarded by `_collecting` (see __init__) so the second
+        end-of-prompt frame — both signals arrive for every prompt, back
+        to back — is a no-op rather than a second, concurrent collection
+        of the same images. The task is held in `_collect_tasks` (see
+        __init__) so it isn't garbage-collected mid-flight, and
+        self-evicts (via `add_done_callback`) once done.
         """
         if job_id in self._collecting:
             return
@@ -779,6 +975,13 @@ class ComfyClient:
                 return
             if job_id in self._cancelled:
                 return
+            # `collect_outputs` returns [] both for "the job produced no
+            # images" and for "the job went terminal, so I bailed". Only
+            # the first is this job's output; publishing the second would
+            # announce an empty result set for a job that was cancelled.
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is not None and current["state"] in _TERMINAL_STATES:
+                return
             self._emit(
                 "job_outputs", {"job_id": job_id, "files": [str(f) for f in files]}
             )
@@ -809,7 +1012,7 @@ class ComfyClient:
         Reads from `/history` (not the websocket event payload): ComfyUI
         emits one `executed` per output-producing node, not one per
         prompt, so trusting the event payload would lose images for a
-        workflow with more than one output node (see `_on_executed`'s
+        workflow with more than one output node (see `_on_prompt_end`'s
         `_collecting` guard for the other half of that same fact).
 
         Bails immediately if the job is no longer queued/running (a
@@ -828,7 +1031,7 @@ class ComfyClient:
         if job["state"] not in ("queued", "running"):
             return []
 
-        entry = await self.fetch_history(prompt_id)
+        entry = await self._await_history(prompt_id)
         _, bindings = await self._load_preset(job["preset_id"])
         images = ((entry.get("outputs") or {}).get(bindings.save) or {}).get(
             "images"
@@ -842,8 +1045,14 @@ class ComfyClient:
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):
                 break
-            name = entry_image.get("filename")
-            if not name:
+            # `filename` comes straight off the wire. Joining it onto
+            # target_dir unvalidated let a name containing `../` write
+            # outside output_root entirely; Path(...).name keeps only the
+            # final component, which is all ComfyUI ever legitimately
+            # sends (`subfolder` carries the rest, and we don't use it
+            # for the local layout).
+            name = Path(str(entry_image.get("filename") or "")).name
+            if not name or name in (".", ".."):
                 continue
             target = target_dir / name
             await self._download_image(entry_image, target)
@@ -940,6 +1149,35 @@ class ComfyClient:
             self._job_done.pop(job_id, None)
 
     # ---- history -----------------------------------------------------
+
+    async def _await_history(self, prompt_id: str) -> Dict[str, Any]:
+        """`fetch_history`, retried briefly, and a hard error if empty.
+
+        Two things this buys over a bare `fetch_history`:
+
+        * It absorbs the genuine microsecond-scale race. ComfyUI emits
+          `execution_success` from inside `PromptExecutor.execute()`, but
+          the history entry is only recorded by `PromptQueue.task_done()`
+          after `execute()` returns. Reacting to the earlier of the two
+          end-of-prompt signals can land just before the write.
+
+        * It refuses to treat a permanently-absent entry as success. The
+          old code let `{}` flow through to `images = []`, `files: []`
+          and `state="done"` — a job that silently produced nothing, with
+          no retry, no error, and no signal to the user anywhere.
+        """
+        entry = await self.fetch_history(prompt_id)
+        if entry:
+            return entry
+        for delay in _HISTORY_POLL_DELAYS:
+            await asyncio.sleep(delay)
+            entry = await self.fetch_history(prompt_id)
+            if entry:
+                return entry
+        raise ComfyError(
+            f"ComfyUI at {self.base_url} signalled that prompt {prompt_id} "
+            "finished, but its /history entry never appeared"
+        )
 
     async def fetch_history(self, prompt_id: str) -> Dict[str, Any]:
         """Return ComfyUI's history entry for a prompt, or {} if absent."""

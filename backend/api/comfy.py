@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
-from backend.services.comfy_service import ComfyService
+from backend.services.comfy_service import ComfyService, PresetInUseError
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 
@@ -97,7 +97,13 @@ async def create_preset(body: PresetRequest) -> Dict[str, int]:
 
 @router.delete("/presets/{preset_id}")
 async def delete_preset(preset_id: int) -> Dict[str, str]:
-    if not await _service().delete_preset(preset_id):
+    try:
+        deleted = await _service().delete_preset(preset_id)
+    except PresetInUseError as exc:
+        # 409, not 500: the request is well-formed but conflicts with
+        # existing job history, which we deliberately never cascade away.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"No preset {preset_id}")
     return {"status": "deleted"}
 

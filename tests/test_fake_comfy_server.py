@@ -1,4 +1,10 @@
-"""The fake ComfyUI must behave before anything is tested against it."""
+"""The fake ComfyUI must behave before anything is tested against it.
+
+These tests pin the protocol details the client used to get wrong: the
+frame ordering around end-of-prompt, that /history is written last, that
+/interrupt is scoped by prompt_id, and that an interrupted prompt reports
+`execution_interrupted` rather than `execution_error`.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +15,23 @@ import httpx
 import websockets
 
 from tests._fake_comfy_server import fake_comfy  # noqa: F401
+
+SAVE_GRAPH = {
+    "prompt": {
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {},
+            "_meta": {"title": "MS_SAVE"},
+        }
+    }
+}
+
+
+async def _drain(ws, count, timeout=5):
+    out = []
+    for _ in range(count):
+        out.append(json.loads(await asyncio.wait_for(ws.recv(), timeout)))
+    return out
 
 
 async def test_submit_returns_a_prompt_id(fake_comfy):  # noqa: F811
@@ -21,27 +44,22 @@ async def test_submit_returns_a_prompt_id(fake_comfy):  # noqa: F811
 async def test_execution_emits_ws_events_and_populates_history(
     fake_comfy,  # noqa: F811
 ):
-    events = []
     async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
         async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{fake_comfy.base_url}/prompt",
-                json={
-                    "prompt": {
-                        "9": {
-                            "class_type": "SaveImage",
-                            "inputs": {},
-                            "_meta": {"title": "MS_SAVE"},
-                        }
-                    }
-                },
-            )
+            r = await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
             prompt_id = r.json()["prompt_id"]
+            events = await _drain(ws, 5)
 
-            for _ in range(2):
-                events.append(json.loads(await asyncio.wait_for(ws.recv(), 5)))
-
-    assert [e["type"] for e in events] == ["execution_start", "executed"]
+    assert [e["type"] for e in events] == [
+        "execution_start",
+        "executing",
+        "executed",
+        "execution_success",
+        "executing",
+    ]
+    # The end-of-prompt frame is `executing` with node: null.
+    assert events[-1]["data"]["node"] is None
+    assert events[-1]["data"]["prompt_id"] == prompt_id
 
     async with httpx.AsyncClient() as client:
         h = await client.get(f"{fake_comfy.base_url}/history/{prompt_id}")
@@ -49,16 +67,164 @@ async def test_execution_emits_ws_events_and_populates_history(
     assert len(images) == 2
 
 
+async def test_history_is_absent_until_the_prompt_ends(fake_comfy):  # noqa: F811
+    """The C2 race, reproduced at the fixture level.
+
+    While a post-save node is still executing, `executed` has already
+    fired for MS_SAVE but /history has nothing at all.
+    """
+    fake_comfy.post_save_delay = 0.4
+    fake_comfy.trailing_output_node = True
+
+    async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+            prompt_id = r.json()["prompt_id"]
+
+            events = await _drain(ws, 3)
+            assert [e["type"] for e in events] == [
+                "execution_start",
+                "executing",
+                "executed",
+            ]
+            h = await client.get(f"{fake_comfy.base_url}/history/{prompt_id}")
+            assert h.json() == {}  # nothing yet — the prompt is still running
+
+            rest = await _drain(ws, 3)
+            assert [e["type"] for e in rest] == [
+                "executed",
+                "execution_success",
+                "executing",
+            ]
+
+            h = await client.get(f"{fake_comfy.base_url}/history/{prompt_id}")
+            assert h.json()[prompt_id]["outputs"]["9"]["images"]
+
+
 async def test_fail_with_emits_execution_error(fake_comfy):  # noqa: F811
     fake_comfy.fail_with = "value not in list: ckpt_name"
     async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
         async with httpx.AsyncClient() as client:
             await client.post(f"{fake_comfy.base_url}/prompt", json={"prompt": {}})
-        types = []
-        for _ in range(2):
-            types.append(json.loads(await asyncio.wait_for(ws.recv(), 5))["type"])
+        events = await _drain(ws, 4)
 
-    assert types == ["execution_start", "execution_error"]
+    assert [e["type"] for e in events] == [
+        "execution_start",
+        "executing",
+        "execution_error",
+        "executing",
+    ]
+
+
+async def test_only_one_prompt_runs_at_a_time(fake_comfy):  # noqa: F811
+    fake_comfy.execution_delay = 0.5
+    async with httpx.AsyncClient() as client:
+        first = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+        second = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if fake_comfy.running_prompt == first:
+            break
+    assert fake_comfy.running_prompt == first
+    assert fake_comfy.pending_prompts == [second]
+
+
+async def test_a_bodyless_interrupt_kills_whatever_is_running(
+    fake_comfy,  # noqa: F811
+):
+    fake_comfy.execution_delay = 1.0
+    async with httpx.AsyncClient() as client:
+        running = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+        pending = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if fake_comfy.running_prompt == running:
+                break
+
+        await client.post(f"{fake_comfy.base_url}/interrupt")
+
+    assert fake_comfy.interrupted_prompts == [running]
+    assert pending in fake_comfy.pending_prompts
+
+
+async def test_an_interrupt_naming_a_pending_prompt_is_a_no_op(
+    fake_comfy,  # noqa: F811
+):
+    fake_comfy.execution_delay = 1.0
+    async with httpx.AsyncClient() as client:
+        running = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+        pending = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if fake_comfy.running_prompt == running:
+                break
+
+        await client.post(
+            f"{fake_comfy.base_url}/interrupt", json={"prompt_id": pending}
+        )
+
+    assert fake_comfy.interrupted == 1
+    assert fake_comfy.interrupted_prompts == []
+    assert fake_comfy.running_prompt == running
+
+
+async def test_an_interrupted_prompt_reports_execution_interrupted(
+    fake_comfy,  # noqa: F811
+):
+    fake_comfy.execution_delay = 1.0
+    async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+            prompt_id = r.json()["prompt_id"]
+            await _drain(ws, 2)  # execution_start, executing
+
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if fake_comfy.running_prompt == prompt_id:
+                    break
+            await client.post(
+                f"{fake_comfy.base_url}/interrupt", json={"prompt_id": prompt_id}
+            )
+            events = await _drain(ws, 2)
+
+    assert [e["type"] for e in events] == ["execution_interrupted", "executing"]
+    assert events[0]["data"]["prompt_id"] == prompt_id
+
+
+async def test_queue_delete_drops_a_pending_prompt(fake_comfy):  # noqa: F811
+    fake_comfy.execution_delay = 0.6
+    async with httpx.AsyncClient() as client:
+        running = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+        pending = (
+            await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+        ).json()["prompt_id"]
+
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if fake_comfy.running_prompt == running:
+                break
+
+        await client.post(f"{fake_comfy.base_url}/queue", json={"delete": [pending]})
+
+    assert fake_comfy.pending_prompts == []
+    assert fake_comfy.running_prompt == running
 
 
 async def test_view_returns_png_bytes(fake_comfy):  # noqa: F811
