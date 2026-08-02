@@ -1,6 +1,6 @@
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple
+from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
 from contextlib import contextmanager
 import logging
 from datetime import datetime
@@ -427,6 +427,52 @@ class DatabaseManager:
                 "ON saved_prompts(file_path)"
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_presets (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name          TEXT NOT NULL UNIQUE,
+                    kind          TEXT NOT NULL CHECK(kind IN ('t2i','ref')),
+                    workflow_json TEXT NOT NULL,
+                    bindings      TEXT NOT NULL,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            # NOTE: panel_id deliberately carries no REFERENCES clause. The
+            # panels table arrives in Phase B; with PRAGMA foreign_keys = ON
+            # an INSERT naming a FK to a missing table fails at runtime, and
+            # SQLite cannot add a FK to an existing table without rebuilding
+            # it. Phase B deletes matching job rows explicitly instead.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS generation_jobs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    preset_id       INTEGER NOT NULL
+                                    REFERENCES workflow_presets(id),
+                    panel_id        INTEGER,
+                    state           TEXT NOT NULL DEFAULT 'queued'
+                                    CHECK(state IN ('queued','running','done',
+                                                    'failed','cancelled')),
+                    comfy_prompt_id TEXT,
+                    params          TEXT NOT NULL,
+                    error           TEXT,
+                    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                    started_at      TEXT,
+                    finished_at     TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_generation_jobs_state "
+                "ON generation_jobs(state)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_generation_jobs_prompt "
+                "ON generation_jobs(comfy_prompt_id)"
+            )
+
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
             # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
@@ -789,6 +835,134 @@ class DatabaseManager:
                 d["styles"] = []
             out.append(d)
         return out
+
+    # ---- ComfyUI workflow presets ---------------------------------------
+
+    _JOB_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {"state", "comfy_prompt_id", "error", "started_at", "finished_at"}
+    )
+
+    # NOTE: the lock attribute is `self.lock` (database_sqlite.py:49), and the
+    # established pattern is `with self.lock:` wrapping `with
+    # self._get_connection() as conn:`. The combined form below is equivalent.
+
+    def create_workflow_preset(
+        self, name: str, kind: str, workflow_json: str, bindings: str
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO workflow_presets (name, kind, workflow_json, "
+                "bindings) VALUES (?, ?, ?, ?)",
+                (name, kind, workflow_json, bindings),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_workflow_preset(self, preset_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM workflow_presets WHERE id = ?", (preset_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_workflow_presets(self) -> List[Dict[str, Any]]:
+        """Summary rows. Omits workflow_json — the graphs are large and no
+        list view needs them."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, name, kind, bindings, created_at, updated_at "
+                "FROM workflow_presets ORDER BY id"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_workflow_preset(self, preset_id: int) -> bool:
+        """Delete a preset.
+
+        Raises ``sqlite3.IntegrityError`` when generation_jobs rows still
+        reference it: ``generation_jobs.preset_id`` is NOT NULL with no
+        ``ON DELETE`` clause and ``PRAGMA foreign_keys = ON``. That is
+        deliberate — cascading would silently destroy job history, and
+        making the column nullable would orphan it. Callers should report
+        the conflict; see ``count_jobs_for_preset``.
+        """
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM workflow_presets WHERE id = ?", (preset_id,)
+            )
+            conn.commit()
+            return int(cur.rowcount) > 0
+
+    def count_jobs_for_preset(self, preset_id: int) -> int:
+        """How many generation_jobs rows reference a preset."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM generation_jobs WHERE preset_id = ?",
+                (preset_id,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    # ---- ComfyUI generation jobs ----------------------------------------
+
+    def create_generation_job(
+        self, preset_id: int, params: str, panel_id: Optional[int] = None
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO generation_jobs (preset_id, params, panel_id) "
+                "VALUES (?, ?, ?)",
+                (preset_id, params, panel_id),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_generation_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_job_by_comfy_prompt_id(self, prompt_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM generation_jobs WHERE comfy_prompt_id = ?",
+                (prompt_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_generation_job(self, job_id: int, **fields: Any) -> None:
+        """Update a whitelisted subset of job columns.
+
+        The whitelist is what keeps this from becoming a SQL-injection
+        surface — column names cannot be parameterized.
+        """
+        unknown = set(fields) - self._JOB_UPDATABLE
+        if unknown:
+            raise ValueError(
+                f"Not updatable on generation_jobs: {', '.join(sorted(unknown))}"
+            )
+        if not fields:
+            return
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [job_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE generation_jobs SET {assignments} WHERE id = ?", values
+            )
+            conn.commit()
+
+    def list_generation_jobs(
+        self, states: Optional[List[str]] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM generation_jobs"
+        params: List[Any] = []
+        if states:
+            sql += " WHERE state IN (" + ",".join("?" * len(states)) + ")"
+            params.extend(states)
+        sql += " ORDER BY id LIMIT ?"
+        params.append(limit)
+        with self.lock, self._get_connection() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0

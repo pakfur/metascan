@@ -97,7 +97,7 @@ metascan/
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
 - **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
-- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync.
+- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in `stores/folders.ts::evaluateCondition`. Tag conditions can't rely on `m.tags` because the summary endpoint omits it — the store fetches only the tag keys referenced by saved smart folders via `POST /api/filters/tag_paths` with `{keys: […]}` and evaluates against those path sets. A previous bulk-GET version fetched the entire inverted index and blocked the media list endpoint for 20+ s; never restore that shape.
@@ -223,6 +223,74 @@ metascan/
   promoted to WARNING. The 200-line ring buffer (`_stderr_ring`) is
   attached to crash reports by `_wait_exit` so debugging info still
   reaches the user on a real failure.
+- **ComfyUI is driven, not just parsed.** `metascan/core/comfy_client.py`
+  submits jobs to a ComfyUI server (the extractors in
+  `metascan/extractors/comfyui*.py` remain read-only metadata parsers, a
+  separate concern). A workflow is registered as an API-format graph whose
+  nodes are titled with the `MS_*` convention (`MS_POSITIVE`, `MS_NEGATIVE`,
+  `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_REF_IMAGE`);
+  `comfy_bindings.resolve_bindings` maps titles to node ids at registration
+  time and **fails loudly** on a missing required title. Titles are used
+  rather than node ids because ComfyUI renumbers nodes on re-save.
+- **Metascan owns the ComfyUI job queue.** `ComfyClient` holds at most
+  `comfy.in_flight` jobs inside ComfyUI at a time so a user-requested reroll
+  can jump the queue and cancellation stays responsive. One persistent
+  WebSocket per app (not per job) consumes ComfyUI's event stream; the
+  `execution_error` node type and message go verbatim into
+  `generation_jobs.error`.
+- **Generated images are fetched over HTTP, never read from disk.**
+  `collect_outputs` pulls each image via `/view` and writes it under
+  `comfy.output_root`, so a remote or containerized ComfyUI works unchanged
+  and there is no watcher race. Ingest goes through the public
+  `Scanner.ingest_file`, wrapped in `asyncio.to_thread` — it does SQLite
+  writes and Pillow work, and running it on the event loop stalls the
+  WebSocket reader.
+- **ComfyUI's protocol has four sharp edges; `tests/_fake_comfy_server.py`
+  models all four and must keep doing so.** Verified against ComfyUI's
+  `server.py` / `execution.py` / `main.py`.
+  1. **`/interrupt` must carry `{"prompt_id": ...}`.** A bodyless POST is
+     an explicit *global* interrupt that kills whatever prompt is
+     currently executing — and since ComfyUI runs one prompt at a time
+     while metascan keeps `in_flight` (default 2) queued there, the job a
+     user cancels is routinely the *pending* one and the bystander is a
+     real generation. Go through `ComfyClient._stop_prompt`.
+  2. **An interrupted prompt reports `execution_interrupted`, not
+     `execution_error`** (`handle_execution_error` branches on
+     `InterruptProcessingException`). It must be handled as terminal or
+     the job never leaves `running` and permanently burns an `in_flight`
+     slot.
+  3. **`/history` is written only at end of prompt**, by
+     `PromptQueue.task_done()` — after every `executed` frame and after
+     `execution_success` (which is emitted from *inside* `execute()`).
+     Collection therefore triggers on `execution_success` /
+     `executing {node: null}`, never on `executed`, and
+     `_await_history` retries briefly before treating an absent entry as
+     a job failure. Reading history on the first `executed` silently
+     lost every image whenever `MS_SAVE` wasn't the last node to run.
+  4. **`executing` is overloaded**: `{node: <id>}` is a per-node ping,
+     `{node: null}` is end-of-prompt. Only the latter is actionable.
+- **ComfyUI job rows are reconciled at startup, not just at reconnect.**
+  `ComfyClient.start()` calls `_rehydrate_jobs` once: `queued` rows are
+  re-enqueued into `_queue` (that's what makes "state survives a restart"
+  true), and `running` rows left by a dead process are marked `failed`
+  with an "interrupted by a restart" message rather than re-adopted —
+  no event will ever arrive for them and re-adopting would
+  over-subscribe `in_flight`. `_rehydrate_prompt_map` is the
+  *reconnect*-time path and deliberately does neither. `_rehydrate_jobs`
+  assumes one process per database — correct for `run_server.py`'s
+  single uvicorn worker, but running with `workers > 1` would have each
+  worker's startup mark the *other* workers' still-running jobs `failed`.
+- **`generation_jobs.preset_id` has no `ON DELETE` clause, on purpose.**
+  Deleting a used preset raises `sqlite3.IntegrityError`;
+  `ComfyService.delete_preset` translates it into `PresetInUseError` and
+  the route answers **409** naming the job count. Do not add `ON DELETE
+  CASCADE` (it would destroy job history) and do not make the column
+  nullable (it would orphan it).
+- **`generation_jobs.panel_id` has no `REFERENCES` clause.** The `panels`
+  table arrives in Phase B of the storyboard feature; with
+  `PRAGMA foreign_keys = ON`, an INSERT naming a foreign key to a missing
+  table fails at runtime, and SQLite cannot add a foreign key to an existing
+  table without rebuilding it.
 
 ## Development Rules
 

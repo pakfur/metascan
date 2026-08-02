@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import (
+    get_comfy_config,
     get_models_config,
     get_server_config,
     load_app_config,
@@ -31,6 +32,7 @@ from backend.api import (
     models,
     prompt as prompt_api,
     vlm,
+    comfy as comfy_api,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
@@ -39,6 +41,9 @@ from metascan.core.inference_client import InferenceClient
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmClient
 from backend.api.vlm import set_vlm_client
+from backend.api.comfy import set_comfy_client
+from metascan.core.comfy_client import ComfyClient
+from metascan.core.scanner import Scanner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -171,6 +176,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _wire_vlm_client_status(vlm_client)
     set_vlm_client(vlm_client)
 
+    comfy_cfg = get_comfy_config(app_config)
+    comfy_client = ComfyClient(
+        base_url=comfy_cfg["base_url"],
+        output_root=Path(comfy_cfg["output_root"]),
+        db=get_db(),
+        scanner=Scanner(get_db(), thumbnail_cache=get_thumbnail_cache()),
+        in_flight=comfy_cfg["in_flight"],
+        request_timeout_s=comfy_cfg["request_timeout_s"],
+    )
+    comfy_client.on_job_event(
+        lambda event, payload: ws_manager.broadcast_sync("comfy", event, payload)
+    )
+    set_comfy_client(comfy_client)
+    # start() never blocks on an unreachable ComfyUI — the reader loop
+    # retries with backoff, so a server that is not running yet simply
+    # connects later.
+    await comfy_client.start()
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -244,6 +267,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await vlm_client.shutdown()
         except Exception:
             logger.exception("VLM client shutdown raised")
+        try:
+            await comfy_client.shutdown()
+        except Exception:
+            logger.exception("Comfy client shutdown raised")
         if prompt_store is not None:
             try:
                 prompt_store.stop_watching()
@@ -316,6 +343,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(models.router)
     app.include_router(vlm.router)
     app.include_router(prompt_api.router)
+    app.include_router(comfy_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

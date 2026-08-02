@@ -111,34 +111,7 @@ class Scanner:
                         logger.info("Scanning cancelled by user")
                         break
 
-                media = self._process_media_file(file_path)
-                if media:
-                    self.db_manager.save_media(media)
-
-                    # Compute and store perceptual hash (lightweight, ~10ms)
-                    try:
-                        phash = compute_phash_for_file(file_path)
-                        if phash:
-                            self.db_manager.save_media_hash(file_path, phash)
-                    except Exception as e:
-                        logger.debug(f"pHash computation failed for {file_path}: {e}")
-
-                    if self.thumbnail_cache:
-                        try:
-                            thumbnail_path = (
-                                self.thumbnail_cache.get_or_create_thumbnail(file_path)
-                            )
-                            if thumbnail_path:
-                                logger.debug(f"Generated thumbnail for {file_path}")
-                            else:
-                                logger.debug(
-                                    f"Failed to generate thumbnail for {file_path}"
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"Thumbnail generation failed for {file_path}: {e}"
-                            )
-
+                if self.ingest_file(file_path) is not None:
                     processed_count += 1
 
             except Exception as e:
@@ -146,6 +119,40 @@ class Scanner:
 
         logger.info(f"Successfully processed {processed_count} new/updated media files")
         return processed_count
+
+    def ingest_file(self, file_path: Path) -> Optional[Media]:
+        """Process, persist, hash, and thumbnail one media file.
+
+        This is the whole single-file ingest sequence, extracted from
+        ``scan_directory`` so callers with a single known file — the
+        ComfyUI output pipeline, for one — do not have to duplicate it or
+        reach into ``_process_media_file``.
+
+        Returns the persisted Media, or None if the file could not be
+        read as media.
+        """
+        media = self._process_media_file(file_path)
+        if media is None:
+            return None
+
+        self.db_manager.save_media(media)
+
+        try:
+            phash = compute_phash_for_file(file_path)
+            if phash:
+                self.db_manager.save_media_hash(file_path, phash)
+        except Exception as e:
+            logger.debug(f"pHash computation failed for {file_path}: {e}")
+
+        if self.thumbnail_cache:
+            try:
+                thumbnail_path = self.thumbnail_cache.get_or_create_thumbnail(file_path)
+                if not thumbnail_path:
+                    logger.debug(f"Failed to generate thumbnail for {file_path}")
+            except Exception as e:
+                logger.warning(f"Thumbnail generation failed for {file_path}: {e}")
+
+        return media
 
     def _find_media_files(self, directory: Path, recursive: bool) -> List[Path]:
         media_files: List[Path] = []
