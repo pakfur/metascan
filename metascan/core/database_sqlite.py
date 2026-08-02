@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
@@ -487,6 +488,71 @@ class DatabaseManager:
             )
 
             # ---- Phase B: storyboard tables --------------------------------
+            # storyboards.folder_id was originally declared INTEGER, but
+            # folders.id is TEXT (a uuid4 string) -- a numeric-looking uuid
+            # would silently coerce and corrupt add_folder_items lookups.
+            # This table shipped only on the storyboard-domain branch (never
+            # released), so a fresh DB just gets the correct DDL below. A dev
+            # DB created from an earlier commit on this branch would still
+            # have the old INTEGER column, though -- detect that from the
+            # live schema and do a standard SQLite column-type rebuild
+            # (create/copy/drop/rename) rather than DROP+recreate, which
+            # would lose data. Follows the off/rebuild/on procedure SQLite's
+            # own docs recommend for schema changes under FK enforcement.
+            old_storyboards_ddl = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='storyboards'"
+            ).fetchone()
+            # sqlite_master preserves the CREATE TABLE text verbatim,
+            # whitespace and all -- match on the column pair with
+            # flexible whitespace rather than a literal substring so this
+            # doesn't depend on exact formatting.
+            if old_storyboards_ddl and re.search(
+                r"folder_id\s+INTEGER", old_storyboards_ddl["sql"] or ""
+            ):
+                logger.info(
+                    "Migrating storyboards.folder_id INTEGER -> TEXT "
+                    "(dev DB predating the folder_id type fix)…"
+                )
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute(
+                    """
+                    CREATE TABLE storyboards_folder_id_migration (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name          TEXT NOT NULL,
+                        source_text   TEXT,
+                        aspect_ratio  TEXT NOT NULL DEFAULT '16:9',
+                        style_block   TEXT,
+                        negative      TEXT,
+                        target_model  TEXT NOT NULL,
+                        architecture  TEXT NOT NULL,
+                        preset_id     INTEGER REFERENCES workflow_presets(id),
+                        base_seed     INTEGER NOT NULL,
+                        batch_size    INTEGER NOT NULL DEFAULT 4,
+                        folder_id     TEXT REFERENCES folders(id)
+                                      ON DELETE SET NULL,
+                        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO storyboards_folder_id_migration "
+                    "(id, name, source_text, aspect_ratio, style_block, "
+                    "negative, target_model, architecture, preset_id, "
+                    "base_seed, batch_size, folder_id, created_at, updated_at) "
+                    "SELECT id, name, source_text, aspect_ratio, style_block, "
+                    "negative, target_model, architecture, preset_id, "
+                    "base_seed, batch_size, CAST(folder_id AS TEXT), "
+                    "created_at, updated_at FROM storyboards"
+                )
+                conn.execute("DROP TABLE storyboards")
+                conn.execute(
+                    "ALTER TABLE storyboards_folder_id_migration "
+                    "RENAME TO storyboards"
+                )
+                conn.commit()
+                conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS storyboards (
@@ -501,7 +567,7 @@ class DatabaseManager:
                     preset_id     INTEGER REFERENCES workflow_presets(id),
                     base_seed     INTEGER NOT NULL,
                     batch_size    INTEGER NOT NULL DEFAULT 4,
-                    folder_id     INTEGER REFERENCES folders(id)
+                    folder_id     TEXT REFERENCES folders(id)
                                   ON DELETE SET NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1217,7 +1283,16 @@ class DatabaseManager:
             conn.commit()
 
     def delete_storyboard(self, storyboard_id: int) -> bool:
+        """Delete a storyboard and everything under it.
+
+        Before the cascade (storyboards -> scenes -> panels ->
+        panel_images), unhides the media rows any curated panel_images
+        pointed at and purges generation_jobs for the panels being
+        destroyed -- see _release_panels.
+        """
         with self.lock, self._get_connection() as conn:
+            panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
+            self._release_panels(conn, panel_ids)
             cur = conn.execute("DELETE FROM storyboards WHERE id = ?", (storyboard_id,))
             conn.commit()
             return int(cur.rowcount) > 0
@@ -1235,6 +1310,13 @@ class DatabaseManager:
         reference_path: Optional[str] = None,
         sort_order: int = 0,
     ) -> int:
+        # storyboard_subjects.reference_path FKs media(file_path), which is
+        # always stored POSIX -- a native-style path (Windows/WSL) would
+        # never match an existing row and surface as a confusing
+        # sqlite3.IntegrityError higher up.
+        posix_reference_path = (
+            to_posix_path(reference_path) if reference_path else reference_path
+        )
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO storyboard_subjects (storyboard_id, name, "
@@ -1246,7 +1328,7 @@ class DatabaseManager:
                     description,
                     lora_name,
                     lora_strength,
-                    reference_path,
+                    posix_reference_path,
                     sort_order,
                 ),
             )
@@ -1262,6 +1344,8 @@ class DatabaseManager:
             )
         if not fields:
             return
+        if fields.get("reference_path"):
+            fields["reference_path"] = to_posix_path(fields["reference_path"])
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [subject_id]
         with self.lock, self._get_connection() as conn:
@@ -1325,7 +1409,21 @@ class DatabaseManager:
             conn.commit()
 
     def delete_scene(self, scene_id: int) -> bool:
+        """Delete a scene and its panels.
+
+        Before the cascade (scenes -> panels -> panel_images), unhides the
+        media rows any curated panel_images pointed at and purges
+        generation_jobs for the panels being destroyed -- see
+        _release_panels.
+        """
         with self.lock, self._get_connection() as conn:
+            panel_ids = [
+                int(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
+                ).fetchall()
+            ]
+            self._release_panels(conn, panel_ids)
             cur = conn.execute("DELETE FROM scenes WHERE id = ?", (scene_id,))
             conn.commit()
             return int(cur.rowcount) > 0
@@ -1401,6 +1499,45 @@ class DatabaseManager:
                 d["subject_ids"] = []
             return d
 
+    def _release_panels(self, conn: sqlite3.Connection, panel_ids: List[int]) -> None:
+        """Unhide panel_images' media rows and purge generation_jobs for
+        ``panel_ids``, before those panels (and their panel_images) are
+        cascade-deleted.
+
+        Must run in the same transaction as the delete/replace that
+        follows -- see delete_panel / delete_scene / delete_storyboard /
+        replace_storyboard_structure. Without this, panel_images cascading
+        away leaves the underlying media rows permanently hidden=1 (nothing
+        else ever flips them back once the panel is gone), and stale
+        generation_jobs rows for now-deleted panels could be re-adopted by
+        a restart (``ComfyClient._rehydrate_jobs``).
+        """
+        if not panel_ids:
+            return
+        placeholders = ",".join("?" * len(panel_ids))
+        conn.execute(
+            f"UPDATE media SET hidden = 0 WHERE file_path IN "
+            f"(SELECT file_path FROM panel_images WHERE panel_id IN ({placeholders}))",
+            panel_ids,
+        )
+        conn.execute(
+            f"DELETE FROM generation_jobs WHERE panel_id IN ({placeholders})",
+            panel_ids,
+        )
+
+    def _panel_ids_for_storyboard(
+        self, conn: sqlite3.Connection, storyboard_id: int
+    ) -> List[int]:
+        return [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT p.id AS id FROM panels p "
+                "JOIN scenes s ON p.scene_id = s.id "
+                "WHERE s.storyboard_id = ?",
+                (storyboard_id,),
+            ).fetchall()
+        ]
+
     def storyboard_id_for_panel(self, panel_id: int) -> Optional[int]:
         """Resolve a panel's storyboard id via panels -> scenes -> storyboards.
 
@@ -1422,13 +1559,15 @@ class DatabaseManager:
 
         ``generation_jobs.panel_id`` carries no FK/cascade (see spec §4.1:
         the panels table didn't exist yet when generation_jobs was
-        created), so the job rows are deleted explicitly first.
+        created), so the job rows are deleted explicitly first. Also
+        unhides the media rows any curated panel_images pointed at before
+        they cascade away -- see _release_panels.
         """
         with self.lock, self._get_connection() as conn:
             cur = conn.execute("SELECT id FROM panels WHERE id = ?", (panel_id,))
             if cur.fetchone() is None:
                 return False
-            conn.execute("DELETE FROM generation_jobs WHERE panel_id = ?", (panel_id,))
+            self._release_panels(conn, [panel_id])
             conn.execute("DELETE FROM panels WHERE id = ?", (panel_id,))
             conn.commit()
             return True
@@ -1443,11 +1582,19 @@ class DatabaseManager:
         ``parsed`` is the validated shape from storyboard_parse: subjects
         carry name/description; panels reference subjects BY NAME
         (case-insensitive); unknown names are dropped. One transaction.
+
+        Before the destructive delete (which cascades scenes -> panels ->
+        panel_images), unhides the media rows any curated panel_images
+        pointed at and purges generation_jobs for the panels being
+        destroyed -- see _release_panels. Re-parsing an existing storyboard
+        would otherwise leave those media rows hidden forever.
         """
         import json as _json
 
         with self.lock:
             with self._get_connection() as conn:
+                panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
+                self._release_panels(conn, panel_ids)
                 conn.execute(
                     "DELETE FROM storyboard_subjects WHERE storyboard_id = ?",
                     (storyboard_id,),
@@ -1548,14 +1695,15 @@ class DatabaseManager:
                         panel["subject_ids"] = _json.loads(panel["subject_ids"] or "[]")
                     except (ValueError, TypeError):
                         panel["subject_ids"] = []
-                    images = [
-                        dict(r)
-                        for r in conn.execute(
-                            "SELECT * FROM panel_images WHERE panel_id = ? "
-                            "ORDER BY variant_index, id",
-                            (panel["id"],),
-                        ).fetchall()
-                    ]
+                    images = []
+                    for r in conn.execute(
+                        "SELECT * FROM panel_images WHERE panel_id = ? "
+                        "ORDER BY variant_index, id",
+                        (panel["id"],),
+                    ).fetchall():
+                        image = dict(r)
+                        image["file_path"] = to_native_path(image["file_path"])
+                        images.append(image)
                     panel["images"] = images
                     panels.append(panel)
                 scene["panels"] = panels
@@ -1602,7 +1750,12 @@ class DatabaseManager:
                 "ORDER BY variant_index, id",
                 (panel_id,),
             ).fetchall()
-            return [dict(r) for r in rows]
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["file_path"] = to_native_path(d["file_path"])
+                out.append(d)
+            return out
 
     def count_panel_images(self, panel_id: int) -> int:
         with self.lock, self._get_connection() as conn:
