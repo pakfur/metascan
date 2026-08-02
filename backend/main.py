@@ -283,14 +283,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await vlm_client.shutdown()
         except Exception:
             logger.exception("VLM client shutdown raised")
-        try:
-            await storyboard_runner.aclose()
-        except Exception:
-            logger.exception("Storyboard runner shutdown raised")
+        # Shut down the event *source* (ComfyClient) before the runner that
+        # consumes its events. storyboard_runner.handle_job_event schedules
+        # a fire-and-forget ingest task for every job_outputs event; if the
+        # runner closed first, a collect task completing in the window
+        # between the two shutdowns would spawn an ingest task nobody ever
+        # awaits (aclose() already returned). Closing comfy_client first
+        # means no more job_outputs events can fire once we reach
+        # storyboard_runner.aclose(), so it only has to drain tasks that
+        # are already in flight.
         try:
             await comfy_client.shutdown()
         except Exception:
             logger.exception("Comfy client shutdown raised")
+        try:
+            await storyboard_runner.aclose()
+        except Exception:
+            logger.exception("Storyboard runner shutdown raised")
         if prompt_store is not None:
             try:
                 prompt_store.stop_watching()
