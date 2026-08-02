@@ -97,7 +97,7 @@ metascan/
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
 - **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
-- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, done, total, prompt_source}`) and `panel_images_changed` (`{storyboard_id, panel_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`.
+- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, done, total, prompt_source}`), `synthesis_complete` (`{storyboard_id, synthesized, fallback, skipped_locked}`), `synthesis_error` (`{storyboard_id, error}`), and `panel_images_changed` (`{storyboard_id, panel_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`. `POST /api/storyboard/{id}/synthesize` is 202 fire-and-forget (`asyncio.create_task`); `synthesis_complete`/`synthesis_error` are the only signal a client gets that the background run actually finished or died — `StoryboardRunner.synthesize` wraps the real work and always emits exactly one of the two, re-raising after `synthesis_error` so a direct (non-route) caller still sees the exception.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in `stores/folders.ts::evaluateCondition`. Tag conditions can't rely on `m.tags` because the summary endpoint omits it — the store fetches only the tag keys referenced by saved smart folders via `POST /api/filters/tag_paths` with `{keys: […]}` and evaluates against those path sets. A previous bulk-GET version fetched the entire inverted index and blocked the media list endpoint for 20+ s; never restore that shape.
@@ -296,7 +296,13 @@ metascan/
   settings) → `storyboard_subjects` (characters, LoRA + reference image) and
   `scenes` (ON DELETE CASCADE from storyboards) → `panels` (ON DELETE
   CASCADE from scenes, carries `subject_ids` as a JSON array) → `panel_images`
-  (ON DELETE CASCADE from panels, FK'd to `media(file_path)`). `media.hidden`
+  (ON DELETE CASCADE from panels, FK'd to `media(file_path)`). `storyboards.folder_id`
+  is `TEXT REFERENCES folders(id)` — `folders.id` is a uuid4 string, so this
+  must never be declared `INTEGER` (a numeric-looking uuid would silently
+  coerce and corrupt `add_folder_items` lookups); `_init_database` detects
+  and rebuilds a pre-existing `INTEGER` column via the standard SQLite
+  create/copy/drop/rename procedure, gated on reading the live DDL from
+  `sqlite_master`. `media.hidden`
   (INTEGER, default 0) keeps generated variants out of the main grid until
   curated: `StoryboardRunner._ingest_outputs` inserts every rendered file
   hidden, `db.select_panel_image` unhides the chosen keeper and re-hides
@@ -305,7 +311,30 @@ metascan/
   `hidden = 0`; pass `include_hidden=true` to see everything. `hidden` was
   added to both grid covering indexes (`idx_media_summary_added`,
   `idx_media_summary_modified`) alongside the column itself — see the
-  covering-index rule above.
+  covering-index rule above. **Every destructive path that cascades
+  `panel_images` away must unhide their media rows first**, or the
+  underlying files become permanently hidden with no path back (the only
+  other unhide is `select_panel_image`, which needs a live panel to act
+  on). `DatabaseManager._release_panels(conn, panel_ids)` is the shared
+  helper — it runs `UPDATE media SET hidden = 0` for the affected
+  `panel_images.file_path`s and deletes the panels' `generation_jobs` rows
+  (so a restart can't re-adopt jobs for panels that no longer exist) — and
+  is called, inside the same transaction as the delete, from `delete_panel`,
+  `delete_scene`, `delete_storyboard`, and `replace_storyboard_structure`
+  (a re-parse destroys the old scene/panel tree the same way a delete does).
+- **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
+  is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
+  `get_storyboard_tree` and `list_panel_images` convert it through
+  `to_native_path` before returning, mirroring `get_folder`'s precedent —
+  `GET /api/storyboard/{id}` and `GET /api/media` must agree on path shape.
+  `StoryboardRunner._ingest_outputs` builds its `panel_images_changed` WS
+  payload from the same `to_posix_path`-normalized value it inserted
+  (converted back with `to_native_path`), not the raw pre-conversion string
+  from the ComfyUI `job_outputs` event. `storyboard_subjects.reference_path`
+  FKs `media(file_path)` the same way — `create_subject`/`update_subject`
+  run it through `to_posix_path` before the INSERT/UPDATE, and an unknown
+  path (raw `sqlite3.IntegrityError` from SQLite) is translated to
+  `InvalidReferenceError` → HTTP 400 in `StoryboardService`, not a 500.
 - **`panels.prompt_locked` / `prompt_source` gate re-synthesis.**
   `prompt_source` is one of `'brief'` (deterministic template, no VLM),
   `'llm'` (VLM-composed), or `'user'` (hand-edited). `StoryboardRunner.synthesize`
@@ -353,6 +382,36 @@ metascan/
   files land next to their panel instead of a flat `comfy.output_root`.
   Non-storyboard submits (`POST /api/comfy/submit`) leave it NULL and the
   ComfyUI driver falls back to `comfy.output_root` directly.
+- **Lifespan shuts the event source down before its consumer.** The
+  shutdown block in `backend/main.py`'s `lifespan` calls
+  `comfy_client.shutdown()` **before** `storyboard_runner.aclose()`
+  (each in its own try/except). `comfy_client.on_job_event` fans `job_outputs`
+  out to both `ws_manager.broadcast_sync` and
+  `storyboard_runner.handle_job_event`, and the latter schedules a
+  fire-and-forget ingest task; closing the runner first would leave a
+  window where a collect task completing between the two shutdowns spawns
+  an ingest task nobody ever awaits.
+- **`generate()`'s per-panel seed accounts for in-flight jobs, not just
+  ingested ones.** `panel_seed`'s `variant_index` used to come from
+  `count_panel_images(panel_id)` alone, which only counts rows already
+  ingested from a *finished* job — two `generate()` calls (e.g. two
+  rerolls) for the same panel before the first has ingested read the same
+  count and submitted identical seeds. `variant_base` is now
+  `count_panel_images(panel_id) + batch_size * len(queued/running jobs for
+  that panel)`. Relatedly, every `StoryboardRunner` call into
+  `db.list_generation_jobs` (this one, plus `cancel()`) passes
+  `limit=10000` explicitly — the default `limit=100` silently truncates and
+  would under-cancel or under-count on a storyboard with more in-flight
+  jobs than that (mirrors `ComfyClient._rehydrate_jobs`'s precedent).
+  `latest_jobs_for_panels` (used by `only_failed`) has no `limit` — it's
+  one row per panel by construction, so it's exempt.
+- **`generate()` waits for a live `synthesize()` before unloading the
+  VLM.** Both share `StoryboardRunner._synth_lock`: `synthesize()` holds it
+  for its entire run, `generate()` acquires it only around the
+  `unload_vlm_during_generation` shutdown call (never across the submit
+  loop — submits don't need the VLM and shouldn't block on synthesis of an
+  unrelated panel). Without this, `generate()` could tear the VLM out from
+  under an in-progress `synthesize()` call.
 
 ## Development Rules
 
