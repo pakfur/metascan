@@ -24,11 +24,23 @@ Browser (Vue 3 SPA)              Backend (FastAPI)
 
 SQLite with WAL mode and a `threading.Lock` over a single connection.
 
-- **`media`** — serialized Media object as JSON, plus favorite status and playback speed.
+- **`media`** — serialized Media object as JSON, plus favorite status, playback speed, and a `hidden` flag (see below).
 - **`indices`** — inverted index for fast filtering (`source`, `model`, `extension`, `path`, `tag`, `prompt`, `lora`). Tag rows carry a `source` column (`'prompt'` / `'clip'` / `'both'`) so CLIP-derived tags survive rescans.
 - **`media_hashes`** — perceptual hashes and CLIP embedding status.
 - **`folders`** — `(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)`.
 - **`folder_items`** — `(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides.
+- **`storyboards`** — script + render settings: `name`, `source_text`, `aspect_ratio`, `style_block`, `negative`, `target_model`, `architecture`, `preset_id` (→ `workflow_presets`), `base_seed`, `batch_size`, `folder_id` (→ `folders`, `ON DELETE SET NULL`).
+- **`storyboard_subjects`** — recurring characters/props: `storyboard_id` (`ON DELETE CASCADE`), `name`, `description`, `lora_name`, `lora_strength`, `reference_path` (→ `media.file_path`, `ON DELETE SET NULL`), `sort_order`.
+- **`scenes`** — `storyboard_id` (`ON DELETE CASCADE`), `sort_order`, `name`, `location`, `time_of_day`, `mood`, `lighting`, `notes`.
+- **`panels`** — one generated shot: `scene_id` (`ON DELETE CASCADE`), `sort_order`, `shot_size`, `angle`, `lens`, `action`, `subject_ids` (JSON array), `notes`, `brief`, `prompt`, `prompt_locked`, `prompt_source`, `negative`, `selected_image_id` (→ `panel_images.id`, `ON DELETE SET NULL`).
+- **`panel_images`** — one rendered variant: `panel_id` (`ON DELETE CASCADE`), `file_path` (→ `media.file_path`, `ON DELETE CASCADE`), `seed`, `variant_index`, `prompt_used`, `preset_id`, `comfy_prompt_id`.
+
+`media.hidden` (`INTEGER NOT NULL DEFAULT 0`) keeps storyboard-generated
+variants out of the main grid until curated: ingest inserts every rendered
+file hidden, selecting a panel's keeper unhides it and re-hides whatever
+was selected before. `GET /api/media` filters `hidden = 0` by default;
+`include_hidden=true` opts back in. `hidden` is part of both grid covering
+indexes (see below) so the filter doesn't force a main-table scan.
 
 Covering indexes (`idx_media_summary_added`, `idx_media_summary_modified`) include every column read by the grid list endpoint, which is the reason `/api/media` returns in ~6 ms instead of ~25 s on large libraries. One-shot data migrations are gated on `PRAGMA user_version`.
 

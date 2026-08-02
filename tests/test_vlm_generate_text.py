@@ -140,3 +140,24 @@ async def test_generate_text_raises_when_not_ready():
     client = VlmClient()  # state == IDLE, _http is None
     with pytest.raises(VlmError, match="not ready"):
         await client.generate_text(system_prompt="s", user_prompt="u")
+
+
+@pytest.mark.asyncio
+async def test_generate_text_forwards_grammar(ready_client):
+    """grammar is transported exactly like generate_tags does: a top-level
+    "grammar" key in the request body."""
+    client, stub = ready_client
+    await client.generate_text(
+        system_prompt="sys", user_prompt="x", grammar='root ::= "x"'
+    )
+    body = stub.calls[-1]
+    assert body["grammar"] == 'root ::= "x"'
+
+
+@pytest.mark.asyncio
+async def test_generate_text_without_grammar_omits_key(ready_client):
+    """Default (no grammar) must not send a "grammar" key at all."""
+    client, stub = ready_client
+    await client.generate_text(system_prompt="sys", user_prompt="x")
+    body = stub.calls[-1]
+    assert "grammar" not in body

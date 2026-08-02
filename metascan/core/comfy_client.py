@@ -252,6 +252,7 @@ class ComfyClient:
         preset_id: int,
         params: GenerationParams,
         panel_id: Optional[int] = None,
+        output_dir: Optional[Path] = None,
     ) -> int:
         """Bypass the queue and hand a job straight to ComfyUI.
 
@@ -266,6 +267,7 @@ class ComfyClient:
                 preset_id,
                 params.to_json(),
                 panel_id,
+                str(output_dir) if output_dir else None,
             )
         )
         try:
@@ -402,6 +404,7 @@ class ComfyClient:
         params: GenerationParams,
         panel_id: Optional[int] = None,
         priority: bool = False,
+        output_dir: Optional[Path] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -426,6 +429,7 @@ class ComfyClient:
                 preset_id,
                 params.to_json(),
                 panel_id,
+                str(output_dir) if output_dir else None,
             )
         )
         if priority:
@@ -1037,7 +1041,8 @@ class ComfyClient:
             "images"
         ) or []
 
-        target_dir = self.output_dir_for(job_id)
+        stored = job.get("output_dir")
+        target_dir = Path(stored) if stored else self.output_dir_for(job_id)
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         written: List[Path] = []
