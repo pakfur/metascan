@@ -97,7 +97,7 @@ metascan/
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
 - **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
-- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync.
+- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, done, total, prompt_source}`) and `panel_images_changed` (`{storyboard_id, panel_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in `stores/folders.ts::evaluateCondition`. Tag conditions can't rely on `m.tags` because the summary endpoint omits it — the store fetches only the tag keys referenced by saved smart folders via `POST /api/filters/tag_paths` with `{keys: […]}` and evaluates against those path sets. A previous bulk-GET version fetched the entire inverted index and blocked the media list endpoint for 20+ s; never restore that shape.
@@ -291,6 +291,68 @@ metascan/
   `PRAGMA foreign_keys = ON`, an INSERT naming a foreign key to a missing
   table fails at runtime, and SQLite cannot add a foreign key to an existing
   table without rebuilding it.
+- **Storyboard domain (Phase B): five tables layered on top of ComfyUI's
+  `workflow_presets`/`generation_jobs`.** `storyboards` (script + render
+  settings) → `storyboard_subjects` (characters, LoRA + reference image) and
+  `scenes` (ON DELETE CASCADE from storyboards) → `panels` (ON DELETE
+  CASCADE from scenes, carries `subject_ids` as a JSON array) → `panel_images`
+  (ON DELETE CASCADE from panels, FK'd to `media(file_path)`). `media.hidden`
+  (INTEGER, default 0) keeps generated variants out of the main grid until
+  curated: `StoryboardRunner._ingest_outputs` inserts every rendered file
+  hidden, `db.select_panel_image` unhides the chosen keeper and re-hides
+  whatever was previously selected, and swapping the keeper is symmetric
+  (old keeper re-hidden, new keeper unhidden). `GET /api/media` defaults to
+  `hidden = 0`; pass `include_hidden=true` to see everything. `hidden` was
+  added to both grid covering indexes (`idx_media_summary_added`,
+  `idx_media_summary_modified`) alongside the column itself — see the
+  covering-index rule above.
+- **`panels.prompt_locked` / `prompt_source` gate re-synthesis.**
+  `prompt_source` is one of `'brief'` (deterministic template, no VLM),
+  `'llm'` (VLM-composed), or `'user'` (hand-edited). `StoryboardRunner.synthesize`
+  skips any panel with `prompt_locked=1` unless the caller explicitly named
+  it in `panel_ids` with `force=true`. `PATCH /api/storyboard/panels/{id}`
+  sets `prompt_locked=1, prompt_source="user"` server-side whenever the body
+  includes `prompt` — the caller cannot leave a hand-edited prompt unlocked
+  by also sending `prompt_locked=false` in the same request; the server wins.
+- **Style block is concatenated after synthesis, never paraphrased.**
+  `compose_brief` / `build_render_messages` never see `storyboards.style_block`
+  — `StoryboardRunner.synthesize` calls `finalize_prompt(text, style_block)`
+  *after* the VLM (or deterministic brief fallback) produces the per-panel
+  prompt, appending the style block verbatim. This keeps the global
+  look-and-feel from drifting through paraphrase across dozens of separate
+  LLM calls (spec §7.2).
+- **Deterministic per-panel seeds.** `panel_seed(base_seed, panel_sort_order,
+  variant_index) = base_seed + panel_sort_order * 1000 + variant_index`
+  (`metascan/core/storyboard_brief.py`). A reroll just advances
+  `variant_index` (read from `count_panel_images(panel_id)` at submit time),
+  so the same panel always starts from the same seed run-to-run.
+- **`bucket_dims` is keyed on `TargetModel`, not architecture.** `sd` and
+  `pony` (`SDXL_TARGETS`) snap to the nearest of five trained SDXL buckets;
+  every other target (Flux and later) computes the nearest multiple-of-16
+  dimensions at a ~1MP budget. Both `POST /api/storyboard` and
+  `PATCH /api/storyboard/{id}` call `bucket_dims(aspect_ratio, target_model)`
+  and answer 400 with the raw `ValueError` message on an unsupported aspect
+  ratio — validation happens at save time, not at generate time.
+- **Runner layering keeps the ComfyUI driver storyboard-agnostic.**
+  `StoryboardRunner` (`metascan/core/storyboard_runner.py`) is the only
+  layer that knows about subjects/scenes/panels; `comfy_client.py` stays a
+  generic job driver with no storyboard imports. Correlation flows one way:
+  `generate()` passes `panel_id` into `ComfyClient.submit(..., panel_id=...)`,
+  which round-trips it onto `generation_jobs.panel_id`; when ComfyUI
+  finishes, `handle_job_event` (registered via `comfy_client.on_job_event`
+  in the lifespan) reads the `job_outputs` payload, looks up the job's
+  `panel_id`, and ingests the produced files as `panel_images` rows. Events
+  the runner emits (`folder_created`, `folder_items_changed`,
+  `panel_images_changed`, `synthesis_progress`) go out through its own
+  `on_event` callback list, wired straight to `ws_manager.broadcast_sync` in
+  the lifespan — `backend/api/storyboard.py` never re-broadcasts them, only
+  translates exceptions to HTTP.
+- **`generation_jobs.output_dir`** holds the per-panel directory
+  `StoryboardRunner.generate` computes
+  (`<comfy.output_root>/<storyboard-slug>/scene_NN/panel_NN/`) so a job's
+  files land next to their panel instead of a flat `comfy.output_root`.
+  Non-storyboard submits (`POST /api/comfy/submit`) leave it NULL and the
+  ComfyUI driver falls back to `comfy.output_root` directly.
 
 ## Development Rules
 
