@@ -154,4 +154,89 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
     )
 
 
-__all__ = ["BindingError", "Bindings", "KINDS", "resolve_bindings"]
+@dataclass(frozen=True)
+class GenerationParams:
+    """One generation request's override values.
+
+    ``ref_image`` is a ComfyUI-side filename as returned by
+    ``POST /upload/image`` — not a local path.
+    """
+
+    positive: str
+    seed: int
+    width: int
+    height: int
+    batch_size: int
+    negative: Optional[str] = None
+    lora_name: Optional[str] = None
+    lora_strength: Optional[float] = None
+    ref_image: Optional[str] = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), sort_keys=True)
+
+    @classmethod
+    def from_json(cls, raw: str) -> "GenerationParams":
+        return cls(**json.loads(raw))
+
+
+def apply_overrides(
+    workflow: Dict[str, Any],
+    bindings: Bindings,
+    params: GenerationParams,
+) -> Dict[str, Any]:
+    """Return a deep copy of ``workflow`` with bound widgets overwritten.
+
+    A parameter supplied without a corresponding binding raises rather
+    than being silently dropped — quietly discarding a negative prompt or
+    a LoRA would produce a wrong image with no signal to the user.
+    """
+    graph: Dict[str, Any] = json.loads(json.dumps(workflow))
+
+    def write(node_id: str, widget: str, value: Any) -> None:
+        graph[node_id]["inputs"][widget] = value
+
+    write(bindings.positive, "text", params.positive)
+    write(bindings.seed, bindings.seed_widget, params.seed)
+    write(bindings.latent, "width", params.width)
+    write(bindings.latent, "height", params.height)
+    write(bindings.latent, "batch_size", params.batch_size)
+
+    if params.negative is not None:
+        if bindings.negative is None:
+            raise BindingError(
+                "A negative prompt was supplied but this workflow has no "
+                "MS_NEGATIVE node. Add one, or clear the negative prompt."
+            )
+        write(bindings.negative, "text", params.negative)
+
+    if params.lora_name is not None:
+        if bindings.lora is None:
+            raise BindingError(
+                "A LoRA was supplied but this workflow has no MS_LORA node. "
+                "Add one, or clear the LoRA."
+            )
+        strength = 0.8 if params.lora_strength is None else params.lora_strength
+        write(bindings.lora, "lora_name", params.lora_name)
+        write(bindings.lora, "strength_model", strength)
+        write(bindings.lora, "strength_clip", strength)
+
+    if params.ref_image is not None:
+        if bindings.ref_image is None:
+            raise BindingError(
+                "A reference image was supplied but this workflow has no "
+                "MS_REF_IMAGE node. Register it with kind='ref'."
+            )
+        write(bindings.ref_image, "image", params.ref_image)
+
+    return graph
+
+
+__all__ = [
+    "BindingError",
+    "Bindings",
+    "GenerationParams",
+    "KINDS",
+    "apply_overrides",
+    "resolve_bindings",
+]
