@@ -42,7 +42,15 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/upscale/queue` | List queue tasks |
 | GET | `/api/models/status` | Per-model availability rows + tier + gates |
 | GET | `/api/models/hardware` | Full hardware probe report |
-| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders` |
+| GET | `/api/comfy/status` | ComfyUI driver connection snapshot |
+| GET | `/api/comfy/presets` | List registered workflow presets |
+| POST | `/api/comfy/presets` | Register a workflow preset |
+| DELETE | `/api/comfy/presets/{id}` | Delete a workflow preset |
+| POST | `/api/comfy/submit` | Submit a generation job |
+| GET | `/api/comfy/jobs` | List generation jobs |
+| GET | `/api/comfy/jobs/{id}` | Get one generation job |
+| POST | `/api/comfy/jobs/{id}/cancel` | Cancel a queued or running job |
+| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy` |
 
 ## WebSocket Envelope
 
@@ -91,3 +99,82 @@ if the job id is unknown.
 Body: `{model_id: string}`. Switches the loaded VLM to a different model
 in the `vlm_models.REGISTRY`. Cancels any in-flight retag jobs first.
 Returns the new VlmClient snapshot. 400 if `model_id` isn't recognised.
+
+## ComfyUI driver (`/api/comfy/*`)
+
+The `ComfyClient` singleton is constructed in the FastAPI lifespan from the
+`comfy` section of `config.json` (see `docs/configuration.md`) and connects
+to an existing ComfyUI server — metascan never spawns one. A ComfyUI that
+isn't reachable yet is not an error: `ComfyClient.start()` never blocks, and
+the driver reconnects with backoff once ComfyUI comes up. Endpoints that
+need the network (`POST /submit`, `POST /jobs/{id}/cancel`,
+`POST|DELETE /presets*`) return 503 only in the (non-standard) case where no
+`ComfyClient` singleton was installed at all; read endpoints
+(`GET /status|/presets|/jobs*`) always succeed.
+
+### `GET /api/comfy/status`
+Returns the driver's connection snapshot: `{base_url, client_id, in_flight}`.
+When no client is installed, returns `{base_url: null, client_id: null,
+in_flight: 0}` with a 200 — this endpoint never errors.
+
+### `GET /api/comfy/presets`
+Returns registered workflow presets, summary shape (omits the workflow
+graph): `[{id, name, kind, bindings, created_at, updated_at}, ...]`.
+
+### `POST /api/comfy/presets`
+Body: `{name: string, kind: "t2i" | "ref", workflow: object}`, where
+`workflow` is a ComfyUI API-format export with `MS_*` node titles. Returns
+`{id: int}`. 400 with the missing/invalid title list if the workflow
+doesn't satisfy the `MS_*` binding contract (`BindingError`).
+
+### `DELETE /api/comfy/presets/{id}`
+Returns `{status: "deleted"}`. 404 if the preset doesn't exist.
+
+### `POST /api/comfy/submit`
+Body:
+```json
+{
+  "preset_id": 1,
+  "positive": "a cat",
+  "seed": 42,
+  "width": 1024,
+  "height": 576,
+  "batch_size": 1,
+  "negative": null,
+  "lora_name": null,
+  "lora_strength": null,
+  "ref_image": null,
+  "priority": false
+}
+```
+Returns `{job_id: int}` immediately — the job is enqueued and reaches
+ComfyUI once an `in_flight` slot frees up (or right away if `priority` is
+`true`, which jumps the queue). 400 if the preset doesn't support a
+supplied parameter (e.g. `negative` with no `MS_NEGATIVE` node). 503 if the
+driver isn't installed, or if ComfyUI rejects/is unreachable — the detail
+message carries the configured `base_url`.
+
+### `GET /api/comfy/jobs`
+Query params: `state` (optional, filters to one state), `limit` (default
+100). Returns generation job rows, newest-id-last.
+
+### `GET /api/comfy/jobs/{id}`
+Returns one generation job row: `{id, preset_id, panel_id, state, params,
+comfy_prompt_id, error, created_at, started_at, finished_at}`. `state` is
+one of `queued | running | done | failed | cancelled`. 404 if unknown.
+
+### `POST /api/comfy/jobs/{id}/cancel`
+Cancels a queued or running job — a queued job never reaches ComfyUI; a
+running job is interrupted there. Returns `{status: "cancelled"}`. 404 if
+the job doesn't exist.
+
+### `comfy` WebSocket channel
+Bridged from `ComfyClient.on_job_event` via
+`ws_manager.broadcast_sync("comfy", event, payload)`:
+
+- **`job_update`** — `{job_id, state, error}`, sent on every state
+  transition (queued → running → done/failed/cancelled).
+- **`job_progress`** — `{job_id, value, max}`, ComfyUI's step progress for
+  the running job.
+- **`job_outputs`** — `{job_id, files}`, sent once a job's images have been
+  downloaded and ingested; `files` is a list of local paths.

@@ -223,6 +223,33 @@ metascan/
   promoted to WARNING. The 200-line ring buffer (`_stderr_ring`) is
   attached to crash reports by `_wait_exit` so debugging info still
   reaches the user on a real failure.
+- **ComfyUI is driven, not just parsed.** `metascan/core/comfy_client.py`
+  submits jobs to a ComfyUI server (the extractors in
+  `metascan/extractors/comfyui*.py` remain read-only metadata parsers, a
+  separate concern). A workflow is registered as an API-format graph whose
+  nodes are titled with the `MS_*` convention (`MS_POSITIVE`, `MS_NEGATIVE`,
+  `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_REF_IMAGE`);
+  `comfy_bindings.resolve_bindings` maps titles to node ids at registration
+  time and **fails loudly** on a missing required title. Titles are used
+  rather than node ids because ComfyUI renumbers nodes on re-save.
+- **Metascan owns the ComfyUI job queue.** `ComfyClient` holds at most
+  `comfy.in_flight` jobs inside ComfyUI at a time so a user-requested reroll
+  can jump the queue and cancellation stays responsive. One persistent
+  WebSocket per app (not per job) consumes ComfyUI's event stream; the
+  `execution_error` node type and message go verbatim into
+  `generation_jobs.error`.
+- **Generated images are fetched over HTTP, never read from disk.**
+  `collect_outputs` pulls each image via `/view` and writes it under
+  `comfy.output_root`, so a remote or containerized ComfyUI works unchanged
+  and there is no watcher race. Ingest goes through the public
+  `Scanner.ingest_file`, wrapped in `asyncio.to_thread` — it does SQLite
+  writes and Pillow work, and running it on the event loop stalls the
+  WebSocket reader.
+- **`generation_jobs.panel_id` has no `REFERENCES` clause.** The `panels`
+  table arrives in Phase B of the storyboard feature; with
+  `PRAGMA foreign_keys = ON`, an INSERT naming a foreign key to a missing
+  table fails at runtime, and SQLite cannot add a foreign key to an existing
+  table without rebuilding it.
 
 ## Development Rules
 

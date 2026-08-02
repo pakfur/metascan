@@ -32,6 +32,13 @@ Configuration is stored in `config.json` in the application directory.
   "models": {
     "preload_at_startup": ["clip-large"],
     "huggingface_token": ""
+  },
+  "comfy": {
+    "base_url": "http://127.0.0.1:8188",
+    "in_flight": 2,
+    "unload_vlm_during_generation": true,
+    "output_root": "data/storyboards",
+    "request_timeout_s": 30.0
   }
 }
 ```
@@ -65,3 +72,13 @@ Managed by the Models tab in the config dialog. Both fields are surfaced via the
 - **`huggingface_token`** — masked in the UI; injected as `HF_TOKEN` into subprocess env so embedding/inference workers can pull gated weights.
 
 Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version.
+
+## `comfy`
+
+Read by `backend.config.get_comfy_config` and consumed by the FastAPI lifespan to construct the `ComfyClient` singleton (`GET /api/comfy/status` surfaces the resolved values at runtime, minus the timeout).
+
+- **`base_url`** — ComfyUI server URL. Default `"http://127.0.0.1:8188"`.
+- **`in_flight`** — max jobs `ComfyClient` holds inside ComfyUI at once; metascan queues the rest itself so a reroll can jump the line and cancellation stays responsive. Default `2`, floored at `1`.
+- **`unload_vlm_during_generation`** — reserved for the storyboard feature (Phase B/C), which will pause VLM tagging while ComfyUI is busy to free VRAM. Default `true`.
+- **`output_root`** — directory generated images are written to, relative to the repo root. Default `"data/storyboards"`.
+- **`request_timeout_s`** — HTTP timeout (seconds) for calls to ComfyUI (`/prompt`, `/upload/image`, `/history`, `/view`). Default `30.0`.
