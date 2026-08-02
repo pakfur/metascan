@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from backend.api import comfy as comfy_api
 from backend.main import create_app
 from metascan.core.comfy_bindings import BindingError
+from metascan.core.comfy_client import PresetNotFoundError
 from metascan.core.database_sqlite import DatabaseManager
 
 
@@ -75,6 +76,21 @@ class StubComfy:
         )
 
     async def submit(self, preset_id, params, panel_id=None, priority=False):
+        # Mirrors ComfyClient.submit()'s eager validation (Task 11 fix
+        # round 1): load the preset for real and run the same pure
+        # apply_overrides() binding check the client uses, so tests
+        # against this stub exercise the actual PresetNotFoundError /
+        # BindingError contract instead of a stub that always succeeds.
+        from metascan.core.comfy_bindings import Bindings, apply_overrides
+        import json as _json
+
+        row = self.db.get_workflow_preset(preset_id)
+        if row is None:
+            raise PresetNotFoundError(f"No workflow preset with id {preset_id}")
+        workflow = _json.loads(row["workflow_json"])
+        bindings = Bindings.from_json(row["bindings"])
+        apply_overrides(workflow, bindings, params)  # raises BindingError
+
         self.submitted.append((preset_id, params, panel_id, priority))
         return self.db.create_generation_job(preset_id, params.to_json(), panel_id)
 
@@ -208,6 +224,48 @@ def test_submit_without_a_client_is_503(client):
         },
     )
     assert r.status_code == 503
+
+
+def test_submit_against_a_missing_preset_is_404(client):
+    r = client.post(
+        "/api/comfy/submit",
+        json={
+            "preset_id": 9999,
+            "positive": "a cat",
+            "seed": 1,
+            "width": 512,
+            "height": 512,
+            "batch_size": 1,
+        },
+    )
+    assert r.status_code == 404
+    assert client.stub.submitted == []
+
+
+def test_submit_with_an_unbindable_parameter_is_400(client):
+    # t2i_workflow() has no MS_NEGATIVE node, so a negative prompt can't
+    # be bound. Must fail synchronously with 400, not succeed and fail
+    # the job later with a message that blames ComfyUI.
+    pid = client.post(
+        "/api/comfy/presets",
+        json={"name": "sdxl", "kind": "t2i", "workflow": t2i_workflow()},
+    ).json()["id"]
+
+    r = client.post(
+        "/api/comfy/submit",
+        json={
+            "preset_id": pid,
+            "positive": "a cat",
+            "negative": "blurry",
+            "seed": 1,
+            "width": 512,
+            "height": 512,
+            "batch_size": 1,
+        },
+    )
+    assert r.status_code == 400
+    assert "MS_NEGATIVE" in r.json()["detail"]
+    assert client.stub.submitted == []
 
 
 def test_get_and_list_jobs(client):
