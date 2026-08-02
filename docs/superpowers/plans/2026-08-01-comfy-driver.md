@@ -17,7 +17,8 @@
 - **`black` formats everything.** Run `black metascan/ backend/ tests/` before committing.
 - **`mypy` is strict on `metascan/core/*`.** Every new function there needs full annotations, including `-> None`.
 - **Never import a UI framework** (`PyQt6`, `qt_material`, `tkinter`) anywhere in `metascan/` or `backend/`.
-- **DB access is synchronous**, guarded by the existing `threading.Lock` in `DatabaseManager`, and wrapped with `asyncio.to_thread()` in the service layer. Never call a `DatabaseManager` method directly from an async route handler.
+- **DB access is synchronous**, guarded by the existing `threading.Lock` in `DatabaseManager`, and wrapped with `asyncio.to_thread()`. Never call a `DatabaseManager` method directly from an async route handler, from `ComfyClient`, or from the WebSocket reader loop. On WSL2 `/mnt/<drive>` mounts a single SQLite fsync runs 50–100 ms; doing that on the event loop stalls the reader and serializes concurrent jobs. **Synchronous test code may call `DatabaseManager` directly** — the rule is about the event loop, not about correctness.
+- **`ComfyClient` never queries the DB to identify an incoming event.** It keeps an in-memory `prompt_id → job_id` map, populated at dispatch and rehydrated from `generation_jobs` on WebSocket reconnect. ComfyUI emits `progress` many times per second per job; a SQLite `SELECT` per event is not acceptable even off-thread.
 - **No real ComfyUI, CLIP, or VLM in tests.** Use the fake server from Task 5.
 - **DELETE endpoints return `{"status": "deleted"}`, not 204.** The frontend `request<T>` wrapper calls `res.json()` on every response.
 - **`generation_jobs.panel_id` is a plain `INTEGER` with no `REFERENCES` clause.** `panels` does not exist until Phase B; with `PRAGMA foreign_keys = ON` an insert naming a FK to a missing table fails at runtime.
@@ -1753,6 +1754,7 @@ survives a restart.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -1798,6 +1800,11 @@ class ComfyClient:
         self.in_flight = max(1, int(in_flight))
         self.client_id = client_id or str(uuid4())
         self._http = httpx.AsyncClient(timeout=request_timeout_s)
+        # ComfyUI's prompt_id -> our generation_jobs.id. Populated at
+        # dispatch and rehydrated on reconnect (Task 7). Exists so the
+        # event reader never touches SQLite: ComfyUI emits `progress`
+        # many times per second per job.
+        self._prompt_to_job: Dict[str, int] = {}
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -1822,14 +1829,17 @@ class ComfyClient:
         written, so an unusable workflow never reaches the database.
         """
         bindings = resolve_bindings(workflow, kind)
-        return int(
-            self.db.create_workflow_preset(
-                name, kind, json.dumps(workflow), bindings.to_json()
-            )
+        preset_id = await asyncio.to_thread(
+            self.db.create_workflow_preset,
+            name,
+            kind,
+            json.dumps(workflow),
+            bindings.to_json(),
         )
+        return int(preset_id)
 
-    def _load_preset(self, preset_id: int) -> tuple:
-        row = self.db.get_workflow_preset(preset_id)
+    async def _load_preset(self, preset_id: int) -> tuple:
+        row = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if row is None:
             raise ComfyError(f"No workflow preset with id {preset_id}")
         return json.loads(row["workflow_json"]), Bindings.from_json(row["bindings"])
@@ -1846,11 +1856,16 @@ class ComfyClient:
 
         Returns the generation_jobs row id.
         """
-        workflow, bindings = self._load_preset(preset_id)
+        workflow, bindings = await self._load_preset(preset_id)
         graph = apply_overrides(workflow, bindings, params)
 
         job_id = int(
-            self.db.create_generation_job(preset_id, params.to_json(), panel_id)
+            await asyncio.to_thread(
+                self.db.create_generation_job,
+                preset_id,
+                params.to_json(),
+                panel_id,
+            )
         )
         try:
             resp = await self._http.post(
@@ -1862,21 +1877,33 @@ class ComfyClient:
             if not prompt_id:
                 raise ComfyError("ComfyUI accepted the prompt but returned no id")
         except ComfyError:
-            self.db.update_generation_job(
-                job_id, state="failed", error="no prompt_id in response",
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="failed",
+                error="no prompt_id in response",
                 finished_at=_now(),
             )
             raise
         except Exception as exc:
             message = f"ComfyUI at {self.base_url} rejected the job: {exc}"
             logger.warning(message)
-            self.db.update_generation_job(
-                job_id, state="failed", error=message, finished_at=_now()
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="failed",
+                error=message,
+                finished_at=_now(),
             )
             raise ComfyError(message) from exc
 
-        self.db.update_generation_job(
-            job_id, state="running", comfy_prompt_id=prompt_id, started_at=_now()
+        self._prompt_to_job[str(prompt_id)] = job_id
+        await asyncio.to_thread(
+            self.db.update_generation_job,
+            job_id,
+            state="running",
+            comfy_prompt_id=prompt_id,
+            started_at=_now(),
         )
         return job_id
 
@@ -2028,10 +2055,10 @@ Expected: FAIL — `AttributeError: 'ComfyClient' object has no attribute 'start
 
 - [ ] **Step 3: Implement**
 
-Add to the imports in `metascan/core/comfy_client.py`:
+Add to the imports in `metascan/core/comfy_client.py` (`asyncio` is already
+imported from Task 6):
 
 ```python
-import asyncio
 import contextlib
 from typing import Callable, List
 from urllib.parse import urlparse, urlunparse
@@ -2105,10 +2132,11 @@ Add the methods:
                 async with websockets.connect(self._ws_url()) as ws:
                     self.connected = True
                     attempt = 0
+                    await self._rehydrate_prompt_map()
                     ready.set()
                     async for raw in ws:
                         try:
-                            self._handle_event(json.loads(raw))
+                            await self._handle_event(json.loads(raw))
                         except Exception:
                             logger.debug("bad comfy event: %r", raw, exc_info=True)
             except asyncio.CancelledError:
@@ -2127,24 +2155,48 @@ Add the methods:
             attempt += 1
             await asyncio.sleep(delay)
 
-    def _job_for(self, prompt_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def _rehydrate_prompt_map(self) -> None:
+        """Rebuild prompt_id -> job_id after a reconnect.
+
+        A drop mid-run leaves in-flight jobs whose events we still need to
+        recognise. This is the only DB read the event path ever does, and
+        it happens once per connection rather than once per event.
+        """
+        try:
+            rows = await asyncio.to_thread(
+                self.db.list_generation_jobs, ["running"], 1000
+            )
+        except Exception:
+            logger.debug("could not rehydrate comfy prompt map", exc_info=True)
+            return
+        for row in rows:
+            prompt_id = row.get("comfy_prompt_id")
+            if prompt_id:
+                self._prompt_to_job.setdefault(str(prompt_id), int(row["id"]))
+
+    def _job_id_for(self, prompt_id: Optional[str]) -> Optional[int]:
+        """Resolve an event's prompt_id from memory only.
+
+        Never hits the database: ComfyUI emits `progress` many times per
+        second per job, and a SELECT per event would stall the reader on
+        slow filesystems even off-thread.
+        """
         if not prompt_id:
             return None
-        row = self.db.get_job_by_comfy_prompt_id(prompt_id)
-        return dict(row) if row else None
+        return self._prompt_to_job.get(str(prompt_id))
 
-    def _handle_event(self, msg: Dict[str, Any]) -> None:
+    async def _handle_event(self, msg: Dict[str, Any]) -> None:
         kind = msg.get("type")
         data = msg.get("data") or {}
-        job = self._job_for(data.get("prompt_id"))
-        if job is None:
+        job_id = self._job_id_for(data.get("prompt_id"))
+        if job_id is None:
             return  # an event for someone else's client, or a stale prompt
 
         if kind == "progress":
             self._emit(
                 "job_progress",
                 {
-                    "job_id": job["id"],
+                    "job_id": job_id,
                     "value": data.get("value"),
                     "max": data.get("max"),
                 },
@@ -2156,23 +2208,23 @@ Add the methods:
                 data.get("node_type") or "unknown node",
                 data.get("exception_message") or "execution failed",
             )
-            self._finish_job(job["id"], "failed", error=error)
+            await self._finish_job(job_id, "failed", error=error)
             return
 
         if kind == "executed":
-            self._on_executed(job, data)
+            await self._on_executed(job_id, data)
 
-    def _on_executed(self, job: Dict[str, Any], data: Dict[str, Any]) -> None:
+    async def _on_executed(self, job_id: int, data: Dict[str, Any]) -> None:
         """Overridden in Task 9 to download outputs before finishing."""
-        self._finish_job(job["id"], "done")
+        await self._finish_job(job_id, "done")
 
-    def _finish_job(
+    async def _finish_job(
         self, job_id: int, state: str, error: Optional[str] = None
     ) -> None:
         fields: Dict[str, Any] = {"state": state, "finished_at": _now()}
         if error is not None:
             fields["error"] = error
-        self.db.update_generation_job(job_id, **fields)
+        await asyncio.to_thread(self.db.update_generation_job, job_id, **fields)
         self._emit("job_update", {"job_id": job_id, "state": state, "error": error})
         event = self._job_done.get(job_id)
         if event is not None:
@@ -2182,7 +2234,7 @@ Add the methods:
         self, job_id: int, timeout: float = 10.0
     ) -> Dict[str, Any]:
         """Block until a job leaves 'running'. Returns the final row."""
-        current = self.db.get_generation_job(job_id)
+        current = await asyncio.to_thread(self.db.get_generation_job, job_id)
         if current is None:
             raise ComfyError(f"No generation job with id {job_id}")
         if current["state"] not in ("queued", "running"):
@@ -2197,7 +2249,7 @@ Add the methods:
             ) from exc
         finally:
             self._job_done.pop(job_id, None)
-        return dict(self.db.get_generation_job(job_id))
+        return dict(await asyncio.to_thread(self.db.get_generation_job, job_id))
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -2382,9 +2434,14 @@ Add the queue methods:
         The preset is validated up front so a bad preset id fails at the
         call site rather than silently inside the pump.
         """
-        self._load_preset(preset_id)
+        await self._load_preset(preset_id)
         job_id = int(
-            self.db.create_generation_job(preset_id, params.to_json(), panel_id)
+            await asyncio.to_thread(
+                self.db.create_generation_job,
+                preset_id,
+                params.to_json(),
+                panel_id,
+            )
         )
         if priority:
             self._queue.appendleft(job_id)
@@ -2400,7 +2457,9 @@ Add the queue methods:
             try:
                 while self._queue and len(self._running) < self.in_flight:
                     job_id = self._queue.popleft()
-                    job = self.db.get_generation_job(job_id)
+                    job = await asyncio.to_thread(
+                        self.db.get_generation_job, job_id
+                    )
                     if job is None or job["state"] != "queued":
                         continue  # cancelled while waiting
                     await self._dispatch(job_id, job)
@@ -2418,7 +2477,7 @@ Add the queue methods:
     async def _dispatch(self, job_id: int, job: Dict[str, Any]) -> None:
         self._running.add(job_id)
         try:
-            workflow, bindings = self._load_preset(job["preset_id"])
+            workflow, bindings = await self._load_preset(job["preset_id"])
             graph = apply_overrides(
                 workflow, bindings, GenerationParams.from_json(job["params"])
             )
@@ -2430,7 +2489,13 @@ Add the queue methods:
             prompt_id = resp.json().get("prompt_id")
             if not prompt_id:
                 raise ComfyError("ComfyUI returned no prompt_id")
-            self.db.update_generation_job(
+            # Register in the map BEFORE the DB write: ComfyUI can emit
+            # execution_start for this prompt while the write is still on
+            # the worker thread, and an event that arrives before the map
+            # entry exists is dropped as unrecognised.
+            self._prompt_to_job[str(prompt_id)] = job_id
+            await asyncio.to_thread(
+                self.db.update_generation_job,
                 job_id,
                 state="running",
                 comfy_prompt_id=prompt_id,
@@ -2443,7 +2508,7 @@ Add the queue methods:
             message = f"ComfyUI at {self.base_url} rejected the job: {exc}"
             logger.warning(message)
             self._running.discard(job_id)
-            self._finish_job(job_id, "failed", error=message)
+            await self._finish_job(job_id, "failed", error=message)
 
     async def cancel(self, job_id: int) -> None:
         """Cancel a queued or running job.
@@ -2451,14 +2516,14 @@ Add the queue methods:
         Queued jobs are simply dropped. A running job is interrupted in
         ComfyUI; already-generated images from earlier jobs are kept.
         """
-        job = self.db.get_generation_job(job_id)
+        job = await asyncio.to_thread(self.db.get_generation_job, job_id)
         if job is None or job["state"] not in ("queued", "running"):
             return
 
         if job["state"] == "queued":
             with contextlib.suppress(ValueError):
                 self._queue.remove(job_id)
-            self._finish_job(job_id, "cancelled")
+            await self._finish_job(job_id, "cancelled")
             return
 
         prompt_id = job["comfy_prompt_id"]
@@ -2471,7 +2536,9 @@ Add the queue methods:
         except Exception as exc:
             logger.warning("Could not interrupt ComfyUI: %s", exc)
         self._running.discard(job_id)
-        self._finish_job(job_id, "cancelled")
+        if prompt_id:
+            self._prompt_to_job.pop(str(prompt_id), None)
+        await self._finish_job(job_id, "cancelled")
         self._pump_wake.set()
 
     async def cancel_all(self) -> None:
@@ -2479,7 +2546,7 @@ Add the queue methods:
         queued = list(self._queue)
         self._queue.clear()
         for job_id in queued:
-            self._finish_job(job_id, "cancelled")
+            await self._finish_job(job_id, "cancelled")
         for job_id in list(self._running):
             await self.cancel(job_id)
 ```
@@ -2632,7 +2699,33 @@ Expected: FAIL — `AttributeError: 'ComfyClient' object has no attribute 'outpu
 
 - [ ] **Step 3: Implement**
 
-Replace the placeholder `_on_executed` from Task 7 with a version that
+First, extend `__init__` with a holder for the collection tasks — a bare
+`asyncio.create_task` result is only weakly referenced by the event loop and
+can be garbage-collected mid-flight:
+
+```python
+        self._collect_tasks: set = set()
+```
+
+and make the tasks self-evict plus be cancelled on shutdown. In
+`_on_executed` (below) each task is added to the set; add this line right
+after the `self._collect_tasks.add(...)` call:
+
+```python
+        for task in list(self._collect_tasks):
+            if task.done():
+                self._collect_tasks.discard(task)
+```
+
+In `shutdown()`, before cancelling `_pump_task`, add:
+
+```python
+        for task in list(self._collect_tasks):
+            task.cancel()
+        self._collect_tasks.clear()
+```
+
+Then replace the placeholder `_on_executed` from Task 7 with a version that
 schedules collection, and add the collection machinery:
 
 ```python
@@ -2641,21 +2734,27 @@ schedules collection, and add the collection machinery:
         overrides this with a storyboard/scene/panel tree."""
         return self.output_root / f"job_{job_id:06d}"
 
-    def _on_executed(self, job: Dict[str, Any], data: Dict[str, Any]) -> None:
+    async def _on_executed(self, job_id: int, data: Dict[str, Any]) -> None:
         """Kick off output collection; the job stays 'running' until the
-        files are on disk and ingested."""
-        prompt_id = job.get("comfy_prompt_id") or data.get("prompt_id")
-        asyncio.create_task(self._complete_job(int(job["id"]), str(prompt_id)))
+        files are on disk and ingested.
+
+        Spawned as a task rather than awaited so downloading one job's
+        images never blocks the reader from seeing another job's events.
+        """
+        prompt_id = str(data.get("prompt_id") or "")
+        self._collect_tasks.add(
+            asyncio.create_task(self._complete_job(job_id, prompt_id))
+        )
 
     async def _complete_job(self, job_id: int, prompt_id: str) -> None:
         try:
             files = await self.collect_outputs(job_id, prompt_id)
         except Exception as exc:
             logger.warning("Output collection failed for job %s: %s", job_id, exc)
-            self._finish_job(job_id, "failed", error=str(exc))
+            await self._finish_job(job_id, "failed", error=str(exc))
             return
         self._emit("job_outputs", {"job_id": job_id, "files": [str(f) for f in files]})
-        self._finish_job(job_id, "done")
+        await self._finish_job(job_id, "done")
 
     async def _download_image(self, entry: Dict[str, Any], target: Path) -> None:
         resp = await self._http.get(
@@ -2675,12 +2774,12 @@ schedules collection, and add the collection machinery:
         Images are pulled over HTTP rather than read from ComfyUI's output
         directory so a remote or containerized ComfyUI works unchanged.
         """
-        job = self.db.get_generation_job(job_id)
+        job = await asyncio.to_thread(self.db.get_generation_job, job_id)
         if job is None:
             raise ComfyError(f"No generation job with id {job_id}")
 
         entry = await self.fetch_history(prompt_id)
-        _, bindings = self._load_preset(job["preset_id"])
+        _, bindings = await self._load_preset(job["preset_id"])
         images = ((entry.get("outputs") or {}).get(bindings.save) or {}).get(
             "images"
         ) or []
