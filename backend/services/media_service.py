@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -23,12 +24,20 @@ class MediaService:
         return await asyncio.to_thread(self.db.get_all_media_with_details)
 
     async def get_all_media_summaries(
-        self, sort: str = "date_added", favorites_only: bool = False
+        self,
+        sort: str = "date_added",
+        favorites_only: bool = False,
+        include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
         """Lightweight list for the grid — all fields come from materialized
         columns so this stays sub-second regardless of sort."""
         summaries = await asyncio.to_thread(
-            self.db.get_all_media_summaries, favorites_only, sort
+            partial(
+                self.db.get_all_media_summaries,
+                favorites_only=favorites_only,
+                sort=sort,
+                include_hidden=include_hidden,
+            )
         )
         if sort == "file_name":
             summaries.sort(key=lambda s: Path(s["file_path"]).name.lower())

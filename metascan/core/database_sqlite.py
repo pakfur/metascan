@@ -240,6 +240,12 @@ class DatabaseManager:
                 "photo_exposure",
                 "ALTER TABLE media ADD COLUMN photo_exposure TEXT",
             )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "hidden",
+                "ALTER TABLE media ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+            )
 
             # Covering indexes for the grid list endpoint. The `media` row
             # layout is `[file_path][data][is_favorite]...[width]...`, so
@@ -265,6 +271,7 @@ class DatabaseManager:
                 "gps_latitude",
                 "gps_longitude",
                 "orientation",
+                "hidden",
             )
             for idx_name in ("idx_media_summary_added", "idx_media_summary_modified"):
                 ddl_row = conn.execute(
@@ -282,7 +289,7 @@ class DatabaseManager:
                     width, height, file_size, frame_rate, duration,
                     modified_at,
                     camera_make, camera_model, datetime_original,
-                    gps_latitude, gps_longitude, orientation
+                    gps_latitude, gps_longitude, orientation, hidden
                 )
                 """
             )
@@ -294,7 +301,7 @@ class DatabaseManager:
                     width, height, file_size, frame_rate, duration,
                     created_at,
                     camera_make, camera_model, datetime_original,
-                    gps_latitude, gps_longitude, orientation
+                    gps_latitude, gps_longitude, orientation, hidden
                 )
                 """
             )
@@ -1047,6 +1054,7 @@ class DatabaseManager:
         self,
         favorites_only: bool = False,
         sort: str = "date_added",
+        include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return a per-file summary tailored for the thumbnail grid.
 
@@ -1061,13 +1069,18 @@ class DatabaseManager:
             # file_name sort happens in the service layer (Python basename
             # extraction) — SQLite has no cheap basename function.
         }.get(sort, "created_at DESC")
-        where = "WHERE is_favorite = 1" if favorites_only else ""
+        conditions = []
+        if favorites_only:
+            conditions.append("is_favorite = 1")
+        if not include_hidden:
+            conditions.append("hidden = 0")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
             "SELECT file_path, is_favorite, playback_speed, "
             "width, height, file_size, frame_rate, duration, "
             "modified_at, created_at, "
             "camera_make, camera_model, datetime_original, "
-            "gps_latitude, gps_longitude, orientation "
+            "gps_latitude, gps_longitude, orientation, hidden "
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
@@ -1100,6 +1113,7 @@ class DatabaseManager:
                             "gps_latitude": row["gps_latitude"],
                             "gps_longitude": row["gps_longitude"],
                             "orientation": row["orientation"],
+                            "hidden": bool(row["hidden"]),
                         }
                     )
         except Exception as e:
@@ -1629,6 +1643,21 @@ class DatabaseManager:
                     return cursor.rowcount > 0  # type: ignore[no-any-return]
         except Exception as e:
             logger.error(f"Failed to set favorite for {file_path}: {e}")
+            return False
+
+    def set_media_hidden(self, file_path: str, hidden: bool) -> bool:
+        """Hide/unhide one media row from the default grid query."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    cur = conn.execute(
+                        "UPDATE media SET hidden = ? WHERE file_path = ?",
+                        (1 if hidden else 0, to_posix_path(file_path)),
+                    )
+                    conn.commit()
+                    return cur.rowcount > 0  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.error(f"Failed to set hidden for {file_path}: {e}")
             return False
 
     def get_favorite_media_paths(self) -> Set[str]:
