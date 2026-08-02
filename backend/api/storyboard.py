@@ -22,7 +22,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
-from backend.services.storyboard_service import ParentNotFoundError, StoryboardService
+from backend.services.storyboard_service import (
+    InvalidReferenceError,
+    ParentNotFoundError,
+    StoryboardService,
+)
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
@@ -333,6 +337,8 @@ async def create_subject(storyboard_id: int, body: SubjectCreate) -> Dict[str, i
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidReferenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": subject_id}
 
 
@@ -343,7 +349,10 @@ async def patch_subject(subject_id: int, body: SubjectPatch) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail=f"No subject {subject_id}")
     fields = body.model_dump(exclude_none=True)
     if fields:
-        await svc.update_subject(subject_id, **fields)
+        try:
+            await svc.update_subject(subject_id, **fields)
+        except InvalidReferenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "updated"}
 
 

@@ -8,6 +8,7 @@ is a thin asyncio.to_thread hop, matching backend/services/comfy_service.py.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from typing import Any, Dict, List, Optional
 
 
@@ -19,6 +20,16 @@ class ParentNotFoundError(RuntimeError):
     surface as a raw sqlite3.IntegrityError (or a 500), the service
     pre-checks the parent and raises this so the route can turn it into a
     404.
+    """
+
+
+class InvalidReferenceError(RuntimeError):
+    """A subject's ``reference_path`` doesn't name a row in ``media``.
+
+    ``storyboard_subjects.reference_path`` FKs ``media(file_path)``; an
+    unknown path raises ``sqlite3.IntegrityError`` from SQLite. That's not
+    actionable as a raw 500, so create/update_subject catch it here and
+    the route maps this to a 400.
     """
 
 
@@ -69,10 +80,22 @@ class StoryboardService:
     async def create_subject(self, storyboard_id: int, **fields: Any) -> int:
         if await self.get_storyboard(storyboard_id) is None:
             raise ParentNotFoundError(f"no storyboard with id {storyboard_id}")
-        return await asyncio.to_thread(self.db.create_subject, storyboard_id, **fields)
+        try:
+            return await asyncio.to_thread(
+                self.db.create_subject, storyboard_id, **fields
+            )
+        except sqlite3.IntegrityError as exc:
+            raise InvalidReferenceError(
+                "reference image is not in the media library"
+            ) from exc
 
     async def update_subject(self, subject_id: int, **fields: Any) -> None:
-        await asyncio.to_thread(self.db.update_subject, subject_id, **fields)
+        try:
+            await asyncio.to_thread(self.db.update_subject, subject_id, **fields)
+        except sqlite3.IntegrityError as exc:
+            raise InvalidReferenceError(
+                "reference image is not in the media library"
+            ) from exc
 
     async def delete_subject(self, subject_id: int) -> bool:
         return await asyncio.to_thread(self.db.delete_subject, subject_id)

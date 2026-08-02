@@ -352,6 +352,30 @@ def test_subject_crud(client):
     assert r.json() == {"status": "deleted"}
 
 
+def test_create_subject_unknown_reference_path_is_400(client):
+    sid = _create_storyboard(client)
+    r = client.post(
+        f"/api/storyboard/{sid}/subjects",
+        json={"name": "Alice", "description": "x", "reference_path": "/nope.png"},
+    )
+    assert r.status_code == 400
+    assert "reference image" in r.json()["detail"]
+
+
+def test_patch_subject_unknown_reference_path_is_400(client):
+    sid = _create_storyboard(client)
+    subj_id = client.post(
+        f"/api/storyboard/{sid}/subjects",
+        json={"name": "Alice", "description": "x"},
+    ).json()["id"]
+    r = client.patch(
+        f"/api/storyboard/subjects/{subj_id}",
+        json={"reference_path": "/nope.png"},
+    )
+    assert r.status_code == 400
+    assert "reference image" in r.json()["detail"]
+
+
 def test_create_subject_unknown_storyboard_is_404(client):
     r = client.post(
         "/api/storyboard/9999/subjects",
