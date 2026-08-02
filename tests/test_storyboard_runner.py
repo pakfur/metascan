@@ -76,7 +76,19 @@ def _media(path: str) -> Media:
 
 
 class StubComfy:
-    def __init__(self):
+    """Mirrors the parts of ComfyClient the runner touches.
+
+    ``submit`` also writes a real ``generation_jobs`` row (state defaults
+    to 'queued'), matching ``ComfyClient.submit`` -- the runner's seed
+    dedup logic (finding 5) reads pending jobs back via
+    ``db.list_generation_jobs``, so the stub has to behave like the real
+    thing here even though it never simulates ComfyUI actually running the
+    job (no ``job_outputs`` event fires unless a test calls
+    ``handle_job_event`` itself).
+    """
+
+    def __init__(self, db=None):
+        self.db = db
         self.submitted = []  # (preset_id, params, panel_id, priority, output_dir)
         self.cancelled = []
         self.uploaded = []
@@ -86,6 +98,15 @@ class StubComfy:
         self, preset_id, params, panel_id=None, priority=False, output_dir=None
     ):
         self.submitted.append((preset_id, params, panel_id, priority, output_dir))
+        if self.db is not None:
+            return int(
+                self.db.create_generation_job(
+                    preset_id,
+                    params.to_json(),
+                    panel_id,
+                    str(output_dir) if output_dir else None,
+                )
+            )
         self._next_job_id += 1
         return self._next_job_id
 
@@ -186,8 +207,8 @@ def events():
 
 
 @pytest.fixture
-def comfy():
-    return StubComfy()
+def comfy(db):
+    return StubComfy(db)
 
 
 class Board:
@@ -368,6 +389,52 @@ async def test_synthesize_emits_progress(db, comfy, events, tmp_path, board):
     assert ("storyboard", "synthesis_progress") in kinds
 
 
+async def test_synthesize_emits_complete_on_success(db, comfy, events, tmp_path, board):
+    """POST .../synthesize is 202 fire-and-forget; synthesis_complete is
+    the only signal a client gets that the background run finished."""
+    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    out = await runner.synthesize(board.sb_id)
+
+    complete = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "synthesis_complete"
+    ]
+    assert len(complete) == 1
+    assert complete[0] == {"storyboard_id": board.sb_id, **out}
+    assert not any(ev == "synthesis_error" for _, ev, _ in events)
+
+
+async def test_synthesize_emits_error_and_reraises_on_failure(
+    db, comfy, events, tmp_path, board
+):
+    """If the background run raises (e.g. the VLM won't load), the runner
+    must emit synthesis_error rather than fail silently, and still
+    re-raise for any direct (non-route) caller."""
+
+    class ExplodingVlm(StubVlm):
+        async def ensure_started(self, model_id):
+            raise RuntimeError("model failed to load")
+
+    vlm = ExplodingVlm()
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    with pytest.raises(RuntimeError, match="model failed to load"):
+        await runner.synthesize(board.sb_id)
+
+    errors = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "synthesis_error"
+    ]
+    assert len(errors) == 1
+    assert errors[0]["storyboard_id"] == board.sb_id
+    assert "model failed to load" in errors[0]["error"]
+    assert not any(ev == "synthesis_complete" for _, ev, _ in events)
+
+
 # ---- generate --------------------------------------------------------
 
 
@@ -470,6 +537,31 @@ async def test_generate_single_panel_is_priority_and_advances_seed(
     assert params.seed == 1000 + 0 + 2  # variant base = existing count
 
 
+async def test_generate_reroll_before_ingest_advances_seed(
+    db, comfy, events, tmp_path, board
+):
+    """Two generate() calls for the same panel *before the first has
+    ingested* (no panel_images pre-seeded, and StubComfy never fires
+    job_outputs) must not submit the same seed twice -- count_panel_images
+    alone can't see the first call's still-queued job."""
+    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(board.sb_id)
+
+    await runner.generate(board.sb_id, panel_ids=[board.panel0])
+    await runner.generate(board.sb_id, panel_ids=[board.panel0])
+
+    seeds = [
+        params.seed
+        for _, params, panel_id, _, _ in comfy.submitted
+        if panel_id == board.panel0
+    ]
+    assert len(seeds) == 2
+    assert seeds[0] != seeds[1]
+    # board fixture's batch_size=2 (see the `board` fixture docstring).
+    assert seeds[1] - seeds[0] == 2
+
+
 async def test_generate_only_failed(db, comfy, events, tmp_path, board, preset_id):
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
@@ -494,6 +586,42 @@ async def test_generate_unloads_vlm(db, comfy, events, tmp_path, board):
     await runner.generate(board.sb_id)
 
     assert vlm.shutdowns == 1  # unload_vlm_during_generation=True (default)
+
+
+async def test_generate_waits_for_synth_lock_before_unloading_vlm(
+    db, comfy, events, tmp_path, board
+):
+    """generate()'s VLM-unload step must not run while a synthesize() (or
+    anything else holding _synth_lock) is in progress -- it would tear the
+    VLM out from under it. Race this deterministically by holding the lock
+    in the test itself: while held, generate() must not be able to finish
+    (asyncio.Lock guarantees vlm.shutdown() can't run), and once released
+    it must proceed and unload."""
+    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(board.sb_id)
+    await runner.generate(board.sb_id)  # pre-create the folder so the
+    # second generate() call below doesn't also need the (separate)
+    # folder lock -- keeps the only await-then-block point the synth lock.
+    vlm.shutdowns = 0  # reset the count from the priming generate() above
+
+    await runner._synth_lock.acquire()
+    try:
+        task = asyncio.create_task(runner.generate(board.sb_id))
+        with pytest.raises(asyncio.TimeoutError):
+            # If generate() acquires the lock correctly, it cannot finish
+            # (and therefore cannot call vlm.shutdown()) until we release
+            # it below, so this must time out. A generate() that forgot
+            # to take the lock would finish almost immediately instead,
+            # and this would NOT raise -- failing the test.
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        assert vlm.shutdowns == 0, "unloaded the VLM while the lock was held"
+    finally:
+        runner._synth_lock.release()
+
+    jobs = await task
+    assert jobs
+    assert vlm.shutdowns == 1
 
 
 async def test_generate_negative_without_binding_fails_before_submitting(
@@ -614,6 +742,56 @@ async def test_ingest_on_job_outputs(db, comfy, events, tmp_path, board, preset_
     fid = db.get_storyboard(board.sb_id)["folder_id"]
     assert set(p["file_path"] for p in imgs) <= set(db.get_folder(fid)["items"])
     assert ("storyboard", "panel_images_changed") in [(c, e) for c, e, _ in events]
+
+
+async def test_ingest_event_payload_uses_normalized_paths(
+    db, comfy, events, tmp_path, board, preset_id, monkeypatch
+):
+    """panel_images_changed's ``files`` must reflect the SAME normalized
+    (to_posix_path-stored, then to_native_path-converted) value that was
+    actually inserted into panel_images -- not the raw pre-conversion
+    string from the comfy job_outputs payload. Patch to_native_path with a
+    distinguishable transform (mirroring the DB-layer test) so the
+    assertion can't pass merely because POSIX round-trips as a no-op on a
+    Linux test host."""
+
+    def fake_to_native(p):
+        return f"NATIVE::{p}"
+
+    monkeypatch.setattr(
+        "metascan.core.storyboard_runner.to_native_path", fake_to_native
+    )
+
+    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(board.sb_id)
+    await runner.generate(board.sb_id)
+
+    params = GenerationParams(
+        positive="a prompt, graphite sketch",
+        seed=1,
+        width=1344,
+        height=768,
+        batch_size=1,
+    )
+    job_id = db.create_generation_job(
+        preset_id, params.to_json(), panel_id=board.panel0
+    )
+
+    f1 = tmp_path / "raw_from_comfy.png"
+    f1.write_bytes(b"x")
+    db.save_media(_media(str(f1)))
+
+    runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
+    await runner.aclose()
+
+    changed = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "panel_images_changed" and data["files"]
+    ]
+    assert changed
+    assert changed[-1]["files"] == [f"NATIVE::{str(f1)}"]
 
 
 async def test_ingest_ignores_jobs_without_panel(

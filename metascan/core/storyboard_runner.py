@@ -31,6 +31,7 @@ from metascan.core.storyboard_parse import (
 from metascan.core.storyboard_synthesis import build_render_messages, finalize_prompt
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_models import REGISTRY
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,38 @@ class StoryboardRunner:
     # ---- synthesize ----------------------------------------------------
 
     async def synthesize(
+        self,
+        storyboard_id: int,
+        panel_ids: Optional[List[int]] = None,
+        force: bool = False,
+    ) -> Dict[str, int]:
+        """Compose per-panel prompts, emitting a terminal WS event.
+
+        The route fires this as a fire-and-forget background task (202
+        response), so a failure here (e.g. the VLM won't load) would
+        otherwise be completely silent to the client. Emits
+        ``synthesis_complete`` with the same counts this returns on
+        success, or ``synthesis_error`` (and re-raises, for any direct
+        caller that isn't going through the fire-and-forget route) on
+        failure.
+        """
+        try:
+            counts = await self._synthesize_locked(storyboard_id, panel_ids, force)
+        except Exception as exc:
+            self._emit(
+                "storyboard",
+                "synthesis_error",
+                {"storyboard_id": storyboard_id, "error": str(exc)},
+            )
+            raise
+        self._emit(
+            "storyboard",
+            "synthesis_complete",
+            {"storyboard_id": storyboard_id, **counts},
+        )
+        return counts
+
+    async def _synthesize_locked(
         self,
         storyboard_id: int,
         panel_ids: Optional[List[int]] = None,
@@ -374,9 +407,16 @@ class StoryboardRunner:
                 tree["folder_id"] = folder_id
 
         if self.unload_vlm_during_generation:
-            vlm = self.get_vlm()
-            if vlm is not None and vlm.model_id:
-                await vlm.shutdown()
+            # Hold the synth lock only around the unload check+call itself
+            # -- never across the submit loop below -- so a synthesize()
+            # in progress finishes (or at least isn't torn out from under
+            # itself) before generate() rips the VLM out from under it.
+            # synthesize() acquires the same lock for its whole run, so
+            # this simply waits for it to finish rather than racing.
+            async with self._synth_lock:
+                vlm = self.get_vlm()
+                if vlm is not None and vlm.model_id:
+                    await vlm.shutdown()
 
         width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
         slug = storyboard_slug(storyboard_id, tree["name"])
@@ -384,9 +424,21 @@ class StoryboardRunner:
 
         job_ids: List[int] = []
         for scene, panel in targets:
-            variant_base = await asyncio.to_thread(
-                self.db.count_panel_images, panel["id"]
+            committed = await asyncio.to_thread(self.db.count_panel_images, panel["id"])
+            # count_panel_images only sees rows already ingested from a
+            # finished job. Two generate() calls for the same panel before
+            # the first has ingested (e.g. two rerolls back-to-back) would
+            # otherwise both read the same committed count and submit an
+            # identical seed. Fold in batch_size for every still-pending
+            # (queued/running) job against this panel so a second reroll
+            # advances the seed even before the first one's outputs land.
+            pending_jobs = await asyncio.to_thread(
+                self.db.list_generation_jobs,
+                states=["queued", "running"],
+                panel_ids=[panel["id"]],
+                limit=10000,
             )
+            variant_base = committed + tree["batch_size"] * len(pending_jobs)
             seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
             effective_negative = panel.get("negative") or tree.get("negative")
             primary = _primary_subject(panel)
@@ -470,21 +522,27 @@ class StoryboardRunner:
             params = {}
         base = await asyncio.to_thread(self.db.count_panel_images, panel_id)
 
+        # POSIX-normalized paths, used for every internal DB write
+        # (set_media_hidden / create_panel_image / add_folder_items all
+        # expect -- and themselves normalize to -- the stored form). Kept
+        # separate from the WS-facing list below so a to_native_path
+        # conversion never leaks into an FK lookup.
         inserted: List[str] = []
         for i, f in enumerate(payload.get("files") or []):
+            posix_path = to_posix_path(f)
             try:
-                await asyncio.to_thread(self.db.set_media_hidden, f, True)
+                await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
                 await asyncio.to_thread(
                     self.db.create_panel_image,
                     panel_id,
-                    file_path=f,
+                    file_path=posix_path,
                     seed=params.get("seed"),
                     variant_index=base + i,
                     prompt_used=params.get("positive"),
                     preset_id=job.get("preset_id"),
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                 )
-                inserted.append(f)
+                inserted.append(posix_path)
             except Exception:
                 logger.warning(
                     "Could not ingest panel image %s for job %s",
@@ -500,13 +558,17 @@ class StoryboardRunner:
             await asyncio.to_thread(self.db.add_folder_items, folder_id, inserted)
             self._emit("folders", "folder_items_changed", {"folder_id": folder_id})
 
+        # The WS payload reflects the SAME normalized values that were
+        # inserted, converted with to_native_path -- mirroring get_folder's
+        # precedent -- rather than the raw, pre-conversion strings from the
+        # comfy job_outputs event.
         self._emit(
             "storyboard",
             "panel_images_changed",
             {
                 "storyboard_id": storyboard_id,
                 "panel_id": panel_id,
-                "files": inserted,
+                "files": [to_native_path(p) for p in inserted],
             },
         )
 
@@ -525,6 +587,10 @@ class StoryboardRunner:
             self.db.list_generation_jobs,
             states=["queued", "running"],
             panel_ids=panel_ids,
+            # list_generation_jobs defaults to limit=100 -- a storyboard
+            # with more in-flight jobs than that would silently under-cancel.
+            # Mirrors ComfyClient._rehydrate_jobs's precedent.
+            limit=10000,
         )
         for job in jobs:
             await self.comfy.cancel(job["id"])
