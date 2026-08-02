@@ -119,6 +119,12 @@ class ComfyClient:
         self._running: "set[int]" = set()
         self._pump_wake = asyncio.Event()
         self._pump_task: Optional[asyncio.Task] = None
+        # Job ids cancel()/cancel_all() have flagged before _dispatch could
+        # get them fully into ComfyUI. Added synchronously (no await before
+        # the add) so a concurrently-running _dispatch, which checks this
+        # right before and right after its POST, can never miss a
+        # cancellation that lands in that window. See cancel()/_dispatch.
+        self._cancelled: "set[int]" = set()
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -285,58 +291,61 @@ class ComfyClient:
             try:
                 while self._queue and len(self._running) < self.in_flight:
                     job_id = self._queue.popleft()
+                    # Added to _running in the same synchronous step as the
+                    # popleft above -- no await between them -- so a job id
+                    # is never observably absent from *both* _queue and
+                    # _running at once. cancel_all() relies on that: it
+                    # reads _queue then _running with nothing awaited in
+                    # between, so every outstanding job is caught by one
+                    # collection or the other, never dropped in the gap.
+                    self._running.add(job_id)
                     job = await asyncio.to_thread(self.db.get_generation_job, job_id)
                     if job is None or job["state"] != "queued":
+                        self._running.discard(job_id)
                         continue  # cancelled while waiting
                     await self._dispatch(job_id, job)
                 self._pump_wake.clear()
-                await self._wait_for_wake(0.5)
+                try:
+                    async with asyncio.timeout(0.5):  # 3.11+, uncancel-aware
+                        await self._pump_wake.wait()
+                except TimeoutError:
+                    pass
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("comfy pump loop error")
                 await asyncio.sleep(0.5)
 
-    async def _wait_for_wake(self, timeout: float) -> None:
-        """Sleep until `_pump_wake` is set, or `timeout` elapses.
-
-        Deliberately NOT `asyncio.wait_for(self._pump_wake.wait(), ...)`:
-        on Python < 3.12, repeatedly cancelling a task parked inside
-        wait_for() around the same moment its own timeout fires can
-        permanently swallow the outer cancellation -- wait_for treats the
-        CancelledError as "my timeout expired" and keeps raising
-        TimeoutError forever afterwards, so `_pump_task.cancel()` in
-        shutdown() would never actually stop the loop. Confirmed live
-        against this exact loop: an `await self._pump_task` after
-        `.cancel()` hung indefinitely, with `task.cancelling()` staying
-        True while the loop kept reporting "woke via timeout" (see
-        Task 8's report). Managing the waiter task explicitly with
-        `asyncio.wait` — which has no such timeout/cancel conflation —
-        does not reproduce the hang.
-        """
-        waiter = asyncio.ensure_future(self._pump_wake.wait())
-        try:
-            await asyncio.wait({waiter}, timeout=timeout)
-        finally:
-            if not waiter.done():
-                waiter.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await waiter
-
     async def _dispatch(self, job_id: int, job: Dict[str, Any]) -> None:
-        """Hand one queued job to ComfyUI.
+        """Hand one queued job to ComfyUI. Caller has already added
+        job_id to `_running`.
 
         Mirrors submit_now's POST handling, including wrapping the POST
         in _track_submit() -- without it, a queued job's prompt_id can be
         resolved by the reader loop before this method's map write runs,
         and the resulting event gets silently dropped with no retry.
+
+        Checks `_cancelled` twice: once before the POST (a cancel() that
+        landed while we were still loading the preset -- a to_thread DB
+        read, 50-100ms+ on WSL2 /mnt -- must stop this job from ever
+        reaching ComfyUI), and once after (a cancel() that landed while
+        the POST itself was in flight; the job already reached ComfyUI by
+        then, so we undo it there instead of letting it run to
+        completion). Without both checks, cancel()'s "queued" branch can
+        lose this race silently: it finds the job already popped from
+        `_queue`, marks the DB row cancelled, and returns -- while this
+        method, unaware, still POSTs the job and overwrites the row back
+        to "running".
         """
-        self._running.add(job_id)
         try:
             workflow, bindings = await self._load_preset(job["preset_id"])
             graph = apply_overrides(
                 workflow, bindings, GenerationParams.from_json(job["params"])
             )
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                await self._finish_job(job_id, "cancelled")
+                return
             async with self._track_submit():
                 resp = await self._http.post(
                     f"{self.base_url}/prompt",
@@ -358,12 +367,25 @@ class ComfyClient:
                 comfy_prompt_id=prompt_id,
                 started_at=_now(),
             )
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                try:
+                    await self._http.post(
+                        f"{self.base_url}/queue", json={"delete": [prompt_id]}
+                    )
+                    await self._http.post(f"{self.base_url}/interrupt")
+                except Exception as exc:
+                    logger.warning("Could not interrupt ComfyUI: %s", exc)
+                self._prompt_to_job.pop(str(prompt_id), None)
+                await self._finish_job(job_id, "cancelled")
+                return
             self._emit(
                 "job_update", {"job_id": job_id, "state": "running", "error": None}
             )
         except Exception as exc:
             message = f"ComfyUI at {self.base_url} rejected the job: {exc}"
             logger.warning(message)
+            self._cancelled.discard(job_id)
             await self._finish_job(job_id, "failed", error=message)
 
     async def cancel(self, job_id: int) -> None:
@@ -371,17 +393,36 @@ class ComfyClient:
 
         Queued jobs are simply dropped. A running job is interrupted in
         ComfyUI; already-generated images from earlier jobs are kept.
+
+        `_cancelled.add(job_id)` is the very first statement -- before
+        any `await` -- so it lands atomically with respect to any other
+        coroutine, including a `_dispatch` that has already popped this
+        job out of `_queue` but hasn't yet reached (or finished) its POST.
+        See `_dispatch` for the other half of this handshake.
         """
+        self._cancelled.add(job_id)
         job = await asyncio.to_thread(self.db.get_generation_job, job_id)
         if job is None or job["state"] not in ("queued", "running"):
+            self._cancelled.discard(job_id)
             return
 
         if job["state"] == "queued":
-            with contextlib.suppress(ValueError):
+            try:
                 self._queue.remove(job_id)
+            except ValueError:
+                # Already popped by _pump_loop: a _dispatch for this job
+                # is in flight (or about to be). Leave _cancelled set --
+                # _dispatch will discover it and finish the job itself.
+                # Finishing it here too would race _dispatch's own write.
+                return
+            self._cancelled.discard(job_id)
             await self._finish_job(job_id, "cancelled")
             return
 
+        # job["state"] == "running": _dispatch already completed for this
+        # job (it only writes "running" after the POST resolves), so
+        # there's no in-flight _dispatch left to observe _cancelled.
+        self._cancelled.discard(job_id)
         prompt_id = job["comfy_prompt_id"]
         try:
             if prompt_id:

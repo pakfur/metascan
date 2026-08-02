@@ -363,8 +363,9 @@ async def test_priority_jobs_jump_the_queue(started_client, fake_comfy):  # noqa
 
     await started_client.wait_for_job(urgent, timeout=10.0)
     order = [s["body"]["prompt"]["6"]["inputs"]["text"] for s in fake_comfy.submitted]
-    assert "urgent" in order
-    assert order.index("urgent") < len(order) - 1
+    # in_flight=2: one bulk pair is already dispatched (indices 0-1) by the
+    # time the priority submit lands, so "urgent" must be exactly next.
+    assert order.index("urgent") == 2
 
 
 async def test_cancel_a_queued_job_never_reaches_comfyui(
@@ -412,8 +413,13 @@ async def test_cancel_all_clears_the_queue(started_client, fake_comfy):  # noqa:
 
     assert started_client.queue_depth() == 0
     states = {started_client.db.get_generation_job(j)["state"] for j in job_ids}
-    assert states <= {"cancelled", "done", "running"}
+    # Tightened: cancel_all() must resolve every job it touches -- including
+    # ones mid-dispatch when it runs -- before returning. "running" would
+    # mean cancel_all() missed a job (see the _cancelled handshake in
+    # cancel()/_dispatch); "queued" would mean the queue wasn't drained.
+    assert states <= {"cancelled", "done"}
     assert "queued" not in states
+    assert "running" not in states
 
 
 async def test_a_failing_job_does_not_stall_its_siblings(
@@ -465,5 +471,75 @@ async def test_dispatch_wraps_its_post_in_track_submit(
 
     job = await started_client.wait_for_job(job_id, timeout=10.0)
     assert job["state"] == "done"
+    # The spy records _submits_in_flight from *inside* _track_submit's CM,
+    # which is only reachable if _dispatch actually entered it around the
+    # POST -- an empty list here means it didn't.
     assert seen_in_flight, "_dispatch never entered _track_submit around its POST"
-    assert seen_in_flight[0] >= 1
+
+
+async def test_cancel_landing_before_the_post_keeps_the_job_off_comfyui(
+    started_client, fake_comfy
+):  # noqa: F811
+    """Regression guard for the cancel()/_dispatch race (review finding 3).
+
+    _dispatch only writes state="running" (and only then would cancel()'s
+    "queued" branch correctly fall through to the running-job path) after
+    its POST resolves. Before that, a job _pump_loop has already popped
+    off `_queue` is in a gap where the DB row still says "queued" but the
+    job is no longer sitting in `_queue` for cancel() to remove -- so a
+    naive cancel() would mark the row cancelled and return, while
+    _dispatch, unaware, still POSTs the job to ComfyUI and overwrites the
+    row back to "running".
+
+    Deterministically reproduces landing in that gap (no timing race) by
+    making cancel() run as a nested step of _dispatch's own
+    `_load_preset` call, guaranteeing it completes strictly before
+    _dispatch's `_cancelled` check and the POST that follows it.
+    """
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+
+    original_load_preset = started_client._load_preset
+
+    async def load_preset_then_cancel(preset_id):
+        result = await original_load_preset(preset_id)
+        await started_client.cancel(job_id)
+        return result
+
+    started_client._load_preset = load_preset_then_cancel  # type: ignore[method-assign]
+
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if started_client.db.get_generation_job(job_id)["state"] != "queued":
+            break
+
+    assert fake_comfy.submitted == []
+    assert started_client.db.get_generation_job(job_id)["state"] == "cancelled"
+    assert job_id not in started_client._running
+
+
+async def test_cancel_landing_mid_post_still_interrupts_comfyui(
+    started_client, fake_comfy  # noqa: F811
+):
+    """The other half of the _dispatch handshake: a cancel() landing after
+    the POST has already reached ComfyUI must undo it there (queue delete
+    + interrupt) rather than letting the job run to completion.
+    """
+    fake_comfy.execution_delay = 0.3
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+
+    original_post = started_client._http.post
+
+    async def post_then_cancel(url, *args, **kwargs):
+        resp = await original_post(url, *args, **kwargs)
+        if url == f"{started_client.base_url}/prompt":
+            await started_client.cancel(job_id)
+        return resp
+
+    started_client._http.post = post_then_cancel  # type: ignore[method-assign]
+
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "cancelled"
+    assert fake_comfy.interrupted >= 1
+    assert job_id not in started_client._running
