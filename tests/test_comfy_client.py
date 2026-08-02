@@ -52,6 +52,24 @@ def workspace():
         yield Path(tmp)
 
 
+async def _until(predicate, timeout: float = 20.0, interval: float = 0.01) -> bool:
+    """Poll `predicate` until true, bounded by wall clock.
+
+    Prefer this over `for _ in range(N): await asyncio.sleep(0.01)`. An
+    iteration-count loop budgets N*interval only on an idle box; under
+    load each sleep overshoots (a 1.8s test here was measured taking
+    5.4s), so the real budget silently shrinks to a fraction of the
+    intended one and the test flakes. A deadline stays honest.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return bool(predicate())
+
+
 @pytest.fixture
 async def client(fake_comfy, workspace):  # noqa: F811
     db = DatabaseManager(workspace / "db")
@@ -422,26 +440,35 @@ async def test_cancel_a_queued_job_never_reaches_comfyui(
 async def test_cancel_a_running_job_interrupts_comfyui(
     started_client, fake_comfy
 ):  # noqa: F811
-    fake_comfy.execution_delay = 1.0
+    release = asyncio.Event()
+    fake_comfy.hold = release  # hold it running until the cancel lands
+    fake_comfy.execution_delay = 0.05
+
     pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await started_client.submit(pid, params())
 
-    for _ in range(100):
-        await asyncio.sleep(0.02)
-        if (
-            started_client.db.get_generation_job(job_id)["state"] == "running"
-            and fake_comfy.running_prompt
-        ):
-            break
+    assert await _until(
+        lambda: started_client.db.get_generation_job(job_id)["state"] == "running"
+        and bool(fake_comfy.running_prompt)
+    ), "the job never reached ComfyUI"
 
     prompt_id = started_client.db.get_generation_job(job_id)["comfy_prompt_id"]
+    assert fake_comfy.running_prompt == prompt_id
     await started_client.cancel(job_id)
+    release.set()
 
-    assert fake_comfy.interrupted == 1
-    # Scoped, not global: the interrupt named this prompt, and because it
-    # really was the running one, ComfyUI acted on it.
-    assert fake_comfy.interrupt_requests == [prompt_id]
-    assert fake_comfy.interrupted_prompts == [prompt_id]
+    assert fake_comfy.interrupted >= 1
+    # Scoped, not global: every interrupt named this prompt, and because
+    # it really was the running one, ComfyUI acted on it.
+    #
+    # Sets, not lists: the cancel()/_dispatch handshake can post the
+    # interrupt twice when a cancel lands exactly as _dispatch finishes
+    # (cancel() discards from `_cancelled` only after its DB read, so
+    # _dispatch can still observe the flag and run its own cancel path).
+    # Both posts are scoped to the same prompt and are idempotent, so
+    # the count is not the invariant here — the scoping is.
+    assert set(fake_comfy.interrupt_requests) == {prompt_id}
+    assert set(fake_comfy.interrupted_prompts) == {prompt_id}
     assert started_client.db.get_generation_job(job_id)["state"] == "cancelled"
 
 
@@ -954,31 +981,62 @@ async def test_cancelling_a_pending_job_leaves_a_running_sibling_untouched(
     collateral-damaged sibling never reached a terminal state: its row
     stayed "running" and its id stayed in `_running` forever.
     """
-    fake_comfy.execution_delay = 1.5
+    # Pin the first prompt in the running state with an explicit gate
+    # rather than a long execution_delay: the assertion below is only
+    # meaningful while the bystander is genuinely mid-generation, and a
+    # wall-clock margin loses that guarantee the moment the box stalls.
+    release = asyncio.Event()
+    fake_comfy.hold = release
+    fake_comfy.execution_delay = 0.05
+
     pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    first = await started_client.submit(pid, params(positive="runner"))
+    second = await started_client.submit(pid, params(positive="victim"))
 
-    await started_client.submit(pid, params(positive="runner"))
-    await started_client.submit(pid, params(positive="victim"))
+    # Wait on the *client's* own state, not the fake's. The fake records
+    # a prompt before its POST response is even sent, so keying off
+    # `fake_comfy.running_prompt` can outrun `_prompt_to_job`; and the
+    # "running" DB write lands later still, which decides whether
+    # cancel() takes the running-job branch or the mid-dispatch
+    # handshake (both correct, but only the former posts the interrupt
+    # synchronously here). Both jobs fully dispatched settles both.
+    def both_dispatched() -> bool:
+        states = [
+            started_client.db.get_generation_job(j)["state"] for j in (first, second)
+        ]
+        return states == ["running", "running"] and bool(fake_comfy.running_prompt)
 
-    for _ in range(300):
-        await asyncio.sleep(0.01)
-        if fake_comfy.running_prompt and fake_comfy.pending_prompts:
-            break
+    assert await _until(both_dispatched), "both jobs never reached ComfyUI"
+
+    prompts = {
+        j: started_client.db.get_generation_job(j)["comfy_prompt_id"]
+        for j in (first, second)
+    }
+    # ComfyUI runs one prompt at a time; whichever it picked up is the
+    # bystander, and the other is the one sitting pending.
     running_prompt = fake_comfy.running_prompt
-    pending_prompt = fake_comfy.pending_prompts[0]
-    assert running_prompt and pending_prompt
-
-    running_job = started_client._prompt_to_job[running_prompt]
-    pending_job = started_client._prompt_to_job[pending_prompt]
+    assert running_prompt in prompts.values()
+    running_job = first if prompts[first] == running_prompt else second
+    pending_job = second if running_job == first else first
+    pending_prompt = prompts[pending_job]
+    assert fake_comfy.pending_prompts == [pending_prompt]
 
     await started_client.cancel(pending_job)
 
+    # Held, so this is still true: the scenario really is "cancel the
+    # pending one while a sibling generates".
+    assert fake_comfy.running_prompt == running_prompt
     # The interrupt must have been scoped to the pending prompt, which
     # ComfyUI then declines to act on because it isn't the running one.
+    # (Set comparison for the same reason as
+    # test_cancel_a_running_job_interrupts_comfyui: the handshake may
+    # post it more than once, always scoped.)
+    assert set(fake_comfy.interrupt_requests) == {pending_prompt}
     assert fake_comfy.interrupted_prompts == []
     assert started_client.db.get_generation_job(pending_job)["state"] == "cancelled"
 
     # And the bystander still finishes normally.
+    release.set()
     sibling = await started_client.wait_for_job(running_job, timeout=15.0)
     assert sibling["state"] == "done"
     assert running_job not in started_client._running
@@ -994,18 +1052,18 @@ async def test_an_external_interrupt_marks_the_job_cancelled(
     branch for it the job sits at "running" forever and permanently
     consumes one of the `in_flight` admission slots.
     """
-    fake_comfy.execution_delay = 1.5
+    release = asyncio.Event()
+    fake_comfy.hold = release  # keep it running until we've interrupted it
+    fake_comfy.execution_delay = 0.05
+
     pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await started_client.submit(pid, params())
 
-    for _ in range(300):
-        await asyncio.sleep(0.01)
-        if fake_comfy.running_prompt:
-            break
-    assert fake_comfy.running_prompt
+    assert await _until(lambda: bool(fake_comfy.running_prompt)), "never started"
 
     # A *global* interrupt, as ComfyUI's own UI issues it.
     await started_client._http.post(f"{fake_comfy.base_url}/interrupt")
+    release.set()
 
     job = await started_client.wait_for_job(job_id, timeout=10.0)
     assert job["state"] == "cancelled"
@@ -1103,10 +1161,7 @@ async def test_an_error_during_the_running_write_does_not_resurrect_the_job(
         db.update_generation_job = gated_update  # type: ignore[method-assign]
 
         submit = asyncio.create_task(c.submit_now(pid, params()))
-        for _ in range(500):
-            await asyncio.sleep(0.01)
-            if c._prompt_to_job:
-                break
+        assert await _until(lambda: bool(c._prompt_to_job)), "prompt never registered"
         prompt_id = next(iter(c._prompt_to_job))
 
         error_frame = asyncio.create_task(
