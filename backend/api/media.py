@@ -20,6 +20,7 @@ def _get_service() -> MediaService:
 async def list_media(
     sort: str = "date_added",
     favorites_only: bool = False,
+    include_hidden: bool = False,
     service: MediaService = Depends(_get_service),
 ):
     """List all media, optionally sorted and filtered.
@@ -32,7 +33,7 @@ async def list_media(
     ``GET /api/media/{path}``.
     """
     return await service.get_all_media_summaries(
-        sort=sort, favorites_only=favorites_only
+        sort=sort, favorites_only=favorites_only, include_hidden=include_hidden
     )
 
 
