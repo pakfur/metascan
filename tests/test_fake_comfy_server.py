@@ -117,7 +117,11 @@ async def test_fail_with_emits_execution_error(fake_comfy):  # noqa: F811
 
 
 async def test_only_one_prompt_runs_at_a_time(fake_comfy):  # noqa: F811
-    fake_comfy.execution_delay = 0.5
+    # These tests assert on *which* prompt is running, so they hold the
+    # prompt open with a never-set gate rather than betting that an
+    # execution_delay out-lasts the assertions. A wall-clock margin does
+    # not survive a loaded box; the fixture's stop() cancels the worker.
+    fake_comfy.hold = asyncio.Event()
     async with httpx.AsyncClient() as client:
         first = (
             await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
@@ -137,7 +141,7 @@ async def test_only_one_prompt_runs_at_a_time(fake_comfy):  # noqa: F811
 async def test_a_bodyless_interrupt_kills_whatever_is_running(
     fake_comfy,  # noqa: F811
 ):
-    fake_comfy.execution_delay = 1.0
+    fake_comfy.hold = asyncio.Event()
     async with httpx.AsyncClient() as client:
         running = (
             await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
@@ -160,7 +164,7 @@ async def test_a_bodyless_interrupt_kills_whatever_is_running(
 async def test_an_interrupt_naming_a_pending_prompt_is_a_no_op(
     fake_comfy,  # noqa: F811
 ):
-    fake_comfy.execution_delay = 1.0
+    fake_comfy.hold = asyncio.Event()
     async with httpx.AsyncClient() as client:
         running = (
             await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
@@ -186,7 +190,7 @@ async def test_an_interrupt_naming_a_pending_prompt_is_a_no_op(
 async def test_an_interrupted_prompt_reports_execution_interrupted(
     fake_comfy,  # noqa: F811
 ):
-    fake_comfy.execution_delay = 1.0
+    fake_comfy.hold = asyncio.Event()
     async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
         async with httpx.AsyncClient() as client:
             r = await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
@@ -207,7 +211,7 @@ async def test_an_interrupted_prompt_reports_execution_interrupted(
 
 
 async def test_queue_delete_drops_a_pending_prompt(fake_comfy):  # noqa: F811
-    fake_comfy.execution_delay = 0.6
+    fake_comfy.hold = asyncio.Event()
     async with httpx.AsyncClient() as client:
         running = (
             await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)

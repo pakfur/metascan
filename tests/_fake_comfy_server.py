@@ -44,6 +44,13 @@ Knobs:
                           end-of-prompt (models a save node that isn't last)
   trailing_output_node -- emit a second `executed` for a non-save node
                           after MS_SAVE
+  hold                 -- an asyncio.Event that must be *set* before a
+                          prompt's work can complete. Lets a test pin a
+                          prompt in the running state for as long as it
+                          needs without relying on `execution_delay`
+                          out-racing the test's own steps — a wall-clock
+                          margin that does not survive a loaded CI box.
+                          The prompt stays interruptible while held.
 """
 
 from __future__ import annotations
@@ -75,6 +82,7 @@ class FakeComfy:
         self.images_per_job: int = 2
         self.post_save_delay: float = 0.0
         self.trailing_output_node: bool = False
+        self.hold: Optional[asyncio.Event] = None
         # When True, POST /prompt is accepted (200) but the response body
         # omits "prompt_id" — exercises ComfyClient's no-prompt_id branch.
         self.omit_prompt_id: bool = False
@@ -269,15 +277,25 @@ class FakeComfy:
                 pass
 
     async def _work(self, seconds: float) -> bool:
-        """Simulate `seconds` of work. False if interrupted part-way."""
+        """Simulate `seconds` of work. False if interrupted part-way.
+
+        While `hold` is present and unset the prompt stays running
+        indefinitely — still interruptible, so a test can hold a prompt
+        in exactly the state it needs to observe rather than betting on
+        `execution_delay` being longer than its own next few steps.
+        """
         remaining = seconds
-        while remaining > 0:
+        while True:
             if self._interrupt_flag:
                 return False
+            if self.hold is not None and not self.hold.is_set():
+                await asyncio.sleep(0.005)
+                continue
+            if remaining <= 0:
+                return True
             step = min(0.01, remaining)
             await asyncio.sleep(step)
             remaining -= step
-        return not self._interrupt_flag
 
     async def _end_of_prompt(self, prompt_id: str, entry: Dict[str, Any]) -> None:
         """task_done() then the trailing `executing {node: null}` frame.
