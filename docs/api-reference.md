@@ -295,6 +295,8 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
   /api/storyboard/subjects/{id}` · `DELETE
   /api/storyboard/subjects/{id}` — subject CRUD (name, description,
   `lora_name`, `lora_strength`, `reference_path`, `sort_order`).
+  `reference_path` FKs `media(file_path)`; **400** if it doesn't name a
+  row in the media library.
 - `POST /api/storyboard/{id}/scenes` · `PATCH
   /api/storyboard/scenes/{id}` · `DELETE /api/storyboard/scenes/{id}` —
   scene CRUD (name, location, time_of_day, mood, lighting, notes,
@@ -328,5 +330,13 @@ those go out on the **`folders`** channel, not `storyboard`:
 - **`synthesis_progress`** — `{storyboard_id, panel_id, done, total,
   prompt_source}`, one per panel as `POST .../synthesize` works through
   its scope.
+- **`synthesis_complete`** — `{storyboard_id, synthesized, fallback,
+  skipped_locked}`, sent once when a `POST .../synthesize` background run
+  finishes successfully. Since `synthesize` returns 202 immediately, this
+  (or `synthesis_error`) is the only signal a client gets that the run is
+  actually done.
+- **`synthesis_error`** — `{storyboard_id, error}`, sent instead of
+  `synthesis_complete` if the background run raises (e.g. the VLM fails to
+  load).
 - **`panel_images_changed`** — `{storyboard_id, panel_id, files}`, sent
   once a ComfyUI job's outputs have been ingested as `panel_images` rows.
