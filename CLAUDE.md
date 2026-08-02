@@ -276,7 +276,10 @@ metascan/
   with an "interrupted by a restart" message rather than re-adopted —
   no event will ever arrive for them and re-adopting would
   over-subscribe `in_flight`. `_rehydrate_prompt_map` is the
-  *reconnect*-time path and deliberately does neither.
+  *reconnect*-time path and deliberately does neither. `_rehydrate_jobs`
+  assumes one process per database — correct for `run_server.py`'s
+  single uvicorn worker, but running with `workers > 1` would have each
+  worker's startup mark the *other* workers' still-running jobs `failed`.
 - **`generation_jobs.preset_id` has no `ON DELETE` clause, on purpose.**
   Deleting a used preset raises `sqlite3.IntegrityError`;
   `ComfyService.delete_preset` translates it into `PresetInUseError` and
