@@ -91,3 +91,27 @@ def get_models_config(config: dict) -> dict:
         "preload_at_startup": [str(x) for x in preload],
         "huggingface_token": str(raw.get("huggingface_token") or ""),
     }
+
+
+def get_comfy_config(config: dict) -> dict:
+    """Return the ``comfy`` section with defaults filled in.
+
+    Shape:
+        {
+            "base_url": "http://127.0.0.1:8188",
+            "in_flight": 2,                  # jobs held inside ComfyUI at once
+            "unload_vlm_during_generation": True,
+            "output_root": "data/storyboards",
+            "request_timeout_s": 30.0,
+        }
+    """
+    raw = config.get("comfy", {}) or {}
+    return {
+        "base_url": str(raw.get("base_url") or "http://127.0.0.1:8188"),
+        "in_flight": max(1, int(raw.get("in_flight") or 2)),
+        "unload_vlm_during_generation": bool(
+            raw.get("unload_vlm_during_generation", True)
+        ),
+        "output_root": str(raw.get("output_root") or "data/storyboards"),
+        "request_timeout_s": float(raw.get("request_timeout_s") or 30.0),
+    }
