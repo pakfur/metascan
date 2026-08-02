@@ -302,3 +302,12 @@ def test_latest_jobs_for_panels(db):
 
 def test_latest_jobs_for_panels_empty_list(db):
     assert db.latest_jobs_for_panels([]) == {}
+
+
+def test_storyboard_id_for_panel(db):
+    sb, su, sc, pa = _build_tree(db)
+    assert db.storyboard_id_for_panel(pa) == sb
+
+
+def test_storyboard_id_for_panel_missing_returns_none(db):
+    assert db.storyboard_id_for_panel(999) is None
