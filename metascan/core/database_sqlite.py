@@ -1401,6 +1401,22 @@ class DatabaseManager:
                 d["subject_ids"] = []
             return d
 
+    def storyboard_id_for_panel(self, panel_id: int) -> Optional[int]:
+        """Resolve a panel's storyboard id via panels -> scenes -> storyboards.
+
+        ``get_panel`` alone doesn't carry the storyboard id, and loading the
+        full tree just to find it is wasteful for the ingest hot path in
+        ``StoryboardRunner._ingest_outputs`` -- this is a cheap two-JOIN
+        SELECT instead.
+        """
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT s.storyboard_id AS sid FROM panels p "
+                "JOIN scenes s ON p.scene_id = s.id WHERE p.id = ?",
+                (panel_id,),
+            ).fetchone()
+            return int(row["sid"]) if row is not None else None
+
     def delete_panel(self, panel_id: int) -> bool:
         """Delete a panel, plus any generation_jobs referencing it.
 
