@@ -51,6 +51,15 @@ Knobs:
                           out-racing the test's own steps — a wall-clock
                           margin that does not survive a loaded CI box.
                           The prompt stays interruptible while held.
+  post_success_hold    -- an asyncio.Event that, if set on the instance
+                          (not None), must be *set* after
+                          `execution_success` is broadcast before the
+                          history entry is written and the trailing
+                          `executing {node: null}` frame is sent. Lets a
+                          test pin the fixture in the narrow window where
+                          `execution_success` has already gone out but
+                          `/history` is still empty, deterministically
+                          instead of racing real socket I/O.
 """
 
 from __future__ import annotations
@@ -83,6 +92,7 @@ class FakeComfy:
         self.post_save_delay: float = 0.0
         self.trailing_output_node: bool = False
         self.hold: Optional[asyncio.Event] = None
+        self.post_success_hold: Optional[asyncio.Event] = None
         # When True, POST /prompt is accepted (200) but the response body
         # omits "prompt_id" — exercises ComfyClient's no-prompt_id branch.
         self.omit_prompt_id: bool = False
@@ -392,6 +402,8 @@ class FakeComfy:
         await self.broadcast(
             {"type": "execution_success", "data": {"prompt_id": prompt_id}}
         )
+        if self.post_success_hold is not None:
+            await self.post_success_hold.wait()
         await self._end_of_prompt(
             prompt_id,
             {

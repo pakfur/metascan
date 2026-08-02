@@ -1082,18 +1082,51 @@ async def test_outputs_are_collected_when_the_save_node_is_not_last(
     the read is deterministically too early: `/history` returns {}, which
     flowed all the way to `_finish_job(job_id, "done")` with zero files
     and no error anywhere.
+
+    `post_save_delay = 0.4` alone proves only the *conjunction* of the
+    trigger fix and `_await_history`'s ~2.2s retry budget: revert the
+    trigger fix (collect on the first `executed` again) and the retry
+    loop alone still recovers within that budget, so the assertions
+    below would keep passing. The `first_history_call_at` probe below
+    pins the trigger fix specifically -- it fails the moment collection
+    starts on the first `executed` frame, regardless of whether the
+    retry loop would have bailed it out.
     """
     fake_comfy.post_save_delay = 0.4
     fake_comfy.trailing_output_node = True
+
+    loop = asyncio.get_running_loop()
+    original_fetch_history = ingesting_client.fetch_history
+    first_history_call_at = None
+
+    async def spying_fetch_history(prompt_id):
+        nonlocal first_history_call_at
+        if first_history_call_at is None:
+            first_history_call_at = loop.time()
+        return await original_fetch_history(prompt_id)
+
+    ingesting_client.fetch_history = spying_fetch_history  # type: ignore[method-assign]
 
     seen = []
     ingesting_client.on_job_event(lambda event, payload: seen.append((event, payload)))
 
     pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    submitted_at = loop.time()
     job_id = await ingesting_client.submit(pid, params())
 
     job = await ingesting_client.wait_for_job(job_id, timeout=15.0)
     assert job["state"] == "done"
+
+    # The trigger fix: collection must not start until the real
+    # end-of-prompt signal (`execution_success` / `executing{node:
+    # null}`), which only arrives after the full `post_save_delay` +
+    # trailing-node sequence. A trigger that fires on the first
+    # `executed` frame instead would call `fetch_history` within a few
+    # milliseconds of submit -- long before the 0.4s save-node delay has
+    # elapsed. 0.3s leaves a wide margin below the 0.4s delay while
+    # still being far above "immediately".
+    assert first_history_call_at is not None, "fetch_history was never called"
+    assert first_history_call_at - submitted_at > 0.3
 
     files = sorted(ingesting_client.output_dir_for(job_id).glob("*.png"))
     assert len(files) == 2
@@ -1186,6 +1219,38 @@ async def test_an_error_during_the_running_write_does_not_resurrect_the_job(
         assert "checkpoint not found" in job["error"]
     finally:
         await c.aclose()
+
+
+async def test_mark_running_does_not_resurrect_an_already_terminal_job(
+    client,  # noqa: F811
+):
+    """Regression guard for final-review I1 -- the ordering the gated
+    test above cannot reach.
+
+    The gated test above forces `_mark_running` to always write first:
+    it blocks *inside* `_mark_running` (which is already holding
+    `_finish_lock`), so `_finish_job` can only run second and correctly
+    overwrite "running" with "failed". The terminal-state guard inside
+    `_mark_running` itself is never consulted -- the test would pass
+    identically with that guard deleted.
+
+    This drives the opposite (and actually dangerous) ordering directly:
+    the job goes terminal first, and a `running` write for it -- e.g. a
+    dispatch continuation that was merely slow, not wrong -- lands
+    afterwards. Without the guard this would silently resurrect a
+    failed/cancelled/done row back to "running".
+    """
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = client.db.create_generation_job(pid, params().to_json(), None)
+
+    await client._finish_job(job_id, "failed", error="checkpoint not found")
+    assert client.db.get_generation_job(job_id)["state"] == "failed"
+
+    assert await client._mark_running(job_id, "some-prompt-id") is False
+
+    job = client.db.get_generation_job(job_id)
+    assert job["state"] == "failed"
+    assert job["error"] == "checkpoint not found"
 
 
 async def test_queued_jobs_are_re_enqueued_after_a_restart(

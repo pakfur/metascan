@@ -101,6 +101,52 @@ async def test_history_is_absent_until_the_prompt_ends(fake_comfy):  # noqa: F81
             assert h.json()[prompt_id]["outputs"]["9"]["images"]
 
 
+async def test_history_is_absent_between_execution_success_and_the_null_frame(
+    fake_comfy,  # noqa: F811
+):
+    """Pins that `/history` is still empty strictly between the two
+    end-of-prompt signals, not just before `executed`.
+
+    `_end_of_prompt` writes `self._history[prompt_id]` and only then
+    broadcasts the trailing `executing {node: null}` frame -- mirroring
+    real ComfyUI, where `execution_success` is emitted from *inside*
+    `PromptExecutor.execute()` while the history entry is only recorded
+    afterwards by `PromptQueue.task_done()`. If the write were moved
+    earlier -- e.g. to just before `execution_success` is broadcast --
+    every other fixture test would still pass (they only check history
+    before `executed`, or after the whole sequence), silently erasing
+    the reason `ComfyClient._await_history` exists at all. Uses
+    `post_success_hold` to pin the fixture in that exact window
+    deterministically, rather than racing real socket I/O.
+    """
+    fake_comfy.post_success_hold = asyncio.Event()
+    async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(f"{fake_comfy.base_url}/prompt", json=SAVE_GRAPH)
+            prompt_id = r.json()["prompt_id"]
+
+            events = await _drain(ws, 4)
+            assert [e["type"] for e in events] == [
+                "execution_start",
+                "executing",
+                "executed",
+                "execution_success",
+            ]
+
+            # execution_success is out, but the fixture is held before
+            # writing history -- the entry must not exist yet.
+            h = await client.get(f"{fake_comfy.base_url}/history/{prompt_id}")
+            assert h.json() == {}
+
+            fake_comfy.post_success_hold.set()
+            rest = await _drain(ws, 1)
+            assert rest[0]["type"] == "executing"
+            assert rest[0]["data"]["node"] is None
+
+            h = await client.get(f"{fake_comfy.base_url}/history/{prompt_id}")
+            assert h.json()[prompt_id]["outputs"]["9"]["images"]
+
+
 async def test_fail_with_emits_execution_error(fake_comfy):  # noqa: F811
     fake_comfy.fail_with = "value not in list: ckpt_name"
     async with websockets.connect(f"ws://127.0.0.1:{fake_comfy._port}/ws") as ws:
