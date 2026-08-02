@@ -581,15 +581,18 @@ async def test_outputs_are_ingested_into_the_media_database(ingesting_client):
     job_id = await ingesting_client.submit(pid, params())
     await ingesting_client.wait_for_job(job_id, timeout=10.0)
 
-    for f in ingesting_client.output_dir_for(job_id).glob("*.png"):
+    files = list(ingesting_client.output_dir_for(job_id).glob("*.png"))
+    assert files  # otherwise the loop below passes vacuously
+    for f in files:
         assert ingesting_client.db.get_media(str(f)) is not None
 
 
 async def test_a_job_is_only_done_after_its_images_land(ingesting_client):
     pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await ingesting_client.submit(pid, params())
-    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+    job = await ingesting_client.wait_for_job(job_id, timeout=10.0)
 
+    assert job["state"] == "done"
     assert list(ingesting_client.output_dir_for(job_id).glob("*.png"))
 
 
@@ -626,27 +629,33 @@ async def test_a_failed_execution_writes_no_files(
     fake_comfy.fail_with = "boom"
     pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await ingesting_client.submit(pid, params())
-    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+    job = await ingesting_client.wait_for_job(job_id, timeout=10.0)
 
+    assert job["state"] == "failed"
     assert not list(ingesting_client.output_dir_for(job_id).glob("*.png"))
 
 
 async def test_a_cancelled_job_does_not_download_or_ingest_its_outputs(
     fake_comfy, workspace  # noqa: F811
 ):
-    """Regression guard: a cancelled job's outputs must never be
-    downloaded or ingested, and the job must not be resurrected to
+    """Regression guard: an `executed` frame processed for a job already
+    flagged in `_cancelled` before `_complete_job` even starts must not
+    download or ingest anything, and must not resurrect the job to
     "done" (review finding, not covered by any earlier task's tests).
 
-    ComfyUI's /interrupt is not synchronous -- a job can still emit
-    `executed` (and _on_executed can still schedule a collection task)
-    after cancel() has already flagged the job in `_cancelled`, or even
-    after cancel() has already written state="cancelled". Rather than
-    fight that inherently timing-dependent race (see this file's
-    docstrings on the cancel()/_dispatch handshake for why that's
-    flaky-by-nature), this reproduces the exact state such a frame would
-    find deterministically: flag the job cancelled, then drive
-    `_on_executed` directly, exactly as the reader loop would.
+    Note on what `_cancelled` actually guarantees here: it is a
+    short-lived flag, not a durable "this job was cancelled" marker --
+    `cancel()`'s running-job branch discards `job_id` from `_cancelled`
+    *before* it interrupts ComfyUI or writes state="cancelled", so by the
+    time a cancel has actually taken effect the flag is already gone.
+    This test only covers the narrow window where `_cancelled` is
+    genuinely still set (a frame arriving before `_complete_job` gets a
+    scheduler turn at all); it deliberately does NOT claim to cover a
+    cancel that lands mid-download or after the job is already finished
+    -- that's `test_a_cancel_landing_mid_download_leaves_no_images_ingested`
+    below, and it's `collect_outputs`'s per-image state rechecks plus
+    `_finish_job`'s terminal-state guard that make that safe, not this
+    flag.
 
     Deliberately builds its own client and never calls `start()`: with a
     live websocket (as `ingesting_client` has), fake_comfy's background
@@ -683,3 +692,128 @@ async def test_a_cancelled_job_does_not_download_or_ingest_its_outputs(
         assert c.db.get_generation_job(job_id)["state"] == "running"
     finally:
         await c.aclose()
+
+
+async def test_a_cancel_landing_mid_download_leaves_no_images_ingested(
+    fake_comfy, workspace  # noqa: F811
+):
+    """Regression guard for review BLOCKING 1.
+
+    The reviewer's own probe (gate `_download_image`, fire `_on_executed`,
+    then `cancel()` mid-download) found the pre-fix code resurrected the
+    job to "done" with both images written *and* ingested, because the
+    only guard at the time was a check against `_cancelled` -- and
+    `cancel()`'s running-job branch discards `job_id` from `_cancelled`
+    before it does anything else, so that check never sees a cancel that
+    actually took effect.
+
+    This reproduces the same scenario deterministically: block the first
+    image's download behind a gate, cancel the job while that download is
+    still in flight, then release the gate and let the (now-orphaned)
+    download complete. The fix -- `collect_outputs` re-checking the job's
+    DB state both before and after each image's download, plus
+    `_finish_job` refusing to move a job out of a terminal state -- must
+    leave the row "cancelled" and ingest nothing, even though the first
+    image's bytes do land on disk (an accepted, documented orphan: a
+    retry re-downloads over it).
+
+    Built as its own unstarted client for the same reason as the test
+    above: a live websocket would let fake_comfy's own zero-delay
+    execution race this test's manual orchestration.
+    """
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        scanner=Scanner(db),
+    )
+    try:
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+        job_id = await c.submit_now(pid, params())
+        prompt_id = c.db.get_generation_job(job_id)["comfy_prompt_id"]
+
+        gate = asyncio.Event()
+        original_download = c._download_image
+
+        async def gated_download(entry, target):
+            await gate.wait()
+            await original_download(entry, target)
+
+        c._download_image = gated_download  # type: ignore[method-assign]
+
+        await c._on_executed(job_id, {"prompt_id": prompt_id})
+        # Let the freshly-scheduled _complete_job task actually run and
+        # reach (and block on) the gate before cancelling.
+        await asyncio.sleep(0.1)
+
+        await c.cancel(job_id)
+        gate.set()
+
+        for task in list(c._collect_tasks):
+            await task
+
+        job = c.db.get_generation_job(job_id)
+        assert job["state"] == "cancelled"
+        for f in c.output_dir_for(job_id).glob("*.png"):
+            assert c.db.get_media(str(f)) is None
+    finally:
+        await c.aclose()
+
+
+async def test_duplicate_executed_frames_produce_exactly_one_collection(
+    ingesting_client, fake_comfy  # noqa: F811
+):
+    """Regression guard for review BLOCKING 2.
+
+    ComfyUI emits one `executed` per output-producing node, not one per
+    prompt -- a workflow with e.g. both MS_SAVE and a PreviewImage node
+    fires two frames for the same job, often microseconds apart. Because
+    collection now runs as a fire-and-forget task rather than an inline
+    await, `_finish_job`'s prompt-map eviction (which used to make a
+    second frame resolve to no job at all) doesn't happen until the first
+    frame's download/ingest finishes -- long after a fast second frame
+    has already resolved to the same job_id. The reviewer reproduced two
+    full collection passes (two `job_outputs`, two `job_update`
+    done-events, double downloads/ingests) through the real reader loop
+    this way.
+
+    Slows the download so the window is wide open, then broadcasts a
+    second `executed` for the same prompt_id while the first collection
+    is confirmed still in flight (via `_collecting`). The `_collecting`
+    guard added in `_on_executed` must make the second frame a no-op.
+    """
+    seen = []
+    ingesting_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+
+    original_download = ingesting_client._download_image
+
+    async def slow_download(entry, target):
+        await asyncio.sleep(0.3)
+        await original_download(entry, target)
+
+    ingesting_client._download_image = slow_download  # type: ignore[method-assign]
+
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit_now(pid, params())
+    prompt_id = ingesting_client.db.get_generation_job(job_id)["comfy_prompt_id"]
+
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if ingesting_client._collecting:
+            break
+    assert ingesting_client._collecting, "collection never started"
+
+    await fake_comfy.broadcast(
+        {"type": "executed", "data": {"prompt_id": prompt_id, "node": "extra"}}
+    )
+    await asyncio.sleep(0.05)  # let the reader loop actually process it
+
+    job = await ingesting_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "done"
+
+    outputs = [p for e, p in seen if e == "job_outputs"]
+    done_updates = [p for e, p in seen if e == "job_update" and p["state"] == "done"]
+    assert len(outputs) == 1
+    assert len(done_updates) == 1
+    assert len(outputs[0]["files"]) == 2

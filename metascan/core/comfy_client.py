@@ -50,6 +50,12 @@ _EVENT_KINDS_WITHOUT_JOB_ID: FrozenSet[str] = frozenset(
 
 JobEventCb = Callable[[str, Dict[str, Any]], None]
 
+# States a generation_jobs row never leaves once reached. _finish_job uses
+# this to refuse to move a job *out* of one of these -- the real guard
+# against a stale completion (e.g. a collection task that was already
+# in flight when cancel() ran) resurrecting a cancelled/failed row.
+_TERMINAL_STATES: FrozenSet[str] = frozenset({"done", "failed", "cancelled"})
+
 
 class ComfyError(RuntimeError):
     """A ComfyUI request failed, or was made against unusable state."""
@@ -131,6 +137,23 @@ class ComfyClient:
         # strong reference here (and self-evicting once done) keeps them
         # alive, and shutdown() cancels any still outstanding.
         self._collect_tasks: "set[asyncio.Task[None]]" = set()
+        # Job ids with an in-flight _complete_job task. ComfyUI emits one
+        # `executed` per output-producing node, not one per prompt, so a
+        # workflow with two such nodes (MS_SAVE plus e.g. a PreviewImage)
+        # fires two frames for the same job, often microseconds apart.
+        # Collection runs as a fire-and-forget task rather than an inline
+        # await, so `_finish_job`'s prompt-map eviction -- which used to
+        # be what made a second frame resolve to no job at all -- doesn't
+        # happen until the first frame's download/ingest finishes, well
+        # after a fast second frame has already resolved to this job_id.
+        # `_on_executed` checks this set (and _complete_job discards from
+        # it in a finally) so only the first frame spawns a task.
+        self._collecting: "set[int]" = set()
+        # Serializes _finish_job's read-then-write of a job's state so two
+        # concurrent terminal transitions for the same job_id (e.g. a
+        # cancel() racing a _complete_job) can't both observe "not yet
+        # terminal" and both write.
+        self._finish_lock = asyncio.Lock()
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -474,8 +497,15 @@ class ComfyClient:
 
     async def shutdown(self) -> None:
         self._stopping = True
-        for task in list(self._collect_tasks):
+        collect_tasks = list(self._collect_tasks)
+        for task in collect_tasks:
             task.cancel()
+        if collect_tasks:
+            # Wait for cancellation to actually be delivered before
+            # clearing -- clearing immediately would drop the strong
+            # references the set exists to hold in the first place,
+            # before the cancel has landed.
+            await asyncio.gather(*collect_tasks, return_exceptions=True)
         self._collect_tasks.clear()
         if self._pump_task is not None:
             self._pump_task.cancel()
@@ -637,41 +667,58 @@ class ComfyClient:
 
         Spawned as a task rather than awaited so downloading one job's
         images never blocks the reader from seeing another job's events.
-        The task is held in `_collect_tasks` (see __init__) so it isn't
-        garbage-collected mid-flight, and self-evicts once done.
+        Guarded by `_collecting` (see __init__) so a second `executed`
+        frame for a job whose first frame is still being collected is a
+        no-op rather than a second, concurrent collection of the same
+        images. The task is held in `_collect_tasks` (see __init__) so it
+        isn't garbage-collected mid-flight, and self-evicts (via
+        `add_done_callback`) once done.
         """
+        if job_id in self._collecting:
+            return
+        self._collecting.add(job_id)
         prompt_id = str(data.get("prompt_id") or "")
         task = asyncio.create_task(self._complete_job(job_id, prompt_id))
         self._collect_tasks.add(task)
-        for pending in list(self._collect_tasks):
-            if pending.done():
-                self._collect_tasks.discard(pending)
+        task.add_done_callback(self._collect_tasks.discard)
 
     async def _complete_job(self, job_id: int, prompt_id: str) -> None:
         """Download, write, and ingest one job's images, then finish it.
 
-        Checks `_cancelled` both before starting the download and again
-        before declaring the job "done": ComfyUI's /interrupt is not
-        synchronous, so a job can still emit `executed` (and this task can
-        still be running) after cancel() has already flagged -- or even
-        finished -- it. Downloading/ingesting a cancelled job's images, or
-        resurrecting its state from "cancelled" back to "done", would both
-        be wrong.
+        The `_cancelled` checks below are a cheap, harmless early-out for
+        the common case, but they are NOT what makes cancellation safe:
+        `cancel()`'s running-job branch discards `job_id` from
+        `_cancelled` *before* it actually interrupts ComfyUI or writes
+        "cancelled" -- by the time a cancel has taken effect the flag is
+        already gone, so a check against it here can miss the exact
+        window it exists to catch. The real guards are (1)
+        `collect_outputs` bailing when the job is no longer
+        queued/running, both up front and again around each image, and
+        (2) `_finish_job` refusing to move a job out of a terminal state.
+        Between those two, a cancel that lands at any point -- before
+        collection starts, mid-download, or after every image already
+        landed -- can neither trigger further downloads/ingests nor
+        resurrect the row.
         """
-        if job_id in self._cancelled:
-            return
         try:
-            files = await self.collect_outputs(job_id, prompt_id)
-        except Exception as exc:
-            logger.warning("Output collection failed for job %s: %s", job_id, exc)
             if job_id in self._cancelled:
                 return
-            await self._finish_job(job_id, "failed", error=str(exc))
-            return
-        if job_id in self._cancelled:
-            return
-        self._emit("job_outputs", {"job_id": job_id, "files": [str(f) for f in files]})
-        await self._finish_job(job_id, "done")
+            try:
+                files = await self.collect_outputs(job_id, prompt_id)
+            except Exception as exc:
+                logger.warning("Output collection failed for job %s: %s", job_id, exc)
+                if job_id in self._cancelled:
+                    return
+                await self._finish_job(job_id, "failed", error=str(exc))
+                return
+            if job_id in self._cancelled:
+                return
+            self._emit(
+                "job_outputs", {"job_id": job_id, "files": [str(f) for f in files]}
+            )
+            await self._finish_job(job_id, "done")
+        finally:
+            self._collecting.discard(job_id)
 
     async def _download_image(self, entry: Dict[str, Any], target: Path) -> None:
         resp = await self._http.get(
@@ -683,7 +730,10 @@ class ComfyClient:
             },
         )
         resp.raise_for_status()
-        target.write_bytes(resp.content)
+        # Multi-MB PNGs onto a WSL2 /mnt output root are exactly the stall
+        # class this module goes out of its way to keep off the event
+        # loop everywhere else.
+        await asyncio.to_thread(target.write_bytes, resp.content)
 
     async def collect_outputs(self, job_id: int, prompt_id: str) -> List[Path]:
         """Fetch, persist, and ingest every image the job produced.
@@ -692,13 +742,25 @@ class ComfyClient:
         directory so a remote or containerized ComfyUI works unchanged.
         Reads from `/history` (not the websocket event payload): ComfyUI
         emits one `executed` per output-producing node, not one per
-        prompt, and `_finish_job` evicts the prompt-map entry, so a second
-        `executed` frame for the same prompt would resolve nothing if we
-        trusted the event payload instead.
+        prompt, so trusting the event payload would lose images for a
+        workflow with more than one output node (see `_on_executed`'s
+        `_collecting` guard for the other half of that same fact).
+
+        Bails immediately if the job is no longer queued/running (a
+        cancel that completed before this call even started), and
+        re-checks around every image inside the loop -- both before
+        starting its download and again right after -- so a cancel
+        landing mid-batch stops further downloads/ingests instead of
+        finishing the batch, and doesn't ingest the one image that was
+        already in flight when the cancel landed either. A file that was
+        already written to disk before the cancel took effect is left in
+        place (harmless orphan): a retry re-downloads over it.
         """
         job = await asyncio.to_thread(self.db.get_generation_job, job_id)
         if job is None:
             raise ComfyError(f"No generation job with id {job_id}")
+        if job["state"] not in ("queued", "running"):
+            return []
 
         entry = await self.fetch_history(prompt_id)
         _, bindings = await self._load_preset(job["preset_id"])
@@ -707,15 +769,24 @@ class ComfyClient:
         ) or []
 
         target_dir = self.output_dir_for(job_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         written: List[Path] = []
         for entry_image in images:
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is None or current["state"] not in ("queued", "running"):
+                break
             name = entry_image.get("filename")
             if not name:
                 continue
             target = target_dir / name
             await self._download_image(entry_image, target)
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is None or current["state"] not in ("queued", "running"):
+                # Cancelled while this image's download was in flight --
+                # the bytes may already be on disk, but they must not be
+                # ingested or counted as this job's output.
+                break
             written.append(target)
             if self.scanner is not None:
                 try:
@@ -733,14 +804,36 @@ class ComfyClient:
         # terminal, regardless of which caller (executed/error event,
         # cancel, cancel_all, or a dispatch failure) got it here.
         self._running.discard(job_id)
-        fields: Dict[str, Any] = {"state": state, "finished_at": _now()}
-        if error is not None:
-            fields["error"] = error
-        await asyncio.to_thread(self.db.update_generation_job, job_id, **fields)
-        self._emit("job_update", {"job_id": job_id, "state": state, "error": error})
+        # The real anti-resurrection guard: a job already in a terminal
+        # state never moves to a different one. Without this, a stale
+        # completion -- e.g. a _complete_job task that was already
+        # in-flight when cancel() ran and finished the job first -- can
+        # silently overwrite "cancelled"/"failed" back to "done". Locked
+        # so two concurrent _finish_job calls for the same job_id can't
+        # both read "not yet terminal" and both write.
+        async with self._finish_lock:
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is not None and current["state"] in _TERMINAL_STATES:
+                logger.debug(
+                    "Ignoring _finish_job(%s, %r): already terminal at %r",
+                    job_id,
+                    state,
+                    current["state"],
+                )
+            else:
+                fields: Dict[str, Any] = {"state": state, "finished_at": _now()}
+                if error is not None:
+                    fields["error"] = error
+                await asyncio.to_thread(self.db.update_generation_job, job_id, **fields)
+                self._emit(
+                    "job_update", {"job_id": job_id, "state": state, "error": error}
+                )
         # Evict the reverse-mapping entry now that the job is terminal --
         # otherwise _prompt_to_job grows by one entry per job for the
         # life of the process once Task 8's queue is submitting steadily.
+        # Safe to do even when the write above was skipped: the job was
+        # already terminal, so the entry (if any) should already be gone,
+        # and this is a no-op in that case.
         stale = [pid for pid, jid in self._prompt_to_job.items() if jid == job_id]
         for pid in stale:
             del self._prompt_to_job[pid]
