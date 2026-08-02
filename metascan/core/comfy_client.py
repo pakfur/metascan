@@ -16,7 +16,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from uuid import uuid4
 
 import httpx
@@ -95,7 +95,7 @@ class ComfyClient:
         )
         return int(preset_id)
 
-    async def _load_preset(self, preset_id: int) -> tuple:
+    async def _load_preset(self, preset_id: int) -> Tuple[Dict[str, Any], Bindings]:
         row = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if row is None:
             raise ComfyError(f"No workflow preset with id {preset_id}")
@@ -132,13 +132,18 @@ class ComfyClient:
             resp.raise_for_status()
             prompt_id = resp.json().get("prompt_id")
             if not prompt_id:
-                raise ComfyError("ComfyUI accepted the prompt but returned no id")
-        except ComfyError:
+                raise ComfyError(
+                    f"ComfyUI at {self.base_url} accepted the prompt but "
+                    "returned no id"
+                )
+        except ComfyError as exc:
+            message = str(exc)
+            logger.warning(message)
             await asyncio.to_thread(
                 self.db.update_generation_job,
                 job_id,
                 state="failed",
-                error="no prompt_id in response",
+                error=message,
                 finished_at=_now(),
             )
             raise

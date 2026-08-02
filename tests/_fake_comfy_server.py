@@ -39,6 +39,9 @@ class FakeComfy:
         self.fail_with: Optional[str] = None
         self.execution_delay: float = 0.0
         self.images_per_job: int = 2
+        # When True, POST /prompt is accepted (200) but the response body
+        # omits "prompt_id" — exercises ComfyClient's no-prompt_id branch.
+        self.omit_prompt_id: bool = False
 
         # Observability for assertions.
         self.submitted: List[Dict[str, Any]] = []
@@ -98,6 +101,8 @@ class FakeComfy:
         body = await request.json()
         prompt_id = str(uuid.uuid4())
         self.submitted.append({"prompt_id": prompt_id, "body": body})
+        if self.omit_prompt_id:
+            return web.json_response({"number": 1})
         self._tasks.append(asyncio.create_task(self._execute(prompt_id, body)))
         return web.json_response({"prompt_id": prompt_id, "number": 1})
 

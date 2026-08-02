@@ -138,6 +138,21 @@ async def test_failed_submit_marks_the_job_failed(workspace):
         await c.aclose()
 
 
+async def test_submit_now_with_no_prompt_id_reports_the_base_url(
+    client, fake_comfy  # noqa: F811
+):
+    fake_comfy.omit_prompt_id = True
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+
+    with pytest.raises(ComfyError) as exc:
+        await client.submit_now(pid, params())
+    assert fake_comfy.base_url in str(exc.value)
+
+    jobs = client.db.list_generation_jobs(states=["failed"])
+    assert len(jobs) == 1
+    assert jobs[0]["error"] == str(exc.value)
+
+
 async def test_fetch_history_returns_the_entry_for_a_prompt(
     client, fake_comfy
 ):  # noqa: F811
