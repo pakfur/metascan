@@ -33,6 +33,7 @@ from backend.api import (
     prompt as prompt_api,
     vlm,
     comfy as comfy_api,
+    storyboard as storyboard_api,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
@@ -40,9 +41,11 @@ from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmClient
-from backend.api.vlm import set_vlm_client
+from backend.api.vlm import set_vlm_client, get_vlm_client
 from backend.api.comfy import set_comfy_client
+from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
+from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.scanner import Scanner
 
 logging.basicConfig(
@@ -194,6 +197,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # connects later.
     await comfy_client.start()
 
+    storyboard_runner = StoryboardRunner(
+        db=get_db(),
+        comfy=comfy_client,
+        get_vlm=get_vlm_client,
+        output_root=Path(comfy_cfg["output_root"]),
+        unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+    )
+    storyboard_runner.on_event(
+        lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
+    )
+    comfy_client.on_job_event(storyboard_runner.handle_job_event)
+    set_storyboard_runner(storyboard_runner)
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -267,6 +283,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await vlm_client.shutdown()
         except Exception:
             logger.exception("VLM client shutdown raised")
+        try:
+            await storyboard_runner.aclose()
+        except Exception:
+            logger.exception("Storyboard runner shutdown raised")
         try:
             await comfy_client.shutdown()
         except Exception:
@@ -344,6 +364,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(vlm.router)
     app.include_router(prompt_api.router)
     app.include_router(comfy_api.router)
+    app.include_router(storyboard_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
