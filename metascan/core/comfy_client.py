@@ -125,6 +125,12 @@ class ComfyClient:
         # right before and right after its POST, can never miss a
         # cancellation that lands in that window. See cancel()/_dispatch.
         self._cancelled: "set[int]" = set()
+        # Output-collection tasks spawned by _on_executed. A bare
+        # asyncio.create_task result is only weakly referenced by the
+        # event loop and can be garbage-collected mid-flight; holding a
+        # strong reference here (and self-evicting once done) keeps them
+        # alive, and shutdown() cancels any still outstanding.
+        self._collect_tasks: "set[asyncio.Task[None]]" = set()
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -468,6 +474,9 @@ class ComfyClient:
 
     async def shutdown(self) -> None:
         self._stopping = True
+        for task in list(self._collect_tasks):
+            task.cancel()
+        self._collect_tasks.clear()
         if self._pump_task is not None:
             self._pump_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -617,9 +626,105 @@ class ComfyClient:
         if kind == "executed":
             await self._on_executed(job_id, data)
 
+    def output_dir_for(self, job_id: int) -> Path:
+        """Where a job's images land. Flat per-job in Phase A; Phase B
+        overrides this with a storyboard/scene/panel tree."""
+        return self.output_root / f"job_{job_id:06d}"
+
     async def _on_executed(self, job_id: int, data: Dict[str, Any]) -> None:
-        """Overridden in Task 9 to download outputs before finishing."""
+        """Kick off output collection; the job stays 'running' until the
+        files are on disk and ingested.
+
+        Spawned as a task rather than awaited so downloading one job's
+        images never blocks the reader from seeing another job's events.
+        The task is held in `_collect_tasks` (see __init__) so it isn't
+        garbage-collected mid-flight, and self-evicts once done.
+        """
+        prompt_id = str(data.get("prompt_id") or "")
+        task = asyncio.create_task(self._complete_job(job_id, prompt_id))
+        self._collect_tasks.add(task)
+        for pending in list(self._collect_tasks):
+            if pending.done():
+                self._collect_tasks.discard(pending)
+
+    async def _complete_job(self, job_id: int, prompt_id: str) -> None:
+        """Download, write, and ingest one job's images, then finish it.
+
+        Checks `_cancelled` both before starting the download and again
+        before declaring the job "done": ComfyUI's /interrupt is not
+        synchronous, so a job can still emit `executed` (and this task can
+        still be running) after cancel() has already flagged -- or even
+        finished -- it. Downloading/ingesting a cancelled job's images, or
+        resurrecting its state from "cancelled" back to "done", would both
+        be wrong.
+        """
+        if job_id in self._cancelled:
+            return
+        try:
+            files = await self.collect_outputs(job_id, prompt_id)
+        except Exception as exc:
+            logger.warning("Output collection failed for job %s: %s", job_id, exc)
+            if job_id in self._cancelled:
+                return
+            await self._finish_job(job_id, "failed", error=str(exc))
+            return
+        if job_id in self._cancelled:
+            return
+        self._emit("job_outputs", {"job_id": job_id, "files": [str(f) for f in files]})
         await self._finish_job(job_id, "done")
+
+    async def _download_image(self, entry: Dict[str, Any], target: Path) -> None:
+        resp = await self._http.get(
+            f"{self.base_url}/view",
+            params={
+                "filename": entry.get("filename", ""),
+                "subfolder": entry.get("subfolder", ""),
+                "type": entry.get("type", "output"),
+            },
+        )
+        resp.raise_for_status()
+        target.write_bytes(resp.content)
+
+    async def collect_outputs(self, job_id: int, prompt_id: str) -> List[Path]:
+        """Fetch, persist, and ingest every image the job produced.
+
+        Images are pulled over HTTP rather than read from ComfyUI's output
+        directory so a remote or containerized ComfyUI works unchanged.
+        Reads from `/history` (not the websocket event payload): ComfyUI
+        emits one `executed` per output-producing node, not one per
+        prompt, and `_finish_job` evicts the prompt-map entry, so a second
+        `executed` frame for the same prompt would resolve nothing if we
+        trusted the event payload instead.
+        """
+        job = await asyncio.to_thread(self.db.get_generation_job, job_id)
+        if job is None:
+            raise ComfyError(f"No generation job with id {job_id}")
+
+        entry = await self.fetch_history(prompt_id)
+        _, bindings = await self._load_preset(job["preset_id"])
+        images = ((entry.get("outputs") or {}).get(bindings.save) or {}).get(
+            "images"
+        ) or []
+
+        target_dir = self.output_dir_for(job_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        written: List[Path] = []
+        for entry_image in images:
+            name = entry_image.get("filename")
+            if not name:
+                continue
+            target = target_dir / name
+            await self._download_image(entry_image, target)
+            written.append(target)
+            if self.scanner is not None:
+                try:
+                    await asyncio.to_thread(self.scanner.ingest_file, target)
+                except Exception as exc:
+                    # A file that fails to ingest is still on disk and still
+                    # reported; losing the whole job over it would be worse.
+                    logger.warning("Could not ingest %s: %s", target, exc)
+        return written
 
     async def _finish_job(
         self, job_id: int, state: str, error: Optional[str] = None
