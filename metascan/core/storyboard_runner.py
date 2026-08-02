@@ -78,6 +78,16 @@ class StoryboardRunner:
         # the same (or another) storyboard would double-write prompts if
         # interleaved with itself; simplest safe answer is a single lock.
         self._synth_lock = asyncio.Lock()
+        # Guards the folder-ensure read-check-create-update sequence in
+        # generate(). Two concurrent generate() calls for the same
+        # storyboard would otherwise both observe folder_id is None, both
+        # create a folder (distinct uuid4 ids, so no DB collision), and
+        # race the update_storyboard(folder_id=...) write -- the loser's
+        # folder becomes a permanent orphan nothing ever references again.
+        # Folder creation is rare (once per storyboard's lifetime), so one
+        # runner-wide lock is fine; a per-storyboard lock map would be
+        # over-engineering for this.
+        self._folder_lock = asyncio.Lock()
 
     # ---- events ----------------------------------------------------------
 
@@ -336,17 +346,32 @@ class StoryboardRunner:
                 )
 
         if tree.get("folder_id") is None:
-            folder = await asyncio.to_thread(
-                self.db.create_folder,
-                str(uuid4()),
-                "manual",
-                f"Storyboard: {tree['name']}",
-            )
-            folder_id = folder["id"] if folder else None
-            await asyncio.to_thread(
-                self.db.update_storyboard, storyboard_id, folder_id=folder_id
-            )
-            tree["folder_id"] = folder_id
+            async with self._folder_lock:
+                # Re-read inside the lock: another generate() call for this
+                # storyboard may have created (and published) the folder
+                # while this one was waiting to acquire it.
+                current = await asyncio.to_thread(self.db.get_storyboard, storyboard_id)
+                if current is None:
+                    raise StoryboardError(
+                        f"storyboard {storyboard_id} vanished during generate"
+                    )
+                folder_id = current.get("folder_id")
+                if folder_id is None:
+                    folder = await asyncio.to_thread(
+                        self.db.create_folder,
+                        str(uuid4()),
+                        "manual",
+                        f"Storyboard: {tree['name']}",
+                    )
+                    folder_id = folder["id"] if folder else None
+                    await asyncio.to_thread(
+                        self.db.update_storyboard,
+                        storyboard_id,
+                        folder_id=folder_id,
+                    )
+                    if folder is not None:
+                        self._emit("folders", "folder_created", {"folder": folder})
+                tree["folder_id"] = folder_id
 
         if self.unload_vlm_during_generation:
             vlm = self.get_vlm()
