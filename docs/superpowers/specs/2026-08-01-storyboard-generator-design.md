@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS workflow_presets (
 CREATE TABLE IF NOT EXISTS generation_jobs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     preset_id       INTEGER NOT NULL REFERENCES workflow_presets(id),
-    panel_id        INTEGER REFERENCES panels(id) ON DELETE CASCADE,
+    panel_id        INTEGER,        -- plain column, see note below
     state           TEXT NOT NULL
                     CHECK(state IN ('queued','running','done','failed','cancelled')),
     comfy_prompt_id TEXT,
@@ -125,6 +125,14 @@ CREATE INDEX IF NOT EXISTS idx_generation_jobs_panel ON generation_jobs(panel_id
 
 `generation_jobs.panel_id` is nullable so Phase A stands alone: a job may be
 submitted with no storyboard context at all.
+
+**It carries no `REFERENCES panels(id)` clause deliberately.** Phase A creates
+`generation_jobs` before `panels` exists; with `PRAGMA foreign_keys = ON`, an
+`INSERT` naming a foreign key to a non-existent table fails at runtime with
+`no such table: main.panels`. SQLite also cannot add a foreign key to an
+existing table without rebuilding it. `panel_id` therefore stays a plain
+integer column, and Phase B's panel-deletion path explicitly deletes the
+matching `generation_jobs` rows.
 
 ### 4.2 Phase B tables
 
@@ -328,8 +336,11 @@ and installed as a singleton.
 - `execution_error` carries the failing node's `class_type` and the exception
   text; both go into `generation_jobs.error` verbatim. This is what turns
   "checkpoint not found" into an actionable message instead of a silent hang.
-- Job state transitions are re-broadcast on the metascan `storyboard` WS
-  channel as `{channel:"storyboard", event:"job_update", data:{…}}`.
+- Job state transitions are re-broadcast on a metascan **`comfy`** WS channel
+  as `{channel:"comfy", event:"job_update", data:{…}}`, alongside
+  `job_progress` and `job_outputs`. The driver knows nothing about
+  storyboards, so it must not broadcast on the `storyboard` channel; Phase C
+  subscribes to both and correlates via `generation_jobs.panel_id`.
 
 ### 5.4 Submission and queue discipline
 
@@ -359,8 +370,11 @@ On job completion:
    thumbnail generation, media row insert — then insert the `panel_images`
    row and add the file to the storyboard's folder.
 
-`MediaScanner._process_media_file` is currently private. Phase A promotes a
-public `ingest_file(path) -> Optional[Media]` wrapper rather than reaching
+`Scanner._process_media_file` (`metascan/core/scanner.py`) is private, and the
+full ingest sequence — process, `save_media`, pHash, thumbnail — currently
+lives inline in `Scanner.scan_directory`'s loop. Phase A extracts that
+sequence into a public `Scanner.ingest_file(path) -> Optional[Media]` and has
+`scan_directory` call it, rather than duplicating the sequence or reaching
 into the private method from new code.
 
 ### 5.6 Reference-image upload
@@ -527,8 +541,10 @@ generating, or an error badge if its job failed.
   pattern established in `stores/folders.ts`; `api/storyboard.ts` and
   `api/comfy.ts` typed fetchers; an import dialog for pasting scene text; a
   workflow-preset registration dialog.
-- **WS:** a new `storyboard` channel on the existing multiplexed `/ws`,
-  carrying `job_update`, `panel_images_changed`, `synthesis_progress`.
+- **WS:** two channels on the existing multiplexed `/ws` — `comfy` (from
+  Phase A: `job_update`, `job_progress`, `job_outputs`, correlated to panels
+  via `generation_jobs.panel_id`) and a new `storyboard` channel carrying
+  `panel_images_changed` and `synthesis_progress`.
 
 ### 8.4 Mobile
 
