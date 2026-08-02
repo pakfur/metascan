@@ -499,6 +499,7 @@ class VlmClient:
         temperature: float = 0.6,
         max_tokens: int = 250,
         timeout: float = 120.0,
+        grammar: Optional[str] = None,
     ) -> str:
         """Free-form text generation (image-grounded or text-only).
 
@@ -511,6 +512,10 @@ class VlmClient:
         and attached as an ``image_url`` part. When ``None``, the request is
         text-only — Qwen3-VL handles text-only inference fine, no model swap
         is needed.
+
+        ``grammar``, when given, is transported exactly like
+        :meth:`generate_tags` does — a top-level ``"grammar"`` key in the
+        request body — to GBNF-constrain the response.
         """
         if self._http is None or self._state != STATE_READY:
             raise VlmError(
@@ -543,6 +548,8 @@ class VlmClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if grammar is not None:
+            body["grammar"] = grammar
         try:
             r = await self._http.post(
                 "/v1/chat/completions", json=body, timeout=timeout

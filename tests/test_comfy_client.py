@@ -652,6 +652,23 @@ async def test_outputs_are_written_under_the_output_root(ingesting_client):
     assert all(f.stat().st_size > 0 for f in files)
 
 
+async def test_submit_with_explicit_output_dir_writes_there(
+    ingesting_client, workspace
+):
+    """A caller-supplied output_dir wins over the default job_XXXXXX tree,
+    both on disk and (via collect_outputs re-reading job["output_dir"])
+    without a second DB read at collection time."""
+    custom = workspace / "custom"
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params(), output_dir=custom)
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    files = sorted(custom.glob("*.png"))
+    assert len(files) == 2
+    assert all(f.stat().st_size > 0 for f in files)
+    assert not list(ingesting_client.output_dir_for(job_id).glob("*.png"))
+
+
 async def test_outputs_are_ingested_into_the_media_database(ingesting_client):
     pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
     job_id = await ingesting_client.submit(pid, params())

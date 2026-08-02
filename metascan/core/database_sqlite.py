@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
@@ -240,6 +241,12 @@ class DatabaseManager:
                 "photo_exposure",
                 "ALTER TABLE media ADD COLUMN photo_exposure TEXT",
             )
+            _idempotent_add_column(
+                conn,
+                "media",
+                "hidden",
+                "ALTER TABLE media ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+            )
 
             # Covering indexes for the grid list endpoint. The `media` row
             # layout is `[file_path][data][is_favorite]...[width]...`, so
@@ -265,6 +272,7 @@ class DatabaseManager:
                 "gps_latitude",
                 "gps_longitude",
                 "orientation",
+                "hidden",
             )
             for idx_name in ("idx_media_summary_added", "idx_media_summary_modified"):
                 ddl_row = conn.execute(
@@ -282,7 +290,7 @@ class DatabaseManager:
                     width, height, file_size, frame_rate, duration,
                     modified_at,
                     camera_make, camera_model, datetime_original,
-                    gps_latitude, gps_longitude, orientation
+                    gps_latitude, gps_longitude, orientation, hidden
                 )
                 """
             )
@@ -294,7 +302,7 @@ class DatabaseManager:
                     width, height, file_size, frame_rate, duration,
                     created_at,
                     camera_make, camera_model, datetime_original,
-                    gps_latitude, gps_longitude, orientation
+                    gps_latitude, gps_longitude, orientation, hidden
                 )
                 """
             )
@@ -471,6 +479,189 @@ class DatabaseManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_generation_jobs_prompt "
                 "ON generation_jobs(comfy_prompt_id)"
+            )
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "output_dir",
+                "ALTER TABLE generation_jobs ADD COLUMN output_dir TEXT",
+            )
+
+            # ---- Phase B: storyboard tables --------------------------------
+            # storyboards.folder_id was originally declared INTEGER, but
+            # folders.id is TEXT (a uuid4 string) -- a numeric-looking uuid
+            # would silently coerce and corrupt add_folder_items lookups.
+            # This table shipped only on the storyboard-domain branch (never
+            # released), so a fresh DB just gets the correct DDL below. A dev
+            # DB created from an earlier commit on this branch would still
+            # have the old INTEGER column, though -- detect that from the
+            # live schema and do a standard SQLite column-type rebuild
+            # (create/copy/drop/rename) rather than DROP+recreate, which
+            # would lose data. Follows the off/rebuild/on procedure SQLite's
+            # own docs recommend for schema changes under FK enforcement.
+            old_storyboards_ddl = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='storyboards'"
+            ).fetchone()
+            # sqlite_master preserves the CREATE TABLE text verbatim,
+            # whitespace and all -- match on the column pair with
+            # flexible whitespace rather than a literal substring so this
+            # doesn't depend on exact formatting.
+            if old_storyboards_ddl and re.search(
+                r"folder_id\s+INTEGER", old_storyboards_ddl["sql"] or ""
+            ):
+                logger.info(
+                    "Migrating storyboards.folder_id INTEGER -> TEXT "
+                    "(dev DB predating the folder_id type fix)…"
+                )
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute(
+                    """
+                    CREATE TABLE storyboards_folder_id_migration (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name          TEXT NOT NULL,
+                        source_text   TEXT,
+                        aspect_ratio  TEXT NOT NULL DEFAULT '16:9',
+                        style_block   TEXT,
+                        negative      TEXT,
+                        target_model  TEXT NOT NULL,
+                        architecture  TEXT NOT NULL,
+                        preset_id     INTEGER REFERENCES workflow_presets(id),
+                        base_seed     INTEGER NOT NULL,
+                        batch_size    INTEGER NOT NULL DEFAULT 4,
+                        folder_id     TEXT REFERENCES folders(id)
+                                      ON DELETE SET NULL,
+                        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO storyboards_folder_id_migration "
+                    "(id, name, source_text, aspect_ratio, style_block, "
+                    "negative, target_model, architecture, preset_id, "
+                    "base_seed, batch_size, folder_id, created_at, updated_at) "
+                    "SELECT id, name, source_text, aspect_ratio, style_block, "
+                    "negative, target_model, architecture, preset_id, "
+                    "base_seed, batch_size, CAST(folder_id AS TEXT), "
+                    "created_at, updated_at FROM storyboards"
+                )
+                conn.execute("DROP TABLE storyboards")
+                conn.execute(
+                    "ALTER TABLE storyboards_folder_id_migration "
+                    "RENAME TO storyboards"
+                )
+                conn.commit()
+                conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storyboards (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name          TEXT NOT NULL,
+                    source_text   TEXT,
+                    aspect_ratio  TEXT NOT NULL DEFAULT '16:9',
+                    style_block   TEXT,
+                    negative      TEXT,
+                    target_model  TEXT NOT NULL,
+                    architecture  TEXT NOT NULL,
+                    preset_id     INTEGER REFERENCES workflow_presets(id),
+                    base_seed     INTEGER NOT NULL,
+                    batch_size    INTEGER NOT NULL DEFAULT 4,
+                    folder_id     TEXT REFERENCES folders(id)
+                                  ON DELETE SET NULL,
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS storyboard_subjects (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    storyboard_id  INTEGER NOT NULL
+                                   REFERENCES storyboards(id) ON DELETE CASCADE,
+                    name           TEXT NOT NULL,
+                    description    TEXT NOT NULL,
+                    lora_name      TEXT,
+                    lora_strength  REAL DEFAULT 0.8,
+                    reference_path TEXT REFERENCES media(file_path)
+                                   ON DELETE SET NULL,
+                    sort_order     INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scenes (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    storyboard_id INTEGER NOT NULL
+                                  REFERENCES storyboards(id) ON DELETE CASCADE,
+                    sort_order    INTEGER NOT NULL DEFAULT 0,
+                    name          TEXT NOT NULL,
+                    location      TEXT,
+                    time_of_day   TEXT,
+                    mood          TEXT,
+                    lighting      TEXT,
+                    notes         TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS panels (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scene_id           INTEGER NOT NULL
+                                       REFERENCES scenes(id) ON DELETE CASCADE,
+                    sort_order         INTEGER NOT NULL DEFAULT 0,
+                    shot_size          TEXT,
+                    angle              TEXT,
+                    lens               TEXT,
+                    action             TEXT NOT NULL,
+                    subject_ids        TEXT NOT NULL DEFAULT '[]',
+                    notes              TEXT,
+                    brief              TEXT,
+                    prompt             TEXT,
+                    prompt_locked      INTEGER NOT NULL DEFAULT 0,
+                    prompt_source      TEXT,
+                    negative           TEXT,
+                    selected_image_id  INTEGER REFERENCES panel_images(id)
+                                       ON DELETE SET NULL,
+                    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS panel_images (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    panel_id        INTEGER NOT NULL
+                                    REFERENCES panels(id) ON DELETE CASCADE,
+                    file_path       TEXT NOT NULL REFERENCES media(file_path)
+                                    ON DELETE CASCADE,
+                    seed            INTEGER,
+                    variant_index   INTEGER NOT NULL DEFAULT 0,
+                    prompt_used     TEXT,
+                    preset_id       INTEGER REFERENCES workflow_presets(id),
+                    comfy_prompt_id TEXT,
+                    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_panel_images_panel "
+                "ON panel_images(panel_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
+                "ON scenes(storyboard_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_panels_scene ON panels(scene_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subjects_storyboard "
+                "ON storyboard_subjects(storyboard_id)"
             )
 
             # One-shot backfill: ``created_at`` previously tracked the last
@@ -904,13 +1095,17 @@ class DatabaseManager:
     # ---- ComfyUI generation jobs ----------------------------------------
 
     def create_generation_job(
-        self, preset_id: int, params: str, panel_id: Optional[int] = None
+        self,
+        preset_id: int,
+        params: str,
+        panel_id: Optional[int] = None,
+        output_dir: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO generation_jobs (preset_id, params, panel_id) "
-                "VALUES (?, ?, ?)",
-                (preset_id, params, panel_id),
+                "INSERT INTO generation_jobs (preset_id, params, panel_id, output_dir) "
+                "VALUES (?, ?, ?, ?)",
+                (preset_id, params, panel_id, output_dir),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -952,17 +1147,685 @@ class DatabaseManager:
             conn.commit()
 
     def list_generation_jobs(
-        self, states: Optional[List[str]] = None, limit: int = 100
+        self,
+        states: Optional[List[str]] = None,
+        limit: int = 100,
+        panel_ids: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM generation_jobs"
+        conditions: List[str] = []
         params: List[Any] = []
         if states:
-            sql += " WHERE state IN (" + ",".join("?" * len(states)) + ")"
+            conditions.append("state IN (" + ",".join("?" * len(states)) + ")")
             params.extend(states)
+        if panel_ids:
+            conditions.append("panel_id IN (" + ",".join("?" * len(panel_ids)) + ")")
+            params.extend(panel_ids)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY id LIMIT ?"
         params.append(limit)
         with self.lock, self._get_connection() as conn:
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    # ---- Storyboards ------------------------------------------------------
+
+    _STORYBOARD_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {
+            "name",
+            "source_text",
+            "aspect_ratio",
+            "style_block",
+            "negative",
+            "target_model",
+            "architecture",
+            "preset_id",
+            "base_seed",
+            "batch_size",
+            "folder_id",
+        }
+    )
+    _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {
+            "name",
+            "description",
+            "lora_name",
+            "lora_strength",
+            "reference_path",
+            "sort_order",
+        }
+    )
+    _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {"name", "sort_order", "location", "time_of_day", "mood", "lighting", "notes"}
+    )
+    _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {
+            "sort_order",
+            "shot_size",
+            "angle",
+            "lens",
+            "action",
+            "subject_ids",
+            "notes",
+            "brief",
+            "prompt",
+            "prompt_locked",
+            "prompt_source",
+            "negative",
+            "selected_image_id",
+        }
+    )
+
+    def create_storyboard(
+        self,
+        *,
+        name: str,
+        target_model: str,
+        architecture: str,
+        aspect_ratio: str = "16:9",
+        style_block: Optional[str] = None,
+        negative: Optional[str] = None,
+        preset_id: Optional[int] = None,
+        base_seed: int = 0,
+        batch_size: int = 4,
+        source_text: Optional[str] = None,
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO storyboards (name, source_text, aspect_ratio, "
+                "style_block, negative, target_model, architecture, "
+                "preset_id, base_seed, batch_size) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    source_text,
+                    aspect_ratio,
+                    style_block,
+                    negative,
+                    target_model,
+                    architecture,
+                    preset_id,
+                    base_seed,
+                    batch_size,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_storyboard(self, storyboard_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM storyboards WHERE id = ?", (storyboard_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_storyboards(self) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM storyboards ORDER BY id").fetchall()
+            return [dict(r) for r in rows]
+
+    def update_storyboard(self, storyboard_id: int, **fields: Any) -> None:
+        unknown = set(fields) - self._STORYBOARD_UPDATABLE
+        if unknown:
+            raise ValueError(
+                f"Not updatable on storyboards: {', '.join(sorted(unknown))}"
+            )
+        if not fields:
+            return
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [storyboard_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE storyboards SET {assignments}, "
+                "updated_at = datetime('now') WHERE id = ?",
+                values,
+            )
+            conn.commit()
+
+    def delete_storyboard(self, storyboard_id: int) -> bool:
+        """Delete a storyboard and everything under it.
+
+        Before the cascade (storyboards -> scenes -> panels ->
+        panel_images), unhides the media rows any curated panel_images
+        pointed at and purges generation_jobs for the panels being
+        destroyed -- see _release_panels.
+        """
+        with self.lock, self._get_connection() as conn:
+            panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
+            self._release_panels(conn, panel_ids)
+            cur = conn.execute("DELETE FROM storyboards WHERE id = ?", (storyboard_id,))
+            conn.commit()
+            return int(cur.rowcount) > 0
+
+    # ---- Storyboard subjects ------------------------------------------------
+
+    def create_subject(
+        self,
+        storyboard_id: int,
+        *,
+        name: str,
+        description: str,
+        lora_name: Optional[str] = None,
+        lora_strength: float = 0.8,
+        reference_path: Optional[str] = None,
+        sort_order: int = 0,
+    ) -> int:
+        # storyboard_subjects.reference_path FKs media(file_path), which is
+        # always stored POSIX -- a native-style path (Windows/WSL) would
+        # never match an existing row and surface as a confusing
+        # sqlite3.IntegrityError higher up.
+        posix_reference_path = (
+            to_posix_path(reference_path) if reference_path else reference_path
+        )
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO storyboard_subjects (storyboard_id, name, "
+                "description, lora_name, lora_strength, reference_path, "
+                "sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    storyboard_id,
+                    name,
+                    description,
+                    lora_name,
+                    lora_strength,
+                    posix_reference_path,
+                    sort_order,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def update_subject(self, subject_id: int, **fields: Any) -> None:
+        unknown = set(fields) - self._SUBJECT_UPDATABLE
+        if unknown:
+            raise ValueError(
+                f"Not updatable on storyboard_subjects: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        if not fields:
+            return
+        if fields.get("reference_path"):
+            fields["reference_path"] = to_posix_path(fields["reference_path"])
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [subject_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE storyboard_subjects SET {assignments} WHERE id = ?",
+                values,
+            )
+            conn.commit()
+
+    def delete_subject(self, subject_id: int) -> bool:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM storyboard_subjects WHERE id = ?", (subject_id,)
+            )
+            conn.commit()
+            return int(cur.rowcount) > 0
+
+    # ---- Scenes -------------------------------------------------------------
+
+    def create_scene(
+        self,
+        storyboard_id: int,
+        *,
+        name: str,
+        sort_order: int = 0,
+        location: Optional[str] = None,
+        time_of_day: Optional[str] = None,
+        mood: Optional[str] = None,
+        lighting: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO scenes (storyboard_id, sort_order, name, "
+                "location, time_of_day, mood, lighting, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    storyboard_id,
+                    sort_order,
+                    name,
+                    location,
+                    time_of_day,
+                    mood,
+                    lighting,
+                    notes,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def update_scene(self, scene_id: int, **fields: Any) -> None:
+        unknown = set(fields) - self._SCENE_UPDATABLE
+        if unknown:
+            raise ValueError(f"Not updatable on scenes: {', '.join(sorted(unknown))}")
+        if not fields:
+            return
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [scene_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(f"UPDATE scenes SET {assignments} WHERE id = ?", values)
+            conn.commit()
+
+    def delete_scene(self, scene_id: int) -> bool:
+        """Delete a scene and its panels.
+
+        Before the cascade (scenes -> panels -> panel_images), unhides the
+        media rows any curated panel_images pointed at and purges
+        generation_jobs for the panels being destroyed -- see
+        _release_panels.
+        """
+        with self.lock, self._get_connection() as conn:
+            panel_ids = [
+                int(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
+                ).fetchall()
+            ]
+            self._release_panels(conn, panel_ids)
+            cur = conn.execute("DELETE FROM scenes WHERE id = ?", (scene_id,))
+            conn.commit()
+            return int(cur.rowcount) > 0
+
+    # ---- Panels ---------------------------------------------------------
+
+    def create_panel(
+        self,
+        scene_id: int,
+        *,
+        action: str,
+        sort_order: int = 0,
+        shot_size: Optional[str] = None,
+        angle: Optional[str] = None,
+        lens: Optional[str] = None,
+        subject_ids: Optional[List[int]] = None,
+        notes: Optional[str] = None,
+    ) -> int:
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO panels (scene_id, sort_order, shot_size, angle, "
+                "lens, action, subject_ids, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scene_id,
+                    sort_order,
+                    shot_size,
+                    angle,
+                    lens,
+                    action,
+                    _json.dumps(list(subject_ids or [])),
+                    notes,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def update_panel(self, panel_id: int, **fields: Any) -> None:
+        import json as _json
+
+        unknown = set(fields) - self._PANEL_UPDATABLE
+        if unknown:
+            raise ValueError(f"Not updatable on panels: {', '.join(sorted(unknown))}")
+        if not fields:
+            return
+        if "subject_ids" in fields:
+            fields["subject_ids"] = _json.dumps(list(fields["subject_ids"] or []))
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [panel_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE panels SET {assignments}, "
+                "updated_at = datetime('now') WHERE id = ?",
+                values,
+            )
+            conn.commit()
+
+    def get_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM panels WHERE id = ?", (panel_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            d = dict(row)
+            try:
+                d["subject_ids"] = _json.loads(d["subject_ids"] or "[]")
+            except (ValueError, TypeError):
+                d["subject_ids"] = []
+            return d
+
+    def _release_panels(self, conn: sqlite3.Connection, panel_ids: List[int]) -> None:
+        """Unhide panel_images' media rows and purge generation_jobs for
+        ``panel_ids``, before those panels (and their panel_images) are
+        cascade-deleted.
+
+        Must run in the same transaction as the delete/replace that
+        follows -- see delete_panel / delete_scene / delete_storyboard /
+        replace_storyboard_structure. Without this, panel_images cascading
+        away leaves the underlying media rows permanently hidden=1 (nothing
+        else ever flips them back once the panel is gone), and stale
+        generation_jobs rows for now-deleted panels could be re-adopted by
+        a restart (``ComfyClient._rehydrate_jobs``).
+        """
+        if not panel_ids:
+            return
+        placeholders = ",".join("?" * len(panel_ids))
+        conn.execute(
+            f"UPDATE media SET hidden = 0 WHERE file_path IN "
+            f"(SELECT file_path FROM panel_images WHERE panel_id IN ({placeholders}))",
+            panel_ids,
+        )
+        conn.execute(
+            f"DELETE FROM generation_jobs WHERE panel_id IN ({placeholders})",
+            panel_ids,
+        )
+
+    def _panel_ids_for_storyboard(
+        self, conn: sqlite3.Connection, storyboard_id: int
+    ) -> List[int]:
+        return [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT p.id AS id FROM panels p "
+                "JOIN scenes s ON p.scene_id = s.id "
+                "WHERE s.storyboard_id = ?",
+                (storyboard_id,),
+            ).fetchall()
+        ]
+
+    def storyboard_id_for_panel(self, panel_id: int) -> Optional[int]:
+        """Resolve a panel's storyboard id via panels -> scenes -> storyboards.
+
+        ``get_panel`` alone doesn't carry the storyboard id, and loading the
+        full tree just to find it is wasteful for the ingest hot path in
+        ``StoryboardRunner._ingest_outputs`` -- this is a cheap two-JOIN
+        SELECT instead.
+        """
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT s.storyboard_id AS sid FROM panels p "
+                "JOIN scenes s ON p.scene_id = s.id WHERE p.id = ?",
+                (panel_id,),
+            ).fetchone()
+            return int(row["sid"]) if row is not None else None
+
+    def delete_panel(self, panel_id: int) -> bool:
+        """Delete a panel, plus any generation_jobs referencing it.
+
+        ``generation_jobs.panel_id`` carries no FK/cascade (see spec §4.1:
+        the panels table didn't exist yet when generation_jobs was
+        created), so the job rows are deleted explicitly first. Also
+        unhides the media rows any curated panel_images pointed at before
+        they cascade away -- see _release_panels.
+        """
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute("SELECT id FROM panels WHERE id = ?", (panel_id,))
+            if cur.fetchone() is None:
+                return False
+            self._release_panels(conn, [panel_id])
+            conn.execute("DELETE FROM panels WHERE id = ?", (panel_id,))
+            conn.commit()
+            return True
+
+    # ---- Structure replace + tree read -----------------------------------
+
+    def replace_storyboard_structure(
+        self, storyboard_id: int, parsed: Dict[str, Any]
+    ) -> None:
+        """Destructively replace subjects/scenes/panels from a parse result.
+
+        ``parsed`` is the validated shape from storyboard_parse: subjects
+        carry name/description; panels reference subjects BY NAME
+        (case-insensitive); unknown names are dropped. One transaction.
+
+        Before the destructive delete (which cascades scenes -> panels ->
+        panel_images), unhides the media rows any curated panel_images
+        pointed at and purges generation_jobs for the panels being
+        destroyed -- see _release_panels. Re-parsing an existing storyboard
+        would otherwise leave those media rows hidden forever.
+        """
+        import json as _json
+
+        with self.lock:
+            with self._get_connection() as conn:
+                panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
+                self._release_panels(conn, panel_ids)
+                conn.execute(
+                    "DELETE FROM storyboard_subjects WHERE storyboard_id = ?",
+                    (storyboard_id,),
+                )
+                conn.execute(
+                    "DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,)
+                )
+                name_to_id: Dict[str, int] = {}
+                for i, subj in enumerate(parsed.get("subjects") or []):
+                    cur = conn.execute(
+                        "INSERT INTO storyboard_subjects "
+                        "(storyboard_id, name, description, sort_order) "
+                        "VALUES (?, ?, ?, ?)",
+                        (storyboard_id, subj["name"], subj["description"], i),
+                    )
+                    name_to_id[subj["name"].strip().lower()] = int(cur.lastrowid)
+                for si, scene in enumerate(parsed.get("scenes") or []):
+                    cur = conn.execute(
+                        "INSERT INTO scenes (storyboard_id, sort_order, name, "
+                        "location, time_of_day, mood, lighting) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            storyboard_id,
+                            si,
+                            scene["name"],
+                            scene.get("location"),
+                            scene.get("time_of_day"),
+                            scene.get("mood"),
+                            scene.get("lighting"),
+                        ),
+                    )
+                    scene_id = int(cur.lastrowid)
+                    for pi, panel in enumerate(scene.get("panels") or []):
+                        ids = [
+                            name_to_id[n.strip().lower()]
+                            for n in (panel.get("subjects") or [])
+                            if n.strip().lower() in name_to_id
+                        ]
+                        conn.execute(
+                            "INSERT INTO panels (scene_id, sort_order, "
+                            "shot_size, angle, lens, action, subject_ids) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                scene_id,
+                                pi,
+                                panel.get("shot_size"),
+                                panel.get("angle"),
+                                panel.get("lens"),
+                                panel["action"],
+                                _json.dumps(ids),
+                            ),
+                        )
+                conn.execute(
+                    "UPDATE storyboards SET updated_at = datetime('now') "
+                    "WHERE id = ?",
+                    (storyboard_id,),
+                )
+                conn.commit()
+
+    def get_storyboard_tree(self, storyboard_id: int) -> Optional[Dict[str, Any]]:
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            sb_row = conn.execute(
+                "SELECT * FROM storyboards WHERE id = ?", (storyboard_id,)
+            ).fetchone()
+            if sb_row is None:
+                return None
+            tree = dict(sb_row)
+
+            subjects = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM storyboard_subjects WHERE storyboard_id = ? "
+                    "ORDER BY sort_order, id",
+                    (storyboard_id,),
+                ).fetchall()
+            ]
+            tree["subjects"] = subjects
+
+            scene_rows = conn.execute(
+                "SELECT * FROM scenes WHERE storyboard_id = ? "
+                "ORDER BY sort_order, id",
+                (storyboard_id,),
+            ).fetchall()
+            scenes = []
+            for scene_row in scene_rows:
+                scene = dict(scene_row)
+                panel_rows = conn.execute(
+                    "SELECT * FROM panels WHERE scene_id = ? "
+                    "ORDER BY sort_order, id",
+                    (scene["id"],),
+                ).fetchall()
+                panels = []
+                for panel_row in panel_rows:
+                    panel = dict(panel_row)
+                    try:
+                        panel["subject_ids"] = _json.loads(panel["subject_ids"] or "[]")
+                    except (ValueError, TypeError):
+                        panel["subject_ids"] = []
+                    images = []
+                    for r in conn.execute(
+                        "SELECT * FROM panel_images WHERE panel_id = ? "
+                        "ORDER BY variant_index, id",
+                        (panel["id"],),
+                    ).fetchall():
+                        image = dict(r)
+                        image["file_path"] = to_native_path(image["file_path"])
+                        images.append(image)
+                    panel["images"] = images
+                    panels.append(panel)
+                scene["panels"] = panels
+                scenes.append(scene)
+            tree["scenes"] = scenes
+            return tree
+
+    # ---- Panel images -----------------------------------------------------
+
+    def create_panel_image(
+        self,
+        panel_id: int,
+        *,
+        file_path: str,
+        seed: Optional[int] = None,
+        variant_index: int = 0,
+        prompt_used: Optional[str] = None,
+        preset_id: Optional[int] = None,
+        comfy_prompt_id: Optional[str] = None,
+    ) -> int:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO panel_images (panel_id, file_path, seed, "
+                "variant_index, prompt_used, preset_id, comfy_prompt_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    panel_id,
+                    posix_path,
+                    seed,
+                    variant_index,
+                    prompt_used,
+                    preset_id,
+                    comfy_prompt_id,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def list_panel_images(self, panel_id: int) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM panel_images WHERE panel_id = ? "
+                "ORDER BY variant_index, id",
+                (panel_id,),
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["file_path"] = to_native_path(d["file_path"])
+                out.append(d)
+            return out
+
+    def count_panel_images(self, panel_id: int) -> int:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM panel_images WHERE panel_id = ?",
+                (panel_id,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def select_panel_image(self, panel_id: int, image_id: Optional[int]) -> bool:
+        """Set a panel's keeper. Unhides the new keeper's media row, re-hides
+        the previous keeper's. image_id=None clears the selection."""
+        with self.lock:
+            with self._get_connection() as conn:
+                panel = conn.execute(
+                    "SELECT selected_image_id FROM panels WHERE id = ?",
+                    (panel_id,),
+                ).fetchone()
+                if panel is None:
+                    return False
+                new_path = None
+                if image_id is not None:
+                    row = conn.execute(
+                        "SELECT file_path FROM panel_images "
+                        "WHERE id = ? AND panel_id = ?",
+                        (image_id, panel_id),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    new_path = row["file_path"]
+                old_id = panel["selected_image_id"]
+                if old_id is not None and old_id != image_id:
+                    old = conn.execute(
+                        "SELECT file_path FROM panel_images WHERE id = ?",
+                        (old_id,),
+                    ).fetchone()
+                    if old is not None:
+                        conn.execute(
+                            "UPDATE media SET hidden = 1 WHERE file_path = ?",
+                            (old["file_path"],),
+                        )
+                if new_path is not None:
+                    conn.execute(
+                        "UPDATE media SET hidden = 0 WHERE file_path = ?",
+                        (new_path,),
+                    )
+                conn.execute(
+                    "UPDATE panels SET selected_image_id = ?, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    (image_id, panel_id),
+                )
+                conn.commit()
+                return True
+
+    # ---- Generation-job panel lookups --------------------------------------
+
+    def latest_jobs_for_panels(self, panel_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Latest (max id) generation_jobs row per panel."""
+        if not panel_ids:
+            return {}
+        placeholders = ",".join("?" * len(panel_ids))
+        sql = (
+            "SELECT gj.* FROM generation_jobs gj "
+            "JOIN (SELECT panel_id, MAX(id) AS mid FROM generation_jobs "
+            f"WHERE panel_id IN ({placeholders}) GROUP BY panel_id) m "
+            "ON gj.id = m.mid"
+        )
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql, panel_ids).fetchall()
+            return {int(r["panel_id"]): dict(r) for r in rows}
 
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0
@@ -1047,6 +1910,7 @@ class DatabaseManager:
         self,
         favorites_only: bool = False,
         sort: str = "date_added",
+        include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return a per-file summary tailored for the thumbnail grid.
 
@@ -1061,13 +1925,18 @@ class DatabaseManager:
             # file_name sort happens in the service layer (Python basename
             # extraction) — SQLite has no cheap basename function.
         }.get(sort, "created_at DESC")
-        where = "WHERE is_favorite = 1" if favorites_only else ""
+        conditions = []
+        if favorites_only:
+            conditions.append("is_favorite = 1")
+        if not include_hidden:
+            conditions.append("hidden = 0")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
             "SELECT file_path, is_favorite, playback_speed, "
             "width, height, file_size, frame_rate, duration, "
             "modified_at, created_at, "
             "camera_make, camera_model, datetime_original, "
-            "gps_latitude, gps_longitude, orientation "
+            "gps_latitude, gps_longitude, orientation, hidden "
             f"FROM media {where} ORDER BY {order_clause}"
         )
         out: List[Dict[str, Any]] = []
@@ -1100,6 +1969,7 @@ class DatabaseManager:
                             "gps_latitude": row["gps_latitude"],
                             "gps_longitude": row["gps_longitude"],
                             "orientation": row["orientation"],
+                            "hidden": bool(row["hidden"]),
                         }
                     )
         except Exception as e:
@@ -1629,6 +2499,21 @@ class DatabaseManager:
                     return cursor.rowcount > 0  # type: ignore[no-any-return]
         except Exception as e:
             logger.error(f"Failed to set favorite for {file_path}: {e}")
+            return False
+
+    def set_media_hidden(self, file_path: str, hidden: bool) -> bool:
+        """Hide/unhide one media row from the default grid query."""
+        try:
+            with self.lock:
+                with self._get_connection() as conn:
+                    cur = conn.execute(
+                        "UPDATE media SET hidden = ? WHERE file_path = ?",
+                        (1 if hidden else 0, to_posix_path(file_path)),
+                    )
+                    conn.commit()
+                    return cur.rowcount > 0  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.error(f"Failed to set hidden for {file_path}: {e}")
             return False
 
     def get_favorite_media_paths(self) -> Set[str]:

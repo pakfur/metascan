@@ -81,6 +81,18 @@ def test_job_accepts_a_panel_id_without_a_panels_table(db):
     assert db.get_generation_job(jid)["panel_id"] == 1234
 
 
+def test_job_accepts_and_round_trips_an_output_dir(db):
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", output_dir="/x/y")
+    assert db.get_generation_job(jid)["output_dir"] == "/x/y"
+
+
+def test_job_output_dir_defaults_to_none(db):
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}")
+    assert db.get_generation_job(jid)["output_dir"] is None
+
+
 def test_update_job_fields(db):
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}")

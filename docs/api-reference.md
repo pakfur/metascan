@@ -18,7 +18,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/media` | List media summaries (with sort/filter params) |
+| GET | `/api/media` | List media summaries (with sort/filter params). `include_hidden=true` also returns media hidden via storyboard panel-image curation (default: hidden rows are excluded) |
 | GET | `/api/media/{path}` | Get single media record |
 | DELETE | `/api/media/{path}` | Delete media (move to trash) |
 | PATCH | `/api/media/{path}` | Update favorite/playback speed |
@@ -50,7 +50,20 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/comfy/jobs` | List generation jobs |
 | GET | `/api/comfy/jobs/{id}` | Get one generation job |
 | POST | `/api/comfy/jobs/{id}/cancel` | Cancel a queued or running job |
-| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy` |
+| GET | `/api/storyboard` | List storyboards |
+| POST | `/api/storyboard` | Create a storyboard |
+| GET | `/api/storyboard/{id}` | Full storyboard tree (subjects, scenes, panels, panel images) |
+| PATCH | `/api/storyboard/{id}` | Update storyboard fields |
+| DELETE | `/api/storyboard/{id}` | Delete a storyboard (its folder survives) |
+| POST | `/api/storyboard/{id}/parse` | VLM-parse source text into subjects/scenes/panels |
+| POST | `/api/storyboard/{id}/synthesize` | Compose per-panel prompts (background, progress via WS) |
+| POST | `/api/storyboard/{id}/generate` | Submit panels to ComfyUI |
+| POST | `/api/storyboard/{id}/cancel` | Cancel queued/running jobs for a storyboard |
+| POST/PATCH/DELETE | `/api/storyboard/{id}/subjects`, `/api/storyboard/subjects/{id}` | Subject CRUD |
+| POST/PATCH/DELETE | `/api/storyboard/{id}/scenes`, `/api/storyboard/scenes/{id}` | Scene CRUD |
+| POST/PATCH/DELETE | `/api/storyboard/scenes/{id}/panels`, `/api/storyboard/panels/{id}` | Panel CRUD |
+| POST | `/api/storyboard/panels/{id}/select` | Choose (or clear) a panel's keeper image |
+| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard` |
 
 ## WebSocket Envelope
 
@@ -204,3 +217,126 @@ Bridged from `ComfyClient.on_job_event` via
   the running job.
 - **`job_outputs`** — `{job_id, files}`, sent once a job's images have been
   downloaded and ingested; `files` is a list of local paths.
+
+## Storyboard domain (`/api/storyboard/*`)
+
+The `StoryboardRunner` singleton is constructed in the FastAPI lifespan
+alongside `ComfyClient` and installed via `set_storyboard_runner`. Plain
+CRUD routes (storyboards, subjects, scenes, panels, select) go straight
+through `StoryboardService` and never need the runner. Routes that drive
+the pipeline (`parse`, `synthesize`, `generate`, `cancel`) return **503**
+`"storyboard runner not initialized"` if the singleton is missing.
+
+### `GET /api/storyboard`
+Lists storyboards (summary rows, no nested subjects/scenes/panels).
+
+### `POST /api/storyboard`
+Body: `{name, target_model, architecture="t2i", aspect_ratio="16:9",
+style_block?, negative?, preset_id?, base_seed?, batch_size=4}`. Returns
+`{id: int}`.
+- `base_seed` omitted → a random `0..2**31-1` seed is assigned.
+- `batch_size` is clamped to `1..16`.
+- **400** if `bucket_dims(aspect_ratio, target_model)` rejects the aspect
+  ratio (unsupported ratios: anything outside `1:1`, `4:3`, `16:9`,
+  `2.39:1`, `9:16`) — validated at save time, not at generate time.
+
+### `GET /api/storyboard/{id}`
+Returns the full nested tree: `{...storyboard fields, subjects: [...],
+scenes: [{...scene fields, panels: [{...panel fields, images: [...]}]}]}`.
+404 if unknown.
+
+### `PATCH /api/storyboard/{id}`
+Partial update of any storyboard column. Returns `{status: "updated"}`.
+404 if unknown. If the effective `aspect_ratio` or `target_model` after
+the patch changes, `bucket_dims` is re-validated the same way as create
+(400 on mismatch).
+
+### `DELETE /api/storyboard/{id}`
+Returns `{status: "deleted"}`. 404 if unknown. The storyboard's linked
+folder (if any) is **not** deleted — only the `folders.id` reference on
+the storyboard row goes away with it.
+
+### `POST /api/storyboard/{id}/parse`
+Body: `{text: string, confirm: boolean = false}`. VLM-parses free text
+into subjects/scenes/panels and destructively replaces the storyboard's
+existing structure. Returns the fresh tree (same shape as `GET
+/api/storyboard/{id}`).
+- **409** `{code: "confirm_required"}` if the storyboard already has
+  scenes and `confirm` wasn't set — re-parsing destroys panel identity
+  (locked prompts, panel images, job history keyed by `panel_id`).
+- **422** if the VLM's output doesn't validate against the parse schema.
+- **503** if no VLM client is available to parse with.
+
+### `POST /api/storyboard/{id}/synthesize` (status: 202)
+Body: `{panel_ids?: int[], force: boolean = false}`. Composes (or
+recomposes) per-panel prompts in the background. Returns immediately:
+`{status: "started", total: n}`, where `n` is the number of panels in
+scope (all panels, or the given `panel_ids` filtered to ones that exist)
+— **not** reduced by however many are prompt-locked and get skipped.
+Progress streams on the `storyboard` WS channel as `synthesis_progress`
+events. 404 if the storyboard doesn't exist.
+
+### `POST /api/storyboard/{id}/generate`
+Body: `{panel_ids?: int[], only_failed: boolean = false}`. Submits panels
+with a composed `prompt` to ComfyUI via the storyboard's `preset_id`.
+Returns `{jobs: [job_id, ...]}` once every panel has been submitted (or
+none, if none qualified). **400** if generation can't proceed — no
+workflow preset, a negative prompt with no `MS_NEGATIVE` node, a subject
+LoRA with no `MS_LORA` node, or a `ref`-kind preset with no subject
+reference image. Validation runs over every targeted panel before any
+job is submitted, so a bad panel never leaves earlier ones half-queued.
+
+### `POST /api/storyboard/{id}/cancel`
+Cancels every `queued`/`running` ComfyUI job for the storyboard's panels.
+Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
+
+### Subjects, scenes, panels
+- `POST /api/storyboard/{id}/subjects` · `PATCH
+  /api/storyboard/subjects/{id}` · `DELETE
+  /api/storyboard/subjects/{id}` — subject CRUD (name, description,
+  `lora_name`, `lora_strength`, `reference_path`, `sort_order`).
+  `reference_path` FKs `media(file_path)`; **400** if it doesn't name a
+  row in the media library.
+- `POST /api/storyboard/{id}/scenes` · `PATCH
+  /api/storyboard/scenes/{id}` · `DELETE /api/storyboard/scenes/{id}` —
+  scene CRUD (name, location, time_of_day, mood, lighting, notes,
+  sort_order).
+- `POST /api/storyboard/scenes/{id}/panels` · `PATCH
+  /api/storyboard/panels/{id}` · `DELETE /api/storyboard/panels/{id}` —
+  panel CRUD (shot_size, angle, lens, action, subject_ids, notes, brief,
+  prompt, negative, sort_order). A `PATCH` whose body includes `prompt`
+  also sets `prompt_locked=1, prompt_source="user"` server-side,
+  overriding whatever the caller sent for those two fields. Create routes
+  404 if the named parent (storyboard / scene) doesn't exist. `selected_image_id`
+  is not settable through the panel `PATCH` — use `POST
+  /panels/{id}/select`, which keeps `media.hidden` in sync.
+
+Every create returns `{id: int}`; every PATCH on a storyboard/subject/scene
+returns `{status: "updated"}`; panel `PATCH` and the select route return
+the full updated panel row (they have a getter, subjects/scenes don't);
+every DELETE returns `{status: "deleted"}`.
+
+### `POST /api/storyboard/panels/{id}/select`
+Body: `{image_id: int | null}`. Sets (or, with `null`, clears) a panel's
+keeper: the new keeper's `media.hidden` flips to `0`, the previous
+keeper's (if any) flips back to `1`. Returns the updated panel row.
+**404** if the panel doesn't exist, or `image_id` doesn't belong to it.
+
+### `storyboard` WebSocket channel
+Bridged from `StoryboardRunner.on_event`. The runner also emits
+`folder_created` / `folder_items_changed` through the same callback, but
+those go out on the **`folders`** channel, not `storyboard`:
+
+- **`synthesis_progress`** — `{storyboard_id, panel_id, done, total,
+  prompt_source}`, one per panel as `POST .../synthesize` works through
+  its scope.
+- **`synthesis_complete`** — `{storyboard_id, synthesized, fallback,
+  skipped_locked}`, sent once when a `POST .../synthesize` background run
+  finishes successfully. Since `synthesize` returns 202 immediately, this
+  (or `synthesis_error`) is the only signal a client gets that the run is
+  actually done.
+- **`synthesis_error`** — `{storyboard_id, error}`, sent instead of
+  `synthesis_complete` if the background run raises (e.g. the VLM fails to
+  load).
+- **`panel_images_changed`** — `{storyboard_id, panel_id, files}`, sent
+  once a ComfyUI job's outputs have been ingested as `panel_images` rows.
