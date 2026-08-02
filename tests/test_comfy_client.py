@@ -12,6 +12,7 @@ import pytest
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyClient, ComfyError, _next_backoff
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.scanner import Scanner
 from tests._fake_comfy_server import fake_comfy  # noqa: F401
 
 
@@ -543,3 +544,142 @@ async def test_cancel_landing_mid_post_still_interrupts_comfyui(
     assert job["state"] == "cancelled"
     assert fake_comfy.interrupted >= 1
     assert job_id not in started_client._running
+
+
+# ---- Task 9: output retrieval and ingest -----------------------------------
+
+
+@pytest.fixture
+async def ingesting_client(fake_comfy, workspace):  # noqa: F811
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        scanner=Scanner(db),
+        in_flight=2,
+    )
+    await c.start()
+    try:
+        yield c
+    finally:
+        await c.shutdown()
+
+
+async def test_outputs_are_written_under_the_output_root(ingesting_client):
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    files = sorted(ingesting_client.output_dir_for(job_id).glob("*.png"))
+    assert len(files) == 2
+    assert all(f.stat().st_size > 0 for f in files)
+
+
+async def test_outputs_are_ingested_into_the_media_database(ingesting_client):
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    for f in ingesting_client.output_dir_for(job_id).glob("*.png"):
+        assert ingesting_client.db.get_media(str(f)) is not None
+
+
+async def test_a_job_is_only_done_after_its_images_land(ingesting_client):
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    assert list(ingesting_client.output_dir_for(job_id).glob("*.png"))
+
+
+async def test_job_outputs_event_carries_the_written_paths(ingesting_client):
+    seen = []
+    ingesting_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    outputs = [p for e, p in seen if e == "job_outputs"]
+    assert outputs and len(outputs[0]["files"]) == 2
+
+
+async def test_a_download_failure_fails_the_job_rather_than_hanging(
+    ingesting_client, fake_comfy, monkeypatch  # noqa: F811
+):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(ingesting_client, "_download_image", boom)
+
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+
+    job = await ingesting_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "failed"
+    assert "connection reset" in job["error"]
+
+
+async def test_a_failed_execution_writes_no_files(
+    ingesting_client, fake_comfy
+):  # noqa: F811
+    fake_comfy.fail_with = "boom"
+    pid = await ingesting_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await ingesting_client.submit(pid, params())
+    await ingesting_client.wait_for_job(job_id, timeout=10.0)
+
+    assert not list(ingesting_client.output_dir_for(job_id).glob("*.png"))
+
+
+async def test_a_cancelled_job_does_not_download_or_ingest_its_outputs(
+    fake_comfy, workspace  # noqa: F811
+):
+    """Regression guard: a cancelled job's outputs must never be
+    downloaded or ingested, and the job must not be resurrected to
+    "done" (review finding, not covered by any earlier task's tests).
+
+    ComfyUI's /interrupt is not synchronous -- a job can still emit
+    `executed` (and _on_executed can still schedule a collection task)
+    after cancel() has already flagged the job in `_cancelled`, or even
+    after cancel() has already written state="cancelled". Rather than
+    fight that inherently timing-dependent race (see this file's
+    docstrings on the cancel()/_dispatch handshake for why that's
+    flaky-by-nature), this reproduces the exact state such a frame would
+    find deterministically: flag the job cancelled, then drive
+    `_on_executed` directly, exactly as the reader loop would.
+
+    Deliberately builds its own client and never calls `start()`: with a
+    live websocket (as `ingesting_client` has), fake_comfy's background
+    execution task -- which runs with no delay by default -- broadcasts a
+    *real* `executed` frame that the reader loop processes concurrently
+    with this test's manual steps, downloading the images for real before
+    `_cancelled` is even set. That raced this test intermittently. With no
+    socket connected, fake_comfy has nothing to broadcast to, so the only
+    `_on_executed` call is the explicit one below.
+    """
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        scanner=Scanner(db),
+    )
+    try:
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+        job_id = await c.submit_now(pid, params())
+        job = c.db.get_generation_job(job_id)
+        prompt_id = job["comfy_prompt_id"]
+
+        c._cancelled.add(job_id)
+
+        await c._on_executed(job_id, {"prompt_id": prompt_id})
+        for task in list(c._collect_tasks):
+            await task
+
+        assert not list(c.output_dir_for(job_id).glob("*.png"))
+        # _complete_job returned before calling _finish_job at all -- the
+        # job is left exactly as cancel() would have left it (never
+        # resurrected to "done" by the collection task that raced it).
+        assert c.db.get_generation_job(job_id)["state"] == "running"
+    finally:
+        await c.aclose()
