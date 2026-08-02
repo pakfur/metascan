@@ -80,6 +80,16 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   // ---- actions: load / refresh ------------------------------------------
 
+  // Monotonic sequence counter shared by load()/refresh(). Both fetch a
+  // tree asynchronously and then assign tree.value; without ordering,
+  // whichever call happens to *resolve* last wins, even if it was issued
+  // first (e.g. two overlapping panel_images_changed-triggered refresh()
+  // calls, or a WS refresh racing an addPanel()-triggered refresh()). Each
+  // call captures its own seq right before the fetch; after the await, if
+  // loadSeq has moved on (a newer load/refresh was issued meanwhile), the
+  // stale call bails out before touching any state.
+  let loadSeq = 0
+
   async function loadList(): Promise<void> {
     loading.value = true
     error.value = null
@@ -97,15 +107,21 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   async function load(id: number): Promise<void> {
     loading.value = true
     error.value = null
+    // A board switch always supersedes any synthesis banner left over from
+    // whatever board was previously loaded (or mid-flight).
+    synthesis.value = { running: false, done: 0, total: 0, error: null }
+    const seq = ++loadSeq
     try {
       const t = await api.fetchStoryboard(id)
+      if (seq !== loadSeq) return
       tree.value = t
       selectDefaults(t)
       await refreshActiveJobs()
     } catch (e) {
+      if (seq !== loadSeq) return
       error.value = errMessage(e)
     } finally {
-      loading.value = false
+      if (seq === loadSeq) loading.value = false
     }
   }
 
@@ -115,8 +131,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   async function refresh(): Promise<void> {
     if (!tree.value) return
     const id = tree.value.id
+    const seq = ++loadSeq
     try {
       const t = await api.fetchStoryboard(id)
+      if (seq !== loadSeq) return
       tree.value = t
       const scene = selectedSceneId.value != null
         ? t.scenes.find((s) => s.id === selectedSceneId.value)
@@ -132,6 +150,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
         selectedPanelId.value = scene.panels[0] ? scene.panels[0].id : null
       }
     } catch (e) {
+      if (seq !== loadSeq) return
       error.value = errMessage(e)
     }
   }
@@ -154,21 +173,38 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  // Rollback restores only the FIELDS that were optimistically patched (not
+  // the whole tree ref) onto whatever tree.value currently is, and only if
+  // it's still the same storyboard -- reassigning tree.value = snapshot
+  // outright would clobber a newer tree a concurrent refresh() installed
+  // while this patch was in flight.
   async function patchStoryboardFields(
     body: Parameters<typeof api.patchStoryboard>[1],
   ): Promise<void> {
     if (!tree.value) return
     const id = tree.value.id
-    const snapshot = { ...tree.value }
+    const current = tree.value as unknown as Record<string, unknown>
+    const snapshot: Record<string, unknown> = {}
+    for (const key of Object.keys(body)) {
+      snapshot[key] = current[key]
+    }
     Object.assign(tree.value, body)
     try {
       await api.patchStoryboard(id, body)
     } catch (e) {
-      tree.value = snapshot
+      if (tree.value && tree.value.id === id) {
+        Object.assign(tree.value, snapshot)
+      }
       error.value = errMessage(e)
     }
   }
 
+  // Both the success-merge and the failure-rollback re-resolve the panel by
+  // id against the CURRENT tree.value after the await, rather than reusing
+  // the pre-await `panel` reference -- if a refresh() swapped tree.value
+  // while the PATCH was in flight, that reference is a detached object the
+  // UI no longer renders, and writing to it would be a silent no-op. If the
+  // panel is gone entirely (deleted, or its scene was), both paths no-op.
   async function patchPanelFields(panelId: number, body: Record<string, unknown>): Promise<void> {
     const panel = panelById(panelId)
     if (!panel) return
@@ -179,13 +215,17 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       // keys present on the response, so the local `images` array (absent
       // from the response) is left untouched.
       const res = await api.patchPanel(panelId, body)
-      Object.assign(panel, res)
+      const current = panelById(panelId)
+      if (current) Object.assign(current, res)
     } catch (e) {
-      Object.assign(panel, snapshot)
+      const current = panelById(panelId)
+      if (current) Object.assign(current, snapshot)
       error.value = errMessage(e)
     }
   }
 
+  // See patchPanelFields: rollback re-resolves the scene by id against the
+  // current tree.value rather than mutating the pre-await reference.
   async function patchSceneFields(sceneId: number, body: Record<string, unknown>): Promise<void> {
     if (!tree.value) return
     const scene = tree.value.scenes.find((s) => s.id === sceneId)
@@ -195,7 +235,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     try {
       await api.patchScene(sceneId, body)
     } catch (e) {
-      Object.assign(scene, snapshot)
+      const current = tree.value?.scenes.find((s) => s.id === sceneId)
+      if (current) Object.assign(current, snapshot)
       error.value = errMessage(e)
     }
   }
@@ -336,7 +377,11 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   function attachWs(): void {
     useWebSocket('storyboard', (event, data) => {
       const d = data as Record<string, unknown>
-      if (tree.value && d.storyboard_id !== tree.value.id) return
+      // While tree.value is null (the attachWs()→load() window, or after
+      // remove()/switching boards), there is no "current" storyboard to
+      // compare against -- every event must be dropped, not passed through,
+      // or another storyboard's synthesis events would pollute state.
+      if (!tree.value || d.storyboard_id !== tree.value.id) return
       if (event === 'synthesis_progress') {
         synthesis.value = {
           running: true,
