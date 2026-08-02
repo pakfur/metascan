@@ -20,6 +20,7 @@ const emit = defineEmits<{
 
 const mediaStore = useMediaStore()
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
+const overlayRef = ref<HTMLElement | null>(null)
 
 // Setup state
 const started = ref(false)
@@ -35,6 +36,7 @@ const shuffledIndices = ref<number[]>([])
 const shufflePos = ref(0)
 const transitioning = ref(false)
 const controlsVisible = ref(true)
+const expanded = ref(false)
 let autoAdvanceTimer: ReturnType<typeof setTimeout> | null = null
 let hideControlsTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -174,13 +176,71 @@ function reopenSetup() {
   started.value = false
 }
 
+// Expand (browser fullscreen — drops window chrome). Safari still ships the
+// webkit-prefixed API only, so both spellings are probed.
+type WebkitFullscreenElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void
+}
+type WebkitFullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null
+  webkitExitFullscreen?: () => Promise<void> | void
+}
+
+const fsDoc = document as WebkitFullscreenDocument
+
+const expandSupported =
+  document.fullscreenEnabled ||
+  typeof (document.documentElement as WebkitFullscreenElement).webkitRequestFullscreen ===
+    'function'
+
+function fullscreenElement(): Element | null {
+  return document.fullscreenElement ?? fsDoc.webkitFullscreenElement ?? null
+}
+
+async function enterExpand() {
+  const el = overlayRef.value as WebkitFullscreenElement | null
+  if (!el) return
+  try {
+    if (el.requestFullscreen) await el.requestFullscreen()
+    else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen()
+  } catch {
+    // Denied (e.g. iOS Safari, or no user gesture) — stay windowed.
+  }
+  syncExpanded()
+}
+
+async function exitExpand() {
+  if (!fullscreenElement()) return
+  try {
+    if (document.exitFullscreen) await document.exitFullscreen()
+    else if (fsDoc.webkitExitFullscreen) await fsDoc.webkitExitFullscreen()
+  } catch {
+    // Ignore — syncExpanded below reconciles with the real state.
+  }
+  syncExpanded()
+}
+
+function toggleExpand() {
+  if (expanded.value) exitExpand()
+  else enterExpand()
+  resetHideControls()
+}
+
+function syncExpanded() {
+  const el = fullscreenElement()
+  expanded.value = !!el && el === overlayRef.value
+}
+
 // Keyboard shortcuts
 function onKeyDown(e: KeyboardEvent) {
   if (!started.value) return
 
   switch (e.key) {
     case 'Escape':
-      emit('close')
+      // Browsers normally swallow the Escape that leaves fullscreen, but when
+      // one does deliver it, collapse instead of tearing down the slideshow.
+      if (expanded.value) exitExpand()
+      else emit('close')
       break
     case ' ':
       e.preventDefault()
@@ -214,6 +274,8 @@ function onKeyDown(e: KeyboardEvent) {
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('fullscreenchange', syncExpanded)
+  document.addEventListener('webkitfullscreenchange', syncExpanded)
   if (props.autoStart && props.mediaList.length > 0) {
     startSlideshow()
   }
@@ -222,8 +284,12 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('mousemove', onMouseMove)
+  document.removeEventListener('fullscreenchange', syncExpanded)
+  document.removeEventListener('webkitfullscreenchange', syncExpanded)
   clearAdvanceTimer()
   if (hideControlsTimer) clearTimeout(hideControlsTimer)
+  // Don't leave the page in fullscreen after the overlay unmounts.
+  if (expanded.value) exitExpand()
 })
 
 // Re-schedule timer when media changes
@@ -236,8 +302,9 @@ watch(current, () => {
 
 <template>
   <div
+    ref="overlayRef"
     class="slideshow-overlay"
-    :class="{ 'hide-cursor': !controlsVisible && started }"
+    :class="{ 'hide-cursor': !controlsVisible && started, expanded }"
     @pointerdown="onPointerReveal"
   >
     <!-- Setup panel (before start) -->
@@ -314,6 +381,8 @@ watch(current, () => {
           ref="videoPlayerRef"
           :file-path="current.file_path"
           :playback-speed="current.playback_speed"
+          :overlay-controls="expanded"
+          :controls-visible="controlsVisible"
           autoplay
         />
         <img
@@ -325,7 +394,13 @@ watch(current, () => {
       </div>
 
       <!-- Hover controls -->
-      <div class="slideshow-controls" :class="{ visible: controlsVisible }">
+      <div
+        class="slideshow-controls"
+        :class="{
+          visible: controlsVisible,
+          'above-video-bar': expanded && current.is_video,
+        }"
+      >
         <button class="ss-btn" @click="navigatePrev">‹</button>
         <button class="ss-btn" @click="togglePause">
           {{ paused ? '▶' : '❚❚' }}
@@ -339,6 +414,21 @@ watch(current, () => {
           {{ current.is_favorite ? '★' : '☆' }}
         </button>
         <button class="ss-btn" @click="reopenSetup" title="Slideshow settings">⚙</button>
+        <button
+          v-if="expandSupported"
+          class="ss-btn expand"
+          :title="expanded ? 'Collapse (Esc)' : 'Expand to full screen'"
+          :aria-label="expanded ? 'Collapse' : 'Expand to full screen'"
+          @click="toggleExpand"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              v-if="expanded"
+              d="M10 4v6H4M14 4v6h6M10 20v-6H4M14 20v-6h6"
+            />
+            <path v-else d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+          </svg>
+        </button>
         <button class="ss-btn exit" @click="emit('close')">✕</button>
       </div>
     </template>
@@ -456,9 +546,12 @@ watch(current, () => {
   justify-content: center;
 }
 
+/* width/height (not max-*) so undersized media scales UP to the viewport;
+   object-fit: contain keeps its own aspect ratio, so it meets the edges
+   top-to-bottom or side-to-side depending on which way it's proportioned. */
 .slide-image {
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   user-select: none;
 }
@@ -493,6 +586,11 @@ watch(current, () => {
   pointer-events: auto;
 }
 
+/* Clear the video player's own overlaid control bar. */
+.slideshow-controls.above-video-bar {
+  bottom: 68px;
+}
+
 .ss-btn {
   background: none;
   border: none;
@@ -515,6 +613,22 @@ watch(current, () => {
 
 .ss-btn.fav.active {
   color: #fbbf24;
+}
+
+.ss-btn.expand {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+}
+
+.ss-btn.expand svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .ss-btn.exit {

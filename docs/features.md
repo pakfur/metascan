@@ -24,6 +24,7 @@
 - Fade transition with adjustable duration
 - Auto-hide controls after 3 seconds
 - Video support (no auto-advance, manual navigation)
+- Expand to true full screen (no browser chrome); media scales to the screen at its own aspect ratio, Escape returns to normal display
 
 ## Similarity & Content Search
 - CLIP-powered text-to-image content search (type a description, find matching media)
