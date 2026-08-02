@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from backend.dependencies import get_db
 from backend.services.comfy_service import ComfyService
 from metascan.core.comfy_bindings import BindingError, GenerationParams
-from metascan.core.comfy_client import ComfyError
+from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,12 @@ async def submit(body: SubmitRequest) -> Dict[str, int]:
     )
     try:
         job_id = await client.submit(body.preset_id, params, priority=body.priority)
+    except PresetNotFoundError as exc:
+        # Must be caught before ComfyError -- it's a subclass. A bad
+        # preset id is a client-request problem, not a ComfyUI-down
+        # problem, so it gets the same 404 the other preset/job routes
+        # use for an unknown id.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except BindingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ComfyError as exc:

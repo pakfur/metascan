@@ -75,7 +75,7 @@ Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr
 
 ## `comfy`
 
-Read by `backend.config.get_comfy_config` and consumed by the FastAPI lifespan to construct the `ComfyClient` singleton (`GET /api/comfy/status` surfaces the resolved values at runtime, minus the timeout).
+Read by `backend.config.get_comfy_config` and consumed by the FastAPI lifespan to construct the `ComfyClient` singleton. `GET /api/comfy/status` does **not** echo this whole section back — see `docs/api-reference.md` for exactly what it returns.
 
 - **`base_url`** — ComfyUI server URL. Default `"http://127.0.0.1:8188"`.
 - **`in_flight`** — max jobs `ComfyClient` holds inside ComfyUI at once; metascan queues the rest itself so a reroll can jump the line and cancellation stays responsive. Default `2`, floored at `1`.

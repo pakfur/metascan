@@ -62,6 +62,15 @@ class ComfyError(RuntimeError):
     """A ComfyUI request failed, or was made against unusable state."""
 
 
+class PresetNotFoundError(ComfyError):
+    """A request named a preset id that does not exist.
+
+    Subclasses ComfyError so every existing `except ComfyError` handler
+    keeps working, while callers that need to distinguish "bad request"
+    (404) from "ComfyUI is unreachable" (503) can catch this first.
+    """
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -196,7 +205,7 @@ class ComfyClient:
     async def _load_preset(self, preset_id: int) -> Tuple[Dict[str, Any], Bindings]:
         row = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if row is None:
-            raise ComfyError(f"No workflow preset with id {preset_id}")
+            raise PresetNotFoundError(f"No workflow preset with id {preset_id}")
         return json.loads(row["workflow_json"]), Bindings.from_json(row["bindings"])
 
     # ---- submission --------------------------------------------------
@@ -341,10 +350,20 @@ class ComfyClient:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
 
-        The preset is validated up front so a bad preset id fails at the
-        call site rather than silently inside the pump.
+        The preset is validated up front -- both that it exists
+        (PresetNotFoundError) and that `params` binds cleanly against it
+        (BindingError, e.g. a negative prompt supplied against a workflow
+        with no MS_NEGATIVE node) -- so a bad request fails synchronously
+        at the call site with an accurate error, rather than reaching
+        `_dispatch` on the background pump and failing later with a
+        message that blames ComfyUI for a purely local validation
+        problem. `apply_overrides`'s result is discarded here; `_dispatch`
+        re-derives the graph from the same preset+params when the job
+        actually reaches the front of the queue, so this is cheap and
+        changes no happy-path behaviour.
         """
-        await self._load_preset(preset_id)
+        workflow, bindings = await self._load_preset(preset_id)
+        apply_overrides(workflow, bindings, params)
         job_id = int(
             await asyncio.to_thread(
                 self.db.create_generation_job,
@@ -936,4 +955,4 @@ class ComfyClient:
         return entry if isinstance(entry, dict) else {}
 
 
-__all__ = ["ComfyClient", "ComfyError"]
+__all__ = ["ComfyClient", "ComfyError", "PresetNotFoundError"]
