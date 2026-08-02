@@ -8,6 +8,7 @@ StoryboardRunner wires the three together correctly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,21 @@ def t2i_workflow() -> dict:
         "6": _node("CLIPTextEncode", "MS_POSITIVE", {"text": ""}),
         "9": _node("SaveImage", "MS_SAVE", {"filename_prefix": "ms"}),
     }
+
+
+def t2i_workflow_full() -> dict:
+    """Like ``t2i_workflow()`` but also carries MS_NEGATIVE and MS_LORA, for
+    the negative/LoRA happy-path test (params.negative/.lora_name/
+    .lora_strength are otherwise never exercised against a preset that can
+    actually accept them)."""
+    wf = t2i_workflow()
+    wf["7"] = _node("CLIPTextEncode", "MS_NEGATIVE", {"text": ""})
+    wf["8"] = _node(
+        "LoraLoader",
+        "MS_LORA",
+        {"lora_name": "", "strength_model": 1.0, "strength_clip": 1.0},
+    )
+    return wf
 
 
 def _media(path: str) -> Media:
@@ -150,6 +166,17 @@ def preset_id(db):
     bindings = resolve_bindings(workflow, "t2i")
     return db.create_workflow_preset(
         "sdxl", "t2i", json.dumps(workflow), bindings.to_json()
+    )
+
+
+@pytest.fixture
+def full_preset_id(db):
+    """A t2i preset whose workflow binds MS_NEGATIVE and MS_LORA, for the
+    negative/LoRA happy-path test."""
+    workflow = t2i_workflow_full()
+    bindings = resolve_bindings(workflow, "t2i")
+    return db.create_workflow_preset(
+        "sdxl-full", "t2i", json.dumps(workflow), bindings.to_json()
     )
 
 
@@ -372,6 +399,47 @@ async def test_generate_creates_folder_once(db, comfy, events, tmp_path, board):
     await runner.generate(board.sb_id)
     assert db.get_storyboard(board.sb_id)["folder_id"] == fid  # reused
 
+    # folder_created is broadcast exactly once, on the call that actually
+    # created the folder -- not on the second, reuse-only call.
+    created_events = [
+        (ch, ev, data)
+        for ch, ev, data in events
+        if ch == "folders" and ev == "folder_created"
+    ]
+    assert len(created_events) == 1
+    assert created_events[0][2]["folder"]["id"] == fid
+
+
+async def test_generate_concurrent_calls_create_folder_once(
+    db, comfy, events, tmp_path, board
+):
+    """Two concurrent generate() calls for the same storyboard must not
+    race the folder-ensure step: exactly one folder gets created, no
+    orphan folder is left behind, and folder_created fires exactly once."""
+    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(board.sb_id)
+
+    await asyncio.gather(
+        runner.generate(board.sb_id),
+        runner.generate(board.sb_id),
+    )
+
+    fid = db.get_storyboard(board.sb_id)["folder_id"]
+    assert fid is not None
+
+    all_folders = db.list_folders()
+    assert len(all_folders) == 1  # no orphan folder from the losing race
+    assert all_folders[0]["id"] == fid
+
+    created_events = [
+        (ch, ev, data)
+        for ch, ev, data in events
+        if ch == "folders" and ev == "folder_created"
+    ]
+    assert len(created_events) == 1
+    assert created_events[0][2]["folder"]["id"] == fid
+
 
 async def test_generate_skips_panels_without_prompt(db, comfy, events, tmp_path, board):
     vlm = StubVlm(responses=[])
@@ -440,6 +508,65 @@ async def test_generate_negative_without_binding_fails_before_submitting(
         await runner.generate(board.sb_id)
 
     assert comfy.submitted == []  # validated before any submit
+
+
+async def test_generate_carries_negative_and_lora_through(
+    db, comfy, events, tmp_path, full_preset_id
+):
+    """Happy path for negative/LoRA -- exercised against a preset whose
+    workflow actually binds MS_NEGATIVE/MS_LORA (t2i_workflow(), used by
+    every other generate() test, deliberately omits both so the
+    missing-binding validation tests mean something)."""
+    sb_id = db.create_storyboard(
+        name="Full Params",
+        target_model="sd",
+        architecture="t2i",
+        aspect_ratio="16:9",
+        style_block="graphite sketch",
+        negative="storyboard-level blur",
+        preset_id=full_preset_id,
+        base_seed=2000,
+        batch_size=1,
+    )
+    subject_id = db.create_subject(
+        sb_id,
+        name="MAYA",
+        description="late 20s, shaved head",
+        lora_name="maya_lora",
+        lora_strength=0.65,
+    )
+    scene_id = db.create_scene(sb_id, name="Yard", sort_order=0)
+    panel0 = db.create_panel(
+        scene_id,
+        action="close on her hands",
+        sort_order=0,
+        subject_ids=[subject_id],
+    )
+    panel1 = db.create_panel(
+        scene_id,
+        action="wide shot",
+        sort_order=1,
+        subject_ids=[subject_id],
+    )
+    db.update_panel(panel1, negative="panel-level smoke")  # overrides storyboard
+
+    vlm = StubVlm(responses=["prompt one", "prompt two"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(sb_id)
+
+    await runner.generate(sb_id)
+
+    by_panel = {submitted[2]: submitted[1] for submitted in comfy.submitted}
+    p0 = by_panel[panel0]
+    p1 = by_panel[panel1]
+
+    assert p0.negative == "storyboard-level blur"
+    assert p0.lora_name == "maya_lora"
+    assert p0.lora_strength == 0.65
+
+    assert p1.negative == "panel-level smoke"  # panel overrides storyboard
+    assert p1.lora_name == "maya_lora"
+    assert p1.lora_strength == 0.65
 
 
 # ---- ingest ------------------------------------------------------------
