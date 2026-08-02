@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from collections import deque
@@ -154,6 +155,11 @@ class ComfyClient:
         # cancel() racing a _complete_job) can't both observe "not yet
         # terminal" and both write.
         self._finish_lock = asyncio.Lock()
+        # Reference-image uploads, keyed by SHA-256 of file content (not
+        # path) -> ComfyUI-side filename. Two different local paths with
+        # identical bytes (e.g. a subject reused across panels) must
+        # upload once and share the resolved name.
+        self._upload_cache: Dict[str, str] = {}
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -278,6 +284,47 @@ class ComfyClient:
             started_at=_now(),
         )
         return job_id
+
+    # ---- reference images ---------------------------------------------
+
+    async def upload_image(self, path: Path) -> str:
+        """Upload a local image to ComfyUI's input directory.
+
+        Returns the ComfyUI-side filename for GenerationParams.ref_image.
+        Cached by content hash, so a subject's reference is uploaded once
+        per run rather than once per panel.
+        """
+        path = Path(path)
+        try:
+            payload = await asyncio.to_thread(path.read_bytes)
+        except OSError as exc:
+            raise ComfyError(f"Cannot read reference image {path}: {exc}") from exc
+
+        digest = hashlib.sha256(payload).hexdigest()
+        cached = self._upload_cache.get(digest)
+        if cached is not None:
+            return cached
+
+        upload_name = f"metascan_{digest[:16]}{path.suffix or '.png'}"
+        files = {"image": (upload_name, payload, "image/png")}
+        try:
+            resp = await self._http.post(
+                f"{self.base_url}/upload/image",
+                files=files,
+                data={"overwrite": "true"},
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            raise ComfyError(
+                f"Reference upload to {self.base_url} failed: {exc}"
+            ) from exc
+
+        body = resp.json()
+        name = body.get("name") or upload_name
+        subfolder = body.get("subfolder") or ""
+        resolved = f"{subfolder}/{name}" if subfolder else str(name)
+        self._upload_cache[digest] = resolved
+        return resolved
 
     # ---- queue ---------------------------------------------------------
 

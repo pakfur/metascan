@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyClient, ComfyError, _next_backoff
@@ -817,3 +818,65 @@ async def test_duplicate_executed_frames_produce_exactly_one_collection(
     assert len(outputs) == 1
     assert len(done_updates) == 1
     assert len(outputs[0]["files"]) == 2
+
+
+def _make_png(path: Path, color=(10, 200, 90)) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (32, 32), color).save(path)
+    return path
+
+
+async def test_upload_image_returns_the_comfy_side_filename(
+    started_client, workspace, fake_comfy  # noqa: F811
+):
+    src = _make_png(workspace / "refs" / "maya.png")
+    name = await started_client.upload_image(src)
+
+    assert name
+    assert len(fake_comfy.uploaded) == 1
+
+
+async def test_identical_content_is_uploaded_once(
+    started_client, workspace, fake_comfy  # noqa: F811
+):
+    a = _make_png(workspace / "refs" / "a.png", color=(1, 2, 3))
+    b = _make_png(workspace / "refs" / "b.png", color=(1, 2, 3))
+
+    first = await started_client.upload_image(a)
+    second = await started_client.upload_image(b)
+
+    assert first == second
+    assert len(fake_comfy.uploaded) == 1
+
+
+async def test_different_content_uploads_twice(
+    started_client, workspace, fake_comfy  # noqa: F811
+):
+    a = _make_png(workspace / "refs" / "c.png", color=(1, 2, 3))
+    b = _make_png(workspace / "refs" / "d.png", color=(9, 9, 9))
+
+    await started_client.upload_image(a)
+    await started_client.upload_image(b)
+
+    assert len(fake_comfy.uploaded) == 2
+
+
+async def test_uploading_a_missing_file_raises(started_client, workspace):
+    with pytest.raises(ComfyError) as exc:
+        await started_client.upload_image(workspace / "refs" / "nope.png")
+    assert "nope.png" in str(exc.value)
+
+
+async def test_a_reference_workflow_receives_the_uploaded_name(
+    started_client, workspace, fake_comfy  # noqa: F811
+):
+    wf = t2i_workflow()
+    wf["11"] = _node("LoadImage", "MS_REF_IMAGE", {"image": "placeholder.png"})
+    pid = await started_client.register_preset("sdxl-ref", "ref", wf)
+
+    name = await started_client.upload_image(_make_png(workspace / "refs" / "m.png"))
+    job_id = await started_client.submit(pid, params(ref_image=name))
+    await started_client.wait_for_job(job_id, timeout=10.0)
+
+    sent = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert sent["11"]["inputs"]["image"] == name
