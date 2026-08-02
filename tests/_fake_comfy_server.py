@@ -42,6 +42,9 @@ class FakeComfy:
         # When True, POST /prompt is accepted (200) but the response body
         # omits "prompt_id" — exercises ComfyClient's no-prompt_id branch.
         self.omit_prompt_id: bool = False
+        # When True, /ws accepts the handshake and immediately closes —
+        # simulates a flapping server for reconnect-backoff tests.
+        self.close_after_connect: bool = False
 
         # Observability for assertions.
         self.submitted: List[Dict[str, Any]] = []
@@ -138,6 +141,9 @@ class FakeComfy:
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        if self.close_after_connect:
+            await ws.close()
+            return ws
         self._sockets.append(ws)
         try:
             async for _ in ws:

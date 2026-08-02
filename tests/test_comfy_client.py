@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from metascan.core.comfy_bindings import BindingError, GenerationParams
-from metascan.core.comfy_client import ComfyClient, ComfyError
+from metascan.core.comfy_client import ComfyClient, ComfyError, _next_backoff
 from metascan.core.database_sqlite import DatabaseManager
 from tests._fake_comfy_server import fake_comfy  # noqa: F401
 
@@ -186,8 +186,13 @@ async def started_client(fake_comfy, workspace):  # noqa: F811
         await c.shutdown()
 
 
-async def test_start_connects_the_websocket(started_client):
+async def test_start_connects_the_websocket(started_client, fake_comfy):  # noqa: F811
     assert started_client.connected is True
+    # A stub that merely flips a flag wouldn't produce a real server-side
+    # socket or leave the reader task running.
+    assert len(fake_comfy._sockets) == 1
+    assert started_client._ws_task is not None
+    assert not started_client._ws_task.done()
 
 
 async def test_successful_execution_marks_the_job_done(started_client):
@@ -227,11 +232,23 @@ async def test_job_events_are_emitted_to_listeners(started_client):
 async def test_events_for_unknown_prompt_ids_are_ignored(
     started_client, fake_comfy
 ):  # noqa: F811
+    seen = []
+    started_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+
     await fake_comfy.broadcast(
         {"type": "executed", "data": {"prompt_id": "not-ours", "node": "9"}}
     )
-    await asyncio.sleep(0.1)
+    # No submit is in flight, so resolution is a single synchronous dict
+    # lookup with no retry sleeps — a handful of short polls is plenty
+    # for the reader loop to have actually processed the frame (as
+    # opposed to the single 0.1s sleep this used to use, which could
+    # pass merely because the reader was still asleep inside a retry).
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
     assert started_client.connected is True  # no crash, no reconnect
+    assert seen == []  # never fired a job_update/job_progress for it
+    assert "not-ours" not in started_client._prompt_to_job
 
 
 async def test_reconnects_after_the_server_drops_the_socket(
@@ -240,7 +257,11 @@ async def test_reconnects_after_the_server_drops_the_socket(
     for ws in list(fake_comfy._sockets):
         await ws.close()
 
-    for _ in range(100):
+    # The dropped connection never delivered a frame and didn't stay open
+    # past _STABLE_CONNECTION_SECONDS, so the backoff escalates to the
+    # second tier (3s) rather than resetting to the first (1s) — budget
+    # generously past that.
+    for _ in range(200):
         await asyncio.sleep(0.05)
         if started_client.connected and fake_comfy._sockets:
             break
@@ -250,3 +271,61 @@ async def test_reconnects_after_the_server_drops_the_socket(
     pid = await started_client.register_preset("sdxl2", "t2i", t2i_workflow())
     job_id = await started_client.submit_now(pid, params())
     assert (await started_client.wait_for_job(job_id, timeout=5.0))["state"] == "done"
+
+
+async def test_reconnecting_immediately_after_a_flapping_server_does_not_hang(
+    workspace, fake_comfy  # noqa: F811
+):
+    """A server that accepts and immediately closes must still recover.
+
+    This isn't primarily about timing the backoff (see the pure
+    _next_backoff tests below for that) — it's a smoke test that the
+    reader loop survives a run of connect/instant-drop cycles at all and
+    a job submitted afterwards still completes, once the server stops
+    flapping.
+    """
+    fake_comfy.close_after_connect = True
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+    )
+    await c.start()
+    try:
+        await asyncio.sleep(0.2)
+        assert c.connected is False  # still flapping, not "connected"
+
+        fake_comfy.close_after_connect = False
+        for _ in range(200):  # let the reader actually reconnect and stay up
+            await asyncio.sleep(0.05)
+            if c.connected:
+                break
+        assert c.connected is True
+
+        pid = await c.register_preset("sdxl", "t2i", t2i_workflow())
+        job_id = await c.submit_now(pid, params())
+        job = await c.wait_for_job(job_id, timeout=5.0)
+        assert job["state"] == "done"
+    finally:
+        await c.shutdown()
+
+
+def test_next_backoff_resets_after_a_frame_is_delivered():
+    attempt, delay = _next_backoff(2, got_frame=True, survived=False)
+    assert (attempt, delay) == (0, 1.0)
+
+
+def test_next_backoff_resets_after_a_connection_survives_the_stable_window():
+    attempt, delay = _next_backoff(2, got_frame=False, survived=True)
+    assert (attempt, delay) == (0, 1.0)
+
+
+def test_next_backoff_escalates_when_the_server_keeps_dropping_instantly():
+    attempt, delay = 0, 0.0
+    seen = []
+    for _ in range(5):
+        attempt, delay = _next_backoff(attempt, got_frame=False, survived=False)
+        seen.append(delay)
+    # Never resets to the 1s tier: it climbs to and then holds at the top.
+    assert seen == [3.0, 10.0, 10.0, 10.0, 10.0]
