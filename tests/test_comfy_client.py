@@ -168,3 +168,85 @@ async def test_fetch_history_returns_the_entry_for_a_prompt(
         await asyncio.sleep(0.02)
 
     assert entry["outputs"]["9"]["images"]
+
+
+@pytest.fixture
+async def started_client(fake_comfy, workspace):  # noqa: F811
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url=fake_comfy.base_url,
+        output_root=workspace / "out",
+        db=db,
+        in_flight=2,
+    )
+    await c.start()
+    try:
+        yield c
+    finally:
+        await c.shutdown()
+
+
+async def test_start_connects_the_websocket(started_client):
+    assert started_client.connected is True
+
+
+async def test_successful_execution_marks_the_job_done(started_client):
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+
+    job = await started_client.wait_for_job(job_id, timeout=5.0)
+    assert job["state"] == "done"
+    assert job["finished_at"]
+
+
+async def test_execution_error_marks_the_job_failed_with_node_context(
+    started_client, fake_comfy  # noqa: F811
+):
+    fake_comfy.fail_with = "value not in list: ckpt_name"
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+
+    job = await started_client.wait_for_job(job_id, timeout=5.0)
+    assert job["state"] == "failed"
+    assert "value not in list" in job["error"]
+    assert "CheckpointLoaderSimple" in job["error"]
+
+
+async def test_job_events_are_emitted_to_listeners(started_client):
+    seen = []
+    started_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+    await started_client.wait_for_job(job_id, timeout=5.0)
+
+    updates = [p for e, p in seen if e == "job_update"]
+    assert any(p["job_id"] == job_id and p["state"] == "done" for p in updates)
+
+
+async def test_events_for_unknown_prompt_ids_are_ignored(
+    started_client, fake_comfy
+):  # noqa: F811
+    await fake_comfy.broadcast(
+        {"type": "executed", "data": {"prompt_id": "not-ours", "node": "9"}}
+    )
+    await asyncio.sleep(0.1)
+    assert started_client.connected is True  # no crash, no reconnect
+
+
+async def test_reconnects_after_the_server_drops_the_socket(
+    started_client, fake_comfy
+):  # noqa: F811
+    for ws in list(fake_comfy._sockets):
+        await ws.close()
+
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if started_client.connected and fake_comfy._sockets:
+            break
+    assert started_client.connected is True
+
+    # and the reconnected socket still drives jobs to completion
+    pid = await started_client.register_preset("sdxl2", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+    assert (await started_client.wait_for_job(job_id, timeout=5.0))["state"] == "done"
