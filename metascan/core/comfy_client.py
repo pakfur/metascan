@@ -12,14 +12,17 @@ survives a restart.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import httpx
+import websockets
 
 from metascan.core.comfy_bindings import (
     Bindings,
@@ -29,6 +32,10 @@ from metascan.core.comfy_bindings import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RECONNECT_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
+
+JobEventCb = Callable[[str, Dict[str, Any]], None]
 
 
 class ComfyError(RuntimeError):
@@ -62,6 +69,11 @@ class ComfyClient:
         # event reader never touches SQLite: ComfyUI emits `progress`
         # many times per second per job.
         self._prompt_to_job: Dict[str, int] = {}
+        self.connected: bool = False
+        self._ws_task: Optional[asyncio.Task] = None
+        self._listeners: List[JobEventCb] = []
+        self._job_done: Dict[int, asyncio.Event] = {}
+        self._stopping = False
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -168,6 +180,190 @@ class ComfyClient:
             started_at=_now(),
         )
         return job_id
+
+    # ---- event stream --------------------------------------------------
+
+    def _ws_url(self) -> str:
+        parsed = urlparse(self.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        return urlunparse(
+            (scheme, parsed.netloc, "/ws", "", f"clientId={self.client_id}", "")
+        )
+
+    async def start(self) -> None:
+        """Open the persistent event socket and begin consuming events."""
+        if self._ws_task is not None:
+            return
+        self._stopping = False
+        ready = asyncio.Event()
+        self._ws_task = asyncio.create_task(self._reader_loop(ready))
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(ready.wait(), timeout=5.0)
+
+    async def shutdown(self) -> None:
+        self._stopping = True
+        if self._ws_task is not None:
+            self._ws_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ws_task
+            self._ws_task = None
+        self.connected = False
+        await self.aclose()
+
+    def on_job_event(self, cb: JobEventCb) -> None:
+        self._listeners.append(cb)
+
+    def _emit(self, event: str, payload: Dict[str, Any]) -> None:
+        for cb in list(self._listeners):
+            try:
+                cb(event, payload)
+            except Exception:
+                logger.debug("comfy job-event listener raised", exc_info=True)
+
+    async def _reader_loop(self, ready: asyncio.Event) -> None:
+        """Consume ComfyUI's event stream, reconnecting on drop."""
+        attempt = 0
+        while not self._stopping:
+            try:
+                async with websockets.connect(self._ws_url()) as ws:
+                    self.connected = True
+                    attempt = 0
+                    await self._rehydrate_prompt_map()
+                    ready.set()
+                    async for raw in ws:
+                        try:
+                            await self._handle_event(json.loads(raw))
+                        except Exception:
+                            logger.debug("bad comfy event: %r", raw, exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("comfy websocket dropped: %s", exc)
+            finally:
+                self.connected = False
+                ready.set()  # never block start() on an unreachable server
+
+            if self._stopping:
+                return
+            delay = _RECONNECT_BACKOFF_SECONDS[
+                min(attempt, len(_RECONNECT_BACKOFF_SECONDS) - 1)
+            ]
+            attempt += 1
+            await asyncio.sleep(delay)
+
+    async def _rehydrate_prompt_map(self) -> None:
+        """Rebuild prompt_id -> job_id after a reconnect.
+
+        A drop mid-run leaves in-flight jobs whose events we still need to
+        recognise. This is the only DB read the event path ever does, and
+        it happens once per connection rather than once per event.
+        """
+        try:
+            rows = await asyncio.to_thread(
+                self.db.list_generation_jobs, ["running"], 1000
+            )
+        except Exception:
+            logger.debug("could not rehydrate comfy prompt map", exc_info=True)
+            return
+        for row in rows:
+            prompt_id = row.get("comfy_prompt_id")
+            if prompt_id:
+                self._prompt_to_job.setdefault(str(prompt_id), int(row["id"]))
+
+    def _job_id_for(self, prompt_id: Optional[str]) -> Optional[int]:
+        """Resolve an event's prompt_id from memory only.
+
+        Never hits the database: ComfyUI emits `progress` many times per
+        second per job, and a SELECT per event would stall the reader on
+        slow filesystems even off-thread.
+        """
+        if not prompt_id:
+            return None
+        return self._prompt_to_job.get(str(prompt_id))
+
+    async def _resolve_job_id(self, prompt_id: Optional[str]) -> Optional[int]:
+        """`_job_id_for`, with a brief in-memory retry.
+
+        `submit_now()` only populates `_prompt_to_job` after its POST
+        /prompt response resolves. A fast ComfyUI -- or, in tests, the
+        in-process fake -- can broadcast `execution_start`/`executed`
+        over the websocket before that continuation gets a scheduler
+        turn, so the very first event for a prompt can otherwise race
+        the map write. This still never touches the database; it only
+        gives the already-scheduled submit_now() coroutine a few short
+        chances to catch up before we treat the event as unrecognised.
+        """
+        if not prompt_id:
+            return None
+        for delay in (0.0, 0.01, 0.02, 0.05, 0.1):
+            if delay:
+                await asyncio.sleep(delay)
+            job_id = self._job_id_for(prompt_id)
+            if job_id is not None:
+                return job_id
+        return None
+
+    async def _handle_event(self, msg: Dict[str, Any]) -> None:
+        kind = msg.get("type")
+        data = msg.get("data") or {}
+        job_id = await self._resolve_job_id(data.get("prompt_id"))
+        if job_id is None:
+            return  # an event for someone else's client, or a stale prompt
+
+        if kind == "progress":
+            self._emit(
+                "job_progress",
+                {
+                    "job_id": job_id,
+                    "value": data.get("value"),
+                    "max": data.get("max"),
+                },
+            )
+            return
+
+        if kind == "execution_error":
+            error = "{}: {}".format(
+                data.get("node_type") or "unknown node",
+                data.get("exception_message") or "execution failed",
+            )
+            await self._finish_job(job_id, "failed", error=error)
+            return
+
+        if kind == "executed":
+            await self._on_executed(job_id, data)
+
+    async def _on_executed(self, job_id: int, data: Dict[str, Any]) -> None:
+        """Overridden in Task 9 to download outputs before finishing."""
+        await self._finish_job(job_id, "done")
+
+    async def _finish_job(
+        self, job_id: int, state: str, error: Optional[str] = None
+    ) -> None:
+        fields: Dict[str, Any] = {"state": state, "finished_at": _now()}
+        if error is not None:
+            fields["error"] = error
+        await asyncio.to_thread(self.db.update_generation_job, job_id, **fields)
+        self._emit("job_update", {"job_id": job_id, "state": state, "error": error})
+        event = self._job_done.get(job_id)
+        if event is not None:
+            event.set()
+
+    async def wait_for_job(self, job_id: int, timeout: float = 10.0) -> Dict[str, Any]:
+        """Block until a job leaves 'running'. Returns the final row."""
+        current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+        if current is None:
+            raise ComfyError(f"No generation job with id {job_id}")
+        if current["state"] not in ("queued", "running"):
+            return dict(current)
+
+        event = self._job_done.setdefault(job_id, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise ComfyError(f"Job {job_id} did not finish within {timeout}s") from exc
+        finally:
+            self._job_done.pop(job_id, None)
+        return dict(await asyncio.to_thread(self.db.get_generation_job, job_id))
 
     # ---- history -----------------------------------------------------
 
