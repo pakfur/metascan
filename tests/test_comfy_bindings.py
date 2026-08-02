@@ -137,3 +137,112 @@ def test_unknown_kind_raises():
 def test_bindings_json_round_trip():
     b = resolve_bindings(minimal_t2i(), "t2i")
     assert Bindings.from_json(b.to_json()) == b
+
+
+from metascan.core.comfy_bindings import GenerationParams, apply_overrides
+
+
+def base_params(**kw) -> GenerationParams:
+    defaults = dict(positive="a cat", seed=42, width=1024, height=576, batch_size=4)
+    defaults.update(kw)
+    return GenerationParams(**defaults)
+
+
+def test_apply_overrides_writes_bound_widgets():
+    wf = minimal_t2i()
+    b = resolve_bindings(wf, "t2i")
+    out = apply_overrides(wf, b, base_params(negative="blurry"))
+
+    assert out["6"]["inputs"]["text"] == "a cat"
+    assert out["7"]["inputs"]["text"] == "blurry"
+    assert out["3"]["inputs"]["seed"] == 42
+    assert out["5"]["inputs"]["width"] == 1024
+    assert out["5"]["inputs"]["height"] == 576
+    assert out["5"]["inputs"]["batch_size"] == 4
+
+
+def test_apply_overrides_does_not_mutate_the_source():
+    wf = minimal_t2i()
+    b = resolve_bindings(wf, "t2i")
+    apply_overrides(wf, b, base_params())
+    assert wf["6"]["inputs"]["text"] == ""
+    assert wf["3"]["inputs"]["seed"] == 0
+
+
+def test_apply_overrides_leaves_unbound_widgets_alone():
+    wf = minimal_t2i()
+    b = resolve_bindings(wf, "t2i")
+    out = apply_overrides(wf, b, base_params())
+    assert out["3"]["inputs"]["steps"] == 20
+    assert out["4"]["inputs"]["ckpt_name"] == "x.safetensors"
+
+
+def test_apply_overrides_uses_noise_seed_when_bound():
+    wf = minimal_t2i()
+    wf["3"] = _node("SamplerCustom", "MS_SEED", {"noise_seed": 0, "cfg": 7.0})
+    b = resolve_bindings(wf, "t2i")
+    out = apply_overrides(wf, b, base_params(seed=7))
+    assert out["3"]["inputs"]["noise_seed"] == 7
+    assert "seed" not in out["3"]["inputs"]
+
+
+def test_negative_without_a_binding_raises_rather_than_dropping_it():
+    wf = minimal_t2i()
+    del wf["7"]
+    b = resolve_bindings(wf, "t2i")
+    with pytest.raises(BindingError) as exc:
+        apply_overrides(wf, b, base_params(negative="blurry"))
+    assert "MS_NEGATIVE" in str(exc.value)
+
+
+def test_empty_negative_without_a_binding_is_fine():
+    wf = minimal_t2i()
+    del wf["7"]
+    b = resolve_bindings(wf, "t2i")
+    out = apply_overrides(wf, b, base_params(negative=None))
+    assert "7" not in out
+
+
+def test_lora_without_a_binding_raises():
+    wf = minimal_t2i()
+    b = resolve_bindings(wf, "t2i")
+    with pytest.raises(BindingError) as exc:
+        apply_overrides(wf, b, base_params(lora_name="maya.safetensors"))
+    assert "MS_LORA" in str(exc.value)
+
+
+def test_lora_is_written_to_both_strength_widgets():
+    wf = minimal_t2i()
+    wf["12"] = _node(
+        "LoraLoader",
+        "MS_LORA",
+        {"lora_name": "x.safetensors", "strength_model": 1.0, "strength_clip": 1.0},
+    )
+    b = resolve_bindings(wf, "t2i")
+    out = apply_overrides(
+        wf, b, base_params(lora_name="maya.safetensors", lora_strength=0.7)
+    )
+    assert out["12"]["inputs"]["lora_name"] == "maya.safetensors"
+    assert out["12"]["inputs"]["strength_model"] == 0.7
+    assert out["12"]["inputs"]["strength_clip"] == 0.7
+
+
+def test_ref_image_is_written():
+    wf = minimal_t2i()
+    wf["11"] = _node("LoadImage", "MS_REF_IMAGE", {"image": "placeholder.png"})
+    b = resolve_bindings(wf, "ref")
+    out = apply_overrides(wf, b, base_params(ref_image="maya_ref.png"))
+    assert out["11"]["inputs"]["image"] == "maya_ref.png"
+
+
+def test_ref_image_without_a_binding_raises():
+    wf = minimal_t2i()
+    b = resolve_bindings(wf, "t2i")
+    with pytest.raises(BindingError) as exc:
+        apply_overrides(wf, b, base_params(ref_image="maya_ref.png"))
+    assert "MS_REF_IMAGE" in str(exc.value)
+
+
+def test_generation_params_json_round_trip():
+    p = base_params(negative="blurry", lora_name="x.safetensors", lora_strength=0.8)
+    assert GenerationParams.from_json(p.to_json()) == p
