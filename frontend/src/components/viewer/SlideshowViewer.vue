@@ -381,6 +381,8 @@ watch(current, () => {
           ref="videoPlayerRef"
           :file-path="current.file_path"
           :playback-speed="current.playback_speed"
+          :overlay-controls="expanded"
+          :controls-visible="controlsVisible"
           autoplay
         />
         <img
@@ -392,7 +394,13 @@ watch(current, () => {
       </div>
 
       <!-- Hover controls -->
-      <div class="slideshow-controls" :class="{ visible: controlsVisible }">
+      <div
+        class="slideshow-controls"
+        :class="{
+          visible: controlsVisible,
+          'above-video-bar': expanded && current.is_video,
+        }"
+      >
         <button class="ss-btn" @click="navigatePrev">‹</button>
         <button class="ss-btn" @click="togglePause">
           {{ paused ? '▶' : '❚❚' }}
@@ -538,17 +546,14 @@ watch(current, () => {
   justify-content: center;
 }
 
+/* width/height (not max-*) so undersized media scales UP to the viewport;
+   object-fit: contain keeps its own aspect ratio, so it meets the edges
+   top-to-bottom or side-to-side depending on which way it's proportioned. */
 .slide-image {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  user-select: none;
-}
-
-/* Expanded: scale the image up to the screen, letterboxed to its own ratio. */
-.slideshow-overlay.expanded .slide-image {
   width: 100%;
   height: 100%;
+  object-fit: contain;
+  user-select: none;
 }
 
 .fade-in {
@@ -579,6 +584,11 @@ watch(current, () => {
 .slideshow-controls.visible {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* Clear the video player's own overlaid control bar. */
+.slideshow-controls.above-video-bar {
+  bottom: 68px;
 }
 
 .ss-btn {

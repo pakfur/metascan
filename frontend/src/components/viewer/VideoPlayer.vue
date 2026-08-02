@@ -2,11 +2,18 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { streamUrl } from '../../api/client'
 
-const props = defineProps<{
-  filePath: string
-  playbackSpeed?: number | null
-  autoplay?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    filePath: string
+    playbackSpeed?: number | null
+    autoplay?: boolean
+    /** Float the control bar over the video instead of reserving layout space. */
+    overlayControls?: boolean
+    /** Only consulted in overlayControls mode — lets the host drive auto-hide. */
+    controlsVisible?: boolean
+  }>(),
+  { overlayControls: false, controlsVisible: true },
+)
 
 const emit = defineEmits<{
   speedChange: [speed: number]
@@ -130,7 +137,7 @@ watch(() => props.playbackSpeed, (s) => {
 </script>
 
 <template>
-  <div class="video-player">
+  <div class="video-player" :class="{ 'overlay-mode': overlayControls }">
     <video
       ref="videoEl"
       :src="streamUrl(filePath)"
@@ -142,7 +149,10 @@ watch(() => props.playbackSpeed, (s) => {
       @click="togglePlay"
     />
 
-    <div class="controls">
+    <div
+      class="controls"
+      :class="{ 'controls-hidden': overlayControls && !controlsVisible }"
+    >
       <button class="ctrl-btn play-btn" @click="togglePlay">
         {{ playing ? '❚❚' : '▶' }}
       </button>
@@ -212,6 +222,32 @@ video {
   padding: 8px 16px;
   background: rgba(0, 0, 0, 0.85);
   flex-shrink: 0;
+}
+
+/* Overlay mode: the bar floats over the video, so the video gets the whole
+   box and scales to it at its own aspect ratio. */
+.video-player.overlay-mode {
+  position: relative;
+}
+
+.video-player.overlay-mode video {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+}
+
+.video-player.overlay-mode .controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  transition: opacity 0.3s;
+}
+
+.controls-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .ctrl-btn {
