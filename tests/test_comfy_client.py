@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -329,3 +330,140 @@ def test_next_backoff_escalates_when_the_server_keeps_dropping_instantly():
         seen.append(delay)
     # Never resets to the 1s tier: it climbs to and then holds at the top.
     assert seen == [3.0, 10.0, 10.0, 10.0, 10.0]
+
+
+# ---- Task 8: queue discipline, cancellation, priority ---------------------
+
+
+async def test_submit_enqueues_and_returns_immediately(
+    started_client, fake_comfy
+):  # noqa: F811
+    fake_comfy.execution_delay = 0.3
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+
+    job_ids = [await started_client.submit(pid, params()) for _ in range(5)]
+
+    assert len(set(job_ids)) == 5
+    await asyncio.sleep(0.1)
+    assert len(fake_comfy.submitted) <= started_client.in_flight
+
+    for jid in job_ids:
+        assert (await started_client.wait_for_job(jid, timeout=10.0))["state"] == "done"
+    assert len(fake_comfy.submitted) == 5
+
+
+async def test_priority_jobs_jump_the_queue(started_client, fake_comfy):  # noqa: F811
+    fake_comfy.execution_delay = 0.2
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+
+    for _ in range(4):
+        await started_client.submit(pid, params(positive="bulk"))
+    await asyncio.sleep(0.05)
+    urgent = await started_client.submit(pid, params(positive="urgent"), priority=True)
+
+    await started_client.wait_for_job(urgent, timeout=10.0)
+    order = [s["body"]["prompt"]["6"]["inputs"]["text"] for s in fake_comfy.submitted]
+    assert "urgent" in order
+    assert order.index("urgent") < len(order) - 1
+
+
+async def test_cancel_a_queued_job_never_reaches_comfyui(
+    started_client, fake_comfy
+):  # noqa: F811
+    fake_comfy.execution_delay = 0.4
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+
+    for _ in range(2):
+        await started_client.submit(pid, params(positive="bulk"))
+    victim = await started_client.submit(pid, params(positive="victim"))
+    await started_client.cancel(victim)
+
+    await asyncio.sleep(1.2)
+    sent = [s["body"]["prompt"]["6"]["inputs"]["text"] for s in fake_comfy.submitted]
+    assert "victim" not in sent
+    assert started_client.db.get_generation_job(victim)["state"] == "cancelled"
+
+
+async def test_cancel_a_running_job_interrupts_comfyui(
+    started_client, fake_comfy
+):  # noqa: F811
+    fake_comfy.execution_delay = 1.0
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if started_client.db.get_generation_job(job_id)["state"] == "running":
+            break
+
+    await started_client.cancel(job_id)
+
+    assert fake_comfy.interrupted == 1
+    assert started_client.db.get_generation_job(job_id)["state"] == "cancelled"
+
+
+async def test_cancel_all_clears_the_queue(started_client, fake_comfy):  # noqa: F811
+    fake_comfy.execution_delay = 0.5
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_ids = [await started_client.submit(pid, params()) for _ in range(6)]
+
+    await asyncio.sleep(0.05)
+    await started_client.cancel_all()
+
+    assert started_client.queue_depth() == 0
+    states = {started_client.db.get_generation_job(j)["state"] for j in job_ids}
+    assert states <= {"cancelled", "done", "running"}
+    assert "queued" not in states
+
+
+async def test_a_failing_job_does_not_stall_its_siblings(
+    started_client, fake_comfy
+):  # noqa: F811
+    fake_comfy.fail_with = "boom"
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_ids = [await started_client.submit(pid, params()) for _ in range(4)]
+
+    for jid in job_ids:
+        assert (await started_client.wait_for_job(jid, timeout=10.0))[
+            "state"
+        ] == "failed"
+    assert len(fake_comfy.submitted) == 4
+
+
+async def test_dispatch_wraps_its_post_in_track_submit(
+    started_client, fake_comfy
+):  # noqa: F811
+    """Regression guard: _dispatch must POST through _track_submit().
+
+    _resolve_job_id only retries an unresolved prompt_id while
+    _submits_in_flight > 0 -- that window is what lets a fast
+    execution_start/executed event survive the race against _dispatch's
+    own write to _prompt_to_job (see _track_submit's docstring). If
+    _dispatch's POST were ever changed to bypass _track_submit, that
+    race window disappears and a queued job's completion event could be
+    dropped, leaving it stuck at "running" forever.
+
+    Rather than trying to force that timing race (flaky by nature), this
+    spies on _track_submit and asserts it actually wraps the POST -- and
+    that the counter it maintains is genuinely nonzero while the POST is
+    in flight -- for a job that went through the queue/pump path (not
+    submit_now, which is already covered by its own tests).
+    """
+    seen_in_flight = []
+    original = started_client._track_submit
+
+    @contextlib.asynccontextmanager
+    async def spy():
+        async with original():
+            seen_in_flight.append(started_client._submits_in_flight)
+            yield
+
+    started_client._track_submit = spy  # type: ignore[method-assign]
+
+    pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "done"
+    assert seen_in_flight, "_dispatch never entered _track_submit around its POST"
+    assert seen_in_flight[0] >= 1

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Tuple
@@ -109,6 +110,15 @@ class ComfyClient:
         # is > 0 -- that's the only window in which a websocket event can
         # race _prompt_to_job's write. See _track_submit.
         self._submits_in_flight: int = 0
+        # Metascan-side queue: submit() appends/appendlefts job ids here;
+        # _pump_loop drains it into ComfyUI, never letting more than
+        # `in_flight` jobs sit inside ComfyUI at once. `_running` is the
+        # admission-control set the pump checks; `_pump_wake` lets submit,
+        # cancel, and _finish_job all nudge the pump without polling.
+        self._queue: "deque[int]" = deque()
+        self._running: "set[int]" = set()
+        self._pump_wake = asyncio.Event()
+        self._pump_task: Optional[asyncio.Task] = None
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -234,6 +244,166 @@ class ComfyClient:
         )
         return job_id
 
+    # ---- queue ---------------------------------------------------------
+
+    def queue_depth(self) -> int:
+        return len(self._queue)
+
+    async def submit(
+        self,
+        preset_id: int,
+        params: GenerationParams,
+        panel_id: Optional[int] = None,
+        priority: bool = False,
+    ) -> int:
+        """Enqueue a job. Returns its id immediately; it reaches ComfyUI
+        when a slot frees up.
+
+        The preset is validated up front so a bad preset id fails at the
+        call site rather than silently inside the pump.
+        """
+        await self._load_preset(preset_id)
+        job_id = int(
+            await asyncio.to_thread(
+                self.db.create_generation_job,
+                preset_id,
+                params.to_json(),
+                panel_id,
+            )
+        )
+        if priority:
+            self._queue.appendleft(job_id)
+        else:
+            self._queue.append(job_id)
+        self._pump_wake.set()
+        self._emit("job_update", {"job_id": job_id, "state": "queued", "error": None})
+        return job_id
+
+    async def _pump_loop(self) -> None:
+        """Keep at most ``in_flight`` jobs inside ComfyUI."""
+        while True:
+            try:
+                while self._queue and len(self._running) < self.in_flight:
+                    job_id = self._queue.popleft()
+                    job = await asyncio.to_thread(self.db.get_generation_job, job_id)
+                    if job is None or job["state"] != "queued":
+                        continue  # cancelled while waiting
+                    await self._dispatch(job_id, job)
+                self._pump_wake.clear()
+                await self._wait_for_wake(0.5)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("comfy pump loop error")
+                await asyncio.sleep(0.5)
+
+    async def _wait_for_wake(self, timeout: float) -> None:
+        """Sleep until `_pump_wake` is set, or `timeout` elapses.
+
+        Deliberately NOT `asyncio.wait_for(self._pump_wake.wait(), ...)`:
+        on Python < 3.12, repeatedly cancelling a task parked inside
+        wait_for() around the same moment its own timeout fires can
+        permanently swallow the outer cancellation -- wait_for treats the
+        CancelledError as "my timeout expired" and keeps raising
+        TimeoutError forever afterwards, so `_pump_task.cancel()` in
+        shutdown() would never actually stop the loop. Confirmed live
+        against this exact loop: an `await self._pump_task` after
+        `.cancel()` hung indefinitely, with `task.cancelling()` staying
+        True while the loop kept reporting "woke via timeout" (see
+        Task 8's report). Managing the waiter task explicitly with
+        `asyncio.wait` — which has no such timeout/cancel conflation —
+        does not reproduce the hang.
+        """
+        waiter = asyncio.ensure_future(self._pump_wake.wait())
+        try:
+            await asyncio.wait({waiter}, timeout=timeout)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await waiter
+
+    async def _dispatch(self, job_id: int, job: Dict[str, Any]) -> None:
+        """Hand one queued job to ComfyUI.
+
+        Mirrors submit_now's POST handling, including wrapping the POST
+        in _track_submit() -- without it, a queued job's prompt_id can be
+        resolved by the reader loop before this method's map write runs,
+        and the resulting event gets silently dropped with no retry.
+        """
+        self._running.add(job_id)
+        try:
+            workflow, bindings = await self._load_preset(job["preset_id"])
+            graph = apply_overrides(
+                workflow, bindings, GenerationParams.from_json(job["params"])
+            )
+            async with self._track_submit():
+                resp = await self._http.post(
+                    f"{self.base_url}/prompt",
+                    json={"prompt": graph, "client_id": self.client_id},
+                )
+            resp.raise_for_status()
+            prompt_id = resp.json().get("prompt_id")
+            if not prompt_id:
+                raise ComfyError("ComfyUI returned no prompt_id")
+            # Register in the map BEFORE the DB write: ComfyUI can emit
+            # execution_start for this prompt while the write is still on
+            # the worker thread, and an event that arrives before the map
+            # entry exists is dropped as unrecognised.
+            self._prompt_to_job[str(prompt_id)] = job_id
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="running",
+                comfy_prompt_id=prompt_id,
+                started_at=_now(),
+            )
+            self._emit(
+                "job_update", {"job_id": job_id, "state": "running", "error": None}
+            )
+        except Exception as exc:
+            message = f"ComfyUI at {self.base_url} rejected the job: {exc}"
+            logger.warning(message)
+            await self._finish_job(job_id, "failed", error=message)
+
+    async def cancel(self, job_id: int) -> None:
+        """Cancel a queued or running job.
+
+        Queued jobs are simply dropped. A running job is interrupted in
+        ComfyUI; already-generated images from earlier jobs are kept.
+        """
+        job = await asyncio.to_thread(self.db.get_generation_job, job_id)
+        if job is None or job["state"] not in ("queued", "running"):
+            return
+
+        if job["state"] == "queued":
+            with contextlib.suppress(ValueError):
+                self._queue.remove(job_id)
+            await self._finish_job(job_id, "cancelled")
+            return
+
+        prompt_id = job["comfy_prompt_id"]
+        try:
+            if prompt_id:
+                await self._http.post(
+                    f"{self.base_url}/queue", json={"delete": [prompt_id]}
+                )
+            await self._http.post(f"{self.base_url}/interrupt")
+        except Exception as exc:
+            logger.warning("Could not interrupt ComfyUI: %s", exc)
+        if prompt_id:
+            self._prompt_to_job.pop(str(prompt_id), None)
+        await self._finish_job(job_id, "cancelled")
+
+    async def cancel_all(self) -> None:
+        """Drop every queued job and interrupt anything running."""
+        queued = list(self._queue)
+        self._queue.clear()
+        for job_id in queued:
+            await self._finish_job(job_id, "cancelled")
+        for job_id in list(self._running):
+            await self.cancel(job_id)
+
     # ---- event stream --------------------------------------------------
 
     def _ws_url(self) -> str:
@@ -250,11 +420,18 @@ class ComfyClient:
         self._stopping = False
         ready = asyncio.Event()
         self._ws_task = asyncio.create_task(self._reader_loop(ready))
+        if self._pump_task is None:
+            self._pump_task = asyncio.create_task(self._pump_loop())
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(ready.wait(), timeout=5.0)
 
     async def shutdown(self) -> None:
         self._stopping = True
+        if self._pump_task is not None:
+            self._pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._pump_task
+            self._pump_task = None
         if self._ws_task is not None:
             self._ws_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -406,6 +583,10 @@ class ComfyClient:
     async def _finish_job(
         self, job_id: int, state: str, error: Optional[str] = None
     ) -> None:
+        # Release the pump's admission-control slot as soon as a job goes
+        # terminal, regardless of which caller (executed/error event,
+        # cancel, cancel_all, or a dispatch failure) got it here.
+        self._running.discard(job_id)
         fields: Dict[str, Any] = {"state": state, "finished_at": _now()}
         if error is not None:
             fields["error"] = error
@@ -420,6 +601,9 @@ class ComfyClient:
         event = self._job_done.get(job_id)
         if event is not None:
             event.set()
+        # Wake the pump: a slot may have just freed up, or a queued job
+        # was just dropped by cancel/cancel_all.
+        self._pump_wake.set()
 
     async def wait_for_job(self, job_id: int, timeout: float = 10.0) -> Dict[str, Any]:
         """Block until a job leaves 'running'. Returns the final row.
