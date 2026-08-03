@@ -62,11 +62,13 @@ DB access is synchronous; async wrappers in `backend/services/` bridge to FastAP
 ```
 frontend/src/
   api/          # Fetch wrapper with auth, typed API functions
+  router/       # index.ts — hash-history vue-router: `/` (LibraryView), `/storyboard/:id?` (StoryboardView)
+  views/        # LibraryView (desktop/mobile grid shell), StoryboardView (desktop-only authoring canvas)
   stores/       # Pinia stores (media, filters, folders, settings, scan,
-                #   similarity, upscale, models)
+                #   similarity, upscale, models, storyboard)
   composables/  # useWebSocket (multiplexed), useKeyboard, useFoldersUi, useToast
   components/
-    layout/     # AppHeader, ContentSearchBar, ViewMenubar, ThreePanel, ScopeBreadcrumb, ToastHost
+    layout/     # ContentSearchBar (header action row), ViewMenubar, ThreePanel, ScopeBreadcrumb, ToastHost
     filters/    # FilterPanel, FilterSection, FoldersSection, FolderRow, FolderKebabMenu
     thumbnails/ # ThumbnailGrid (virtual scroll), ThumbnailCard, SimilarityBanner
     metadata/   # MetadataPanel, MetadataField

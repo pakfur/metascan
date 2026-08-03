@@ -39,6 +39,7 @@ export interface Media {
   frame_rate: number | null
   duration: number | null
   similarity_score?: number
+  hidden?: boolean
 
   // --- Photo summary fields (also returned by GET /api/media) ---
   camera_make?: string | null

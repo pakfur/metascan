@@ -17,6 +17,7 @@ export const useMediaStore = defineStore('media', () => {
   const selectedPaths = ref<Set<string>>(new Set())
   const sortOrder = ref('date_added')
   const favoritesOnly = ref(false)
+  const showHidden = ref(false)
   const loading = ref(false)
   const detailLoading = ref(false)
 
@@ -47,7 +48,7 @@ export const useMediaStore = defineStore('media', () => {
   async function loadAllMedia() {
     loading.value = true
     try {
-      const data = await fetchAllMedia(sortOrder.value)
+      const data = await fetchAllMedia(sortOrder.value, false, showHidden.value)
       allMedia.value = data
       favoritePaths.value = new Set(
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
@@ -55,6 +56,16 @@ export const useMediaStore = defineStore('media', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  // Hidden media (generated storyboard variants that haven't been picked as
+  // the panel keeper) are excluded server-side by default. Toggling this
+  // refetches with include_hidden=true rather than filtering client-side, so
+  // the grid's item count and hidden badges reflect the same data the server
+  // considers "hidden".
+  function toggleShowHidden() {
+    showHidden.value = !showHidden.value
+    loadAllMedia()
   }
 
   async function applyActiveFilters(filters: ActiveFilters) {
@@ -147,6 +158,7 @@ export const useMediaStore = defineStore('media', () => {
     selectedPaths,
     sortOrder,
     favoritesOnly,
+    showHidden,
     loading,
     detailLoading,
     loadAllMedia,
@@ -156,5 +168,6 @@ export const useMediaStore = defineStore('media', () => {
     toggleFavorite,
     removeMedia,
     setSortOrder,
+    toggleShowHidden,
   }
 })

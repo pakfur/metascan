@@ -71,6 +71,18 @@ const menuItems = computed<MenuItem[]>(() => {
             </option>
           </select>
 
+          <button
+            type="button"
+            class="hidden-toggle-btn"
+            :class="{ active: mediaStore.showHidden }"
+            :aria-pressed="mediaStore.showHidden"
+            title="Show hidden media"
+            @click="mediaStore.toggleShowHidden()"
+          >
+            <i class="pi pi-eye-slash" />
+            Show hidden
+          </button>
+
           <Button
             label="Slideshow"
             icon="pi pi-play"
@@ -145,6 +157,26 @@ const menuItems = computed<MenuItem[]>(() => {
   font-size: 13px;
   color: var(--text-color-secondary);
   white-space: nowrap;
+}
+
+.hidden-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.hidden-toggle-btn.active {
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+  color: #fff;
 }
 </style>
 
