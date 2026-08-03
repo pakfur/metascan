@@ -62,13 +62,19 @@ metascan/
   frontend/             # Vue 3 SPA
     src/
       api/              # Fetch wrapper with auth, typed API functions
-                        #   client.ts, media.ts, filters.ts, folders.ts, …
+                        #   client.ts, media.ts, filters.ts, folders.ts, storyboard.ts, …
+      router/           # index.ts — hash-history vue-router: `/` (LibraryView),
+                        #   `/storyboard/:id?` (StoryboardView)
+      views/            # LibraryView (desktop/mobile shell + grid), StoryboardView
+                        #   (desktop-only authoring canvas)
       stores/           # Pinia stores (media, filters, folders, settings, scan,
-                        #   similarity, upscale, models)
+                        #   similarity, upscale, models, storyboard)
       composables/      # useWebSocket (multiplexed, auto-reconnect), useKeyboard,
                         #   useFoldersUi (shared overlay state), useToast
       components/
-        layout/         # AppHeader, ContentSearchBar, ViewMenubar, ThreePanel,
+        layout/         # ContentSearchBar (header action row — scan, refresh,
+                        #   upscale queue, duplicates, similarity settings, config,
+                        #   Storyboards nav), ViewMenubar, ThreePanel,
                         #   ScopeBreadcrumb, ToastHost
         filters/        # FilterPanel, FilterSection, FoldersSection, FolderRow,
                         #   FolderKebabMenu
@@ -112,7 +118,8 @@ metascan/
 - **`LocationSection`'s map container must never hit `display:none`.** When the MapLibre canvas is inside a `display:none` element, browsers pause its `requestAnimationFrame` and the render loop wedges — the next `flyTo` updates camera state but no tiles ever fetch, so the panel becomes a permanently blank gray canvas until page refresh. `v-if`/`v-show` (which both end up at `display:none`) on the section wrapper triggered this on every GPS → no-GPS → GPS toggle. The component instead applies a `meta-section--offscreen` class (`position:absolute; visibility:hidden; top:-10000px`) for non-GPS media, keeping the canvas painted offscreen so its rAF loop and WebGL context stay alive across toggles. The watcher waits one `requestAnimationFrame` after the offscreen→onscreen flip before calling `map.resize()` so `clientWidth` reflects the visible size. Because the section now renders for non-GPS media too, GPS-only computeds (`coordsLabel`, `osmUrl`) must early-return when `!hasGps` to avoid `null.toFixed`. `onBeforeUnmount(destroyMap)` still releases the WebGL context when the panel itself unmounts.
 - **Hardware tier + per-model gates.** `metascan/core/hardware.py` runs probes once (`@lru_cache(maxsize=1)` on `detect_hardware()`) for CPU/RAM/CUDA/MPS/Vulkan/glibc/NLTK and classifies hosts into 5 tiers: `cpu_only`, `apple_silicon`, `cuda_entry` (<6 GB VRAM), `cuda_mainstream` (6–12 GB), `cuda_workstation` (≥12 GB). CUDA always wins over MPS. `feature_gates(report)` returns `{model_id: Gate(available, recommended, reason)}` per CLIP/Real-ESRGAN/GFPGAN/RIFE/NLTK model. Auto-warnings populate `report.warnings` for WSL2-without-real-Vulkan and Linux glibc < 2.29 (the latter blocks `rife-ncnn-vulkan`). RIFE is gated unavailable when only `llvmpipe` (software Vulkan) is detected. NLTK ≥ 3.8.2 forces `punkt_tab` over legacy `punkt` (CVE-2024-39705). Both `/api/models/hardware` (returns `{tier, report, ...legacy fields}`) and `/api/models/status` (adds `tier` + `gates`) consume the cached report. The frontend `useModelsStore` exposes `tier`, `gates`, `gateFor(id)`; `ConfigModelsTab.vue` renders a tier banner + per-row recommended/unsupported chips with reason tooltips.
 - **Shared torch device picker.** `select_torch_device(preference="auto")` in `hardware.py` is the single source of truth for CUDA → MPS (Darwin only) → CPU precedence. `EmbeddingManager._resolve_device` delegates to it; new PyTorch paths (Real-ESRGAN, GFPGAN if/when wired) should do the same. Explicit preferences (`"cpu"`, `"cuda"`, `"mps"`) are returned verbatim — only `"auto"` triggers detection. **Apple Silicon previously fell through to CPU** for CLIP because the old `_resolve_device` only checked `cuda.is_available()`; the shared picker fixes that gap.
-- **Mobile UI is a viewport-selected shell, not responsive CSS on the desktop tree.** `composables/useViewport.ts` exposes a reactive `isMobile` (VueUse `useMediaQuery('(max-width: 767px)')`, the only place that query string lives). `App.vue` renders `ThreePanel` (desktop) or `MobileShell` (mobile), and swaps the full-screen viewer between `MediaViewer` (Galleria, desktop) and the touch-first `MobileMediaViewer` (`components/mobile/`). The mobile experience is deliberately narrow — grid browsing, folder bottom sheet (`MobileFolderMenu`), content search (`composables/useContentSearch.ts`, a port of `ContentSearchBar`'s coalesce logic — the desktop component is left untouched), sort/size, one-tap slideshow, and the gesture viewer; filters, the metadata panel, and all management dialogs are simply never mounted on mobile. **Desktop stays behaviorally identical** because every shared-component change is an additive prop defaulting to the old behavior: `ThumbnailGrid`'s `mobile` (tap-to-open, no context menu, no drag) and `SlideshowViewer`'s `autoStart`. Two consistency rules matter: the mobile viewer binds `gridList` (`simStore.active ? filteredResults : scopedMedia`) and `openViewer` indexes against that same list when `isMobile`, so a content search's index/list stay aligned; and `App.vue` watches `isMobile` to close any open viewer/slideshow on a breakpoint flip (the two viewers bind different lists behind the same index). Touch gestures (`components/mobile/MobileMediaViewer.vue` + pure helpers in `utils/gestures.ts`) use pointer events: swipe prev/next, pinch-zoom + pan, swipe-down-to-close, with the zoom snap-to-1 running before the pinch→single-finger re-arm so a swipe survives pinch jitter. See `docs/superpowers/specs/2026-07-28-mobile-responsive-ui-design.md`.
+- **Routing is hash-history vue-router (`frontend/src/router/index.ts`), added in Phase C.** `/` is `LibraryView` — the pre-Phase-C `App.vue` moved verbatim, still the desktop/mobile grid shell. `/storyboard/:id?` is `StoryboardView`, a desktop-only authoring canvas (no mobile layout). `App.vue` itself is now a thin router shell: `<router-view>` plus `ToastHost` and the folders WS bridge (`folder_created`/`folder_updated`/`folder_deleted`/`folder_items_changed`) — it holds no dialog or page state, so grep `views/LibraryView.vue` or `views/StoryboardView.vue` for that, not `App.vue`.
+- **Mobile UI is a viewport-selected shell, not responsive CSS on the desktop tree.** `composables/useViewport.ts` exposes a reactive `isMobile` (VueUse `useMediaQuery('(max-width: 767px)')`, the only place that query string lives). `LibraryView.vue` renders `ThreePanel` (desktop) or `MobileShell` (mobile), and swaps the full-screen viewer between `MediaViewer` (Galleria, desktop) and the touch-first `MobileMediaViewer` (`components/mobile/`). The mobile experience is deliberately narrow — grid browsing, folder bottom sheet (`MobileFolderMenu`), content search (`composables/useContentSearch.ts`, a port of `ContentSearchBar`'s coalesce logic), sort/size, one-tap slideshow, and the gesture viewer; filters, the metadata panel, and all management dialogs are simply never mounted on mobile. The mobile port itself didn't touch `ContentSearchBar.vue`; Phase C later added the Storyboards nav button there, so the desktop component has moved since — read it directly rather than assuming it's frozen. **Desktop stays behaviorally identical** because every shared-component change is an additive prop defaulting to the old behavior: `ThumbnailGrid`'s `mobile` (tap-to-open, no context menu, no drag) and `SlideshowViewer`'s `autoStart`. Two consistency rules matter: the mobile viewer binds `gridList` (`simStore.active ? filteredResults : scopedMedia`) and `openViewer` indexes against that same list when `isMobile`, so a content search's index/list stay aligned; and `LibraryView.vue` watches `isMobile` to close any open viewer/slideshow on a breakpoint flip (the two viewers bind different lists behind the same index). Touch gestures (`components/mobile/MobileMediaViewer.vue` + pure helpers in `utils/gestures.ts`) use pointer events: swipe prev/next, pinch-zoom + pan, swipe-down-to-close, with the zoom snap-to-1 running before the pinch→single-finger re-arm so a swipe survives pinch jitter. See `docs/superpowers/specs/2026-07-28-mobile-responsive-ui-design.md`.
 - **Vite proxy** forwards `/api/*` and `/ws` to the backend during development. The EPIPE error handler silences broken pipe from cancelled browser requests.
 - **FAISS test vectors must use dim >= 32** to avoid SIMD alignment crashes on ARM (Apple Silicon). Tests normalize all vectors for IndexFlatIP.
 - **`KMP_DUPLICATE_LIB_OK=TRUE`** is set in `tests/conftest.py` to prevent OpenMP duplicate library crash when torch + faiss-cpu both link libomp on macOS.
@@ -412,6 +419,27 @@ metascan/
   loop — submits don't need the VLM and shouldn't block on synthesis of an
   unrelated panel). Without this, `generate()` could tear the VLM out from
   under an in-progress `synthesize()` call.
+- **`stores/storyboard.ts` correlates ComfyUI jobs to panels client-side.**
+  `refreshActiveJobs()` rebuilds `jobToPanel` from `GET /api/comfy/jobs`
+  (`comfyApi.listJobs('queued'|'running', 1000)`) filtered to the current
+  tree's panel ids — this is what survives a page reload mid-generation,
+  since there's no other durable client record of in-flight jobs. Live
+  updates then come off the `comfy` WS channel: `job_update` moves a panel
+  in/out of `panelJobState` (`done`/`cancelled` clears it), `job_progress`
+  sets `{state: 'running', value, max}`; `job_outputs` is ignored on this
+  channel — image ingestion is signaled separately. The `storyboard` channel
+  drives refreshes: `panel_images_changed` and `synthesis_complete` both
+  trigger a full `refresh()` (no per-panel GET exists, and refresh preserves
+  selection), `synthesis_progress` updates the running counter in place, and
+  `synthesis_error` surfaces the message without refetching. Both handlers
+  drop events whose `storyboard_id` doesn't match the loaded `tree.value.id`
+  — necessary because `attachWs()` is called from `StoryboardView`'s
+  `<script setup>` on every mount (no module-level "already attached"
+  guard), so switching boards must not let a stale board's events leak in.
+  Keeper selection always goes through `selectImage()` →
+  `POST /panels/{id}/select` — never `PATCH /api/storyboard/panels/{id}`,
+  which has no concept of `panel_images` and cannot flip `media.hidden` on
+  the old/new keeper.
 
 ## Development Rules
 
@@ -520,8 +548,8 @@ When adding new user-facing documentation:
 
 ### Adding a new frontend dialog
 1. Create `frontend/src/components/dialogs/MyDialog.vue`
-2. Add state/open flag in `App.vue`
-3. Add button/shortcut trigger in `AppHeader.vue`
+2. Add state/open flag in `views/LibraryView.vue` (or `views/StoryboardView.vue` for a storyboard-only dialog) — `App.vue` is just the router shell (`<router-view>` + `ToastHost` + the folders WS bridge) and holds no dialog state.
+3. Add button/shortcut trigger in `ContentSearchBar.vue` (the header action row).
 4. If it needs a store, create `frontend/src/stores/my.ts`
 
 ### Adding a tag axis / extending the CLIP vocabulary

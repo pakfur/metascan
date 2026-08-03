@@ -83,6 +83,18 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 - **Smart folders** — saved rules over fields like tags, model, source, modified/added date, favorite status. Evaluated client-side and re-resolved as the library changes
 - Cross-tab sync over WebSocket: creating, renaming, or moving items broadcasts to every connected browser
 
+## Storyboards
+Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header action row), for scripting and generating multi-panel AI image sequences via a driven ComfyUI backend.
+- Create a storyboard with a name, aspect ratio, target model, and shared style block / negative prompt applied to every panel
+- Import a plain-text script and have it parsed into scenes and panels, or build the scene/panel tree by hand
+- Define subjects (characters) with a LoRA and reference image, reused across panels
+- Per-panel controls for shot size, camera angle, and lens; prompts can be locked to protect hand edits from re-synthesis
+- **Synthesize** — generates per-panel prompts (VLM-composed or a deterministic template fallback), respecting locked panels
+- **Generate** — submits panels to ComfyUI with deterministic per-panel/variant seeds; supports generating only failed panels and rerolling a single panel for a fresh variant
+- Live synthesis and per-panel job progress over WebSocket, with cancel-all support
+- Candidate picker per panel — every rendered variant is kept as a candidate thumbnail; click one to make it the keeper. Non-keeper variants are hidden from the main library grid until picked
+- Hidden-media toggle ("Show hidden" in the view menubar) reveals those in-progress/non-keeper variants in the grid, each marked with an eye-slash badge
+
 ## Context Menu
 - Open (full-screen viewer)
 - Find Similar (enter similarity mode)

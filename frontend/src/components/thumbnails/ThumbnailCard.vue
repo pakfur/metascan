@@ -81,6 +81,10 @@ function onImgError(e: Event) {
 
     <span v-if="media.is_video" class="video-badge">▶</span>
 
+    <span v-if="media.hidden" class="hidden-badge" title="Hidden from library">
+      <i class="pi pi-eye-slash" />
+    </span>
+
     <div class="filename-overlay" :title="displayName">
       {{ displayName }}
     </div>
@@ -194,6 +198,21 @@ function onImgError(e: Event) {
 
 .thumbnail-card:hover .filename-overlay {
   opacity: 1;
+}
+
+.hidden-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  color: #f87171;
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 4px;
 }
 
 .similarity-badge {

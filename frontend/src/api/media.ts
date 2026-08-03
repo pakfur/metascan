@@ -1,9 +1,14 @@
 import type { Media } from '../types/media'
 import { get, patch, del } from './client'
 
-export function fetchAllMedia(sort = 'date_added', favoritesOnly = false): Promise<Media[]> {
+export function fetchAllMedia(
+  sort = 'date_added',
+  favoritesOnly = false,
+  includeHidden = false,
+): Promise<Media[]> {
   const params = new URLSearchParams({ sort })
   if (favoritesOnly) params.set('favorites_only', 'true')
+  if (includeHidden) params.set('include_hidden', 'true')
   return get<Media[]>(`/media?${params}`)
 }
 
