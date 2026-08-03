@@ -10,6 +10,10 @@ const router = useRouter()
 
 const showCreate = ref(false)
 const showPresets = ref(false)
+// store.remove() rethrows on failure (see storyboard.ts) so callers can
+// react locally -- deleteError is what surfaces that here, next to the
+// list, mirroring PresetRegistrationDialog's onDelete/deleteError pattern.
+const deleteError = ref<string | null>(null)
 
 onMounted(() => {
   void store.loadList()
@@ -21,7 +25,12 @@ function open(id: number) {
 
 async function onDelete(id: number, name: string) {
   if (!confirm(`Delete storyboard "${name}"? The folder and its media are kept.`)) return
-  await store.remove(id)
+  deleteError.value = null
+  try {
+    await store.remove(id)
+  } catch (e) {
+    deleteError.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 function onCreated(id: number) {
@@ -60,6 +69,7 @@ function formatDate(raw: string): string {
     </div>
 
     <p v-if="store.error" class="error">{{ store.error }}</p>
+    <p v-if="deleteError" class="error">{{ deleteError }}</p>
 
     <div v-if="store.loading" class="muted">Loading…</div>
     <div v-else-if="store.list.length === 0" class="empty-state">
