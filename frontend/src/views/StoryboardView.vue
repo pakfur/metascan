@@ -26,7 +26,13 @@
           synthesis failed
         </span>
         <div class="sb-actions">
-          <!-- Import text / Settings buttons + dialogs arrive in Task 6 -->
+          <Button
+            label="Import text"
+            icon="pi pi-file-import"
+            text
+            :disabled="!store.tree"
+            @click="importOpen = true"
+          />
           <Button
             label="Synthesize"
             text
@@ -45,32 +51,48 @@
             :disabled="!store.tree"
             @click="store.cancelAll()"
           />
+          <Button
+            icon="pi pi-cog"
+            text
+            rounded
+            aria-label="Storyboard settings"
+            title="Storyboard settings"
+            :disabled="!store.tree"
+            @click="settingsOpen = true"
+          />
         </div>
       </header>
 
       <template v-if="store.tree">
         <SceneStrip />
         <PanelGrid />
+        <PanelDetail v-if="store.selectedPanel" />
       </template>
       <div v-else-if="store.loading" class="sb-loading">Loading…</div>
-
-      <!-- Task 6: PanelDetail mounts here when store.selectedPanel is set -->
     </div>
+
+    <ImportTextDialog v-if="importOpen" @close="importOpen = false" />
+    <StoryboardSettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useViewport } from '../composables/useViewport'
 import { useStoryboardStore } from '../stores/storyboard'
 import StoryboardLanding from '../components/storyboard/StoryboardLanding.vue'
 import SceneStrip from '../components/storyboard/SceneStrip.vue'
 import PanelGrid from '../components/storyboard/PanelGrid.vue'
+import PanelDetail from '../components/storyboard/PanelDetail.vue'
+import ImportTextDialog from '../components/storyboard/ImportTextDialog.vue'
+import StoryboardSettingsDialog from '../components/storyboard/StoryboardSettingsDialog.vue'
 
 const props = defineProps<{ id?: number }>()
 const { isMobile } = useViewport()
 const store = useStoryboardStore()
+const importOpen = ref(false)
+const settingsOpen = ref(false)
 
 // attachWs() registers its cleanup via onUnmounted from inside setup, so it
 // must be called exactly once here in the script setup body -- never from
