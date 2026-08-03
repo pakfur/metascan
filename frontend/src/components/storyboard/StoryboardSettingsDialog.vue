@@ -2,7 +2,8 @@
 import { onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
-import { ApiError } from '../../api/client'
+import { ApiError, thumbnailUrl } from '../../api/client'
+import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import { ASPECT_RATIOS, TARGET_MODELS } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
@@ -172,6 +173,29 @@ function onSubjectReferencePath(id: number, e: Event): void {
   void commitSubjectField(id, { reference_path: val || null })
 }
 
+// ---- reference image picker ---------------------------------------------
+
+// Subject id the picker is currently open for, or null when closed.
+const pickerForSubject = ref<number | null>(null)
+
+// Per-subject record of the reference_path whose thumbnail failed to load.
+// Keyed by the path itself so a subsequent path change retries naturally.
+const refThumbFailed = ref<Record<number, string>>({})
+
+function onRefThumbError(id: number, path: string): void {
+  refThumbFailed.value[id] = path
+}
+
+function onPickReference(path: string): void {
+  const id = pickerForSubject.value
+  pickerForSubject.value = null
+  if (id != null) void commitSubjectField(id, { reference_path: path })
+}
+
+function onClearReference(id: number): void {
+  void commitSubjectField(id, { reference_path: null })
+}
+
 async function onDeleteSubject(id: number): Promise<void> {
   if (!confirm('Delete this subject?')) return
   try {
@@ -323,6 +347,16 @@ function close(): void {
             </button>
           </div>
           <div class="subject-ref-row">
+            <img
+              v-if="s.reference_path && refThumbFailed[s.id] !== s.reference_path"
+              :src="thumbnailUrl(s.reference_path)"
+              alt=""
+              class="ref-thumb"
+              @error="onRefThumbError(s.id, s.reference_path)"
+            />
+            <div v-else class="ref-thumb ref-thumb-empty" title="No reference image">
+              <span>—</span>
+            </div>
             <input
               type="text"
               class="subject-ref"
@@ -330,7 +364,18 @@ function close(): void {
               placeholder="Reference image path"
               @change="onSubjectReferencePath(s.id, $event)"
             />
-            <span class="hint">path of a library image</span>
+            <button type="button" class="browse-btn" @click="pickerForSubject = s.id">
+              Browse…
+            </button>
+            <button
+              v-if="s.reference_path"
+              type="button"
+              class="remove-btn"
+              title="Clear reference image"
+              @click="onClearReference(s.id)"
+            >
+              &times;
+            </button>
           </div>
           <p v-if="subjectErrors[s.id]" class="error inline">{{ subjectErrors[s.id] }}</p>
         </div>
@@ -358,6 +403,12 @@ function close(): void {
         <button class="btn-secondary" @click="close">Close</button>
       </div>
     </div>
+
+    <ReferenceImagePicker
+      v-if="pickerForSubject !== null"
+      @select="onPickReference"
+      @close="pickerForSubject = null"
+    />
   </div>
 </template>
 
@@ -487,8 +538,11 @@ textarea {
 }
 
 .subject-strength {
-  width: 80px;
-  flex-shrink: 0;
+  /* flex-basis, not width: the generic input[type='number'] { width: 100% }
+     rule above outranks this class by specificity, and width:100% +
+     flex-shrink:0 made this input swallow the whole row, collapsing the
+     text inputs beside it to zero-width slivers. */
+  flex: 0 0 80px;
 }
 
 .subject-ref-row {
@@ -500,13 +554,42 @@ textarea {
 
 .subject-ref {
   flex: 1;
+  min-width: 0;
 }
 
-.hint {
-  font-size: 11px;
+.ref-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--surface-border);
+  flex-shrink: 0;
+  display: block;
+}
+
+.ref-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-card);
   color: var(--text-color-secondary);
+  font-size: 14px;
+}
+
+.browse-btn {
+  padding: 6px 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 13px;
+  cursor: pointer;
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.browse-btn:hover {
+  background: var(--surface-hover);
 }
 
 .remove-btn {
