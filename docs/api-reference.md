@@ -251,6 +251,18 @@ Partial update of any storyboard column. Returns `{status: "updated"}`.
 the patch changes, `bucket_dims` is re-validated the same way as create
 (400 on mismatch).
 
+All four storyboard/subject/scene/panel PATCH routes use
+`model_dump(exclude_unset=True)`, not `exclude_none=True`: a field that's
+**absent** from the request body is left untouched, but a field sent as
+explicit JSON `null` clears the column (e.g. `{"preset_id": null}`,
+`{"shot_size": null}`, `{"notes": null}`). Sending explicit `null` for a
+`NOT NULL` column (`name`, `aspect_ratio`, `target_model`, `architecture`,
+`base_seed`, `batch_size` on storyboards; `name`/`description`/`sort_order`
+on subjects; `name`/`sort_order` on scenes; `sort_order`/`action`/
+`subject_ids`/`prompt_locked` on panels) is rejected with **400**, naming
+the offending field(s), rather than surfacing as a raw 500 from a SQLite
+NOT NULL constraint violation.
+
 ### `DELETE /api/storyboard/{id}`
 Returns `{status: "deleted"}`. 404 if unknown. The storyboard's linked
 folder (if any) is **not** deleted — only the `folders.id` reference on
