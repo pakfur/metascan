@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useSimilarityStore } from '../../stores/similarity'
 import { useModelsStore } from '../../stores/models'
 
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 
 const simStore = useSimilarityStore()
 const modelsStore = useModelsStore()
+const router = useRouter()
 const query = ref(simStore.contentQuery)
 
 // Query that was submitted while the inference worker wasn't ready.
@@ -106,6 +108,10 @@ function onClear() {
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter') onSubmit()
+}
+
+function openStoryboards() {
+  void router.push({ name: 'storyboard' })
 }
 
 async function onRebuildIndex() {
@@ -204,6 +210,15 @@ async function onRebuildIndex() {
         rounded
         aria-label="Config"
         @click="emit('config')"
+      />
+      <Button
+        v-tooltip.bottom="'Storyboards'"
+        icon="pi pi-images"
+        severity="secondary"
+        text
+        rounded
+        aria-label="Storyboards"
+        @click="openStoryboards"
       />
     </div>
 

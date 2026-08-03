@@ -196,6 +196,25 @@ def test_patch_storyboard_bad_aspect_ratio_is_400(client):
     assert r.status_code == 400
 
 
+def test_patch_storyboard_null_negative_clears_it(client):
+    sid = _create_storyboard(client, negative="ugly, blurry")
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["negative"] == "ugly, blurry"
+
+    r = client.patch(f"/api/storyboard/{sid}", json={"negative": None})
+    assert r.status_code == 200
+
+    tree2 = client.get(f"/api/storyboard/{sid}").json()
+    assert tree2["negative"] is None
+
+
+def test_patch_storyboard_null_name_is_400(client):
+    sid = _create_storyboard(client)
+    r = client.patch(f"/api/storyboard/{sid}", json={"name": None})
+    assert r.status_code == 400
+    assert "name" in r.json()["detail"]
+
+
 def test_create_storyboard_defaults_base_seed_and_clamps_batch_size(client):
     r = client.post(
         "/api/storyboard",
@@ -376,6 +395,31 @@ def test_patch_subject_unknown_reference_path_is_400(client):
     assert "reference image" in r.json()["detail"]
 
 
+def test_patch_subject_null_lora_name_clears_it(client):
+    sid = _create_storyboard(client)
+    subj_id = client.post(
+        f"/api/storyboard/{sid}/subjects",
+        json={"name": "Alice", "description": "x", "lora_name": "alice_lora"},
+    ).json()["id"]
+
+    r = client.patch(f"/api/storyboard/subjects/{subj_id}", json={"lora_name": None})
+    assert r.status_code == 200
+
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["subjects"][0]["lora_name"] is None
+
+
+def test_patch_subject_null_name_is_400(client):
+    sid = _create_storyboard(client)
+    subj_id = client.post(
+        f"/api/storyboard/{sid}/subjects",
+        json={"name": "Alice", "description": "x"},
+    ).json()["id"]
+    r = client.patch(f"/api/storyboard/subjects/{subj_id}", json={"name": None})
+    assert r.status_code == 400
+    assert "name" in r.json()["detail"]
+
+
 def test_create_subject_unknown_storyboard_is_404(client):
     r = client.post(
         "/api/storyboard/9999/subjects",
@@ -414,6 +458,29 @@ def test_scene_crud(client):
     r = client.delete(f"/api/storyboard/scenes/{scene_id}")
     assert r.status_code == 200
     assert r.json() == {"status": "deleted"}
+
+
+def test_patch_scene_null_notes_clears_it(client):
+    sid = _create_storyboard(client)
+    scene_id = client.post(
+        f"/api/storyboard/{sid}/scenes", json={"name": "Scene 1", "notes": "foggy"}
+    ).json()["id"]
+
+    r = client.patch(f"/api/storyboard/scenes/{scene_id}", json={"notes": None})
+    assert r.status_code == 200
+
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["scenes"][0]["notes"] is None
+
+
+def test_patch_scene_null_name_is_400(client):
+    sid = _create_storyboard(client)
+    scene_id = client.post(
+        f"/api/storyboard/{sid}/scenes", json={"name": "Scene 1"}
+    ).json()["id"]
+    r = client.patch(f"/api/storyboard/scenes/{scene_id}", json={"name": None})
+    assert r.status_code == 400
+    assert "name" in r.json()["detail"]
 
 
 def test_create_scene_unknown_storyboard_is_404(client):
@@ -495,6 +562,32 @@ def test_panel_patch_with_prompt_locks_it(client):
     panel = tree["scenes"][0]["panels"][0]
     assert panel["prompt_locked"] == 1
     assert panel["prompt_source"] == "user"
+
+
+def test_patch_panel_null_shot_size_clears_column(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": "CU"})
+    assert r.status_code == 200
+    assert r.json()["shot_size"] == "CU"
+
+    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": None})
+    assert r.status_code == 200
+    assert r.json()["shot_size"] is None
+
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    panel = tree["scenes"][0]["panels"][0]
+    assert panel["shot_size"] is None
+
+
+def test_patch_panel_null_action_is_400(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"action": None})
+    assert r.status_code == 400
+    assert "action" in r.json()["detail"]
 
 
 # ---- select -----------------------------------------------------------------

@@ -35,6 +35,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/storyboard", tags=["storyboard"])
 
+# Columns that are NOT NULL in the schema (see metascan/core/database_sqlite.py's
+# CREATE TABLE storyboards/storyboard_subjects/scenes/panels). PATCH now uses
+# exclude_unset=True so an explicit `null` for a nullable column (e.g.
+# `preset_id`, `shot_size`, `notes`) is a legitimate "clear this field"
+# request -- but an explicit `null` for one of these would otherwise reach
+# sqlite3 as a raw NOT NULL constraint violation (500). Reject it as a 400
+# instead, naming the offending field(s).
+_STORYBOARD_NOT_NULLABLE = frozenset(
+    {"name", "aspect_ratio", "target_model", "architecture", "base_seed", "batch_size"}
+)
+_SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
+_SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
+_PANEL_NOT_NULLABLE = frozenset(
+    {"sort_order", "action", "subject_ids", "prompt_locked"}
+)
+
+
+def _reject_null_for_required(
+    fields: Dict[str, Any], not_nullable: "frozenset[str]"
+) -> None:
+    nulled = sorted(k for k in not_nullable if k in fields and fields[k] is None)
+    if nulled:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot clear required field(s): {', '.join(nulled)}",
+        )
+
+
 _storyboard_runner: Optional[Any] = None
 # Background synthesize() tasks. A bare asyncio.create_task result is only
 # weakly referenced by the event loop and can be garbage-collected
@@ -226,7 +254,8 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
     if existing is None:
         raise HTTPException(status_code=404, detail=f"No storyboard {storyboard_id}")
 
-    fields = body.model_dump(exclude_none=True)
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _STORYBOARD_NOT_NULLABLE)
     if "aspect_ratio" in fields or "target_model" in fields:
         effective_aspect = fields.get("aspect_ratio", existing["aspect_ratio"])
         effective_target = fields.get("target_model", existing["target_model"])
@@ -347,7 +376,8 @@ async def patch_subject(subject_id: int, body: SubjectPatch) -> Dict[str, str]:
     svc = _service()
     if not await svc.subject_exists(subject_id):
         raise HTTPException(status_code=404, detail=f"No subject {subject_id}")
-    fields = body.model_dump(exclude_none=True)
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _SUBJECT_NOT_NULLABLE)
     if fields:
         try:
             await svc.update_subject(subject_id, **fields)
@@ -390,7 +420,8 @@ async def patch_scene(scene_id: int, body: ScenePatch) -> Dict[str, str]:
     svc = _service()
     if not await svc.scene_exists(scene_id):
         raise HTTPException(status_code=404, detail=f"No scene {scene_id}")
-    fields = body.model_dump(exclude_none=True)
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _SCENE_NOT_NULLABLE)
     if fields:
         await svc.update_scene(scene_id, **fields)
     return {"status": "updated"}
@@ -432,7 +463,8 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
     if existing is None:
         raise HTTPException(status_code=404, detail=f"No panel {panel_id}")
 
-    fields = body.model_dump(exclude_none=True)
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _PANEL_NOT_NULLABLE)
     if body.prompt is not None:
         # Server wins: a user-supplied prompt always locks, regardless of
         # whatever prompt_locked/prompt_source the caller also sent.
