@@ -220,9 +220,9 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   // needs to react per-row -- StoryboardLanding shows a local message next
   // to the row being deleted -- can, while error.value still carries a
   // sensible fallback for anything that doesn't.
-  async function remove(id: number): Promise<void> {
+  async function remove(id: number, purgeImages = false): Promise<void> {
     try {
-      await api.deleteStoryboard(id)
+      await api.deleteStoryboard(id, purgeImages)
     } catch (e) {
       error.value = errMessage(e)
       throw e
@@ -326,18 +326,18 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
-  async function removeScene(id: number): Promise<void> {
+  async function removeScene(id: number, purgeImages = false): Promise<void> {
     try {
-      await api.deleteScene(id)
+      await api.deleteScene(id, purgeImages)
       await refresh()
     } catch (e) {
       error.value = errMessage(e)
     }
   }
 
-  async function removePanel(id: number): Promise<void> {
+  async function removePanel(id: number, purgeImages = false): Promise<void> {
     try {
-      await api.deletePanel(id)
+      await api.deletePanel(id, purgeImages)
       await refresh()
     } catch (e) {
       error.value = errMessage(e)

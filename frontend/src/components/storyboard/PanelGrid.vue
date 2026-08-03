@@ -76,6 +76,16 @@
       </div>
     </template>
     <div v-else class="panel-grid-empty">Select a scene to see its panels.</div>
+
+    <DeleteImagesDialog
+      v-if="deleteTarget"
+      title="Delete panel?"
+      message="This panel has generated images. Delete them permanently, or keep them visible in the media library?"
+      :image-count="deleteTarget.images.length"
+      @purge="confirmDelete(true)"
+      @keep="confirmDelete(false)"
+      @cancel="deleteTarget = null"
+    />
   </div>
 </template>
 
@@ -84,6 +94,7 @@ import { nextTick, ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Panel } from '../../types/storyboard'
+import DeleteImagesDialog from './DeleteImagesDialog.vue'
 
 const store = useStoryboardStore()
 
@@ -111,9 +122,25 @@ function caption(panel: Panel): string {
   return names ? `${shot} · ${names}` : shot
 }
 
+// Deleting a panel with generated images asks what happens to them
+// (purge / keep in library / cancel) via DeleteImagesDialog; a panel
+// with no images gets a plain confirm.
+const deleteTarget = ref<Panel | null>(null)
+
 async function onDeletePanel(panel: Panel): Promise<void> {
-  if (!confirm('Delete this panel and its images?')) return
-  await store.removePanel(panel.id)
+  if (panel.images.length === 0) {
+    if (!confirm('Delete this panel?')) return
+    await store.removePanel(panel.id)
+    return
+  }
+  deleteTarget.value = panel
+}
+
+async function confirmDelete(purgeImages: boolean): Promise<void> {
+  const panel = deleteTarget.value
+  deleteTarget.value = null
+  if (!panel) return
+  await store.removePanel(panel.id, purgeImages)
 }
 
 function onAddTileClick(): void {

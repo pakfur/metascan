@@ -50,6 +50,16 @@
       :scene="editorScene"
       @close="editorOpen = false"
     />
+
+    <DeleteImagesDialog
+      v-if="deleteTarget"
+      :title="`Delete scene &quot;${deleteTarget.name}&quot;?`"
+      message="Its panels have generated images. Delete them permanently, or keep them visible in the media library?"
+      :image-count="sceneImageCount(deleteTarget)"
+      @purge="confirmDelete(true)"
+      @keep="confirmDelete(false)"
+      @cancel="deleteTarget = null"
+    />
   </div>
 </template>
 
@@ -59,6 +69,7 @@ import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Panel, Scene } from '../../types/storyboard'
 import SceneEditDialog from './SceneEditDialog.vue'
+import DeleteImagesDialog from './DeleteImagesDialog.vue'
 
 const store = useStoryboardStore()
 
@@ -84,9 +95,29 @@ function selectScene(scene: Scene): void {
   store.selectedPanelId = scene.panels[0]?.id ?? null
 }
 
+// Deleting a scene whose panels have generated images asks what happens
+// to them (purge / keep in library / cancel); an image-less scene gets a
+// plain confirm.
+const deleteTarget = ref<Scene | null>(null)
+
+function sceneImageCount(scene: Scene): number {
+  return scene.panels.reduce((n, p) => n + p.images.length, 0)
+}
+
 async function onDeleteScene(scene: Scene): Promise<void> {
-  if (!confirm(`Delete scene "${scene.name}"? Its panels and images are removed too.`)) return
-  await store.removeScene(scene.id)
+  if (sceneImageCount(scene) === 0) {
+    if (!confirm(`Delete scene "${scene.name}"? Its panels are removed too.`)) return
+    await store.removeScene(scene.id)
+    return
+  }
+  deleteTarget.value = scene
+}
+
+async function confirmDelete(purgeImages: boolean): Promise<void> {
+  const scene = deleteTarget.value
+  deleteTarget.value = null
+  if (!scene) return
+  await store.removeScene(scene.id, purgeImages)
 }
 
 function openCreator(): void {

@@ -8,8 +8,36 @@ is a thin asyncio.to_thread hop, matching backend/services/comfy_service.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from send2trash import send2trash
+
+logger = logging.getLogger(__name__)
+
+
+def _remove_files_sync(paths: List[str]) -> None:
+    """Move purged image files to the OS trash (unlink as a fallback).
+
+    Mirrors MediaService.delete_media's send2trash behavior. Failures are
+    logged and skipped -- the DB rows are already gone by the time this
+    runs, so a stray file on disk is a cosmetic leftover, not corruption
+    (a rescan of a watched directory would re-ingest it; storyboard
+    output dirs live under comfy.output_root, which isn't scanned).
+    """
+    for raw in paths:
+        path = Path(raw)
+        if not path.exists():
+            continue
+        try:
+            send2trash(str(path))
+        except Exception:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove purged image %s", path, exc_info=True)
 
 
 class ParentNotFoundError(RuntimeError):
@@ -67,8 +95,18 @@ class StoryboardService:
     async def update_storyboard(self, storyboard_id: int, **fields: Any) -> None:
         await asyncio.to_thread(self.db.update_storyboard, storyboard_id, **fields)
 
-    async def delete_storyboard(self, storyboard_id: int) -> bool:
-        return await asyncio.to_thread(self.db.delete_storyboard, storyboard_id)
+    async def delete_storyboard(
+        self, storyboard_id: int, purge_images: bool = False
+    ) -> Tuple[bool, Optional[str]]:
+        """Returns ``(deleted, deleted_folder_id)`` -- the route broadcasts
+        folder_deleted for the storyboard's library folder, which is
+        removed along with the storyboard."""
+        ok, purged_files, folder_id = await asyncio.to_thread(
+            self.db.delete_storyboard, storyboard_id, purge_images
+        )
+        if purged_files:
+            await asyncio.to_thread(_remove_files_sync, purged_files)
+        return ok, folder_id
 
     # ---- subjects ---------------------------------------------------------
 
@@ -113,8 +151,13 @@ class StoryboardService:
     async def update_scene(self, scene_id: int, **fields: Any) -> None:
         await asyncio.to_thread(self.db.update_scene, scene_id, **fields)
 
-    async def delete_scene(self, scene_id: int) -> bool:
-        return await asyncio.to_thread(self.db.delete_scene, scene_id)
+    async def delete_scene(self, scene_id: int, purge_images: bool = False) -> bool:
+        ok, purged_files = await asyncio.to_thread(
+            self.db.delete_scene, scene_id, purge_images
+        )
+        if purged_files:
+            await asyncio.to_thread(_remove_files_sync, purged_files)
+        return ok
 
     # ---- panels ---------------------------------------------------------
 
@@ -129,8 +172,13 @@ class StoryboardService:
     async def update_panel(self, panel_id: int, **fields: Any) -> None:
         await asyncio.to_thread(self.db.update_panel, panel_id, **fields)
 
-    async def delete_panel(self, panel_id: int) -> bool:
-        return await asyncio.to_thread(self.db.delete_panel, panel_id)
+    async def delete_panel(self, panel_id: int, purge_images: bool = False) -> bool:
+        ok, purged_files = await asyncio.to_thread(
+            self.db.delete_panel, panel_id, purge_images
+        )
+        if purged_files:
+            await asyncio.to_thread(_remove_files_sync, purged_files)
+        return ok
 
     async def select_panel_image(self, panel_id: int, image_id: Optional[int]) -> bool:
         return await asyncio.to_thread(self.db.select_panel_image, panel_id, image_id)

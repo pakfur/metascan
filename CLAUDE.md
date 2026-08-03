@@ -325,13 +325,30 @@ metascan/
   `panel_images` away must unhide their media rows first**, or the
   underlying files become permanently hidden with no path back (the only
   other unhide is `select_panel_image`, which needs a live panel to act
-  on). `DatabaseManager._release_panels(conn, panel_ids)` is the shared
-  helper — it runs `UPDATE media SET hidden = 0` for the affected
-  `panel_images.file_path`s and deletes the panels' `generation_jobs` rows
-  (so a restart can't re-adopt jobs for panels that no longer exist) — and
-  is called, inside the same transaction as the delete, from `delete_panel`,
-  `delete_scene`, `delete_storyboard`, and `replace_storyboard_structure`
-  (a re-parse destroys the old scene/panel tree the same way a delete does).
+  on). `DatabaseManager._release_panels(conn, panel_ids, purge_images=False)`
+  is the shared helper — it runs `UPDATE media SET hidden = 0` for the
+  affected `panel_images.file_path`s and deletes the panels'
+  `generation_jobs` rows (so a restart can't re-adopt jobs for panels that
+  no longer exist) — and is called, inside the same transaction as the
+  delete, from `delete_panel`, `delete_scene`, `delete_storyboard`, and
+  `replace_storyboard_structure` (a re-parse destroys the old scene/panel
+  tree the same way a delete does — always keep/unhide, never purge).
+  With `purge_images=True` (the `?purge_images=true` query flag on the
+  three DELETE routes) the unhide is replaced by
+  `_purge_media_rows`, run *after* the cascade delete in the same
+  transaction: media rows are deleted (indices + `folder_items` cascade)
+  and the native file paths returned up through `StoryboardService`,
+  which moves the files to the OS trash (`send2trash`, unlink fallback).
+  Files still referenced by a surviving `panel_images` row or a
+  `storyboard_subjects.reference_path` are unhidden instead of deleted —
+  the media FK's `ON DELETE CASCADE`/`SET NULL` would silently destroy
+  the other panel's image row / null the subject reference.
+  `delete_storyboard` also deletes the storyboard's "Storyboard: <name>"
+  folder in the same transaction and returns its id so the route can
+  broadcast `folder_deleted` on the `folders` WS channel. The frontend
+  prompts via `DeleteImagesDialog.vue` (purge / keep-in-library / cancel)
+  on every panel, scene, and storyboard delete that affects generated
+  images.
 - **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_panel_images` convert it through
