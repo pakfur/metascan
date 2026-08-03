@@ -1,0 +1,311 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useStoryboardStore } from '../../stores/storyboard'
+import { listPresets } from '../../api/comfy'
+import { ApiError } from '../../api/client'
+import { ASPECT_RATIOS, TARGET_MODELS } from '../../types/storyboard'
+import type { WorkflowPreset } from '../../types/storyboard'
+
+const emit = defineEmits<{
+  close: []
+  created: [id: number]
+  'open-presets': []
+}>()
+
+const store = useStoryboardStore()
+
+const name = ref('')
+const targetModel = ref<string>(TARGET_MODELS[0])
+const aspectRatio = ref<string>('16:9')
+const presetId = ref<number | null>(null)
+const batchSize = ref(4)
+const styleBlock = ref('')
+const negative = ref('')
+
+const presets = ref<WorkflowPreset[]>([])
+const presetsLoading = ref(true)
+const submitting = ref(false)
+const errorMsg = ref<string | null>(null)
+
+onMounted(async () => {
+  presetsLoading.value = true
+  try {
+    presets.value = await listPresets()
+  } catch {
+    // Non-fatal: the "no presets" hint still shows a usable path forward.
+    presets.value = []
+  } finally {
+    presetsLoading.value = false
+  }
+})
+
+function clampBatchSize() {
+  const n = Math.round(batchSize.value)
+  batchSize.value = Number.isFinite(n) ? Math.min(16, Math.max(1, n)) : 4
+}
+
+function close() {
+  emit('close')
+}
+
+function openPresets() {
+  // Registration is a full dialog, not something CreateStoryboardDialog
+  // nests -- hand off to the landing page and close this one.
+  emit('open-presets')
+  emit('close')
+}
+
+async function submit() {
+  const trimmedName = name.value.trim()
+  if (!trimmedName) return
+  clampBatchSize()
+  errorMsg.value = null
+  submitting.value = true
+  try {
+    const body: {
+      name: string
+      target_model: string
+      aspect_ratio: string
+      batch_size: number
+      style_block?: string
+      negative?: string
+      preset_id?: number
+    } = {
+      name: trimmedName,
+      target_model: targetModel.value,
+      aspect_ratio: aspectRatio.value,
+      batch_size: batchSize.value,
+    }
+    const style = styleBlock.value.trim()
+    if (style) body.style_block = style
+    const neg = negative.value.trim()
+    if (neg) body.negative = neg
+    if (presetId.value !== null) body.preset_id = presetId.value
+
+    const id = await store.create(body)
+    emit('created', id)
+  } catch (e) {
+    errorMsg.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+  } finally {
+    submitting.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="dialog-overlay" @click.self="close">
+    <div class="dialog-card">
+      <h3>New storyboard</h3>
+
+      <div class="field">
+        <label for="sb-name">Name</label>
+        <InputText id="sb-name" v-model="name" placeholder="e.g. Coffee shop meet-cute" />
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label for="sb-model">Target model</label>
+          <select id="sb-model" v-model="targetModel">
+            <option v-for="m in TARGET_MODELS" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="sb-ar">Aspect ratio</label>
+          <select id="sb-ar" v-model="aspectRatio">
+            <option v-for="ar in ASPECT_RATIOS" :key="ar" :value="ar">{{ ar }}</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="sb-preset">Workflow preset</label>
+        <select id="sb-preset" v-model="presetId" :disabled="presetsLoading">
+          <option :value="null">None</option>
+          <option v-for="p in presets" :key="p.id" :value="p.id">
+            {{ p.name }} ({{ p.kind }})
+          </option>
+        </select>
+        <p v-if="!presetsLoading && presets.length === 0" class="hint">
+          No presets yet.
+          <button type="button" class="link-btn" @click="openPresets">Register one</button>
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="sb-batch">Batch size</label>
+        <input
+          id="sb-batch"
+          v-model.number="batchSize"
+          type="number"
+          min="1"
+          max="16"
+          @blur="clampBatchSize"
+        />
+      </div>
+
+      <div class="field">
+        <label for="sb-style">Style block (optional)</label>
+        <textarea
+          id="sb-style"
+          v-model="styleBlock"
+          rows="3"
+          placeholder="Shared style/quality tags applied to every panel prompt"
+        />
+      </div>
+
+      <div class="field">
+        <label for="sb-negative">Negative prompt (optional)</label>
+        <textarea id="sb-negative" v-model="negative" rows="2" placeholder="Things to avoid" />
+      </div>
+
+      <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
+
+      <div class="dialog-actions">
+        <button
+          class="btn-primary"
+          :disabled="!name.trim() || submitting"
+          @click="submit"
+        >
+          {{ submitting ? 'Creating…' : 'Create' }}
+        </button>
+        <button class="btn-secondary" @click="close">Cancel</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dialog-card {
+  background: var(--surface-section);
+  border-radius: 12px;
+  padding: 22px 28px 24px;
+  width: 480px;
+  max-width: 92vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+h3 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  color: var(--text-color);
+}
+
+.field {
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.field-row .field {
+  flex: 1;
+}
+
+label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-color-secondary);
+}
+
+select,
+input[type='number'],
+textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+select:focus,
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.error {
+  color: var(--danger-color, #e53e3e);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.btn-primary {
+  padding: 8px 20px;
+  background: var(--primary-color);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  padding: 8px 20px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn-secondary:hover {
+  background: var(--surface-hover);
+}
+</style>
