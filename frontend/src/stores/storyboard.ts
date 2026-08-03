@@ -133,6 +133,22 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     // A board switch always supersedes any synthesis banner left over from
     // whatever board was previously loaded (or mid-flight).
     synthesis.value = { running: false, done: 0, total: 0, error: null }
+    // Navigating to a DIFFERENT board (or there's no tree at all yet) must
+    // clear the previously-rendered board's state before the fetch, not
+    // after: a failed fetch otherwise leaves the OLD board's tree fully
+    // rendered under the NEW url (notFound never trips because tree stays
+    // non-null), and even a successful fetch would flash the old board's
+    // scenes/panels/jobs for a frame before the new tree lands. Guarded on
+    // id so a same-board reload (e.g. a manual refresh of the current
+    // board) keeps the existing tree visible while the new fetch is in
+    // flight, matching refresh()'s no-flash behavior.
+    if (tree.value === null || tree.value.id !== id) {
+      tree.value = null
+      selectedSceneId.value = null
+      selectedPanelId.value = null
+      jobToPanel.value = new Map()
+      panelJobState.value = new Map()
+    }
     try {
       const t = await api.fetchStoryboard(id)
       if (seq !== loadSeq) return
@@ -289,23 +305,39 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   async function addScene(name: string): Promise<void> {
     if (!tree.value) return
-    await api.createScene(tree.value.id, { name })
-    await refresh()
+    try {
+      await api.createScene(tree.value.id, { name })
+      await refresh()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   async function addPanel(sceneId: number, action: string): Promise<void> {
-    await api.createPanel(sceneId, { action })
-    await refresh()
+    try {
+      await api.createPanel(sceneId, { action })
+      await refresh()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   async function removeScene(id: number): Promise<void> {
-    await api.deleteScene(id)
-    await refresh()
+    try {
+      await api.deleteScene(id)
+      await refresh()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   async function removePanel(id: number): Promise<void> {
-    await api.deletePanel(id)
-    await refresh()
+    try {
+      await api.deletePanel(id)
+      await refresh()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   // Replaces the tree wholesale and resets selection. Deliberately rethrows
@@ -331,8 +363,22 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const body: { panel_ids?: number[]; force?: boolean } = {}
     if (panelIds !== undefined) body.panel_ids = panelIds
     if (force !== undefined) body.force = force
-    const res = await api.synthesizeStoryboard(tree.value.id, body)
-    synthesis.value = { running: true, done: 0, total: res.total, error: null }
+    // Set the banner optimistically BEFORE the await: on a fast no-VLM
+    // path the runner can broadcast synthesis_complete/synthesis_error
+    // over the `storyboard` WS channel before this HTTP 202 response even
+    // resolves. If `running: true` were only set after the await, it would
+    // stomp that already-arrived terminal state -- a permanently stuck
+    // "synthesizing 0/N" chip with Re-synth disabled forever.
+    synthesis.value = { running: true, done: 0, total: 0, error: null }
+    try {
+      const res = await api.synthesizeStoryboard(tree.value.id, body)
+      // Only fill in the real total if nothing has already reported
+      // completion/failure via WS while this request was in flight.
+      if (synthesis.value.running) synthesis.value.total = res.total
+    } catch (e) {
+      synthesis.value = { running: false, done: 0, total: 0, error: errMessage(e) }
+      error.value = errMessage(e)
+    }
   }
 
   async function generate(panelIds?: number[], onlyFailed?: boolean): Promise<void> {
@@ -340,20 +386,32 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const body: { panel_ids?: number[]; only_failed?: boolean } = {}
     if (panelIds !== undefined) body.panel_ids = panelIds
     if (onlyFailed !== undefined) body.only_failed = onlyFailed
-    await api.generateStoryboard(tree.value.id, body)
-    await refreshActiveJobs()
+    try {
+      await api.generateStoryboard(tree.value.id, body)
+      await refreshActiveJobs()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   async function cancelAll(): Promise<void> {
     if (!tree.value) return
-    await api.cancelStoryboard(tree.value.id)
-    await refreshActiveJobs()
+    try {
+      await api.cancelStoryboard(tree.value.id)
+      await refreshActiveJobs()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   async function selectImage(panelId: number, imageId: number | null): Promise<void> {
-    const res = await api.selectPanelImage(panelId, imageId)
-    const panel = panelById(panelId)
-    if (panel) Object.assign(panel, res)
+    try {
+      const res = await api.selectPanelImage(panelId, imageId)
+      const panel = panelById(panelId)
+      if (panel) Object.assign(panel, res)
+    } catch (e) {
+      error.value = errMessage(e)
+    }
   }
 
   // Rebuilds jobToPanel/panelJobState from the server's queued+running job

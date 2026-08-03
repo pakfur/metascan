@@ -25,6 +25,17 @@
         >
           synthesis failed
         </span>
+        <span v-if="store.error" class="sb-chip sb-chip--error" :title="store.error">
+          <span class="sb-chip-text">{{ store.error }}</span>
+          <button
+            type="button"
+            class="sb-chip-dismiss"
+            aria-label="Dismiss error"
+            @click="store.error = null"
+          >
+            ×
+          </button>
+        </span>
         <div class="sb-actions">
           <Button
             label="Import text"
@@ -170,8 +181,30 @@ watch(
 }
 
 .sb-chip--error {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
   color: var(--danger-color, #e53e3e);
   background: color-mix(in srgb, var(--danger-color, #e53e3e) 12%, transparent);
+}
+
+.sb-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-chip-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .sb-actions {
