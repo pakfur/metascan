@@ -10,10 +10,21 @@ import ImageViewer from './ImageViewer.vue'
 import VideoPlayer from './VideoPlayer.vue'
 import LazyThumb from './LazyThumb.vue'
 
-const props = defineProps<{
-  mediaList: Media[]
-  initialIndex: number
-}>()
+// allowDestructive defaults to true so every existing (desktop library)
+// mount stays byte-identical. The storyboard candidate picker
+// (PanelDetail.vue) passes false: its mediaList is synthesized from
+// PanelImage rows (stubbed is_favorite, no real Media row for
+// mediaStore.selectMedia to resolve), so real-file delete, the favorite
+// toggle, and the library-metadata-panel selectMedia leak all need to be
+// off there.
+const props = withDefaults(
+  defineProps<{
+    mediaList: Media[]
+    initialIndex: number
+    allowDestructive?: boolean
+  }>(),
+  { allowDestructive: true },
+)
 
 const emit = defineEmits<{
   close: []
@@ -32,7 +43,7 @@ const positionLabel = computed(() =>
 )
 
 watch(current, (media) => {
-  if (media) mediaStore.selectMedia(media)
+  if (media && props.allowDestructive) mediaStore.selectMedia(media)
 })
 
 // Navigation
@@ -49,13 +60,13 @@ function goPrev() { navigate(-1) }
 
 // Favorite
 async function toggleFavorite() {
-  if (!current.value) return
+  if (!props.allowDestructive || !current.value) return
   await mediaStore.toggleFavorite(current.value)
 }
 
 // Delete with undo
 async function deleteCurrent() {
-  if (!current.value) return
+  if (!props.allowDestructive || !current.value) return
   const confirmed = window.confirm(
     `Delete "${current.value.file_name ?? fileName(current.value.file_path)}"?`,
   )
@@ -108,7 +119,7 @@ function onKeyDown(e: KeyboardEvent) {
       break
     case 'f':
     case 'F':
-      toggleFavorite()
+      if (props.allowDestructive) toggleFavorite()
       break
     case ',':
       videoPlayerRef.value?.stepFrame(-1)
@@ -134,7 +145,7 @@ function onKeyDown(e: KeyboardEvent) {
       showHelp.value = !showHelp.value
       break
     case 'd':
-      if (e.ctrlKey || e.metaKey) {
+      if ((e.ctrlKey || e.metaKey) && props.allowDestructive) {
         e.preventDefault()
         deleteCurrent()
       }
@@ -159,6 +170,7 @@ function formatSize(bytes: number): string {
       <div class="viewer-header">
         <div class="header-left">
           <button
+            v-if="allowDestructive"
             class="fav-btn"
             :class="{ active: current?.is_favorite }"
             @click="toggleFavorite"
@@ -174,7 +186,14 @@ function formatSize(bytes: number): string {
 
         <div class="header-right">
           <button class="icon-btn" @click="showHelp = !showHelp" title="Shortcuts (H)">?</button>
-          <button class="icon-btn delete-btn" @click="deleteCurrent" title="Delete (Ctrl+D)">🗑</button>
+          <button
+            v-if="allowDestructive"
+            class="icon-btn delete-btn"
+            @click="deleteCurrent"
+            title="Delete (Ctrl+D)"
+          >
+            🗑
+          </button>
           <button class="icon-btn close-btn" @click="emit('close')" title="Close (Esc)">✕</button>
         </div>
       </div>
@@ -233,8 +252,8 @@ function formatSize(bytes: number): string {
               <tr><td>Esc</td><td>Close viewer</td></tr>
               <tr><td>← →</td><td>Previous / Next</td></tr>
               <tr><td>Space</td><td>Play / Pause (video)</td></tr>
-              <tr><td>F</td><td>Toggle favorite</td></tr>
-              <tr><td>Ctrl+D</td><td>Delete file</td></tr>
+              <tr v-if="allowDestructive"><td>F</td><td>Toggle favorite</td></tr>
+              <tr v-if="allowDestructive"><td>Ctrl+D</td><td>Delete file</td></tr>
               <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
               <tr><td>M</td><td>Mute / Unmute (video)</td></tr>
               <tr><td>↑ ↓</td><td>Volume up / down (video)</td></tr>
