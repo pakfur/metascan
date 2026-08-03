@@ -89,7 +89,7 @@ async function saveFields(): Promise<void> {
     name: string
     aspect_ratio: string
     target_model: string
-    preset_id: number
+    preset_id: number | null
     batch_size: number
     base_seed: number
     style_block: string
@@ -100,10 +100,12 @@ async function saveFields(): Promise<void> {
   if (trimmedName !== original.name) body.name = trimmedName
   if (aspectRatio.value !== original.aspectRatio) body.aspect_ratio = aspectRatio.value
   if (targetModel.value !== original.targetModel) body.target_model = targetModel.value
-  // The PATCH wire type has no way to explicitly clear preset_id back to
-  // null (mirrors CreateStoryboardDialog, which never sends it either) --
-  // only forward assignment to a real preset id is supported here.
-  if (presetId.value !== original.presetId && presetId.value !== null) {
+  // Selecting "None" sends an explicit `preset_id: null` clear -- the
+  // backend now honors that (exclude_unset=True) instead of silently
+  // dropping it, so this must count as a real changed field too, or
+  // "None + nothing else changed" would hit the empty-body early return
+  // below and never save.
+  if (presetId.value !== original.presetId) {
     body.preset_id = presetId.value
   }
   if (batchSize.value !== original.batchSize) body.batch_size = batchSize.value
