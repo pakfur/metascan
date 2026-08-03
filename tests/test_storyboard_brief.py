@@ -66,6 +66,7 @@ def test_storyboard_slug():
 def test_compose_brief_full():
     storyboard = {"aspect_ratio": "2.39:1", "style_block": "graphite sketch"}
     scene = {
+        "setting": "derelict orbital shipbreaking yard, zero-g debris",
         "location": "salvage yard, twisted hulls",
         "time_of_day": "dusk",
         "mood": "tense",
@@ -83,6 +84,7 @@ def test_compose_brief_full():
         "SHOT: extreme close-up, eye level, 2.39:1",
         "SUBJECT Maya: late 20s, shaved head, red scarf",
         "ACTION: her hand rests on the hull seam",
+        "SETTING: derelict orbital shipbreaking yard, zero-g debris",
         "LOCATION: salvage yard, twisted hulls",
         "LIGHT/MOOD: dusk, amber haze, long shadows, tense",
     ]

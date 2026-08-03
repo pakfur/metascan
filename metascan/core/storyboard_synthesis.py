@@ -21,7 +21,7 @@ Rules:
   Never paraphrase, shorten, reorder, or embellish subject descriptors.
 - Translate the SHOT line into composition tags (framing, camera angle,
   lens character).
-- Include the location, lighting, and mood as tags.
+- Include the setting, location, lighting, and mood as tags.
 - Describe exactly the moment in ACTION — one frame, not a sequence.
 - Output only the prompt text: no quotes, no labels, no explanations.
 """
@@ -36,7 +36,7 @@ Rules:
   Never paraphrase, shorten, reorder, or embellish subject descriptors.
 - Establish the framing and camera angle from the SHOT line in the
   first sentence.
-- Weave the location, lighting, and mood into the description.
+- Weave the setting, location, lighting, and mood into the description.
 - Describe exactly the moment in ACTION — one frame, not a sequence.
 - Output only the prompt text: no quotes, no labels, no explanations.
 """

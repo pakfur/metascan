@@ -31,7 +31,7 @@ SQLite with WAL mode and a `threading.Lock` over a single connection.
 - **`folder_items`** — `(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides.
 - **`storyboards`** — script + render settings: `name`, `source_text`, `aspect_ratio`, `style_block`, `negative`, `target_model`, `architecture`, `preset_id` (→ `workflow_presets`), `base_seed`, `batch_size`, `folder_id` (→ `folders`, `ON DELETE SET NULL`).
 - **`storyboard_subjects`** — recurring characters/props: `storyboard_id` (`ON DELETE CASCADE`), `name`, `description`, `lora_name`, `lora_strength`, `reference_path` (→ `media.file_path`, `ON DELETE SET NULL`), `sort_order`.
-- **`scenes`** — `storyboard_id` (`ON DELETE CASCADE`), `sort_order`, `name`, `location`, `time_of_day`, `mood`, `lighting`, `notes`.
+- **`scenes`** — `storyboard_id` (`ON DELETE CASCADE`), `sort_order`, `name`, `subtitle`, `setting`, `location`, `time_of_day`, `mood`, `lighting`, `notes`. `subtitle` is display-only; `setting` is woven into every panel brief (`SETTING:` line in `compose_brief`).
 - **`panels`** — one generated shot: `scene_id` (`ON DELETE CASCADE`), `sort_order`, `shot_size`, `angle`, `lens`, `action`, `subject_ids` (JSON array), `notes`, `brief`, `prompt`, `prompt_locked`, `prompt_source`, `negative`, `selected_image_id` (→ `panel_images.id`, `ON DELETE SET NULL`).
 - **`panel_images`** — one rendered variant: `panel_id` (`ON DELETE CASCADE`), `file_path` (→ `media.file_path`, `ON DELETE CASCADE`), `seed`, `variant_index`, `prompt_used`, `preset_id`, `comfy_prompt_id`.
 

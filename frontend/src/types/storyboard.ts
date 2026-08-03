@@ -43,6 +43,8 @@ export interface Scene {
   storyboard_id: number
   sort_order: number
   name: string
+  subtitle: string | null
+  setting: string | null
   location: string | null
   time_of_day: string | null
   mood: string | null

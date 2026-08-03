@@ -102,6 +102,8 @@ def compose_brief(
         lines.append(f"SUBJECT {subj['name']}: {subj['description']}")
     if panel.get("action"):
         lines.append(f"ACTION: {panel['action']}")
+    if scene.get("setting"):
+        lines.append(f"SETTING: {scene['setting']}")
     if scene.get("location"):
         lines.append(f"LOCATION: {scene['location']}")
     light_bits = [scene.get("time_of_day"), scene.get("lighting"), scene.get("mood")]

@@ -473,6 +473,41 @@ def test_patch_scene_null_notes_clears_it(client):
     assert tree["scenes"][0]["notes"] is None
 
 
+def test_scene_subtitle_and_setting_roundtrip(client):
+    sid = _create_storyboard(client)
+    scene_id = client.post(
+        f"/api/storyboard/{sid}/scenes",
+        json={
+            "name": "Scene 1",
+            "subtitle": "the reunion",
+            "setting": "rain-slick rooftop garden at night",
+        },
+    ).json()["id"]
+
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["scenes"][0]["subtitle"] == "the reunion"
+    assert tree["scenes"][0]["setting"] == "rain-slick rooftop garden at night"
+
+    r = client.patch(
+        f"/api/storyboard/scenes/{scene_id}",
+        json={"subtitle": "the parting", "setting": "sun-bleached desert highway"},
+    )
+    assert r.status_code == 200
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["scenes"][0]["subtitle"] == "the parting"
+    assert tree["scenes"][0]["setting"] == "sun-bleached desert highway"
+
+    # Explicit nulls clear both nullable columns.
+    r = client.patch(
+        f"/api/storyboard/scenes/{scene_id}",
+        json={"subtitle": None, "setting": None},
+    )
+    assert r.status_code == 200
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["scenes"][0]["subtitle"] is None
+    assert tree["scenes"][0]["setting"] is None
+
+
 def test_patch_scene_null_name_is_400(client):
     sid = _create_storyboard(client)
     scene_id = client.post(

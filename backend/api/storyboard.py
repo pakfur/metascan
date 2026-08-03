@@ -140,6 +140,8 @@ class SubjectPatch(BaseModel):
 class SceneCreate(BaseModel):
     name: str
     sort_order: int = 0
+    subtitle: Optional[str] = None
+    setting: Optional[str] = None
     location: Optional[str] = None
     time_of_day: Optional[str] = None
     mood: Optional[str] = None
@@ -150,6 +152,8 @@ class SceneCreate(BaseModel):
 class ScenePatch(BaseModel):
     name: Optional[str] = None
     sort_order: Optional[int] = None
+    subtitle: Optional[str] = None
+    setting: Optional[str] = None
     location: Optional[str] = None
     time_of_day: Optional[str] = None
     mood: Optional[str] = None
@@ -404,6 +408,8 @@ async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
             storyboard_id,
             name=body.name,
             sort_order=body.sort_order,
+            subtitle=body.subtitle,
+            setting=body.setting,
             location=body.location,
             time_of_day=body.time_of_day,
             mood=body.mood,
