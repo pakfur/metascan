@@ -145,12 +145,13 @@
     v-if="viewerIndex !== null"
     :media-list="viewerMedia"
     :initial-index="viewerIndex"
+    :allow-destructive="false"
     @close="viewerIndex = null"
   />
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { SHOT_SIZES, ANGLES, LENSES } from '../../types/storyboard'
@@ -165,10 +166,19 @@ const hasActiveJob = computed(() =>
   panel.value ? store.panelJobState.has(panel.value.id) : false,
 )
 
-// Local editable copies of the "commit on change" text/select fields --
-// resynced only when the SELECTED PANEL changes (by id), never when the
-// current panel's fields are patched in place, so an in-flight edit isn't
-// clobbered by the store's own optimistic Object.assign.
+// Local editable copies of the "commit on change" text/select fields.
+//
+// Each field also carries a "last synced from server" snapshot (below) --
+// commit* functions update local + snapshot together (see the `sync`
+// helper), so a field with no pending edit always has local === snapshot.
+// The watcher further down uses that equality to decide, on every
+// server-driven refresh, whether it's safe to overwrite a field: adopt the
+// new server value when local === snapshot (no pending edit), leave it
+// alone otherwise (an uncommitted PATCH is in flight for that field).
+// Without this, a synthesis/VLM pass that rewrites e.g. `prompt` on the
+// CURRENTLY SELECTED panel would never reach the textarea (the old watcher
+// only fired on panel-id change), and a later blur would PATCH the stale
+// (often empty) local value back over the server's synthesized one.
 const actionVal = ref('')
 const notesVal = ref('')
 const negativeVal = ref('')
@@ -177,17 +187,39 @@ const shotSizeVal = ref('')
 const angleVal = ref('')
 const lensVal = ref('')
 
+const actionSnap = ref('')
+const notesSnap = ref('')
+const negativeSnap = ref('')
+const promptSnap = ref('')
+const shotSizeSnap = ref('')
+const angleSnap = ref('')
+const lensSnap = ref('')
+
+function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): void {
+  if (local.value === snap.value) {
+    local.value = serverVal
+    snap.value = serverVal
+  }
+}
+
+// Resyncs on a panel switch (by id) AND on any server-side rewrite of the
+// CURRENTLY selected panel (detected via updated_at -- bumped on every
+// successful PATCH, including synthesis/VLM writes and edits from another
+// tab). Subject membership/order isn't tracked here: the template reads
+// `panel.subject_ids` directly rather than through a local cached copy, so
+// it's always current and needs no resync of its own.
 watch(
-  () => panel.value?.id,
+  () => [panel.value?.id, panel.value?.updated_at],
   () => {
     const p = panel.value
-    actionVal.value = p?.action ?? ''
-    notesVal.value = p?.notes ?? ''
-    negativeVal.value = p?.negative ?? ''
-    promptVal.value = p?.prompt ?? ''
-    shotSizeVal.value = p?.shot_size ?? ''
-    angleVal.value = p?.angle ?? ''
-    lensVal.value = p?.lens ?? ''
+    if (!p) return
+    syncField(actionVal, actionSnap, p.action ?? '')
+    syncField(notesVal, notesSnap, p.notes ?? '')
+    syncField(negativeVal, negativeSnap, p.negative ?? '')
+    syncField(promptVal, promptSnap, p.prompt ?? '')
+    syncField(shotSizeVal, shotSizeSnap, p.shot_size ?? '')
+    syncField(angleVal, angleSnap, p.angle ?? '')
+    syncField(lensVal, lensSnap, p.lens ?? '')
   },
   { immediate: true },
 )
@@ -206,9 +238,14 @@ function resynth(): void {
   void store.synthesize([panel.value.id], true)
 }
 
+// Every commit* handler updates its local ref AND snapshot together
+// (before the optimistic patch resolves) so the field is never mistaken
+// for "someone else's pending edit" by the resync watcher above once the
+// round trip's updated_at bump comes back through.
 function commitAction(e: Event): void {
   const val = (e.target as HTMLInputElement).value
   actionVal.value = val
+  actionSnap.value = val
   if (!panel.value || val === panel.value.action) return
   void store.patchPanelFields(panel.value.id, { action: val })
 }
@@ -216,6 +253,7 @@ function commitAction(e: Event): void {
 function commitNotes(e: Event): void {
   const val = (e.target as HTMLInputElement).value
   notesVal.value = val
+  notesSnap.value = val
   if (!panel.value) return
   const next = val.trim() || null
   if (next === (panel.value.notes ?? null)) return
@@ -225,6 +263,7 @@ function commitNotes(e: Event): void {
 function commitNegative(e: Event): void {
   const val = (e.target as HTMLInputElement).value
   negativeVal.value = val
+  negativeSnap.value = val
   if (!panel.value) return
   const next = val.trim() || null
   if (next === (panel.value.negative ?? null)) return
@@ -234,6 +273,7 @@ function commitNegative(e: Event): void {
 function commitPrompt(e: Event): void {
   const val = (e.target as HTMLTextAreaElement).value
   promptVal.value = val
+  promptSnap.value = val
   if (!panel.value) return
   if (val === (panel.value.prompt ?? '')) return
   void store.patchPanelFields(panel.value.id, { prompt: val })
@@ -247,6 +287,7 @@ function unlockPrompt(): void {
 function commitShotSize(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   shotSizeVal.value = val
+  shotSizeSnap.value = val
   if (!panel.value) return
   const next = val === '' ? null : val
   if (next === panel.value.shot_size) return
@@ -256,6 +297,7 @@ function commitShotSize(e: Event): void {
 function commitAngle(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   angleVal.value = val
+  angleSnap.value = val
   if (!panel.value) return
   const next = val === '' ? null : val
   if (next === panel.value.angle) return
@@ -265,6 +307,7 @@ function commitAngle(e: Event): void {
 function commitLens(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   lensVal.value = val
+  lensSnap.value = val
   if (!panel.value) return
   const next = val === '' ? null : val
   if (next === panel.value.lens) return
