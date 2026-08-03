@@ -1306,20 +1306,39 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def delete_storyboard(self, storyboard_id: int) -> bool:
-        """Delete a storyboard and everything under it.
+    def delete_storyboard(
+        self, storyboard_id: int, purge_images: bool = False
+    ) -> Tuple[bool, List[str], Optional[str]]:
+        """Delete a storyboard and everything under it, including its
+        library folder (the "Storyboard: <name>" folder the runner
+        created, if any -- folder_items cascade with it).
+
+        Returns ``(deleted, purged_file_paths, deleted_folder_id)``.
 
         Before the cascade (storyboards -> scenes -> panels ->
         panel_images), unhides the media rows any curated panel_images
         pointed at and purges generation_jobs for the panels being
-        destroyed -- see _release_panels.
+        destroyed -- see _release_panels. With ``purge_images=True`` the
+        media rows are deleted instead (unless still referenced elsewhere)
+        and their native-format file paths returned so the caller can
+        remove the files from disk.
         """
         with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT folder_id FROM storyboards WHERE id = ?", (storyboard_id,)
+            ).fetchone()
+            folder_id: Optional[str] = row["folder_id"] if row is not None else None
             panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
-            self._release_panels(conn, panel_ids)
+            purge_paths = self._release_panels(conn, panel_ids, purge_images)
             cur = conn.execute("DELETE FROM storyboards WHERE id = ?", (storyboard_id,))
+            deleted_files = self._purge_media_rows(conn, purge_paths)
+            deleted_folder: Optional[str] = None
+            if folder_id is not None:
+                fcur = conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+                if int(fcur.rowcount) > 0:
+                    deleted_folder = folder_id
             conn.commit()
-            return int(cur.rowcount) > 0
+            return int(cur.rowcount) > 0, deleted_files, deleted_folder
 
     # ---- Storyboard subjects ------------------------------------------------
 
@@ -1436,13 +1455,20 @@ class DatabaseManager:
             conn.execute(f"UPDATE scenes SET {assignments} WHERE id = ?", values)
             conn.commit()
 
-    def delete_scene(self, scene_id: int) -> bool:
+    def delete_scene(
+        self, scene_id: int, purge_images: bool = False
+    ) -> Tuple[bool, List[str]]:
         """Delete a scene and its panels.
+
+        Returns ``(deleted, purged_file_paths)``.
 
         Before the cascade (scenes -> panels -> panel_images), unhides the
         media rows any curated panel_images pointed at and purges
         generation_jobs for the panels being destroyed -- see
-        _release_panels.
+        _release_panels. With ``purge_images=True`` the media rows are
+        deleted instead (unless still referenced elsewhere) and their
+        native-format file paths returned so the caller can remove the
+        files from disk.
         """
         with self.lock, self._get_connection() as conn:
             panel_ids = [
@@ -1451,10 +1477,11 @@ class DatabaseManager:
                     "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
                 ).fetchall()
             ]
-            self._release_panels(conn, panel_ids)
+            purge_paths = self._release_panels(conn, panel_ids, purge_images)
             cur = conn.execute("DELETE FROM scenes WHERE id = ?", (scene_id,))
+            deleted_files = self._purge_media_rows(conn, purge_paths)
             conn.commit()
-            return int(cur.rowcount) > 0
+            return int(cur.rowcount) > 0, deleted_files
 
     # ---- Panels ---------------------------------------------------------
 
@@ -1527,7 +1554,12 @@ class DatabaseManager:
                 d["subject_ids"] = []
             return d
 
-    def _release_panels(self, conn: sqlite3.Connection, panel_ids: List[int]) -> None:
+    def _release_panels(
+        self,
+        conn: sqlite3.Connection,
+        panel_ids: List[int],
+        purge_images: bool = False,
+    ) -> List[str]:
         """Unhide panel_images' media rows and purge generation_jobs for
         ``panel_ids``, before those panels (and their panel_images) are
         cascade-deleted.
@@ -1539,19 +1571,80 @@ class DatabaseManager:
         else ever flips them back once the panel is gone), and stale
         generation_jobs rows for now-deleted panels could be re-adopted by
         a restart (``ComfyClient._rehydrate_jobs``).
+
+        With ``purge_images=True`` the unhide is skipped; instead the
+        panels' image paths (POSIX) are returned so the caller can run
+        ``_purge_media_rows`` after the cascade delete. The media rows
+        must not be deleted here: panel_images FKs media(file_path) with
+        ON DELETE CASCADE, so removing a media row now would also take
+        out any *other* panel's panel_images row for a shared file --
+        and the shared-reference checks in ``_purge_media_rows`` only
+        make sense once the doomed panels' own rows are gone.
         """
         if not panel_ids:
-            return
+            return []
         placeholders = ",".join("?" * len(panel_ids))
-        conn.execute(
-            f"UPDATE media SET hidden = 0 WHERE file_path IN "
-            f"(SELECT file_path FROM panel_images WHERE panel_id IN ({placeholders}))",
-            panel_ids,
-        )
+        purged: List[str] = []
+        if purge_images:
+            purged = [
+                str(r["file_path"])
+                for r in conn.execute(
+                    f"SELECT DISTINCT file_path FROM panel_images "
+                    f"WHERE panel_id IN ({placeholders})",
+                    panel_ids,
+                ).fetchall()
+            ]
+        else:
+            conn.execute(
+                f"UPDATE media SET hidden = 0 WHERE file_path IN "
+                f"(SELECT file_path FROM panel_images "
+                f"WHERE panel_id IN ({placeholders}))",
+                panel_ids,
+            )
         conn.execute(
             f"DELETE FROM generation_jobs WHERE panel_id IN ({placeholders})",
             panel_ids,
         )
+        return purged
+
+    def _purge_media_rows(
+        self, conn: sqlite3.Connection, posix_paths: List[str]
+    ) -> List[str]:
+        """Delete the media rows behind purged panel images; return the
+        native-format paths actually deleted (the caller removes those
+        files from disk).
+
+        Must run after the panels' cascade delete, in the same
+        transaction. A path still referenced by a surviving panel_images
+        row (another panel's variant) or by a
+        storyboard_subjects.reference_path is NOT deleted -- the media
+        FK's ON DELETE CASCADE / SET NULL would silently destroy that
+        other panel's image row or null the subject's reference -- it is
+        unhidden instead, the same release-into-the-library semantics as
+        a non-purge delete. Deleting a media row cascades its indices
+        and folder_items rows.
+        """
+        deleted: List[str] = []
+        for path in posix_paths:
+            still_referenced = (
+                conn.execute(
+                    "SELECT 1 FROM panel_images WHERE file_path = ? LIMIT 1",
+                    (path,),
+                ).fetchone()
+                is not None
+                or conn.execute(
+                    "SELECT 1 FROM storyboard_subjects "
+                    "WHERE reference_path = ? LIMIT 1",
+                    (path,),
+                ).fetchone()
+                is not None
+            )
+            if still_referenced:
+                conn.execute("UPDATE media SET hidden = 0 WHERE file_path = ?", (path,))
+            else:
+                conn.execute("DELETE FROM media WHERE file_path = ?", (path,))
+                deleted.append(to_native_path(path))
+        return deleted
 
     def _panel_ids_for_storyboard(
         self, conn: sqlite3.Connection, storyboard_id: int
@@ -1582,23 +1675,31 @@ class DatabaseManager:
             ).fetchone()
             return int(row["sid"]) if row is not None else None
 
-    def delete_panel(self, panel_id: int) -> bool:
+    def delete_panel(
+        self, panel_id: int, purge_images: bool = False
+    ) -> Tuple[bool, List[str]]:
         """Delete a panel, plus any generation_jobs referencing it.
+
+        Returns ``(deleted, purged_file_paths)``.
 
         ``generation_jobs.panel_id`` carries no FK/cascade (see spec §4.1:
         the panels table didn't exist yet when generation_jobs was
         created), so the job rows are deleted explicitly first. Also
         unhides the media rows any curated panel_images pointed at before
-        they cascade away -- see _release_panels.
+        they cascade away -- see _release_panels. With
+        ``purge_images=True`` the media rows are deleted instead (unless
+        still referenced elsewhere) and their native-format file paths
+        returned so the caller can remove the files from disk.
         """
         with self.lock, self._get_connection() as conn:
             cur = conn.execute("SELECT id FROM panels WHERE id = ?", (panel_id,))
             if cur.fetchone() is None:
-                return False
-            self._release_panels(conn, [panel_id])
+                return False, []
+            purge_paths = self._release_panels(conn, [panel_id], purge_images)
             conn.execute("DELETE FROM panels WHERE id = ?", (panel_id,))
+            deleted_files = self._purge_media_rows(conn, purge_paths)
             conn.commit()
-            return True
+            return True, deleted_files
 
     # ---- Structure replace + tree read -----------------------------------
 

@@ -263,10 +263,15 @@ on subjects; `name`/`sort_order` on scenes; `sort_order`/`action`/
 the offending field(s), rather than surfacing as a raw 500 from a SQLite
 NOT NULL constraint violation.
 
-### `DELETE /api/storyboard/{id}`
+### `DELETE /api/storyboard/{id}?purge_images=false`
 Returns `{status: "deleted"}`. 404 if unknown. The storyboard's linked
-folder (if any) is **not** deleted — only the `folders.id` reference on
-the storyboard row goes away with it.
+"Storyboard: <name>" folder (if any) is deleted with it (`folder_items`
+cascade; a `folder_deleted` event goes out on the `folders` WS channel).
+Generated images: by default their media rows are unhidden — released
+into the main library. With `purge_images=true` the media rows are
+deleted and the files moved to the OS trash instead, except files still
+referenced by another panel's `panel_images` or by a subject's
+`reference_path`, which are unhidden rather than deleted.
 
 ### `POST /api/storyboard/{id}/parse`
 Body: `{text: string, confirm: boolean = false}`. VLM-parses free text
@@ -322,6 +327,11 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
   404 if the named parent (storyboard / scene) doesn't exist. `selected_image_id`
   is not settable through the panel `PATCH` — use `POST
   /panels/{id}/select`, which keeps `media.hidden` in sync.
+- The scene and panel `DELETE` routes accept the same
+  `?purge_images=true` query flag as the storyboard delete: default
+  unhides the panels' generated images into the library; with the flag
+  their media rows are deleted and files moved to the OS trash (same
+  shared-reference exceptions).
 
 Every create returns `{id: int}`; every PATCH on a storyboard/subject/scene
 returns `{status: "updated"}`; panel `PATCH` and the select route return

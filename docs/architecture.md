@@ -42,6 +42,17 @@ was selected before. `GET /api/media` filters `hidden = 0` by default;
 `include_hidden=true` opts back in. `hidden` is part of both grid covering
 indexes (see below) so the filter doesn't force a main-table scan.
 
+Deleting a panel/scene/storyboard releases its generated images into the
+library by default (media rows unhidden), or — with `purge_images=true` on
+the DELETE route — removes them entirely: media rows deleted in the same
+transaction (`DatabaseManager._purge_media_rows`), files moved to the OS
+trash by the service layer. Files still referenced by another panel's
+`panel_images` or a subject's `reference_path` are spared (unhidden
+instead) — the media FK's `ON DELETE CASCADE`/`SET NULL` would otherwise
+silently destroy those references. Deleting a storyboard also deletes its
+"Storyboard: <name>" folder (`folder_items` cascade) and broadcasts
+`folder_deleted`.
+
 Covering indexes (`idx_media_summary_added`, `idx_media_summary_modified`) include every column read by the grid list endpoint, which is the reason `/api/media` returns in ~6 ms instead of ~25 s on large libraries. One-shot data migrations are gated on `PRAGMA user_version`.
 
 ## Backend Layout

@@ -87,7 +87,7 @@ def test_update_storyboard_rejects_unknown(db):
 
 def test_delete_storyboard_cascades(db):
     sb, su, sc, pa = _build_tree(db)
-    assert db.delete_storyboard(sb) is True
+    assert db.delete_storyboard(sb)[0] is True
     with db.lock, db._get_connection() as conn:
         for table in ("storyboard_subjects", "scenes", "panels"):
             assert (
@@ -96,7 +96,7 @@ def test_delete_storyboard_cascades(db):
 
 
 def test_delete_storyboard_missing_returns_false(db):
-    assert db.delete_storyboard(999) is False
+    assert db.delete_storyboard(999)[0] is False
 
 
 def test_create_subject_converts_reference_path_to_posix(db):
@@ -148,7 +148,7 @@ def test_update_scene_and_delete(db):
     tree = db.get_storyboard_tree(sb)
     assert tree["scenes"][0]["mood"] == "tense"
     # deleting the scene should cascade the panel too
-    assert db.delete_scene(sc) is True
+    assert db.delete_scene(sc)[0] is True
     tree = db.get_storyboard_tree(sb)
     assert tree["scenes"] == []
 
@@ -264,12 +264,12 @@ def test_delete_panel_removes_generation_jobs(db):
     sb, su, sc, pa = _build_tree(db)
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
-    assert db.delete_panel(pa) is True
+    assert db.delete_panel(pa)[0] is True
     assert db.get_generation_job(jid) is None
 
 
 def test_delete_panel_missing_returns_false(db):
-    assert db.delete_panel(999) is False
+    assert db.delete_panel(999)[0] is False
 
 
 def _hidden_by_path(db) -> dict:
@@ -293,7 +293,7 @@ def test_delete_panel_unhides_media_and_purges_jobs(db):
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
-    assert db.delete_panel(pa) is True
+    assert db.delete_panel(pa)[0] is True
 
     assert _hidden_by_path(db)["/pics/a.png"] is False
     assert db.get_generation_job(jid) is None
@@ -307,7 +307,7 @@ def test_delete_scene_unhides_media_and_purges_jobs(db):
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
-    assert db.delete_scene(sc) is True
+    assert db.delete_scene(sc)[0] is True
 
     assert _hidden_by_path(db)["/pics/a.png"] is False
     assert db.get_generation_job(jid) is None
@@ -321,7 +321,7 @@ def test_delete_storyboard_unhides_media_and_purges_jobs(db):
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
-    assert db.delete_storyboard(sb) is True
+    assert db.delete_storyboard(sb)[0] is True
 
     assert _hidden_by_path(db)["/pics/a.png"] is False
     assert db.get_generation_job(jid) is None
@@ -516,3 +516,119 @@ def test_storyboards_folder_id_column_migrates_int_to_text(tmp_path):
         assert mgr.get_storyboard(1)["folder_id"] == folder["id"]
     finally:
         mgr.close()
+
+
+# ---- purge_images + folder removal ----------------------------------------
+
+
+def test_delete_panel_purge_images_deletes_media_rows(db):
+    """purge_images=True deletes the media rows instead of unhiding them
+    and returns the file paths so the service can remove the files."""
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    jid = db.create_generation_job(pid, "{}", panel_id=pa)
+
+    ok, purged = db.delete_panel(pa, purge_images=True)
+
+    assert ok is True
+    assert purged == ["/pics/a.png"]
+    assert "/pics/a.png" not in _hidden_by_path(db)
+    assert db.get_generation_job(jid) is None
+
+
+def test_delete_storyboard_purge_images_deletes_media_rows(db):
+    sb, su, sc, pa = _build_tree(db)
+    for name in ("a", "b"):
+        db.save_media(_media(f"/pics/{name}.png"))
+        db.set_media_hidden(f"/pics/{name}.png", True)
+        db.create_panel_image(pa, file_path=f"/pics/{name}.png")
+
+    ok, purged, _folder = db.delete_storyboard(sb, purge_images=True)
+
+    assert ok is True
+    assert sorted(purged) == ["/pics/a.png", "/pics/b.png"]
+    assert _hidden_by_path(db) == {}
+
+
+def test_delete_scene_purge_images_deletes_media_rows(db):
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.set_media_hidden("/pics/a.png", True)
+    db.create_panel_image(pa, file_path="/pics/a.png")
+
+    ok, purged = db.delete_scene(sc, purge_images=True)
+
+    assert ok is True
+    assert purged == ["/pics/a.png"]
+    assert "/pics/a.png" not in _hidden_by_path(db)
+
+
+def test_purge_spares_media_referenced_by_another_panel(db):
+    """A file shared with a surviving panel's panel_images must not be
+    deleted out from under it (FK) -- it is unhidden instead, and its
+    path is NOT returned for filesystem removal."""
+    sb, su, sc, pa = _build_tree(db)
+    pa2 = db.create_panel(sc, action="second", sort_order=1, subject_ids=[su])
+    db.save_media(_media("/pics/shared.png"))
+    db.set_media_hidden("/pics/shared.png", True)
+    db.create_panel_image(pa, file_path="/pics/shared.png")
+    db.create_panel_image(pa2, file_path="/pics/shared.png")
+
+    ok, purged = db.delete_panel(pa, purge_images=True)
+
+    assert ok is True
+    assert purged == []
+    assert _hidden_by_path(db)["/pics/shared.png"] is False
+
+
+def test_purge_spares_media_used_as_subject_reference(db):
+    """A generated image picked as a subject reference (possibly in a
+    different storyboard) survives a purge -- deleting its media row
+    would break storyboard_subjects.reference_path's FK."""
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/ref.png"))
+    db.set_media_hidden("/pics/ref.png", True)
+    db.create_panel_image(pa, file_path="/pics/ref.png")
+    sb2 = db.create_storyboard(
+        name="Other", target_model="sd", architecture="t2i", base_seed=1
+    )
+    db.create_subject(sb2, name="X", description="d", reference_path="/pics/ref.png")
+
+    ok, purged, _folder = db.delete_storyboard(sb, purge_images=True)
+
+    assert ok is True
+    assert purged == []
+    assert _hidden_by_path(db)["/pics/ref.png"] is False
+
+
+def test_delete_storyboard_removes_its_folder(db):
+    """The 'Storyboard: <name>' folder the runner created goes with the
+    storyboard (folder_items cascade), purge or not. The deleted folder id
+    is returned so the route can broadcast folder_deleted."""
+    sb, su, sc, pa = _build_tree(db)
+    db.save_media(_media("/pics/a.png"))
+    db.create_panel_image(pa, file_path="/pics/a.png")
+    folder = db.create_folder(
+        "22222222-2222-2222-2222-222222222222", "manual", "Storyboard: Yard"
+    )
+    db.update_storyboard(sb, folder_id=folder["id"])
+    db.add_folder_items(folder["id"], ["/pics/a.png"])
+
+    ok, _purged, deleted_folder = db.delete_storyboard(sb)
+
+    assert ok is True
+    assert deleted_folder == folder["id"]
+    assert db.get_folder(folder["id"]) is None
+    with db.lock, db._get_connection() as conn:
+        n = conn.execute("SELECT COUNT(*) AS n FROM folder_items").fetchone()["n"]
+        assert n == 0
+
+
+def test_delete_storyboard_without_folder_returns_none_folder(db):
+    sb, *_ = _build_tree(db)
+    ok, _purged, deleted_folder = db.delete_storyboard(sb)
+    assert ok is True
+    assert deleted_folder is None

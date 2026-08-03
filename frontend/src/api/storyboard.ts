@@ -44,8 +44,14 @@ export function patchStoryboard(
   return patch<{ status: string }>(`/storyboard/${id}`, body)
 }
 
-export function deleteStoryboard(id: number): Promise<{ status: string }> {
-  return del<{ status: string }>(`/storyboard/${id}`)
+// purgeImages=true also deletes the generated images (media rows + files
+// moved to OS trash); default releases them into the library (unhidden).
+// Deleting a storyboard always removes its "Storyboard: <name>" folder.
+export function deleteStoryboard(
+  id: number,
+  purgeImages = false,
+): Promise<{ status: string }> {
+  return del<{ status: string }>(`/storyboard/${id}?purge_images=${purgeImages}`)
 }
 
 // Runner-backed. 409 with detail {code: 'confirm_required', message} when
@@ -126,8 +132,13 @@ export function patchScene(
   return patch<{ status: string }>(`/storyboard/scenes/${sceneId}`, body)
 }
 
-export function deleteScene(sceneId: number): Promise<{ status: string }> {
-  return del<{ status: string }>(`/storyboard/scenes/${sceneId}`)
+export function deleteScene(
+  sceneId: number,
+  purgeImages = false,
+): Promise<{ status: string }> {
+  return del<{ status: string }>(
+    `/storyboard/scenes/${sceneId}?purge_images=${purgeImages}`,
+  )
 }
 
 export function createPanel(
@@ -155,8 +166,13 @@ export function patchPanel(
   return patch<PanelWithoutImages>(`/storyboard/panels/${panelId}`, body)
 }
 
-export function deletePanel(panelId: number): Promise<{ status: string }> {
-  return del<{ status: string }>(`/storyboard/panels/${panelId}`)
+export function deletePanel(
+  panelId: number,
+  purgeImages = false,
+): Promise<{ status: string }> {
+  return del<{ status: string }>(
+    `/storyboard/panels/${panelId}?purge_images=${purgeImages}`,
+  )
 }
 
 export function selectPanelImage(

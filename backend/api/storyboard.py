@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
+from backend.ws.manager import ws_manager
 from backend.services.storyboard_service import (
     InvalidReferenceError,
     ParentNotFoundError,
@@ -276,10 +277,23 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
 
 
 @router.delete("/{storyboard_id}")
-async def delete_storyboard(storyboard_id: int) -> Dict[str, str]:
-    ok = await _service().delete_storyboard(storyboard_id)
+async def delete_storyboard(
+    storyboard_id: int, purge_images: bool = False
+) -> Dict[str, str]:
+    """Delete a storyboard, its library folder, and (optionally) its
+    generated images.
+
+    Default: generated images are released into the library (unhidden).
+    With ``purge_images=true`` their media rows are deleted and the files
+    moved to the OS trash. The folder_deleted broadcast here is a route
+    responsibility like backend/api/folders.py's -- it is not one of the
+    runner-owned events the module docstring forbids re-broadcasting.
+    """
+    ok, folder_id = await _service().delete_storyboard(storyboard_id, purge_images)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No storyboard {storyboard_id}")
+    if folder_id is not None:
+        ws_manager.broadcast_sync("folders", "folder_deleted", {"id": folder_id})
     return {"status": "deleted"}
 
 
@@ -434,8 +448,8 @@ async def patch_scene(scene_id: int, body: ScenePatch) -> Dict[str, str]:
 
 
 @router.delete("/scenes/{scene_id}")
-async def delete_scene(scene_id: int) -> Dict[str, str]:
-    ok = await _service().delete_scene(scene_id)
+async def delete_scene(scene_id: int, purge_images: bool = False) -> Dict[str, str]:
+    ok = await _service().delete_scene(scene_id, purge_images)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No scene {scene_id}")
     return {"status": "deleted"}
@@ -484,8 +498,8 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
 
 
 @router.delete("/panels/{panel_id}")
-async def delete_panel(panel_id: int) -> Dict[str, str]:
-    ok = await _service().delete_panel(panel_id)
+async def delete_panel(panel_id: int, purge_images: bool = False) -> Dict[str, str]:
+    ok = await _service().delete_panel(panel_id, purge_images)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No panel {panel_id}")
     return {"status": "deleted"}

@@ -692,3 +692,99 @@ def test_select_image_from_a_different_panel_is_404(client):
         f"/api/storyboard/panels/{panel_b}/select", json={"image_id": image_id}
     )
     assert r.status_code == 404
+
+
+# ---- purge_images + folder removal ----------------------------------------
+
+
+def _seed_panel_with_image(client, path: str):
+    sid = _create_storyboard(client)
+    scene_id = client.post(f"/api/storyboard/{sid}/scenes", json={"name": "S"}).json()[
+        "id"
+    ]
+    panel_id = client.post(
+        f"/api/storyboard/scenes/{scene_id}/panels", json={"action": "a"}
+    ).json()["id"]
+    client.db.save_media(
+        Media(
+            file_path=Path(path),
+            file_size=1,
+            width=8,
+            height=8,
+            format="png",
+            created_at=datetime.now(),
+            modified_at=datetime.now(),
+        )
+    )
+    client.db.set_media_hidden(path, True)
+    client.db.create_panel_image(panel_id, file_path=path)
+    return sid, scene_id, panel_id
+
+
+def _media_paths(client) -> set:
+    return {
+        r["file_path"] for r in client.db.get_all_media_summaries(include_hidden=True)
+    }
+
+
+def test_delete_panel_purge_images_removes_media_and_trashes_file(
+    client, monkeypatch, tmp_path
+):
+    img = tmp_path / "purge-me.png"
+    img.write_bytes(b"x")
+    trashed = []
+    monkeypatch.setattr(
+        "backend.services.storyboard_service.send2trash",
+        lambda p: trashed.append(p),
+    )
+    _sid, _scene_id, panel_id = _seed_panel_with_image(client, str(img))
+
+    r = client.delete(f"/api/storyboard/panels/{panel_id}?purge_images=true")
+
+    assert r.status_code == 200
+    assert str(img) not in _media_paths(client)
+    assert trashed == [str(img)]
+
+
+def test_delete_panel_default_keeps_and_unhides_media(client):
+    _sid, _scene_id, panel_id = _seed_panel_with_image(client, "/tmp/keep-me.png")
+
+    r = client.delete(f"/api/storyboard/panels/{panel_id}")
+
+    assert r.status_code == 200
+    rows = {
+        r2["file_path"]: r2["hidden"]
+        for r2 in client.db.get_all_media_summaries(include_hidden=True)
+    }
+    assert rows["/tmp/keep-me.png"] is False
+
+
+def test_delete_storyboard_purge_images_via_query_param(client, monkeypatch, tmp_path):
+    img = tmp_path / "board-img.png"
+    img.write_bytes(b"x")
+    trashed = []
+    monkeypatch.setattr(
+        "backend.services.storyboard_service.send2trash",
+        lambda p: trashed.append(p),
+    )
+    sid, _scene_id, _panel_id = _seed_panel_with_image(client, str(img))
+
+    r = client.delete(f"/api/storyboard/{sid}?purge_images=true")
+
+    assert r.status_code == 200
+    assert str(img) not in _media_paths(client)
+    assert trashed == [str(img)]
+
+
+def test_delete_storyboard_removes_folder(client):
+    sid, _scene_id, _panel_id = _seed_panel_with_image(client, "/tmp/folder-img.png")
+    folder = client.db.create_folder(
+        "33333333-3333-3333-3333-333333333333", "manual", "Storyboard: My Storyboard"
+    )
+    client.db.update_storyboard(sid, folder_id=folder["id"])
+    client.db.add_folder_items(folder["id"], ["/tmp/folder-img.png"])
+
+    r = client.delete(f"/api/storyboard/{sid}")
+
+    assert r.status_code == 200
+    assert client.db.get_folder(folder["id"]) is None

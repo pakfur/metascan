@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useStoryboardStore } from '../../stores/storyboard'
 import CreateStoryboardDialog from './CreateStoryboardDialog.vue'
 import PresetRegistrationDialog from './PresetRegistrationDialog.vue'
+import DeleteImagesDialog from './DeleteImagesDialog.vue'
 
 const store = useStoryboardStore()
 const router = useRouter()
@@ -23,11 +24,23 @@ function open(id: number) {
   router.push({ name: 'storyboard', params: { id } })
 }
 
-async function onDelete(id: number, name: string) {
-  if (!confirm(`Delete storyboard "${name}"? The folder and its media are kept.`)) return
+// The landing list only has summaries (no tree), so the generated-image
+// count isn't known here -- deleting a whole storyboard always asks what
+// happens to its images (purge / keep in library / cancel). The
+// storyboard's library folder is removed either way.
+const deleteTarget = ref<{ id: number; name: string } | null>(null)
+
+function onDelete(id: number, name: string) {
+  deleteTarget.value = { id, name }
+}
+
+async function confirmDelete(purgeImages: boolean) {
+  const target = deleteTarget.value
+  deleteTarget.value = null
+  if (!target) return
   deleteError.value = null
   try {
-    await store.remove(id)
+    await store.remove(target.id, purgeImages)
   } catch (e) {
     deleteError.value = e instanceof Error ? e.message : String(e)
   }
@@ -98,6 +111,15 @@ function formatDate(raw: string): string {
       @open-presets="onOpenPresetsFromCreate"
     />
     <PresetRegistrationDialog v-if="showPresets" @close="showPresets = false" />
+
+    <DeleteImagesDialog
+      v-if="deleteTarget"
+      :title="`Delete storyboard &quot;${deleteTarget.name}&quot;?`"
+      message="Its scenes, panels, and library folder are removed. What should happen to the generated images?"
+      @purge="confirmDelete(true)"
+      @keep="confirmDelete(false)"
+      @cancel="deleteTarget = null"
+    />
   </div>
 </template>
 
