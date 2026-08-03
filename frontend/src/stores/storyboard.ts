@@ -80,15 +80,32 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   // ---- actions: load / refresh ------------------------------------------
 
-  // Monotonic sequence counter shared by load()/refresh(). Both fetch a
-  // tree asynchronously and then assign tree.value; without ordering,
-  // whichever call happens to *resolve* last wins, even if it was issued
-  // first (e.g. two overlapping panel_images_changed-triggered refresh()
-  // calls, or a WS refresh racing an addPanel()-triggered refresh()). Each
-  // call captures its own seq right before the fetch; after the await, if
-  // loadSeq has moved on (a newer load/refresh was issued meanwhile), the
-  // stale call bails out before touching any state.
+  // Tracks which storyboard load() most recently targeted -- a NAVIGATION,
+  // not just a re-fetch. refresh() reads this to detect it's stale (its
+  // target board is one the user has since navigated away from) and bails
+  // out *before* consuming a loadSeq token, so a refresh of the old board
+  // can never supersede a newer load() of a different board.
+  let currentBoardId: number | null = null
+
+  // Monotonic counter shared by load()/refresh() that arbitrates which
+  // call's fetched tree gets applied to tree.value: whichever call holds
+  // the highest seq value when its fetch resolves wins (issue-order, not
+  // resolve-order). load() always bumps it. refresh() only bumps it after
+  // confirming (via currentBoardId, above) that it isn't stale.
   let loadSeq = 0
+
+  // Monotonic counter incremented ONLY by load() (never by refresh()).
+  // Used solely to decide, in load()'s `finally`, whether THIS call is
+  // still the most recently issued load() and therefore responsible for
+  // clearing `loading`. This has to be tracked separately from loadSeq:
+  // a same-board refresh() racing a reload legitimately consumes a
+  // loadSeq token (so the fresher of the two trees wins), but must never
+  // be mistaken for "a newer load is in flight" and wedge `loading` at
+  // true forever -- refresh() never touches loading itself, so if load()
+  // deferred resetting it on the assumption that "something newer will
+  // handle it," and that "something newer" was actually just a refresh(),
+  // nothing ever would.
+  let loadCallSeq = 0
 
   async function loadList(): Promise<void> {
     loading.value = true
@@ -104,13 +121,18 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   // Fetch the tree, default-select the first scene/panel, then pull any
   // in-flight comfy jobs so a mid-generation reload still shows progress.
+  // A load() call is a navigation: it always wins over any in-flight
+  // refresh() of whatever board was previously current (see currentBoardId
+  // / loadSeq / loadCallSeq comments above).
   async function load(id: number): Promise<void> {
+    currentBoardId = id
+    const callSeq = ++loadCallSeq
+    const seq = ++loadSeq
     loading.value = true
     error.value = null
     // A board switch always supersedes any synthesis banner left over from
     // whatever board was previously loaded (or mid-flight).
     synthesis.value = { running: false, done: 0, total: 0, error: null }
-    const seq = ++loadSeq
     try {
       const t = await api.fetchStoryboard(id)
       if (seq !== loadSeq) return
@@ -121,7 +143,13 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       if (seq !== loadSeq) return
       error.value = errMessage(e)
     } finally {
-      if (seq === loadSeq) loading.value = false
+      // Reset `loading` iff no newer load() call has been issued since
+      // this one. Deliberately independent of the seq/loadSeq check above:
+      // a racing same-board refresh() can legitimately bump loadSeq past
+      // `seq` (making the tree-application branch above a no-op) while
+      // this is still the only/latest *load* call -- in that case loading
+      // must still clear, since nothing else ever will.
+      if (callSeq === loadCallSeq) loading.value = false
     }
   }
 
@@ -131,6 +159,14 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   async function refresh(): Promise<void> {
     if (!tree.value) return
     const id = tree.value.id
+    // Stale by definition if the user has navigated to a different board
+    // since this refresh's tree.value snapshot was taken (load() already
+    // updated currentBoardId synchronously, even though tree.value itself
+    // hasn't been overwritten yet because that load's fetch is still in
+    // flight). Bail without consuming a loadSeq token -- letting a
+    // dropped, off-target refresh grab a token would incorrectly make a
+    // still-in-flight load() for the NEW board look stale against it.
+    if (id !== currentBoardId) return
     const seq = ++loadSeq
     try {
       const t = await api.fetchStoryboard(id)
