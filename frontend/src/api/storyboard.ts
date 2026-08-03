@@ -27,13 +27,16 @@ export function patchStoryboard(
   id: number,
   body: Partial<{
     name: string
-    source_text: string
+    // Nullable columns (see storyboards table DDL) -- `| null` lets callers
+    // send an explicit clear, which the backend now honors via
+    // exclude_unset=True rather than silently dropping it (exclude_none).
+    source_text: string | null
     aspect_ratio: string
-    style_block: string
-    negative: string
+    style_block: string | null
+    negative: string | null
     target_model: string
     architecture: string
-    preset_id: number
+    preset_id: number | null
     base_seed: number
     batch_size: number
   }>,
