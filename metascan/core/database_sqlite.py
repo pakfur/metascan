@@ -598,6 +598,8 @@ class DatabaseManager:
                                   REFERENCES storyboards(id) ON DELETE CASCADE,
                     sort_order    INTEGER NOT NULL DEFAULT 0,
                     name          TEXT NOT NULL,
+                    subtitle      TEXT,
+                    setting       TEXT,
                     location      TEXT,
                     time_of_day   TEXT,
                     mood          TEXT,
@@ -605,6 +607,18 @@ class DatabaseManager:
                     notes         TEXT
                 )
                 """
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "subtitle",
+                "ALTER TABLE scenes ADD COLUMN subtitle TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "setting",
+                "ALTER TABLE scenes ADD COLUMN setting TEXT",
             )
             conn.execute(
                 """
@@ -1196,7 +1210,17 @@ class DatabaseManager:
         }
     )
     _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(
-        {"name", "sort_order", "location", "time_of_day", "mood", "lighting", "notes"}
+        {
+            "name",
+            "sort_order",
+            "subtitle",
+            "setting",
+            "location",
+            "time_of_day",
+            "mood",
+            "lighting",
+            "notes",
+        }
     )
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
@@ -1371,6 +1395,8 @@ class DatabaseManager:
         *,
         name: str,
         sort_order: int = 0,
+        subtitle: Optional[str] = None,
+        setting: Optional[str] = None,
         location: Optional[str] = None,
         time_of_day: Optional[str] = None,
         mood: Optional[str] = None,
@@ -1380,12 +1406,14 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO scenes (storyboard_id, sort_order, name, "
-                "location, time_of_day, mood, lighting, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "subtitle, setting, location, time_of_day, mood, lighting, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     sort_order,
                     name,
+                    subtitle,
+                    setting,
                     location,
                     time_of_day,
                     mood,

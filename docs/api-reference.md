@@ -311,8 +311,8 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
   row in the media library.
 - `POST /api/storyboard/{id}/scenes` · `PATCH
   /api/storyboard/scenes/{id}` · `DELETE /api/storyboard/scenes/{id}` —
-  scene CRUD (name, location, time_of_day, mood, lighting, notes,
-  sort_order).
+  scene CRUD (name, subtitle, setting, location, time_of_day, mood,
+  lighting, notes, sort_order).
 - `POST /api/storyboard/scenes/{id}/panels` · `PATCH
   /api/storyboard/panels/{id}` · `DELETE /api/storyboard/panels/{id}` —
   panel CRUD (shot_size, angle, lens, action, subject_ids, notes, brief,

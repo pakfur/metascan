@@ -107,6 +107,8 @@ export function createScene(
   body: {
     name: string
     sort_order?: number
+    subtitle?: string | null
+    setting?: string | null
     location?: string | null
     time_of_day?: string | null
     mood?: string | null
