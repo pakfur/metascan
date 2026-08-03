@@ -199,8 +199,18 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     return res.id
   }
 
+  // Mirrors importText's catch-set-error-and-rethrow shape (rather than the
+  // swallow-and-set-error shape most other actions use) so a caller that
+  // needs to react per-row -- StoryboardLanding shows a local message next
+  // to the row being deleted -- can, while error.value still carries a
+  // sensible fallback for anything that doesn't.
   async function remove(id: number): Promise<void> {
-    await api.deleteStoryboard(id)
+    try {
+      await api.deleteStoryboard(id)
+    } catch (e) {
+      error.value = errMessage(e)
+      throw e
+    }
     list.value = list.value.filter((s) => s.id !== id)
     if (tree.value?.id === id) {
       tree.value = null
