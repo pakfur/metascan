@@ -80,7 +80,10 @@ metascan/
                         #   FolderKebabMenu
         thumbnails/     # ThumbnailGrid (virtual scroll), ThumbnailCard, SimilarityBanner
         metadata/       # MetadataPanel, MetadataField
-        viewer/         # MediaViewer, ImageViewer, VideoPlayer, SlideshowViewer
+        viewer/         # MediaViewer (allowDestructive prop, default true, gates
+                        #   delete/favorite/library-selectMedia for non-library
+                        #   callers like PanelDetail's candidate picker),
+                        #   ImageViewer, VideoPlayer, SlideshowViewer
         dialogs/        # ScanDialog, SimilaritySettings, DuplicateFinder,
                         # UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab),
                         # NewFolderDialog, SmartFolderEditor
@@ -440,6 +443,39 @@ metascan/
   `POST /panels/{id}/select` — never `PATCH /api/storyboard/panels/{id}`,
   which has no concept of `panel_images` and cannot flip `media.hidden` on
   the old/new keeper.
+- **Detail editors with local commit-on-change copies must resync on id +
+  updated_at, not id alone.** `PanelDetail.vue` keeps a local editable ref
+  per text/select field (bound `:value` + `@change`, not `v-model`) so an
+  in-flight edit survives the store's optimistic `Object.assign`. Resyncing
+  only when the selected panel's *id* changes misses every server-side
+  rewrite of the panel currently open — a synthesis or VLM-tagging pass
+  that rewrites `prompt` (or any other field) in place never reaches the
+  textarea, and a later blur then PATCHes the stale (often empty) local
+  value back over the server's write, destroying it. Each field pairs its
+  local ref with a "last synced from server" snapshot ref, updated
+  together by the field's own commit handler; the resync watcher fires on
+  `[panel.value?.id, panel.value?.updated_at]` (updated_at bumps on every
+  successful PATCH, including server-driven ones) and only overwrites a
+  field whose local ref still equals its snapshot — i.e. no pending
+  uncommitted edit for that specific field. Apply the same pattern to any
+  other detail editor that caches server fields in local commit-on-change
+  refs.
+- **Storyboard PATCH routes use `exclude_unset`, not `exclude_none`.**
+  `backend/api/storyboard.py`'s four PATCH routes (storyboard, subject,
+  scene, panel) call `body.model_dump(exclude_unset=True)` so an explicit
+  JSON `null` in the request body clears a nullable column (`preset_id`,
+  `shot_size`, `notes`, `lora_name`, …) instead of being silently dropped —
+  a field simply absent from the body is still left untouched. Each route
+  runs the result through `_reject_null_for_required` first, which 400s
+  (naming the field) if the caller sent `null` for a `NOT NULL` column
+  (`name`/`aspect_ratio`/`target_model`/`architecture`/`base_seed`/
+  `batch_size` on storyboards; `name`/`description`/`sort_order` on
+  subjects; `name`/`sort_order` on scenes; `sort_order`/`action`/
+  `subject_ids`/`prompt_locked` on panels) — otherwise that would reach
+  SQLite as a raw NOT NULL constraint violation (500). Frontend callers
+  that want to send an explicit clear (e.g. `StoryboardSettingsDialog`'s
+  preset picker sending `preset_id: null` for "None") must diff against
+  `null` as a real change, not skip it as falsy.
 
 ## Development Rules
 
