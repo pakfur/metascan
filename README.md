@@ -8,6 +8,18 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
 
+# Unreleased
+
+### Search as a Filter
+
+Content search moved from a separate results view into the left filter panel, where it composes with everything else:
+
+- **SEARCH section** in the filter panel — CLIP text-to-image search, tag search (AND of multiple tags with autocomplete chips), and an adjustable score-threshold slider
+- **Search results are a filter layer** — they intersect with the Video/Images/Favorites presets, the standard filters, and the selected folder instead of replacing the grid
+- **Unbounded results** — everything above the score threshold is shown, not a fixed top-100
+- **Relevance sort** — auto-selected when a search runs, restoring your previous sort when cleared
+- **Find Similar** (right-click a thumbnail) uses the same filter model, with its own 0–1 threshold scale
+
 # Latest Release v0.3.0
 
 ### Web UI Migration

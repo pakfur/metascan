@@ -56,8 +56,7 @@ Configuration is stored in `config.json` in the application directory.
 
 - **`clip_model`** — CLIP model size (`"small"`, `"medium"`, `"large"`)
 - **`device`** — compute device (`"auto"`, `"cpu"`, `"cuda"`, `"mps"`)
-- **`clip_threshold`** — similarity search threshold (0–1)
-- **`search_results_count`** — max similarity search results
+- **`clip_threshold`**, **`phash_threshold`**, **`search_results_count`** — legacy keys, not consumed by search: the search thresholds are per-session sliders in the filter panel's SEARCH section (text 0–0.45, Find Similar 0–1), results are unbounded, and the duplicate finder uses a fixed Hamming distance
 - **`compute_phash_during_scan`** — compute perceptual hashes during scan
 
 ## `ui`

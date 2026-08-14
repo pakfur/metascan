@@ -35,8 +35,8 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | DELETE | `/api/folders/{id}/items` | Remove items from a static folder |
 | POST | `/api/scan/prepare` | Count files for scan confirmation |
 | POST | `/api/scan/start` | Begin scan (progress via WebSocket) |
-| POST | `/api/similarity/search` | Find similar media (image → image) |
-| POST | `/api/similarity/content-search` | CLIP text-to-image search |
+| POST | `/api/similarity/search` | Find similar media (image → image); light unbounded results |
+| POST | `/api/similarity/content-search` | CLIP text-to-image search; light unbounded results |
 | POST | `/api/duplicates/find` | Find duplicate groups |
 | POST | `/api/upscale` | Submit upscale tasks |
 | GET | `/api/upscale/queue` | List queue tasks |
@@ -65,6 +65,19 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/storyboard/panels/{id}/select` | Choose (or clear) a panel's keeper image |
 | WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard` |
 
+## Similarity Search Endpoints
+
+Both search endpoints return a light, score-ordered list — no full media records:
+
+```json
+[ { "file_path": "/native/path/to/file.png", "similarity_score": 0.254 }, ... ]
+```
+
+- **`POST /api/similarity/content-search`** — body `{ "query": string, "threshold": float = 0.0, "max_results": int | null = null }`. Encodes the query with the active CLIP model and searches the FAISS index.
+- **`POST /api/similarity/search`** — body `{ "file_path": string, "threshold": float = 0.7, "max_results": int | null = null }`. Encodes the image (or video keyframes) and searches the index.
+
+The `threshold` is applied server-side (results with `similarity_score >= threshold`). When `max_results` is omitted or null, the result set is unbounded — every indexed file above the threshold is returned. Paths are native-format, matching `/api/media`.
+
 ## WebSocket Envelope
 
 Every message on `/ws` carries a JSON envelope:
@@ -83,7 +96,7 @@ Most errors are FastAPI's default `{ "detail": "..." }`. Two endpoints return a 
   ```json
   { "detail": { "code": "dim_mismatch", "index_dim": 768, "model_dim": 1024 } }
   ```
-  The frontend renders an actionable "Rebuild index" banner.
+  The frontend renders an actionable "Rebuild index" prompt in the filter panel's SEARCH section.
 
 ## VLM tagging (`/api/vlm/*`)
 
