@@ -106,6 +106,7 @@ export const useSearchStore = defineStore('search', () => {
       const mismatch = extractDimMismatch(e)
       if (mismatch) dimMismatch.value = mismatch
       else searchError.value = e instanceof Error ? e.message : String(e)
+      restoreSort()
       scores.value = null
       console.error('Content search failed:', e)
     } finally {
@@ -127,6 +128,7 @@ export const useSearchStore = defineStore('search', () => {
       const mismatch = extractDimMismatch(e)
       if (mismatch) dimMismatch.value = mismatch
       else searchError.value = e instanceof Error ? e.message : String(e)
+      restoreSort()
       scores.value = null
       console.error('Similarity search failed:', e)
     } finally {
@@ -200,6 +202,8 @@ export const useSearchStore = defineStore('search', () => {
     textQuery.value = ''
     similarTo.value = null
     pending.value = null
+    searchError.value = null
+    dimMismatch.value = null
   }
 
   function clearTags() {
