@@ -40,32 +40,32 @@ export function fetchEmbeddingStatus(): Promise<{
   return get('/embeddings/status')
 }
 
-export interface SimilarityResult {
+export interface SearchHit {
   file_path: string
-  file_name: string
-  file_size: number
-  width: number
-  height: number
-  format: string
-  is_favorite: boolean
-  is_video: boolean
-  media_type: 'image' | 'video'
   similarity_score: number
-  [key: string]: unknown
 }
 
-export function searchSimilar(filePath: string, threshold = 0.7, maxResults = 100): Promise<SimilarityResult[]> {
-  return post<SimilarityResult[]>('/similarity/search', {
+export function searchSimilar(
+  filePath: string,
+  threshold = 0.7,
+  maxResults: number | null = null,
+): Promise<SearchHit[]> {
+  return post<SearchHit[]>('/similarity/search', {
     file_path: filePath,
     threshold,
-    max_results: maxResults,
+    ...(maxResults !== null ? { max_results: maxResults } : {}),
   })
 }
 
-export function contentSearch(query: string, maxResults = 100): Promise<SimilarityResult[]> {
-  return post<SimilarityResult[]>('/similarity/content-search', {
+export function contentSearch(
+  query: string,
+  threshold = 0,
+  maxResults: number | null = null,
+): Promise<SearchHit[]> {
+  return post<SearchHit[]>('/similarity/content-search', {
     query,
-    max_results: maxResults,
+    threshold,
+    ...(maxResults !== null ? { max_results: maxResults } : {}),
   })
 }
 
