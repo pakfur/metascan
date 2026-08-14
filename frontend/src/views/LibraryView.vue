@@ -6,7 +6,7 @@ import { useFilterStore } from '../stores/filters'
 import { useFoldersStore } from '../stores/folders'
 import { useSettingsStore } from '../stores/settings'
 import { useScanStore } from '../stores/scan'
-import { useSimilarityStore } from '../stores/similarity'
+import { useSearchStore } from '../stores/search'
 import { useKeyboard } from '../composables/useKeyboard'
 import { useWebSocket } from '../composables/useWebSocket'
 import ThreePanel from '../components/layout/ThreePanel.vue'
@@ -38,15 +38,13 @@ const filterStore = useFilterStore()
 const foldersStore = useFoldersStore()
 const settingsStore = useSettingsStore()
 const scanStore = useScanStore()
-const simStore = useSimilarityStore()
+const searchStore = useSearchStore()
 const foldersUi = useFoldersUi()
 const { isMobile } = useViewport()
 
-// The list the mobile grid shows, and the list the mobile viewer navigates:
-// content-search results when a search is active, otherwise the folder scope.
-const gridList = computed(() =>
-  simStore.active ? simStore.filteredResults : mediaStore.scopedMedia,
-)
+// Search now narrows scopedMedia itself, so mobile and desktop share the
+// same list.
+const gridList = computed(() => mediaStore.scopedMedia)
 
 const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 
@@ -151,8 +149,8 @@ useKeyboard([
   {
     key: 'Escape',
     handler: () => {
-      if (simStore.active) {
-        simStore.exit()
+      if (searchStore.active) {
+        searchStore.clearAll()
       } else if (!viewerOpen.value && !slideshowOpen.value) {
         mediaStore.selectMedia(null)
       }
