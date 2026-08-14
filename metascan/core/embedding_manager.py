@@ -548,7 +548,7 @@ class FaissIndexManager:
         self._mapping_path = self.index_dir / "id_mapping.json"
         self._meta_path = self.index_dir / "index_meta.json"
 
-        self._index = None
+        self._index: Optional[Any] = None
         self._id_to_path: List[str] = []
         self._path_to_id: Dict[str, int] = {}
         self._meta: Dict[str, Any] = {}
@@ -563,6 +563,11 @@ class FaissIndexManager:
     def file_count(self) -> int:
         """Number of vectors in the index."""
         return len(self._id_to_path)
+
+    @property
+    def size(self) -> int:
+        """Number of vectors currently in the index (0 if not loaded)."""
+        return int(self._index.ntotal) if self._index is not None else 0
 
     @property
     def meta(self) -> Dict[str, Any]:
@@ -714,8 +719,8 @@ class FaissIndexManager:
         # Rebuild index without stale entries
         dim = self._index.d
         new_index = _faiss.IndexFlatIP(dim)
-        new_id_to_path = []
-        new_path_to_id = {}
+        new_id_to_path: List[str] = []
+        new_path_to_id: Dict[str, int] = {}
 
         for i, path in enumerate(self._id_to_path):
             if path in valid_paths:

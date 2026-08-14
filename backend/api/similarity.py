@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from metascan.core.embedding_queue import EmbeddingQueue
 from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
+from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
 
@@ -231,12 +232,13 @@ async def shutdown_embedding_queue() -> None:
 class SimilaritySearchRequest(BaseModel):
     file_path: str
     threshold: float = 0.7
-    max_results: int = 100
+    max_results: Optional[int] = None
 
 
 class ContentSearchRequest(BaseModel):
     query: str
-    max_results: int = 100
+    threshold: float = 0.0
+    max_results: Optional[int] = None
 
 
 class SimilaritySettingsUpdate(BaseModel):
@@ -278,8 +280,7 @@ def _assert_dim_matches(fm: FaissIndexManager, vec_dim: int) -> None:
 @router.post("/search")
 async def search_similar(
     body: SimilaritySearchRequest,
-    service: MediaService = Depends(_get_service),
-):
+) -> List[Dict[str, Any]]:
     """Search for media similar to the given file path using FAISS."""
     client = get_inference_client()
     fm = _get_faiss_manager()
@@ -311,25 +312,20 @@ async def search_similar(
 
     _assert_dim_matches(fm, int(vec.shape[0]))
 
-    raw = await asyncio.to_thread(fm.search, vec, body.max_results)
+    k = body.max_results if body.max_results else fm.size
+    raw = await asyncio.to_thread(fm.search, vec, k)
 
-    output = []
-    for file_path, score in raw:
-        if float(score) < body.threshold:
-            continue
-        media = await service.get_media(file_path)
-        if media:
-            d = service.media_to_dict(media)
-            d["similarity_score"] = float(score)
-            output.append(d)
-    return output
+    return [
+        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        for p, s in raw
+        if float(s) >= body.threshold
+    ]
 
 
 @router.post("/content-search")
 async def content_search(
     body: ContentSearchRequest,
-    service: MediaService = Depends(_get_service),
-):
+) -> List[Dict[str, Any]]:
     """Search for media matching a text query using CLIP embeddings."""
     client = get_inference_client()
     fm = _get_faiss_manager()
@@ -348,16 +344,14 @@ async def content_search(
 
     _assert_dim_matches(fm, int(vec.shape[0]))
 
-    raw = await asyncio.to_thread(fm.search, vec, body.max_results)
+    k = body.max_results if body.max_results else fm.size
+    raw = await asyncio.to_thread(fm.search, vec, k)
 
-    output = []
-    for file_path, score in raw:
-        media = await service.get_media(file_path)
-        if media:
-            d = service.media_to_dict(media)
-            d["similarity_score"] = float(score)
-            output.append(d)
-    return output
+    return [
+        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        for p, s in raw
+        if float(s) >= body.threshold
+    ]
 
 
 # ----- Settings -----
