@@ -35,7 +35,7 @@ from typing import Final, Iterator, Literal, Mapping, NamedTuple
 from metascan.core.prompt_store import get_prompt_store
 
 
-TargetModel = Literal["sd", "pony", "flux1", "flux2", "zimage", "chroma", "qwen"]
+TargetModel = Literal["sd", "pony", "flux1", "flux2", "zimage", "chroma", "qwen", "minimax"]
 Architecture = Literal["t2i"]  # t2v / i2v / i2i deferred to v2
 
 # Two-option vocabulary: the user can ask for explicit, anatomically
@@ -70,6 +70,7 @@ _YAML_KEY_BY_TARGET: Final[Mapping[TargetModel, str]] = {
     "zimage": "META_ZIMAGE",
     "chroma": "META_CHROMA",
     "qwen": "META_QWEN",
+    "minimax": "META_MINIMAX"
 }
 
 
@@ -200,6 +201,12 @@ TARGET_PRESETS: Final[dict[TargetModel, TargetPreset]] = {
         prefix="",
         suffix="",
         has_negative=True,
+    ),
+    "minimax": TargetPreset(
+            label="MiniMax",
+            prefix="",
+            suffix="",
+            has_negative=False,
     ),
 }
 

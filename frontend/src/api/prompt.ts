@@ -1,6 +1,6 @@
 import { del, get, post } from './client'
 
-export type TargetModel = 'sd' | 'pony' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'qwen'
+export type TargetModel = 'sd' | 'pony' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'qwen' | 'minimax'
 export type Architecture = 't2i'
 
 // Two-option vocabulary: tell Qwen3 to keep output SFW, or to describe
@@ -24,10 +24,11 @@ export const TARGET_MODEL_LABELS: Record<TargetModel, string> = {
   'zimage': 'Z-Image Turbo',
   'chroma': 'Chroma',
   'qwen': 'Qwen-Image',
+  'minimax': 'MiniMax H3',
 }
 
 export const TARGET_MODEL_ORDER: TargetModel[] = [
-  'sd', 'pony', 'flux1', 'flux2', 'zimage', 'chroma', 'qwen',
+  'sd', 'pony', 'flux1', 'flux2', 'zimage', 'chroma', 'qwen', 'minimax',
 ]
 
 // Targets whose meta-prompt asks Qwen3 for a separate "Negative:" block.
@@ -76,6 +77,7 @@ export const TARGET_PRESETS: Record<TargetModel, TargetPreset> = {
   zimage: { id: 'zimage', label: 'Z-Image Turbo', prefix: '', suffix: '', hasNegative: false },
   chroma: { id: 'chroma', label: 'Chroma', prefix: '', suffix: '', hasNegative: true },
   qwen: { id: 'qwen', label: 'Qwen-Image', prefix: '', suffix: '', hasNegative: true },
+  minimax: { id: 'minimax', label: 'MiniMax H3', prefix: '', suffix: '', hasNegative: false },
 }
 
 export interface GenerateBody {
