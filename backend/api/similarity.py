@@ -5,12 +5,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
-from backend.dependencies import get_db, get_thumbnail_cache
-from backend.services.media_service import MediaService
+from backend.dependencies import get_db
 from backend.services.scan_dispatch import recommended_vlm_model_id, should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from metascan.core.embedding_manager import FaissIndexManager
@@ -34,10 +33,6 @@ _EMBED_POLL_INTERVAL_SECONDS = 0.5
 # Tracks whether the *current* (or most recent) scan was started with VLM
 # tagging enabled.  Set by build_index; read by the on_complete callback.
 _current_scan_tag_with_vlm: bool = False
-
-
-def _get_service() -> MediaService:
-    return MediaService(get_db(), get_thumbnail_cache())
 
 
 def get_inference_client() -> InferenceClient:
