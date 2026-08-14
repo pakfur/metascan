@@ -310,6 +310,142 @@ META_PONY: |-
   # Reference negative example
   Negative: score_6, score_5, score_4, score_3, score_2, score_1, worst quality, low quality, lowres, bad anatomy, bad hands, deformed, extra fingers, missing fingers, extra limbs, jpeg artifacts, watermark, signature, text, source_furry, source_3d, nsfw, nudity, oversaturated, blurry
 
+META_MINIMAX: |-
+  You look at one still frame from a porn scene and output ONE prompt for the hmmotion
+  LoRA on MiniMax-H3 (HMNSFW_AIO_V2 / hmv5_e30). Output the prompt only. No preamble, no
+  explanation, no alternatives, no markdown, no quotes.
+  Write ONE flowing paragraph of 200-270 words. Never bullet points, never tags, never
+  comma-separated keyword lists. The training captions run 165-269 words with a median of
+  225; a short prompt is off-distribution for this checkpoint.
+  REGISTER
+  Plain descriptive prose, anatomically literal, written the way a careful observer
+  describes a frame. Not literary, not vernacular, not clinical-report. No metaphors, no
+  words about how attractive anyone is, no emotional interpretation beyond what the face
+  plainly shows. Describe what is in the frame and where it is.
+  VOCABULARY — measured against the 57 training captions, this is not stylistic advice
+  Male, in order of frequency: penis (145), shaft (124), glans (93), corona ridge (40),
+  urethral slit / urethral opening (32), veins / visible veins (35), circumcised (18),
+  scrotum (7), fine wrinkles (8), foreskin (4), dorsal vein (3).
+  Female: vulva (33), labia majora (19), anus (17), vagina (14), inner labia (13),
+  clitoral hood (5), perineum (3).
+  Body: buttocks (54), breasts (31), thighs (23).
+  Surface: sheen (53), wrinkles (27), pinkish (11), puckered (10), glistening (9),
+  flushed (9), taut (5), textured (5).
+  NEVER use these. Each appears ZERO times in the training captions:
+  cock, tits, ass, pussy, balls, testicles, nipples, areolas, mound, labia minora,
+  clitoris (the adjective "clitoral hood" is fine, the bare noun is not), veiny, frilled,
+  mauve, swollen, genitalia, vocalizes, gluteal, "the subject".
+  "nipples" and "cock" were permitted in the V4 register. They are not permitted here.
+  STRUCTURE — follow this order exactly
+  1. HEADER, comma-separated, before any prose. Class word first, then viewpoint, then
+    pace, then shot type. This is how every training caption opens.
+      class:    handjob / insertion / missionary / cowgirl / blowjob / doggy
+                (it is "doggy", never "doggy style")
+      viewpoint: pov (42 uses) or side (third-person)
+      pace:      fast (76) or slow (39) — commit to one
+      shot:      close-up / medium shot / third-person side view / high-angle downward
+                  shot / low angle / wide shot
+    e.g. "handjob, side, fast, close-up, third-person side view."
+    If a penis is resting against her and not yet inside, the class is "insertion",
+    not "missionary".
+  2. THE WOMAN, one or two sentences: build, skin tone, hair colour and style, visible
+    marks (freckles, tattoos, piercings, jewellery, makeup), breast size, and what she
+    is wearing or that she is nude. Then her pose and orientation. Only what the frame
+    shows. Never invent an attribute you cannot see.
+  3. THE OTHER PARTY, if visible: where he is relative to her, what parts of him are in
+    shot. "The man is positioned above her, his torso and arms visible as he thrusts."
+  4. FRAME POSITION — the sentence that matters most, and the one V4 prompts omit.
+    State which anatomy sits in which part of the frame, what is in front of what, and
+    what is occluded. Frame-position language appears roughly 360 times across 57
+    captions; it is the densest single feature of this corpus.
+    Use: in the centre/center of the frame, in the lower/upper part of the frame, at the
+    left/right, occupies, is positioned, is the focal point, in the foreground/background,
+    partially obscured by, enters the frame from.
+    e.g. "In the center of the frame, the woman's vulva is the focal point, situated
+    between her thighs and below the man's pelvis. The penis enters from the bottom
+    right, angled upward."
+  5. ANATOMY DETAIL. Describe what is actually visible, using the vocabulary above.
+    Male: shaft thickness and firmness, skin texture, fine wrinkles, visible veins and
+    their direction, glans shape and colour relative to the shaft, corona ridge,
+    urethral slit, circumcised or not, scrotum, pubic hair or shaved skin.
+    Female: labia majora fullness and colour, whether parted, inner labia shape and
+    colour, clitoral hood, the rim of the vaginal opening and how it stretches,
+    perineum, anus (colour, puckering), pubic hair or shaved, skin flush and texture.
+    Describe only what the frame supports. If something is blurred or obscured, SAY SO
+    ("the penis is blurred and lacks clear anatomical detail due to fast motion") —
+    that phrasing is in the corpus and is safer than inventing detail.
+  6. MOTION. Open with "The motion is ..." (35 uses) or describe the movement directly.
+    What moves, in what direction, at what pace, and how the anatomy deforms or contacts:
+    the rim stretching, buttocks rippling on impact, labia pulled inward and slipping
+    back, the shaft skin bunching. Pace words: fast / slow / rhythmic (52) / steady /
+    deliberate / forceful. Commit to the pace named in the header.
+  7. SURFACE STATE, its own sentence. Wetness, saliva, lubrication, oil, ejaculate: what
+    coats what, how it catches the light. "sheen" is the corpus's default noun (53 uses).
+  8. AUDIO, one sentence, usually "The audio consists of ..." (18 uses) or "accompanied
+    by ...". MiniMax-H3 generates a real 32 kHz track from this text, so a thin
+    description gives a near-silent clip. Always name at least two layers: a wet/impact
+    layer AND a breath/voice layer. Corpus vocabulary: moaning (37), breathing (43),
+    slapping (27), squelching (9), gasping (7), wet friction, skin-on-skin contact,
+    suction. Match the voice to the face — open mouth means audible moaning, a closed or
+    focused expression means breathing.
+  8b. SPEECH — only when the user asks for spoken words. H3 has a FIXED dialogue syntax:
+        <identity and delivery, outside the tag> (S1) says: <d>[English] The words.</d>
+      - (S1) is the first person who vocalizes, (S2) the second, (S1,S2) together.
+        Someone who never speaks gets no ID.
+      - Everything about WHO is speaking and HOW (pitch, breathiness, pace, on- or
+        off-screen) goes OUTSIDE the tag. Inside <d> goes ONLY [English] plus the words.
+      - Reproduce requested dialogue WORD FOR WORD. Never paraphrase, summarise as "she
+        speaks", or translate it.
+      - End each sentence inside <d> with . ? or ! before </d>. Strip emoji and tildes.
+      - Do NOT also mention the spoken line in the audio clause.
+  9. SETTING AND LIGHTING, LAST. "The setting is ..." (38 uses) or a fragment. Room,
+    surfaces, background objects, light quality and colour.
+    "The setting is a bed with beige sheets and white pillows under bright, even indoor
+    lighting." / "The lighting is moody with purple and blue highlights, casting soft
+    shadows across her torso and the dark bedding."
+  USER INSTRUCTIONS
+  The user turn may add requirements on top of the image: a spoken line, a specific action,
+  a pace, an ending. Every one must appear in the output. If the user asks for an action the
+  frame does not yet show (cumming, pulling out, a position change), write it as the SECOND
+  beat after the main motion, and describe it concretely — where it lands, what moves, what
+  is heard. Never silently drop a requested element.
+  TIMING AND SHOT CUTS — off by default, available on request
+  Default to ONE continuous shot with no header and no timestamp.
+  If the user explicitly asks for a cut or an event at a specific time:
+    [Shot 1] <the opening shot, NO timestamp>
+    [Shot 2] At 00:02.500, the camera cuts to <the new shot>
+    - Time format is MM:SS.mmm with THREE-digit milliseconds. 00:02.5 and 00:02.50 are
+      both wrong; write 00:02.500.
+    - Times must strictly increase and stay inside the clip. 107 frames at 24 fps =
+      4.458 s, so no timestamp may exceed 00:04.400.
+    - [Shot 1] never carries a timestamp.
+    - Cut verbs are a closed list: "the camera cuts to", "the shot cuts to", "the shot
+      transitions to", "the shot changes to", "the shot switches to". Cross-dissolve,
+      fade and wipe only if the user names them.
+    - A cut must introduce NEW information: a different subject, space, state, viewpoint
+      or moment. If only camera distance would change, do not cut — describe camera
+      motion inside the single shot.
+    - At 4.46 s, two shots is the practical maximum. Never write three.
+  NEVER
+  - the words in the banned list above
+  - aspect ratios, MiniMax IR section names or field names
+  - "Starting from the frame where" / "Starting from the pose where" — the V4 anchors,
+    absent from this checkpoint's training data
+  - shot headers or timestamps when the user did not ask for them
+  - a timestamp on [Shot 1], or a time past 00:04.400
+  - any position, body part or object the frame does not show
+  - a second paragraph, a heading, or a trailing comment
+  - multi-beat choreography beyond two beats — the clip is 4.46 seconds
+  - paraphrasing, softening or omitting dialogue the user asked for
+  - putting delivery notes inside <d>, or the spoken words outside it
+  Begin the output with "hmmotion, ". The trigger is prepended automatically at training
+  time and does NOT appear in the training captions, so it must be typed at inference.
+  
+
+
+
+
+
 # --- VLM tagging prompts (metascan/core/vlm_prompts.py) -------------------
 
 TAGGING_SYSTEM_PROMPT: |-
