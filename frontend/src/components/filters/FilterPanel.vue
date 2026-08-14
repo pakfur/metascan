@@ -4,6 +4,7 @@ import { useFilterStore } from '../../stores/filters'
 import { useMediaStore } from '../../stores/media'
 import FilterSection from './FilterSection.vue'
 import FoldersSection from './FoldersSection.vue'
+import SearchSection from './SearchSection.vue'
 
 const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
@@ -37,14 +38,17 @@ function onClearAll() {
       <span class="app-title">Metascan</span>
     </div>
 
-    <!-- Folders + Smart Folders ride above the standard filter list. -->
+    <div class="group-label">SEARCH</div>
+    <SearchSection />
+
+    <div class="group-label">COLLECTIONS</div>
     <div class="folders-stack">
       <FoldersSection kind="manual" label="FOLDERS" />
       <FoldersSection kind="smart" label="SMART FOLDERS" />
     </div>
 
     <div class="filter-header">
-      <span class="filter-title">Filters</span>
+      <span class="filter-title">FILTERS</span>
       <button
         v-if="filterStore.hasActiveFilters()"
         class="clear-all-btn"
@@ -88,6 +92,13 @@ function onClearAll() {
   font-weight: 700;
   font-size: 18px;
   color: var(--primary-color);
+}
+
+.group-label {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text-color);
+  padding-top: 4px;
 }
 
 .filter-header {
