@@ -4,6 +4,7 @@ import type { MenuItem } from 'primevue/menuitem'
 import { useFilterStore, type ViewPreset } from '../../stores/filters'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore, type ThumbnailSize } from '../../stores/settings'
+import { useSearchStore } from '../../stores/search'
 
 const emit = defineEmits<{
   slideshow: []
@@ -12,6 +13,7 @@ const emit = defineEmits<{
 const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
+const searchStore = useSearchStore()
 
 const sizes: { value: ThumbnailSize; label: string }[] = [
   { value: 'small', label: 'S' },
@@ -19,11 +21,19 @@ const sizes: { value: ThumbnailSize; label: string }[] = [
   { value: 'large', label: 'L' },
 ]
 
-const sortOptions = [
-  { label: 'Date Added', value: 'date_added' },
-  { label: 'Date Modified', value: 'date_modified' },
-  { label: 'Name', value: 'file_name' },
-]
+const sortOptions = computed(() => {
+  const base = [
+    { label: 'Date Added', value: 'date_added' },
+    { label: 'Date Modified', value: 'date_modified' },
+    { label: 'Name', value: 'file_name' },
+  ]
+  // Relevance only means something while a similarity search has scores;
+  // keep it listed if it's the current selection so the <select> stays valid.
+  if (searchStore.similarityActive || mediaStore.sortOrder === 'relevance') {
+    return [{ label: 'Relevance', value: 'relevance' }, ...base]
+  }
+  return base
+})
 
 function isActive(view: ViewPreset) {
   return filterStore.activeView === view
