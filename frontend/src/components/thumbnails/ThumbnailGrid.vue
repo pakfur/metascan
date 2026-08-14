@@ -3,9 +3,8 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore } from '../../stores/settings'
-import { useSimilarityStore } from '../../stores/similarity'
+import { useSearchStore } from '../../stores/search'
 import ThumbnailCard from './ThumbnailCard.vue'
-import SimilarityBanner from './SimilarityBanner.vue'
 import { fileName } from '../../utils/path'
 import { useFoldersStore } from '../../stores/folders'
 import { useFoldersUi } from '../../composables/useFoldersUi'
@@ -28,7 +27,7 @@ const props = withDefaults(
 
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
-const simStore = useSimilarityStore()
+const searchStore = useSearchStore()
 const foldersStore = useFoldersStore()
 const foldersUi = useFoldersUi()
 const toast = useToast()
@@ -54,12 +53,9 @@ const padding = 12
 
 const cellSize = computed(() => settingsStore.thumbnailSize[0] + gap)
 
-// Use similarity results when active; otherwise apply the current folder
-// scope. Similarity results are already a narrowed slice and shouldn't be
-// re-filtered by scope (the user is searching the library, not the folder).
-const displayList = computed(() =>
-  simStore.active ? simStore.filteredResults : mediaStore.scopedMedia,
-)
+// Search is now one of the standard path-set layers inside displayedMedia,
+// so the grid always renders the folder-scoped view.
+const displayList = computed(() => mediaStore.scopedMedia)
 
 // Set of file paths that belong to any manual folder — used to show the
 // little blue dot on thumbs that are members (when not already inside
@@ -260,7 +256,7 @@ function closeContextMenu() {
 
 function ctxFindSimilar() {
   if (contextMenu.value) {
-    simStore.findSimilar(contextMenu.value.media)
+    searchStore.submitSimilar(contextMenu.value.media)
     contextMenu.value = null
   }
 }
@@ -401,8 +397,6 @@ function onThumbDragEnd() {
 
 <template>
   <div class="thumbnail-grid-wrapper">
-    <SimilarityBanner v-if="simStore.active" />
-
     <div ref="container" class="thumbnail-grid" @scroll="onScroll">
       <!-- Empty state -->
       <div v-if="displayList.length === 0 && !mediaStore.loading" class="empty-state">
