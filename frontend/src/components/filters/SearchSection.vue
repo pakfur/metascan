@@ -22,6 +22,12 @@ watch(
 
 // Tag AND search — chips autocompleted from the known tag vocabulary.
 const tagModel = ref<string[]>([...searchStore.tagChips])
+watch(
+  () => searchStore.tagChips,
+  (t) => {
+    tagModel.value = [...t]
+  },
+)
 const tagSuggestions = ref<string[]>([])
 
 function completeTags(event: { query: string }) {
