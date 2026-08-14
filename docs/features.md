@@ -6,7 +6,7 @@
 - Virtual-scrolling thumbnail grid for large collections (12,000+ items)
 - Three-panel resizable layout: filters, thumbnails, metadata
 - Thumbnail size presets (S/M/L)
-- Sorting by file name, date added, or date modified
+- Sorting by file name, date added, or date modified — plus relevance while a search is active
 - Favorites system with star toggle
 - Dark/light mode following system preference
 
@@ -26,10 +26,14 @@
 - Video support (no auto-advance, manual navigation)
 - Expand to true full screen (no browser chrome); media scales to the screen at its own aspect ratio, Escape returns to normal display
 
-## Similarity & Content Search
+## Search (Content, Similar, Tags)
+Search lives in the **SEARCH section** at the top of the left filter panel and behaves like a filter: results intersect with the Video/Images/Favorites presets, the standard filters, and the selected folder rather than replacing the grid.
 - CLIP-powered text-to-image content search (type a description, find matching media)
-- FAISS-based visual similarity search (right-click any thumbnail, "Find Similar")
-- Similarity banner with adjustable threshold slider
+- FAISS-based visual similarity search (right-click any thumbnail, "Find Similar" — shows a "Similar to …" chip in the panel)
+- Tag search — autocomplete chips ANDed together (tag AND tag AND tag), combinable with the text search
+- Unbounded results defined by an adjustable score threshold (text search 0–0.45, default 0.2; Find Similar 0–1, default 0.7); moving the slider re-runs the search
+- Relevance sort option, auto-selected when a search runs and restored to your previous sort on clear
+- Inline model-status chip; a search submitted before the CLIP worker is ready is queued and fires automatically once the model loads
 - Multiple CLIP model sizes (Small/Medium/Large)
 - Device selection (Auto/CPU/CUDA)
 - Embedding index build/rebuild with live progress
@@ -77,6 +81,7 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 - Collapsible filter sections with item counts
 - AND logic between filter types, OR within same type
 - Favorites-only toggle
+- Active searches (content, Find Similar, tag AND) compose with all of the above as additional filter layers
 
 ## Folders (Static & Smart)
 - **Static folders** — manually curated collections; right-click items to add/remove
@@ -97,7 +102,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 
 ## Context Menu
 - Open (full-screen viewer)
-- Find Similar (enter similarity mode)
+- Find Similar (image-to-image search, applied as a filter with a "Similar to …" chip)
 - Upscale (open upscale dialog)
 - Delete (move to trash with confirmation)
 
@@ -110,7 +115,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 | Ctrl+Shift+S | Open slideshow |
 | Ctrl+Shift+D | Open duplicate finder |
 | Ctrl+U | Upscale selected media |
-| Esc | Close viewer / exit similarity mode |
+| Esc | Close viewer / clear active search |
 | Space | Play/Pause (video) |
 | Left/Right | Previous/Next media (in viewer) |
 | Up/Down | Volume up/down (video) |

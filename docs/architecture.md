@@ -76,12 +76,13 @@ frontend/src/
   router/       # index.ts — hash-history vue-router: `/` (LibraryView), `/storyboard/:id?` (StoryboardView)
   views/        # LibraryView (desktop/mobile grid shell), StoryboardView (desktop-only authoring canvas)
   stores/       # Pinia stores (media, filters, folders, settings, scan,
-                #   similarity, upscale, models, storyboard)
+                #   search, upscale, models, storyboard)
   composables/  # useWebSocket (multiplexed), useKeyboard, useFoldersUi, useToast
   components/
     layout/     # ContentSearchBar (header action row), ViewMenubar, ThreePanel, ScopeBreadcrumb, ToastHost
-    filters/    # FilterPanel, FilterSection, FoldersSection, FolderRow, FolderKebabMenu
-    thumbnails/ # ThumbnailGrid (virtual scroll), ThumbnailCard, SimilarityBanner
+    filters/    # FilterPanel, SearchSection (content/tag search + threshold slider),
+                #   FilterSection, FoldersSection, FolderRow, FolderKebabMenu
+    thumbnails/ # ThumbnailGrid (virtual scroll), ThumbnailCard
     metadata/   # MetadataPanel, MetadataField
     viewer/     # MediaViewer, ImageViewer, VideoPlayer, SlideshowViewer
     dialogs/    # ScanDialog, SimilaritySettings, DuplicateFinder,
@@ -99,6 +100,7 @@ The Vite proxy forwards `/api/*` and `/ws` to the backend during development.
 - **FastAPI uses `lifespan`** (not the deprecated `@app.on_event`). The lifespan constructs the `InferenceClient` singleton, injects `HF_TOKEN`, and optionally preloads CLIP for the current model.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in the Pinia store. Tag conditions fetch only the referenced tag keys via `POST /api/filters/tag_paths` — never bulk-GET the entire inverted index.
 - **DELETE endpoints return `{status: "deleted"}` (not 204).** The frontend `request<T>` wrapper calls `res.json()` on every response.
+- **Search is a filter layer, not a separate results view.** `useSearchStore` holds text search, Find Similar, and tag-AND path sets that the media store intersects with the folder/preset scope. The search endpoints return light unbounded `[{file_path, similarity_score}]` lists with the score threshold applied server-side, and a Relevance sort orders the grid by score while a search is active.
 
 ## Qwen3-VL VLM tagger
 
