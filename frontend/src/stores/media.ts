@@ -5,6 +5,7 @@ import type { ActiveFilters } from '../types/filters'
 import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
 import { applyFilters } from '../api/filters'
 import { useFoldersStore } from './folders'
+import { useSearchStore } from './search'
 
 export const useMediaStore = defineStore('media', () => {
   // Summary records only. Heavy AI-generation fields are absent from these
@@ -31,6 +32,26 @@ export const useMediaStore = defineStore('media', () => {
     if (filteredPaths.value) {
       const paths = filteredPaths.value
       items = items.filter((m) => paths.has(m.file_path))
+    }
+
+    // Content search + tag-AND search are two more path-set layers, composed
+    // like filteredPaths. Stale index paths (deleted files) drop out here
+    // naturally because they no longer appear in allMedia.
+    const search = useSearchStore()
+    if (search.scores) {
+      const s = search.scores
+      items = items.filter((m) => s.has(m.file_path))
+    }
+    if (search.tagPaths) {
+      const t = search.tagPaths
+      items = items.filter((m) => t.has(m.file_path))
+    }
+
+    if (sortOrder.value === 'relevance' && search.scores) {
+      const s = search.scores
+      items = [...items].sort(
+        (a, b) => (s.get(b.file_path) ?? 0) - (s.get(a.file_path) ?? 0),
+      )
     }
 
     return items
@@ -145,8 +166,9 @@ export const useMediaStore = defineStore('media', () => {
   function setSortOrder(order: string) {
     if (order === sortOrder.value) return
     sortOrder.value = order
-    // Sort fields (`file_name`, `modified_at`) aren't in the summary
-    // payload any more, so defer sorting to the server and refetch.
+    // Relevance sorts client-side from the search score map; every other
+    // order defers to the server and refetches.
+    if (order === 'relevance') return
     loadAllMedia()
   }
 
