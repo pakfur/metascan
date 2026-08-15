@@ -92,6 +92,7 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header action row), for scripting and generating multi-panel AI image sequences via a driven ComfyUI backend.
 - Create a storyboard with a name, aspect ratio, target model, and shared style block / negative prompt applied to every panel
 - Import a plain-text script and have it parsed into scenes and panels, or build the scene/panel tree by hand
+- **Story engine** — from a premise, AI-build the outline, scenes, shots, and beats in sequence; re-roll any single level, and every generated field is editable afterward
 - Define subjects (characters) with a LoRA and reference image, reused across panels
 - Per-panel controls for shot size, camera angle, and lens; prompts can be locked to protect hand edits from re-synthesis
 - **Synthesize** — generates per-panel prompts (VLM-composed or a deterministic template fallback), respecting locked panels

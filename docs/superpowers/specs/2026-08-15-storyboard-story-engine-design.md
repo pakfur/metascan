@@ -212,9 +212,11 @@ are built in `metascan/core/storyboard_story.py` from the enum constants
 (the `PARSE_GRAMMAR` precedent) — grammars derive from code and cannot
 hot-reload from YAML.
 Python-side accessors in `metascan/core/storyboard_story.py` follow the
-`vlm_prompts.__getattr__` pattern. System prompts carry 1–2 few-shot
-exemplars each (compact, budget-conscious) and the uncensored directive
-already used by `TAGGING_SYSTEM_PROMPT` so NSFW premises are not refused.
+`vlm_prompts.__getattr__` pattern. System prompts are instructional prose
+only (no few-shot exemplars in v1) plus the uncensored directive already
+used by `TAGGING_SYSTEM_PROMPT` so NSFW premises are not refused; grammars
+constrain output structure and the YAML store is hot-reloadable for
+tuning prompt wording without a code change.
 Each stage prompt instructs cinematic storytelling craft: scenes advance the
 arc visually, shots follow coverage grammar (establish → medium → close),
 beats escalate within the shot.
