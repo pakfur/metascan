@@ -678,6 +678,48 @@ class DatabaseManager:
                 "ON storyboard_subjects(storyboard_id)"
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS beats (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    panel_id    INTEGER NOT NULL
+                                REFERENCES panels(id) ON DELETE CASCADE,
+                    sort_order  INTEGER NOT NULL DEFAULT 0,
+                    duration_s  REAL NOT NULL DEFAULT 4.0,
+                    action      TEXT NOT NULL,
+                    camera_motion    TEXT,
+                    camera_amplitude TEXT,
+                    camera_speed     TEXT,
+                    is_cut      INTEGER NOT NULL DEFAULT 0,
+                    dialog      TEXT NOT NULL DEFAULT '[]',
+                    sound       TEXT,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_beats_panel ON beats(panel_id)"
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "outline",
+                "ALTER TABLE storyboards ADD COLUMN outline TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboard_subjects",
+                "voice",
+                "ALTER TABLE storyboard_subjects ADD COLUMN voice TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "duration_s",
+                "ALTER TABLE panels ADD COLUMN duration_s REAL NOT NULL DEFAULT 12.0",
+            )
+
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
             # ``DEFAULT CURRENT_TIMESTAMP`` every time). Smart-folder "Added"
@@ -1197,6 +1239,7 @@ class DatabaseManager:
             "base_seed",
             "batch_size",
             "folder_id",
+            "outline",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1207,6 +1250,7 @@ class DatabaseManager:
             "lora_strength",
             "reference_path",
             "sort_order",
+            "voice",
         }
     )
     _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1237,6 +1281,20 @@ class DatabaseManager:
             "prompt_source",
             "negative",
             "selected_image_id",
+            "duration_s",
+        }
+    )
+    _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
+        {
+            "sort_order",
+            "duration_s",
+            "action",
+            "camera_motion",
+            "camera_amplitude",
+            "camera_speed",
+            "is_cut",
+            "dialog",
+            "sound",
         }
     )
 
@@ -1352,6 +1410,7 @@ class DatabaseManager:
         lora_strength: float = 0.8,
         reference_path: Optional[str] = None,
         sort_order: int = 0,
+        voice: Optional[str] = None,
     ) -> int:
         # storyboard_subjects.reference_path FKs media(file_path), which is
         # always stored POSIX -- a native-style path (Windows/WSL) would
@@ -1364,7 +1423,7 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO storyboard_subjects (storyboard_id, name, "
                 "description, lora_name, lora_strength, reference_path, "
-                "sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "sort_order, voice) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     name,
@@ -1373,6 +1432,7 @@ class DatabaseManager:
                     lora_strength,
                     posix_reference_path,
                     sort_order,
+                    voice,
                 ),
             )
             conn.commit()
@@ -1496,14 +1556,15 @@ class DatabaseManager:
         lens: Optional[str] = None,
         subject_ids: Optional[List[int]] = None,
         notes: Optional[str] = None,
+        duration_s: float = 12.0,
     ) -> int:
         import json as _json
 
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO panels (scene_id, sort_order, shot_size, angle, "
-                "lens, action, subject_ids, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "lens, action, subject_ids, notes, duration_s) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     scene_id,
                     sort_order,
@@ -1513,6 +1574,7 @@ class DatabaseManager:
                     action,
                     _json.dumps(list(subject_ids or [])),
                     notes,
+                    duration_s,
                 ),
             )
             conn.commit()
@@ -1701,6 +1763,129 @@ class DatabaseManager:
             conn.commit()
             return True, deleted_files
 
+    # ---- Beats ----
+
+    def create_beat(
+        self,
+        panel_id: int,
+        *,
+        action: str,
+        sort_order: int = 0,
+        duration_s: float = 4.0,
+        camera_motion: Optional[str] = None,
+        camera_amplitude: Optional[str] = None,
+        camera_speed: Optional[str] = None,
+        is_cut: int = 0,
+        dialog: Optional[List[Dict[str, Any]]] = None,
+        sound: Optional[str] = None,
+    ) -> int:
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO beats (panel_id, sort_order, duration_s, action, "
+                "camera_motion, camera_amplitude, camera_speed, is_cut, "
+                "dialog, sound) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    panel_id,
+                    sort_order,
+                    duration_s,
+                    action,
+                    camera_motion,
+                    camera_amplitude,
+                    camera_speed,
+                    is_cut,
+                    _json.dumps(list(dialog or [])),
+                    sound,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    @staticmethod
+    def _decode_beat_row(row: sqlite3.Row) -> Dict[str, Any]:
+        import json as _json
+
+        d = dict(row)
+        try:
+            d["dialog"] = _json.loads(d["dialog"] or "[]")
+        except (ValueError, TypeError):
+            d["dialog"] = []
+        return d
+
+    def get_beat(self, beat_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM beats WHERE id = ?", (beat_id,)
+            ).fetchone()
+            return self._decode_beat_row(row) if row is not None else None
+
+    def list_beats(self, panel_id: int) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM beats WHERE panel_id = ? ORDER BY sort_order, id",
+                (panel_id,),
+            ).fetchall()
+            return [self._decode_beat_row(r) for r in rows]
+
+    def update_beat(self, beat_id: int, **fields: Any) -> None:
+        import json as _json
+
+        unknown = set(fields) - self._BEAT_UPDATABLE
+        if unknown:
+            raise ValueError(f"Not updatable on beats: {', '.join(sorted(unknown))}")
+        if not fields:
+            return
+        if "dialog" in fields:
+            fields["dialog"] = _json.dumps(list(fields["dialog"] or []))
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [beat_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE beats SET {assignments}, "
+                "updated_at = datetime('now') WHERE id = ?",
+                values,
+            )
+            conn.commit()
+
+    def delete_beat(self, beat_id: int) -> bool:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute("DELETE FROM beats WHERE id = ?", (beat_id,))
+            conn.commit()
+            return int(cur.rowcount) > 0
+
+    def replace_panel_beats(
+        self, panel_id: int, beats: List[Dict[str, Any]]
+    ) -> List[int]:
+        """Transactionally replace a panel's beats (compose stage 4)."""
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            conn.execute("DELETE FROM beats WHERE panel_id = ?", (panel_id,))
+            new_ids: List[int] = []
+            for i, b in enumerate(beats):
+                cur = conn.execute(
+                    "INSERT INTO beats (panel_id, sort_order, duration_s, "
+                    "action, camera_motion, camera_amplitude, camera_speed, "
+                    "is_cut, dialog, sound) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        panel_id,
+                        b.get("sort_order", i),
+                        b.get("duration_s", 4.0),
+                        b["action"],
+                        b.get("camera_motion"),
+                        b.get("camera_amplitude"),
+                        b.get("camera_speed"),
+                        int(b.get("is_cut", 0)),
+                        _json.dumps(list(b.get("dialog") or [])),
+                        b.get("sound"),
+                    ),
+                )
+                new_ids.append(int(cur.lastrowid))
+            conn.commit()
+            return new_ids
+
     # ---- Structure replace + tree read -----------------------------------
 
     def replace_storyboard_structure(
@@ -1834,6 +2019,14 @@ class DatabaseManager:
                         image["file_path"] = to_native_path(image["file_path"])
                         images.append(image)
                     panel["images"] = images
+                    panel["beats"] = [
+                        self._decode_beat_row(r)
+                        for r in conn.execute(
+                            "SELECT * FROM beats WHERE panel_id = ? "
+                            "ORDER BY sort_order, id",
+                            (panel["id"],),
+                        ).fetchall()
+                    ]
                     panels.append(panel)
                 scene["panels"] = panels
                 scenes.append(scene)
