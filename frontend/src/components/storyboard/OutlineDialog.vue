@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { ApiError } from '../../api/client'
 import { COMPOSE_STAGES, type ComposeStage } from '../../types/storyboard'
@@ -15,10 +15,30 @@ const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const store = useStoryboardStore()
 
+// Local editable copies of the premise/outline fields, each paired with a
+// "last synced from server" snapshot -- mirrors PanelDetail.vue's
+// commit-on-change pattern (see CLAUDE.md "Detail editors with local
+// commit-on-change copies must resync on id + updated_at"). The resync
+// watcher below only overwrites a field whose local value still equals its
+// snapshot (no pending edit); `run()` updates both together on save so the
+// round trip doesn't get mistaken for a foreign change. Without this, a
+// background store.tree replacement unrelated to this dialog (refresh()
+// runs from several WS handlers -- synthesis_complete, panel_images_changed,
+// story_stage_complete, story_complete) would silently discard whatever the
+// user was mid-typing.
 const premise = ref('')
+const premiseSnap = ref('')
 const outlineText = ref('') // pretty-printed JSON, directly editable
+const outlineSnap = ref('')
 const confirmPending = ref<ComposeStage[] | null>(null)
 const error = ref<string | null>(null)
+
+function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): void {
+  if (local.value === snap.value) {
+    local.value = serverVal
+    snap.value = serverVal
+  }
+}
 
 // One checkbox per COMPOSE_STAGES entry. Defaults to scenes+shots+beats
 // checked the first time an outline exists (spec §6: partial re-runs) --
@@ -33,18 +53,24 @@ const stageChecks = reactive<Record<ComposeStage, boolean>>({
 })
 let stagesInitialized = false
 
+// Keyed on tree id + updated_at (not on `store.tree.outline` directly) so it
+// resyncs on a board switch AND on any server-side rewrite of the current
+// board, but does not treat every `tree.value` reassignment as a reason to
+// stomp an in-progress edit -- see the field comment above.
 watch(
-  () => [props.open, store.tree?.outline],
+  () => [props.open, store.tree?.id, store.tree?.updated_at],
   () => {
     if (!props.open || !store.tree) return
-    premise.value = store.tree.source_text ?? ''
+    syncField(premise, premiseSnap, store.tree.source_text ?? '')
+    let prettyOutline: string
     try {
-      outlineText.value = store.tree.outline
+      prettyOutline = store.tree.outline
         ? JSON.stringify(JSON.parse(store.tree.outline), null, 2)
         : ''
     } catch {
-      outlineText.value = store.tree.outline ?? ''
+      prettyOutline = store.tree.outline ?? ''
     }
+    syncField(outlineText, outlineSnap, prettyOutline)
     if (store.tree.outline && !stagesInitialized) {
       stageChecks.scenes = true
       stageChecks.shots = true
@@ -64,11 +90,16 @@ const checkedStages = computed<ComposeStage[]>(() =>
 async function run(stages: ComposeStage[], confirm = false): Promise<void> {
   if (stages.length === 0) return
   error.value = null
+  confirmPending.value = null
   try {
-    if (premise.value !== (store.tree?.source_text ?? ''))
+    if (premise.value !== (store.tree?.source_text ?? '')) {
       await store.patchStoryboardFields({ source_text: premise.value })
-    if (outlineText.value && stages[0] !== 'outline')
+      premiseSnap.value = premise.value
+    }
+    if (outlineText.value && stages[0] !== 'outline') {
       await store.patchStoryboardFields({ outline: outlineText.value })
+      outlineSnap.value = outlineText.value
+    }
     await store.composeStory({ stages, confirm })
     confirmPending.value = null
   } catch (e: unknown) {
