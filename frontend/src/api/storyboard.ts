@@ -1,5 +1,11 @@
 import { get, post, patch, del } from './client'
-import type { PanelWithoutImages, StoryboardSummary, StoryboardTree } from '../types/storyboard'
+import type {
+  Beat,
+  ComposeStage,
+  PanelWithoutImages,
+  StoryboardSummary,
+  StoryboardTree,
+} from '../types/storyboard'
 
 export function listStoryboards(): Promise<StoryboardSummary[]> {
   return get<StoryboardSummary[]>('/storyboard')
@@ -63,6 +69,20 @@ export function parseStoryboard(
   confirm = false,
 ): Promise<StoryboardTree> {
   return post<StoryboardTree>(`/storyboard/${id}/parse`, { text, confirm })
+}
+
+// Runner-backed, same confirm_required 409 shape as parseStoryboard --
+// callers should catch ApiError and re-call with confirm=true.
+export function composeStoryboard(
+  id: number,
+  body: {
+    stages?: ComposeStage[]
+    scene_ids?: number[]
+    panel_ids?: number[]
+    confirm?: boolean
+  },
+): Promise<{ status: string }> {
+  return post<{ status: string }>(`/storyboard/${id}/compose`, body)
 }
 
 export function synthesizeStoryboard(
@@ -182,4 +202,24 @@ export function selectPanelImage(
   return post<PanelWithoutImages>(`/storyboard/panels/${panelId}/select`, {
     image_id: imageId,
   })
+}
+
+export function createBeat(
+  panelId: number,
+  body: Partial<Omit<Beat, 'id' | 'panel_id' | 'created_at' | 'updated_at'>> & {
+    action: string
+  },
+): Promise<{ id: number }> {
+  return post<{ id: number }>(`/storyboard/panels/${panelId}/beats`, body)
+}
+
+export function patchBeat(
+  beatId: number,
+  body: Partial<Omit<Beat, 'id' | 'panel_id' | 'created_at' | 'updated_at'>>,
+): Promise<Beat> {
+  return patch<Beat>(`/storyboard/beats/${beatId}`, body)
+}
+
+export function deleteBeat(beatId: number): Promise<{ status: string }> {
+  return del<{ status: string }>(`/storyboard/beats/${beatId}`)
 }

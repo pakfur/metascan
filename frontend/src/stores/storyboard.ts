@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type {
+  Beat,
+  ComposeStage,
   Panel,
   PanelImage,
   Scene,
@@ -35,6 +37,13 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     total: 0,
     error: null,
   })
+  const story = ref<{
+    running: boolean
+    stage: ComposeStage | null
+    done: number
+    total: number
+    error: string | null
+  }>({ running: false, stage: null, done: 0, total: 0, error: null })
 
   // ---- getters ----------------------------------------------------------
   const selectedScene = computed<Scene | null>(() => {
@@ -385,6 +394,24 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  async function composeStory(body: {
+    stages?: ComposeStage[]
+    scene_ids?: number[]
+    panel_ids?: number[]
+    confirm?: boolean
+  }): Promise<void> {
+    // Optimistic before await: the WS story_progress can beat the HTTP
+    // response (same race as synthesize(), storyboard.ts:365-386).
+    story.value = { running: true, stage: null, done: 0, total: 0, error: null }
+    try {
+      if (!tree.value) throw new Error('no board loaded')
+      await api.composeStoryboard(tree.value.id, body)
+    } catch (e) {
+      story.value.running = false
+      throw e
+    }
+  }
+
   async function generate(panelIds?: number[], onlyFailed?: boolean): Promise<void> {
     if (!tree.value) return
     const body: { panel_ids?: number[]; only_failed?: boolean } = {}
@@ -468,6 +495,32 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     await refresh()
   }
 
+  // ---- actions: beat CRUD ------------------------------------------
+
+  async function addBeat(panelId: number, action: string): Promise<void> {
+    await api.createBeat(panelId, { action })
+    await refresh()
+  }
+
+  async function patchBeatFields(
+    beatId: number,
+    body: Partial<Omit<Beat, 'id' | 'panel_id' | 'created_at' | 'updated_at'>>,
+  ): Promise<void> {
+    const updated = await api.patchBeat(beatId, body)
+    const panel = panelById(updated.panel_id)
+    if (!panel) return
+    const idx = panel.beats.findIndex((b) => b.id === beatId)
+    if (idx >= 0) panel.beats[idx] = updated
+    panel.beats.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
+  }
+
+  async function removeBeat(beatId: number): Promise<void> {
+    await api.deleteBeat(beatId)
+    for (const scene of tree.value?.scenes ?? [])
+      for (const panel of scene.panels)
+        panel.beats = panel.beats.filter((b) => b.id !== beatId)
+  }
+
   // ---- WS wiring ------------------------------------------------------
   //
   // useWebSocket() registers its cleanup via Vue's onUnmounted, which only
@@ -517,6 +570,22 @@ export const useStoryboardStore = defineStore('storyboard', () => {
         // preserves selection) is the simplest correct way to pick up the
         // new image set.
         void refresh()
+      } else if (event === 'story_progress') {
+        story.value = {
+          running: true,
+          stage: (d.stage as ComposeStage) ?? null,
+          done: Number(d.done ?? 0),
+          total: Number(d.total ?? 0),
+          error: null,
+        }
+      } else if (event === 'story_stage_complete') {
+        void refresh() // each stage lands reviewable state immediately
+      } else if (event === 'story_complete') {
+        story.value.running = false
+        void refresh()
+      } else if (event === 'story_error') {
+        story.value.running = false
+        story.value.error = String(d.error ?? 'compose failed')
       }
     })
 
@@ -556,6 +625,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     jobToPanel,
     panelJobState,
     synthesis,
+    story,
     // getters
     selectedScene,
     selectedPanel,
@@ -584,6 +654,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     addSubject,
     patchSubjectFields,
     removeSubject,
+    composeStory,
+    addBeat,
+    patchBeatFields,
+    removeBeat,
     attachWs,
   }
 })
