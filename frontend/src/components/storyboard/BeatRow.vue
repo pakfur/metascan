@@ -4,7 +4,13 @@ import { useStoryboardStore } from '../../stores/storyboard'
 import type { Beat, DialogLine, Subject } from '../../types/storyboard'
 import { CAMERA_AMPLITUDES, CAMERA_MOTIONS, CAMERA_SPEEDS } from '../../types/storyboard'
 
-const props = defineProps<{ beat: Beat; subjects: Subject[] }>()
+const props = defineProps<{
+  beat: Beat
+  subjects: Subject[]
+  canMoveUp?: boolean
+  canMoveDown?: boolean
+}>()
+const emit = defineEmits<{ moveUp: []; moveDown: [] }>()
 const store = useStoryboardStore()
 
 // Local editable copies of the "commit on change" text fields, each paired
@@ -203,6 +209,24 @@ async function remove(): Promise<void> {
         <label class="beat-label">Sound</label>
         <input type="text" :value="soundVal" @input="onSoundInput" @change="onSoundChange" />
       </div>
+      <button
+        type="button"
+        class="beat-icon-btn"
+        title="Move beat up"
+        :disabled="!canMoveUp"
+        @click="emit('moveUp')"
+      >
+        ↑
+      </button>
+      <button
+        type="button"
+        class="beat-icon-btn"
+        title="Move beat down"
+        :disabled="!canMoveDown"
+        @click="emit('moveDown')"
+      >
+        ↓
+      </button>
       <button type="button" class="beat-icon-btn" title="Delete beat" @click="remove">✕</button>
     </div>
 
@@ -357,9 +381,14 @@ select:focus {
   flex-shrink: 0;
 }
 
-.beat-icon-btn:hover {
+.beat-icon-btn:hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--text-color);
+}
+
+.beat-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .beat-dialog {

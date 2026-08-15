@@ -498,7 +498,9 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   // ---- actions: beat CRUD ------------------------------------------
 
   async function addBeat(panelId: number, action: string): Promise<void> {
-    await api.createBeat(panelId, { action })
+    const panel = panelById(panelId)
+    const sort_order = panel ? panel.beats.length : 0
+    await api.createBeat(panelId, { action, sort_order })
     await refresh()
   }
 
