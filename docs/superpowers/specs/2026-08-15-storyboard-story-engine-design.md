@@ -207,10 +207,10 @@ async def compose_story(self, storyboard_id: int, *,
 
 ### 4.6 Prompts and grammars
 
-New YAML keys in `data/meta_prompt.yml` (hot-reloadable):
-`STORY_OUTLINE_SYSTEM`, `STORY_OUTLINE_GRAMMAR`, `STORY_SCENES_SYSTEM`,
-`STORY_SCENES_GRAMMAR`, `STORY_SHOTS_SYSTEM`, `STORY_SHOTS_GRAMMAR`,
-`STORY_BEATS_SYSTEM`, `STORY_BEATS_GRAMMAR`, plus user-prompt templates.
+System prompts live in `data/meta_prompt.yml` (`STORY_*_SYSTEM`); grammars
+are built in `metascan/core/storyboard_story.py` from the enum constants
+(the `PARSE_GRAMMAR` precedent) — grammars derive from code and cannot
+hot-reload from YAML.
 Python-side accessors in `metascan/core/storyboard_story.py` follow the
 `vlm_prompts.__getattr__` pattern. System prompts carry 1–2 few-shot
 exemplars each (compact, budget-conscious) and the uncensored directive
