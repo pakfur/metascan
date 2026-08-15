@@ -109,6 +109,19 @@
           </div>
           <textarea :value="promptVal" rows="4" @change="commitPrompt" />
         </div>
+
+        <div class="pd-field">
+          <label class="pd-label">Duration (s)</label>
+          <input
+            type="number"
+            step="0.5"
+            min="0.5"
+            :value="durationVal"
+            @change="commitDuration"
+          />
+        </div>
+
+        <BeatsEditor :panel="panel" />
       </div>
 
       <div class="pd-col pd-col-candidates">
@@ -158,6 +171,7 @@ import { SHOT_SIZES, ANGLES, LENSES } from '../../types/storyboard'
 import type { PanelImage } from '../../types/storyboard'
 import type { Media } from '../../types/media'
 import MediaViewer from '../viewer/MediaViewer.vue'
+import BeatsEditor from './BeatsEditor.vue'
 
 const store = useStoryboardStore()
 const panel = computed(() => store.selectedPanel)
@@ -186,6 +200,7 @@ const promptVal = ref('')
 const shotSizeVal = ref('')
 const angleVal = ref('')
 const lensVal = ref('')
+const durationVal = ref('0')
 
 const actionSnap = ref('')
 const notesSnap = ref('')
@@ -194,6 +209,7 @@ const promptSnap = ref('')
 const shotSizeSnap = ref('')
 const angleSnap = ref('')
 const lensSnap = ref('')
+const durationSnap = ref('0')
 
 function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): void {
   if (local.value === snap.value) {
@@ -220,6 +236,7 @@ watch(
     syncField(shotSizeVal, shotSizeSnap, p.shot_size ?? '')
     syncField(angleVal, angleSnap, p.angle ?? '')
     syncField(lensVal, lensSnap, p.lens ?? '')
+    syncField(durationVal, durationSnap, String(p.duration_s))
   },
   { immediate: true },
 )
@@ -312,6 +329,16 @@ function commitLens(e: Event): void {
   const next = val === '' ? null : val
   if (next === panel.value.lens) return
   void store.patchPanelFields(panel.value.id, { lens: next })
+}
+
+function commitDuration(e: Event): void {
+  const val = (e.target as HTMLInputElement).value
+  durationVal.value = val
+  durationSnap.value = val
+  if (!panel.value) return
+  const next = Math.max(0.5, Number(val) || panel.value.duration_s)
+  if (next === panel.value.duration_s) return
+  void store.patchPanelFields(panel.value.id, { duration_s: next })
 }
 
 function toggleSubject(id: number): void {
