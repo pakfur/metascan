@@ -349,6 +349,33 @@ metascan/
   prompts via `DeleteImagesDialog.vue` (purge / keep-in-library / cancel)
   on every panel, scene, and storyboard delete that affects generated
   images.
+- **Story engine composes outline → scenes → shots → beats as four staged
+  VLM calls.** `StoryboardRunner.compose_story` runs the requested stages
+  (a subset of `storyboard_story.STAGES`) inside `_compose_locked`, which
+  holds `_synth_lock` for the whole run (mutually exclusive with
+  `synthesize()`/`generate()`'s VLM-unload path) and emits `story_progress`
+  (per-stage done/total), `story_stage_complete`, and `story_complete` on
+  the `storyboard` WS channel; any exception stamps `_compose_stage` with
+  the stage it failed in so `story_error` names the right stage even when
+  the failure comes from `check_compose_gates` before the per-stage loop
+  starts. `POST /api/storyboard/{id}/compose` calls `check_compose_gates`
+  synchronously first and answers 409 `confirm_required` (or 400 for a
+  non-gate `StoryboardError`, e.g. no premise) before creating the 202
+  fire-and-forget task — outline (already has one) and scenes (rebuilding
+  destroys panel identity) are gated whenever content already exists,
+  shots are gated only when the target scenes already have panels, and
+  beats are never gated (rerolling beats is cheap and non-destructive).
+  The `beats` table (`ON DELETE CASCADE` from `panels`) stores dialog as a
+  JSON array column and camera fields as free-text columns whose values
+  `storyboard_story.py`'s validators constrain to a fixed enum, dropping
+  anything else to NULL rather than raising. Beat durations are rescaled
+  to fit each panel's `duration_s` entirely in code
+  (`rescale_beat_durations`), never by the VLM. Grammars (`OUTLINE_GRAMMAR`,
+  `SCENES_GRAMMAR`, `SHOTS_GRAMMAR`, `BEATS_GRAMMAR`) live in Python in
+  `storyboard_story.py`; system prompts (`STORY_OUTLINE_SYSTEM`,
+  `STORY_SCENES_SYSTEM`, `STORY_SHOTS_SYSTEM`, `STORY_BEATS_SYSTEM`) live in
+  `data/meta_prompt.yml` and hot-reload through the same `PromptStore` as
+  the render pipeline's prompts.
 - **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_panel_images` convert it through
