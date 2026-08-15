@@ -25,6 +25,16 @@
         >
           synthesis failed
         </span>
+        <span v-if="store.story.running" class="sb-chip">
+          Composing {{ store.story.stage }} {{ store.story.done }}/{{ store.story.total }}
+        </span>
+        <span
+          v-else-if="store.story.error"
+          class="sb-chip sb-chip--error"
+          :title="store.story.error"
+        >
+          compose failed
+        </span>
         <span v-if="store.error" class="sb-chip sb-chip--error" :title="store.error">
           <span class="sb-chip-text">{{ store.error }}</span>
           <button
@@ -43,6 +53,13 @@
             text
             :disabled="!store.tree"
             @click="importOpen = true"
+          />
+          <Button
+            label="Compose"
+            icon="pi pi-sparkles"
+            text
+            :disabled="!store.tree"
+            @click="composeOpen = true"
           />
           <Button
             label="Synthesize"
@@ -83,6 +100,7 @@
     </div>
 
     <ImportTextDialog v-if="importOpen" @close="importOpen = false" />
+    <OutlineDialog v-if="composeOpen" :open="composeOpen" @close="composeOpen = false" />
     <StoryboardSettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
   </div>
 </template>
@@ -97,12 +115,14 @@ import SceneStrip from '../components/storyboard/SceneStrip.vue'
 import PanelGrid from '../components/storyboard/PanelGrid.vue'
 import PanelDetail from '../components/storyboard/PanelDetail.vue'
 import ImportTextDialog from '../components/storyboard/ImportTextDialog.vue'
+import OutlineDialog from '../components/storyboard/OutlineDialog.vue'
 import StoryboardSettingsDialog from '../components/storyboard/StoryboardSettingsDialog.vue'
 
 const props = defineProps<{ id?: number }>()
 const { isMobile } = useViewport()
 const store = useStoryboardStore()
 const importOpen = ref(false)
+const composeOpen = ref(false)
 const settingsOpen = ref(false)
 
 // attachWs() registers its cleanup via onUnmounted from inside setup, so it
