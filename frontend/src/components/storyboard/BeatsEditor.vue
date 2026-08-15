@@ -19,6 +19,24 @@ async function rebeat(): Promise<void> {
 async function add(): Promise<void> {
   await store.addBeat(props.panel.id, 'new beat')
 }
+
+// Swap sort_order for the beats at `index` and `index + dir` (adjacent
+// positions in the displayed, already sort_order-sorted array). Computing
+// the swap from array positions rather than trusting the stored values to
+// already be a contiguous/distinct sequence keeps this correct even for
+// hand-added beats whose sort_order may collide with a neighbor's -- in
+// that case position indices are used instead of the (identical) stored
+// values, so the write always actually changes the order.
+async function moveBeat(index: number, dir: -1 | 1): Promise<void> {
+  const beats = props.panel.beats
+  const otherIndex = index + dir
+  if (otherIndex < 0 || otherIndex >= beats.length) return
+  const a = beats[index]
+  const b = beats[otherIndex]
+  const tie = a.sort_order === b.sort_order
+  await store.patchBeatFields(a.id, { sort_order: tie ? otherIndex : b.sort_order })
+  await store.patchBeatFields(b.id, { sort_order: tie ? index : a.sort_order })
+}
 </script>
 
 <template>
@@ -30,10 +48,14 @@ async function add(): Promise<void> {
     </label>
     <div class="beats-list">
       <BeatRow
-        v-for="b in panel.beats"
+        v-for="(b, i) in panel.beats"
         :key="b.id"
         :beat="b"
         :subjects="store.tree?.subjects ?? []"
+        :can-move-up="i > 0"
+        :can-move-down="i < panel.beats.length - 1"
+        @move-up="moveBeat(i, -1)"
+        @move-down="moveBeat(i, 1)"
       />
       <span v-if="panel.beats.length === 0" class="pd-hint">No beats yet.</span>
     </div>
