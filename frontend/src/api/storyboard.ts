@@ -37,6 +37,7 @@ export function patchStoryboard(
     // send an explicit clear, which the backend now honors via
     // exclude_unset=True rather than silently dropping it (exclude_none).
     source_text: string | null
+    outline: string | null
     aspect_ratio: string
     style_block: string | null
     negative: string | null
