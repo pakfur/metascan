@@ -177,7 +177,15 @@ class StoryboardRunner:
         confirm: bool,
     ) -> None:
         """Synchronous-shaped gate check so the route can 409 before the
-        202 fire-and-forget task starts. Small TOCTOU window accepted."""
+        202 fire-and-forget task starts. Small TOCTOU window accepted.
+
+        Every raise stamps ``exc._compose_stage`` with the stage the gate
+        failure actually concerns, so a direct ``compose_story(...,
+        stages=(...))`` call (which never enters the per-stage loop in
+        ``_compose_locked`` before this gate fires) still reports the
+        correct stage on the ``story_error`` event -- not the "outline"
+        fallback ``compose_story`` initializes ``stage`` to.
+        """
         unknown = set(stages) - set(story.STAGES)
         if unknown:
             raise StoryboardError(f"unknown stages: {', '.join(sorted(unknown))}")
@@ -185,26 +193,36 @@ class StoryboardRunner:
         if tree is None:
             raise StoryboardError(f"no storyboard with id {storyboard_id}")
         if "outline" in stages and not (tree.get("source_text") or "").strip():
-            raise StoryboardError("storyboard has no premise (source_text)")
+            exc: StoryboardError = StoryboardError(
+                "storyboard has no premise (source_text)"
+            )
+            exc._compose_stage = "outline"  # type: ignore[attr-defined]
+            raise exc
         if confirm:
             return
         if "outline" in stages and tree.get("outline"):
-            raise ConfirmRequiredError(
+            exc = ConfirmRequiredError(
                 "storyboard already has an outline — pass confirm=true"
             )
+            exc._compose_stage = "outline"  # type: ignore[attr-defined]
+            raise exc
         if "scenes" in stages and tree["scenes"]:
-            raise ConfirmRequiredError(
+            exc = ConfirmRequiredError(
                 "storyboard already has scenes; rebuilding destroys panel "
                 "identity — pass confirm=true"
             )
+            exc._compose_stage = "scenes"  # type: ignore[attr-defined]
+            raise exc
         if "shots" in stages:
             targets = [
                 s for s in tree["scenes"] if scene_ids is None or s["id"] in scene_ids
             ]
             if any(s["panels"] for s in targets):
-                raise ConfirmRequiredError(
+                exc = ConfirmRequiredError(
                     "target scenes already have shots — pass confirm=true"
                 )
+                exc._compose_stage = "shots"  # type: ignore[attr-defined]
+                raise exc
 
     async def compose_story(
         self,
