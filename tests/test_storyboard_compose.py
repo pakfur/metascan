@@ -160,6 +160,24 @@ def test_outline_confirm_gate(db, tmp_path):
     asyncio.run(runner.compose_story(sb, stages=("outline",), confirm=True))
 
 
+def test_shots_confirm_gate_reports_correct_stage(db, tmp_path):
+    """A gate failure on a non-outline stage, hit via compose_story (not a
+    direct check_compose_gates call), must attribute story_error to the
+    stage that actually failed -- not the "outline" fallback."""
+    vlm = FakeVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    events = []
+    runner.on_event(lambda ch, ev, d: events.append((ch, ev, d)))
+    sb = _board(db)
+    asyncio.run(runner.compose_story(sb))  # full cascade -- scenes have shots now
+    with pytest.raises(ConfirmRequiredError):
+        asyncio.run(runner.compose_story(sb, stages=("shots",)))
+    errs = [e for e in events if e[1] == "story_error"]
+    assert len(errs) == 1 and errs[0][2]["stage"] == "shots"
+
+
 def test_missing_premise_rejected(db, tmp_path):
     vlm = FakeVlm()
     runner = StoryboardRunner(
