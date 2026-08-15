@@ -49,7 +49,10 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
 _SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
 _PANEL_NOT_NULLABLE = frozenset(
-    {"sort_order", "action", "subject_ids", "prompt_locked"}
+    {"sort_order", "action", "subject_ids", "prompt_locked", "duration_s"}
+)
+_BEAT_NOT_NULLABLE = frozenset(
+    {"sort_order", "duration_s", "action", "is_cut", "dialog"}
 )
 
 
@@ -118,6 +121,7 @@ class StoryboardPatch(BaseModel):
     preset_id: Optional[int] = None
     base_seed: Optional[int] = None
     batch_size: Optional[int] = None
+    outline: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -127,6 +131,7 @@ class SubjectCreate(BaseModel):
     lora_strength: float = 0.8
     reference_path: Optional[str] = None
     sort_order: int = 0
+    voice: Optional[str] = None
 
 
 class SubjectPatch(BaseModel):
@@ -136,6 +141,7 @@ class SubjectPatch(BaseModel):
     lora_strength: Optional[float] = None
     reference_path: Optional[str] = None
     sort_order: Optional[int] = None
+    voice: Optional[str] = None
 
 
 class SceneCreate(BaseModel):
@@ -185,6 +191,7 @@ class PanelPatch(BaseModel):
     prompt_locked: Optional[bool] = None
     prompt_source: Optional[str] = None
     negative: Optional[str] = None
+    duration_s: Optional[float] = None
     # selected_image_id is deliberately NOT exposed here: selecting a
     # panel's keeper toggles media.hidden on the old/new keeper via
     # db.select_panel_image, and a raw PATCH would bypass that. Use
@@ -204,6 +211,45 @@ class SynthesizeRequest(BaseModel):
 class GenerateRequest(BaseModel):
     panel_ids: Optional[List[int]] = None
     only_failed: bool = False
+
+
+class ComposeRequest(BaseModel):
+    stages: Optional[List[str]] = None
+    scene_ids: Optional[List[int]] = None
+    panel_ids: Optional[List[int]] = None
+    confirm: bool = False
+
+
+class DialogLine(BaseModel):
+    subject_id: Optional[int] = None
+    voice: Optional[str] = None
+    delivery: Optional[str] = None
+    language: str = "English"
+    text: str
+
+
+class BeatCreate(BaseModel):
+    action: str
+    sort_order: int = 0
+    duration_s: float = 4.0
+    camera_motion: Optional[str] = None
+    camera_amplitude: Optional[str] = None
+    camera_speed: Optional[str] = None
+    is_cut: int = 0
+    dialog: List[DialogLine] = []
+    sound: Optional[str] = None
+
+
+class BeatPatch(BaseModel):
+    action: Optional[str] = None
+    sort_order: Optional[int] = None
+    duration_s: Optional[float] = None
+    camera_motion: Optional[str] = None
+    camera_amplitude: Optional[str] = None
+    camera_speed: Optional[str] = None
+    is_cut: Optional[int] = None
+    dialog: Optional[List[DialogLine]] = None
+    sound: Optional[str] = None
 
 
 class SelectRequest(BaseModel):
@@ -354,6 +400,42 @@ async def generate_storyboard(
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"jobs": job_ids}
+
+
+@router.post("/{storyboard_id}/compose", status_code=202)
+async def compose_storyboard(
+    storyboard_id: int, body: ComposeRequest
+) -> Dict[str, str]:
+    runner = _require_runner()
+    from metascan.core import storyboard_story as story
+
+    stages = tuple(body.stages) if body.stages else story.STAGES
+    try:
+        await runner.check_compose_gates(
+            storyboard_id, stages, body.scene_ids, body.confirm
+        )
+    except ConfirmRequiredError as exc:
+        # Must be caught before StoryboardError -- it's a subclass.
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "confirm_required", "message": str(exc)},
+        ) from exc
+    except StoryboardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    task = asyncio.create_task(
+        runner.compose_story(
+            storyboard_id,
+            stages=stages,
+            scene_ids=body.scene_ids,
+            panel_ids=body.panel_ids,
+            confirm=body.confirm,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {"status": "started"}
 
 
 @router.post("/{storyboard_id}/cancel")
@@ -519,3 +601,38 @@ async def select_panel_image(panel_id: int, body: SelectRequest) -> Dict[str, An
     if updated is None:
         raise HTTPException(status_code=404, detail=f"No panel {panel_id}")
     return updated
+
+
+# ---- beats ------------------------------------------------------------------
+
+
+@router.post("/panels/{panel_id}/beats")
+async def create_beat(panel_id: int, body: BeatCreate) -> Dict[str, int]:
+    svc = _service()
+    if not await svc.panel_exists(panel_id):
+        raise HTTPException(status_code=404, detail=f"No panel {panel_id}")
+    fields = body.model_dump()
+    beat_id = await svc.create_beat(panel_id, **fields)
+    return {"id": beat_id}
+
+
+@router.patch("/beats/{beat_id}")
+async def patch_beat(beat_id: int, body: BeatPatch) -> Dict[str, Any]:
+    svc = _service()
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _BEAT_NOT_NULLABLE)
+    existing = await svc.get_beat(beat_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"No beat {beat_id}")
+    if fields:
+        await svc.update_beat(beat_id, **fields)
+    updated = await svc.get_beat(beat_id)
+    return updated if updated is not None else existing
+
+
+@router.delete("/beats/{beat_id}")
+async def delete_beat(beat_id: int) -> Dict[str, str]:
+    ok = await _service().delete_beat(beat_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No beat {beat_id}")
+    return {"status": "deleted"}

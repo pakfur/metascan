@@ -182,3 +182,20 @@ class StoryboardService:
 
     async def select_panel_image(self, panel_id: int, image_id: Optional[int]) -> bool:
         return await asyncio.to_thread(self.db.select_panel_image, panel_id, image_id)
+
+    async def panel_exists(self, panel_id: int) -> bool:
+        return await asyncio.to_thread(_row_exists_sync, self.db, "panels", panel_id)
+
+    # ---- beats ------------------------------------------------------------
+
+    async def create_beat(self, panel_id: int, **fields: Any) -> int:
+        return await asyncio.to_thread(self.db.create_beat, panel_id, **fields)
+
+    async def get_beat(self, beat_id: int) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.db.get_beat, beat_id)
+
+    async def update_beat(self, beat_id: int, **fields: Any) -> None:
+        await asyncio.to_thread(self.db.update_beat, beat_id, **fields)
+
+    async def delete_beat(self, beat_id: int) -> bool:
+        return await asyncio.to_thread(self.db.delete_beat, beat_id)
