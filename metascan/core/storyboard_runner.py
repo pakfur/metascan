@@ -12,10 +12,11 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from metascan.core.comfy_bindings import Bindings, GenerationParams
+from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
     bucket_dims,
     compose_brief,
@@ -165,6 +166,292 @@ class StoryboardRunner:
         if fresh is None:
             raise StoryboardError(f"storyboard {storyboard_id} vanished during parse")
         return fresh
+
+    # ---- compose (story engine) --------------------------------------
+
+    async def check_compose_gates(
+        self,
+        storyboard_id: int,
+        stages: Sequence[str],
+        scene_ids: Optional[List[int]],
+        confirm: bool,
+    ) -> None:
+        """Synchronous-shaped gate check so the route can 409 before the
+        202 fire-and-forget task starts. Small TOCTOU window accepted."""
+        unknown = set(stages) - set(story.STAGES)
+        if unknown:
+            raise StoryboardError(f"unknown stages: {', '.join(sorted(unknown))}")
+        tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
+        if tree is None:
+            raise StoryboardError(f"no storyboard with id {storyboard_id}")
+        if "outline" in stages and not (tree.get("source_text") or "").strip():
+            raise StoryboardError("storyboard has no premise (source_text)")
+        if confirm:
+            return
+        if "outline" in stages and tree.get("outline"):
+            raise ConfirmRequiredError(
+                "storyboard already has an outline — pass confirm=true"
+            )
+        if "scenes" in stages and tree["scenes"]:
+            raise ConfirmRequiredError(
+                "storyboard already has scenes; rebuilding destroys panel "
+                "identity — pass confirm=true"
+            )
+        if "shots" in stages:
+            targets = [
+                s for s in tree["scenes"] if scene_ids is None or s["id"] in scene_ids
+            ]
+            if any(s["panels"] for s in targets):
+                raise ConfirmRequiredError(
+                    "target scenes already have shots — pass confirm=true"
+                )
+
+    async def compose_story(
+        self,
+        storyboard_id: int,
+        *,
+        stages: Sequence[str] = story.STAGES,
+        scene_ids: Optional[List[int]] = None,
+        panel_ids: Optional[List[int]] = None,
+        confirm: bool = False,
+    ) -> Dict[str, int]:
+        stage = "outline"
+        try:
+            counts = await self._compose_locked(
+                storyboard_id,
+                stages=stages,
+                scene_ids=scene_ids,
+                panel_ids=panel_ids,
+                confirm=confirm,
+            )
+        except Exception as exc:
+            stage = getattr(exc, "_compose_stage", stage)
+            self._emit(
+                "storyboard",
+                "story_error",
+                {"storyboard_id": storyboard_id, "stage": stage, "error": str(exc)},
+            )
+            raise
+        self._emit(
+            "storyboard",
+            "story_complete",
+            {"storyboard_id": storyboard_id, "counts": counts},
+        )
+        return counts
+
+    async def _compose_locked(
+        self,
+        storyboard_id: int,
+        *,
+        stages: Sequence[str],
+        scene_ids: Optional[List[int]],
+        panel_ids: Optional[List[int]],
+        confirm: bool,
+    ) -> Dict[str, int]:
+        vlm = self.get_vlm()
+        if vlm is None:
+            raise StoryboardError("no VLM client — composing requires a VLM")
+        await self.check_compose_gates(storyboard_id, stages, scene_ids, confirm)
+
+        run_stages = [s for s in story.STAGES if s in set(stages)]
+        counts: Dict[str, int] = {}
+        current = "outline"
+        try:
+            async with self._synth_lock:
+                model_id = self._pick_vlm_model(vlm)
+                await vlm.ensure_started(model_id)
+                from metascan.core.vlm_models import REGISTRY
+
+                slots = 2
+                spec = REGISTRY.get(model_id)
+                if spec is not None:
+                    slots = spec.parallel_slots
+                sem = asyncio.Semaphore(slots)
+
+                for current in run_stages:
+                    n = await self._run_stage(
+                        current, vlm, sem, storyboard_id, scene_ids, panel_ids
+                    )
+                    counts[current] = n
+                    self._emit(
+                        "storyboard",
+                        "story_stage_complete",
+                        {"storyboard_id": storyboard_id, "stage": current},
+                    )
+        except Exception as exc:
+            exc._compose_stage = current  # type: ignore[attr-defined]
+            raise
+        return counts
+
+    async def _run_stage(
+        self,
+        stage: str,
+        vlm: Any,
+        sem: asyncio.Semaphore,
+        storyboard_id: int,
+        scene_ids: Optional[List[int]],
+        panel_ids: Optional[List[int]],
+    ) -> int:
+        tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
+        assert tree is not None
+        roster = {s["name"].strip().lower(): int(s["id"]) for s in tree["subjects"]}
+
+        def progress(done: int, total: int) -> None:
+            self._emit(
+                "storyboard",
+                "story_progress",
+                {
+                    "storyboard_id": storyboard_id,
+                    "stage": stage,
+                    "done": done,
+                    "total": total,
+                },
+            )
+
+        if stage == "outline":
+            progress(0, 1)
+            raw = await vlm.generate_text(
+                system_prompt=story.STORY_OUTLINE_SYSTEM,
+                user_prompt=story.build_outline_user_prompt(
+                    tree["source_text"], tree["subjects"]
+                ),
+                grammar=story.OUTLINE_GRAMMAR,
+                temperature=0.7,
+                max_tokens=1500,
+                timeout=600.0,
+            )
+            outline = story.validate_outline_response(raw)
+            await asyncio.to_thread(
+                self.db.update_storyboard,
+                storyboard_id,
+                outline=json.dumps(outline),
+            )
+            created = 0
+            for i, subj in enumerate(outline["subjects"]):
+                if subj["name"].strip().lower() in roster:
+                    continue  # user's existing description wins
+                await asyncio.to_thread(
+                    self.db.create_subject,
+                    storyboard_id,
+                    name=subj["name"],
+                    description=subj["description"],
+                    voice=subj.get("voice"),
+                    sort_order=len(roster) + created,
+                )
+                created += 1
+            progress(1, 1)
+            return 1
+
+        outline_json = tree.get("outline") or ""
+        if not outline_json:
+            raise StoryboardError(f"stage {stage!r} needs an outline first")
+
+        if stage == "scenes":
+            progress(0, 1)
+            raw = await vlm.generate_text(
+                system_prompt=story.STORY_SCENES_SYSTEM,
+                user_prompt=story.build_scenes_user_prompt(outline_json),
+                grammar=story.SCENES_GRAMMAR,
+                temperature=0.7,
+                max_tokens=1200,
+                timeout=300.0,
+            )
+            scenes = story.validate_scenes_response(raw)
+            await asyncio.to_thread(
+                self.db.replace_storyboard_scenes, storyboard_id, scenes
+            )
+            progress(1, 1)
+            return len(scenes)
+
+        if stage == "shots":
+            targets = [
+                (i, s)
+                for i, s in enumerate(tree["scenes"])
+                if scene_ids is None or s["id"] in scene_ids
+            ]
+            total = len(targets)
+            done = 0
+            lock = asyncio.Lock()
+            made = 0
+
+            async def _shots_for(idx: int, scene: Dict[str, Any]) -> int:
+                nonlocal done
+                prev_name = tree["scenes"][idx - 1]["name"] if idx > 0 else None
+                next_name = (
+                    tree["scenes"][idx + 1]["name"]
+                    if idx + 1 < len(tree["scenes"])
+                    else None
+                )
+                async with sem:
+                    raw = await vlm.generate_text(
+                        system_prompt=story.STORY_SHOTS_SYSTEM,
+                        user_prompt=story.build_shots_user_prompt(
+                            outline_json,
+                            scene,
+                            tree["subjects"],
+                            prev_name,
+                            next_name,
+                        ),
+                        grammar=story.SHOTS_GRAMMAR,
+                        temperature=0.6,
+                        max_tokens=800,
+                        timeout=300.0,
+                    )
+                panels, warnings = story.validate_shots_response(raw, roster)
+                for w in warnings:
+                    logger.warning("compose shots (%s): %s", scene["name"], w)
+                await asyncio.to_thread(
+                    self.db.replace_scene_panels, scene["id"], panels
+                )
+                async with lock:
+                    done += 1
+                    progress(done, total)
+                return len(panels)
+
+            results = await asyncio.gather(*(_shots_for(i, s) for i, s in targets))
+            made = sum(results)
+            return made
+
+        # stage == "beats"
+        work = [
+            (scene, panel)
+            for scene in tree["scenes"]
+            for panel in scene["panels"]
+            if panel_ids is None or panel["id"] in panel_ids
+        ]
+        logline = ""
+        try:
+            logline = json.loads(outline_json).get("logline", "")
+        except (TypeError, ValueError):
+            pass
+        total = len(work)
+        done = 0
+        lock = asyncio.Lock()
+
+        async def _beats_for(scene: Dict[str, Any], panel: Dict[str, Any]) -> int:
+            nonlocal done
+            subjects = [s for s in tree["subjects"] if s["id"] in panel["subject_ids"]]
+            async with sem:
+                raw = await vlm.generate_text(
+                    system_prompt=story.STORY_BEATS_SYSTEM,
+                    user_prompt=story.build_beats_user_prompt(
+                        logline, scene, panel, subjects
+                    ),
+                    grammar=story.BEATS_GRAMMAR,
+                    temperature=0.6,
+                    max_tokens=900,
+                    timeout=300.0,
+                )
+            beats = story.validate_beats_response(raw, roster)
+            story.rescale_beat_durations(beats, float(panel.get("duration_s") or 12.0))
+            await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
+            async with lock:
+                done += 1
+                progress(done, total)
+            return len(beats)
+
+        results = await asyncio.gather(*(_beats_for(s, p) for s, p in work))
+        return sum(results)
 
     # ---- synthesize ----------------------------------------------------
 
