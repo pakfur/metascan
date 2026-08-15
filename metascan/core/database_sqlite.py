@@ -1968,6 +1968,79 @@ class DatabaseManager:
                 )
                 conn.commit()
 
+    def replace_storyboard_scenes(
+        self, storyboard_id: int, scenes: List[Dict[str, Any]]
+    ) -> List[int]:
+        """Destructively replace all scenes (compose stage 2); subjects are
+        untouched. Releases panel media/jobs first — see _release_panels."""
+        with self.lock, self._get_connection() as conn:
+            panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
+            self._release_panels(conn, panel_ids)
+            conn.execute("DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,))
+            new_ids: List[int] = []
+            for i, sc in enumerate(scenes):
+                cur = conn.execute(
+                    "INSERT INTO scenes (storyboard_id, sort_order, name, "
+                    "subtitle, setting, location, time_of_day, mood, "
+                    "lighting, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        storyboard_id,
+                        i,
+                        sc["name"],
+                        sc.get("subtitle"),
+                        sc.get("setting"),
+                        sc.get("location"),
+                        sc.get("time_of_day"),
+                        sc.get("mood"),
+                        sc.get("lighting"),
+                        sc.get("notes"),
+                    ),
+                )
+                new_ids.append(int(cur.lastrowid))
+            conn.execute(
+                "UPDATE storyboards SET updated_at = datetime('now') " "WHERE id = ?",
+                (storyboard_id,),
+            )
+            conn.commit()
+            return new_ids
+
+    def replace_scene_panels(
+        self, scene_id: int, panels: List[Dict[str, Any]]
+    ) -> List[int]:
+        """Destructively replace one scene's panels (compose stage 3).
+        ``panels`` carry resolved subject_ids + duration_s."""
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            old_ids = [
+                int(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
+                ).fetchall()
+            ]
+            self._release_panels(conn, old_ids)
+            conn.execute("DELETE FROM panels WHERE scene_id = ?", (scene_id,))
+            new_ids: List[int] = []
+            for i, p in enumerate(panels):
+                cur = conn.execute(
+                    "INSERT INTO panels (scene_id, sort_order, shot_size, "
+                    "angle, lens, action, subject_ids, duration_s) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        scene_id,
+                        i,
+                        p.get("shot_size"),
+                        p.get("angle"),
+                        p.get("lens"),
+                        p["action"],
+                        _json.dumps(list(p.get("subject_ids") or [])),
+                        p.get("duration_s", 12.0),
+                    ),
+                )
+                new_ids.append(int(cur.lastrowid))
+            conn.commit()
+            return new_ids
+
     def get_storyboard_tree(self, storyboard_id: int) -> Optional[Dict[str, Any]]:
         import json as _json
 
