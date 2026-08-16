@@ -1314,6 +1314,11 @@ class StoryboardRunner:
                 issues.append(
                     f"panel {pid}: video_mode {mode!r} requires a video_anchor"
                 )
+            if (anchor or mode in ("i2va", "fl2va")) and bindings.first_frame is None:
+                issues.append(
+                    f"panel {pid}: anchor set but the video preset has no "
+                    "MS_FIRST_FRAME node"
+                )
             if anchor == "keeper":
                 image = _panel_image_by_id(panel, panel.get("selected_image_id"))
                 if image is None:
@@ -1481,7 +1486,11 @@ class StoryboardRunner:
                     ref_images=ref_images,
                     first_frame=first_frame,
                     audio_refs=audio_refs,
-                    duration_s=panel.get("duration_s"),
+                    duration_s=(
+                        panel.get("duration_s")
+                        if bindings.duration is not None
+                        else None
+                    ),
                 )
                 output_dir = (
                     self.output_root

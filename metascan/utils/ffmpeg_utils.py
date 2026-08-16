@@ -150,7 +150,15 @@ def extract_last_frame(video_path: Path, out_png: Path) -> None:
         str(out_png),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=False)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=False, timeout=FFMPEG_FRAME_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"ffmpeg timed out after {FFMPEG_FRAME_TIMEOUT}s extracting last "
+            f"frame from {video_path}"
+        )
 
     if result.returncode != 0:
         stderr_tail = result.stderr.decode(errors="replace")[-300:]
