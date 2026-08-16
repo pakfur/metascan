@@ -38,6 +38,12 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     total: 0,
     error: null,
   })
+  const compile = ref<{ running: boolean; done: number; total: number; error: string | null }>({
+    running: false,
+    done: 0,
+    total: 0,
+    error: null,
+  })
   const story = ref<{
     running: boolean
     stage: ComposeStage | null
@@ -156,9 +162,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const seq = ++loadSeq
     loading.value = true
     error.value = null
-    // A board switch always supersedes any synthesis banner left over from
-    // whatever board was previously loaded (or mid-flight).
+    // A board switch always supersedes any synthesis/compile banner left
+    // over from whatever board was previously loaded (or mid-flight).
     synthesis.value = { running: false, done: 0, total: 0, error: null }
+    compile.value = { running: false, done: 0, total: 0, error: null }
     // Navigating to a DIFFERENT board (or there's no tree at all yet) must
     // clear the previously-rendered board's state before the fetch, not
     // after: a failed fetch otherwise leaves the OLD board's tree fully
@@ -407,6 +414,26 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  async function compileVideo(panelIds?: number[], force?: boolean): Promise<void> {
+    if (!tree.value) return
+    const body: { panel_ids?: number[]; force?: boolean } = {}
+    if (panelIds !== undefined) body.panel_ids = panelIds
+    if (force !== undefined) body.force = force
+    // Set the banner optimistically BEFORE the await -- same race as
+    // synthesize() (compile_progress/compile_complete can beat the HTTP 202
+    // response back over the WS channel).
+    compile.value = { running: true, done: 0, total: 0, error: null }
+    try {
+      const res = await api.compileStoryboard(tree.value.id, body)
+      // Only fill in the real total if nothing has already reported
+      // completion/failure via WS while this request was in flight.
+      if (compile.value.running) compile.value.total = res.total
+    } catch (e) {
+      compile.value = { running: false, done: 0, total: 0, error: errMessage(e) }
+      error.value = errMessage(e)
+    }
+  }
+
   async function composeStory(body: {
     stages?: ComposeStage[]
     scene_ids?: number[]
@@ -602,6 +629,28 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       } else if (event === 'story_error') {
         story.value.running = false
         story.value.error = String(d.error ?? 'compose failed')
+      } else if (event === 'compile_progress') {
+        compile.value = {
+          running: true,
+          done: d.done as number,
+          total: d.total as number,
+          error: null,
+        }
+      } else if (event === 'compile_complete') {
+        compile.value = {
+          running: false,
+          done: compile.value.total,
+          total: compile.value.total,
+          error: null,
+        }
+        void refresh()
+      } else if (event === 'compile_error') {
+        compile.value = {
+          running: false,
+          done: compile.value.done,
+          total: compile.value.total,
+          error: String(d.error ?? 'compile failed'),
+        }
       }
     })
 
@@ -642,6 +691,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     jobToPanel,
     panelJobState,
     synthesis,
+    compile,
     story,
     // getters
     selectedScene,
@@ -665,6 +715,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     removePanel,
     importText,
     synthesize,
+    compileVideo,
     generate,
     cancelAll,
     selectImage,

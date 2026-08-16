@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
-import type { Panel } from '../../types/storyboard'
+import { VIDEO_TARGET_CAPS, DEFAULT_SHOT_CAP, type Panel } from '../../types/storyboard'
 import BeatRow from './BeatRow.vue'
 
 const props = defineProps<{ panel: Panel }>()
@@ -9,7 +9,10 @@ const store = useStoryboardStore()
 
 const total = computed(() => props.panel.beats.reduce((s, b) => s + b.duration_s, 0))
 const overShot = computed(() => total.value > props.panel.duration_s + 0.5)
-const overH3 = computed(() => total.value > 15)
+const shotCap = computed(
+  () => VIDEO_TARGET_CAPS[store.tree?.video_target ?? ''] ?? DEFAULT_SHOT_CAP,
+)
+const overH3 = computed(() => total.value > shotCap.value)
 const composing = computed(() => store.story.running)
 
 async function rebeat(): Promise<void> {

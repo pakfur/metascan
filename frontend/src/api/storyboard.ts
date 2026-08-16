@@ -46,6 +46,8 @@ export function patchStoryboard(
     preset_id: number | null
     base_seed: number
     batch_size: number
+    video_target: string | null
+    video_mode: string | null
   }>,
 ): Promise<{ status: string }> {
   return patch<{ status: string }>(`/storyboard/${id}`, body)
@@ -91,6 +93,14 @@ export function synthesizeStoryboard(
   body: { panel_ids?: number[]; force?: boolean } = {},
 ): Promise<{ status: string; total: number }> {
   return post<{ status: string; total: number }>(`/storyboard/${id}/synthesize`, body)
+}
+
+// Runner-backed. 400 when the storyboard's video_target isn't 'minimax'.
+export function compileStoryboard(
+  id: number,
+  body: { panel_ids?: number[]; force?: boolean } = {},
+): Promise<{ status: string; total: number }> {
+  return post<{ status: string; total: number }>(`/storyboard/${id}/compile`, body)
 }
 
 export function generateStoryboard(
@@ -197,7 +207,10 @@ export function createPanel(
 
 // Backend returns `db.get_panel`, which never carries `images` (only
 // `get_storyboard_tree` assembles that array) -- callers must merge the
-// images they already have for this panel back onto the result.
+// images they already have for this panel back onto the result. `body` also
+// accepts `video_prompt?: string | null` (non-null forces
+// video_prompt_locked=1/video_prompt_source='user' server-side; null clears
+// all three video-prompt fields) and `video_prompt_locked?: 0 | 1`.
 export function patchPanel(
   panelId: number,
   body: Record<string, unknown>,
