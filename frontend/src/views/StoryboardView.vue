@@ -119,7 +119,13 @@
         <div class="sb-main">
           <SceneStrip />
           <PanelGrid />
-          <PanelDetail v-if="store.selectedPanel" />
+          <div
+            v-if="store.selectedPanel"
+            class="sb-divider"
+            title="Drag to resize"
+            @pointerdown="startDetailDrag"
+          />
+          <PanelDetail v-if="store.selectedPanel" :style="detailStyle" />
         </div>
         <PanelSidePanel v-if="store.selectedPanel" class="sb-side" />
       </div>
@@ -131,6 +137,12 @@
     <StoryboardSettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
   </div>
 </template>
+
+<script lang="ts">
+// Module scope, not component state: the dragged detail-panel height
+// survives navigating between boards but resets with the page itself.
+let savedDetailHeight: number | null = null
+</script>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
@@ -152,6 +164,40 @@ const store = useStoryboardStore()
 const importOpen = ref(false)
 const composeOpen = ref(false)
 const settingsOpen = ref(false)
+
+const detailHeight = ref<number | null>(savedDetailHeight)
+
+// null = untouched: PanelDetail keeps its default auto height capped at
+// 44vh. Once dragged, the explicit height wins (max-height lifted).
+const detailStyle = computed(() =>
+  detailHeight.value === null
+    ? undefined
+    : { height: `${detailHeight.value}px`, maxHeight: 'none' },
+)
+
+function startDetailDrag(down: PointerEvent): void {
+  const divider = down.currentTarget as HTMLElement
+  const detail = divider.nextElementSibling as HTMLElement | null
+  if (!detail) return
+  down.preventDefault()
+  const startY = down.clientY
+  const startHeight = detail.getBoundingClientRect().height
+  divider.setPointerCapture(down.pointerId)
+  const onMove = (move: PointerEvent) => {
+    const raw = startHeight + (startY - move.clientY)
+    const max = Math.max(120, window.innerHeight - 240)
+    detailHeight.value = Math.min(max, Math.max(120, Math.round(raw)))
+    savedDetailHeight = detailHeight.value
+  }
+  const onUp = () => {
+    divider.removeEventListener('pointermove', onMove)
+    divider.removeEventListener('pointerup', onUp)
+    divider.removeEventListener('pointercancel', onUp)
+  }
+  divider.addEventListener('pointermove', onMove)
+  divider.addEventListener('pointerup', onUp)
+  divider.addEventListener('pointercancel', onUp)
+}
 
 // attachWs() registers its cleanup via onUnmounted from inside setup, so it
 // must be called exactly once here in the script setup body -- never from
@@ -193,11 +239,35 @@ watch(
 </script>
 
 <style scoped>
+/* #app is height:100% + overflow:hidden; without an explicit height here
+   the view grows with content and every inner overflow-y:auto (grid,
+   detail, side panel) has nothing to scroll within. */
+.storyboard-view {
+  height: 100%;
+  min-height: 0;
+}
+
 .sb-root {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+
+.sb-divider {
+  flex-shrink: 0;
+  height: 5px;
+  margin: -2px 0;
+  cursor: row-resize;
+  z-index: 5;
+  touch-action: none;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.sb-divider:hover,
+.sb-divider:active {
+  background: var(--primary-color);
 }
 
 .sb-header {
@@ -301,6 +371,8 @@ watch(
 }
 
 .storyboard-shell {
+  height: 100%;
+  overflow-y: auto;
   padding: 32px 20px;
 }
 </style>
