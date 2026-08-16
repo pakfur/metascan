@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -28,9 +29,13 @@ from backend.services.storyboard_service import (
     ParentNotFoundError,
     StoryboardService,
 )
+from metascan.core import ref_describe as rd
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
+from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
+from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +504,49 @@ async def delete_subject(subject_id: int) -> Dict[str, str]:
     return {"status": "deleted"}
 
 
+@router.post("/subjects/{subject_id}/describe")
+async def describe_subject(subject_id: int) -> Dict[str, Any]:
+    """VLM-describe a subject from its reference image(s).
+
+    Review-only -- never writes description/voice back to the DB; the
+    caller decides whether to accept the suggestion via a normal PATCH.
+    """
+    from backend.api.vlm import get_vlm_client
+
+    vlm = get_vlm_client()
+    if vlm is None:
+        raise HTTPException(status_code=503, detail="no VLM client configured")
+    svc = _service()
+    subject = await svc.get_subject(subject_id)
+    if subject is None:
+        raise HTTPException(status_code=404, detail="subject not found")
+    refs = [
+        p for p in (subject.get("reference_path"), subject.get("reference_path_2")) if p
+    ]
+    if not refs:
+        raise HTTPException(status_code=400, detail="no reference image set")
+    try:
+        model_id = pick_vlm_model(vlm)
+    except VlmSelectError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    await vlm.ensure_started(model_id)
+    try:
+        raw = await vlm.generate_text(
+            system_prompt=rd.REF_DESCRIBE_SUBJECT_SYSTEM,
+            user_prompt=rd.SUBJECT_USER_PROMPT,
+            image_paths=[Path(to_native_path(p)) for p in refs],
+            grammar=rd.SUBJECT_DESCRIBE_GRAMMAR,
+            temperature=0.3,
+            max_tokens=400,
+            timeout=180.0,
+        )
+        return rd.validate_subject_describe(raw)
+    except VlmError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except rd.DescribeError as e:
+        raise HTTPException(status_code=502, detail=f"unusable VLM output: {e}")
+
+
 # ---- scenes ---------------------------------------------------------------
 
 
@@ -546,6 +594,47 @@ async def delete_scene(scene_id: int, purge_images: bool = False) -> Dict[str, s
     if not ok:
         raise HTTPException(status_code=404, detail=f"No scene {scene_id}")
     return {"status": "deleted"}
+
+
+@router.post("/scenes/{scene_id}/describe")
+async def describe_scene(scene_id: int) -> Dict[str, Any]:
+    """VLM-describe a scene from its reference image.
+
+    Review-only -- never writes setting/lighting/mood back to the DB; the
+    caller decides whether to accept the suggestion via a normal PATCH.
+    """
+    from backend.api.vlm import get_vlm_client
+
+    vlm = get_vlm_client()
+    if vlm is None:
+        raise HTTPException(status_code=503, detail="no VLM client configured")
+    svc = _service()
+    scene = await svc.get_scene(scene_id)
+    if scene is None:
+        raise HTTPException(status_code=404, detail="scene not found")
+    ref = scene.get("reference_path")
+    if not ref:
+        raise HTTPException(status_code=400, detail="no reference image set")
+    try:
+        model_id = pick_vlm_model(vlm)
+    except VlmSelectError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    await vlm.ensure_started(model_id)
+    try:
+        raw = await vlm.generate_text(
+            system_prompt=rd.REF_DESCRIBE_SETTING_SYSTEM,
+            user_prompt=rd.SETTING_USER_PROMPT,
+            image_paths=[Path(to_native_path(ref))],
+            grammar=rd.SETTING_DESCRIBE_GRAMMAR,
+            temperature=0.3,
+            max_tokens=400,
+            timeout=180.0,
+        )
+        return rd.validate_setting_describe(raw)
+    except VlmError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except rd.DescribeError as e:
+        raise HTTPException(status_code=502, detail=f"unusable VLM output: {e}")
 
 
 # ---- panels -----------------------------------------------------------------
