@@ -609,22 +609,35 @@ def test_deterministic_only_produces_doc_without_vlm(db, tmp_path):
 
 def test_compile_appends_audio_sections_and_records_anchor(db, tmp_path):
     """A voice_ref-carrying subject who actually speaks in the panel's
-    beats gets <Audio N> definition/retention lines appended, and the
-    success write records video_compiled_anchor from the panel's
-    video_anchor at compile time."""
+    beats gets <Audio N> definition/retention lines appended, those lines
+    lint clean (regression coverage for the retention_marker vocabulary
+    split -- §4.2 audio markers vs §4.1 subject markers), and the success
+    write records video_compiled_anchor from the panel's video_anchor at
+    compile time. Uses a full (non-deterministic) compile against a real
+    lint-clean body, not deterministic_only -- the deterministic fallback
+    body is always too short to clear the word_count floor on its own and
+    would fail regardless of the audio lines, which would mask a
+    retention_marker regression exactly as it did before this test was
+    strengthened."""
     sb = _make_storyboard(db)
     _, panel_id, subject_id = _make_panel(
         db, sb, voice_ref_path="/refs/grandma_voice.wav"
     )
     db.update_panel(panel_id, video_anchor="keeper")
+    scaffold, expect = _expect_and_scaffold(db, sb, panel_id)
+    valid_body = make_valid_body(scaffold, expect)
+    vlm = FakeVlm(body_response=valid_body)
     runner = StoryboardRunner(
-        db=db, comfy=None, get_vlm=lambda: None, output_root=tmp_path
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
 
-    counts = asyncio.run(runner.compile_video(sb, deterministic_only=True))
-    assert counts["compiled"] + counts["failed"] == 1
+    counts = asyncio.run(runner.compile_video(sb))
+    assert counts["compiled"] == 1
+    assert counts["failed"] == 0
+    assert vlm.body_calls == 1  # no retry needed -- audio lines don't trip lint
 
     panel = db.get_panel(panel_id)
+    assert not any("retention_marker" in w for w in panel["video_prompt_warnings"])
     doc = panel["video_prompt"]
     assert doc is not None
     assert "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)." in doc

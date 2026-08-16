@@ -989,6 +989,39 @@ def test_lint_retention_marker_flags_unknown_value() -> None:
     assert any(e.code == "retention_marker" and e.severity == "error" for e in errors)
 
 
+def test_lint_accepts_audio_reference_marker_but_rejects_it_on_subject_lines() -> None:
+    """ref-guide §4.2: <Audio N> retention lines use their own marker
+    vocabulary (fully_copy/partially_copy/reference/weak_reference),
+    distinct from the §4.1 set that applies to <Subject N>/<Picture N>
+    lines -- a merged marker set would wrongly accept "fully_copy" on a
+    Subject line, which this also checks for."""
+    parts = _fixture_parts()
+    dd = _SHOT1 + "\n" + _SHOT2
+
+    audio_line = (
+        "<Audio 1>: reference - the target speaker follows <Audio 1>'s "
+        "voice timbre and delivery without copying the original signal."
+    )
+    parts_with_audio = dict(parts)
+    parts_with_audio["retention_analysis"] = "\n".join(
+        [parts["retention_analysis"], audio_line]
+    )
+    text = _assemble_doc(parts_with_audio, dd)
+    errors = lint_h3_prompt(text, parts["expect"])
+    assert not any(e.code == "retention_marker" for e in errors)
+
+    bad_line = "<Subject 1>: fully_copy - reused from the reference verbatim."
+    parts_with_bad = dict(parts)
+    parts_with_bad["retention_analysis"] = "\n".join(
+        [parts["retention_analysis"], bad_line]
+    )
+    bad_text = _assemble_doc(parts_with_bad, dd)
+    bad_errors = lint_h3_prompt(bad_text, parts["expect"])
+    assert any(
+        e.code == "retention_marker" and e.severity == "error" for e in bad_errors
+    )
+
+
 def test_lint_soundscape_missing_when_empty() -> None:
     text, expect = _known_good_doc()
     mutated = text.replace(_SOUNDSCAPE, "", 1)

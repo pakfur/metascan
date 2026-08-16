@@ -801,6 +801,14 @@ _RETENTION_LINE_RE = re.compile(r":\s*([A-Za-z_]+)\s*-")
 _RETENTION_MARKERS: FrozenSet[str] = frozenset(
     {"fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference"}
 )
+# ref-guide §4.2: <Audio N> retention lines use their own marker vocabulary,
+# distinct from the §4.1 set above -- a single merged set would wrongly
+# allow e.g. "fully_copy" on a <Subject N> line. Kept separate and applied
+# per-line (see _lint_retention_and_sound) based on whether the line starts
+# with "<Audio".
+_AUDIO_RETENTION_MARKERS: FrozenSet[str] = frozenset(
+    {"fully_copy", "partially_copy", "reference", "weak_reference"}
+)
 
 # Opposite-direction camera phrase pairs (canonical phrasing from
 # ``_CAMERA_PHRASES``). Two members of the same pair inside one shot's text
@@ -1168,7 +1176,12 @@ def _lint_retention_and_sound(sections: Dict[str, str]) -> List[LintError]:
         if m is None:
             continue
         marker = m.group(1)
-        if marker not in _RETENTION_MARKERS:
+        valid_markers = (
+            _AUDIO_RETENTION_MARKERS
+            if line.startswith("<Audio")
+            else _RETENTION_MARKERS
+        )
+        if marker not in valid_markers:
             errors.append(
                 LintError(
                     "retention_marker",
