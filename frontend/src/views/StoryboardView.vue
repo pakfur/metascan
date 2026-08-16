@@ -35,6 +35,16 @@
         >
           compose failed
         </span>
+        <span v-if="store.compile.running" class="sb-chip">
+          Compiling {{ store.compile.done }}/{{ store.compile.total }}
+        </span>
+        <span
+          v-else-if="store.compile.error"
+          class="sb-chip sb-chip--error"
+          :title="store.compile.error"
+        >
+          compile failed
+        </span>
         <span v-if="store.error" class="sb-chip sb-chip--error" :title="store.error">
           <span class="sb-chip-text">{{ store.error }}</span>
           <button
@@ -66,6 +76,13 @@
             text
             :disabled="store.loading || !store.tree"
             @click="store.synthesize()"
+          />
+          <Button
+            v-if="store.tree?.video_target"
+            label="Compile video prompts"
+            text
+            :disabled="store.compile.running || store.synthesis.running || store.story.running"
+            @click="store.compileVideo()"
           />
           <Button
             label="Generate all"

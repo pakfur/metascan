@@ -129,6 +129,10 @@ function close(): void {
         Write a premise, generate an outline, then build scenes, shots and beats from it.
       </p>
 
+      <p v-if="store.tree?.video_target" class="hint video-echo">
+        Video: MiniMax H3 · {{ store.tree.video_mode || 'ref2va' }} (change in Settings)
+      </p>
+
       <label class="field-label">Premise</label>
       <textarea
         v-model="premise"

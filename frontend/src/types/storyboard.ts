@@ -64,6 +64,10 @@ export interface Panel {
   created_at: string
   updated_at: string
   duration_s: number
+  video_prompt: string | null
+  video_prompt_locked: 0 | 1
+  video_prompt_source: 'compiled' | 'user' | null
+  video_prompt_warnings: string[]
   images: PanelImage[]
   beats: Beat[]
 }
@@ -118,6 +122,8 @@ export interface StoryboardSummary {
   base_seed: number
   batch_size: number
   folder_id: string | null
+  video_target: string | null
+  video_mode: string | null
   created_at: string
   updated_at: string
 }
@@ -136,6 +142,13 @@ export const ANGLES = ['eye', 'low', 'high', 'overhead', 'dutch', 'ots', 'pov'] 
 export const LENSES = ['wide', 'normal', 'tele', 'macro'] as const
 export const ASPECT_RATIOS = ['1:1', '4:3', '16:9', '2.39:1', '9:16'] as const
 export const TARGET_MODELS = ['sd', 'pony', 'flux1', 'flux2', 'zimage', 'chroma', 'qwen'] as const
+
+// ---- H3 video prompt compiler ----
+
+export const VIDEO_TARGETS = ['minimax'] as const
+export const VIDEO_MODES = ['t2va', 'i2va', 'fl2va', 'ref2va'] as const
+export const VIDEO_TARGET_CAPS: Record<string, number> = { minimax: 15 }
+export const DEFAULT_SHOT_CAP = 15
 
 // ---- comfy ----
 

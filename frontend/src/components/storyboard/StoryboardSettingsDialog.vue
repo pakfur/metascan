@@ -5,7 +5,7 @@ import { listPresets } from '../../api/comfy'
 import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
-import { ASPECT_RATIOS, TARGET_MODELS } from '../../types/storyboard'
+import { ASPECT_RATIOS, TARGET_MODELS, VIDEO_TARGETS, VIDEO_MODES } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
 const emit = defineEmits<{ close: [] }>()
@@ -21,6 +21,8 @@ const batchSize = ref(1)
 const baseSeed = ref(0)
 const styleBlock = ref('')
 const negative = ref('')
+const videoTarget = ref<string | null>(null)
+const videoMode = ref<string | null>(null)
 
 const presets = ref<WorkflowPreset[]>([])
 const presetsLoading = ref(true)
@@ -39,6 +41,8 @@ let original = {
   baseSeed: 0,
   styleBlock: '',
   negativeVal: '',
+  videoTarget: null as string | null,
+  videoMode: null as string | null,
 }
 
 function seedFromTree(): void {
@@ -52,6 +56,8 @@ function seedFromTree(): void {
   baseSeed.value = t.base_seed
   styleBlock.value = t.style_block ?? ''
   negative.value = t.negative ?? ''
+  videoTarget.value = t.video_target
+  videoMode.value = t.video_mode
   original = {
     name: name.value,
     aspectRatio: aspectRatio.value,
@@ -61,6 +67,8 @@ function seedFromTree(): void {
     baseSeed: baseSeed.value,
     styleBlock: styleBlock.value,
     negativeVal: negative.value,
+    videoTarget: videoTarget.value,
+    videoMode: videoMode.value,
   }
 }
 
@@ -96,6 +104,8 @@ async function saveFields(): Promise<void> {
     base_seed: number
     style_block: string
     negative: string
+    video_target: string | null
+    video_mode: string | null
   }> = {}
 
   const trimmedName = name.value.trim()
@@ -114,6 +124,10 @@ async function saveFields(): Promise<void> {
   if (baseSeed.value !== original.baseSeed) body.base_seed = baseSeed.value
   if (styleBlock.value !== original.styleBlock) body.style_block = styleBlock.value
   if (negative.value !== original.negativeVal) body.negative = negative.value
+  // Selecting "None" sends an explicit clear -- same null-diff handling as
+  // preset_id above (the backend's exclude_unset=True honors it).
+  if (videoTarget.value !== original.videoTarget) body.video_target = videoTarget.value
+  if (videoMode.value !== original.videoMode) body.video_mode = videoMode.value
 
   if (Object.keys(body).length === 0) return
 
@@ -340,6 +354,23 @@ function close(): void {
         <div class="field">
           <label for="ss-negative">Negative</label>
           <textarea id="ss-negative" v-model="negative" rows="2" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="ss-video-target">Video target</label>
+            <select id="ss-video-target" v-model="videoTarget">
+              <option :value="null">None</option>
+              <option v-for="t in VIDEO_TARGETS" :key="t" :value="t">MiniMax H3</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ss-video-mode">Video mode</label>
+            <select id="ss-video-mode" v-model="videoMode">
+              <option :value="null">None</option>
+              <option v-for="m in VIDEO_MODES" :key="m" :value="m">{{ m.toUpperCase() }}</option>
+            </select>
+          </div>
         </div>
 
         <p v-if="fieldsError" class="error">{{ fieldsError }}</p>
