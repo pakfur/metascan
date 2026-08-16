@@ -86,9 +86,9 @@ def _alts(values: Tuple[str, ...], with_null: bool = True) -> str:
 
 _OUTLINE_TEMPLATE = (
     r"""root ::= "{{" ws "\"logline\"" ws ":" ws string ws "," ws "\"tone\"" ws ":" ws string ws "," ws "\"duration_target_s\"" ws ":" ws number ws "," ws "\"subjects\"" ws ":" ws subjects ws "," ws "\"arc\"" ws ":" ws arc ws "}}"
-subjects ::= "[" ws subject (ws "," ws subject)* ws "]"
+subjects ::= "[" ws subject (ws "," ws subject){{0,5}} ws "]"
 subject ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"description\"" ws ":" ws string ws "," ws "\"voice\"" ws ":" ws nullable ws "}}"
-arc ::= "[" ws arcitem (ws "," ws arcitem)* ws "]"
+arc ::= "[" ws arcitem (ws "," ws arcitem){{1,6}} ws "]"
 arcitem ::= "{{" ws "\"beat\"" ws ":" ws arcbeat ws "," ws "\"summary\"" ws ":" ws string ws "}}"
 arcbeat ::= {arcbeat_alts}
 """
@@ -100,19 +100,19 @@ OUTLINE_GRAMMAR = _OUTLINE_TEMPLATE.format(
 )
 
 SCENES_GRAMMAR = (
-    r"""root ::= "[" ws scene (ws "," ws scene)* ws "]"
+    r"""root ::= "[" ws scene (ws "," ws scene){{1,7}} ws "]"
 scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "}}"
 """
     + _COMMON_RULES
 ).format()
 
 _SHOTS_TEMPLATE = (
-    r"""root ::= "[" ws shot (ws "," ws shot)* ws "]"
+    r"""root ::= "[" ws shot (ws "," ws shot){{0,5}} ws "]"
 shot ::= "{{" ws "\"shot_size\"" ws ":" ws shotsize ws "," ws "\"angle\"" ws ":" ws angle ws "," ws "\"lens\"" ws ":" ws lens ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"subjects\"" ws ":" ws namelist ws "," ws "\"duration_s\"" ws ":" ws number ws "}}"
 shotsize ::= {shotsize_alts}
 angle ::= {angle_alts}
 lens ::= {lens_alts}
-namelist ::= "[" ws (string (ws "," ws string)*)? ws "]"
+namelist ::= "[" ws (string (ws "," ws string){{0,5}})? ws "]"
 """
     + _COMMON_RULES
 )
@@ -124,12 +124,12 @@ SHOTS_GRAMMAR = _SHOTS_TEMPLATE.format(
 )
 
 _BEATS_TEMPLATE = (
-    r"""root ::= "[" ws beat (ws "," ws beat)* ws "]"
+    r"""root ::= "[" ws beat (ws "," ws beat){{1,5}} ws "]"
 beat ::= "{{" ws "\"duration_s\"" ws ":" ws number ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"camera_motion\"" ws ":" ws motion ws "," ws "\"camera_amplitude\"" ws ":" ws amplitude ws "," ws "\"camera_speed\"" ws ":" ws speed ws "," ws "\"is_cut\"" ws ":" ws boolean ws "," ws "\"sound\"" ws ":" ws nullable ws "," ws "\"dialog\"" ws ":" ws dialog ws "}}"
 motion ::= {motion_alts}
 amplitude ::= {amplitude_alts}
 speed ::= {speed_alts}
-dialog ::= "[" ws (line (ws "," ws line)*)? ws "]"
+dialog ::= "[" ws (line (ws "," ws line){{0,3}})? ws "]"
 line ::= "{{" ws "\"subject\"" ws ":" ws nullable ws "," ws "\"voice\"" ws ":" ws nullable ws "," ws "\"delivery\"" ws ":" ws nullable ws "," ws "\"language\"" ws ":" ws string ws "," ws "\"text\"" ws ":" ws string ws "}}"
 """
     + _COMMON_RULES
@@ -208,6 +208,38 @@ def build_beats_user_prompt(
 # -- Validators ------------------------------------------------------------
 
 
+def _loads_array(raw: str) -> Any:
+    """Parse a JSON array, salvaging complete leading elements when the
+    response was truncated at the token limit mid-element.
+
+    Grammar-constrained output is structurally valid until the exact
+    point generation stopped, so trimming back to the last parseable
+    element boundary and closing the array recovers everything the model
+    finished. Falls through to ``_loads`` (and its truncation-hint
+    error) when nothing salvageable remains.
+    """
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(raw, str):
+        end = len(raw)
+        while True:
+            i = raw.rfind("}", 0, end)
+            if i < 0:
+                break
+            end = i
+            try:
+                data = json.loads(raw[: i + 1] + "]")
+            except ValueError:
+                # A '}' inside a string, or a nested object whose parent
+                # element is itself unclosed — keep walking backwards.
+                continue
+            if isinstance(data, list) and data:
+                return data
+    return _loads(raw)
+
+
 def _loads(raw: str) -> Any:
     try:
         return json.loads(raw)
@@ -273,7 +305,7 @@ def validate_outline_response(raw: str) -> Dict[str, Any]:
 
 
 def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
-    data = _loads(raw)
+    data = _loads_array(raw)
     if not isinstance(data, list):
         raise StoryError("scenes response is not a JSON array")
     scenes = []
@@ -303,7 +335,7 @@ def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
 def validate_shots_response(
     raw: str, roster: Mapping[str, int]
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    data = _loads(raw)
+    data = _loads_array(raw)
     if not isinstance(data, list):
         raise StoryError("shots response is not a JSON array")
     panels: List[Dict[str, Any]] = []
@@ -349,7 +381,7 @@ def validate_shots_response(
 def validate_beats_response(
     raw: str, roster: Mapping[str, int]
 ) -> List[Dict[str, Any]]:
-    data = _loads(raw)
+    data = _loads_array(raw)
     if not isinstance(data, list):
         raise StoryError("beats response is not a JSON array")
     beats: List[Dict[str, Any]] = []
