@@ -237,6 +237,40 @@ def test_assign_speakers_stable_ids_and_voice_fallbacks() -> None:
     assert speakers.lines[3].speaker_id == "S2"  # case-insensitive voice reuse
 
 
+def test_assign_speakers_unknown_subject_id_falls_back_to_anonymous_voice() -> None:
+    """A dialog line naming a subject_id absent from ``refplan.subject_labels``
+    (e.g. a caller that built the RefPlan from a narrower subject list than
+    the dialog actually references) must not raise KeyError -- it falls
+    back to the same anonymous-voice path as an unnamed voice line."""
+    subjects = _subjects()
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    beats = [
+        {
+            "duration_s": 2.0,
+            "action": "a",
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": 999,  # not present in refplan.subject_labels
+                    "voice": "a distant voice",
+                    "delivery": None,
+                    "language": "English",
+                    "text": "Hello?",
+                }
+            ],
+            "sound": None,
+        }
+    ]
+
+    speakers = assign_speakers(beats, subjects, refplan)
+    assert len(speakers.lines) == 1
+    line = speakers.lines[0]
+    assert line.subject_label is None
+    assert line.speaker_id == "S1"
+    assert speakers.voice_by_id["S1"] == "a distant voice"
+
+
 def test_render_camera_full_partial_none() -> None:
     assert (
         render_camera("push_in", "small", "slow")
@@ -730,8 +764,11 @@ def test_lint_camera_vocab_flags_motion_not_among_beat_expected_phrases() -> Non
     )
     text = _assemble_doc(parts, dd)
     errors = lint_h3_prompt(text, expect)
+    # Contradicting an explicitly-set beat camera is a hard error (spec
+    # §3.3 rule 5) -- distinct from the internal opposite-pair check above,
+    # which stays a "warning".
     assert any(
-        e.code == "camera_vocab" and e.severity == "warning" and "Shot 2" in e.message
+        e.code == "camera_vocab" and e.severity == "error" and "Shot 2" in e.message
         for e in errors
     )
 

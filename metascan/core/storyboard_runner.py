@@ -535,7 +535,6 @@ class StoryboardRunner:
                     "deterministic_only=True"
                 )
 
-            subjects_by_id = {s["id"]: s for s in tree["subjects"]}
             explicit_ids = set(panel_ids) if panel_ids is not None else None
             candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
             for scene in tree["scenes"]:
@@ -578,11 +577,20 @@ class StoryboardRunner:
 
             async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
                 nonlocal done
-                subjects = [
-                    subjects_by_id[sid]
-                    for sid in panel["subject_ids"]
-                    if sid in subjects_by_id
-                ]
+                # Beat dialog subject_ids are picked from the whole board
+                # roster (BeatForm's picker + validate_beats_response), not
+                # just this panel's subject_ids -- so an off-panel speaker
+                # still needs a real <Subject N> definition/refplan entry.
+                # Union the two sets, preserving tree["subjects"]' board
+                # sort_order (already ORDER BY sort_order, id from the DB).
+                dialog_subject_ids = {
+                    d.get("subject_id")
+                    for beat in (panel.get("beats") or [])
+                    for d in (beat.get("dialog") or [])
+                    if d.get("subject_id") is not None
+                }
+                wanted_ids = set(panel["subject_ids"]) | dialog_subject_ids
+                subjects = [s for s in tree["subjects"] if s["id"] in wanted_ids]
                 try:
                     if sem is not None:
                         async with sem:
@@ -599,7 +607,16 @@ class StoryboardRunner:
                         doc, issues = await self._compile_panel(
                             vlm, tree, scene, panel, subjects, mode, deterministic_only
                         )
-                except (VlmError, TimeoutError, RuntimeError, h3.H3Error) as exc:
+                except Exception as exc:
+                    if not isinstance(
+                        exc, (VlmError, TimeoutError, RuntimeError, h3.H3Error)
+                    ):
+                        logger.warning(
+                            "compile_video: panel %s failed with an unexpected "
+                            "error: %s",
+                            panel["id"],
+                            exc,
+                        )
                     await asyncio.to_thread(
                         self.db.update_panel,
                         panel["id"],
