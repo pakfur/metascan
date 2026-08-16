@@ -125,7 +125,16 @@
             title="Drag to resize"
             @pointerdown="startDetailDrag"
           />
-          <PanelDetail v-if="store.selectedPanel" :style="detailStyle" />
+          <!-- PanelDetail is multi-root (detail div + MediaViewer), so Vue
+               drops :style fallthrough on it — the wrapper owns the height. -->
+          <div
+            v-if="store.selectedPanel"
+            class="sb-detail-wrap"
+            :class="{ resized: detailHeight !== null }"
+            :style="detailStyle"
+          >
+            <PanelDetail />
+          </div>
         </div>
         <PanelSidePanel v-if="store.selectedPanel" class="sb-side" />
       </div>
@@ -275,6 +284,21 @@ watch(
 .sb-divider:hover,
 .sb-divider:active {
   background: var(--primary-color);
+}
+
+/* Untouched: auto height, PanelDetail's own 44vh cap applies. Once
+   dragged (.resized + inline height), the inner panel fills the wrapper. */
+.sb-detail-wrap {
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sb-detail-wrap.resized :deep(.panel-detail) {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .sb-header {
