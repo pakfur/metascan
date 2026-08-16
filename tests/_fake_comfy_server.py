@@ -60,6 +60,17 @@ Knobs:
                           `execution_success` has already gone out but
                           `/history` is still empty, deterministically
                           instead of racing real socket I/O.
+  output_override      -- when set (not None), replaces the default
+                          `{"images": [...]}` shape emitted on both the
+                          `executed` frame and the history entry's
+                          `outputs[save_node]` with this dict verbatim.
+                          Lets a test model a video-combine node's
+                          `{"gifs": [...]}` (mp4 files often show up
+                          under this key), a `videos`/`video`/`audio`
+                          key, or any mix of keys -- including a sidecar
+                          entry with a `.json` filename -- without the
+                          fixture needing per-shape knobs. `images_per_job`
+                          is ignored while this is set.
 """
 
 from __future__ import annotations
@@ -93,6 +104,8 @@ class FakeComfy:
         self.trailing_output_node: bool = False
         self.hold: Optional[asyncio.Event] = None
         self.post_success_hold: Optional[asyncio.Event] = None
+        # See module docstring's Knobs section.
+        self.output_override: Optional[Dict[str, List[Dict[str, Any]]]] = None
         # When True, POST /prompt is accepted (200) but the response body
         # omits "prompt_id" — exercises ComfyClient's no-prompt_id branch.
         self.omit_prompt_id: bool = False
@@ -199,10 +212,20 @@ class FakeComfy:
         )
 
     async def _post_upload(self, request: web.Request) -> web.Response:
+        # httpx's multipart encoder writes `data=` fields before `files=`
+        # fields, so the first part here is "overwrite", not "image" --
+        # taking only `reader.next()` silently recorded the wrong part's
+        # (missing) filename. Walk every part, read each so the request
+        # body is fully drained, and keep the first one that actually
+        # carries a filename.
         reader = await request.multipart()
-        field = await reader.next()
-        name = getattr(field, "filename", None) or "upload.png"
-        await field.read()
+        name = "upload.png"
+        found = False
+        async for field in reader:
+            await field.read()
+            if not found and field.filename:
+                name = field.filename
+                found = True
         self.uploaded.append(name)
         return web.json_response({"name": name, "subfolder": "", "type": "input"})
 
@@ -360,14 +383,19 @@ class FakeComfy:
             )
             return
 
-        images = [
-            {
-                "filename": f"{prompt_id[:8]}_{i:05d}_.png",
-                "subfolder": "",
-                "type": "output",
+        if self.output_override is not None:
+            output = self.output_override
+        else:
+            output = {
+                "images": [
+                    {
+                        "filename": f"{prompt_id[:8]}_{i:05d}_.png",
+                        "subfolder": "",
+                        "type": "output",
+                    }
+                    for i in range(self.images_per_job)
+                ]
             }
-            for i in range(self.images_per_job)
-        ]
         await self.broadcast(
             {
                 "type": "executed",
@@ -375,7 +403,7 @@ class FakeComfy:
                     "prompt_id": prompt_id,
                     "node": save_node,
                     "display_node": save_node,
-                    "output": {"images": images},
+                    "output": output,
                 },
             }
         )
@@ -408,7 +436,7 @@ class FakeComfy:
             prompt_id,
             {
                 "status": {"completed": True},
-                "outputs": {save_node: {"images": images}},
+                "outputs": {save_node: output},
             },
         )
 
