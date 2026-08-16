@@ -494,9 +494,13 @@ def render_retention_analysis(
 def _dialog_clause(sl: SpeakerLine) -> str:
     # The beats stage sometimes parrots the line text into ``voice`` (it
     # should be a timbre like "soft female voice") — treat that as unset
-    # rather than rendering "says in a Hello? voice".
+    # rather than rendering "says in a Hello? voice". Containment either
+    # way, not equality: observed values include the text with a filler
+    # prefix ("Mm... you're here." for the line "You're here.").
     voice = (sl.voice or "").strip()
-    if voice.lower() == (sl.text or "").strip().lower():
+    text_norm = (sl.text or "").strip().lower()
+    voice_norm = voice.lower()
+    if text_norm and (text_norm in voice_norm or voice_norm in text_norm):
         voice = ""
     speaker = (
         f"{sl.subject_label} ({sl.speaker_id})"
