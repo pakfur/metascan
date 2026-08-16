@@ -223,3 +223,46 @@ def test_invalid_json_truncation_hint():
         validate_shots_response("not json", {})
     except StoryError as e:
         assert "truncated" not in str(e)
+
+
+def test_grammars_carry_repetition_bounds():
+    # Unbounded arrays let the model ramble past any token cap; the
+    # bounds are the hard stop (regression: a 25-shot scene truncated
+    # twice in a row at max_tokens).
+    assert '(ws "," ws shot){0,5}' in SHOTS_GRAMMAR
+    assert '(ws "," ws scene){1,7}' in SCENES_GRAMMAR
+    assert '(ws "," ws beat){1,5}' in BEATS_GRAMMAR
+    assert '(ws "," ws line){0,3}' in BEATS_GRAMMAR
+    assert '(ws "," ws arcitem){1,6}' in OUTLINE_GRAMMAR
+
+
+def test_truncated_shots_array_salvages_leading_elements():
+    good = (
+        '{"shot_size": "WS", "angle": "eye", "lens": null, '
+        '"action": "Maya crosses the yard", "subjects": ["maya"], '
+        '"duration_s": 10}'
+    )
+    truncated = f'[{good}, {good}, {{"shot_size": "CU", "angle": "eye", "lens": null, "action": "she rea'
+    panels, warnings = validate_shots_response(truncated, {"maya": 7})
+    assert len(panels) == 2
+    assert panels[0]["subject_ids"] == [7]
+
+
+def test_truncated_beats_array_salvages_across_nested_dialog():
+    beat = (
+        '{"duration_s": 4, "action": "she kneels", "camera_motion": null, '
+        '"camera_amplitude": null, "camera_speed": null, "is_cut": false, '
+        '"sound": null, "dialog": [{"subject": null, "voice": "low voice", '
+        '"delivery": null, "language": "English", "text": "Easy now."}]}'
+    )
+    # Truncation lands INSIDE the second beat's nested dialog object —
+    # salvage must walk back past the inner '}' to the first complete beat.
+    truncated = (
+        f'[{beat}, {{"duration_s": 5, "action": "hatch opens", '
+        f'"camera_motion": null, "camera_amplitude": null, '
+        f'"camera_speed": null, "is_cut": true, "sound": null, '
+        f'"dialog": [{{"subject": null, "voice": "gravel'
+    )
+    beats = validate_beats_response(truncated, {})
+    assert len(beats) == 1
+    assert beats[0]["dialog"][0]["text"] == "Easy now."
