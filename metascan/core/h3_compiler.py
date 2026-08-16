@@ -321,9 +321,16 @@ def compute_timeline(
     mode: str,
     refplan: RefPlan,
 ) -> Timeline:
-    """Rescale beat durations to sum exactly to ``duration_s`` and group
-    beats into internal shots, cutting at each beat with ``is_cut == 1``
-    (beat 0 always starts shot 1)."""
+    """Rescale beat durations to sum exactly to ``duration_s`` and map
+    every beat to its own ``[Shot n]``.
+
+    Beat == shot is deliberate: the storyboard's beat breakdown IS the
+    shot script, and the compiled ``detailed_description`` must follow it
+    exactly — one ``[Shot n]`` per beat, each carrying its start
+    timestamp (the end time of the previous beat). ``is_cut`` no longer
+    changes the grouping; it only tunes the deterministic phrasing in
+    ``render_detailed_description`` ("the shot cuts" vs a continuous
+    transition)."""
     n = len(beats)
     orig_durations = [float(b.get("duration_s") or 0.0) for b in beats]
     total = sum(orig_durations)
@@ -336,34 +343,10 @@ def compute_timeline(
         rescaled = []
 
     shots: List[TimelineShot] = []
-    current_indices: List[int] = []
-    current_start = 0.0
     cum = 0.0
-    shot_number = 1
-
-    for i, beat in enumerate(beats):
-        if i > 0 and beat.get("is_cut"):
-            shots.append(
-                TimelineShot(
-                    number=shot_number,
-                    start_s=current_start,
-                    beat_indices=current_indices,
-                )
-            )
-            shot_number += 1
-            current_indices = []
-            current_start = cum
-        current_indices.append(i)
+    for i in range(n):
+        shots.append(TimelineShot(number=i + 1, start_s=cum, beat_indices=[i]))
         cum += rescaled[i]
-
-    if current_indices:
-        shots.append(
-            TimelineShot(
-                number=shot_number,
-                start_s=current_start,
-                beat_indices=current_indices,
-            )
-        )
 
     alignment_line = _build_alignment_line(mode, refplan, duration_s, shots)
     return Timeline(shots=shots, duration_s=duration_s, alignment_line=alignment_line)
@@ -506,6 +489,88 @@ def render_retention_analysis(
             )
 
     return "\n".join(lines)
+
+
+def _dialog_clause(sl: SpeakerLine) -> str:
+    # The beats stage sometimes parrots the line text into ``voice`` (it
+    # should be a timbre like "soft female voice") — treat that as unset
+    # rather than rendering "says in a Hello? voice".
+    voice = (sl.voice or "").strip()
+    if voice.lower() == (sl.text or "").strip().lower():
+        voice = ""
+    speaker = (
+        f"{sl.subject_label} ({sl.speaker_id})"
+        if sl.subject_label
+        else f"the {voice or 'voice'} ({sl.speaker_id})"
+    )
+    clause = "says"
+    if voice:
+        suffix = "" if "voice" in voice.lower() else " voice"
+        clause += f" in a {voice}{suffix}"
+    if sl.delivery:
+        clause += f", {sl.delivery.strip()},"
+    return f"{speaker} {clause} <d>[{sl.language}] {sl.text}</d>"
+
+
+def _sentence(text: str) -> str:
+    s = text.strip()
+    if not s:
+        return s
+    s = s[0].upper() + s[1:]
+    return s if s[-1] in ".!?" else s + "."
+
+
+def render_detailed_description(
+    style: str,
+    beats: Sequence[Mapping[str, Any]],
+    timeline: Timeline,
+    speakers: SpeakerPlan,
+) -> str:
+    """Deterministic ``detailed_description``: the beat breakdown IS the
+    shot script, rendered verbatim rather than paraphrased by the VLM.
+
+    One ``[Shot n]`` per beat (beat == shot, see ``compute_timeline``);
+    every shot after the first carries its ``At MM:SS.mmm`` start
+    timestamp per the ref-guide §5 cut-time convention. Each shot block
+    is the beat's action prose, its canonical camera phrase, its dialog
+    as ``(Sx)``-tagged ``<d>`` spans, and its sound event."""
+    lines_by_beat: Dict[int, List[SpeakerLine]] = {}
+    for sl in speakers.lines:
+        lines_by_beat.setdefault(sl.beat_index, []).append(sl)
+
+    parts = [f"The target video is in a {style} style."]
+    for shot in timeline.shots:
+        bi = shot.beat_indices[0]
+        beat = beats[bi] if bi < len(beats) else {}
+        if shot.number == 1:
+            header = "[Shot 1]"
+        elif beat.get("is_cut"):
+            header = f"[Shot {shot.number}] At {format_timecode(shot.start_s)}, the shot cuts."
+        else:
+            header = (
+                f"[Shot {shot.number}] At {format_timecode(shot.start_s)}, "
+                "continuing without a cut."
+            )
+
+        sentences: List[str] = []
+        action = _sentence(str(beat.get("action") or ""))
+        if action:
+            sentences.append(action)
+        camera = render_camera(
+            beat.get("camera_motion"),
+            beat.get("camera_amplitude"),
+            beat.get("camera_speed"),
+        )
+        if camera:
+            sentences.append(f"The camera {camera}.")
+        for sl in sorted(lines_by_beat.get(bi, []), key=lambda x: x.line_index):
+            sentences.append(_dialog_clause(sl))
+        sound = beat.get("sound")
+        if sound:
+            sentences.append(_sentence(str(sound)))
+
+        parts.append(f"{header} {' '.join(sentences)}".strip())
+    return "\n".join(parts)
 
 
 # -- Audio references (ref-guide §2.4/§4.2) --------------------------------
@@ -1069,10 +1134,13 @@ def _lint_camera_vocab(
 def _lint_word_count(dd: str) -> List[LintError]:
     count = len(dd.split())
     if count < _WORD_COUNT_FLOOR:
+        # Advisory only: the description is rendered deterministically from
+        # the beat script, so a terse script legitimately compiles short —
+        # flagging it must not mark the panel "failed".
         return [
             LintError(
                 "word_count",
-                "error",
+                "warning",
                 f"detailed_description is {count} words, below the "
                 f"{_WORD_COUNT_FLOOR}-word floor",
             )

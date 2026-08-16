@@ -15,6 +15,13 @@
       <header class="sb-header">
         <RouterLink to="/" class="sb-back">← Library</RouterLink>
         <h2>{{ store.tree?.name }}</h2>
+        <span
+          v-if="videoLabel"
+          class="sb-chip sb-chip--video"
+          title="Video model and mode driving the compiled video prompts — change in Storyboard settings"
+        >
+          {{ videoLabel }}
+        </span>
         <span v-if="store.synthesis.running" class="sb-chip">
           synthesizing {{ store.synthesis.done }}/{{ store.synthesis.total }}
         </span>
@@ -217,6 +224,16 @@ function startDetailDrag(down: PointerEvent): void {
 // onMounted or a watcher callback (see storyboard.ts's attachWs comment).
 store.attachWs()
 
+const VIDEO_TARGET_LABELS: Record<string, string> = { minimax: 'MiniMax H3' }
+
+const videoLabel = computed(() => {
+  const target = store.tree?.video_target
+  if (!target) return null
+  const name = VIDEO_TARGET_LABELS[target] ?? target
+  const mode = store.tree?.video_mode
+  return mode ? `${name} · ${mode}` : name
+})
+
 // A non-finite id (e.g. /storyboard/abc -> router props does Number('abc')
 // -> NaN) and a failed load() (404) both resolve to the same "not found"
 // state instead of ever calling store.load(NaN) or rendering a blank shell.
@@ -339,6 +356,11 @@ watch(
   padding: 4px 10px;
   border-radius: 999px;
   flex-shrink: 0;
+}
+
+.sb-chip--video {
+  color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
 }
 
 .sb-chip--error {

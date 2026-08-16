@@ -26,6 +26,7 @@ from metascan.core.h3_compiler import (
     render_audio_definition_lines,
     render_audio_retention_lines,
     render_camera,
+    render_detailed_description,
     render_retention_analysis,
     render_subject_definitions,
     render_summary,
@@ -133,18 +134,22 @@ def test_refplan_numbers_subjects_pictures_and_keyframe() -> None:
     assert refplan.keyframe_picture_label == "Picture 4"
 
 
-def test_timeline_rescales_groups_and_formats() -> None:
+def test_timeline_beat_equals_shot_and_formats() -> None:
     beats = _beats()
     refplan = RefPlan({}, "Subject 1", [], "Picture 1")
     timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
 
+    # beat == shot: every beat maps to its own [Shot n], regardless of
+    # is_cut. 3 beats of 2.0s rescaled to sum to 12.0s -> 4.0s each.
     assert [(s.number, s.start_s, s.beat_indices) for s in timeline.shots] == [
-        (1, 0.0, [0, 1]),
-        (2, 8.0, [2]),
+        (1, 0.0, [0]),
+        (2, 4.0, [1]),
+        (3, 8.0, [2]),
     ]
     assert timeline.duration_s == 12.0
     assert timeline.alignment_line is None
-    assert format_timecode(timeline.shots[1].start_s) == "00:08.000"
+    assert format_timecode(timeline.shots[1].start_s) == "00:04.000"
+    assert format_timecode(timeline.shots[2].start_s) == "00:08.000"
     assert format_timecode(3.5) == "00:03.500"
 
 
@@ -356,10 +361,13 @@ def test_retention_lines_and_keyframe_entry() -> None:
     timeline_i2va = compute_timeline(beats, 12.0, "i2va", refplan)
     text = render_retention_analysis(refplan, subjects, scene, timeline_i2va)
     assert (
-        "<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - "
-        "a kind elderly woman with silver hair, wearing a floral apron."
+        "<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): "
+        "fully_preserved - a kind elderly woman with silver hair, "
+        "wearing a floral apron."
     ) in text
-    assert "<Subject 3> (appears in [Shot 1], [Shot 2]): fully_preserved -" in text
+    assert (
+        "<Subject 3> (appears in [Shot 1], [Shot 2], [Shot 3]): " "fully_preserved -"
+    ) in text
     assert (
         "<Picture 4> ([Shot 1] first frame): fully_preserved - "
         "the shot begins from this frame."
@@ -368,7 +376,7 @@ def test_retention_lines_and_keyframe_entry() -> None:
     timeline_fl2va = compute_timeline(beats, 12.0, "fl2va", refplan)
     text_fl = render_retention_analysis(refplan, subjects, scene, timeline_fl2va)
     assert (
-        "<Picture 5> ([Shot 2] last frame): fully_preserved - "
+        "<Picture 5> ([Shot 3] last frame): fully_preserved - "
         "the shot ends on this frame."
     ) in text_fl
 
@@ -535,7 +543,8 @@ def test_scaffold_contains_beats_dialog_and_timecodes() -> None:
     assert "SUBJECTS PRESENT: <Subject 1> Grandma Rose" in scaffold
     assert "<Subject 2> Rex" in scaffold
     assert "[Shot 1] starts 00:00.000" in scaffold
-    assert "[Shot 2] At 00:08.000, cut." in scaffold
+    assert "[Shot 2] At 00:04.000, cut." in scaffold
+    assert "[Shot 3] At 00:08.000, cut." in scaffold
     assert "- action: Grandma pets the dog" in scaffold
     assert "- camera: pushes in, small amplitude, slow speed" in scaffold
     assert '- dialog: <Subject 1> (S1) [soft] (English): "Hello, old girl."' in scaffold
@@ -582,6 +591,88 @@ def test_scaffold_no_beats_no_dialog_no_camera_omits_lines() -> None:
     assert "- camera: unspecified" in scaffold
 
 
+def test_render_detailed_description_beat_equals_shot() -> None:
+    """One [Shot n] per beat: shot 1 has no timestamp, every later shot
+    carries its ``At MM:SS.mmm`` start time and the is_cut-driven cut vs
+    continuing phrasing, dialog renders voice/delivery per the ref-guide
+    §5.4 clause shape, and a beat's sound becomes its own sentence."""
+    subjects = _subjects()
+    scene = _scene()
+    beats = _beats()
+    refplan = assign_reference_labels(subjects, scene)
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
+
+    text = render_detailed_description(
+        "cinematic, live-action", beats, timeline, speakers
+    )
+    lines = text.split("\n")
+
+    assert lines[0] == "The target video is in a cinematic, live-action style."
+    assert len(lines) == 4  # style line + one line per beat (3 beats)
+
+    # Shot 1: no timestamp; beat 0's action/camera/dialog(no voice, has
+    # delivery)/sound all present.
+    assert lines[1] == (
+        "[Shot 1] Grandma pets the dog. The camera pushes in, small "
+        "amplitude, slow speed. <Subject 1> (S1) says, soft, "
+        "<d>[English] Hello, old girl.</d> A kettle whistles."
+    )
+
+    # Shot 2: is_cut=0 -> "continuing without a cut."; beat 1's dialog has
+    # a voice (no subject) and no delivery -> "says in a {voice}" clause,
+    # with " voice" NOT appended because "voice" is already in the string.
+    assert lines[2] == (
+        "[Shot 2] At 00:04.000, continuing without a cut. Rex barks at "
+        "the door. the gravelly voice (S2) says in a gravelly voice "
+        "<d>[English] Watch it!</d>"
+    )
+
+    # Shot 3: is_cut=1 -> "the shot cuts."; no dialog, no sound.
+    assert lines[3] == (
+        "[Shot 3] At 00:08.000, the shot cuts. Grandma opens the door. "
+        "The camera holds a static shot."
+    )
+
+
+def test_render_detailed_description_voice_suffix_and_dialog_only_line() -> None:
+    """A voice string that doesn't already say "voice" gets " voice"
+    appended; a beat with only dialog (no action/camera/sound) renders
+    just the dialog clause after its header."""
+    subjects = _subjects()
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    beats = [
+        {
+            "duration_s": 3.0,
+            "action": "",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": None,
+                    "voice": "a low rasp",
+                    "delivery": None,
+                    "language": "English",
+                    "text": "Who's there?",
+                }
+            ],
+            "sound": None,
+        }
+    ]
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 3.0, "ref2va", refplan)
+
+    text = render_detailed_description("noir", beats, timeline, speakers)
+    lines = text.split("\n")
+    assert lines[1] == (
+        "[Shot 1] the a low rasp (S1) says in a a low rasp voice "
+        "<d>[English] Who's there?</d>"
+    )
+
+
 def test_assemble_order_and_alignment_first() -> None:
     doc = assemble(
         "ALIGN LINE",
@@ -618,12 +709,13 @@ def test_assemble_order_and_alignment_first() -> None:
 
 # -- Lint fixtures -----------------------------------------------------
 #
-# One hand-written, guide-compliant `detailed_description` body (406 words,
-# verified with a standalone word count) over the two shots produced by
-# `_beats()`/`_subjects()`/`_scene()` at duration_s=12.0, mode="ref2va"
-# (shot 2 starts at 00:08.000 per test_timeline_rescales_groups_and_formats
-# above). Both dialog lines from `_beats()` appear verbatim, adjacent
-# (same line) to their `(Sx)` id, inside `<d>[English] ...</d>`.
+# One hand-written, guide-compliant `detailed_description` body over the
+# three shots produced by `_beats()`/`_subjects()`/`_scene()` at
+# duration_s=12.0, mode="ref2va" (beat == shot: shot 2 starts at
+# 00:04.000, shot 3 at 00:08.000, per
+# test_timeline_beat_equals_shot_and_formats above). Both dialog lines
+# from `_beats()` appear verbatim, adjacent (same line) to their `(Sx)`
+# id, inside `<d>[English] ...</d>`.
 
 _SHOT1 = (
     "[Shot 1] Cinematic, live-action, a wide establishing shot opens on "
@@ -638,8 +730,12 @@ _SHOT1 = (
     "morning light. Grandma Rose (S1) smiles warmly down at the dog and "
     "says, <d>[English] Hello, old girl.</d> Her voice carries the same "
     "warmth as the kettle's rising steam, and the dog's tail thumps twice "
-    "against the worn floorboards in reply. Outside the window, a light "
-    "breeze stirs the curtains, and somewhere down the hallway a "
+    "against the worn floorboards in reply."
+)
+
+_SHOT2 = (
+    "[Shot 2] At 00:04.000, continuing without a cut. Outside the window, "
+    "a light breeze stirs the curtains, and somewhere down the hallway a "
     "floorboard creaks under an unseen footstep. The gravelly voice (S2), "
     "low and rough, calls out from just beyond the doorway, unseen but "
     "unmistakably present in the next room, cutting through the quiet "
@@ -653,8 +749,8 @@ _SHOT1 = (
     "over the room."
 )
 
-_SHOT2 = (
-    "[Shot 2] At 00:08.000, the shot cuts to a medium shot of Grandma "
+_SHOT3 = (
+    "[Shot 3] At 00:08.000, the shot cuts to a medium shot of Grandma "
     "Rose stepping toward the kitchen door, her floral apron swaying "
     "gently as she crosses the sunlit floor. The camera holds a static "
     "shot as she reaches for the wooden door handle, her silver hair "
@@ -717,7 +813,7 @@ def _assemble_doc(parts: Dict[str, Any], detailed_description: str) -> str:
 
 def _known_good_doc() -> "tuple[str, Any]":
     parts = _fixture_parts()
-    dd = _SHOT1 + "\n" + _SHOT2
+    dd = _SHOT1 + "\n" + _SHOT2 + "\n" + _SHOT3
     return _assemble_doc(parts, dd), parts["expect"]
 
 
@@ -738,7 +834,7 @@ def test_lint_known_good_document_passes() -> None:
 
 def test_lint_missing_section_flags_absent_header() -> None:
     parts = _fixture_parts()
-    dd = _SHOT1 + "\n" + _SHOT2
+    dd = _SHOT1 + "\n" + _SHOT2 + "\n" + _SHOT3
     text = "\n\n".join(
         [
             f"subject_definitions:\n{parts['subject_definitions']}",
@@ -755,7 +851,7 @@ def test_lint_missing_section_flags_absent_header() -> None:
 
 def test_lint_missing_section_flags_out_of_order() -> None:
     parts = _fixture_parts()
-    dd = _SHOT1 + "\n" + _SHOT2
+    dd = _SHOT1 + "\n" + _SHOT2 + "\n" + _SHOT3
     text = "\n\n".join(
         [
             f"summary:\n{parts['summary']}",
@@ -820,7 +916,7 @@ def test_lint_dialog_missing_when_line_dropped() -> None:
         "Grandma Rose (S1) smiles warmly down at the dog and says, "
         "<d>[English] Hello, old girl.</d> Her voice carries the same "
         "warmth as the kettle's rising steam, and the dog's tail thumps "
-        "twice against the worn floorboards in reply. ",
+        "twice against the worn floorboards in reply.",
         "",
         1,
     )
@@ -857,10 +953,13 @@ def test_lint_dialog_invented_when_extra_line_added() -> None:
 
 def test_lint_camera_vocab_flags_contradictory_motion_in_same_shot() -> None:
     text, expect = _known_good_doc()
+    # Insert the contradictory phrase inside Shot 1's own segment (which
+    # carries "pushes in" from beat 0's camera) -- the check is per-shot,
+    # so a contradiction in a different shot's segment wouldn't fire.
     mutated = text.replace(
-        "over the room.",
-        "over the room. Moments later the camera pulls out sharply to "
-        "reveal the whole kitchen.",
+        "against the worn floorboards in reply.",
+        "against the worn floorboards in reply. Moments later the camera "
+        "pulls out sharply to reveal the whole kitchen.",
         1,
     )
     errors = lint_h3_prompt(mutated, expect)
@@ -885,13 +984,15 @@ def test_lint_camera_vocab_flags_motion_not_among_beat_expected_phrases() -> Non
     timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
     expect = build_expectations(refplan, speakers, timeline, "ref2va", beats=beats)
 
-    # Shot 2's only beat has camera_motion="static" (expected phrase "holds
+    # Shot 3's only beat has camera_motion="static" (expected phrase "holds
     # a static shot"); replace that phrase with an unrelated one ("pans
     # right") so no expected phrase remains in the shot's text at all.
     dd = (
         _SHOT1
         + "\n"
-        + _SHOT2.replace(
+        + _SHOT2
+        + "\n"
+        + _SHOT3.replace(
             "The camera holds a static shot as she reaches",
             "The camera pans right as she reaches",
             1,
@@ -903,7 +1004,7 @@ def test_lint_camera_vocab_flags_motion_not_among_beat_expected_phrases() -> Non
     # §3.3 rule 5) -- distinct from the internal opposite-pair check above,
     # which stays a "warning".
     assert any(
-        e.code == "camera_vocab" and e.severity == "error" and "Shot 2" in e.message
+        e.code == "camera_vocab" and e.severity == "error" and "Shot 3" in e.message
         for e in errors
     )
 
@@ -921,19 +1022,22 @@ def test_lint_camera_vocab_does_not_flag_when_expected_phrase_still_present() ->
     # the shot's expected phrases appear, so this must stay clean.
     dd = (
         _SHOT1.replace(
-            "over the room.",
-            "over the room. The camera also pans right briefly.",
+            "against the worn floorboards in reply.",
+            "against the worn floorboards in reply. The camera also pans "
+            "right briefly.",
             1,
         )
         + "\n"
         + _SHOT2
+        + "\n"
+        + _SHOT3
     )
     text = _assemble_doc(parts, dd)
     errors = lint_h3_prompt(text, expect)
     assert not any(e.code == "camera_vocab" for e in errors)
 
 
-def test_lint_word_count_error_below_floor() -> None:
+def test_lint_word_count_warning_below_floor() -> None:
     parts = _fixture_parts()
     dd = _filler_words(149)
     text = _assemble_doc(parts, dd)
@@ -941,7 +1045,10 @@ def test_lint_word_count_error_below_floor() -> None:
         e for e in lint_h3_prompt(text, parts["expect"]) if e.code == "word_count"
     ]
     assert len(errors) == 1
-    assert errors[0].severity == "error"
+    # Below-floor is advisory only: the description is rendered
+    # deterministically from the beat script, so a terse script
+    # legitimately compiles short -- it must not be a hard error.
+    assert errors[0].severity == "warning"
 
 
 def test_lint_word_count_warning_at_150() -> None:
@@ -996,7 +1103,7 @@ def test_lint_accepts_audio_reference_marker_but_rejects_it_on_subject_lines() -
     lines -- a merged marker set would wrongly accept "fully_copy" on a
     Subject line, which this also checks for."""
     parts = _fixture_parts()
-    dd = _SHOT1 + "\n" + _SHOT2
+    dd = _SHOT1 + "\n" + _SHOT2 + "\n" + _SHOT3
 
     audio_line = (
         "<Audio 1>: reference - the target speaker follows <Audio 1>'s "

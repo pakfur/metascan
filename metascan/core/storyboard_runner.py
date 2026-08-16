@@ -744,9 +744,13 @@ class StoryboardRunner:
         mode: str,
         deterministic_only: bool,
     ) -> Tuple[str, List[h3.LintError]]:
-        """Compile one panel's H3 video prompt: scaffold -> body/sound LLM
-        calls (or a deterministic fallback) -> assemble -> lint -> (one
-        retry on lint errors).
+        """Compile one panel's H3 video prompt.
+
+        The ``detailed_description`` is rendered deterministically from
+        the beat script (beat == [Shot n], see ``h3.compute_timeline``) —
+        the VLM never paraphrases the shot structure. The only VLM call
+        left is the grammar-constrained sound stage (soundscape + music),
+        with a deterministic fallback when no VLM is available.
 
         This is the ONLY place in the runner that imports/uses
         ``h3_compiler`` symbols (spec §8 dialect seam) -- a future ``ltx``
@@ -779,12 +783,6 @@ class StoryboardRunner:
         )
         timeline = h3.compute_timeline(beats, duration_s, mode, refplan)
 
-        scaffold_panel = dict(panel)
-        scaffold_panel["beats"] = beats
-        scaffold = h3.build_scaffold(
-            scaffold_panel, scene, tree, subjects, refplan, speakers, timeline
-        )
-
         subject_definitions = h3.render_subject_definitions(refplan, subjects, scene)
         summary = h3.render_summary(refplan, panel, subjects, mode)
         retention_analysis = h3.render_retention_analysis(
@@ -806,45 +804,12 @@ class StoryboardRunner:
 
         expect = h3.build_expectations(refplan, speakers, timeline, mode, beats=beats)
 
-        def _fallback_body() -> str:
-            style = tree.get("style_block") or "cinematic, live-action"
-            lines_by_beat: Dict[int, List[Any]] = {}
-            for sl in speakers.lines:
-                lines_by_beat.setdefault(sl.beat_index, []).append(sl)
-            parts = [f"The target video is in a {style} style."]
-            for shot in timeline.shots:
-                header = (
-                    "[Shot 1]"
-                    if shot.number == 1
-                    else f"[Shot {shot.number}] At "
-                    f"{h3.format_timecode(shot.start_s)}, the shot cuts to"
-                )
-                sentences: List[str] = []
-                for bi in shot.beat_indices:
-                    beat = beats[bi] if bi < len(beats) else {}
-                    action = beat.get("action") or ""
-                    if action:
-                        sentences.append(f"{action}.")
-                    camera = h3.render_camera(
-                        beat.get("camera_motion"),
-                        beat.get("camera_amplitude"),
-                        beat.get("camera_speed"),
-                    )
-                    if camera:
-                        sentences.append(f"The camera {camera}.")
-                    for sl in sorted(
-                        lines_by_beat.get(bi, []), key=lambda x: x.line_index
-                    ):
-                        speaker_part = (
-                            f"{sl.subject_label} ({sl.speaker_id})"
-                            if sl.subject_label
-                            else f"the {sl.voice or 'voice'} ({sl.speaker_id})"
-                        )
-                        sentences.append(
-                            f"{speaker_part} says, <d>[{sl.language}] {sl.text}</d>"
-                        )
-                parts.append(f"{header} {' '.join(sentences)}".strip())
-            return "\n".join(parts)
+        detailed_description = h3.render_detailed_description(
+            tree.get("style_block") or "cinematic, live-action",
+            beats,
+            timeline,
+            speakers,
+        )
 
         def _fallback_sound() -> Tuple[str, str]:
             events = [str(b["sound"]) for b in beats if b.get("sound")]
@@ -855,16 +820,8 @@ class StoryboardRunner:
             return soundscape, "N/A"
 
         if deterministic_only or vlm is None:
-            detailed_description = _fallback_body()
             overall_soundscape, non_diegetic_music = _fallback_sound()
         else:
-            detailed_description = await vlm.generate_text(
-                system_prompt=h3.H3_BODY_SYSTEM,
-                user_prompt=h3.build_body_user_prompt(scaffold),
-                temperature=0.5,
-                max_tokens=1200,
-                timeout=300.0,
-            )
             sound_raw = await vlm.generate_text(
                 system_prompt=h3.H3_SOUND_SYSTEM,
                 user_prompt=h3.build_sound_user_prompt(beats, scene.get("mood")),
@@ -877,35 +834,16 @@ class StoryboardRunner:
             overall_soundscape = sound["overall_soundscape"]
             non_diegetic_music = sound["non_diegetic_music"]
 
-        def _assemble(dd: str) -> str:
-            return h3.assemble(
-                timeline.alignment_line,
-                subject_definitions,
-                summary,
-                retention_analysis,
-                dd,
-                overall_soundscape,
-                non_diegetic_music,
-            )
-
-        doc = _assemble(detailed_description)
+        doc = h3.assemble(
+            timeline.alignment_line,
+            subject_definitions,
+            summary,
+            retention_analysis,
+            detailed_description,
+            overall_soundscape,
+            non_diegetic_music,
+        )
         issues = h3.lint_h3_prompt(doc, expect)
-
-        if (
-            not deterministic_only
-            and vlm is not None
-            and any(i.severity == "error" for i in issues)
-        ):
-            detailed_description = await vlm.generate_text(
-                system_prompt=h3.H3_BODY_SYSTEM,
-                user_prompt=h3.build_retry_user_prompt(scaffold, issues),
-                temperature=0.5,
-                max_tokens=1200,
-                timeout=300.0,
-            )
-            doc = _assemble(detailed_description)
-            issues = h3.lint_h3_prompt(doc, expect)
-
         return doc, issues
 
     # ---- synthesize ----------------------------------------------------
