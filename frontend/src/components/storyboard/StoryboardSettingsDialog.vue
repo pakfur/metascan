@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
+import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import { ASPECT_RATIOS, TARGET_MODELS } from '../../types/storyboard'
@@ -168,32 +169,79 @@ function onSubjectLoraStrength(id: number, e: Event): void {
   void commitSubjectField(id, { lora_strength: raw === '' ? null : Number(raw) })
 }
 
-function onSubjectReferencePath(id: number, e: Event): void {
+function onSubjectVoice(id: number, e: Event): void {
   const val = (e.target as HTMLInputElement).value.trim()
-  void commitSubjectField(id, { reference_path: val || null })
+  void commitSubjectField(id, { voice: val || null })
+}
+
+function referenceField(slot: 1 | 2): 'reference_path' | 'reference_path_2' {
+  return slot === 1 ? 'reference_path' : 'reference_path_2'
+}
+
+function onSubjectReferencePath(id: number, e: Event, slot: 1 | 2 = 1): void {
+  const val = (e.target as HTMLInputElement).value.trim()
+  void commitSubjectField(id, { [referenceField(slot)]: val || null })
 }
 
 // ---- reference image picker ---------------------------------------------
 
-// Subject id the picker is currently open for, or null when closed.
-const pickerForSubject = ref<number | null>(null)
+// Subject + slot the picker is currently open for, or null when closed.
+// A single picker instance serves both reference rows.
+const picker = ref<{ id: number; slot: 1 | 2 } | null>(null)
 
 // Per-subject record of the reference_path whose thumbnail failed to load.
 // Keyed by the path itself so a subsequent path change retries naturally.
+// Slot 1 and slot 2 track separately since a subject can have both set.
 const refThumbFailed = ref<Record<number, string>>({})
+const refThumbFailed2 = ref<Record<number, string>>({})
 
-function onRefThumbError(id: number, path: string): void {
-  refThumbFailed.value[id] = path
+function onRefThumbError(id: number, path: string, slot: 1 | 2 = 1): void {
+  if (slot === 1) refThumbFailed.value[id] = path
+  else refThumbFailed2.value[id] = path
 }
 
 function onPickReference(path: string): void {
-  const id = pickerForSubject.value
-  pickerForSubject.value = null
-  if (id != null) void commitSubjectField(id, { reference_path: path })
+  const target = picker.value
+  picker.value = null
+  if (target != null) void commitSubjectField(target.id, { [referenceField(target.slot)]: path })
 }
 
-function onClearReference(id: number): void {
-  void commitSubjectField(id, { reference_path: null })
+function onClearReference(id: number, slot: 1 | 2 = 1): void {
+  void commitSubjectField(id, { [referenceField(slot)]: null })
+}
+
+// ---- describe from refs --------------------------------------------------
+
+const describing = ref<Record<number, boolean>>({})
+const describeResult = ref<Record<number, { description: string; voice: string | null }>>({})
+const describeErrors = ref<Record<number, string>>({})
+
+async function onDescribeSubject(id: number): Promise<void> {
+  describing.value[id] = true
+  delete describeErrors.value[id]
+  try {
+    describeResult.value[id] = await describeSubject(id)
+  } catch (e) {
+    describeErrors.value[id] = describeError(e)
+  } finally {
+    describing.value[id] = false
+  }
+}
+
+async function onApplyDescribe(id: number): Promise<void> {
+  const result = describeResult.value[id]
+  if (!result) return
+  const subject = store.tree?.subjects.find((s) => s.id === id)
+  const body: Record<string, unknown> = { description: result.description }
+  if (result.voice && !(subject?.voice ?? '').trim()) {
+    body.voice = result.voice
+  }
+  await commitSubjectField(id, body)
+  delete describeResult.value[id]
+}
+
+function onDismissDescribe(id: number): void {
+  delete describeResult.value[id]
 }
 
 async function onDeleteSubject(id: number): Promise<void> {
@@ -346,6 +394,15 @@ function close(): void {
               &times;
             </button>
           </div>
+          <div class="subject-row-fields">
+            <input
+              type="text"
+              class="subject-voice"
+              :value="s.voice ?? ''"
+              placeholder="Voice (e.g. narrator, husky alto)"
+              @change="onSubjectVoice(s.id, $event)"
+            />
+          </div>
           <div class="subject-ref-row">
             <img
               v-if="s.reference_path && refThumbFailed[s.id] !== s.reference_path"
@@ -364,7 +421,7 @@ function close(): void {
               placeholder="Reference image path"
               @change="onSubjectReferencePath(s.id, $event)"
             />
-            <button type="button" class="browse-btn" @click="pickerForSubject = s.id">
+            <button type="button" class="browse-btn" @click="picker = { id: s.id, slot: 1 }">
               Browse…
             </button>
             <button
@@ -377,6 +434,68 @@ function close(): void {
               &times;
             </button>
           </div>
+          <div class="subject-ref-row">
+            <img
+              v-if="s.reference_path_2 && refThumbFailed2[s.id] !== s.reference_path_2"
+              :src="thumbnailUrl(s.reference_path_2)"
+              alt=""
+              class="ref-thumb"
+              @error="onRefThumbError(s.id, s.reference_path_2, 2)"
+            />
+            <div v-else class="ref-thumb ref-thumb-empty" title="No second reference image">
+              <span>—</span>
+            </div>
+            <input
+              type="text"
+              class="subject-ref"
+              :value="s.reference_path_2 ?? ''"
+              placeholder="Second reference image path"
+              @change="onSubjectReferencePath(s.id, $event, 2)"
+            />
+            <button type="button" class="browse-btn" @click="picker = { id: s.id, slot: 2 }">
+              Browse…
+            </button>
+            <button
+              v-if="s.reference_path_2"
+              type="button"
+              class="remove-btn"
+              title="Clear second reference image"
+              @click="onClearReference(s.id, 2)"
+            >
+              &times;
+            </button>
+          </div>
+
+          <div class="describe-row">
+            <button
+              type="button"
+              class="describe-btn"
+              :disabled="(!s.reference_path && !s.reference_path_2) || describing[s.id]"
+              @click="onDescribeSubject(s.id)"
+            >
+              {{ describing[s.id] ? 'Describing…' : 'Describe from refs' }}
+            </button>
+            <span class="hint">First call may take up to a minute while the model loads.</span>
+          </div>
+          <p v-if="describeErrors[s.id]" class="error inline">{{ describeErrors[s.id] }}</p>
+
+          <div v-if="describeResult[s.id]" class="describe-card">
+            <label>Description</label>
+            <textarea readonly rows="3" :value="describeResult[s.id]!.description" />
+            <template v-if="describeResult[s.id]!.voice">
+              <label>Voice</label>
+              <div class="describe-voice">{{ describeResult[s.id]!.voice }}</div>
+            </template>
+            <div class="describe-actions">
+              <button type="button" class="btn-secondary" @click="onApplyDescribe(s.id)">
+                Apply
+              </button>
+              <button type="button" class="btn-secondary" @click="onDismissDescribe(s.id)">
+                Dismiss
+              </button>
+            </div>
+          </div>
+
           <p v-if="subjectErrors[s.id]" class="error inline">{{ subjectErrors[s.id] }}</p>
         </div>
 
@@ -405,9 +524,9 @@ function close(): void {
     </div>
 
     <ReferenceImagePicker
-      v-if="pickerForSubject !== null"
+      v-if="picker !== null"
       @select="onPickReference"
-      @close="pickerForSubject = null"
+      @close="picker = null"
     />
   </div>
 </template>
@@ -545,11 +664,82 @@ textarea {
   flex: 0 0 80px;
 }
 
+.subject-voice {
+  flex: 1;
+  min-width: 0;
+}
+
 .subject-ref-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+.describe-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.describe-btn {
+  padding: 6px 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.describe-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.describe-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-color-secondary);
+}
+
+.describe-card {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-ground);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.describe-card label {
+  font-size: 11px;
+}
+
+.describe-card textarea {
+  resize: vertical;
+}
+
+.describe-voice {
+  padding: 6px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+.describe-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .subject-ref {

@@ -129,6 +129,14 @@ export function deleteSubject(subjectId: number): Promise<{ status: string }> {
   return del<{ status: string }>(`/storyboard/subjects/${subjectId}`)
 }
 
+// Runner-backed VLM call: reads the subject's persisted reference(s) from
+// the DB. First call can take ~30-60s while the VLM model loads.
+export function describeSubject(
+  subjectId: number,
+): Promise<{ description: string; voice: string | null }> {
+  return post(`/storyboard/subjects/${subjectId}/describe`, {})
+}
+
 export function createScene(
   storyboardId: number,
   body: {
@@ -141,6 +149,7 @@ export function createScene(
     mood?: string | null
     lighting?: string | null
     notes?: string | null
+    reference_path?: string | null
   },
 ): Promise<{ id: number }> {
   return post<{ id: number }>(`/storyboard/${storyboardId}/scenes`, body)
@@ -151,6 +160,15 @@ export function patchScene(
   body: Record<string, unknown>,
 ): Promise<{ status: string }> {
   return patch<{ status: string }>(`/storyboard/scenes/${sceneId}`, body)
+}
+
+// Runner-backed VLM call: reads the scene's persisted `reference_path` from
+// the DB (not the request body) -- callers in edit mode must patchScene the
+// reference first. First call can take ~30-60s while the VLM model loads.
+export function describeScene(
+  sceneId: number,
+): Promise<{ setting: string; lighting: string | null; mood: string | null }> {
+  return post(`/storyboard/scenes/${sceneId}/describe`, {})
 }
 
 export function deleteScene(

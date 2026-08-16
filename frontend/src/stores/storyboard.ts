@@ -329,11 +329,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
-  async function addScene(fields: {
-    name: string
-    subtitle?: string | null
-    setting?: string | null
-  }): Promise<void> {
+  async function addScene(fields: Parameters<typeof api.createScene>[1]): Promise<void> {
     if (!tree.value) return
     try {
       await api.createScene(tree.value.id, fields)

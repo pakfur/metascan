@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
+import { describeScene } from '../../api/storyboard'
+import { ApiError, thumbnailUrl } from '../../api/client'
+import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import type { Scene } from '../../types/storyboard'
 
 // `scene` null means create mode: Save POSTs a new scene. Otherwise Save
@@ -13,12 +16,80 @@ const store = useStoryboardStore()
 const name = ref(props.scene?.name ?? '')
 const subtitle = ref(props.scene?.subtitle ?? '')
 const setting = ref(props.scene?.setting ?? '')
+const lighting = ref(props.scene?.lighting ?? '')
+const mood = ref(props.scene?.mood ?? '')
+const referencePath = ref(props.scene?.reference_path ?? '')
 
 const saving = ref(false)
 const saveError = ref<string | null>(null)
 
 const isCreate = computed(() => props.scene === null)
 const canSave = computed(() => name.value.trim().length > 0 && !saving.value)
+
+function errMsg(e: unknown): string {
+  return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+}
+
+// ---- reference image ------------------------------------------------------
+
+// Path whose thumbnail failed to load, so a subsequent path change retries.
+const refThumbFailedPath = ref<string | null>(null)
+
+function onRefThumbError(path: string): void {
+  refThumbFailedPath.value = path
+}
+
+const pickerOpen = ref(false)
+const refError = ref<string | null>(null)
+
+async function onPickReference(path: string): Promise<void> {
+  referencePath.value = path
+  pickerOpen.value = false
+  // The describe endpoint reads the persisted reference from the DB, so in
+  // edit mode it must be saved immediately rather than waiting for Save.
+  // Create mode has no scene id yet -- the picked path just rides along in
+  // the create payload when the user hits Save.
+  if (props.scene) {
+    refError.value = null
+    store.error = null
+    await store.patchSceneFields(props.scene.id, { reference_path: path })
+    if (store.error) {
+      refError.value = store.error
+      store.error = null
+    }
+  }
+}
+
+function onClearReference(): void {
+  referencePath.value = ''
+}
+
+// ---- describe from ref -----------------------------------------------------
+
+const describing = ref(false)
+const describeErr = ref<string | null>(null)
+
+const canDescribe = computed(
+  () => !isCreate.value && referencePath.value.trim().length > 0 && !describing.value,
+)
+
+async function onDescribeScene(): Promise<void> {
+  if (!props.scene) return
+  describing.value = true
+  describeErr.value = null
+  try {
+    const res = await describeScene(props.scene.id)
+    setting.value = res.setting
+    if (!lighting.value.trim() && res.lighting) lighting.value = res.lighting
+    if (!mood.value.trim() && res.mood) mood.value = res.mood
+  } catch (e) {
+    describeErr.value = errMsg(e)
+  } finally {
+    describing.value = false
+  }
+}
+
+// ---- save -------------------------------------------------------------
 
 async function save(): Promise<void> {
   const trimmedName = name.value.trim()
@@ -32,6 +103,9 @@ async function save(): Promise<void> {
         name: trimmedName,
         subtitle: subtitle.value.trim() || null,
         setting: setting.value.trim() || null,
+        lighting: lighting.value.trim() || null,
+        mood: mood.value.trim() || null,
+        reference_path: referencePath.value.trim() || null,
       })
     } else {
       // Changed fields only; empty text clears the nullable columns via an
@@ -42,6 +116,12 @@ async function save(): Promise<void> {
       if (newSubtitle !== (props.scene.subtitle ?? null)) body.subtitle = newSubtitle
       const newSetting = setting.value.trim() || null
       if (newSetting !== (props.scene.setting ?? null)) body.setting = newSetting
+      const newLighting = lighting.value.trim() || null
+      if (newLighting !== (props.scene.lighting ?? null)) body.lighting = newLighting
+      const newMood = mood.value.trim() || null
+      if (newMood !== (props.scene.mood ?? null)) body.mood = newMood
+      const newRef = referencePath.value.trim() || null
+      if (newRef !== (props.scene.reference_path ?? null)) body.reference_path = newRef
       if (Object.keys(body).length > 0) {
         await store.patchSceneFields(props.scene.id, body)
       }
@@ -90,6 +170,65 @@ async function save(): Promise<void> {
         />
       </div>
 
+      <div class="field-row">
+        <div class="field">
+          <label for="se-lighting">Lighting</label>
+          <input
+            id="se-lighting"
+            v-model="lighting"
+            type="text"
+            placeholder="e.g. golden hour, harsh fluorescent"
+          />
+        </div>
+        <div class="field">
+          <label for="se-mood">Mood</label>
+          <input id="se-mood" v-model="mood" type="text" placeholder="e.g. tense, melancholic" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="se-ref">Setting reference image</label>
+        <div class="ref-row">
+          <img
+            v-if="referencePath && refThumbFailedPath !== referencePath"
+            :src="thumbnailUrl(referencePath)"
+            alt=""
+            class="ref-thumb"
+            @error="onRefThumbError(referencePath)"
+          />
+          <div v-else class="ref-thumb ref-thumb-empty" title="No reference image">
+            <span>—</span>
+          </div>
+          <input
+            id="se-ref"
+            v-model="referencePath"
+            type="text"
+            class="ref-path"
+            placeholder="Reference image path"
+          />
+          <button type="button" class="browse-btn" @click="pickerOpen = true">Browse…</button>
+          <button
+            v-if="referencePath"
+            type="button"
+            class="remove-btn"
+            title="Clear reference image"
+            @click="onClearReference"
+          >
+            &times;
+          </button>
+        </div>
+        <p v-if="refError" class="error inline">{{ refError }}</p>
+      </div>
+
+      <div class="describe-row">
+        <button type="button" class="describe-btn" :disabled="!canDescribe" @click="onDescribeScene">
+          {{ describing ? 'Describing…' : 'Describe from ref' }}
+        </button>
+        <span v-if="isCreate" class="hint">Save the scene first to enable Describe.</span>
+        <span v-else class="hint">First call may take up to a minute while the model loads.</span>
+      </div>
+      <p v-if="describeErr" class="error inline">{{ describeErr }}</p>
+
       <p v-if="saveError" class="error">{{ saveError }}</p>
 
       <div class="dialog-actions">
@@ -99,6 +238,12 @@ async function save(): Promise<void> {
         <button class="btn-secondary" :disabled="saving" @click="emit('close')">Cancel</button>
       </div>
     </div>
+
+    <ReferenceImagePicker
+      v-if="pickerOpen"
+      @select="onPickReference"
+      @close="pickerOpen = false"
+    />
   </div>
 </template>
 
@@ -137,6 +282,15 @@ h3 {
   gap: 6px;
 }
 
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.field-row .field {
+  flex: 1;
+}
+
 label {
   font-size: 12px;
   font-weight: 600;
@@ -167,10 +321,108 @@ textarea {
   min-height: 120px;
 }
 
+.ref-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ref-path {
+  flex: 1;
+  min-width: 0;
+}
+
+.ref-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--surface-border);
+  flex-shrink: 0;
+  display: block;
+}
+
+.ref-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-card);
+  color: var(--text-color-secondary);
+  font-size: 14px;
+}
+
+.browse-btn {
+  padding: 6px 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.browse-btn:hover {
+  background: var(--surface-hover);
+}
+
+.remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-color-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.remove-btn:hover {
+  color: var(--danger-color, #e53e3e);
+}
+
+.describe-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.describe-btn {
+  padding: 6px 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.describe-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.describe-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-color-secondary);
+}
+
 .error {
   color: var(--danger-color, #e53e3e);
   font-size: 13px;
   margin: 4px 0 0;
+}
+
+.error.inline {
+  margin-top: 6px;
 }
 
 .dialog-actions {
