@@ -733,6 +733,43 @@ class DatabaseManager:
                 "ALTER TABLE scenes ADD COLUMN reference_path "
                 "TEXT REFERENCES media(file_path) ON DELETE SET NULL",
             )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "video_target",
+                "ALTER TABLE storyboards ADD COLUMN video_target TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "video_mode",
+                "ALTER TABLE storyboards ADD COLUMN video_mode TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_prompt",
+                "ALTER TABLE panels ADD COLUMN video_prompt TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_prompt_locked",
+                "ALTER TABLE panels ADD COLUMN video_prompt_locked "
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_prompt_source",
+                "ALTER TABLE panels ADD COLUMN video_prompt_source TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_prompt_warnings",
+                "ALTER TABLE panels ADD COLUMN video_prompt_warnings TEXT",
+            )
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
@@ -1254,6 +1291,8 @@ class DatabaseManager:
             "batch_size",
             "folder_id",
             "outline",
+            "video_target",
+            "video_mode",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1298,6 +1337,10 @@ class DatabaseManager:
             "negative",
             "selected_image_id",
             "duration_s",
+            "video_prompt",
+            "video_prompt_locked",
+            "video_prompt_source",
+            "video_prompt_warnings",
         }
     )
     _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1662,6 +1705,12 @@ class DatabaseManager:
                 d["subject_ids"] = _json.loads(d["subject_ids"] or "[]")
             except (ValueError, TypeError):
                 d["subject_ids"] = []
+            try:
+                d["video_prompt_warnings"] = _json.loads(
+                    d.get("video_prompt_warnings") or "[]"
+                )
+            except (ValueError, TypeError):
+                d["video_prompt_warnings"] = []
             return d
 
     def _release_panels(
@@ -2130,6 +2179,12 @@ class DatabaseManager:
                         panel["subject_ids"] = _json.loads(panel["subject_ids"] or "[]")
                     except (ValueError, TypeError):
                         panel["subject_ids"] = []
+                    try:
+                        panel["video_prompt_warnings"] = _json.loads(
+                            panel.get("video_prompt_warnings") or "[]"
+                        )
+                    except (ValueError, TypeError):
+                        panel["video_prompt_warnings"] = []
                     images = []
                     for r in conn.execute(
                         "SELECT * FROM panel_images WHERE panel_id = ? "
