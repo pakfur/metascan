@@ -212,7 +212,17 @@ def _loads(raw: str) -> Any:
     try:
         return json.loads(raw)
     except (TypeError, ValueError) as e:
-        raise StoryError(f"response is not valid JSON: {e}") from e
+        # A grammar-constrained response can only be malformed when
+        # llama-server cut generation off at max_tokens — long output that
+        # doesn't end on a JSON closer is the signature of that truncation.
+        hint = ""
+        if (
+            isinstance(raw, str)
+            and len(raw) > 200
+            and not raw.rstrip().endswith(("}", "]"))
+        ):
+            hint = " (the response appears truncated at the token limit)"
+        raise StoryError(f"response is not valid JSON: {e}{hint}") from e
 
 
 def _clean(v: Any) -> Optional[str]:

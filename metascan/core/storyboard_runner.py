@@ -349,19 +349,40 @@ class StoryboardRunner:
                 },
             )
 
+        async def generate_validated(
+            unit: str, validate: Any, **gen_kwargs: Any
+        ) -> Any:
+            """One VLM call + validation, retried once on StoryError.
+
+            Grammar-constrained output only fails validation when the
+            sampler truncated it at max_tokens (or produced empty fields)
+            — both stochastic, so a single fresh sample usually recovers.
+            The second failure propagates and fails the stage.
+            """
+            try:
+                return validate(await vlm.generate_text(**gen_kwargs))
+            except story.StoryError as exc:
+                logger.warning(
+                    "compose %s: invalid response (%s); retrying once",
+                    unit,
+                    exc,
+                )
+                return validate(await vlm.generate_text(**gen_kwargs))
+
         if stage == "outline":
             progress(0, 1)
-            raw = await vlm.generate_text(
+            outline = await generate_validated(
+                "outline",
+                story.validate_outline_response,
                 system_prompt=story.STORY_OUTLINE_SYSTEM,
                 user_prompt=story.build_outline_user_prompt(
                     tree["source_text"], tree["subjects"]
                 ),
                 grammar=story.OUTLINE_GRAMMAR,
                 temperature=0.7,
-                max_tokens=1500,
+                max_tokens=2048,
                 timeout=600.0,
             )
-            outline = story.validate_outline_response(raw)
             await asyncio.to_thread(
                 self.db.update_storyboard,
                 storyboard_id,
@@ -389,15 +410,16 @@ class StoryboardRunner:
 
         if stage == "scenes":
             progress(0, 1)
-            raw = await vlm.generate_text(
+            scenes = await generate_validated(
+                "scenes",
+                story.validate_scenes_response,
                 system_prompt=story.STORY_SCENES_SYSTEM,
                 user_prompt=story.build_scenes_user_prompt(outline_json),
                 grammar=story.SCENES_GRAMMAR,
                 temperature=0.7,
-                max_tokens=1200,
+                max_tokens=2048,
                 timeout=300.0,
             )
-            scenes = story.validate_scenes_response(raw)
             await asyncio.to_thread(
                 self.db.replace_storyboard_scenes, storyboard_id, scenes
             )
@@ -429,7 +451,9 @@ class StoryboardRunner:
                     else None
                 )
                 async with sem:
-                    raw = await vlm.generate_text(
+                    panels, warnings = await generate_validated(
+                        f"shots ({scene['name']})",
+                        lambda raw: story.validate_shots_response(raw, roster),
                         system_prompt=story.STORY_SHOTS_SYSTEM,
                         user_prompt=story.build_shots_user_prompt(
                             outline_json,
@@ -441,10 +465,9 @@ class StoryboardRunner:
                         ),
                         grammar=story.SHOTS_GRAMMAR,
                         temperature=0.6,
-                        max_tokens=800,
+                        max_tokens=1600,
                         timeout=300.0,
                     )
-                panels, warnings = story.validate_shots_response(raw, roster)
                 for w in warnings:
                     logger.warning("compose shots (%s): %s", scene["name"], w)
                 await asyncio.to_thread(
@@ -479,17 +502,18 @@ class StoryboardRunner:
             nonlocal done
             subjects = [s for s in tree["subjects"] if s["id"] in panel["subject_ids"]]
             async with sem:
-                raw = await vlm.generate_text(
+                beats = await generate_validated(
+                    f"beats (panel {panel['id']})",
+                    lambda raw: story.validate_beats_response(raw, roster),
                     system_prompt=story.STORY_BEATS_SYSTEM,
                     user_prompt=story.build_beats_user_prompt(
                         logline, scene, panel, subjects
                     ),
                     grammar=story.BEATS_GRAMMAR,
                     temperature=0.6,
-                    max_tokens=900,
+                    max_tokens=1600,
                     timeout=300.0,
                 )
-            beats = story.validate_beats_response(raw, roster)
             story.rescale_beat_durations(beats, float(panel.get("duration_s") or 12.0))
             await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
             async with lock:

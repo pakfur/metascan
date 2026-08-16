@@ -208,3 +208,18 @@ def test_system_prompts_resolve_from_store():
     ):
         assert isinstance(getattr(story, key), str)
         assert len(getattr(story, key)) > 100
+
+
+def test_invalid_json_truncation_hint():
+    # Long response cut mid-string (the max_tokens signature) gets the hint...
+    truncated = (
+        '[{"shot_size": "WS", "angle": "eye", "lens": null, "action": "'
+        + "she walks through the yard " * 10
+    )
+    with pytest.raises(StoryError, match="truncated"):
+        validate_shots_response(truncated, {})
+    # ...but short garbage does not claim truncation.
+    try:
+        validate_shots_response("not json", {})
+    except StoryError as e:
+        assert "truncated" not in str(e)

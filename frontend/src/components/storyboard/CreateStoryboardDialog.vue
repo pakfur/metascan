@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
+import { patchStoryboard } from '../../api/storyboard'
 import { ApiError } from '../../api/client'
-import { ASPECT_RATIOS, TARGET_MODELS } from '../../types/storyboard'
+import { ASPECT_RATIOS, TARGET_MODELS, VIDEO_MODES } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
 const emit = defineEmits<{
@@ -22,10 +23,19 @@ const batchSize = ref(4)
 const styleBlock = ref('')
 const negative = ref('')
 
+const videoTarget = ref<string>('')
+const videoMode = ref<string>('ref2va')
+const videoPresetId = ref<number | null>(null)
+
 const presets = ref<WorkflowPreset[]>([])
 const presetsLoading = ref(true)
 const submitting = ref(false)
 const errorMsg = ref<string | null>(null)
+
+// The stills preset drives image renders; ref2v presets only make sense
+// as the video workflow — keep the two selects from cross-contaminating.
+const stillsPresets = computed(() => presets.value.filter((p) => p.kind !== 'ref2v'))
+const videoPresets = computed(() => presets.value.filter((p) => p.kind === 'ref2v'))
 
 onMounted(async () => {
   presetsLoading.value = true
@@ -83,6 +93,21 @@ async function submit() {
     if (presetId.value !== null) body.preset_id = presetId.value
 
     const id = await store.create(body)
+    if (videoTarget.value) {
+      // Video config rides a follow-up PATCH (the create route is
+      // stills-only). The board already exists at this point, so a
+      // failure here must not strand the user on the create dialog —
+      // Settings can finish the video setup.
+      try {
+        await patchStoryboard(id, {
+          video_target: videoTarget.value,
+          video_mode: videoMode.value,
+          video_preset_id: videoPresetId.value,
+        })
+      } catch {
+        // Non-fatal: configure video later via Settings.
+      }
+    }
     emit('created', id)
   } catch (e) {
     errorMsg.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
@@ -122,7 +147,7 @@ async function submit() {
         <label for="sb-preset">Workflow preset</label>
         <select id="sb-preset" v-model="presetId" :disabled="presetsLoading">
           <option :value="null">None</option>
-          <option v-for="p in presets" :key="p.id" :value="p.id">
+          <option v-for="p in stillsPresets" :key="p.id" :value="p.id">
             {{ p.name }} ({{ p.kind }})
           </option>
         </select>
@@ -130,6 +155,37 @@ async function submit() {
           No presets yet.
           <button type="button" class="link-btn" @click="openPresets">Register one</button>
         </p>
+      </div>
+
+      <div class="field">
+        <label for="sb-video-target">Video target (optional)</label>
+        <select id="sb-video-target" v-model="videoTarget">
+          <option value="">None — stills only</option>
+          <option value="minimax">MiniMax H3</option>
+        </select>
+      </div>
+
+      <div v-if="videoTarget" class="field-row">
+        <div class="field">
+          <label for="sb-video-mode">Video mode</label>
+          <select id="sb-video-mode" v-model="videoMode">
+            <option v-for="m in VIDEO_MODES" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="sb-video-preset">Video workflow preset</label>
+          <select id="sb-video-preset" v-model="videoPresetId" :disabled="presetsLoading">
+            <option :value="null">None</option>
+            <option v-for="p in videoPresets" :key="p.id" :value="p.id">
+              {{ p.name }}
+            </option>
+          </select>
+          <p v-if="!presetsLoading && videoPresets.length === 0" class="hint">
+            No ref2v presets yet.
+            <button type="button" class="link-btn" @click="openPresets">Register one</button>
+          </p>
+        </div>
       </div>
 
       <div class="field">
