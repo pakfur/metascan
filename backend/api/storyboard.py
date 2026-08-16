@@ -529,8 +529,8 @@ async def describe_subject(subject_id: int) -> Dict[str, Any]:
         model_id = pick_vlm_model(vlm)
     except VlmSelectError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    await vlm.ensure_started(model_id)
     try:
+        await vlm.ensure_started(model_id)
         raw = await vlm.generate_text(
             system_prompt=rd.REF_DESCRIBE_SUBJECT_SYSTEM,
             user_prompt=rd.SUBJECT_USER_PROMPT,
@@ -541,7 +541,7 @@ async def describe_subject(subject_id: int) -> Dict[str, Any]:
             timeout=180.0,
         )
         return rd.validate_subject_describe(raw)
-    except VlmError as e:
+    except (VlmError, TimeoutError, RuntimeError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except rd.DescribeError as e:
         raise HTTPException(status_code=502, detail=f"unusable VLM output: {e}")
@@ -619,8 +619,8 @@ async def describe_scene(scene_id: int) -> Dict[str, Any]:
         model_id = pick_vlm_model(vlm)
     except VlmSelectError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    await vlm.ensure_started(model_id)
     try:
+        await vlm.ensure_started(model_id)
         raw = await vlm.generate_text(
             system_prompt=rd.REF_DESCRIBE_SETTING_SYSTEM,
             user_prompt=rd.SETTING_USER_PROMPT,
@@ -631,7 +631,7 @@ async def describe_scene(scene_id: int) -> Dict[str, Any]:
             timeout=180.0,
         )
         return rd.validate_setting_describe(raw)
-    except VlmError as e:
+    except (VlmError, TimeoutError, RuntimeError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except rd.DescribeError as e:
         raise HTTPException(status_code=502, detail=f"unusable VLM output: {e}")
