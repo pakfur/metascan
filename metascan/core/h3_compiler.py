@@ -439,7 +439,7 @@ def render_summary(
         if mode in _KEYFRAME_MODES
         else "[reference generation]"
     )
-    action = panel.get("action", "")
+    action = _substitute_subject_labels(str(panel.get("action", "")), subjects, refplan)
     return (
         f"{prefix} The target video shows {joined} in "
         f"<{refplan.environment_label}>: {action}."
@@ -512,6 +512,32 @@ def _dialog_clause(sl: SpeakerLine) -> str:
     return f"{speaker} {clause} <d>[{sl.language}] {sl.text}</d>"
 
 
+def _substitute_subject_labels(
+    text: str,
+    subjects: Sequence[Mapping[str, Any]],
+    refplan: RefPlan,
+) -> str:
+    """Replace roster-name mentions with their ``<Subject N>`` labels.
+
+    The ref guide requires every subject reference in the prose to carry
+    its label, but the beats stage writes plain roster names ("the Young
+    Escort"). Longest name first so overlapping names can't partially
+    match; an optional leading article folds into the replacement, so
+    "the Business Woman's" becomes "<Subject 1>'s"."""
+    out = text
+    ordered = sorted(
+        subjects, key=lambda s: len(str(s.get("name") or "")), reverse=True
+    )
+    for subject in ordered:
+        name = str(subject.get("name") or "").strip()
+        label = refplan.subject_labels.get(subject["id"])
+        if not name or not label:
+            continue
+        pattern = re.compile(r"\b(?:the\s+)?" + re.escape(name) + r"\b", re.IGNORECASE)
+        out = pattern.sub(f"<{label}>", out)
+    return out
+
+
 def _sentence(text: str) -> str:
     s = text.strip()
     if not s:
@@ -525,6 +551,8 @@ def render_detailed_description(
     beats: Sequence[Mapping[str, Any]],
     timeline: Timeline,
     speakers: SpeakerPlan,
+    subjects: Sequence[Mapping[str, Any]] = (),
+    refplan: Optional[RefPlan] = None,
 ) -> str:
     """Deterministic ``detailed_description``: the beat breakdown IS the
     shot script, rendered verbatim rather than paraphrased by the VLM.
@@ -532,8 +560,15 @@ def render_detailed_description(
     One ``[Shot n]`` per beat (beat == shot, see ``compute_timeline``);
     every shot after the first carries its ``At MM:SS.mmm`` start
     timestamp per the ref-guide §5 cut-time convention. Each shot block
-    is the beat's action prose, its canonical camera phrase, its dialog
-    as ``(Sx)``-tagged ``<d>`` spans, and its sound event."""
+    is the beat's action prose (roster-name mentions swapped for their
+    ``<Subject N>`` labels), its canonical camera phrase, its dialog as
+    ``(Sx)``-tagged ``<d>`` spans, and its sound event."""
+
+    def _labeled(text: str) -> str:
+        if refplan is None or not subjects:
+            return text
+        return _substitute_subject_labels(text, subjects, refplan)
+
     lines_by_beat: Dict[int, List[SpeakerLine]] = {}
     for sl in speakers.lines:
         lines_by_beat.setdefault(sl.beat_index, []).append(sl)
@@ -553,7 +588,7 @@ def render_detailed_description(
             )
 
         sentences: List[str] = []
-        action = _sentence(str(beat.get("action") or ""))
+        action = _sentence(_labeled(str(beat.get("action") or "")))
         if action:
             sentences.append(action)
         camera = render_camera(
@@ -567,7 +602,7 @@ def render_detailed_description(
             sentences.append(_dialog_clause(sl))
         sound = beat.get("sound")
         if sound:
-            sentences.append(_sentence(str(sound)))
+            sentences.append(_sentence(_labeled(str(sound))))
 
         parts.append(f"{header} {' '.join(sentences)}".strip())
     return "\n".join(parts)
