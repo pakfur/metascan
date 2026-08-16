@@ -130,6 +130,7 @@ class SubjectCreate(BaseModel):
     lora_name: Optional[str] = None
     lora_strength: float = 0.8
     reference_path: Optional[str] = None
+    reference_path_2: Optional[str] = None
     sort_order: int = 0
     voice: Optional[str] = None
 
@@ -140,6 +141,7 @@ class SubjectPatch(BaseModel):
     lora_name: Optional[str] = None
     lora_strength: Optional[float] = None
     reference_path: Optional[str] = None
+    reference_path_2: Optional[str] = None
     sort_order: Optional[int] = None
     voice: Optional[str] = None
 
@@ -154,6 +156,7 @@ class SceneCreate(BaseModel):
     mood: Optional[str] = None
     lighting: Optional[str] = None
     notes: Optional[str] = None
+    reference_path: Optional[str] = None
 
 
 class ScenePatch(BaseModel):
@@ -166,6 +169,7 @@ class ScenePatch(BaseModel):
     mood: Optional[str] = None
     lighting: Optional[str] = None
     notes: Optional[str] = None
+    reference_path: Optional[str] = None
 
 
 class PanelCreate(BaseModel):
@@ -462,6 +466,7 @@ async def create_subject(storyboard_id: int, body: SubjectCreate) -> Dict[str, i
             lora_name=body.lora_name,
             lora_strength=body.lora_strength,
             reference_path=body.reference_path,
+            reference_path_2=body.reference_path_2,
             sort_order=body.sort_order,
         )
     except ParentNotFoundError as exc:
@@ -511,9 +516,12 @@ async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
             mood=body.mood,
             lighting=body.lighting,
             notes=body.notes,
+            reference_path=body.reference_path,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidReferenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": scene_id}
 
 
@@ -525,7 +533,10 @@ async def patch_scene(scene_id: int, body: ScenePatch) -> Dict[str, str]:
     fields = body.model_dump(exclude_unset=True)
     _reject_null_for_required(fields, _SCENE_NOT_NULLABLE)
     if fields:
-        await svc.update_scene(scene_id, **fields)
+        try:
+            await svc.update_scene(scene_id, **fields)
+        except InvalidReferenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "updated"}
 
 

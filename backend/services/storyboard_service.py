@@ -115,6 +115,9 @@ class StoryboardService:
             _row_exists_sync, self.db, "storyboard_subjects", subject_id
         )
 
+    async def get_subject(self, subject_id: int) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.db.get_subject, subject_id)
+
     async def create_subject(self, storyboard_id: int, **fields: Any) -> int:
         if await self.get_storyboard(storyboard_id) is None:
             raise ParentNotFoundError(f"no storyboard with id {storyboard_id}")
@@ -143,13 +146,28 @@ class StoryboardService:
     async def scene_exists(self, scene_id: int) -> bool:
         return await asyncio.to_thread(_row_exists_sync, self.db, "scenes", scene_id)
 
+    async def get_scene(self, scene_id: int) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.db.get_scene, scene_id)
+
     async def create_scene(self, storyboard_id: int, **fields: Any) -> int:
         if await self.get_storyboard(storyboard_id) is None:
             raise ParentNotFoundError(f"no storyboard with id {storyboard_id}")
-        return await asyncio.to_thread(self.db.create_scene, storyboard_id, **fields)
+        try:
+            return await asyncio.to_thread(
+                self.db.create_scene, storyboard_id, **fields
+            )
+        except sqlite3.IntegrityError as exc:
+            raise InvalidReferenceError(
+                "reference image is not in the media library"
+            ) from exc
 
     async def update_scene(self, scene_id: int, **fields: Any) -> None:
-        await asyncio.to_thread(self.db.update_scene, scene_id, **fields)
+        try:
+            await asyncio.to_thread(self.db.update_scene, scene_id, **fields)
+        except sqlite3.IntegrityError as exc:
+            raise InvalidReferenceError(
+                "reference image is not in the media library"
+            ) from exc
 
     async def delete_scene(self, scene_id: int, purge_images: bool = False) -> bool:
         ok, purged_files = await asyncio.to_thread(
