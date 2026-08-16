@@ -94,6 +94,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 - Import a plain-text script and have it parsed into scenes and panels, or build the scene/panel tree by hand
 - **Story engine** — from a premise, AI-build the outline, scenes, shots, and beats in sequence; re-roll any single level, and every generated field is editable afterward
 - Define subjects (characters) with a LoRA and reference image, reused across panels
+- Attach up to two subject reference images plus a per-scene setting reference from the library, and have the VLM draft a description/voice or setting/lighting/mood suggestion for review before accepting it
 - Per-panel controls for shot size, camera angle, and lens; prompts can be locked to protect hand edits from re-synthesis
 - **Synthesize** — generates per-panel prompts (VLM-composed or a deterministic template fallback), respecting locked panels
 - **Generate** — submits panels to ComfyUI with deterministic per-panel/variant seeds; supports generating only failed panels and rerolling a single panel for a fresh variant

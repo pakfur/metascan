@@ -376,6 +376,23 @@ metascan/
   `STORY_SCENES_SYSTEM`, `STORY_SHOTS_SYSTEM`, `STORY_BEATS_SYSTEM`) live in
   `data/meta_prompt.yml` and hot-reload through the same `PromptStore` as
   the render pipeline's prompts.
+- **Describe endpoints are review-only.** `POST /api/storyboard/subjects/{id}/describe`
+  and `/scenes/{id}/describe` VLM-describe a subject/scene from its reference
+  image(s) and return the parsed descriptor JSON without ever writing the
+  DB — the frontend shows the suggestion and the user accepts it through the
+  normal PATCH flow. `VlmClient.generate_text` takes `image_path` (single) or
+  `image_paths` (multi-image, one `image_url` part per path in prompt
+  reference order); passing both raises `ValueError`. `pick_vlm_model` in
+  `metascan/core/vlm_select.py` is the shared model picker used by both the
+  describe routes and `StoryboardRunner`. `storyboard_subjects.reference_path_2`
+  and `scenes.reference_path` follow the existing `reference_path`
+  POSIX-storage / `InvalidReferenceError` conventions. Grammars and
+  validators live in `metascan/core/ref_describe.py`; its system prompts
+  (`REF_DESCRIBE_SUBJECT_SYSTEM`, `REF_DESCRIBE_SETTING_SYSTEM`) are
+  YAML-backed in `data/meta_prompt.yml` via the same hot-reloading
+  `PromptStore`. The frontend persists a scene's reference on pick/clear and
+  gates the Describe button on that persisted value, since the endpoint
+  reads the reference from the DB rather than taking it as a request body.
 - **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_panel_images` convert it through
