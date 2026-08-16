@@ -19,6 +19,11 @@ const setting = ref(props.scene?.setting ?? '')
 const lighting = ref(props.scene?.lighting ?? '')
 const mood = ref(props.scene?.mood ?? '')
 const referencePath = ref(props.scene?.reference_path ?? '')
+// Last value successfully persisted to the DB via a pick/clear (below) --
+// distinct from `referencePath`, which updates optimistically the instant
+// the user picks/clears. Only used to gate Describe: it must never run
+// against a reference the server doesn't actually have on file.
+const persistedRef = ref<string | null>(props.scene?.reference_path ?? null)
 
 const saving = ref(false)
 const saveError = ref<string | null>(null)
@@ -41,6 +46,10 @@ function onRefThumbError(path: string): void {
 
 const pickerOpen = ref(false)
 const refError = ref<string | null>(null)
+// True while a pick/clear persist is in flight -- disables Browse/Clear so a
+// second pick can't race the first's PATCH, and blocks Describe (below)
+// until the in-flight persist resolves one way or the other.
+const refBusy = ref(false)
 
 async function onPickReference(path: string): Promise<void> {
   referencePath.value = path
@@ -50,18 +59,42 @@ async function onPickReference(path: string): Promise<void> {
   // Create mode has no scene id yet -- the picked path just rides along in
   // the create payload when the user hits Save.
   if (props.scene) {
+    refBusy.value = true
     refError.value = null
     store.error = null
     await store.patchSceneFields(props.scene.id, { reference_path: path })
     if (store.error) {
+      // referencePath now shows the attempted (unsaved) pick and refError
+      // explains why it isn't persisted; persistedRef deliberately stays at
+      // its old value so Describe (gated below) can't run against it.
       refError.value = store.error
       store.error = null
+    } else {
+      persistedRef.value = path
     }
+    refBusy.value = false
   }
 }
 
-function onClearReference(): void {
+// The path input itself is read-only (see template) -- the reference only
+// ever changes via a picked file or this clear, both of which persist
+// immediately in edit mode so `persistedRef` can never drift from what a
+// manually-typed, never-saved path would have caused.
+async function onClearReference(): Promise<void> {
   referencePath.value = ''
+  if (props.scene) {
+    refBusy.value = true
+    refError.value = null
+    store.error = null
+    await store.patchSceneFields(props.scene.id, { reference_path: null })
+    if (store.error) {
+      refError.value = store.error
+      store.error = null
+    } else {
+      persistedRef.value = null
+    }
+    refBusy.value = false
+  }
 }
 
 // ---- describe from ref -----------------------------------------------------
@@ -69,8 +102,17 @@ function onClearReference(): void {
 const describing = ref(false)
 const describeErr = ref<string | null>(null)
 
+// Requires the local reference to exactly match what's persisted -- after a
+// failed pick/clear persist (refError set, persistedRef unchanged) this is
+// false until the user re-picks (or re-clears) successfully, so Describe
+// can never read a stale/mismatched DB reference silently.
 const canDescribe = computed(
-  () => !isCreate.value && referencePath.value.trim().length > 0 && !describing.value,
+  () =>
+    !isCreate.value &&
+    !!persistedRef.value &&
+    referencePath.value === persistedRef.value &&
+    !refBusy.value &&
+    !describing.value,
 )
 
 async function onDescribeScene(): Promise<void> {
@@ -201,17 +243,26 @@ async function save(): Promise<void> {
           </div>
           <input
             id="se-ref"
-            v-model="referencePath"
+            :value="referencePath"
             type="text"
             class="ref-path"
             placeholder="Reference image path"
+            readonly
           />
-          <button type="button" class="browse-btn" @click="pickerOpen = true">Browse…</button>
+          <button
+            type="button"
+            class="browse-btn"
+            :disabled="refBusy"
+            @click="pickerOpen = true"
+          >
+            Browse…
+          </button>
           <button
             v-if="referencePath"
             type="button"
             class="remove-btn"
             title="Clear reference image"
+            :disabled="refBusy"
             @click="onClearReference"
           >
             &times;
@@ -332,6 +383,11 @@ textarea {
   min-width: 0;
 }
 
+.ref-path[readonly] {
+  cursor: default;
+  background: var(--surface-ground);
+}
+
 .ref-thumb {
   width: 44px;
   height: 44px;
@@ -363,8 +419,13 @@ textarea {
   white-space: nowrap;
 }
 
-.browse-btn:hover {
+.browse-btn:hover:not(:disabled) {
   background: var(--surface-hover);
+}
+
+.browse-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .remove-btn {
@@ -378,8 +439,13 @@ textarea {
   flex-shrink: 0;
 }
 
-.remove-btn:hover {
+.remove-btn:hover:not(:disabled) {
   color: var(--danger-color, #e53e3e);
+}
+
+.remove-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .describe-row {
