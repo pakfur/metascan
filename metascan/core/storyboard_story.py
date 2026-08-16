@@ -75,7 +75,7 @@ number ::= [0-9]+ ("." [0-9]+)?
 boolean ::= "true" | "false"
 string ::= "\"" char* "\""
 char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
-ws ::= [ \t\n]*
+ws ::= [ \t\n]{{0,20}}
 """
 
 

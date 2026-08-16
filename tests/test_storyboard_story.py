@@ -225,6 +225,15 @@ def test_invalid_json_truncation_hint():
         assert "truncated" not in str(e)
 
 
+def test_grammar_whitespace_is_bounded():
+    # Unbounded ws lets the sampler wander into an infinite newline loop
+    # mid-object, burning all of max_tokens on whitespace and returning
+    # truncated JSON (regression: ~1 in 3 beats calls failed this way).
+    for g in (OUTLINE_GRAMMAR, SCENES_GRAMMAR, SHOTS_GRAMMAR, BEATS_GRAMMAR):
+        assert "ws ::= [ \\t\\n]{0,20}" in g
+        assert "]*" not in g
+
+
 def test_grammars_carry_repetition_bounds():
     # Unbounded arrays let the model ramble past any token cap; the
     # bounds are the hard stop (regression: a 25-shot scene truncated
