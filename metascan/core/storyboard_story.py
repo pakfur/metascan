@@ -172,6 +172,7 @@ def build_shots_user_prompt(
     subjects: Sequence[Mapping[str, Any]],
     prev_scene_name: Optional[str],
     next_scene_name: Optional[str],
+    max_shot_s: float = 15.0,
 ) -> str:
     return (
         f"Story outline:\n{outline_json}\n\n"
@@ -183,7 +184,8 @@ def build_shots_user_prompt(
         f"Previous scene: {prev_scene_name or '(story opening)'}\n"
         f"Next scene: {next_scene_name or '(story ending)'}\n\n"
         f"Subjects (use these exact names):\n{_roster_lines(subjects)}\n\n"
-        "Write the shot list JSON."
+        "Write the shot list JSON.\n"
+        f"Each shot must be at most {max_shot_s:.0f} seconds long."
     )
 
 
