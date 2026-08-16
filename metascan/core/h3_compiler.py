@@ -233,8 +233,8 @@ def assign_speakers(
                     voice_by_id[speaker_id] = d.get("voice") or "a voice"
 
             subject_label = (
-                f"<{refplan.subject_labels[subject_id]}>"
-                if subject_id is not None
+                f"<{refplan.subject_labels.get(subject_id)}>"
+                if subject_id is not None and refplan.subject_labels.get(subject_id)
                 else None
             )
             lines.append(
@@ -943,7 +943,7 @@ def _lint_camera_vocab(
                 errors.append(
                     LintError(
                         "camera_vocab",
-                        "warning",
+                        "error",
                         f"[Shot {shot_no}] uses camera motion phrasing "
                         f"{unexpected[0]!r}, which is not among the "
                         f"shot's beats' expected motion(s) {list(expected)!r}",

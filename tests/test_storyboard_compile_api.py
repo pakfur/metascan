@@ -238,6 +238,12 @@ def test_patch_panel_video_prompt_locks_server_side(client):
     scene_id = _make_scene(client, sid)
     panel_id = _make_panel(client, scene_id)
 
+    # Seed stale lint warnings from a prior compile, as the runner would.
+    client.db.update_panel(
+        panel_id,
+        video_prompt_warnings='["shot exceeds cap"]',
+    )
+
     r = client.patch(
         f"/api/storyboard/panels/{panel_id}",
         json={"video_prompt": "slow dolly forward", "video_prompt_locked": 0},
@@ -247,11 +253,15 @@ def test_patch_panel_video_prompt_locks_server_side(client):
     assert body["video_prompt"] == "slow dolly forward"
     assert body["video_prompt_locked"] == 1
     assert body["video_prompt_source"] == "user"
+    # A user edit clears stale lint warnings from a prior compile (spec
+    # §6: warnings are "cleared on user edit").
+    assert body["video_prompt_warnings"] == []
 
     # And it's really in the DB, not just the response.
     panel = _panel_from_tree(client, sid, panel_id)
     assert panel["video_prompt_locked"] == 1
     assert panel["video_prompt_source"] == "user"
+    assert panel["video_prompt_warnings"] == []
 
 
 def test_patch_panel_video_prompt_null_clears_all(client):

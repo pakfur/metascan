@@ -450,6 +450,140 @@ def test_h3_error_marks_panel_failed_not_run(db, tmp_path):
     assert failed_panels[0]["video_prompt_warnings"] == ["overall_soundscape is empty"]
 
 
+def test_offpanel_dialog_subject_gets_definition_no_crash(db, tmp_path):
+    """Beat dialog subject_ids are picked from the whole board roster
+    (BeatForm's picker + validate_beats_response), not just the panel's
+    own subject_ids. A dialog line naming an off-panel subject must not
+    raise -- it gets a real <Subject N> definition and the panel compiles
+    normally, with no compile_error escaping the run."""
+    sb = _make_storyboard(db)
+    subject_a = db.create_subject(
+        sb,
+        name="Grandma Rose",
+        description="a kind elderly woman with silver hair, wearing a floral apron",
+        voice="warm, elderly voice",
+        sort_order=0,
+    )
+    subject_b = db.create_subject(
+        sb,
+        name="Rex",
+        description="a scruffy grey terrier with one floppy ear",
+        voice="a low growl",
+        sort_order=1,
+    )
+    scene_id = db.create_scene(
+        sb,
+        name="Kitchen",
+        setting="a sunlit farmhouse kitchen with a wooden table",
+        location="Farmhouse",
+    )
+    # Panel only lists subject_a -- subject_b is off-panel.
+    panel_id = db.create_panel(
+        scene_id, action="Grandma putters", subject_ids=[subject_a], duration_s=8.0
+    )
+    beats = [
+        {
+            "duration_s": 8.0,
+            "action": "Grandma putters while Rex barks from just outside",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": subject_b,  # off-panel speaker
+                    "voice": None,
+                    "delivery": "loud",
+                    "language": "English",
+                    "text": "Woof!",
+                }
+            ],
+            "sound": None,
+        }
+    ]
+    db.replace_panel_beats(panel_id, beats)
+
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: None, output_root=tmp_path
+    )
+    events: List[Tuple[str, str, Dict[str, Any]]] = []
+    runner.on_event(lambda ch, ev, d: events.append((ch, ev, d)))
+
+    counts = asyncio.run(runner.compile_video(sb, deterministic_only=True))
+    assert counts["compiled"] + counts["failed"] == 1
+    assert [e for e in events if e[1] == "compile_error"] == []
+    assert len([e for e in events if e[1] == "compile_complete"]) == 1
+
+    panel = db.get_panel(panel_id)
+    doc = panel["video_prompt"]
+    assert doc is not None
+    subject_definitions = doc.split("summary:")[0]
+    assert "Rex" in subject_definitions
+    assert "<Subject 2>" in subject_definitions
+
+
+def test_unexpected_exception_isolates_to_one_panel(db, tmp_path):
+    """A plain Exception (not one of the previously-named types) raised for
+    one panel's body call must still be isolated -- the other panel
+    compiles, and exactly one compile_complete (never compile_error) is
+    emitted for the run."""
+
+    class ExplodingVlm:
+        model_id = "qwen3vl-30b-a3b"
+
+        def __init__(self, good_body: str) -> None:
+            self._good_body = good_body
+            self.body_calls = 0
+
+        async def ensure_started(self, model_id: str) -> None:
+            pass
+
+        async def generate_text(
+            self,
+            *,
+            system_prompt: str,
+            user_prompt: str,
+            grammar: Optional[str] = None,
+            temperature: float = 0.6,
+            max_tokens: int = 250,
+            timeout: float = 120.0,
+        ) -> str:
+            if grammar is None:
+                self.body_calls += 1
+                if self.body_calls == 1:
+                    raise KeyError("boom")  # a plain, unexpected exception
+                return self._good_body
+            return _VALID_SOUND
+
+    sb = _make_storyboard(db)
+    _, panel1_id, _ = _make_panel(db, sb, action="Panel one")
+    _, panel2_id, _ = _make_panel(db, sb, action="Panel two")
+    scaffold, expect = _expect_and_scaffold(db, sb, panel1_id)
+    body = make_valid_body(scaffold, expect)
+    vlm = ExplodingVlm(good_body=body)
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    events: List[Tuple[str, str, Dict[str, Any]]] = []
+    runner.on_event(lambda ch, ev, d: events.append((ch, ev, d)))
+
+    counts = asyncio.run(runner.compile_video(sb))
+    assert counts["failed"] == 1
+    assert counts["compiled"] == 1
+    assert counts["skipped_locked"] == 0
+
+    assert [e for e in events if e[1] == "compile_error"] == []
+    complete = [e for e in events if e[1] == "compile_complete"]
+    assert len(complete) == 1
+
+    panels = [db.get_panel(panel1_id), db.get_panel(panel2_id)]
+    failed_panels = [p for p in panels if not p["video_prompt"]]
+    ok_panels = [p for p in panels if p["video_prompt"]]
+    assert len(failed_panels) == 1
+    assert len(ok_panels) == 1
+    assert failed_panels[0]["video_prompt_warnings"] == ["'boom'"]
+
+
 def test_deterministic_only_produces_doc_without_vlm(db, tmp_path):
     sb = _make_storyboard(db)
     _, panel_id, _ = _make_panel(db, sb)

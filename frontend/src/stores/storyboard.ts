@@ -651,6 +651,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
           total: compile.value.total,
           error: String(d.error ?? 'compile failed'),
         }
+        // Panels compiled before the run-level failure already wrote their
+        // video_prompt/warnings server-side -- refetch so they surface now
+        // instead of waiting for an unrelated reload.
+        void refresh()
       }
     })
 

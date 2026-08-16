@@ -755,9 +755,12 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
 
     if "video_prompt" in fields:
         if fields["video_prompt"] is not None:
-            # Server wins: mirror the prompt block above.
+            # Server wins: mirror the prompt block above. A user edit also
+            # clears any stale lint warnings from a prior compile (spec
+            # §6: warnings are "cleared on user edit").
             fields["video_prompt_locked"] = 1
             fields["video_prompt_source"] = "user"
+            fields["video_prompt_warnings"] = None
         else:
             # Explicit `video_prompt: null` clears the whole video-prompt
             # block, not just the text.
