@@ -440,7 +440,8 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS workflow_presets (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     name          TEXT NOT NULL UNIQUE,
-                    kind          TEXT NOT NULL CHECK(kind IN ('t2i','ref')),
+                    kind          TEXT NOT NULL
+                                  CHECK(kind IN ('t2i','ref','ref2v')),
                     workflow_json TEXT NOT NULL,
                     bindings      TEXT NOT NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -448,6 +449,51 @@ class DatabaseManager:
                 )
                 """
             )
+            # workflow_presets.kind originally only allowed ('t2i','ref').
+            # V4 (video generation) adds 'ref2v'. A dev DB created before
+            # this change still has the old CHECK baked into its DDL --
+            # SQLite CHECK constraints can't be altered in place, so detect
+            # the stale constraint from the live schema and rebuild the
+            # table (create/copy/drop/rename), mirroring the
+            # storyboards.folder_id INTEGER->TEXT rebuild above.
+            old_presets_ddl = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='workflow_presets'"
+            ).fetchone()
+            if old_presets_ddl and "ref2v" not in (old_presets_ddl["sql"] or ""):
+                logger.info(
+                    "Migrating workflow_presets.kind CHECK to allow 'ref2v' "
+                    "(dev DB predating video generation)…"
+                )
+                conn.execute("PRAGMA foreign_keys = OFF")
+                conn.execute(
+                    """
+                    CREATE TABLE workflow_presets_kind_migration (
+                        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name          TEXT NOT NULL UNIQUE,
+                        kind          TEXT NOT NULL
+                                      CHECK(kind IN ('t2i','ref','ref2v')),
+                        workflow_json TEXT NOT NULL,
+                        bindings      TEXT NOT NULL,
+                        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO workflow_presets_kind_migration "
+                    "(id, name, kind, workflow_json, bindings, created_at, "
+                    "updated_at) "
+                    "SELECT id, name, kind, workflow_json, bindings, "
+                    "created_at, updated_at FROM workflow_presets"
+                )
+                conn.execute("DROP TABLE workflow_presets")
+                conn.execute(
+                    "ALTER TABLE workflow_presets_kind_migration "
+                    "RENAME TO workflow_presets"
+                )
+                conn.commit()
+                conn.execute("PRAGMA foreign_keys = ON")
             # NOTE: panel_id deliberately carries no REFERENCES clause. The
             # panels table arrives in Phase B; with PRAGMA foreign_keys = ON
             # an INSERT naming a FK to a missing table fails at runtime, and
@@ -769,6 +815,34 @@ class DatabaseManager:
                 "panels",
                 "video_prompt_warnings",
                 "ALTER TABLE panels ADD COLUMN video_prompt_warnings TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "video_preset_id",
+                "ALTER TABLE storyboards ADD COLUMN video_preset_id "
+                "INTEGER REFERENCES workflow_presets(id)",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_anchor",
+                "ALTER TABLE panels ADD COLUMN video_anchor TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_compiled_anchor",
+                "ALTER TABLE panels ADD COLUMN video_compiled_anchor TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboard_subjects",
+                "voice_ref_path",
+                # Plain filesystem path -- audio files are not library media,
+                # so unlike reference_path(/_2) this deliberately carries no
+                # REFERENCES media(file_path) FK.
+                "ALTER TABLE storyboard_subjects ADD COLUMN voice_ref_path TEXT",
             )
 
             # One-shot backfill: ``created_at`` previously tracked the last
@@ -1293,6 +1367,7 @@ class DatabaseManager:
             "outline",
             "video_target",
             "video_mode",
+            "video_preset_id",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1305,6 +1380,7 @@ class DatabaseManager:
             "reference_path_2",
             "sort_order",
             "voice",
+            "voice_ref_path",
         }
     )
     _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1341,6 +1417,8 @@ class DatabaseManager:
             "video_prompt_locked",
             "video_prompt_source",
             "video_prompt_warnings",
+            "video_anchor",
+            "video_compiled_anchor",
         }
     )
     _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1471,11 +1549,14 @@ class DatabaseManager:
         reference_path_2: Optional[str] = None,
         sort_order: int = 0,
         voice: Optional[str] = None,
+        voice_ref_path: Optional[str] = None,
     ) -> int:
         # storyboard_subjects.reference_path(/_2) FKs media(file_path),
         # which is always stored POSIX -- a native-style path (Windows/WSL)
         # would never match an existing row and surface as a confusing
-        # sqlite3.IntegrityError higher up.
+        # sqlite3.IntegrityError higher up. voice_ref_path is a plain
+        # filesystem path (no media FK -- audio files aren't library media)
+        # and is stored verbatim.
         posix_reference_path = (
             to_posix_path(reference_path) if reference_path else reference_path
         )
@@ -1486,8 +1567,8 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO storyboard_subjects (storyboard_id, name, "
                 "description, lora_name, lora_strength, reference_path, "
-                "reference_path_2, sort_order, voice) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reference_path_2, sort_order, voice, voice_ref_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     name,
@@ -1498,6 +1579,7 @@ class DatabaseManager:
                     posix_reference_path_2,
                     sort_order,
                     voice,
+                    voice_ref_path,
                 ),
             )
             conn.commit()
