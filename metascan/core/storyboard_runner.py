@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from metascan.core.comfy_bindings import Bindings, GenerationParams
+from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
 from metascan.core import h3_compiler as h3
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
@@ -34,11 +35,34 @@ from metascan.core.storyboard_synthesis import build_render_messages, finalize_p
 from metascan.core.video_targets import shot_cap
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_models import REGISTRY
+from metascan.utils.ffmpeg_utils import extract_last_frame
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
 EventCb = Callable[[str, str, Dict[str, Any]], None]
+
+# Video file suffixes recognized throughout the storyboard pipeline (matches
+# Scanner.SUPPORTED_EXTENSIONS' video subset / media.py's Media.is_video /
+# duplicate_detection.VIDEO_EXTENSIONS -- there's no single shared constant
+# for this across the codebase, so this mirrors the existing precedent).
+_VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov"})
+
+
+def _panel_image_by_id(
+    panel: Dict[str, Any], image_id: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    """Look up one of ``panel["images"]`` (as returned by
+    ``get_storyboard_tree``) by its ``panel_images.id``."""
+    if image_id is None:
+        return None
+    return next(
+        (img for img in panel.get("images") or [] if img["id"] == image_id), None
+    )
+
+
+def _is_video_file(path: str) -> bool:
+    return Path(path).suffix.lower() in _VIDEO_EXTS
 
 
 class StoryboardError(RuntimeError):
@@ -475,6 +499,33 @@ class StoryboardRunner:
         results = await asyncio.gather(*(_beats_for(s, p) for s, p in work))
         return sum(results)
 
+    # ---- shared panel helpers --------------------------------------------
+
+    def _panel_subjects(
+        self, tree: Dict[str, Any], panel: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """The subjects a panel's H3 compile -- and video generation --
+        must account for: the union of the panel's own ``subject_ids`` and
+        every subject a beat's dialog names, in the board's subject
+        ``sort_order``.
+
+        Beat dialog subject_ids are picked from the whole board roster
+        (BeatForm's picker + validate_beats_response), not just this
+        panel's subject_ids -- so an off-panel speaker still needs a real
+        ``<Subject N>`` definition/refplan entry. Factored out of
+        ``_compile_locked`` so compile's prompt text and
+        ``generate_video``'s uploaded pixels can never disagree about who's
+        in the shot.
+        """
+        dialog_subject_ids = {
+            d.get("subject_id")
+            for beat in (panel.get("beats") or [])
+            for d in (beat.get("dialog") or [])
+            if d.get("subject_id") is not None
+        }
+        wanted_ids = set(panel["subject_ids"]) | dialog_subject_ids
+        return [s for s in tree["subjects"] if s["id"] in wanted_ids]
+
     # ---- compile (H3 video-prompt) --------------------------------------
 
     async def compile_video(
@@ -577,20 +628,7 @@ class StoryboardRunner:
 
             async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
                 nonlocal done
-                # Beat dialog subject_ids are picked from the whole board
-                # roster (BeatForm's picker + validate_beats_response), not
-                # just this panel's subject_ids -- so an off-panel speaker
-                # still needs a real <Subject N> definition/refplan entry.
-                # Union the two sets, preserving tree["subjects"]' board
-                # sort_order (already ORDER BY sort_order, id from the DB).
-                dialog_subject_ids = {
-                    d.get("subject_id")
-                    for beat in (panel.get("beats") or [])
-                    for d in (beat.get("dialog") or [])
-                    if d.get("subject_id") is not None
-                }
-                wanted_ids = set(panel["subject_ids"]) | dialog_subject_ids
-                subjects = [s for s in tree["subjects"] if s["id"] in wanted_ids]
+                subjects = self._panel_subjects(tree, panel)
                 try:
                     if sem is not None:
                         async with sem:
@@ -1153,6 +1191,296 @@ class StoryboardRunner:
             )
             job_ids.append(job_id)
         return job_ids
+
+    # ---- generate video --------------------------------------------------
+
+    async def generate_video(
+        self,
+        storyboard_id: int,
+        panel_ids: Optional[List[int]] = None,
+        only_failed: bool = False,
+    ) -> Dict[str, Any]:
+        """Submit ``ref2v`` (H3/MiniMax) jobs for a storyboard's panels.
+
+        Returns ``{"jobs": [job_id, ...], "skipped": [{"panel_id",
+        "error"}, ...]}``. Everything statically checkable (missing
+        prompt/preset/ref-audio-slot arithmetic/anchor prerequisites) is
+        validated upfront -- spec §8/§9 half-run avoidance -- and raised as
+        ONE ``StoryboardError`` listing every failing panel. The only
+        runtime-only failures (frame extraction, upload I/O) happen inside
+        the submit loop and skip just that panel instead of aborting the
+        whole run, since the upfront gate already caught everything else.
+        """
+        tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
+        if tree is None:
+            raise StoryboardError(f"no storyboard with id {storyboard_id}")
+        if tree.get("video_target") != "minimax":
+            raise StoryboardError(
+                f"storyboard {storyboard_id} has video_target "
+                f"{tree.get('video_target')!r} -- video generation only "
+                "supports 'minimax'"
+            )
+        video_preset_id = tree.get("video_preset_id")
+        if video_preset_id is None:
+            raise StoryboardError(
+                f"storyboard {storyboard_id} has no video workflow preset"
+            )
+        preset = await asyncio.to_thread(self.db.get_workflow_preset, video_preset_id)
+        if preset is None:
+            raise StoryboardError(f"no workflow preset with id {video_preset_id}")
+        if preset["kind"] != "ref2v":
+            raise StoryboardError(
+                f"preset {video_preset_id} has kind {preset['kind']!r}, "
+                "expected 'ref2v'"
+            )
+        bindings = resolve_bindings(json.loads(preset["workflow_json"]), "ref2v")
+
+        # Full board order (scene sort_order, then panel sort_order) --
+        # unfiltered by panel_ids/only_failed -- so a 'prev_last' anchor can
+        # always look one panel back regardless of what this call targets.
+        flat_panels: List[Tuple[Dict[str, Any], Dict[str, Any]]] = [
+            (scene, panel) for scene in tree["scenes"] for panel in scene["panels"]
+        ]
+        panel_index = {panel["id"]: i for i, (_, panel) in enumerate(flat_panels)}
+
+        targets = flat_panels
+        if panel_ids is not None:
+            wanted = set(panel_ids)
+            targets = [(s, p) for s, p in targets if p["id"] in wanted]
+
+        if only_failed:
+            ids = [p["id"] for _, p in targets]
+            latest = await asyncio.to_thread(self.db.latest_jobs_for_panels, ids)
+            targets = [
+                (s, p)
+                for s, p in targets
+                if (latest.get(p["id"]) or {}).get("state") == "failed"
+            ]
+
+        if not targets:
+            return {"jobs": [], "skipped": []}
+
+        # Validate every target panel before submitting anything. ALL
+        # failures are collected -- not just the first -- so a bad batch
+        # fails loudly, naming every affected panel in one error.
+        mode = tree.get("video_mode") or "ref2va"
+        ref_slots = len(
+            [
+                b
+                for b in (
+                    bindings.ref_image,
+                    bindings.ref_image_2,
+                    bindings.ref_image_3,
+                )
+                if b is not None
+            ]
+        )
+        audio_slots = len(
+            [b for b in (bindings.audio, bindings.audio_2) if b is not None]
+        )
+        issues: List[str] = []
+        for scene, panel in targets:
+            pid = panel["id"]
+            if not (panel.get("video_prompt") or "").strip():
+                issues.append(f"panel {pid}: no compiled video_prompt")
+
+            subjects = self._panel_subjects(tree, panel)
+            refplan = h3.assign_reference_labels(subjects, scene)
+            if len(refplan.picture_labels) > ref_slots:
+                issues.append(
+                    f"panel {pid}: {len(refplan.picture_labels)} reference "
+                    f"picture(s) but preset {video_preset_id} provides "
+                    f"{ref_slots} ref-image slot(s)"
+                )
+            beats = panel.get("beats") or []
+            speakers = h3.assign_speakers(beats, subjects, refplan)
+            active_audio = h3.active_audio_refs(refplan, speakers, subjects)
+            if len(active_audio) > audio_slots:
+                issues.append(
+                    f"panel {pid}: {len(active_audio)} active audio "
+                    f"reference(s) but preset {video_preset_id} provides "
+                    f"{audio_slots} audio slot(s)"
+                )
+            for voice_path, audio_label in active_audio:
+                if not Path(voice_path).exists():
+                    issues.append(
+                        f"panel {pid}: voice reference for {audio_label} "
+                        f"({voice_path}) does not exist on disk"
+                    )
+
+            anchor = panel.get("video_anchor")
+            if mode in ("i2va", "fl2va") and not anchor:
+                issues.append(
+                    f"panel {pid}: video_mode {mode!r} requires a video_anchor"
+                )
+            if anchor == "keeper":
+                image = _panel_image_by_id(panel, panel.get("selected_image_id"))
+                if image is None:
+                    issues.append(
+                        f"panel {pid}: video_anchor 'keeper' requires a "
+                        "selected still image"
+                    )
+                elif _is_video_file(image["file_path"]):
+                    issues.append(
+                        f"panel {pid}: video_anchor 'keeper' requires the "
+                        "selected image to be a still, not a video"
+                    )
+            elif anchor == "prev_last":
+                # idx == 0 (first panel on the board) and idx is None
+                # (shouldn't happen -- every target panel is in flat_panels)
+                # both correctly fall through to "no previous panel".
+                idx = panel_index.get(pid)
+                prev_panel = flat_panels[idx - 1][1] if idx else None
+                if prev_panel is None:
+                    issues.append(
+                        f"panel {pid}: video_anchor 'prev_last' requires a "
+                        "previous panel"
+                    )
+                else:
+                    prev_image = _panel_image_by_id(
+                        prev_panel, prev_panel.get("selected_image_id")
+                    )
+                    if prev_image is None:
+                        issues.append(
+                            f"panel {pid}: video_anchor 'prev_last' requires "
+                            "the previous panel to have a selected video"
+                        )
+                    elif not _is_video_file(prev_image["file_path"]):
+                        issues.append(
+                            f"panel {pid}: video_anchor 'prev_last' requires "
+                            "the previous panel's selected image to be a "
+                            "video"
+                        )
+
+        if issues:
+            raise StoryboardError("\n".join(issues))
+
+        if tree.get("folder_id") is None:
+            async with self._folder_lock:
+                # Re-read inside the lock: another generate()/generate_video()
+                # call for this storyboard may have created (and published)
+                # the folder while this one was waiting to acquire it.
+                current = await asyncio.to_thread(self.db.get_storyboard, storyboard_id)
+                if current is None:
+                    raise StoryboardError(
+                        f"storyboard {storyboard_id} vanished during " "generate_video"
+                    )
+                folder_id = current.get("folder_id")
+                if folder_id is None:
+                    folder = await asyncio.to_thread(
+                        self.db.create_folder,
+                        str(uuid4()),
+                        "manual",
+                        f"Storyboard: {tree['name']}",
+                    )
+                    folder_id = folder["id"] if folder else None
+                    await asyncio.to_thread(
+                        self.db.update_storyboard,
+                        storyboard_id,
+                        folder_id=folder_id,
+                    )
+                    if folder is not None:
+                        self._emit("folders", "folder_created", {"folder": folder})
+                tree["folder_id"] = folder_id
+
+        if self.unload_vlm_during_generation:
+            # See generate()'s identical block: hold the synth lock only
+            # around the unload check+call, never across the submit loop.
+            async with self._synth_lock:
+                vlm = self.get_vlm()
+                if vlm is not None and vlm.model_id:
+                    await vlm.shutdown()
+
+        width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
+        slug = storyboard_slug(storyboard_id, tree["name"])
+
+        jobs: List[int] = []
+        skipped: List[Dict[str, Any]] = []
+        # Lazily created on the first 'prev_last' anchor this run needs --
+        # most runs need none. tempfile.mkdtemp keeps it out of any
+        # scanned/watched directory.
+        tmp_dir: Optional[Path] = None
+
+        for scene, panel in targets:
+            pid = panel["id"]
+            try:
+                subjects = self._panel_subjects(tree, panel)
+                refplan = h3.assign_reference_labels(subjects, scene)
+                beats = panel.get("beats") or []
+                speakers = h3.assign_speakers(beats, subjects, refplan)
+                active_audio = h3.active_audio_refs(refplan, speakers, subjects)
+
+                ref_images: List[str] = []
+                for path, _label in refplan.picture_labels:
+                    ref_images.append(await self.comfy.upload_file(Path(path)))
+
+                audio_refs: List[str] = []
+                for voice_path, _label in active_audio:
+                    audio_refs.append(await self.comfy.upload_file(Path(voice_path)))
+
+                first_frame: Optional[str] = None
+                anchor = panel.get("video_anchor")
+                if anchor == "keeper":
+                    image = _panel_image_by_id(panel, panel.get("selected_image_id"))
+                    assert image is not None  # validated above
+                    first_frame = await self.comfy.upload_file(Path(image["file_path"]))
+                elif anchor == "prev_last":
+                    idx = panel_index[pid]
+                    prev_panel = flat_panels[idx - 1][1]
+                    prev_image = _panel_image_by_id(
+                        prev_panel, prev_panel.get("selected_image_id")
+                    )
+                    assert prev_image is not None  # validated above
+                    if tmp_dir is None:
+                        tmp_dir = Path(tempfile.mkdtemp(prefix="ms-videogen-"))
+                    frame_path = tmp_dir / f"panel_{pid}_frame.png"
+                    extract_last_frame(Path(prev_image["file_path"]), frame_path)
+                    first_frame = await self.comfy.upload_file(frame_path)
+            except Exception as exc:
+                logger.warning(
+                    "generate_video: panel %s upload/extraction failed: %s",
+                    pid,
+                    exc,
+                )
+                skipped.append({"panel_id": pid, "error": str(exc)})
+                continue
+
+            committed = await asyncio.to_thread(self.db.count_panel_images, pid)
+            pending_jobs = await asyncio.to_thread(
+                self.db.list_generation_jobs,
+                states=["queued", "running"],
+                panel_ids=[pid],
+                limit=10000,
+            )
+            variant_base = committed + len(pending_jobs)
+            seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
+
+            params = GenerationParams(
+                positive=panel["video_prompt"],
+                seed=seed,
+                width=width,
+                height=height,
+                batch_size=1,
+                ref_images=ref_images,
+                first_frame=first_frame,
+                audio_refs=audio_refs,
+                duration_s=panel.get("duration_s"),
+            )
+            output_dir = (
+                self.output_root
+                / slug
+                / f"scene_{scene['sort_order']:02d}"
+                / f"panel_{panel['sort_order']:02d}"
+            )
+            job_id = await self.comfy.submit(
+                video_preset_id,
+                params,
+                panel_id=pid,
+                output_dir=output_dir,
+            )
+            jobs.append(job_id)
+
+        return {"jobs": jobs, "skipped": skipped}
 
     # ---- job-output ingest ----------------------------------------------
 
