@@ -258,8 +258,15 @@ def test_subject_definitions_verbatim_and_env() -> None:
     assert (
         "<Subject 2> is the Rex: a scruffy grey terrier with one floppy ear."
     ) in text
+    # scene has a reference_path (allocated "Picture 3" by assign_reference_labels
+    # above), so ref-guide §2.2 requires the environment line to cite it rather
+    # than create a standalone picture entry — mirrors the §7 worked example
+    # ("<Subject 1> is the coffee-shop environment in <Picture 1>, featuring...").
     assert (
-        "<Subject 3> is the Kitchen environment: "
+        refplan.keyframe_picture_label == "Picture 4"
+    )  # confirms scene ref -> Picture 3
+    assert (
+        "<Subject 3> is the Kitchen environment in <Picture 3>, "
         "a sunlit farmhouse kitchen with a wooden table."
     ) in text
 
@@ -273,6 +280,7 @@ def test_subject_definitions_verbatim_and_env() -> None:
     refplan2 = assign_reference_labels([], scene_no_setting)
     text2 = render_subject_definitions(refplan2, [], scene_no_setting)
     assert "<Subject 1> is the Kitchen environment: Farmhouse." in text2
+    assert "in <Picture" not in text2  # no scene reference_path -> no citation
 
 
 def test_summary_prefix_modes() -> None:
