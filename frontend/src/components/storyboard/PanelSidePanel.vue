@@ -11,16 +11,6 @@ type TabKey = 'edit' | 'preview'
 const store = useStoryboardStore()
 const activeTab = ref<TabKey>('edit')
 
-// Selecting a beat (clicking a pill, or adding one) targets the beat form,
-// which lives on the Edit tab — surface it even when Preview is showing,
-// otherwise the click looks like a no-op.
-watch(
-  () => store.selectedBeatId,
-  (id) => {
-    if (id != null) activeTab.value = 'edit'
-  },
-)
-
 const panel = computed(() => store.selectedPanel)
 const scene = computed(() => store.selectedScene)
 
