@@ -599,7 +599,7 @@ class StoryboardRunner:
                         doc, issues = await self._compile_panel(
                             vlm, tree, scene, panel, subjects, mode, deterministic_only
                         )
-                except (VlmError, TimeoutError, RuntimeError) as exc:
+                except (VlmError, TimeoutError, RuntimeError, h3.H3Error) as exc:
                     await asyncio.to_thread(
                         self.db.update_panel,
                         panel["id"],

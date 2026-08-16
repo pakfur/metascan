@@ -218,6 +218,7 @@ class FakeVlm:
         body_response: str,
         sound_response: str = _VALID_SOUND,
         body_fails_first: bool = False,
+        sound_fails_first: bool = False,
     ) -> None:
         self.calls: List[Tuple[str, str, Optional[str]]] = []
         self.body_calls = 0
@@ -226,6 +227,8 @@ class FakeVlm:
         self._sound_response = sound_response
         self._body_fails_first = body_fails_first
         self._first_body_seen = False
+        self._sound_fails_first = sound_fails_first
+        self._first_sound_seen = False
 
     async def ensure_started(self, model_id: str) -> None:
         pass
@@ -248,6 +251,12 @@ class FakeVlm:
                 raise VlmError("simulated VLM crash")
             return self._body_response
         self.sound_calls += 1
+        if self._sound_fails_first and not self._first_sound_seen:
+            self._first_sound_seen = True
+            # SOUND_GRAMMAR's "string" rule permits zero characters --
+            # this is grammar-valid JSON that validate_sound_response
+            # nonetheless rejects (empty overall_soundscape) with H3Error.
+            return json.dumps({"overall_soundscape": "", "non_diegetic_music": "N/A"})
         return self._sound_response
 
 
@@ -406,6 +415,39 @@ def test_vlm_error_marks_panel_failed_not_run(db, tmp_path):
     assert len(failed_panels) == 1
     assert len(ok_panels) == 1
     assert failed_panels[0]["video_prompt_warnings"] == ["simulated VLM crash"]
+
+
+def test_h3_error_marks_panel_failed_not_run(db, tmp_path):
+    """validate_sound_response's H3Error (grammar-valid JSON, empty
+    overall_soundscape) must stay panel-scoped like VlmError/TimeoutError/
+    RuntimeError -- not escape asyncio.gather and blow up the whole run."""
+    sb = _make_storyboard(db)
+    _, panel1_id, _ = _make_panel(db, sb, action="Panel one")
+    _, panel2_id, _ = _make_panel(db, sb, action="Panel two")
+    scaffold, expect = _expect_and_scaffold(db, sb, panel1_id)
+    body = make_valid_body(scaffold, expect)
+    vlm = FakeVlm(body_response=body, sound_fails_first=True)
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    events: List[Tuple[str, str, Dict[str, Any]]] = []
+    runner.on_event(lambda ch, ev, d: events.append((ch, ev, d)))
+
+    counts = asyncio.run(runner.compile_video(sb))
+    assert counts["failed"] == 1
+    assert counts["compiled"] == 1
+    assert counts["skipped_locked"] == 0
+
+    complete = [e for e in events if e[1] == "compile_complete"]
+    assert len(complete) == 1
+    assert [e for e in events if e[1] == "compile_error"] == []
+
+    panels = [db.get_panel(panel1_id), db.get_panel(panel2_id)]
+    failed_panels = [p for p in panels if not p["video_prompt"]]
+    ok_panels = [p for p in panels if p["video_prompt"]]
+    assert len(failed_panels) == 1
+    assert len(ok_panels) == 1
+    assert failed_panels[0]["video_prompt_warnings"] == ["overall_soundscape is empty"]
 
 
 def test_deterministic_only_produces_doc_without_vlm(db, tmp_path):
