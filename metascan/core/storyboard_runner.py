@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -1398,89 +1399,108 @@ class StoryboardRunner:
         skipped: List[Dict[str, Any]] = []
         # Lazily created on the first 'prev_last' anchor this run needs --
         # most runs need none. tempfile.mkdtemp keeps it out of any
-        # scanned/watched directory.
+        # scanned/watched directory. Always removed in the finally below --
+        # the upload happens immediately after extraction, so nothing needs
+        # the file to survive past its own iteration.
         tmp_dir: Optional[Path] = None
 
-        for scene, panel in targets:
-            pid = panel["id"]
-            try:
-                subjects = self._panel_subjects(tree, panel)
-                refplan = h3.assign_reference_labels(subjects, scene)
-                beats = panel.get("beats") or []
-                speakers = h3.assign_speakers(beats, subjects, refplan)
-                active_audio = h3.active_audio_refs(refplan, speakers, subjects)
+        try:
+            for scene, panel in targets:
+                pid = panel["id"]
+                try:
+                    subjects = self._panel_subjects(tree, panel)
+                    refplan = h3.assign_reference_labels(subjects, scene)
+                    beats = panel.get("beats") or []
+                    speakers = h3.assign_speakers(beats, subjects, refplan)
+                    active_audio = h3.active_audio_refs(refplan, speakers, subjects)
 
-                ref_images: List[str] = []
-                for path, _label in refplan.picture_labels:
-                    ref_images.append(await self.comfy.upload_file(Path(path)))
+                    ref_images: List[str] = []
+                    for path, _label in refplan.picture_labels:
+                        ref_images.append(await self.comfy.upload_file(Path(path)))
 
-                audio_refs: List[str] = []
-                for voice_path, _label in active_audio:
-                    audio_refs.append(await self.comfy.upload_file(Path(voice_path)))
+                    audio_refs: List[str] = []
+                    for voice_path, _label in active_audio:
+                        audio_refs.append(
+                            await self.comfy.upload_file(Path(voice_path))
+                        )
 
-                first_frame: Optional[str] = None
-                anchor = panel.get("video_anchor")
-                if anchor == "keeper":
-                    image = _panel_image_by_id(panel, panel.get("selected_image_id"))
-                    assert image is not None  # validated above
-                    first_frame = await self.comfy.upload_file(Path(image["file_path"]))
-                elif anchor == "prev_last":
-                    idx = panel_index[pid]
-                    prev_panel = flat_panels[idx - 1][1]
-                    prev_image = _panel_image_by_id(
-                        prev_panel, prev_panel.get("selected_image_id")
+                    first_frame: Optional[str] = None
+                    anchor = panel.get("video_anchor")
+                    if anchor == "keeper":
+                        image = _panel_image_by_id(
+                            panel, panel.get("selected_image_id")
+                        )
+                        assert image is not None  # validated above
+                        first_frame = await self.comfy.upload_file(
+                            Path(image["file_path"])
+                        )
+                    elif anchor == "prev_last":
+                        idx = panel_index[pid]
+                        prev_panel = flat_panels[idx - 1][1]
+                        prev_image = _panel_image_by_id(
+                            prev_panel, prev_panel.get("selected_image_id")
+                        )
+                        assert prev_image is not None  # validated above
+                        if tmp_dir is None:
+                            tmp_dir = Path(tempfile.mkdtemp(prefix="ms-videogen-"))
+                        frame_path = tmp_dir / f"panel_{pid}_frame.png"
+                        # extract_last_frame shells out to ffmpeg via a
+                        # blocking subprocess.run -- run it off the event
+                        # loop, same rule as every DB write in this class.
+                        await asyncio.to_thread(
+                            extract_last_frame,
+                            Path(prev_image["file_path"]),
+                            frame_path,
+                        )
+                        first_frame = await self.comfy.upload_file(frame_path)
+                except Exception as exc:
+                    logger.warning(
+                        "generate_video: panel %s upload/extraction failed: %s",
+                        pid,
+                        exc,
                     )
-                    assert prev_image is not None  # validated above
-                    if tmp_dir is None:
-                        tmp_dir = Path(tempfile.mkdtemp(prefix="ms-videogen-"))
-                    frame_path = tmp_dir / f"panel_{pid}_frame.png"
-                    extract_last_frame(Path(prev_image["file_path"]), frame_path)
-                    first_frame = await self.comfy.upload_file(frame_path)
-            except Exception as exc:
-                logger.warning(
-                    "generate_video: panel %s upload/extraction failed: %s",
-                    pid,
-                    exc,
+                    skipped.append({"panel_id": pid, "error": str(exc)})
+                    continue
+
+                committed = await asyncio.to_thread(self.db.count_panel_images, pid)
+                pending_jobs = await asyncio.to_thread(
+                    self.db.list_generation_jobs,
+                    states=["queued", "running"],
+                    panel_ids=[pid],
+                    limit=10000,
                 )
-                skipped.append({"panel_id": pid, "error": str(exc)})
-                continue
+                variant_base = committed + len(pending_jobs)
+                seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
 
-            committed = await asyncio.to_thread(self.db.count_panel_images, pid)
-            pending_jobs = await asyncio.to_thread(
-                self.db.list_generation_jobs,
-                states=["queued", "running"],
-                panel_ids=[pid],
-                limit=10000,
-            )
-            variant_base = committed + len(pending_jobs)
-            seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
+                params = GenerationParams(
+                    positive=panel["video_prompt"],
+                    seed=seed,
+                    width=width,
+                    height=height,
+                    batch_size=1,
+                    ref_images=ref_images,
+                    first_frame=first_frame,
+                    audio_refs=audio_refs,
+                    duration_s=panel.get("duration_s"),
+                )
+                output_dir = (
+                    self.output_root
+                    / slug
+                    / f"scene_{scene['sort_order']:02d}"
+                    / f"panel_{panel['sort_order']:02d}"
+                )
+                job_id = await self.comfy.submit(
+                    video_preset_id,
+                    params,
+                    panel_id=pid,
+                    output_dir=output_dir,
+                )
+                jobs.append(job_id)
 
-            params = GenerationParams(
-                positive=panel["video_prompt"],
-                seed=seed,
-                width=width,
-                height=height,
-                batch_size=1,
-                ref_images=ref_images,
-                first_frame=first_frame,
-                audio_refs=audio_refs,
-                duration_s=panel.get("duration_s"),
-            )
-            output_dir = (
-                self.output_root
-                / slug
-                / f"scene_{scene['sort_order']:02d}"
-                / f"panel_{panel['sort_order']:02d}"
-            )
-            job_id = await self.comfy.submit(
-                video_preset_id,
-                params,
-                panel_id=pid,
-                output_dir=output_dir,
-            )
-            jobs.append(job_id)
-
-        return {"jobs": jobs, "skipped": skipped}
+            return {"jobs": jobs, "skipped": skipped}
+        finally:
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ---- job-output ingest ----------------------------------------------
 

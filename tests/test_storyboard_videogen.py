@@ -389,6 +389,44 @@ async def test_prev_last_uses_extracted_frame(db, comfy, events, tmp_path, monke
     assert params.first_frame is not None
 
 
+async def test_prev_last_crosses_scene_boundary(
+    db, comfy, events, tmp_path, monkeypatch
+):
+    """Board order for 'prev_last' is scene sort_order then panel
+    sort_order across the WHOLE board, not scene-local -- the "previous
+    panel" of the first panel in scene 1 is the last panel of scene 0, not
+    None."""
+    preset_id = _preset(db, first_frame=True)
+    sb_id = _storyboard(db, preset_id)
+
+    scene0_id, panel_a = _bare_panel(db, sb_id, scene_sort_order=0, panel_sort_order=0)
+    _video_image(db, panel_a, "/pics/scene0-last.mp4", selected=True)
+
+    scene1_id, panel_b = _bare_panel(
+        db, sb_id, scene_sort_order=1, panel_sort_order=0, video_anchor="prev_last"
+    )
+    assert scene1_id != scene0_id
+
+    calls = []
+
+    def fake_extract_last_frame(video_path, out_png):
+        calls.append((Path(video_path), Path(out_png)))
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        out_png.write_bytes(b"stub-png")
+
+    monkeypatch.setattr(
+        "metascan.core.storyboard_runner.extract_last_frame", fake_extract_last_frame
+    )
+
+    runner = make_runner(db, comfy, events, tmp_path)
+    result = await runner.generate_video(sb_id, panel_ids=[panel_b])
+
+    assert result["skipped"] == []
+    assert len(result["jobs"]) == 1
+    assert len(calls) == 1
+    assert calls[0][0] == Path("/pics/scene0-last.mp4")
+
+
 # ---- only_failed -----------------------------------------------------
 
 
