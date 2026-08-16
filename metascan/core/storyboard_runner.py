@@ -359,13 +359,16 @@ class StoryboardRunner:
             — both stochastic, so a single fresh sample usually recovers.
             The second failure propagates and fails the stage.
             """
+            raw = await vlm.generate_text(**gen_kwargs)
             try:
-                return validate(await vlm.generate_text(**gen_kwargs))
+                return validate(raw)
             except story.StoryError as exc:
                 logger.warning(
-                    "compose %s: invalid response (%s); retrying once",
+                    "compose %s: invalid response (%s); retrying once. "
+                    "Response tail: %r",
                     unit,
                     exc,
+                    raw[-300:],
                 )
                 return validate(await vlm.generate_text(**gen_kwargs))
 
