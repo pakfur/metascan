@@ -430,6 +430,61 @@ metascan/
   prompt-format guides are vendored verbatim at
   `data/prompt_guides/minimax-h3/` and are the format authority every
   renderer in `h3_compiler.py` follows.
+- **Video generation drives ComfyUI with a third preset kind, `ref2v`.**
+  `workflow_presets.kind`'s CHECK gained `'ref2v'` alongside `t2i`/`ref`; a
+  dev DB with the old two-value CHECK baked into its DDL is detected via
+  `sqlite_master` and rebuilt (create/copy/drop/rename), same procedure as
+  the `storyboards.folder_id` migration — the pending init transaction is
+  committed first so `PRAGMA foreign_keys = OFF` actually takes effect
+  before the `DROP TABLE`. `ref2v` only requires `MS_POSITIVE`/`MS_SEED`/
+  `MS_SAVE`; everything else (`MS_REF_IMAGE`/`_2`/`_3`, `MS_FIRST_FRAME`,
+  `MS_LAST_FRAME`, `MS_AUDIO`/`_2`, `MS_DURATION`, `MS_NEGATIVE`, `MS_LORA`)
+  is optional per-workflow. `Bindings.latent` is now `Optional[str]` —
+  `t2i`/`ref` still require `MS_LATENT` via `_REQUIRED_TITLES`, only `ref2v`
+  workflows may omit it. `ComfyClient.upload_file` generalizes the old
+  image-only ref upload to any file (video/audio included), keyed by
+  content sha256 so a repeated input uploads once per run regardless of
+  how many panels reference it; `collect_outputs` scans a save node's
+  history entry across every `_OUTPUT_KEYS` key (`images`/`gifs`/`videos`/
+  `video`/`audio` — video-combine nodes commonly emit the same mp4 under
+  both `gifs` and `videos`) and de-dupes on the `(filename, subfolder,
+  type)` identity `/view` itself resolves by; a downloaded file whose
+  suffix `Scanner` doesn't recognize (e.g. a video node's sidecar `.json`)
+  is still written to disk but excluded from ingest and the returned list.
+  `StoryboardRunner.generate_video` validates every target panel upfront —
+  compiled `video_prompt` present, reference/audio counts against the
+  preset's actual slot count, voice files exist on disk, `video_anchor`
+  prerequisites for `i2va`/`fl2va` — and raises one `StoryboardError`
+  naming every failing panel before submitting anything; only frame
+  extraction/upload are runtime-only failures, and those skip just that
+  panel (`generate_video` returns `{"jobs": [...], "skipped": [{panel_id,
+  error}, ...]}`, not a hard failure). `_panel_subjects` (the panel
+  `subject_ids` ∪ beat-dialog subject union) is factored out of
+  `_compile_panel` specifically so `compile_video`'s prompt text and
+  `generate_video`'s uploaded reference pictures/audio can never disagree
+  about who's in the shot. Rendered clips ingest through the same
+  `_ingest_outputs` path still images use — `panel_images` needed no
+  video-specific handling. The side panel's "Anchor changed since the last
+  compile" chip compares live `video_anchor` against `video_compiled_anchor`
+  (the anchor recorded at compile time), not against re-validating the
+  actual anchor prerequisites. `<Audio N>` reference/retention lines
+  (`render_audio_definition_lines`/`render_audio_retention_lines`) are
+  emitted only for subjects that both have a `voice_ref_path` and actually
+  speak in the panel (`_active_audio_entries` filters `RefPlan.audio_labels`
+  against `SpeakerPlan.lines`) — that same active set is what
+  `active_audio_refs` uploads, so the document and the ComfyUI submission
+  can't drift apart. `<Audio N>` retention lines lint against their own
+  §4.2 marker vocabulary (`fully_copy`/`partially_copy`/`reference`/
+  `weak_reference`), distinct from the §4.1 `<Subject N>`/`<Picture N>` set
+  — `_lint_retention_and_sound` picks the marker set per-line based on
+  whether the line starts with `<Audio`. `fl2va`'s second keyframe anchor
+  (the compiled document's `<Picture N+1>` end-frame reference) is a
+  documented scope cut: `generate_video` only ever populates `first_frame`
+  (`MS_FIRST_FRAME`) for `keeper`/`prev_last` anchors — `MS_LAST_FRAME` is
+  bound and written by `apply_overrides` when a preset's workflow wires it,
+  but nothing in the runner ever sets `GenerationParams.last_frame`, so an
+  `fl2va` workflow needing its second anchor must supply it by hand in
+  ComfyUI.
 - **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_panel_images` convert it through
