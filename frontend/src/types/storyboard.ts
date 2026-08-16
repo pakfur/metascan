@@ -91,6 +91,7 @@ export interface Scene {
   mood: string | null
   lighting: string | null
   notes: string | null
+  reference_path: string | null
   panels: Panel[]
 }
 
@@ -102,6 +103,7 @@ export interface Subject {
   lora_name: string | null
   lora_strength: number | null
   reference_path: string | null
+  reference_path_2: string | null
   sort_order: number
   voice: string | null
 }
