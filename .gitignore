@@ -3,12 +3,14 @@
 # ============================================================
 
 # Runtime data — ignore everything under data/ except the
-# vocabulary directory (tracked CLIP tag axes) and the
+# vocabulary directory (tracked CLIP tag axes), the
 # meta-prompt YAML (source-of-truth for VLM prompts; loaded by
-# metascan/core/prompt_store.py and hot-reloaded at runtime).
+# metascan/core/prompt_store.py and hot-reloaded at runtime),
+# and the prompt guides (format documentation for video compilers).
 data/*
 !data/vocabulary/
 !data/meta_prompt.yml
+!data/prompt_guides/
 
 .claude/
 
