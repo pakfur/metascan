@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import mimetypes
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from metascan.core.comfy_bindings import (
     apply_overrides,
     resolve_bindings,
 )
+from metascan.core.scanner import Scanner
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,15 @@ JobEventCb = Callable[[str, Dict[str, Any]], None]
 # against a stale completion (e.g. a collection task that was already
 # in flight when cancel() ran) resurrecting a cancelled/failed row.
 _TERMINAL_STATES: FrozenSet[str] = frozenset({"done", "failed", "cancelled"})
+
+# Keys a ComfyUI save/output node's history entry can carry outputs
+# under. "images" is the classic SaveImage/PreviewImage shape; video
+# nodes (VHS_VideoCombine and friends) commonly emit their file under
+# "gifs" even when it's an mp4, sometimes alongside (or instead of)
+# "videos"/"video"; "audio" covers nodes that emit a separate track.
+# collect_outputs scans all of them and takes every dict entry that
+# carries a "filename", regardless of which key it sat under.
+_OUTPUT_KEYS: Tuple[str, ...] = ("images", "gifs", "videos", "video", "audio")
 
 
 class ComfyError(RuntimeError):
@@ -354,26 +365,41 @@ class ComfyClient:
 
     # ---- reference images ---------------------------------------------
 
-    async def upload_image(self, path: Path) -> str:
-        """Upload a local image to ComfyUI's input directory.
+    async def upload_file(self, path: Path) -> str:
+        """Upload a local file to ComfyUI's input directory.
+
+        Generalizes what used to be image-only reference upload: despite
+        the endpoint name, ComfyUI's `/upload/image` stores whatever
+        bytes it is given under its input directory, so this is also how
+        a to-be-animated source image or an i2v/v2v input file reaches
+        ComfyUI. MIME type is derived from the real suffix via
+        `mimetypes.guess_type` (falling back to
+        `application/octet-stream` for anything unrecognized); the
+        uploaded name keeps that suffix so ComfyUI-side nodes that sniff
+        the extension still work.
 
         Returns the ComfyUI-side filename for GenerationParams.ref_image.
-        Cached by content hash, so a subject's reference is uploaded once
-        per run rather than once per panel.
+        Cached by content hash, so a subject's reference (or any other
+        repeated input) is uploaded once per run rather than once per
+        panel.
         """
         path = Path(path)
         try:
             payload = await asyncio.to_thread(path.read_bytes)
         except OSError as exc:
-            raise ComfyError(f"Cannot read reference image {path}: {exc}") from exc
+            raise ComfyError(f"Cannot read {path}: {exc}") from exc
 
         digest = hashlib.sha256(payload).hexdigest()
         cached = self._upload_cache.get(digest)
         if cached is not None:
             return cached
 
-        upload_name = f"metascan_{digest[:16]}{path.suffix or '.png'}"
-        files = {"image": (upload_name, payload, "image/png")}
+        suffix = path.suffix or ".png"
+        upload_name = f"metascan_{digest[:16]}{suffix}"
+        mime_type, _ = mimetypes.guess_type(upload_name)
+        files = {
+            "image": (upload_name, payload, mime_type or "application/octet-stream")
+        }
         try:
             resp = await self._http.post(
                 f"{self.base_url}/upload/image",
@@ -382,9 +408,7 @@ class ComfyClient:
             )
             resp.raise_for_status()
         except Exception as exc:
-            raise ComfyError(
-                f"Reference upload to {self.base_url} failed: {exc}"
-            ) from exc
+            raise ComfyError(f"Upload to {self.base_url} failed: {exc}") from exc
 
         body = resp.json()
         name = body.get("name") or upload_name
@@ -392,6 +416,9 @@ class ComfyClient:
         resolved = f"{subfolder}/{name}" if subfolder else str(name)
         self._upload_cache[digest] = resolved
         return resolved
+
+    # Callers unchanged: upload_image was the original (image-only) name.
+    upload_image = upload_file
 
     # ---- queue ---------------------------------------------------------
 
@@ -994,6 +1021,16 @@ class ComfyClient:
             self._collecting.discard(job_id)
 
     async def _download_image(self, entry: Dict[str, Any], target: Path) -> None:
+        """Fetch one output-node entry via `/view` and write it to disk.
+
+        Filename-agnostic: the entry's `filename`/`subfolder`/`type`
+        triplet is all `/view` needs, whether it names an image, a
+        video, or an audio file, so this one implementation covers every
+        key `collect_outputs` scans. Kept under this name -- rather than
+        the more accurate `_download_output` -- because
+        `tests/test_comfy_client.py` monkeypatches it by name;
+        `_download_output` below is an alias for new call sites.
+        """
         resp = await self._http.get(
             f"{self.base_url}/view",
             params={
@@ -1003,15 +1040,17 @@ class ComfyClient:
             },
         )
         resp.raise_for_status()
-        # Multi-MB PNGs onto a WSL2 /mnt output root are exactly the stall
-        # class this module goes out of its way to keep off the event
-        # loop everywhere else.
+        # Multi-MB files (PNGs, but now also video) onto a WSL2 /mnt
+        # output root are exactly the stall class this module goes out
+        # of its way to keep off the event loop everywhere else.
         await asyncio.to_thread(target.write_bytes, resp.content)
 
-    async def collect_outputs(self, job_id: int, prompt_id: str) -> List[Path]:
-        """Fetch, persist, and ingest every image the job produced.
+    _download_output = _download_image
 
-        Images are pulled over HTTP rather than read from ComfyUI's output
+    async def collect_outputs(self, job_id: int, prompt_id: str) -> List[Path]:
+        """Fetch, persist, and ingest every output file the job produced.
+
+        Files are pulled over HTTP rather than read from ComfyUI's output
         directory so a remote or containerized ComfyUI works unchanged.
         Reads from `/history` (not the websocket event payload): ComfyUI
         emits one `executed` per output-producing node, not one per
@@ -1019,12 +1058,23 @@ class ComfyClient:
         workflow with more than one output node (see `_on_prompt_end`'s
         `_collecting` guard for the other half of that same fact).
 
+        The save node's history entry is scanned across every key in
+        `_OUTPUT_KEYS` (`images`, `gifs`, `videos`, `video`, `audio`) --
+        video-combine nodes commonly emit an mp4 under `gifs` -- and
+        every dict entry carrying a `filename`, under any of those keys,
+        is downloaded. A downloaded file whose suffix isn't one
+        `Scanner` recognizes (e.g. a sidecar `.json` some video nodes
+        emit alongside the media file) is still written to disk -- so
+        nothing is silently lost -- but is excluded from both the
+        ingested set and the returned/`job_outputs` list, and logged at
+        INFO by name.
+
         Bails immediately if the job is no longer queued/running (a
         cancel that completed before this call even started), and
-        re-checks around every image inside the loop -- both before
+        re-checks around every file inside the loop -- both before
         starting its download and again right after -- so a cancel
         landing mid-batch stops further downloads/ingests instead of
-        finishing the batch, and doesn't ingest the one image that was
+        finishing the batch, and doesn't ingest the one file that was
         already in flight when the cancel landed either. A file that was
         already written to disk before the cancel took effect is left in
         place (harmless orphan): a retry re-downloads over it.
@@ -1037,16 +1087,20 @@ class ComfyClient:
 
         entry = await self._await_history(prompt_id)
         _, bindings = await self._load_preset(job["preset_id"])
-        images = ((entry.get("outputs") or {}).get(bindings.save) or {}).get(
-            "images"
-        ) or []
+        node_output = (entry.get("outputs") or {}).get(bindings.save) or {}
+        entries: List[Dict[str, Any]] = [
+            item
+            for key in _OUTPUT_KEYS
+            for item in (node_output.get(key) or [])
+            if isinstance(item, dict) and item.get("filename")
+        ]
 
         stored = job.get("output_dir")
         target_dir = Path(stored) if stored else self.output_dir_for(job_id)
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         written: List[Path] = []
-        for entry_image in images:
+        for entry_item in entries:
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):
                 break
@@ -1056,17 +1110,25 @@ class ComfyClient:
             # final component, which is all ComfyUI ever legitimately
             # sends (`subfolder` carries the rest, and we don't use it
             # for the local layout).
-            name = Path(str(entry_image.get("filename") or "")).name
+            name = Path(str(entry_item.get("filename") or "")).name
             if not name or name in (".", ".."):
                 continue
             target = target_dir / name
-            await self._download_image(entry_image, target)
+            await self._download_image(entry_item, target)
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):
-                # Cancelled while this image's download was in flight --
+                # Cancelled while this file's download was in flight --
                 # the bytes may already be on disk, but they must not be
                 # ingested or counted as this job's output.
                 break
+            if target.suffix.lower() not in Scanner.SUPPORTED_EXTENSIONS:
+                logger.info(
+                    "collect_outputs: downloaded unsupported output %s for "
+                    "job %s; excluded from ingest",
+                    target.name,
+                    job_id,
+                )
+                continue
             written.append(target)
             if self.scanner is not None:
                 try:
