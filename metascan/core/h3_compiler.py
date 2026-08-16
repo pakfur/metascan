@@ -352,9 +352,17 @@ def render_subject_definitions(
 
     scene_name = scene.get("name", "scene")
     setting = _fallback_setting(scene)
-    lines.append(
-        f"<{refplan.environment_label}> is the {scene_name} environment: {setting}."
-    )
+    scene_ref = scene.get("reference_path")
+    env_pic = pic_by_path.get(scene_ref) if scene_ref else None
+    if env_pic:
+        lines.append(
+            f"<{refplan.environment_label}> is the {scene_name} environment "
+            f"in <{env_pic}>, {setting}."
+        )
+    else:
+        lines.append(
+            f"<{refplan.environment_label}> is the {scene_name} environment: {setting}."
+        )
     return "\n".join(lines)
 
 
