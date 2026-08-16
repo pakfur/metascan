@@ -22,7 +22,17 @@ import mimetypes
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
@@ -1088,12 +1098,26 @@ class ComfyClient:
         entry = await self._await_history(prompt_id)
         _, bindings = await self._load_preset(job["preset_id"])
         node_output = (entry.get("outputs") or {}).get(bindings.save) or {}
-        entries: List[Dict[str, Any]] = [
-            item
-            for key in _OUTPUT_KEYS
-            for item in (node_output.get(key) or [])
-            if isinstance(item, dict) and item.get("filename")
-        ]
+        # A video node can legitimately list the same file under more
+        # than one key (e.g. VHS_VideoCombine's mp4 under both "gifs"
+        # and "videos"); de-dupe on the (filename, subfolder, type)
+        # triplet -- the same identity /view resolves the file by -- so
+        # it's downloaded, ingested, and reported exactly once.
+        entries: List[Dict[str, Any]] = []
+        seen: Set[Tuple[Any, Any, Any]] = set()
+        for key in _OUTPUT_KEYS:
+            for item in node_output.get(key) or []:
+                if not isinstance(item, dict) or not item.get("filename"):
+                    continue
+                identity = (
+                    item.get("filename"),
+                    item.get("subfolder", ""),
+                    item.get("type", "output"),
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                entries.append(item)
 
         stored = job.get("output_dir")
         target_dir = Path(stored) if stored else self.output_dir_for(job_id)
