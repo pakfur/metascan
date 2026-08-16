@@ -171,6 +171,33 @@ async def test_collect_outputs_mixed_keys_and_sidecar_filtered(
     assert ingested_names == {"frame_00001_.png", "clip_00001.mp4"}
 
 
+async def test_collect_outputs_same_file_listed_under_two_keys_deduped(
+    started_client, fake_comfy  # noqa: F811
+):
+    """Regression guard: a video node can list the same output under more
+    than one key (e.g. VHS_VideoCombine's mp4 under both "gifs" and
+    "videos"). It must be downloaded, returned, and ingested exactly
+    once -- not twice."""
+    fake_comfy.output_override = {
+        "gifs": [{"filename": "clip_00001.mp4", "subfolder": "", "type": "output"}],
+        "videos": [{"filename": "clip_00001.mp4", "subfolder": "", "type": "output"}],
+    }
+    seen: List[Tuple[str, Dict[str, Any]]] = []
+    started_client.on_job_event(lambda event, payload: seen.append((event, payload)))
+
+    job_id, job = await _run_job(started_client)
+    assert job["state"] == "done"
+
+    files = list(started_client.output_dir_for(job_id).glob("*.mp4"))
+    assert len(files) == 1
+
+    outputs = [p for e, p in seen if e == "job_outputs"]
+    assert len(outputs) == 1
+    assert [Path(f).name for f in outputs[0]["files"]] == ["clip_00001.mp4"]
+
+    assert started_client.scanner.ingested == [files[0]]
+
+
 async def test_collect_outputs_images_only_unchanged(
     started_client, fake_comfy  # noqa: F811
 ):
