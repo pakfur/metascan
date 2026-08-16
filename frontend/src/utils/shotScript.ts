@@ -48,36 +48,40 @@ function speakerLabel(subjectId: number | null, voice: string | null, subjects: 
   return voice ?? 'Voice'
 }
 
-/**
- * Renders a human-readable beat sheet for a panel: a header describing the
- * shot, then one block per beat with cumulative timecodes, camera phrasing,
- * sound, and dialog. Pure function — no store/API access, safe to call from
- * any component or a future export/print path.
- */
-export function buildShotScript(panel: Panel, scene: Scene, subjects: Subject[]): string {
-  const lines: string[] = []
+export interface ShotScriptBlocks {
+  header: string
+  beats: { beatId: number; text: string }[]
+}
 
+/**
+ * Structured form of the beat sheet: the shot header plus one text block
+ * per beat, keyed by beat id so the preview can highlight/scroll the
+ * currently selected beat. Pure function — no store/API access.
+ */
+export function buildShotScriptBlocks(
+  panel: Panel,
+  scene: Scene,
+  subjects: Subject[],
+): ShotScriptBlocks {
   const shotBits = [panel.shot_size, panel.angle, panel.lens].filter(
     (v): v is string => v !== null && v !== '',
   )
   const shotLabel = shotBits.length ? ` (${shotBits.join(', ')})` : ''
-  lines.push(`${scene.name} — ${panel.action}${shotLabel}`)
-  lines.push(`Duration: ${formatTimecode(panel.duration_s)}`)
-  lines.push('')
+  const header = [
+    `${scene.name} — ${panel.action}${shotLabel}`,
+    `Duration: ${formatTimecode(panel.duration_s)}`,
+  ].join('\n')
 
   let cursor = 0
   const beats = [...panel.beats].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
-  if (beats.length === 0) {
-    lines.push('(no beats)')
-    return lines.join('\n')
-  }
+  const blocks: { beatId: number; text: string }[] = []
 
   for (const beat of beats) {
     const start = cursor
     const end = cursor + beat.duration_s
     cursor = end
     const cutMarker = beat.is_cut ? ' (CUT)' : ''
-    lines.push(`[${formatTimecode(start)} – ${formatTimecode(end)}]${cutMarker} ${beat.action}`)
+    const lines = [`[${formatTimecode(start)} – ${formatTimecode(end)}]${cutMarker} ${beat.action}`]
 
     const camera = cameraLine(beat)
     if (camera) lines.push(`  Camera: ${camera}`)
@@ -89,8 +93,20 @@ export function buildShotScript(panel: Panel, scene: Scene, subjects: Subject[])
       lines.push(`  ${speaker} (${delivery}): "${line.text}"`)
     }
 
-    lines.push('')
+    blocks.push({ beatId: beat.id, text: lines.join('\n') })
   }
 
-  return lines.join('\n').trimEnd()
+  return { header, beats: blocks }
+}
+
+/**
+ * Renders a human-readable beat sheet for a panel: a header describing the
+ * shot, then one block per beat with cumulative timecodes, camera phrasing,
+ * sound, and dialog. Pure function — no store/API access, safe to call from
+ * any component or a future export/print path.
+ */
+export function buildShotScript(panel: Panel, scene: Scene, subjects: Subject[]): string {
+  const { header, beats } = buildShotScriptBlocks(panel, scene, subjects)
+  if (beats.length === 0) return `${header}\n\n(no beats)`
+  return [header, ...beats.map((b) => b.text)].join('\n\n')
 }
