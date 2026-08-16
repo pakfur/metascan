@@ -719,6 +719,20 @@ class DatabaseManager:
                 "duration_s",
                 "ALTER TABLE panels ADD COLUMN duration_s REAL NOT NULL DEFAULT 12.0",
             )
+            _idempotent_add_column(
+                conn,
+                "storyboard_subjects",
+                "reference_path_2",
+                "ALTER TABLE storyboard_subjects ADD COLUMN reference_path_2 "
+                "TEXT REFERENCES media(file_path) ON DELETE SET NULL",
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "reference_path",
+                "ALTER TABLE scenes ADD COLUMN reference_path "
+                "TEXT REFERENCES media(file_path) ON DELETE SET NULL",
+            )
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
@@ -1249,6 +1263,7 @@ class DatabaseManager:
             "lora_name",
             "lora_strength",
             "reference_path",
+            "reference_path_2",
             "sort_order",
             "voice",
         }
@@ -1264,6 +1279,7 @@ class DatabaseManager:
             "mood",
             "lighting",
             "notes",
+            "reference_path",
         }
     )
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1409,21 +1425,26 @@ class DatabaseManager:
         lora_name: Optional[str] = None,
         lora_strength: float = 0.8,
         reference_path: Optional[str] = None,
+        reference_path_2: Optional[str] = None,
         sort_order: int = 0,
         voice: Optional[str] = None,
     ) -> int:
-        # storyboard_subjects.reference_path FKs media(file_path), which is
-        # always stored POSIX -- a native-style path (Windows/WSL) would
-        # never match an existing row and surface as a confusing
+        # storyboard_subjects.reference_path(/_2) FKs media(file_path),
+        # which is always stored POSIX -- a native-style path (Windows/WSL)
+        # would never match an existing row and surface as a confusing
         # sqlite3.IntegrityError higher up.
         posix_reference_path = (
             to_posix_path(reference_path) if reference_path else reference_path
+        )
+        posix_reference_path_2 = (
+            to_posix_path(reference_path_2) if reference_path_2 else reference_path_2
         )
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO storyboard_subjects (storyboard_id, name, "
                 "description, lora_name, lora_strength, reference_path, "
-                "sort_order, voice) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "reference_path_2, sort_order, voice) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     name,
@@ -1431,6 +1452,7 @@ class DatabaseManager:
                     lora_name,
                     lora_strength,
                     posix_reference_path,
+                    posix_reference_path_2,
                     sort_order,
                     voice,
                 ),
@@ -1449,6 +1471,8 @@ class DatabaseManager:
             return
         if fields.get("reference_path"):
             fields["reference_path"] = to_posix_path(fields["reference_path"])
+        if fields.get("reference_path_2"):
+            fields["reference_path_2"] = to_posix_path(fields["reference_path_2"])
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [subject_id]
         with self.lock, self._get_connection() as conn:
@@ -1457,6 +1481,13 @@ class DatabaseManager:
                 values,
             )
             conn.commit()
+
+    def get_subject(self, subject_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM storyboard_subjects WHERE id = ?", (subject_id,)
+            ).fetchone()
+            return dict(row) if row else None
 
     def delete_subject(self, subject_id: int) -> bool:
         with self.lock, self._get_connection() as conn:
@@ -1481,12 +1512,19 @@ class DatabaseManager:
         mood: Optional[str] = None,
         lighting: Optional[str] = None,
         notes: Optional[str] = None,
+        reference_path: Optional[str] = None,
     ) -> int:
+        # scenes.reference_path FKs media(file_path), which is always
+        # stored POSIX -- see create_subject's identical rationale.
+        posix_reference_path = (
+            to_posix_path(reference_path) if reference_path else reference_path
+        )
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO scenes (storyboard_id, sort_order, name, "
-                "subtitle, setting, location, time_of_day, mood, lighting, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "subtitle, setting, location, time_of_day, mood, lighting, "
+                "notes, reference_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     sort_order,
@@ -1498,6 +1536,7 @@ class DatabaseManager:
                     mood,
                     lighting,
                     notes,
+                    posix_reference_path,
                 ),
             )
             conn.commit()
@@ -1509,11 +1548,20 @@ class DatabaseManager:
             raise ValueError(f"Not updatable on scenes: {', '.join(sorted(unknown))}")
         if not fields:
             return
+        if fields.get("reference_path"):
+            fields["reference_path"] = to_posix_path(fields["reference_path"])
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [scene_id]
         with self.lock, self._get_connection() as conn:
             conn.execute(f"UPDATE scenes SET {assignments} WHERE id = ?", values)
             conn.commit()
+
+    def get_scene(self, scene_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM scenes WHERE id = ?", (scene_id,)
+            ).fetchone()
+            return dict(row) if row else None
 
     def delete_scene(
         self, scene_id: int, purge_images: bool = False
