@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch, type Ref } from 'vue'
+import { computed, nextTick, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
-import { buildShotScript } from '../../utils/shotScript'
+import { buildShotScript, buildShotScriptBlocks } from '../../utils/shotScript'
 import { copyToClipboard } from '../../utils/clipboard'
 import { VIDEO_ANCHORS } from '../../types/storyboard'
 import BeatForm from './BeatForm.vue'
@@ -18,6 +18,28 @@ const shotScript = computed(() => {
   if (!panel.value || !scene.value) return ''
   return buildShotScript(panel.value, scene.value, store.tree?.subjects ?? [])
 })
+
+const scriptBlocks = computed(() => {
+  if (!panel.value || !scene.value) return null
+  return buildShotScriptBlocks(panel.value, scene.value, store.tree?.subjects ?? [])
+})
+
+// The preview keeps its tab on beat selection but must visibly follow it:
+// the selected beat's script block highlights and scrolls into view.
+const beatBlockEls = new Map<number, HTMLElement>()
+function setBeatBlockRef(beatId: number, el: unknown): void {
+  if (el instanceof HTMLElement) beatBlockEls.set(beatId, el)
+  else beatBlockEls.delete(beatId)
+}
+
+watch(
+  () => [store.selectedBeatId, activeTab.value] as const,
+  async ([beatId, tab]) => {
+    if (tab !== 'preview' || beatId == null) return
+    await nextTick()
+    beatBlockEls.get(beatId)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  },
+)
 
 const scriptCopied = ref(false)
 const promptCopied = ref(false)
@@ -239,7 +261,18 @@ async function renderVideo(): Promise<void> {
             {{ scriptCopied ? 'Copied' : 'Copy' }}
           </button>
         </div>
-        <pre class="sp-script">{{ shotScript }}</pre>
+        <div v-if="scriptBlocks" class="sp-script">
+          <div class="sp-script-header">{{ scriptBlocks.header }}</div>
+          <div v-if="scriptBlocks.beats.length === 0" class="sp-script-beat">(no beats)</div>
+          <div
+            v-for="b in scriptBlocks.beats"
+            :key="b.beatId"
+            :ref="(el) => setBeatBlockRef(b.beatId, el)"
+            class="sp-script-beat"
+            :class="{ selected: b.beatId === store.selectedBeatId }"
+            @click="store.selectedBeatId = b.beatId"
+          >{{ b.text }}</div>
+        </div>
       </div>
 
       <div class="sp-section">
@@ -437,6 +470,32 @@ async function renderVideo(): Promise<void> {
 .sp-video-actions {
   display: flex;
   gap: 8px;
+}
+
+.sp-script-header {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 8px;
+  color: var(--text-color-secondary);
+}
+
+.sp-script-beat {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 4px 6px;
+  margin: 0 -6px 6px;
+  border-left: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.sp-script-beat:hover {
+  background: var(--surface-hover);
+}
+
+.sp-script-beat.selected {
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  border-left-color: var(--primary-color);
 }
 
 .sp-script {
