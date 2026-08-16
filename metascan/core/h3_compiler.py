@@ -16,6 +16,15 @@ Pure module: no I/O, no VLM calls (those live in ``storyboard_runner``
 and are added in Task 4 alongside the lint layer from Task 3). Imports
 are limited to ``dataclasses``/``typing``/``json`` plus the shared
 ``CAMERA_MOTION_VALUES`` enum tuple.
+
+``<Audio N>`` voice-timbre references (ref-guide §2.4/§4.2, ``RefPlan.
+audio_labels``, ``render_audio_definition_lines``/``render_audio_
+retention_lines``/``active_audio_refs`` below) are deliberately NOT
+covered by ``_lint_unknown_labels`` -- its ``_LABEL_RE`` regex only
+matches ``Subject``/``Picture``, so an ``<Audio N>`` span in a compiled
+document is invisible to lint by design. Do not extend that regex to
+"fix" this; audio spans are static (subject/voice-ref-driven, never
+VLM-authored) so there's nothing to validate against drift.
 """
 
 from __future__ import annotations
@@ -59,6 +68,10 @@ class RefPlan:
     environment_label: str  # "Subject K+1" (scene environment)
     picture_labels: List[Tuple[str, str]]  # [(posix_path, "Picture 1"), ...]
     keyframe_picture_label: str  # next free "Picture N" (i2va/fl2va anchors)
+    # (subject_id, "Audio N") -- numbered 1.. in subject sort_order, assigned
+    # only for subjects with a truthy voice_ref_path (ref-guide §2.4). Default
+    # keeps every pre-Task-4 constructor call/test passing unchanged.
+    audio_labels: Tuple[Tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,17 +168,22 @@ _KEYFRAME_MODES = ("i2va", "fl2va")
 def assign_reference_labels(
     subjects: Sequence[Mapping[str, Any]], scene: Mapping[str, Any]
 ) -> RefPlan:
-    """Number subjects, the scene environment, and every reference picture.
+    """Number subjects, the scene environment, every reference picture, and
+    every voice-timbre audio reference.
 
     ref-guide §2.1 makes environments Subjects: the scene always becomes
     the final ``<Subject K+1>``. Pictures are numbered in upload order:
     each subject's ``reference_path`` then ``reference_path_2`` (subject
-    order), then the scene's ``reference_path``.
+    order), then the scene's ``reference_path``. ``<Audio N>`` labels
+    (ref-guide §2.4) are numbered separately, in subject ``sort_order``,
+    for every subject with a truthy ``voice_ref_path``.
     """
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     subject_labels: Dict[int, str] = {}
     picture_labels: List[Tuple[str, str]] = []
+    audio_labels: List[Tuple[int, str]] = []
     next_picture = 1
+    next_audio = 1
 
     for subject in ordered:
         subject_labels[subject["id"]] = f"Subject {len(subject_labels) + 1}"
@@ -174,6 +192,9 @@ def assign_reference_labels(
             if path:
                 picture_labels.append((path, f"Picture {next_picture}"))
                 next_picture += 1
+        if subject.get("voice_ref_path"):
+            audio_labels.append((subject["id"], f"Audio {next_audio}"))
+            next_audio += 1
 
     scene_ref = scene.get("reference_path")
     if scene_ref:
@@ -187,6 +208,7 @@ def assign_reference_labels(
         environment_label=environment_label,
         picture_labels=picture_labels,
         keyframe_picture_label=keyframe_picture_label,
+        audio_labels=tuple(audio_labels),
     )
 
 
@@ -484,6 +506,90 @@ def render_retention_analysis(
             )
 
     return "\n".join(lines)
+
+
+# -- Audio references (ref-guide §2.4/§4.2) --------------------------------
+
+
+def _active_audio_entries(
+    refplan: RefPlan, speakers: SpeakerPlan, subjects: Sequence[Mapping[str, Any]]
+) -> List[Tuple[int, str, str, str]]:
+    """``(subject_id, audio_label, speaker_id, voice_ref_path)`` for every
+    ``RefPlan`` audio label whose subject actually SPEAKS in this panel --
+    i.e. its bracketed subject label (``"<Subject N>"``) appears among
+    ``speakers.lines``. Non-speaking subjects' audio labels are silently
+    dropped here, which is what keeps ``render_audio_definition_lines``,
+    ``render_audio_retention_lines``, and ``active_audio_refs`` (the
+    runner's upload order) in lockstep with each other."""
+    subject_by_id = {s["id"]: s for s in subjects}
+    speaking_labels = {sl.subject_label for sl in speakers.lines if sl.subject_label}
+    out: List[Tuple[int, str, str, str]] = []
+    for subject_id, audio_label in refplan.audio_labels:
+        subject_label = refplan.subject_labels.get(subject_id)
+        bracketed = f"<{subject_label}>" if subject_label else None
+        if bracketed is None or bracketed not in speaking_labels:
+            continue
+        subject = subject_by_id.get(subject_id)
+        voice_ref_path = subject.get("voice_ref_path") if subject else None
+        if not voice_ref_path:
+            continue
+        speaker_id = next(
+            (sl.speaker_id for sl in speakers.lines if sl.subject_label == bracketed),
+            None,
+        )
+        if speaker_id is None:
+            continue
+        out.append((subject_id, audio_label, speaker_id, voice_ref_path))
+    return out
+
+
+def active_audio_refs(
+    refplan: RefPlan, speakers: SpeakerPlan, subjects: Sequence[Mapping[str, Any]]
+) -> List[Tuple[str, str]]:
+    """``[(voice_ref_path, "Audio N"), ...]`` in label order -- the set the
+    runner actually uploads as H3 audio references. Only subjects with a
+    defined ``<Audio N>`` label (truthy ``voice_ref_path``) who also
+    actually speak in this panel are included."""
+    return [
+        (voice_ref_path, audio_label)
+        for _, audio_label, _, voice_ref_path in _active_audio_entries(
+            refplan, speakers, subjects
+        )
+    ]
+
+
+def render_audio_definition_lines(
+    refplan: RefPlan, speakers: SpeakerPlan, subjects: Sequence[Mapping[str, Any]]
+) -> List[str]:
+    """ref-guide §2.4: one ``subject_definitions`` line per active audio
+    label -- ``"<Audio 1> is the voice-timbre reference for <Subject 2>
+    (S1)."`` -- reusing the speaker's already-assigned ``(Sx)`` id rather
+    than assigning a new one (never independently numbered)."""
+    lines: List[str] = []
+    for subject_id, audio_label, speaker_id, _ in _active_audio_entries(
+        refplan, speakers, subjects
+    ):
+        subject_label = refplan.subject_labels[subject_id]
+        lines.append(
+            f"<{audio_label}> is the voice-timbre reference for "
+            f"<{subject_label}> ({speaker_id})."
+        )
+    return lines
+
+
+def render_audio_retention_lines(
+    refplan: RefPlan, speakers: SpeakerPlan, subjects: Sequence[Mapping[str, Any]]
+) -> List[str]:
+    """ref-guide §4.2 ``reference`` relationship marker for the same active
+    set as ``render_audio_definition_lines``: ``"<Audio 1>: reference -
+    the target speaker follows <Audio 1>'s voice timbre and delivery
+    without copying the original signal."``"""
+    return [
+        f"<{audio_label}>: reference - the target speaker follows "
+        f"<{audio_label}>'s voice timbre and delivery without copying "
+        "the original signal."
+        for _, audio_label, _, _ in _active_audio_entries(refplan, speakers, subjects)
+    ]
 
 
 # -- LLM scaffold ------------------------------------------------------------

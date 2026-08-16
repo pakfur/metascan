@@ -54,6 +54,7 @@ def _make_panel(
     action: str = "Grandma and Rex share a quiet morning",
     duration_s: float = 8.0,
     with_beats: bool = True,
+    voice_ref_path: Optional[str] = None,
 ) -> Tuple[int, int, int]:
     subject_id = db.create_subject(
         storyboard_id,
@@ -61,6 +62,7 @@ def _make_panel(
         description=("a kind elderly woman with silver hair, wearing a floral apron"),
         voice="warm, elderly voice",
         sort_order=0,
+        voice_ref_path=voice_ref_path,
     )
     scene_id = db.create_scene(
         storyboard_id,
@@ -603,3 +605,31 @@ def test_deterministic_only_produces_doc_without_vlm(db, tmp_path):
     assert doc is not None
     assert "detailed_description:" in doc
     assert panel["video_prompt_source"] == "compiled"
+
+
+def test_compile_appends_audio_sections_and_records_anchor(db, tmp_path):
+    """A voice_ref-carrying subject who actually speaks in the panel's
+    beats gets <Audio N> definition/retention lines appended, and the
+    success write records video_compiled_anchor from the panel's
+    video_anchor at compile time."""
+    sb = _make_storyboard(db)
+    _, panel_id, subject_id = _make_panel(
+        db, sb, voice_ref_path="/refs/grandma_voice.wav"
+    )
+    db.update_panel(panel_id, video_anchor="keeper")
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: None, output_root=tmp_path
+    )
+
+    counts = asyncio.run(runner.compile_video(sb, deterministic_only=True))
+    assert counts["compiled"] + counts["failed"] == 1
+
+    panel = db.get_panel(panel_id)
+    doc = panel["video_prompt"]
+    assert doc is not None
+    assert "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)." in doc
+    assert (
+        "<Audio 1>: reference - the target speaker follows <Audio 1>'s "
+        "voice timbre and delivery without copying the original signal."
+    ) in doc
+    assert panel["video_compiled_anchor"] == "keeper"
