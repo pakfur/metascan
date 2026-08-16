@@ -7,7 +7,7 @@ export function listPresets(): Promise<WorkflowPreset[]> {
 
 export function createPreset(body: {
   name: string
-  kind: 't2i' | 'ref'
+  kind: 't2i' | 'ref' | 'ref2v'
   workflow: Record<string, unknown>
 }): Promise<{ id: number }> {
   return post<{ id: number }>('/comfy/presets', body)

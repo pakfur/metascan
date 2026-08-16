@@ -10,7 +10,7 @@ const emit = defineEmits<{
 }>()
 
 const name = ref('')
-const kind = ref<'t2i' | 'ref'>('t2i')
+const kind = ref<'t2i' | 'ref' | 'ref2v'>('t2i')
 const workflowText = ref('')
 
 const jsonError = ref<string | null>(null)
@@ -108,6 +108,9 @@ function close() {
           </label>
           <label class="radio-label">
             <input v-model="kind" type="radio" value="ref" /> ref
+          </label>
+          <label class="radio-label">
+            <input v-model="kind" type="radio" value="ref2v" /> Video (ref2v)
           </label>
         </div>
       </div>

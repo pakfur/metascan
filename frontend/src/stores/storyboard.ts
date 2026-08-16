@@ -465,6 +465,32 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  // Mirrors generate(): calls the API then refreshActiveJobs() (video jobs
+  // are ordinary generation_jobs -- the existing `comfy` channel jobToPanel
+  // overlay and `panel_images_changed` refresh already cover them, no new
+  // WS handling needed). Unlike generate(), returns the response so callers
+  // can surface `skipped` entries (per-panel reasons that didn't fail the
+  // whole request) themselves -- returns undefined on a thrown error (e.g.
+  // the 400 multi-line validation detail), which is set on error.value the
+  // same way every other action here does.
+  async function generateVideo(
+    panelIds?: number[],
+    onlyFailed?: boolean,
+  ): Promise<{ jobs: number[]; skipped: { panel_id: number; error: string }[] } | undefined> {
+    if (!tree.value) return undefined
+    const body: { panel_ids?: number[]; only_failed?: boolean } = {}
+    if (panelIds !== undefined) body.panel_ids = panelIds
+    if (onlyFailed !== undefined) body.only_failed = onlyFailed
+    try {
+      const res = await api.generateVideoStoryboard(tree.value.id, body)
+      await refreshActiveJobs()
+      return res
+    } catch (e) {
+      error.value = errMessage(e)
+      return undefined
+    }
+  }
+
   async function cancelAll(): Promise<void> {
     if (!tree.value) return
     try {
@@ -721,6 +747,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     synthesize,
     compileVideo,
     generate,
+    generateVideo,
     cancelAll,
     selectImage,
     refreshActiveJobs,

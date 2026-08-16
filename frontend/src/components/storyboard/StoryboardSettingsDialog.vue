@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
 import { describeSubject } from '../../api/storyboard'
@@ -23,6 +23,7 @@ const styleBlock = ref('')
 const negative = ref('')
 const videoTarget = ref<string | null>(null)
 const videoMode = ref<string | null>(null)
+const videoPresetId = ref<number | null>(null)
 
 const presets = ref<WorkflowPreset[]>([])
 const presetsLoading = ref(true)
@@ -43,6 +44,7 @@ let original = {
   negativeVal: '',
   videoTarget: null as string | null,
   videoMode: null as string | null,
+  videoPresetId: null as number | null,
 }
 
 function seedFromTree(): void {
@@ -58,6 +60,7 @@ function seedFromTree(): void {
   negative.value = t.negative ?? ''
   videoTarget.value = t.video_target
   videoMode.value = t.video_mode
+  videoPresetId.value = t.video_preset_id
   original = {
     name: name.value,
     aspectRatio: aspectRatio.value,
@@ -69,8 +72,11 @@ function seedFromTree(): void {
     negativeVal: negative.value,
     videoTarget: videoTarget.value,
     videoMode: videoMode.value,
+    videoPresetId: videoPresetId.value,
   }
 }
+
+const ref2vPresets = computed(() => presets.value.filter((p) => p.kind === 'ref2v'))
 
 onMounted(async () => {
   seedFromTree()
@@ -106,6 +112,7 @@ async function saveFields(): Promise<void> {
     negative: string
     video_target: string | null
     video_mode: string | null
+    video_preset_id: number | null
   }> = {}
 
   const trimmedName = name.value.trim()
@@ -128,6 +135,10 @@ async function saveFields(): Promise<void> {
   // preset_id above (the backend's exclude_unset=True honors it).
   if (videoTarget.value !== original.videoTarget) body.video_target = videoTarget.value
   if (videoMode.value !== original.videoMode) body.video_mode = videoMode.value
+  // Same "None" -> explicit-clear diff handling as preset_id above.
+  if (videoPresetId.value !== original.videoPresetId) {
+    body.video_preset_id = videoPresetId.value
+  }
 
   if (Object.keys(body).length === 0) return
 
@@ -186,6 +197,11 @@ function onSubjectLoraStrength(id: number, e: Event): void {
 function onSubjectVoice(id: number, e: Event): void {
   const val = (e.target as HTMLInputElement).value.trim()
   void commitSubjectField(id, { voice: val || null })
+}
+
+function onSubjectVoiceRefPath(id: number, e: Event): void {
+  const val = (e.target as HTMLInputElement).value.trim()
+  void commitSubjectField(id, { voice_ref_path: val || null })
 }
 
 function referenceField(slot: 1 | 2): 'reference_path' | 'reference_path_2' {
@@ -373,6 +389,16 @@ function close(): void {
           </div>
         </div>
 
+        <div class="field">
+          <label for="ss-video-preset">Video workflow preset</label>
+          <select id="ss-video-preset" v-model="videoPresetId" :disabled="presetsLoading">
+            <option :value="null">None</option>
+            <option v-for="p in ref2vPresets" :key="p.id" :value="p.id">
+              {{ p.name }}
+            </option>
+          </select>
+        </div>
+
         <p v-if="fieldsError" class="error">{{ fieldsError }}</p>
 
         <div class="section-actions">
@@ -432,6 +458,13 @@ function close(): void {
               :value="s.voice ?? ''"
               placeholder="Voice (e.g. narrator, husky alto)"
               @change="onSubjectVoice(s.id, $event)"
+            />
+            <input
+              type="text"
+              class="subject-voice"
+              :value="s.voice_ref_path ?? ''"
+              placeholder="Voice ref (audio path)"
+              @change="onSubjectVoiceRefPath(s.id, $event)"
             />
           </div>
           <div class="subject-ref-row">
