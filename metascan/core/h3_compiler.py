@@ -20,8 +20,9 @@ are limited to ``dataclasses``/``typing``/``json`` plus the shared
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from metascan.core.storyboard_story import CAMERA_MOTION_VALUES
 
@@ -66,6 +67,22 @@ class Timeline:
     shots: List[TimelineShot]
     duration_s: float
     alignment_line: Optional[str]  # None for t2va/ref2va
+
+
+@dataclass(frozen=True)
+class LintError:
+    code: str  # e.g. "missing_section", "timestamp_order", "dialog_missing"
+    severity: str  # "error" | "warning"
+    message: str
+
+
+@dataclass(frozen=True)
+class LintExpectations:
+    subject_labels: FrozenSet[str]  # {"Subject 1", ...} incl. environment
+    picture_labels: FrozenSet[str]  # incl. keyframe label(s) when mode uses them
+    dialog_lines: Tuple[SpeakerLine, ...]
+    timeline: Timeline
+    duration_s: float
 
 
 # -- Camera vocabulary (base guide §4.3) --------------------------------
@@ -540,3 +557,384 @@ def assemble(
         blocks.append(alignment_line)
     blocks.extend(f"{header}:\n{body}" for header, body in sections)
     return "\n\n".join(blocks)
+
+
+# -- Lint --------------------------------------------------------------
+
+_SECTION_ORDER: Tuple[str, ...] = (
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "detailed_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+
+_HEADER_LINE_RE = re.compile(r"^(\w+):$", re.MULTILINE)
+_LABEL_RE = re.compile(r"<(Subject|Picture)\s+(\d+)>")
+_SHOT_MARK_RE = re.compile(r"\[Shot (\d+)\](?:\s+At\s+(\d{2}:\d{2}\.\d{3}))?")
+_DIALOG_SPAN_RE = re.compile(r"<d>\[([^\]]+)\]\s*(.*?)\s*</d>")
+_SPEAKER_PAREN_RE = re.compile(r"\(([A-Za-z0-9, ]+)\)")
+_RETENTION_LINE_RE = re.compile(r":\s*([A-Za-z_]+)\s*-")
+
+_RETENTION_MARKERS: FrozenSet[str] = frozenset(
+    {"fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference"}
+)
+
+# Opposite-direction camera phrase pairs (canonical phrasing from
+# ``_CAMERA_PHRASES``). Two members of the same pair inside one shot's text
+# describe contradictory motion and are conservatively flagged.
+_OPPOSITE_CAMERA_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("zooms in", "zooms out"),
+    ("pushes in", "pulls out"),
+    ("pans left", "pans right"),
+    ("trucks left", "trucks right"),
+    ("tilts up", "tilts down"),
+    ("pedestals up", "pedestals down"),
+    ("rolls clockwise", "rolls counterclockwise"),
+)
+
+_TIMESTAMP_TOLERANCE_S = 0.5
+_FLOAT_EPS = 1e-6
+_WORD_COUNT_FLOOR = 150
+_WORD_COUNT_MIN = 350
+_WORD_COUNT_MAX = 500
+
+
+def build_expectations(
+    refplan: RefPlan,
+    speakers: SpeakerPlan,
+    timeline: Timeline,
+    mode: str,
+) -> LintExpectations:
+    """Derive the set of labels/dialog/timing a compiled H3 document must
+    honor, given the same plans used to render it."""
+    subject_labels = set(refplan.subject_labels.values())
+    subject_labels.add(refplan.environment_label)
+
+    picture_labels = {label for _, label in refplan.picture_labels}
+    if mode in _KEYFRAME_MODES:
+        kf = refplan.keyframe_picture_label
+        picture_labels.add(kf)
+        if mode == "fl2va":
+            picture_labels.add(_increment_picture_label(kf))
+
+    return LintExpectations(
+        subject_labels=frozenset(subject_labels),
+        picture_labels=frozenset(picture_labels),
+        dialog_lines=tuple(speakers.lines),
+        timeline=timeline,
+        duration_s=timeline.duration_s,
+    )
+
+
+def _extract_sections(text: str) -> Dict[str, str]:
+    """Split an assembled H3 document into its six named sections, keyed by
+    header name, using the ``^header:$`` line convention from ``assemble``.
+    Sections that never appear are simply absent from the result."""
+    matches = [
+        m for m in _HEADER_LINE_RE.finditer(text) if m.group(1) in _SECTION_ORDER
+    ]
+    sections: Dict[str, str] = {}
+    for i, m in enumerate(matches):
+        start = m.end() + 1
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        sections[m.group(1)] = text[start:end].strip("\n")
+    return sections
+
+
+def _lint_missing_sections(text: str) -> List[LintError]:
+    errors: List[LintError] = []
+    found = [
+        m.group(1)
+        for m in _HEADER_LINE_RE.finditer(text)
+        if m.group(1) in _SECTION_ORDER
+    ]
+    seen: List[str] = []
+    for name in found:
+        if name not in seen:
+            seen.append(name)
+
+    missing = [h for h in _SECTION_ORDER if h not in seen]
+    for h in missing:
+        errors.append(
+            LintError("missing_section", "error", f"missing required section '{h}:'")
+        )
+
+    if not missing and seen != list(_SECTION_ORDER):
+        errors.append(
+            LintError(
+                "missing_section",
+                "error",
+                f"sections out of order: expected {list(_SECTION_ORDER)}, found {seen}",
+            )
+        )
+    return errors
+
+
+def _lint_unknown_labels(text: str, expect: LintExpectations) -> List[LintError]:
+    errors: List[LintError] = []
+    for m in _LABEL_RE.finditer(text):
+        kind, number = m.group(1), m.group(2)
+        label = f"{kind} {number}"
+        valid = (
+            label in expect.subject_labels
+            if kind == "Subject"
+            else label in expect.picture_labels
+        )
+        if not valid:
+            errors.append(
+                LintError(
+                    "unknown_label", "error", f"unknown reference label <{label}>"
+                )
+            )
+    return errors
+
+
+def _parse_timecode(tc: str) -> float:
+    minutes, _, secs = tc.partition(":")
+    return int(minutes) * 60 + float(secs)
+
+
+def _lint_timestamps(dd: str, expect: LintExpectations) -> List[LintError]:
+    errors: List[LintError] = []
+    starts_by_number = {s.number: s.start_s for s in expect.timeline.shots}
+    prev_time: Optional[float] = None
+
+    for m in _SHOT_MARK_RE.finditer(dd):
+        number = int(m.group(1))
+        tc = m.group(2)
+
+        if number == 1:
+            if tc is not None:
+                errors.append(
+                    LintError(
+                        "timestamp_order",
+                        "error",
+                        "[Shot 1] must not carry an At MM:SS.mmm timestamp",
+                    )
+                )
+            continue
+
+        if tc is None:
+            errors.append(
+                LintError(
+                    "timestamp_order",
+                    "error",
+                    f"[Shot {number}] is missing its At MM:SS.mmm timestamp",
+                )
+            )
+            continue
+
+        t = _parse_timecode(tc)
+
+        if prev_time is not None and t <= prev_time + _FLOAT_EPS:
+            errors.append(
+                LintError(
+                    "timestamp_order",
+                    "error",
+                    f"[Shot {number}] timestamp {tc} is not strictly increasing",
+                )
+            )
+        if t > expect.duration_s + _TIMESTAMP_TOLERANCE_S + _FLOAT_EPS:
+            errors.append(
+                LintError(
+                    "timestamp_order",
+                    "error",
+                    f"[Shot {number}] timestamp {tc} exceeds duration_s + 0.5s",
+                )
+            )
+
+        prescribed = starts_by_number.get(number)
+        if (
+            prescribed is not None
+            and abs(t - prescribed) > _TIMESTAMP_TOLERANCE_S + _FLOAT_EPS
+        ):
+            errors.append(
+                LintError(
+                    "timestamp_order",
+                    "error",
+                    f"[Shot {number}] timestamp {tc} is not within 0.5s of the "
+                    f"prescribed start {prescribed:.3f}",
+                )
+            )
+
+        prev_time = t
+
+    return errors
+
+
+def _lint_camera_vocab(dd: str) -> List[LintError]:
+    errors: List[LintError] = []
+    marks = list(_SHOT_MARK_RE.finditer(dd))
+    for i, m in enumerate(marks):
+        seg_start = m.end()
+        seg_end = marks[i + 1].start() if i + 1 < len(marks) else len(dd)
+        segment = dd[seg_start:seg_end].lower()
+        shot_no = m.group(1)
+        for a, b in _OPPOSITE_CAMERA_PAIRS:
+            if a in segment and b in segment:
+                errors.append(
+                    LintError(
+                        "camera_vocab",
+                        "warning",
+                        f"[Shot {shot_no}] contains contradictory camera motion "
+                        f"phrasing: {a!r} and {b!r}",
+                    )
+                )
+    return errors
+
+
+def _lint_word_count(dd: str) -> List[LintError]:
+    count = len(dd.split())
+    if count < _WORD_COUNT_FLOOR:
+        return [
+            LintError(
+                "word_count",
+                "error",
+                f"detailed_description is {count} words, below the "
+                f"{_WORD_COUNT_FLOOR}-word floor",
+            )
+        ]
+    if count < _WORD_COUNT_MIN or count > _WORD_COUNT_MAX:
+        return [
+            LintError(
+                "word_count",
+                "warning",
+                f"detailed_description is {count} words, outside the "
+                f"{_WORD_COUNT_MIN}-{_WORD_COUNT_MAX} target range",
+            )
+        ]
+    return []
+
+
+def _extract_dialog_spans(dd: str) -> List[Dict[str, Any]]:
+    """One entry per ``<d>...</d>`` span, paired with the nearest preceding
+    ``(Sx[,Sy])`` marker on the same line (ref-guide §5.4: identity/id sit
+    outside the tag, adjacent to it on the same line)."""
+    found: List[Dict[str, Any]] = []
+    for line in dd.splitlines():
+        for dm in _DIALOG_SPAN_RE.finditer(line):
+            preceding = list(_SPEAKER_PAREN_RE.finditer(line[: dm.start()]))
+            speakers_str = preceding[-1].group(1) if preceding else ""
+            speaker_ids = {s.strip() for s in speakers_str.split(",") if s.strip()}
+            found.append(
+                {"speakers": speaker_ids, "language": dm.group(1), "text": dm.group(2)}
+            )
+    return found
+
+
+def _lint_dialog(dd: str, expect: LintExpectations) -> List[LintError]:
+    errors: List[LintError] = []
+    found = _extract_dialog_spans(dd)
+    consumed: Set[int] = set()
+
+    for sl in expect.dialog_lines:
+        expected_text = sl.text.strip()
+
+        exact_idx: Optional[int] = None
+        for i, f in enumerate(found):
+            if (
+                i not in consumed
+                and sl.speaker_id in f["speakers"]
+                and f["text"].strip() == expected_text
+            ):
+                exact_idx = i
+                break
+        if exact_idx is not None:
+            consumed.add(exact_idx)
+            continue
+
+        same_speaker_idx: Optional[int] = None
+        for i, f in enumerate(found):
+            if i not in consumed and sl.speaker_id in f["speakers"]:
+                same_speaker_idx = i
+                break
+        if same_speaker_idx is not None:
+            consumed.add(same_speaker_idx)
+            errors.append(
+                LintError(
+                    "dialog_mutated",
+                    "error",
+                    f"dialog for ({sl.speaker_id}) does not match the scaffold "
+                    f"verbatim: expected {expected_text!r}",
+                )
+            )
+            continue
+
+        errors.append(
+            LintError(
+                "dialog_missing",
+                "error",
+                f"missing dialog line for ({sl.speaker_id}): {expected_text!r}",
+            )
+        )
+
+    for i, f in enumerate(found):
+        if i not in consumed:
+            errors.append(
+                LintError(
+                    "dialog_invented",
+                    "error",
+                    f"unexpected <d> line not present in the scaffold: {f['text']!r}",
+                )
+            )
+
+    return errors
+
+
+def _lint_retention_and_sound(sections: Dict[str, str]) -> List[LintError]:
+    errors: List[LintError] = []
+
+    retention = sections.get("retention_analysis", "")
+    for line in retention.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _RETENTION_LINE_RE.search(line)
+        if m is None:
+            continue
+        marker = m.group(1)
+        if marker not in _RETENTION_MARKERS:
+            errors.append(
+                LintError(
+                    "retention_marker",
+                    "error",
+                    f"invalid retention marker {marker!r} in line: {line!r}",
+                )
+            )
+
+    if not sections.get("overall_soundscape", "").strip():
+        errors.append(
+            LintError(
+                "soundscape_missing", "error", "overall_soundscape section is empty"
+            )
+        )
+
+    if not sections.get("non_diegetic_music", "").strip():
+        errors.append(
+            LintError("music_missing", "error", "non_diegetic_music section is empty")
+        )
+
+    return errors
+
+
+def lint_h3_prompt(text: str, expect: LintExpectations) -> List[LintError]:
+    """Expectation-driven lint over an assembled H3 document. Pure/regex
+    based — no VLM calls. Returns every violation found; callers decide how
+    to act on severities (Task 4 retries once on any ``"error"``)."""
+    errors: List[LintError] = []
+    sections = _extract_sections(text)
+
+    errors.extend(_lint_missing_sections(text))
+    errors.extend(_lint_unknown_labels(text, expect))
+
+    dd = sections.get("detailed_description")
+    if dd is not None:
+        errors.extend(_lint_timestamps(dd, expect))
+        errors.extend(_lint_camera_vocab(dd))
+        errors.extend(_lint_word_count(dd))
+        errors.extend(_lint_dialog(dd, expect))
+
+    errors.extend(_lint_retention_and_sound(sections))
+    return errors

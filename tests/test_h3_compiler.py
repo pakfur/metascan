@@ -17,9 +17,11 @@ from metascan.core.h3_compiler import (
     assemble,
     assign_reference_labels,
     assign_speakers,
+    build_expectations,
     build_scaffold,
     compute_timeline,
     format_timecode,
+    lint_h3_prompt,
     render_camera,
     render_retention_analysis,
     render_subject_definitions,
@@ -443,3 +445,327 @@ def test_assemble_order_and_alignment_first() -> None:
     )
     assert doc_no_align.startswith("subject_definitions:\nSUBJDEF")
     assert "ALIGN LINE" not in doc_no_align
+
+
+# -- Lint fixtures -----------------------------------------------------
+#
+# One hand-written, guide-compliant `detailed_description` body (406 words,
+# verified with a standalone word count) over the two shots produced by
+# `_beats()`/`_subjects()`/`_scene()` at duration_s=12.0, mode="ref2va"
+# (shot 2 starts at 00:08.000 per test_timeline_rescales_groups_and_formats
+# above). Both dialog lines from `_beats()` appear verbatim, adjacent
+# (same line) to their `(Sx)` id, inside `<d>[English] ...</d>`.
+
+_SHOT1 = (
+    "[Shot 1] Cinematic, live-action, a wide establishing shot opens on "
+    "<Subject 3>, the sunlit farmhouse kitchen with its wooden table "
+    "catching the early morning light through gauzy curtains. <Subject 1>, "
+    "Grandma Rose, a kind elderly woman with silver hair and a floral "
+    "apron, kneels beside the wooden table, her weathered hands resting "
+    "gently on the head of <Subject 2>, a scruffy grey terrier with one "
+    "floppy ear who leans contentedly into her palm. The camera pushes in "
+    "with small amplitude at slow speed as steam curls from a kettle on "
+    "the stove behind them, catching soft flecks of dust suspended in the "
+    "morning light. Grandma Rose (S1) smiles warmly down at the dog and "
+    "says, <d>[English] Hello, old girl.</d> Her voice carries the same "
+    "warmth as the kettle's rising steam, and the dog's tail thumps twice "
+    "against the worn floorboards in reply. Outside the window, a light "
+    "breeze stirs the curtains, and somewhere down the hallway a "
+    "floorboard creaks under an unseen footstep. The gravelly voice (S2), "
+    "low and rough, calls out from just beyond the doorway, unseen but "
+    "unmistakably present in the next room, cutting through the quiet "
+    "morning hush with sudden alertness, <d>[English] Watch it!</d> "
+    "Grandma Rose glances toward the sound, her expression shifting from "
+    "warmth to mild concern, while the terrier's ears perk upward and its "
+    "head turns sharply toward the hallway, a low growl rumbling faintly "
+    "in its throat as the kettle continues to whistle softly in the "
+    "background, its steady rising pitch filling the small kitchen with "
+    "an anticipatory hum that mirrors the sudden tension now settling "
+    "over the room."
+)
+
+_SHOT2 = (
+    "[Shot 2] At 00:08.000, the shot cuts to a medium shot of Grandma "
+    "Rose stepping toward the kitchen door, her floral apron swaying "
+    "gently as she crosses the sunlit floor. The camera holds a static "
+    "shot as she reaches for the wooden door handle, her silver hair "
+    "catching a last warm shaft of morning light before she pulls the "
+    "door open, revealing the hallway beyond in soft shadow. <Subject 2> "
+    "trots close behind her heels, ears still raised, tail held low but "
+    "steady, its floppy ear bouncing gently with each step across the "
+    "worn floorboards. The kettle's whistle fades slightly into the "
+    "background as the door creaks open on old hinges, and the farmhouse "
+    "settles into a watchful stillness, the morning light spilling "
+    "further across the wooden table behind them as the scene closes on "
+    "the threshold between kitchen and hallway."
+)
+
+_SOUNDSCAPE = (
+    "A kettle whistles steadily on the stove while the old floorboards "
+    "creak faintly underfoot. A light breeze stirs the curtains, and the "
+    "wooden door creaks open on its hinges near the end of the scene."
+)
+
+_MUSIC = (
+    "A gentle acoustic guitar plays at a slow, warm tempo, joined by soft "
+    "strings that swell briefly before settling as the door opens."
+)
+
+
+def _fixture_parts() -> Dict[str, Any]:
+    subjects = _subjects()
+    scene = _scene()
+    beats = _beats()
+    refplan = assign_reference_labels(subjects, scene)
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
+    expect = build_expectations(refplan, speakers, timeline, "ref2va")
+    panel = {"action": "share a quiet morning together"}
+    return {
+        "expect": expect,
+        "alignment_line": timeline.alignment_line,
+        "subject_definitions": render_subject_definitions(refplan, subjects, scene),
+        "summary": render_summary(refplan, panel, subjects, "ref2va"),
+        "retention_analysis": render_retention_analysis(
+            refplan, subjects, scene, timeline
+        ),
+        "overall_soundscape": _SOUNDSCAPE,
+        "non_diegetic_music": _MUSIC,
+    }
+
+
+def _assemble_doc(parts: Dict[str, Any], detailed_description: str) -> str:
+    return assemble(
+        parts["alignment_line"],
+        parts["subject_definitions"],
+        parts["summary"],
+        parts["retention_analysis"],
+        detailed_description,
+        parts["overall_soundscape"],
+        parts["non_diegetic_music"],
+    )
+
+
+def _known_good_doc() -> "tuple[str, Any]":
+    parts = _fixture_parts()
+    dd = _SHOT1 + "\n" + _SHOT2
+    return _assemble_doc(parts, dd), parts["expect"]
+
+
+def _filler_words(n: int) -> str:
+    return " ".join(f"word{i}" for i in range(n))
+
+
+# -- Lint: known-good document ------------------------------------------
+
+
+def test_lint_known_good_document_passes() -> None:
+    text, expect = _known_good_doc()
+    assert lint_h3_prompt(text, expect) == []
+
+
+# -- Lint: rule 1, missing_section ---------------------------------------
+
+
+def test_lint_missing_section_flags_absent_header() -> None:
+    parts = _fixture_parts()
+    dd = _SHOT1 + "\n" + _SHOT2
+    text = "\n\n".join(
+        [
+            f"subject_definitions:\n{parts['subject_definitions']}",
+            f"summary:\n{parts['summary']}",
+            # retention_analysis omitted entirely
+            f"detailed_description:\n{dd}",
+            f"overall_soundscape:\n{parts['overall_soundscape']}",
+            f"non_diegetic_music:\n{parts['non_diegetic_music']}",
+        ]
+    )
+    errors = lint_h3_prompt(text, parts["expect"])
+    assert any(e.code == "missing_section" and e.severity == "error" for e in errors)
+
+
+def test_lint_missing_section_flags_out_of_order() -> None:
+    parts = _fixture_parts()
+    dd = _SHOT1 + "\n" + _SHOT2
+    text = "\n\n".join(
+        [
+            f"summary:\n{parts['summary']}",
+            f"subject_definitions:\n{parts['subject_definitions']}",
+            f"retention_analysis:\n{parts['retention_analysis']}",
+            f"detailed_description:\n{dd}",
+            f"overall_soundscape:\n{parts['overall_soundscape']}",
+            f"non_diegetic_music:\n{parts['non_diegetic_music']}",
+        ]
+    )
+    errors = lint_h3_prompt(text, parts["expect"])
+    assert any(e.code == "missing_section" and e.severity == "error" for e in errors)
+
+
+# -- Lint: rule 2, timestamp_order ----------------------------------------
+
+
+def test_lint_timestamp_order_flags_shot1_with_timestamp() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace("[Shot 1] Cinematic", "[Shot 1] At 00:00.000, Cinematic", 1)
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "timestamp_order" and e.severity == "error" for e in errors)
+
+
+def test_lint_timestamp_order_flags_out_of_tolerance() -> None:
+    text, expect = _known_good_doc()
+    # prescribed shot-2 start is 00:08.000; 00:09.500 is 1.5s off (> 0.5s).
+    mutated = text.replace("At 00:08.000,", "At 00:09.500,", 1)
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "timestamp_order" and e.severity == "error" for e in errors)
+
+
+def test_lint_timestamp_order_boundary_at_prescribed_plus_half_second_ok() -> None:
+    text, expect = _known_good_doc()
+    # exactly prescribed (8.0s) + 0.5s tolerance -> must NOT be flagged.
+    mutated = text.replace("At 00:08.000,", "At 00:08.500,", 1)
+    errors = lint_h3_prompt(mutated, expect)
+    assert not any(e.code == "timestamp_order" for e in errors)
+
+
+# -- Lint: rule 3, unknown_label -------------------------------------------
+
+
+def test_lint_unknown_label_flags_undeclared_subject() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "the threshold between kitchen and hallway.",
+        "the threshold between kitchen and hallway, where <Subject 9> "
+        "watches silently from the shadows.",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "unknown_label" and e.severity == "error" for e in errors)
+
+
+# -- Lint: rule 4, dialog_missing / dialog_mutated / dialog_invented -------
+
+
+def test_lint_dialog_missing_when_line_dropped() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "Grandma Rose (S1) smiles warmly down at the dog and says, "
+        "<d>[English] Hello, old girl.</d> Her voice carries the same "
+        "warmth as the kettle's rising steam, and the dog's tail thumps "
+        "twice against the worn floorboards in reply. ",
+        "",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "dialog_missing" and e.severity == "error" for e in errors)
+
+
+def test_lint_dialog_mutated_when_text_altered() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "<d>[English] Hello, old girl.</d>",
+        "<d>[English] Hello there, old girl!</d>",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "dialog_mutated" and e.severity == "error" for e in errors)
+
+
+def test_lint_dialog_invented_when_extra_line_added() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "the threshold between kitchen and hallway.",
+        "the threshold between kitchen and hallway. The mail carrier "
+        "(S3) calls out from the porch steps, "
+        "<d>[English] Special delivery!</d>",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "dialog_invented" and e.severity == "error" for e in errors)
+
+
+# -- Lint: rule 5, camera_vocab ---------------------------------------------
+
+
+def test_lint_camera_vocab_flags_contradictory_motion_in_same_shot() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "over the room.",
+        "over the room. Moments later the camera pulls out sharply to "
+        "reveal the whole kitchen.",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "camera_vocab" and e.severity == "warning" for e in errors)
+
+
+# -- Lint: rule 6, word_count (boundaries: 149/150/350/500) -----------------
+
+
+def test_lint_word_count_error_below_floor() -> None:
+    parts = _fixture_parts()
+    dd = _filler_words(149)
+    text = _assemble_doc(parts, dd)
+    errors = [
+        e for e in lint_h3_prompt(text, parts["expect"]) if e.code == "word_count"
+    ]
+    assert len(errors) == 1
+    assert errors[0].severity == "error"
+
+
+def test_lint_word_count_warning_at_150() -> None:
+    parts = _fixture_parts()
+    dd = _filler_words(150)
+    text = _assemble_doc(parts, dd)
+    errors = [
+        e for e in lint_h3_prompt(text, parts["expect"]) if e.code == "word_count"
+    ]
+    assert len(errors) == 1
+    assert errors[0].severity == "warning"
+
+
+def test_lint_word_count_ok_at_350() -> None:
+    parts = _fixture_parts()
+    dd = _filler_words(350)
+    text = _assemble_doc(parts, dd)
+    errors = [
+        e for e in lint_h3_prompt(text, parts["expect"]) if e.code == "word_count"
+    ]
+    assert errors == []
+
+
+def test_lint_word_count_ok_at_500() -> None:
+    parts = _fixture_parts()
+    dd = _filler_words(500)
+    text = _assemble_doc(parts, dd)
+    errors = [
+        e for e in lint_h3_prompt(text, parts["expect"]) if e.code == "word_count"
+    ]
+    assert errors == []
+
+
+# -- Lint: rule 7, retention_marker / soundscape_missing / music_missing ----
+
+
+def test_lint_retention_marker_flags_unknown_value() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(
+        "fully_preserved - a kind elderly woman",
+        "kinda_preserved - a kind elderly woman",
+        1,
+    )
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "retention_marker" and e.severity == "error" for e in errors)
+
+
+def test_lint_soundscape_missing_when_empty() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(_SOUNDSCAPE, "", 1)
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "soundscape_missing" and e.severity == "error" for e in errors)
+
+
+def test_lint_music_missing_when_empty() -> None:
+    text, expect = _known_good_doc()
+    mutated = text.replace(_MUSIC, "", 1)
+    errors = lint_h3_prompt(mutated, expect)
+    assert any(e.code == "music_missing" and e.severity == "error" for e in errors)
