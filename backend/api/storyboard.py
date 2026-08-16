@@ -54,11 +54,23 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
 _SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
 _PANEL_NOT_NULLABLE = frozenset(
-    {"sort_order", "action", "subject_ids", "prompt_locked", "duration_s"}
+    {
+        "sort_order",
+        "action",
+        "subject_ids",
+        "prompt_locked",
+        "duration_s",
+        "video_prompt_locked",
+    }
 )
 _BEAT_NOT_NULLABLE = frozenset(
     {"sort_order", "duration_s", "action", "is_cut", "dialog"}
 )
+
+# H3 compiler only supports the "minimax" video target for now; "ltx" is a
+# reserved id for a future target, not yet wired to any prompt compiler.
+_VIDEO_TARGETS = frozenset({"minimax"})
+_VIDEO_MODES = frozenset({"t2va", "i2va", "fl2va", "ref2va"})
 
 
 def _reject_null_for_required(
@@ -127,6 +139,8 @@ class StoryboardPatch(BaseModel):
     base_seed: Optional[int] = None
     batch_size: Optional[int] = None
     outline: Optional[str] = None
+    video_target: Optional[str] = None
+    video_mode: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -201,6 +215,8 @@ class PanelPatch(BaseModel):
     prompt_source: Optional[str] = None
     negative: Optional[str] = None
     duration_s: Optional[float] = None
+    video_prompt: Optional[str] = None
+    video_prompt_locked: Optional[int] = None
     # selected_image_id is deliberately NOT exposed here: selecting a
     # panel's keeper toggles media.hidden on the old/new keeper via
     # db.select_panel_image, and a raw PATCH would bypass that. Use
@@ -213,6 +229,11 @@ class ParseRequest(BaseModel):
 
 
 class SynthesizeRequest(BaseModel):
+    panel_ids: Optional[List[int]] = None
+    force: bool = False
+
+
+class CompileRequest(BaseModel):
     panel_ids: Optional[List[int]] = None
     force: bool = False
 
@@ -325,6 +346,24 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if "batch_size" in fields:
         fields["batch_size"] = max(1, min(16, fields["batch_size"]))
+    if (
+        fields.get("video_target") is not None
+        and fields["video_target"] not in _VIDEO_TARGETS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"video_target {fields['video_target']!r} is not supported "
+            "-- only 'minimax' is available ('ltx' reserved for a future target)",
+        )
+    if (
+        fields.get("video_mode") is not None
+        and fields["video_mode"] not in _VIDEO_MODES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"video_mode {fields['video_mode']!r} is not one of "
+            f"{sorted(_VIDEO_MODES)}",
+        )
 
     if fields:
         await svc.update_storyboard(storyboard_id, **fields)
@@ -390,6 +429,47 @@ async def synthesize_storyboard(
 
     task = asyncio.create_task(
         runner.synthesize(storyboard_id, panel_ids=body.panel_ids, force=body.force)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return {"status": "started", "total": total}
+
+
+@router.post("/{storyboard_id}/compile", status_code=202)
+async def compile_storyboard(
+    storyboard_id: int, body: CompileRequest
+) -> Dict[str, Any]:
+    runner = _require_runner()
+    svc = _service()
+    storyboard = await svc.get_storyboard(storyboard_id)
+    if storyboard is None:
+        raise HTTPException(status_code=404, detail=f"No storyboard {storyboard_id}")
+    if storyboard.get("video_target") != "minimax":
+        raise HTTPException(
+            status_code=400,
+            detail=f"storyboard {storyboard_id} has video_target "
+            f"{storyboard.get('video_target')!r} -- the H3 compiler only "
+            "supports 'minimax'",
+        )
+
+    tree = await svc.get_storyboard_tree(storyboard_id)
+    all_panels = [p for scene in tree["scenes"] for p in scene["panels"]]
+    explicit_ids = set(body.panel_ids) if body.panel_ids is not None else None
+
+    total = 0
+    for panel in all_panels:
+        if explicit_ids is not None and panel["id"] not in explicit_ids:
+            continue
+        forced_override = (
+            body.force and explicit_ids is not None and panel["id"] in explicit_ids
+        )
+        if panel["video_prompt_locked"] and not forced_override:
+            continue
+        total += 1
+
+    task = asyncio.create_task(
+        runner.compile_video(storyboard_id, panel_ids=body.panel_ids, force=body.force)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -672,6 +752,18 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
         # whatever prompt_locked/prompt_source the caller also sent.
         fields["prompt_locked"] = 1
         fields["prompt_source"] = "user"
+
+    if "video_prompt" in fields:
+        if fields["video_prompt"] is not None:
+            # Server wins: mirror the prompt block above.
+            fields["video_prompt_locked"] = 1
+            fields["video_prompt_source"] = "user"
+        else:
+            # Explicit `video_prompt: null` clears the whole video-prompt
+            # block, not just the text.
+            fields["video_prompt_source"] = None
+            fields["video_prompt_locked"] = 0
+            fields["video_prompt_warnings"] = None
 
     if fields:
         await svc.update_panel(panel_id, **fields)
