@@ -161,3 +161,78 @@ async def test_generate_text_without_grammar_omits_key(ready_client):
     await client.generate_text(system_prompt="sys", user_prompt="x")
     body = stub.calls[-1]
     assert "grammar" not in body
+
+
+@pytest.mark.asyncio
+async def test_generate_text_two_images_two_parts(ready_client, tmp_path):
+    client, stub = ready_client
+    img_a = tmp_path / "a.jpg"
+    img_b = tmp_path / "b.jpg"
+    Image.new("RGB", (4, 4), color="white").save(img_a, "JPEG")
+    Image.new("RGB", (4, 4), color="black").save(img_b, "JPEG")
+
+    await client.generate_text(
+        system_prompt="s",
+        user_prompt="u",
+        image_paths=[img_a, img_b],
+    )
+    content = stub.calls[-1]["messages"][1]["content"]
+    assert content[0] == {"type": "text", "text": "u"}
+    assert [p["type"] for p in content[1:]] == ["image_url", "image_url"]
+
+
+@pytest.mark.asyncio
+async def test_generate_text_both_image_params_raises(ready_client, tmp_path):
+    client, stub = ready_client
+    img_a = tmp_path / "a.jpg"
+    img_b = tmp_path / "b.jpg"
+    Image.new("RGB", (4, 4), color="white").save(img_a, "JPEG")
+    Image.new("RGB", (4, 4), color="black").save(img_b, "JPEG")
+
+    with pytest.raises(ValueError):
+        await client.generate_text(
+            system_prompt="s",
+            user_prompt="u",
+            image_path=img_a,
+            image_paths=[img_b],
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_text_non_image_in_list_raises_before_send(
+    ready_client, tmp_path
+):
+    client, stub = ready_client
+    img_a = tmp_path / "a.jpg"
+    Image.new("RGB", (4, 4), color="white").save(img_a, "JPEG")
+
+    with pytest.raises(VlmError):
+        await client.generate_text(
+            system_prompt="s",
+            user_prompt="u",
+            image_paths=[img_a, tmp_path / "clip.mp4"],
+        )
+    assert stub.calls == []  # nothing was sent
+
+
+@pytest.mark.asyncio
+async def test_generate_text_single_image_path_unchanged(ready_client, tmp_path):
+    client, stub = ready_client
+    img_a = tmp_path / "a.jpg"
+    Image.new("RGB", (4, 4), color="white").save(img_a, "JPEG")
+
+    await client.generate_text(
+        system_prompt="s",
+        user_prompt="u",
+        image_path=img_a,
+    )
+    content = stub.calls[-1]["messages"][1]["content"]
+    assert len(content) == 2 and content[1]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_empty_image_paths_is_text_only(ready_client):
+    client, stub = ready_client
+    await client.generate_text(system_prompt="s", user_prompt="u", image_paths=[])
+    content = stub.calls[-1]["messages"][1]["content"]
+    assert content == "u"
