@@ -1141,3 +1141,27 @@ def test_lint_music_missing_when_empty() -> None:
     mutated = text.replace(_MUSIC, "", 1)
     errors = lint_h3_prompt(mutated, expect)
     assert any(e.code == "music_missing" and e.severity == "error" for e in errors)
+
+
+def test_render_detailed_description_substitutes_subject_labels():
+    # Roster-name mentions in beat action/sound prose must carry their
+    # <Subject N> labels (bare-label substitution, article folded in).
+    subs = [
+        {"id": 1, "name": "Business Woman", "description": "d", "sort_order": 0},
+        {"id": 2, "name": "Young Escort", "description": "d", "sort_order": 1},
+    ]
+    scene = {"name": "Hotel Room", "setting": "s"}
+    plan = assign_reference_labels(subs, scene)
+    beats = [
+        {
+            "duration_s": 4,
+            "action": "The Young Escort waves at the Business Woman's reflection",
+            "is_cut": 0,
+            "dialog": [],
+        },
+    ]
+    speakers = assign_speakers(beats, subs, plan)
+    tl = compute_timeline(beats, 4.0, "ref2va", plan)
+    dd = render_detailed_description("cinematic", beats, tl, speakers, subs, plan)
+    assert "<Subject 2> waves at <Subject 1>'s reflection" in dd
+    assert "Young Escort" not in dd and "Business Woman" not in dd

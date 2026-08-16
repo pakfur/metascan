@@ -809,6 +809,8 @@ class StoryboardRunner:
             beats,
             timeline,
             speakers,
+            subjects,
+            refplan,
         )
 
         def _fallback_sound() -> Tuple[str, str]:
