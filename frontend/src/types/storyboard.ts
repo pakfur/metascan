@@ -68,9 +68,13 @@ export interface Panel {
   video_prompt_locked: 0 | 1
   video_prompt_source: 'compiled' | 'user' | null
   video_prompt_warnings: string[]
+  video_anchor: string | null
+  video_compiled_anchor: string | null
   images: PanelImage[]
   beats: Beat[]
 }
+
+export const VIDEO_ANCHORS = ['keeper', 'prev_last'] as const
 
 // `db.get_panel` (used by the PATCH /panels/{id} and POST
 // /panels/{id}/select routes) returns every panels-table column but never
@@ -110,6 +114,7 @@ export interface Subject {
   reference_path_2: string | null
   sort_order: number
   voice: string | null
+  voice_ref_path: string | null
 }
 
 export interface StoryboardSummary {
@@ -124,6 +129,7 @@ export interface StoryboardSummary {
   folder_id: string | null
   video_target: string | null
   video_mode: string | null
+  video_preset_id: number | null
   created_at: string
   updated_at: string
 }
@@ -160,7 +166,7 @@ export const DEFAULT_SHOT_CAP = 15
 export interface WorkflowPreset {
   id: number
   name: string
-  kind: 't2i' | 'ref'
+  kind: 't2i' | 'ref' | 'ref2v'
   bindings: string
   created_at: string
   updated_at: string

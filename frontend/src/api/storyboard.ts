@@ -48,6 +48,7 @@ export function patchStoryboard(
     batch_size: number
     video_target: string | null
     video_mode: string | null
+    video_preset_id: number | null
   }>,
 ): Promise<{ status: string }> {
   return patch<{ status: string }>(`/storyboard/${id}`, body)
@@ -110,6 +111,20 @@ export function generateStoryboard(
   return post<{ jobs: number[] }>(`/storyboard/${id}/generate`, body)
 }
 
+// Runner-backed. 400 (multi-line validation detail) when video_target/mode
+// or the storyboard's video_preset_id aren't set, or a named panel has no
+// compiled video_prompt / keeper image. `skipped` names per-panel reasons
+// (e.g. missing anchor source) that don't fail the whole request.
+export function generateVideoStoryboard(
+  id: number,
+  body: { panel_ids?: number[]; only_failed?: boolean } = {},
+): Promise<{ jobs: number[]; skipped: { panel_id: number; error: string }[] }> {
+  return post<{ jobs: number[]; skipped: { panel_id: number; error: string }[] }>(
+    `/storyboard/${id}/generate-video`,
+    body,
+  )
+}
+
 export function cancelStoryboard(id: number): Promise<{ cancelled: number }> {
   return post<{ cancelled: number }>(`/storyboard/${id}/cancel`)
 }
@@ -128,6 +143,8 @@ export function createSubject(
   return post<{ id: number }>(`/storyboard/${storyboardId}/subjects`, body)
 }
 
+// `body` also accepts `voice_ref_path?: string | null` (audio reference for
+// the H3 video pipeline's per-subject voice cloning).
 export function patchSubject(
   subjectId: number,
   body: Record<string, unknown>,
@@ -210,7 +227,8 @@ export function createPanel(
 // images they already have for this panel back onto the result. `body` also
 // accepts `video_prompt?: string | null` (non-null forces
 // video_prompt_locked=1/video_prompt_source='user' server-side; null clears
-// all three video-prompt fields) and `video_prompt_locked?: 0 | 1`.
+// all three video-prompt fields), `video_prompt_locked?: 0 | 1`, and
+// `video_anchor?: 'keeper' | 'prev_last' | null`.
 export function patchPanel(
   panelId: number,
   body: Record<string, unknown>,

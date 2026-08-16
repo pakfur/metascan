@@ -3,6 +3,7 @@ import { computed, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { buildShotScript } from '../../utils/shotScript'
 import { copyToClipboard } from '../../utils/clipboard'
+import { VIDEO_ANCHORS } from '../../types/storyboard'
 import BeatForm from './BeatForm.vue'
 
 type TabKey = 'edit' | 'preview'
@@ -98,6 +99,44 @@ async function copyVideoPrompt(): Promise<void> {
   videoPromptCopied.value = true
   setTimeout(() => (videoPromptCopied.value = false), 1500)
 }
+
+// ---- video anchor + render (H3 pipeline) ---------------------------------
+
+const ANCHOR_LABELS: Record<(typeof VIDEO_ANCHORS)[number], string> = {
+  keeper: 'First frame from keeper',
+  prev_last: 'Continue from previous shot',
+}
+
+function onAnchorChange(e: Event): void {
+  if (!panel.value) return
+  const val = (e.target as HTMLSelectElement).value
+  void store.patchPanelFields(panel.value.id, { video_anchor: val || null })
+}
+
+const recompileSuggested = computed(
+  () => !!panel.value && panel.value.video_anchor !== panel.value.video_compiled_anchor,
+)
+
+const hasActiveVideoJob = computed(
+  () => !!panel.value && store.panelJobState.get(panel.value.id) !== undefined,
+)
+
+const canRenderVideo = computed(
+  () => !!store.tree?.video_preset_id && !!panel.value?.video_prompt,
+)
+
+// Same treatment as the Compile button: no local error state here, a
+// thrown error lands on store.error which is already rendered in
+// StoryboardView's header chip. A 200 response can still name skipped
+// panels (this call only ever targets the one currently selected), so fold
+// that into the same banner.
+async function renderVideo(): Promise<void> {
+  if (!panel.value) return
+  const res = await store.generateVideo([panel.value.id])
+  if (res && res.skipped.length > 0) {
+    store.error = res.skipped.map((s) => s.error).join('\n')
+  }
+}
 </script>
 
 <template>
@@ -125,6 +164,9 @@ async function copyVideoPrompt(): Promise<void> {
         <div class="sp-section-header">
           <label class="sp-label">Video prompt</label>
           <span class="sp-video-status">{{ videoPromptStatusLabel }}</span>
+          <span v-if="recompileSuggested" class="sp-chip-warn" title="Anchor changed since the last compile">
+            recompile suggested
+          </span>
           <button
             v-if="panel?.video_prompt_locked === 1"
             type="button"
@@ -137,6 +179,13 @@ async function copyVideoPrompt(): Promise<void> {
         <ul v-if="panel?.video_prompt_warnings.length" class="sp-warnings">
           <li v-for="(w, i) in panel.video_prompt_warnings" :key="i">{{ w }}</li>
         </ul>
+        <div class="sp-field">
+          <label class="sp-label" for="sp-video-anchor">Anchor</label>
+          <select id="sp-video-anchor" :value="panel?.video_anchor ?? ''" @change="onAnchorChange">
+            <option value="">None</option>
+            <option v-for="a in VIDEO_ANCHORS" :key="a" :value="a">{{ ANCHOR_LABELS[a] }}</option>
+          </select>
+        </div>
         <textarea
           class="sp-video-textarea"
           rows="8"
@@ -160,6 +209,14 @@ async function copyVideoPrompt(): Promise<void> {
             @click="copyVideoPrompt"
           >
             {{ videoPromptCopied ? 'Copied' : 'Copy' }}
+          </button>
+          <button
+            type="button"
+            class="sp-copy-btn"
+            :disabled="!canRenderVideo || hasActiveVideoJob"
+            @click="renderVideo"
+          >
+            {{ hasActiveVideoJob ? 'Rendering…' : 'Render video' }}
           </button>
         </div>
       </div>
@@ -316,6 +373,36 @@ async function copyVideoPrompt(): Promise<void> {
   color: var(--warn, #e0a030);
   font-size: 11px;
   line-height: 1.5;
+}
+
+.sp-chip-warn {
+  font-size: 11px;
+  color: var(--warn, #e0a030);
+  background: color-mix(in srgb, var(--warn, #e0a030) 14%, transparent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.sp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sp-field select {
+  padding: 6px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-ground);
+  color: var(--text-color);
+  font-size: 12px;
+}
+
+.sp-field select:focus {
+  outline: none;
+  border-color: var(--primary-color);
 }
 
 .sp-video-textarea {

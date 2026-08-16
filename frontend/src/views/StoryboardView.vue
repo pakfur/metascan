@@ -90,6 +90,13 @@
             @click="store.generate()"
           />
           <Button
+            v-if="store.tree?.video_target && store.tree?.video_preset_id"
+            label="Generate video"
+            text
+            :disabled="store.compile.running || store.synthesis.running || store.story.running"
+            @click="onGenerateVideo"
+          />
+          <Button
             label="Cancel"
             severity="danger"
             text
@@ -159,6 +166,18 @@ const notFound = computed(() => {
   if (!Number.isFinite(props.id)) return true
   return store.error !== null && store.tree === null
 })
+
+// Generate-all has no per-item outcome to show beyond store.error (the
+// existing sb-chip--error banner above). generate-video's 200 response can
+// additionally carry `skipped` (panels the run didn't fail on, but couldn't
+// submit) -- fold those into the same banner mechanism, same treatment as a
+// thrown error.
+async function onGenerateVideo(): Promise<void> {
+  const res = await store.generateVideo()
+  if (res && res.skipped.length > 0) {
+    store.error = res.skipped.map((s) => `panel ${s.panel_id}: ${s.error}`).join('\n')
+  }
+}
 
 // Single load path: the immediate watcher fires once on mount (covering the
 // initial load) and again on every id change (covering navigation between

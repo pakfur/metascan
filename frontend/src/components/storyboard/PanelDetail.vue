@@ -170,6 +170,7 @@ import { useStoryboardStore } from '../../stores/storyboard'
 import { SHOT_SIZES, ANGLES, LENSES } from '../../types/storyboard'
 import type { PanelImage } from '../../types/storyboard'
 import type { Media } from '../../types/media'
+import { isVideoPath } from '../../utils/path'
 import MediaViewer from '../viewer/MediaViewer.vue'
 import BeatsEditor from './BeatsEditor.vue'
 
@@ -383,7 +384,7 @@ const viewerMedia = computed<Media[]>(() =>
       ({
         file_path: img.file_path,
         is_favorite: false,
-        is_video: false,
+        is_video: isVideoPath(img.file_path),
         playback_speed: null,
         width: 0,
         height: 0,
