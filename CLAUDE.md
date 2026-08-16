@@ -393,6 +393,43 @@ metascan/
   `PromptStore`. The frontend persists a scene's reference on pick/clear and
   gates the Describe button on that persisted value, since the endpoint
   reads the reference from the DB rather than taking it as a request body.
+- **H3 (MiniMax) video-prompt compiler splits pure logic from bounded VLM calls.**
+  `metascan/core/h3_compiler.py` is pure (no I/O): it assigns
+  reference/speaker labels, computes shot timelines, renders the
+  deterministic sections (`subject_definitions`, `summary`,
+  `retention_analysis`), builds the machine-readable scaffold, assembles
+  the six-section document, and runs an expectation-driven lint over it.
+  `StoryboardRunner._compile_panel` makes exactly two VLM calls per panel:
+  the `detailed_description` body is free-form prose (no grammar — the
+  lint pass plus a single retry on any `"error"`-severity issue is the
+  enforcement mechanism) and the sound section is grammar-constrained JSON
+  (`h3.SOUND_GRAMMAR`, `{overall_soundscape, non_diegetic_music}`).
+  `compile_video` shares `StoryboardRunner._synth_lock` with `synthesize`
+  and emits `compile_progress`/`compile_complete`/`compile_error` on the
+  `storyboard` WS channel, mirroring the synthesize contract. A lint
+  failure after the retry still writes the assembled document to
+  `panels.video_prompt` (with the lint messages in `video_prompt_warnings`)
+  rather than discarding the draft; a per-panel exception
+  (`VlmError`/`TimeoutError`/`RuntimeError`/`h3.H3Error`) leaves
+  `video_prompt` untouched and records only the exception message in
+  `video_prompt_warnings`, so other panels in the batch keep compiling.
+  `PATCH /api/storyboard/panels/{id}` mirrors the `prompt`/`prompt_locked`
+  server-wins rule for `video_prompt`: sending a non-null `video_prompt`
+  forces `video_prompt_locked=1, video_prompt_source="user"`; sending
+  `video_prompt: null` clears `video_prompt_source`, `video_prompt_locked`,
+  and `video_prompt_warnings` together. `video_target` accepts only
+  `"minimax"` and `video_mode` only `t2va`/`i2va`/`fl2va`/`ref2va` (400 on
+  anything else); `POST /{id}/compile` 404s on an unknown storyboard and
+  400s synchronously when `video_target != "minimax"`, before creating the
+  202 fire-and-forget task. `metascan/core/video_targets.py::shot_cap` is
+  the single coupling between story composition and the video dialect — the
+  shots-composition stage reads it for per-shot duration guidance and the
+  frontend's `BeatsEditor.vue` mirrors the same constant
+  (`VIDEO_TARGET_CAPS`/`DEFAULT_SHOT_CAP` in `types/storyboard.ts`) to warn
+  when a beat's duration exceeds the target's cap. The two MiniMax H3
+  prompt-format guides are vendored verbatim at
+  `data/prompt_guides/minimax-h3/` and are the format authority every
+  renderer in `h3_compiler.py` follows.
 - **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_panel_images` convert it through

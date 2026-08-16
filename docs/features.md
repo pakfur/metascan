@@ -101,6 +101,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 - Live synthesis and per-panel job progress over WebSocket, with cancel-all support
 - Candidate picker per panel — every rendered variant is kept as a candidate thumbnail; click one to make it the keeper. Non-keeper variants are hidden from the main library grid until picked
 - Hidden-media toggle ("Show hidden" in the view menubar) reveals those in-progress/non-keeper variants in the grid, each marked with an eye-slash badge
+- **Compile** — compile shots into MiniMax H3 video prompts (six-section format) with lint warnings, editable in the side panel
 
 ## Context Menu
 - Open (full-screen viewer)
