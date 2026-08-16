@@ -223,3 +223,37 @@ schema change.
   runner; PATCH lock semantics for `video_prompt`.
 - Runner tests with a fake VLM: retry-on-lint-error path, failed-compile
   raw-text persistence, `deterministic_only` path, no-beats fallback.
+
+## 10. Amendments (2026-08-15, post-V1 user feedback)
+
+1. **Generation mode joins the target selection.** Alongside
+   `storyboards.video_target` (`'minimax'` | `'ltx'`), add
+   `storyboards.video_mode TEXT` ∈ `{'t2va','i2va','fl2va','ref2va'}`
+   (nullable; default `'ref2va'` when a target is set). The mode selects
+   which prompt skeleton the compiler emits: `t2va` (no reference labels,
+   three core fields only, per the base guide), `i2va`/`fl2va` (keyframe
+   alignment instruction + `keyframe completion` task type), `ref2va`
+   (full six-section reference format). The V4 `panels.video_anchor`
+   field supplies the per-shot keyframe source for `i2va`/`fl2va`; a
+   mode that needs an anchor and a panel without one is a compile-time
+   validation error, not a silent fallback.
+2. **Where the user picks target + mode.** Both live in storyboard
+   settings AND are surfaced in the Compose dialog (read-only echo with
+   a link to settings) so the choice is visible when authoring begins —
+   per user request. Composition itself stays target-agnostic except
+   (3).
+3. **Per-target shot-duration cap feeds the shots stage.** The V1 shots
+   stage prompts for 5-15 s shots (H3's ceiling). When `video_target`
+   is set, the stage's duration guidance and the beats editor's warning
+   threshold must come from a per-target constant
+   (`TARGET_CAPS: {minimax: 15.0, ltx: <its cap>}`) instead of the
+   hardcoded 15 — the one real coupling between story composition and
+   dialect.
+4. **Panel side-panel preview is the compiled prompt's UI home.** V1's
+   follow-up adds a right-hand side panel on StoryboardView with an
+   Edit tab (beat form) and a read-only Preview tab (beat script +
+   image prompt). V3's compiled `video_prompt` renders into that
+   existing Preview tab (with lint warnings) rather than adding a new
+   textarea inside PanelDetail — supersedes §7's "monospace textarea in
+   PanelDetail" placement; the editable/lock controls move to the side
+   panel too.
