@@ -17,7 +17,16 @@ async function rebeat(): Promise<void> {
 }
 
 async function add(): Promise<void> {
-  await store.addBeat(props.panel.id, 'new beat')
+  const panelId = props.panel.id
+  await store.addBeat(panelId, 'new beat')
+  // addBeat() awaits refresh(), which reassigns store.tree.value
+  // synchronously before its promise resolves -- reading through the store
+  // (rather than props.panel, whose update depends on Vue's async render
+  // scheduling of the parent) is guaranteed fresh here. The newly added beat
+  // is always last (its sort_order was set to the pre-add beat count).
+  const beats = store.panelById(panelId)?.beats ?? []
+  const last = beats[beats.length - 1]
+  if (last) store.selectedBeatId = last.id
 }
 
 // Swap sort_order for the beats at `index` and `index + dir` (adjacent
@@ -52,6 +61,7 @@ async function moveBeat(index: number, dir: -1 | 1): Promise<void> {
         :key="b.id"
         :beat="b"
         :subjects="store.tree?.subjects ?? []"
+        :index="i"
         :can-move-up="i > 0"
         :can-move-down="i < panel.beats.length - 1"
         @move-up="moveBeat(i, -1)"

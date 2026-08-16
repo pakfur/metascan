@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type {
   Beat,
   ComposeStage,
@@ -27,6 +27,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   const error = ref<string | null>(null)
   const selectedSceneId = ref<number | null>(null)
   const selectedPanelId = ref<number | null>(null)
+  const selectedBeatId = ref<number | null>(null)
   const jobToPanel = ref<Map<number, number>>(new Map())
   const panelJobState = ref<
     Map<number, { state: JobState; error: string | null; value?: number; max?: number }>
@@ -55,6 +56,22 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const scene = selectedScene.value
     if (!scene || selectedPanelId.value == null) return null
     return scene.panels.find((p) => p.id === selectedPanelId.value) ?? null
+  })
+
+  const selectedBeat = computed<Beat | null>(() => {
+    const panel = selectedPanel.value
+    if (!panel || selectedBeatId.value == null) return null
+    return panel.beats.find((b) => b.id === selectedBeatId.value) ?? null
+  })
+
+  // Any panel switch invalidates the previously-selected beat -- it belonged
+  // to a different panel's beats array and would otherwise resolve to null
+  // silently (harmless) or, worse, to a same-id beat on the new panel in some
+  // hypothetical future schema. Clearing explicitly keeps the invariant
+  // "selectedBeatId is always either null or a beat of selectedPanel" true
+  // without relying on selectedBeat's own null-fallback.
+  watch(selectedPanelId, () => {
+    selectedBeatId.value = null
   })
 
   const subjectsById = computed<Map<number, Subject>>(() => {
@@ -521,6 +538,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     for (const scene of tree.value?.scenes ?? [])
       for (const panel of scene.panels)
         panel.beats = panel.beats.filter((b) => b.id !== beatId)
+    if (selectedBeatId.value === beatId) selectedBeatId.value = null
   }
 
   // ---- WS wiring ------------------------------------------------------
@@ -624,6 +642,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     error,
     selectedSceneId,
     selectedPanelId,
+    selectedBeatId,
     jobToPanel,
     panelJobState,
     synthesis,
@@ -631,6 +650,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     // getters
     selectedScene,
     selectedPanel,
+    selectedBeat,
     subjectsById,
     panelById,
     keeperImage,

@@ -91,11 +91,14 @@
         </div>
       </header>
 
-      <template v-if="store.tree">
-        <SceneStrip />
-        <PanelGrid />
-        <PanelDetail v-if="store.selectedPanel" />
-      </template>
+      <div v-if="store.tree" class="sb-body">
+        <div class="sb-main">
+          <SceneStrip />
+          <PanelGrid />
+          <PanelDetail v-if="store.selectedPanel" />
+        </div>
+        <PanelSidePanel v-if="store.selectedPanel" class="sb-side" />
+      </div>
       <div v-else-if="store.loading" class="sb-loading">Loading…</div>
     </div>
 
@@ -114,6 +117,7 @@ import StoryboardLanding from '../components/storyboard/StoryboardLanding.vue'
 import SceneStrip from '../components/storyboard/SceneStrip.vue'
 import PanelGrid from '../components/storyboard/PanelGrid.vue'
 import PanelDetail from '../components/storyboard/PanelDetail.vue'
+import PanelSidePanel from '../components/storyboard/PanelSidePanel.vue'
 import ImportTextDialog from '../components/storyboard/ImportTextDialog.vue'
 import OutlineDialog from '../components/storyboard/OutlineDialog.vue'
 import StoryboardSettingsDialog from '../components/storyboard/StoryboardSettingsDialog.vue'
@@ -232,6 +236,25 @@ watch(
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.sb-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.sb-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sb-side {
+  flex: 0 0 400px;
+  min-height: 0;
 }
 
 .sb-loading {
