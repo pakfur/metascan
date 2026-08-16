@@ -112,16 +112,12 @@ class StoryboardRunner:
         of the same model); otherwise picks the first hardware-recommended
         ``qwen3vl-*`` gate.
         """
-        model_id = getattr(vlm, "model_id", None)
-        if model_id:
-            return str(model_id)
-        from metascan.core.hardware import detect_hardware, feature_gates
+        from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 
-        gates = feature_gates(detect_hardware())
-        for mid, gate in gates.items():
-            if mid.startswith("qwen3vl-") and gate.recommended:
-                return mid
-        raise StoryboardError("no VLM model available on this hardware")
+        try:
+            return pick_vlm_model(vlm)
+        except VlmSelectError as e:
+            raise StoryboardError(str(e)) from e
 
     # ---- parse -------------------------------------------------------
 
