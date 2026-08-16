@@ -50,13 +50,20 @@ class FakeVlm:
 
     model_id = "qwen3vl-8b"
 
-    def __init__(self, payload: Any = None, error: Optional[Exception] = None):
+    def __init__(
+        self,
+        payload: Any = None,
+        error: Optional[Exception] = None,
+        ensure_started_error: Optional[Exception] = None,
+    ):
         self.payload = payload
         self.error = error
+        self.ensure_started_error = ensure_started_error
         self.calls: List[Dict[str, Any]] = []
 
     async def ensure_started(self, model_id: str) -> None:
-        pass
+        if self.ensure_started_error is not None:
+            raise self.ensure_started_error
 
     async def generate_text(self, **kw: Any) -> str:
         self.calls.append(kw)
@@ -227,6 +234,40 @@ def test_describe_subject_503_on_vlm_select_error(
     assert r.status_code == 503
 
 
+def test_describe_subject_502_on_ensure_started_timeout(
+    client, db, board_id, media_path
+):
+    sid = db.create_subject(
+        board_id, name="M", description="d", reference_path=media_path
+    )
+    vlm_api.set_vlm_client(
+        FakeVlm(
+            payload={"description": "x", "voice": "alto"},
+            ensure_started_error=TimeoutError("model load timed out"),
+        )
+    )
+    r = client.post(f"/api/storyboard/subjects/{sid}/describe")
+    assert r.status_code == 502
+    assert "model load timed out" in r.json()["detail"]
+
+
+def test_describe_subject_502_on_ensure_started_runtime_error(
+    client, db, board_id, media_path
+):
+    sid = db.create_subject(
+        board_id, name="M", description="d", reference_path=media_path
+    )
+    vlm_api.set_vlm_client(
+        FakeVlm(
+            payload={"description": "x", "voice": "alto"},
+            ensure_started_error=RuntimeError("failed to start VLM: model not ready"),
+        )
+    )
+    r = client.post(f"/api/storyboard/subjects/{sid}/describe")
+    assert r.status_code == 502
+    assert "failed to start VLM" in r.json()["detail"]
+
+
 # ---- scene describe ----------------------------------------------------------
 
 
@@ -256,6 +297,36 @@ def test_describe_scene_400_when_no_ref(client, db, board_id, fake_vlm):
 
 def test_describe_scene_404(client):
     assert client.post("/api/storyboard/scenes/9999/describe").status_code == 404
+
+
+def test_describe_scene_502_on_ensure_started_timeout(
+    client, db, board_id, media_path
+):
+    scene_id = db.create_scene(board_id, name="Yard", reference_path=media_path)
+    vlm_api.set_vlm_client(
+        FakeVlm(
+            payload={"setting": "yard", "lighting": None, "mood": "tense"},
+            ensure_started_error=TimeoutError("model load timed out"),
+        )
+    )
+    r = client.post(f"/api/storyboard/scenes/{scene_id}/describe")
+    assert r.status_code == 502
+    assert "model load timed out" in r.json()["detail"]
+
+
+def test_describe_scene_502_on_ensure_started_runtime_error(
+    client, db, board_id, media_path
+):
+    scene_id = db.create_scene(board_id, name="Yard", reference_path=media_path)
+    vlm_api.set_vlm_client(
+        FakeVlm(
+            payload={"setting": "yard", "lighting": None, "mood": "tense"},
+            ensure_started_error=RuntimeError("failed to start VLM: model not ready"),
+        )
+    )
+    r = client.post(f"/api/storyboard/scenes/{scene_id}/describe")
+    assert r.status_code == 502
+    assert "failed to start VLM" in r.json()["detail"]
 
 
 # ---- controller ruling: reference fields round-trip via PATCH ---------------
