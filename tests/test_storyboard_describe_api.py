@@ -299,9 +299,7 @@ def test_describe_scene_404(client):
     assert client.post("/api/storyboard/scenes/9999/describe").status_code == 404
 
 
-def test_describe_scene_502_on_ensure_started_timeout(
-    client, db, board_id, media_path
-):
+def test_describe_scene_502_on_ensure_started_timeout(client, db, board_id, media_path):
     scene_id = db.create_scene(board_id, name="Yard", reference_path=media_path)
     vlm_api.set_vlm_client(
         FakeVlm(
