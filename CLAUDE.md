@@ -399,15 +399,21 @@ metascan/
   deterministic sections (`subject_definitions`, `summary`,
   `retention_analysis`), builds the machine-readable scaffold, assembles
   the six-section document, and runs an expectation-driven lint over it.
-  `StoryboardRunner._compile_panel` makes exactly two VLM calls per panel:
-  the `detailed_description` body is free-form prose (no grammar — the
-  lint pass plus a single retry on any `"error"`-severity issue is the
-  enforcement mechanism) and the sound section is grammar-constrained JSON
-  (`h3.SOUND_GRAMMAR`, `{overall_soundscape, non_diegetic_music}`).
+  **`detailed_description` is deterministic — the beat script IS the shot
+  script.** `compute_timeline` maps every beat to its own `[Shot n]`
+  (`is_cut` only tunes phrasing — "the shot cuts." vs "continuing without
+  a cut." — never grouping), and `render_detailed_description` renders
+  each beat's action/camera/dialog/sound verbatim with ref-guide cut-time
+  timestamps on every shot after the first; the VLM never paraphrases
+  shot structure. `StoryboardRunner._compile_panel` makes exactly one VLM
+  call per panel: the sound section, grammar-constrained JSON
+  (`h3.SOUND_GRAMMAR`, `{overall_soundscape, non_diegetic_music}`). The
+  lint still runs as a safety net (a word-count shortfall is a warning,
+  not an error — a terse beat script legitimately compiles short).
   `compile_video` shares `StoryboardRunner._synth_lock` with `synthesize`
   and emits `compile_progress`/`compile_complete`/`compile_error` on the
   `storyboard` WS channel, mirroring the synthesize contract. A lint
-  failure after the retry still writes the assembled document to
+  failure still writes the assembled document to
   `panels.video_prompt` (with the lint messages in `video_prompt_warnings`)
   rather than discarding the draft; a per-panel exception
   (`VlmError`/`TimeoutError`/`RuntimeError`/`h3.H3Error`) leaves

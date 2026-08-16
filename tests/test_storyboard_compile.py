@@ -1,12 +1,17 @@
 """StoryboardRunner.compile_video against a scripted fake VLM.
 
 Mirrors tests/test_storyboard_compose.py's structure: a real (temp) DB,
-a FakeVlm dispatching on the grammar object, and a board built through
-real DB calls (no mocking of the DB layer itself).
+a FakeVlm, and a board built through real DB calls (no mocking of the DB
+layer itself).
 
-FakeVlm dispatches on ``grammar is None`` (body stage) vs
-``grammar == h3.SOUND_GRAMMAR`` (sound stage) -- system prompts alone
-aren't reliable discriminators here any more than in the compose tests.
+Under the current H3 contract, ``_compile_panel`` never calls the VLM for
+the ``detailed_description`` body -- it's always rendered deterministically
+from the beat script by ``h3.render_detailed_description`` and passes its
+own lint by construction (labels/timestamps/dialog are derived from the
+exact same plans it renders from). The only VLM call left is the
+grammar-constrained sound stage (``h3.SOUND_GRAMMAR``); ``FakeVlm`` asserts
+it is never called with ``grammar=None`` so a regression that reintroduces
+a body call fails loudly here rather than silently.
 """
 
 from __future__ import annotations
@@ -17,7 +22,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-import metascan.core.h3_compiler as h3
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.storyboard_runner import StoryboardError, StoryboardRunner
 from metascan.core.vlm_client import VlmError
@@ -108,128 +112,30 @@ def _make_panel(
     return scene_id, panel_id, subject_id
 
 
-def _expect_and_scaffold(
-    db: DatabaseManager, storyboard_id: int, panel_id: int, mode: str = "ref2va"
-) -> Tuple[str, h3.LintExpectations]:
-    """Independently reproduce what ``_compile_panel`` computes for a given
-    panel, so a test can build a lint-clean body/scaffold pair up front."""
-    tree = db.get_storyboard_tree(storyboard_id)
-    assert tree is not None
-    subjects_by_id = {s["id"]: s for s in tree["subjects"]}
-    scene = panel = None
-    for sc in tree["scenes"]:
-        for p in sc["panels"]:
-            if p["id"] == panel_id:
-                scene, panel = sc, p
-    assert scene is not None and panel is not None
-    subjects = [
-        subjects_by_id[sid] for sid in panel["subject_ids"] if sid in subjects_by_id
-    ]
-    beats = panel["beats"] or [
-        {
-            "duration_s": panel.get("duration_s") or 12.0,
-            "action": panel.get("action") or "",
-            "camera_motion": None,
-            "camera_amplitude": None,
-            "camera_speed": None,
-            "is_cut": 0,
-            "sound": None,
-            "dialog": [],
-        }
-    ]
-    refplan = h3.assign_reference_labels(subjects, scene)
-    speakers = h3.assign_speakers(beats, subjects, refplan)
-    duration_s = float(
-        panel.get("duration_s")
-        or sum(float(b.get("duration_s") or 0) for b in beats)
-        or 12.0
-    )
-    timeline = h3.compute_timeline(beats, duration_s, mode, refplan)
-    scaffold_panel = dict(panel)
-    scaffold_panel["beats"] = beats
-    scaffold = h3.build_scaffold(
-        scaffold_panel, scene, tree, subjects, refplan, speakers, timeline
-    )
-    expect = h3.build_expectations(refplan, speakers, timeline, mode, beats=beats)
-    return scaffold, expect
-
-
-def make_valid_body(scaffold: str, expect: h3.LintExpectations) -> str:
-    """Render the scaffold's shots into simple, lint-compliant prose,
-    including every expected dialog line (verbatim, inside <d>...</d>,
-    adjacent to its (Sx) id) and every expected camera phrase -- the same
-    shape H3_BODY_SYSTEM asks the VLM to produce."""
-    style_line = "cinematic, live-action"
-    for line in scaffold.splitlines():
-        if line.startswith("STYLE: "):
-            style_line = line[len("STYLE: ") :]
-            break
-
-    dialog_by_beat: Dict[int, List[Any]] = {}
-    for sl in expect.dialog_lines:
-        dialog_by_beat.setdefault(sl.beat_index, []).append(sl)
-
-    parts = [f"The target video opens in a {style_line} style, calm and unhurried."]
-    for i, shot in enumerate(expect.timeline.shots):
-        header = (
-            "[Shot 1]"
-            if shot.number == 1
-            else f"[Shot {shot.number}] At {h3.format_timecode(shot.start_s)}, "
-            "the shot cuts to"
-        )
-        sentences = [
-            "the camera settles on the scene as gentle morning light fills "
-            "the frame, and every detail of the room comes softly into view "
-            "around the people gathered there, warm and unhurried and "
-            "entirely ordinary"
-        ]
-        camera_phrases = (
-            expect.shot_camera_phrases[i] if expect.shot_camera_phrases else ()
-        )
-        for phrase in camera_phrases:
-            sentences.append(f"The camera {phrase} as the moment unfolds")
-        for bi in shot.beat_indices:
-            for sl in sorted(dialog_by_beat.get(bi, []), key=lambda x: x.line_index):
-                speaker_part = (
-                    f"{sl.subject_label} ({sl.speaker_id})"
-                    if sl.subject_label
-                    else f"the {sl.voice or 'voice'} ({sl.speaker_id})"
-                )
-                sentences.append(
-                    f"{speaker_part} turns and says, "
-                    f"<d>[{sl.language}] {sl.text}</d>"
-                )
-        parts.append(f"{header} {', '.join(sentences)}.")
-
-    body = "\n".join(parts)
-    words = body.split()
-    if len(words) < 360:
-        pad = " ".join(f"detail{i}" for i in range(360 - len(words) + 20))
-        body = f"{body} {pad}"
-    return body
-
-
 # -- FakeVlm ------------------------------------------------------------
 
 
 class FakeVlm:
+    """A VLM stub for the sound stage only -- the current contract has no
+    other VLM call in ``_compile_panel``. ``crash_first_sound`` raises a
+    ``VlmError`` on the first sound call (panel-scoped failure);
+    ``sound_fails_first`` instead returns grammar-valid-but-semantically-
+    invalid JSON (empty ``overall_soundscape``), which
+    ``validate_sound_response`` rejects with ``H3Error``."""
+
     model_id = "qwen3vl-30b-a3b"
 
     def __init__(
         self,
-        body_response: str,
         sound_response: str = _VALID_SOUND,
-        body_fails_first: bool = False,
         sound_fails_first: bool = False,
+        crash_first_sound: bool = False,
     ) -> None:
         self.calls: List[Tuple[str, str, Optional[str]]] = []
-        self.body_calls = 0
         self.sound_calls = 0
-        self._body_response = body_response
         self._sound_response = sound_response
-        self._body_fails_first = body_fails_first
-        self._first_body_seen = False
         self._sound_fails_first = sound_fails_first
+        self._crash_first_sound = crash_first_sound
         self._first_sound_seen = False
 
     async def ensure_started(self, model_id: str) -> None:
@@ -246,13 +152,15 @@ class FakeVlm:
         timeout: float = 120.0,
     ) -> str:
         self.calls.append((system_prompt, user_prompt, grammar))
-        if grammar is None:
-            self.body_calls += 1
-            if self._body_fails_first and not self._first_body_seen:
-                self._first_body_seen = True
-                raise VlmError("simulated VLM crash")
-            return self._body_response
+        assert grammar is not None, (
+            "no VLM body stage remains under the current H3 contract -- "
+            "_compile_panel must only call generate_text for the "
+            "grammar-constrained sound stage"
+        )
         self.sound_calls += 1
+        if self._crash_first_sound and not self._first_sound_seen:
+            self._first_sound_seen = True
+            raise VlmError("simulated VLM crash")
         if self._sound_fails_first and not self._first_sound_seen:
             self._first_sound_seen = True
             # SOUND_GRAMMAR's "string" rule permits zero characters --
@@ -296,9 +204,7 @@ def test_compile_requires_vlm_unless_deterministic(db, tmp_path):
 def test_full_compile_writes_doc_and_events(db, tmp_path):
     sb = _make_storyboard(db)
     _, panel_id, _ = _make_panel(db, sb)
-    scaffold, expect = _expect_and_scaffold(db, sb, panel_id)
-    valid_body = make_valid_body(scaffold, expect)
-    vlm = FakeVlm(body_response=valid_body)
+    vlm = FakeVlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
@@ -307,13 +213,17 @@ def test_full_compile_writes_doc_and_events(db, tmp_path):
 
     counts = asyncio.run(runner.compile_video(sb))
     assert counts == {"compiled": 1, "failed": 0, "skipped_locked": 0}
-    assert vlm.body_calls == 1  # no retry needed
     assert vlm.sound_calls == 1
 
     panel = db.get_panel(panel_id)
     assert panel["video_prompt_source"] == "compiled"
     assert panel["video_prompt_locked"] == 0
-    assert panel["video_prompt_warnings"] == []
+    # _make_panel's beats are short -- the deterministic
+    # detailed_description passes its own lint by construction but comes
+    # in under the 150-word floor, which is advisory-only (a warning, not
+    # an error -- see test_lint_word_count_warning_below_floor).
+    assert len(panel["video_prompt_warnings"]) == 1
+    assert "word floor" in panel["video_prompt_warnings"][0]
     doc = panel["video_prompt"]
     for header in (
         "subject_definitions:",
@@ -334,48 +244,50 @@ def test_full_compile_writes_doc_and_events(db, tmp_path):
     assert complete[0][2]["compiled"] == 1
 
 
-def test_lint_failure_retries_once_then_stores_with_errors(db, tmp_path):
+def test_word_count_shortfall_is_warning_not_failure(db, tmp_path):
+    """The old VLM-body/retry contract is gone: the detailed_description is
+    always rendered deterministically from the beat script, and it passes
+    its own lint by construction (labels/timestamps/dialog are derived
+    from the exact plans it was rendered from, so they can't drift). The
+    only lint issue a short beat script like _make_panel's can produce is
+    a below-floor word_count warning -- it must not fail the panel and
+    must not trigger any extra VLM call (there is no retry mechanism left
+    at all)."""
     sb = _make_storyboard(db)
     _, panel_id, _ = _make_panel(db, sb)
-    scaffold, expect = _expect_and_scaffold(db, sb, panel_id)
-    valid_body = make_valid_body(scaffold, expect)
-    # Drop the only dialog line -> dialog_missing error, both attempts.
-    broken_body = valid_body.replace("<d>[English] Hello, old girl.</d>", "")
-    vlm = FakeVlm(body_response=broken_body)
+    vlm = FakeVlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
 
     counts = asyncio.run(runner.compile_video(sb))
-    assert counts == {"compiled": 0, "failed": 1, "skipped_locked": 0}
-    assert vlm.body_calls == 2  # one retry
-    assert vlm.sound_calls == 1  # sound is not retried
+    assert counts == {"compiled": 1, "failed": 0, "skipped_locked": 0}
+    assert vlm.sound_calls == 1  # exactly one call -- nothing retries
 
     panel = db.get_panel(panel_id)
-    assert panel["video_prompt"]  # stored regardless
+    assert panel["video_prompt"]
     assert panel["video_prompt_source"] == "compiled"
-    assert panel["video_prompt_warnings"]
-    assert any("dialog" in w for w in panel["video_prompt_warnings"])
+    assert len(panel["video_prompt_warnings"]) == 1
+    assert "word floor" in panel["video_prompt_warnings"][0]
 
 
 def test_locked_panel_skipped_unless_forced(db, tmp_path):
     sb = _make_storyboard(db)
     _, panel_id, _ = _make_panel(db, sb)
     db.update_panel(panel_id, video_prompt_locked=1)
-    scaffold, expect = _expect_and_scaffold(db, sb, panel_id)
-    vlm = FakeVlm(body_response=make_valid_body(scaffold, expect))
+    vlm = FakeVlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
 
     counts = asyncio.run(runner.compile_video(sb))
     assert counts == {"compiled": 0, "failed": 0, "skipped_locked": 1}
-    assert vlm.body_calls == 0
+    assert vlm.sound_calls == 0
 
     counts2 = asyncio.run(runner.compile_video(sb, panel_ids=[panel_id], force=True))
     assert counts2["skipped_locked"] == 0
     assert counts2["compiled"] + counts2["failed"] == 1
-    assert vlm.body_calls >= 1
+    assert vlm.sound_calls >= 1
 
 
 def test_no_beats_panel_uses_single_shot_fallback(db, tmp_path):
@@ -399,9 +311,8 @@ def test_vlm_error_marks_panel_failed_not_run(db, tmp_path):
     sb = _make_storyboard(db)
     _, panel1_id, _ = _make_panel(db, sb, action="Panel one")
     _, panel2_id, _ = _make_panel(db, sb, action="Panel two")
-    scaffold, expect = _expect_and_scaffold(db, sb, panel1_id)
-    body = make_valid_body(scaffold, expect)
-    vlm = FakeVlm(body_response=body, body_fails_first=True)
+    # The only VLM call left is the sound stage -- crash on the first one.
+    vlm = FakeVlm(crash_first_sound=True)
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
@@ -426,9 +337,7 @@ def test_h3_error_marks_panel_failed_not_run(db, tmp_path):
     sb = _make_storyboard(db)
     _, panel1_id, _ = _make_panel(db, sb, action="Panel one")
     _, panel2_id, _ = _make_panel(db, sb, action="Panel two")
-    scaffold, expect = _expect_and_scaffold(db, sb, panel1_id)
-    body = make_valid_body(scaffold, expect)
-    vlm = FakeVlm(body_response=body, sound_fails_first=True)
+    vlm = FakeVlm(sound_fails_first=True)
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
@@ -526,16 +435,15 @@ def test_offpanel_dialog_subject_gets_definition_no_crash(db, tmp_path):
 
 def test_unexpected_exception_isolates_to_one_panel(db, tmp_path):
     """A plain Exception (not one of the previously-named types) raised for
-    one panel's body call must still be isolated -- the other panel
+    one panel's sound call must still be isolated -- the other panel
     compiles, and exactly one compile_complete (never compile_error) is
     emitted for the run."""
 
     class ExplodingVlm:
         model_id = "qwen3vl-30b-a3b"
 
-        def __init__(self, good_body: str) -> None:
-            self._good_body = good_body
-            self.body_calls = 0
+        def __init__(self) -> None:
+            self.sound_calls = 0
 
         async def ensure_started(self, model_id: str) -> None:
             pass
@@ -550,19 +458,15 @@ def test_unexpected_exception_isolates_to_one_panel(db, tmp_path):
             max_tokens: int = 250,
             timeout: float = 120.0,
         ) -> str:
-            if grammar is None:
-                self.body_calls += 1
-                if self.body_calls == 1:
-                    raise KeyError("boom")  # a plain, unexpected exception
-                return self._good_body
+            self.sound_calls += 1
+            if self.sound_calls == 1:
+                raise KeyError("boom")  # a plain, unexpected exception
             return _VALID_SOUND
 
     sb = _make_storyboard(db)
     _, panel1_id, _ = _make_panel(db, sb, action="Panel one")
     _, panel2_id, _ = _make_panel(db, sb, action="Panel two")
-    scaffold, expect = _expect_and_scaffold(db, sb, panel1_id)
-    body = make_valid_body(scaffold, expect)
-    vlm = ExplodingVlm(good_body=body)
+    vlm = ExplodingVlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
@@ -613,28 +517,20 @@ def test_compile_appends_audio_sections_and_records_anchor(db, tmp_path):
     lint clean (regression coverage for the retention_marker vocabulary
     split -- §4.2 audio markers vs §4.1 subject markers), and the success
     write records video_compiled_anchor from the panel's video_anchor at
-    compile time. Uses a full (non-deterministic) compile against a real
-    lint-clean body, not deterministic_only -- the deterministic fallback
-    body is always too short to clear the word_count floor on its own and
-    would fail regardless of the audio lines, which would mask a
-    retention_marker regression exactly as it did before this test was
-    strengthened."""
+    compile time. Uses deterministic_only=True -- the detailed_description
+    passes its own lint by construction (see the FakeVlm docstring), so a
+    short beat script no longer fails the compile and this no longer needs
+    a hand-built, lint-clean VLM body to exercise the audio lines."""
     sb = _make_storyboard(db)
-    _, panel_id, subject_id = _make_panel(
-        db, sb, voice_ref_path="/refs/grandma_voice.wav"
-    )
+    _, panel_id, _ = _make_panel(db, sb, voice_ref_path="/refs/grandma_voice.wav")
     db.update_panel(panel_id, video_anchor="keeper")
-    scaffold, expect = _expect_and_scaffold(db, sb, panel_id)
-    valid_body = make_valid_body(scaffold, expect)
-    vlm = FakeVlm(body_response=valid_body)
     runner = StoryboardRunner(
-        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+        db=db, comfy=None, get_vlm=lambda: None, output_root=tmp_path
     )
 
-    counts = asyncio.run(runner.compile_video(sb))
+    counts = asyncio.run(runner.compile_video(sb, deterministic_only=True))
     assert counts["compiled"] == 1
     assert counts["failed"] == 0
-    assert vlm.body_calls == 1  # no retry needed -- audio lines don't trip lint
 
     panel = db.get_panel(panel_id)
     assert not any("retention_marker" in w for w in panel["video_prompt_warnings"])

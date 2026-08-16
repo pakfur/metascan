@@ -113,8 +113,19 @@ function onAnchorChange(e: Event): void {
   void store.patchPanelFields(panel.value.id, { video_anchor: val || null })
 }
 
+// The anchor picks the first-frame source ComfyUI is given (keeper image /
+// previous shot's last frame) — that only exists for the keyframe modes.
+// In ref2va/t2va it contributes nothing, so hide the control entirely.
+const anchorRelevant = computed(() => {
+  const mode = store.tree?.video_mode
+  return mode === 'i2va' || mode === 'fl2va'
+})
+
 const recompileSuggested = computed(
-  () => !!panel.value && panel.value.video_anchor !== panel.value.video_compiled_anchor,
+  () =>
+    anchorRelevant.value &&
+    !!panel.value &&
+    panel.value.video_anchor !== panel.value.video_compiled_anchor,
 )
 
 const hasActiveVideoJob = computed(
@@ -179,7 +190,7 @@ async function renderVideo(): Promise<void> {
         <ul v-if="panel?.video_prompt_warnings.length" class="sp-warnings">
           <li v-for="(w, i) in panel.video_prompt_warnings" :key="i">{{ w }}</li>
         </ul>
-        <div class="sp-field">
+        <div v-if="anchorRelevant" class="sp-field">
           <label class="sp-label" for="sp-video-anchor">Anchor</label>
           <select id="sp-video-anchor" :value="panel?.video_anchor ?? ''" @change="onAnchorChange">
             <option value="">None</option>
