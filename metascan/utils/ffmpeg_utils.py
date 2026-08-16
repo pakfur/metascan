@@ -6,7 +6,10 @@ to prevent hangs on corrupted or incomplete media files.
 
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+from metascan.cache.thumbnail import get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
 
@@ -110,3 +113,47 @@ def extract_frame_with_timeout(
     except Exception as e:
         logger.debug(f"Failed to extract frame from {file_path} at {ss}s: {e}")
         return None
+
+
+def extract_last_frame(video_path: Path, out_png: Path) -> None:
+    """Extract the last frame from a video file as PNG.
+
+    Creates parent directories of out_png if they don't exist.
+
+    Args:
+        video_path: Path to the video file.
+        out_png: Path where the PNG frame will be written.
+
+    Raises:
+        RuntimeError: If ffmpeg is not found or the extraction fails.
+    """
+    # Create parent directories if they don't exist
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+
+    # Find ffmpeg
+    ffmpeg_path = get_ffmpeg_path()
+    if not ffmpeg_path:
+        raise RuntimeError("ffmpeg not found in PATH or common locations")
+
+    # Run ffmpeg to extract the last frame
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-sseof",
+        "-0.5",
+        "-i",
+        str(video_path),
+        "-update",
+        "1",
+        "-frames:v",
+        "1",
+        str(out_png),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=False)
+
+    if result.returncode != 0:
+        stderr_tail = result.stderr.decode(errors="replace")[-300:]
+        raise RuntimeError(
+            f"ffmpeg failed to extract last frame from {video_path}: {stderr_tail}"
+        )
