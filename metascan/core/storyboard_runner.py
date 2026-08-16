@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from metascan.core.comfy_bindings import Bindings, GenerationParams
+from metascan.core import h3_compiler as h3
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
     bucket_dims,
@@ -30,6 +31,7 @@ from metascan.core.storyboard_parse import (
     validate_parse_response,
 )
 from metascan.core.storyboard_synthesis import build_render_messages, finalize_prompt
+from metascan.core.video_targets import shot_cap
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_models import REGISTRY
 from metascan.utils.path_utils import to_native_path, to_posix_path
@@ -378,6 +380,11 @@ class StoryboardRunner:
             return len(scenes)
 
         if stage == "shots":
+            # spec §10.3: the shots stage's per-shot duration guidance is
+            # coupled to the storyboard's video target so H3 (max ~15s per
+            # clip) and future dialects with a different cap both steer the
+            # LLM toward shots the compiler can actually render as one clip.
+            cap = shot_cap(tree.get("video_target"))
             targets = [
                 (i, s)
                 for i, s in enumerate(tree["scenes"])
@@ -405,6 +412,7 @@ class StoryboardRunner:
                             tree["subjects"],
                             prev_name,
                             next_name,
+                            max_shot_s=cap,
                         ),
                         grammar=story.SHOTS_GRAMMAR,
                         temperature=0.6,
@@ -466,6 +474,341 @@ class StoryboardRunner:
 
         results = await asyncio.gather(*(_beats_for(s, p) for s, p in work))
         return sum(results)
+
+    # ---- compile (H3 video-prompt) --------------------------------------
+
+    async def compile_video(
+        self,
+        storyboard_id: int,
+        panel_ids: Optional[List[int]] = None,
+        force: bool = False,
+        deterministic_only: bool = False,
+    ) -> Dict[str, int]:
+        """Compile per-panel H3 video prompts, emitting a terminal WS event.
+
+        Mirrors ``synthesize``'s contract: fires ``compile_complete`` with
+        the same counts this returns on success, or ``compile_error`` (and
+        re-raises, for a direct caller not going through a fire-and-forget
+        route) on failure. Unlike ``compose_story``, compile has no
+        sub-stages, so the error event stamps nothing beyond the message.
+        """
+        try:
+            counts = await self._compile_locked(
+                storyboard_id, panel_ids, force, deterministic_only
+            )
+        except Exception as exc:
+            self._emit(
+                "storyboard",
+                "compile_error",
+                {"storyboard_id": storyboard_id, "error": str(exc)},
+            )
+            raise
+        self._emit(
+            "storyboard",
+            "compile_complete",
+            {"storyboard_id": storyboard_id, **counts},
+        )
+        return counts
+
+    async def _compile_locked(
+        self,
+        storyboard_id: int,
+        panel_ids: Optional[List[int]],
+        force: bool,
+        deterministic_only: bool,
+    ) -> Dict[str, int]:
+        async with self._synth_lock:
+            tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
+            if tree is None:
+                raise StoryboardError(f"no storyboard with id {storyboard_id}")
+            if tree.get("video_target") != "minimax":
+                raise StoryboardError(
+                    f"storyboard {storyboard_id} has video_target "
+                    f"{tree.get('video_target')!r} -- the H3 compiler only "
+                    "supports 'minimax'"
+                )
+
+            vlm = None if deterministic_only else self.get_vlm()
+            if vlm is None and not deterministic_only:
+                raise StoryboardError(
+                    "no VLM client — compiling requires a VLM unless "
+                    "deterministic_only=True"
+                )
+
+            subjects_by_id = {s["id"]: s for s in tree["subjects"]}
+            explicit_ids = set(panel_ids) if panel_ids is not None else None
+            candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for scene in tree["scenes"]:
+                for panel in scene["panels"]:
+                    if explicit_ids is not None and panel["id"] not in explicit_ids:
+                        continue
+                    candidates.append((scene, panel))
+
+            work: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            skipped_locked = 0
+            for scene, panel in candidates:
+                forced_override = (
+                    force and explicit_ids is not None and panel["id"] in explicit_ids
+                )
+                if panel["video_prompt_locked"] and not forced_override:
+                    skipped_locked += 1
+                    continue
+                work.append((scene, panel))
+
+            counts: Dict[str, int] = {
+                "compiled": 0,
+                "failed": 0,
+                "skipped_locked": skipped_locked,
+            }
+            total = len(work)
+            if total == 0:
+                return counts
+
+            mode = tree.get("video_mode") or "ref2va"
+
+            sem: Optional[asyncio.Semaphore] = None
+            if vlm is not None:
+                model_id = self._pick_vlm_model(vlm)
+                await vlm.ensure_started(model_id)
+                slots = REGISTRY[model_id].parallel_slots if model_id in REGISTRY else 2
+                sem = asyncio.Semaphore(slots)
+
+            progress_lock = asyncio.Lock()
+            done = 0
+
+            async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
+                nonlocal done
+                subjects = [
+                    subjects_by_id[sid]
+                    for sid in panel["subject_ids"]
+                    if sid in subjects_by_id
+                ]
+                try:
+                    if sem is not None:
+                        async with sem:
+                            doc, issues = await self._compile_panel(
+                                vlm,
+                                tree,
+                                scene,
+                                panel,
+                                subjects,
+                                mode,
+                                deterministic_only,
+                            )
+                    else:
+                        doc, issues = await self._compile_panel(
+                            vlm, tree, scene, panel, subjects, mode, deterministic_only
+                        )
+                except (VlmError, TimeoutError, RuntimeError) as exc:
+                    await asyncio.to_thread(
+                        self.db.update_panel,
+                        panel["id"],
+                        video_prompt_source="compiled",
+                        video_prompt_locked=0,
+                        video_prompt_warnings=json.dumps([str(exc)]),
+                    )
+                    async with progress_lock:
+                        done += 1
+                        counts["failed"] += 1
+                        done_snapshot = done
+                    self._emit(
+                        "storyboard",
+                        "compile_progress",
+                        {
+                            "storyboard_id": storyboard_id,
+                            "panel_id": panel["id"],
+                            "done": done_snapshot,
+                            "total": total,
+                        },
+                    )
+                    return
+
+                has_error = any(i.severity == "error" for i in issues)
+                await asyncio.to_thread(
+                    self.db.update_panel,
+                    panel["id"],
+                    video_prompt=doc,
+                    video_prompt_source="compiled",
+                    video_prompt_locked=0,
+                    video_prompt_warnings=json.dumps([i.message for i in issues]),
+                )
+                async with progress_lock:
+                    done += 1
+                    counts["failed" if has_error else "compiled"] += 1
+                    done_snapshot = done
+                self._emit(
+                    "storyboard",
+                    "compile_progress",
+                    {
+                        "storyboard_id": storyboard_id,
+                        "panel_id": panel["id"],
+                        "done": done_snapshot,
+                        "total": total,
+                    },
+                )
+
+            await asyncio.gather(*(_one(scene, panel) for scene, panel in work))
+            return counts
+
+    async def _compile_panel(
+        self,
+        vlm: Optional[Any],
+        tree: Dict[str, Any],
+        scene: Dict[str, Any],
+        panel: Dict[str, Any],
+        subjects: List[Dict[str, Any]],
+        mode: str,
+        deterministic_only: bool,
+    ) -> Tuple[str, List[h3.LintError]]:
+        """Compile one panel's H3 video prompt: scaffold -> body/sound LLM
+        calls (or a deterministic fallback) -> assemble -> lint -> (one
+        retry on lint errors).
+
+        This is the ONLY place in the runner that imports/uses
+        ``h3_compiler`` symbols (spec §8 dialect seam) -- a future ``ltx``
+        dialect adds one dispatch branch inside this method; the rest of
+        the runner, the API, storage, and UI stay untouched.
+        """
+        beats: List[Dict[str, Any]] = list(panel.get("beats") or [])
+        if not beats:
+            # No beats yet: fall back to a single beat-equivalent group
+            # built straight from the panel's own action/duration_s.
+            beats = [
+                {
+                    "duration_s": panel.get("duration_s") or 12.0,
+                    "action": panel.get("action") or "",
+                    "camera_motion": None,
+                    "camera_amplitude": None,
+                    "camera_speed": None,
+                    "is_cut": 0,
+                    "sound": None,
+                    "dialog": [],
+                }
+            ]
+
+        refplan = h3.assign_reference_labels(subjects, scene)
+        speakers = h3.assign_speakers(beats, subjects, refplan)
+        duration_s = float(
+            panel.get("duration_s")
+            or sum(float(b.get("duration_s") or 0) for b in beats)
+            or 12.0
+        )
+        timeline = h3.compute_timeline(beats, duration_s, mode, refplan)
+
+        scaffold_panel = dict(panel)
+        scaffold_panel["beats"] = beats
+        scaffold = h3.build_scaffold(
+            scaffold_panel, scene, tree, subjects, refplan, speakers, timeline
+        )
+
+        subject_definitions = h3.render_subject_definitions(refplan, subjects, scene)
+        summary = h3.render_summary(refplan, panel, subjects, mode)
+        retention_analysis = h3.render_retention_analysis(
+            refplan, subjects, scene, timeline
+        )
+        expect = h3.build_expectations(refplan, speakers, timeline, mode, beats=beats)
+
+        def _fallback_body() -> str:
+            style = tree.get("style_block") or "cinematic, live-action"
+            lines_by_beat: Dict[int, List[Any]] = {}
+            for sl in speakers.lines:
+                lines_by_beat.setdefault(sl.beat_index, []).append(sl)
+            parts = [f"The target video is in a {style} style."]
+            for shot in timeline.shots:
+                header = (
+                    "[Shot 1]"
+                    if shot.number == 1
+                    else f"[Shot {shot.number}] At "
+                    f"{h3.format_timecode(shot.start_s)}, the shot cuts to"
+                )
+                sentences: List[str] = []
+                for bi in shot.beat_indices:
+                    beat = beats[bi] if bi < len(beats) else {}
+                    action = beat.get("action") or ""
+                    if action:
+                        sentences.append(f"{action}.")
+                    camera = h3.render_camera(
+                        beat.get("camera_motion"),
+                        beat.get("camera_amplitude"),
+                        beat.get("camera_speed"),
+                    )
+                    if camera:
+                        sentences.append(f"The camera {camera}.")
+                    for sl in sorted(
+                        lines_by_beat.get(bi, []), key=lambda x: x.line_index
+                    ):
+                        speaker_part = (
+                            f"{sl.subject_label} ({sl.speaker_id})"
+                            if sl.subject_label
+                            else f"the {sl.voice or 'voice'} ({sl.speaker_id})"
+                        )
+                        sentences.append(
+                            f"{speaker_part} says, <d>[{sl.language}] {sl.text}</d>"
+                        )
+                parts.append(f"{header} {' '.join(sentences)}".strip())
+            return "\n".join(parts)
+
+        def _fallback_sound() -> Tuple[str, str]:
+            events = [str(b["sound"]) for b in beats if b.get("sound")]
+            if events:
+                soundscape = " ".join(f"{e}." for e in events)
+            else:
+                soundscape = "The scene carries quiet ambient room tone throughout."
+            return soundscape, "N/A"
+
+        if deterministic_only or vlm is None:
+            detailed_description = _fallback_body()
+            overall_soundscape, non_diegetic_music = _fallback_sound()
+        else:
+            detailed_description = await vlm.generate_text(
+                system_prompt=h3.H3_BODY_SYSTEM,
+                user_prompt=h3.build_body_user_prompt(scaffold),
+                temperature=0.5,
+                max_tokens=1200,
+                timeout=300.0,
+            )
+            sound_raw = await vlm.generate_text(
+                system_prompt=h3.H3_SOUND_SYSTEM,
+                user_prompt=h3.build_sound_user_prompt(beats, scene.get("mood")),
+                grammar=h3.SOUND_GRAMMAR,
+                temperature=0.4,
+                max_tokens=250,
+                timeout=120.0,
+            )
+            sound = h3.validate_sound_response(sound_raw)
+            overall_soundscape = sound["overall_soundscape"]
+            non_diegetic_music = sound["non_diegetic_music"]
+
+        def _assemble(dd: str) -> str:
+            return h3.assemble(
+                timeline.alignment_line,
+                subject_definitions,
+                summary,
+                retention_analysis,
+                dd,
+                overall_soundscape,
+                non_diegetic_music,
+            )
+
+        doc = _assemble(detailed_description)
+        issues = h3.lint_h3_prompt(doc, expect)
+
+        if (
+            not deterministic_only
+            and vlm is not None
+            and any(i.severity == "error" for i in issues)
+        ):
+            detailed_description = await vlm.generate_text(
+                system_prompt=h3.H3_BODY_SYSTEM,
+                user_prompt=h3.build_retry_user_prompt(scaffold, issues),
+                temperature=0.5,
+                max_tokens=1200,
+                timeout=300.0,
+            )
+            doc = _assemble(detailed_description)
+            issues = h3.lint_h3_prompt(doc, expect)
+
+        return doc, issues
 
     # ---- synthesize ----------------------------------------------------
 

@@ -20,11 +20,35 @@ are limited to ``dataclasses``/``typing``/``json`` plus the shared
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from metascan.core.storyboard_story import CAMERA_MOTION_VALUES
+
+_PROMPT_KEYS = frozenset({"H3_BODY_SYSTEM", "H3_SOUND_SYSTEM"})
+
+
+def __getattr__(name: str) -> str:
+    """Resolve ``H3_BODY_SYSTEM`` / ``H3_SOUND_SYSTEM`` against the live
+    YAML prompt store on every access (module-attribute hot reload).
+
+    NOTE: access these as module attributes at call time (``h3.H3_BODY_SYSTEM``).
+    A module-scope ``from ... import H3_BODY_SYSTEM`` freezes a snapshot at
+    import time and defeats the hot reload -- mirrors ``ref_describe.py``
+    and ``storyboard_story.py``'s identical caveat for their own prompts.
+    """
+    if name in _PROMPT_KEYS:
+        from metascan.core.prompt_store import get_prompt_store
+
+        return get_prompt_store().get(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class H3Error(ValueError):
+    """An H3 LLM-stage response could not be validated."""
+
 
 # -- Dataclasses -------------------------------------------------------
 
@@ -83,6 +107,13 @@ class LintExpectations:
     dialog_lines: Tuple[SpeakerLine, ...]
     timeline: Timeline
     duration_s: float
+    # Per internal shot (same order as ``timeline.shots``), the canonical
+    # phrases (``_CAMERA_PHRASES`` values) of that shot's beats' explicitly
+    # set ``camera_motion``s. Empty by default -- only populated when
+    # ``build_expectations`` is given ``beats`` (Task 4's controller
+    # ruling); the camera_vocab lint check only cross-checks a shot's text
+    # against this when it's non-empty, keeping it backward compatible.
+    shot_camera_phrases: Tuple[Tuple[str, ...], ...] = ()
 
 
 # -- Camera vocabulary (base guide §4.3) --------------------------------
@@ -529,6 +560,90 @@ def build_scaffold(
     return "\n".join(out)
 
 
+# -- LLM stage plumbing (Task 4): grammar, validator, prompt builders ------
+#
+# The VLM calls themselves live in storyboard_runner.py -- this module
+# stays pure (no I/O). Grammar built with the same _COMMON-rules .format()
+# idiom as ref_describe.py; "N/A" for non_diegetic_music is a plain string
+# value, not null, so both fields are the unadorned ``string`` rule.
+
+_COMMON = r"""nullable ::= string | "null"
+string ::= "\"" char* "\""
+char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+ws ::= [ \t\n]*
+"""
+
+SOUND_GRAMMAR = (
+    r"""root ::= "{{" ws "\"overall_soundscape\"" ws ":" ws string ws "," ws "\"non_diegetic_music\"" ws ":" ws string ws "}}"
+"""
+    + _COMMON
+).format()
+
+
+def _loads(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as e:
+        raise H3Error(f"response is not valid JSON: {e}") from e
+
+
+def _clean(v: Any) -> Optional[str]:
+    if isinstance(v, str):
+        s = v.strip()
+        return s or None
+    return None
+
+
+def validate_sound_response(raw: str) -> Dict[str, str]:
+    """Validate the sound-stage JSON: ``{"overall_soundscape", "non_diegetic_music"}``.
+
+    An empty/absent ``non_diegetic_music`` becomes ``"N/A"``; an empty or
+    absent ``overall_soundscape`` raises (every shot has *some* ambience).
+    """
+    data = _loads(raw)
+    if not isinstance(data, dict):
+        raise H3Error("sound response is not a JSON object")
+    soundscape = _clean(data.get("overall_soundscape"))
+    if not soundscape:
+        raise H3Error("overall_soundscape is empty")
+    music = _clean(data.get("non_diegetic_music")) or "N/A"
+    return {"overall_soundscape": soundscape, "non_diegetic_music": music}
+
+
+def build_body_user_prompt(scaffold: str) -> str:
+    return (
+        f"Shot scaffold:\n{scaffold}\n\n"
+        "Write the detailed_description body for this scaffold."
+    )
+
+
+def build_retry_user_prompt(scaffold: str, errors: List[LintError]) -> str:
+    error_lines = (
+        "\n".join(f"- {e.message}" for e in errors if e.severity == "error")
+        or "(no specific errors reported)"
+    )
+    return (
+        f"Shot scaffold:\n{scaffold}\n\n"
+        "Your previous detailed_description body had these problems:\n"
+        f"{error_lines}\n\n"
+        "Write a corrected detailed_description body that fixes every "
+        "problem above while still following every rule in the system "
+        "prompt."
+    )
+
+
+def build_sound_user_prompt(
+    beats: Sequence[Mapping[str, Any]], tone: Optional[str]
+) -> str:
+    events = [str(b["sound"]) for b in beats if b.get("sound")]
+    event_lines = "\n".join(f"- {e}" for e in events) or "(no sound events listed)"
+    tone_line = f"Tone/mood: {tone}\n" if tone else ""
+    return (
+        f"{tone_line}Sound events across this shot's beats:\n{event_lines}\n\n"
+        "Write the sound JSON for this shot."
+    )
+
+
 # -- Document assembly -------------------------------------------------------
 
 
@@ -606,9 +721,19 @@ def build_expectations(
     speakers: SpeakerPlan,
     timeline: Timeline,
     mode: str,
+    beats: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> LintExpectations:
     """Derive the set of labels/dialog/timing a compiled H3 document must
-    honor, given the same plans used to render it."""
+    honor, given the same plans used to render it.
+
+    ``beats`` (the panel's flat beat list, indexed the same way
+    ``timeline``'s ``TimelineShot.beat_indices`` are) is optional and
+    backward compatible: when omitted, ``shot_camera_phrases`` stays empty
+    and the camera_vocab lint check behaves exactly as before (Task 3).
+    When provided, it populates ``shot_camera_phrases`` so camera_vocab can
+    also cross-check a shot's rendered text against what its beats'
+    ``camera_motion`` fields actually called for.
+    """
     subject_labels = set(refplan.subject_labels.values())
     subject_labels.add(refplan.environment_label)
 
@@ -619,12 +744,27 @@ def build_expectations(
         if mode == "fl2va":
             picture_labels.add(_increment_picture_label(kf))
 
+    shot_camera_phrases: Tuple[Tuple[str, ...], ...] = ()
+    if beats is not None:
+        per_shot: List[Tuple[str, ...]] = []
+        for shot in timeline.shots:
+            phrases: List[str] = []
+            for bi in shot.beat_indices:
+                beat = beats[bi] if bi < len(beats) else {}
+                motion = beat.get("camera_motion")
+                phrase = _CAMERA_PHRASES.get(motion) if motion else None
+                if phrase:
+                    phrases.append(phrase)
+            per_shot.append(tuple(phrases))
+        shot_camera_phrases = tuple(per_shot)
+
     return LintExpectations(
         subject_labels=frozenset(subject_labels),
         picture_labels=frozenset(picture_labels),
         dialog_lines=tuple(speakers.lines),
         timeline=timeline,
         duration_s=timeline.duration_s,
+        shot_camera_phrases=shot_camera_phrases,
     )
 
 
@@ -764,9 +904,20 @@ def _lint_timestamps(dd: str, expect: LintExpectations) -> List[LintError]:
     return errors
 
 
-def _lint_camera_vocab(dd: str) -> List[LintError]:
+def _lint_camera_vocab(
+    dd: str, expect: Optional[LintExpectations] = None
+) -> List[LintError]:
     errors: List[LintError] = []
     marks = list(_SHOT_MARK_RE.finditer(dd))
+
+    expected_by_number: Dict[int, Tuple[str, ...]] = {}
+    if expect is not None and expect.shot_camera_phrases:
+        expected_by_number = {
+            shot.number: phrases
+            for shot, phrases in zip(expect.timeline.shots, expect.shot_camera_phrases)
+        }
+    all_phrases = tuple(_CAMERA_PHRASES.values())
+
     for i, m in enumerate(marks):
         seg_start = m.end()
         seg_end = marks[i + 1].start() if i + 1 < len(marks) else len(dd)
@@ -780,6 +931,22 @@ def _lint_camera_vocab(dd: str) -> List[LintError]:
                         "warning",
                         f"[Shot {shot_no}] contains contradictory camera motion "
                         f"phrasing: {a!r} and {b!r}",
+                    )
+                )
+
+        expected = expected_by_number.get(int(shot_no))
+        if expected:
+            found = [p for p in all_phrases if p in segment]
+            unexpected = [p for p in found if p not in expected]
+            expected_present = any(p in segment for p in expected)
+            if unexpected and not expected_present:
+                errors.append(
+                    LintError(
+                        "camera_vocab",
+                        "warning",
+                        f"[Shot {shot_no}] uses camera motion phrasing "
+                        f"{unexpected[0]!r}, which is not among the "
+                        f"shot's beats' expected motion(s) {list(expected)!r}",
                     )
                 )
     return errors
@@ -932,7 +1099,7 @@ def lint_h3_prompt(text: str, expect: LintExpectations) -> List[LintError]:
     dd = sections.get("detailed_description")
     if dd is not None:
         errors.extend(_lint_timestamps(dd, expect))
-        errors.extend(_lint_camera_vocab(dd))
+        errors.extend(_lint_camera_vocab(dd, expect))
         errors.extend(_lint_word_count(dd))
         errors.extend(_lint_dialog(dd, expect))
 

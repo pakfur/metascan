@@ -701,6 +701,66 @@ def test_lint_camera_vocab_flags_contradictory_motion_in_same_shot() -> None:
 # -- Lint: rule 6, word_count (boundaries: 149/150/350/500) -----------------
 
 
+# -- Lint: camera_vocab cross-checked against beat camera data (Task 4's
+# controller ruling: build_expectations(..., beats=...) populates
+# shot_camera_phrases; camera_vocab warns when a shot's text uses a
+# canonical motion phrase not among that shot's beats' expected motions
+# AND none of the expected motions appear at all -- conservative). --------
+
+
+def test_lint_camera_vocab_flags_motion_not_among_beat_expected_phrases() -> None:
+    parts = _fixture_parts()
+    beats = _beats()
+    refplan = assign_reference_labels(_subjects(), _scene())
+    speakers = assign_speakers(beats, _subjects(), refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
+    expect = build_expectations(refplan, speakers, timeline, "ref2va", beats=beats)
+
+    # Shot 2's only beat has camera_motion="static" (expected phrase "holds
+    # a static shot"); replace that phrase with an unrelated one ("pans
+    # right") so no expected phrase remains in the shot's text at all.
+    dd = (
+        _SHOT1
+        + "\n"
+        + _SHOT2.replace(
+            "The camera holds a static shot as she reaches",
+            "The camera pans right as she reaches",
+            1,
+        )
+    )
+    text = _assemble_doc(parts, dd)
+    errors = lint_h3_prompt(text, expect)
+    assert any(
+        e.code == "camera_vocab" and e.severity == "warning" and "Shot 2" in e.message
+        for e in errors
+    )
+
+
+def test_lint_camera_vocab_does_not_flag_when_expected_phrase_still_present() -> None:
+    parts = _fixture_parts()
+    beats = _beats()
+    refplan = assign_reference_labels(_subjects(), _scene())
+    speakers = assign_speakers(beats, _subjects(), refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan)
+    expect = build_expectations(refplan, speakers, timeline, "ref2va", beats=beats)
+
+    # Shot 1's expected phrase ("pushes in") is still present alongside an
+    # unrelated mention -- the conservative rule only fires when NONE of
+    # the shot's expected phrases appear, so this must stay clean.
+    dd = (
+        _SHOT1.replace(
+            "over the room.",
+            "over the room. The camera also pans right briefly.",
+            1,
+        )
+        + "\n"
+        + _SHOT2
+    )
+    text = _assemble_doc(parts, dd)
+    errors = lint_h3_prompt(text, expect)
+    assert not any(e.code == "camera_vocab" for e in errors)
+
+
 def test_lint_word_count_error_below_floor() -> None:
     parts = _fixture_parts()
     dd = _filler_words(149)

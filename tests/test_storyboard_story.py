@@ -173,6 +173,27 @@ def test_rescale_beat_durations_only_outside_tolerance():
     assert [b["duration_s"] for b in beats2] == [5.0, 6.0]
 
 
+def test_build_shots_user_prompt_states_max_shot_seconds():
+    prompt = story.build_shots_user_prompt(
+        json.dumps({"logline": "L"}),
+        {"name": "Yard", "setting": "hulls"},
+        [],
+        None,
+        None,
+        max_shot_s=10.0,
+    )
+    assert "at most 10 seconds" in prompt
+    # default stays 15s when the caller doesn't override it.
+    default_prompt = story.build_shots_user_prompt(
+        json.dumps({"logline": "L"}),
+        {"name": "Yard", "setting": "hulls"},
+        [],
+        None,
+        None,
+    )
+    assert "at most 15 seconds" in default_prompt
+
+
 def test_camera_vocabulary_matches_spec():
     for v in ("push_in", "static", "roll_ccw", "tracking", "pov"):
         assert v in CAMERA_MOTION_VALUES
