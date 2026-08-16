@@ -465,6 +465,16 @@ class DatabaseManager:
                     "Migrating workflow_presets.kind CHECK to allow 'ref2v' "
                     "(dev DB predating video generation)…"
                 )
+                # PRAGMA foreign_keys is a no-op while a transaction is
+                # open (SQLite requires it be toggled outside one) -- the
+                # summary-column backfill earlier in this method runs an
+                # UPDATE that leaves an implicit transaction pending even
+                # on a fresh DB with zero media rows. Commit it first so
+                # the OFF actually takes, or DROP TABLE below raises
+                # "FOREIGN KEY constraint failed" the moment any other
+                # table (e.g. generation_jobs) has a row referencing
+                # workflow_presets.
+                conn.commit()
                 conn.execute("PRAGMA foreign_keys = OFF")
                 conn.execute(
                     """
