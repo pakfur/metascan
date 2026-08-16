@@ -221,3 +221,55 @@ def test_story_error_emitted_and_reraised(db, tmp_path):
         asyncio.run(runner.compose_story(sb))
     errs = [e for e in events if e[1] == "story_error"]
     assert len(errs) == 1 and errs[0][2]["stage"] == "outline"
+
+
+def test_stage_retries_once_on_invalid_json(db, tmp_path):
+    """A truncated/invalid response is retried once per unit; a clean
+    second sample lets the stage succeed (regression: a single truncated
+    shots response used to abort the whole compose run)."""
+
+    class FlakyVlm(FakeVlm):
+        def __init__(self):
+            super().__init__()
+            self.shots_calls = 0
+
+        async def generate_text(self, *, grammar=None, **kw):
+            from metascan.core import storyboard_story as story
+
+            if grammar == story.SHOTS_GRAMMAR:
+                self.shots_calls += 1
+                if self.shots_calls == 1:
+                    # Truncated mid-string, as llama-server produces when
+                    # generation hits max_tokens.
+                    return '[{"shot_size": "WS", "angle": "eye", "lens": null, "action": "she wal'
+            return await super().generate_text(grammar=grammar, **kw)
+
+    vlm = FlakyVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    sb = _board(db)
+    counts = asyncio.run(runner.compose_story(sb))
+    assert counts["shots"] == 1  # the stage recovered
+    assert vlm.shots_calls == 2  # exactly one retry
+
+
+def test_stage_fails_after_second_invalid_json(db, tmp_path):
+    class AlwaysBadVlm(FakeVlm):
+        async def generate_text(self, *, grammar=None, **kw):
+            from metascan.core import storyboard_story as story
+
+            if grammar == story.SHOTS_GRAMMAR:
+                return "[{"
+            return await super().generate_text(grammar=grammar, **kw)
+
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: AlwaysBadVlm(), output_root=tmp_path
+    )
+    events = []
+    runner.on_event(lambda ch, ev, d: events.append((ev, d)))
+    sb = _board(db)
+    with pytest.raises(Exception):
+        asyncio.run(runner.compose_story(sb))
+    errs = [d for ev, d in events if ev == "story_error"]
+    assert len(errs) == 1 and errs[0]["stage"] == "shots"
