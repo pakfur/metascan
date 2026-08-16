@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from metascan.core.comfy_bindings import resolve_bindings
+from metascan.core.comfy_bindings import apply_overrides, resolve_bindings
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 from metascan.core.storyboard_runner import StoryboardError, StoryboardRunner
@@ -28,7 +28,10 @@ def _node(class_type: str, title: str, inputs: dict) -> dict:
 
 
 def _ref2v_workflow(
-    n_ref: int = 0, n_audio: int = 0, first_frame: bool = False
+    n_ref: int = 0,
+    n_audio: int = 0,
+    first_frame: bool = False,
+    duration: bool = False,
 ) -> dict:
     wf = {
         "1": _node("KSamplerAdvanced", "MS_SEED", {"noise_seed": 0}),
@@ -43,6 +46,8 @@ def _ref2v_workflow(
         wf[f"audio{i}"] = _node("LoadAudio", audio_titles[i], {"audio": ""})
     if first_frame:
         wf["ff"] = _node("LoadImage", "MS_FIRST_FRAME", {"image": ""})
+    if duration:
+        wf["dur"] = _node("PrimitiveFloat", "MS_DURATION", {"value": 0})
     return wf
 
 
@@ -63,12 +68,20 @@ class FakeComfy:
     never reads bytes off disk (unlike the real ComfyClient), so tests
     don't need real files to exist for reference/keeper pictures -- only
     the "voice reference exists on disk" validation needs real files,
-    handled per-test via tmp_path."""
+    handled per-test via tmp_path.
+
+    ``submit`` mirrors ComfyClient.submit's real behavior of resolving the
+    preset's bindings and running ``apply_overrides`` synchronously before
+    recording the job -- a stub that skipped this (as this class used to)
+    would never surface a BindingError the real client raises, which is
+    exactly the bug class this file's binding-integration tests exist to
+    catch."""
 
     def __init__(self, db=None):
         self.db = db
         self.uploaded: list = []  # Path objects passed to upload_file, in order
         self.submitted: list = []  # (preset_id, params, panel_id, output_dir)
+        self.applied_graphs: list = []  # apply_overrides() results, submit order
         self._n = 0
 
     async def upload_file(self, path):
@@ -80,6 +93,11 @@ class FakeComfy:
     async def submit(
         self, preset_id, params, panel_id=None, priority=False, output_dir=None
     ):
+        preset = self.db.get_workflow_preset(preset_id)
+        workflow = json.loads(preset["workflow_json"])
+        bindings = resolve_bindings(workflow, preset["kind"])
+        graph = apply_overrides(workflow, bindings, params)  # raises BindingError
+        self.applied_graphs.append(graph)
         self.submitted.append((preset_id, params, panel_id, output_dir))
         return int(
             self.db.create_generation_job(
@@ -123,11 +141,16 @@ def make_runner(db, comfy, events, tmp_path, unload_vlm=False) -> StoryboardRunn
     return runner
 
 
-def _preset(db, n_ref=0, n_audio=0, first_frame=False) -> int:
-    workflow = _ref2v_workflow(n_ref=n_ref, n_audio=n_audio, first_frame=first_frame)
+def _preset(db, n_ref=0, n_audio=0, first_frame=False, duration=False) -> int:
+    workflow = _ref2v_workflow(
+        n_ref=n_ref, n_audio=n_audio, first_frame=first_frame, duration=duration
+    )
     bindings = resolve_bindings(workflow, "ref2v")
     return db.create_workflow_preset(
-        f"h3-{n_ref}-{n_audio}", "ref2v", json.dumps(workflow), bindings.to_json()
+        f"h3-{n_ref}-{n_audio}-{int(duration)}",
+        "ref2v",
+        json.dumps(workflow),
+        bindings.to_json(),
     )
 
 
@@ -450,6 +473,95 @@ async def test_only_failed_filters(db, comfy, events, tmp_path):
 
 
 # ---- per-panel failure isolation ---------------------------------------
+
+
+def _node_by_title(graph: dict, title: str) -> dict:
+    for node in graph.values():
+        if isinstance(node, dict) and (node.get("_meta") or {}).get("title") == title:
+            return node
+    raise AssertionError(f"no node titled {title!r} in graph")
+
+
+# ---- binding integration (real apply_overrides, not stubbed) -----------
+#
+# generate_video ALWAYS sets duration_s (panels.duration_s is NOT NULL) and
+# always sets first_frame when an anchor is used, but a minimal spec-legal
+# ref2v preset (only MS_POSITIVE/MS_SEED/MS_SAVE) has neither MS_DURATION
+# nor MS_FIRST_FRAME. Since FakeComfy.submit now runs the REAL
+# resolve_bindings + apply_overrides (see FakeComfy's docstring), these
+# tests exercise the exact BindingError the real ComfyClient.submit raises
+# -- this class of bug must never hide behind a stub again.
+
+
+async def test_minimal_preset_no_binding_error_duration_omitted(
+    db, comfy, events, tmp_path
+):
+    """A minimal spec-legal ref2v preset (only the 3 required titles) has
+    no MS_DURATION node. generate_video must not crash with a BindingError
+    on a plain (non-anchor) panel, and must not ask apply_overrides to
+    bind a duration this preset can't accept."""
+    preset_id = _preset(db)  # no ref/audio/first_frame/duration bindings
+    sb_id = _storyboard(db, preset_id)
+    _, panel_id = _bare_panel(db, sb_id, duration_s=6.0)
+
+    runner = make_runner(db, comfy, events, tmp_path)
+    result = await runner.generate_video(sb_id)
+
+    assert result["skipped"] == []
+    assert len(result["jobs"]) == 1
+    assert len(comfy.applied_graphs) == 1  # apply_overrides succeeded
+
+    _, params, panel_id_arg, _ = comfy.submitted[0]
+    assert panel_id_arg == panel_id
+    assert params.duration_s is None
+    assert params.first_frame is None
+
+
+async def test_preset_with_duration_binding_writes_duration(
+    db, comfy, events, tmp_path
+):
+    """A preset that DOES have MS_DURATION gets the panel's duration_s
+    both on the submitted params and written into the rendered graph."""
+    preset_id = _preset(db, duration=True)
+    sb_id = _storyboard(db, preset_id)
+    _, panel_id = _bare_panel(db, sb_id, duration_s=6.0)
+
+    runner = make_runner(db, comfy, events, tmp_path)
+    result = await runner.generate_video(sb_id)
+
+    assert result["skipped"] == []
+    assert len(result["jobs"]) == 1
+
+    _, params, panel_id_arg, _ = comfy.submitted[0]
+    assert panel_id_arg == panel_id
+    assert params.duration_s == 6.0
+
+    graph = comfy.applied_graphs[0]
+    dur_node = _node_by_title(graph, "MS_DURATION")
+    assert dur_node["inputs"]["value"] == 6.0
+
+
+async def test_anchor_without_first_frame_binding_fails_upfront(
+    db, comfy, events, tmp_path
+):
+    """A preset with no MS_FIRST_FRAME node, targeted by a panel with an
+    anchor set, must fail upfront validation (naming the panel) rather
+    than reach comfy.submit and blow up with a raw BindingError."""
+    preset_id = _preset(db)  # no MS_FIRST_FRAME binding
+    sb_id = _storyboard(db, preset_id)
+    _, panel_id = _bare_panel(db, sb_id, video_anchor="keeper")
+    _video_image(db, panel_id, "/pics/keeper.png", selected=True)
+
+    runner = make_runner(db, comfy, events, tmp_path)
+
+    with pytest.raises(StoryboardError) as exc_info:
+        await runner.generate_video(sb_id)
+
+    message = str(exc_info.value)
+    assert f"panel {panel_id}" in message
+    assert "MS_FIRST_FRAME" in message
+    assert comfy.submitted == []
+    assert comfy.applied_graphs == []
 
 
 async def test_extraction_failure_isolates_panel(

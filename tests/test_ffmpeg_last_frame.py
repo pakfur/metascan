@@ -77,3 +77,23 @@ def test_extract_last_frame_creates_parent_dirs(tmp_path):
     # Verify the PNG was created in the nested path
     assert out_png.exists(), "Output PNG was not created in nested dir"
     assert out_png.stat().st_size > 0, "Output PNG is empty"
+
+
+def test_extract_last_frame_timeout_raises_runtime_error(tmp_path, monkeypatch):
+    """A hung ffmpeg process (e.g. on a malformed AI-generated video) must
+    raise RuntimeError, not block the request thread forever."""
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "metascan.utils.ffmpeg_utils.get_ffmpeg_path", lambda: "/usr/bin/ffmpeg"
+    )
+
+    video_path = tmp_path / "malformed.mp4"
+    video_path.write_bytes(b"not a real video")
+    out_png = tmp_path / "frame.png"
+
+    with pytest.raises(RuntimeError):
+        extract_last_frame(video_path, out_png)
