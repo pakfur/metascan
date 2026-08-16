@@ -24,12 +24,14 @@ from pydantic import BaseModel
 
 from backend.dependencies import get_db
 from backend.ws.manager import ws_manager
+from backend.services.comfy_service import ComfyService
 from backend.services.storyboard_service import (
     InvalidReferenceError,
     ParentNotFoundError,
     StoryboardService,
 )
 from metascan.core import ref_describe as rd
+from metascan.core.comfy_client import ComfyError
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
@@ -71,6 +73,7 @@ _BEAT_NOT_NULLABLE = frozenset(
 # reserved id for a future target, not yet wired to any prompt compiler.
 _VIDEO_TARGETS = frozenset({"minimax"})
 _VIDEO_MODES = frozenset({"t2va", "i2va", "fl2va", "ref2va"})
+_VIDEO_ANCHORS = frozenset({"keeper", "prev_last"})
 
 
 def _reject_null_for_required(
@@ -141,6 +144,7 @@ class StoryboardPatch(BaseModel):
     outline: Optional[str] = None
     video_target: Optional[str] = None
     video_mode: Optional[str] = None
+    video_preset_id: Optional[int] = None
 
 
 class SubjectCreate(BaseModel):
@@ -152,6 +156,7 @@ class SubjectCreate(BaseModel):
     reference_path_2: Optional[str] = None
     sort_order: int = 0
     voice: Optional[str] = None
+    voice_ref_path: Optional[str] = None
 
 
 class SubjectPatch(BaseModel):
@@ -163,6 +168,7 @@ class SubjectPatch(BaseModel):
     reference_path_2: Optional[str] = None
     sort_order: Optional[int] = None
     voice: Optional[str] = None
+    voice_ref_path: Optional[str] = None
 
 
 class SceneCreate(BaseModel):
@@ -217,6 +223,7 @@ class PanelPatch(BaseModel):
     duration_s: Optional[float] = None
     video_prompt: Optional[str] = None
     video_prompt_locked: Optional[int] = None
+    video_anchor: Optional[str] = None
     # selected_image_id is deliberately NOT exposed here: selecting a
     # panel's keeper toggles media.hidden on the old/new keeper via
     # db.select_panel_image, and a raw PATCH would bypass that. Use
@@ -364,6 +371,13 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
             detail=f"video_mode {fields['video_mode']!r} is not one of "
             f"{sorted(_VIDEO_MODES)}",
         )
+    if fields.get("video_preset_id") is not None:
+        preset = await ComfyService(get_db()).get_preset(fields["video_preset_id"])
+        if preset is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no workflow preset with id {fields['video_preset_id']}",
+            )
 
     if fields:
         await svc.update_storyboard(storyboard_id, **fields)
@@ -491,6 +505,29 @@ async def generate_storyboard(
     return {"jobs": job_ids}
 
 
+@router.post("/{storyboard_id}/generate-video")
+async def generate_storyboard_video(
+    storyboard_id: int, body: GenerateRequest
+) -> Dict[str, Any]:
+    """Submit ref2v (H3/MiniMax) jobs for a storyboard's panels.
+
+    Synchronous await, mirroring /generate (not the 202 fire-and-forget
+    pattern used by synthesize/compile/compose) -- jobs are only queued
+    here, not run in-request. Returns the runner's
+    {"jobs": [...], "skipped": [...]} verbatim.
+    """
+    runner = _require_runner()
+    try:
+        result = await runner.generate_video(
+            storyboard_id, panel_ids=body.panel_ids, only_failed=body.only_failed
+        )
+    except StoryboardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ComfyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return result
+
+
 @router.post("/{storyboard_id}/compose", status_code=202)
 async def compose_storyboard(
     storyboard_id: int, body: ComposeRequest
@@ -553,6 +590,7 @@ async def create_subject(storyboard_id: int, body: SubjectCreate) -> Dict[str, i
             reference_path=body.reference_path,
             reference_path_2=body.reference_path_2,
             sort_order=body.sort_order,
+            voice_ref_path=body.voice_ref_path,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -747,6 +785,15 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
 
     fields = body.model_dump(exclude_unset=True)
     _reject_null_for_required(fields, _PANEL_NOT_NULLABLE)
+    if (
+        fields.get("video_anchor") is not None
+        and fields["video_anchor"] not in _VIDEO_ANCHORS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"video_anchor {fields['video_anchor']!r} is not one of "
+            f"{sorted(_VIDEO_ANCHORS)}",
+        )
     if body.prompt is not None:
         # Server wins: a user-supplied prompt always locks, regardless of
         # whatever prompt_locked/prompt_source the caller also sent.
