@@ -182,7 +182,10 @@ function startDetailDrag(down: PointerEvent): void {
   down.preventDefault()
   const startY = down.clientY
   const startHeight = detail.getBoundingClientRect().height
-  divider.setPointerCapture(down.pointerId)
+  // Window-level listeners rather than pointer capture on the divider:
+  // capture proved unreliable here, and window always sees the moves.
+  const prevUserSelect = document.body.style.userSelect
+  document.body.style.userSelect = 'none'
   const onMove = (move: PointerEvent) => {
     const raw = startHeight + (startY - move.clientY)
     const max = Math.max(120, window.innerHeight - 240)
@@ -190,13 +193,14 @@ function startDetailDrag(down: PointerEvent): void {
     savedDetailHeight = detailHeight.value
   }
   const onUp = () => {
-    divider.removeEventListener('pointermove', onMove)
-    divider.removeEventListener('pointerup', onUp)
-    divider.removeEventListener('pointercancel', onUp)
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onUp)
+    document.body.style.userSelect = prevUserSelect
   }
-  divider.addEventListener('pointermove', onMove)
-  divider.addEventListener('pointerup', onUp)
-  divider.addEventListener('pointercancel', onUp)
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
 }
 
 // attachWs() registers its cleanup via onUnmounted from inside setup, so it
@@ -255,11 +259,14 @@ watch(
 }
 
 .sb-divider {
-  flex-shrink: 0;
-  height: 5px;
-  margin: -2px 0;
-  cursor: row-resize;
+  /* position:relative makes z-index effective — without it the grid and
+     detail panel overlap the hit strip left by the negative margins. */
+  position: relative;
   z-index: 5;
+  flex-shrink: 0;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
   touch-action: none;
   background: transparent;
   transition: background 0.15s;
