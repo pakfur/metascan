@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 from metascan.core.h3_compiler import (
     RefPlan,
+    active_audio_refs,
     assemble,
     assign_reference_labels,
     assign_speakers,
@@ -22,6 +23,8 @@ from metascan.core.h3_compiler import (
     compute_timeline,
     format_timecode,
     lint_h3_prompt,
+    render_audio_definition_lines,
+    render_audio_retention_lines,
     render_camera,
     render_retention_analysis,
     render_subject_definitions,
@@ -373,6 +376,138 @@ def test_retention_lines_and_keyframe_entry() -> None:
     text_none = render_retention_analysis(refplan, subjects, scene, timeline_ref2va)
     assert "Picture 4" not in text_none
     assert "Picture 5" not in text_none
+
+
+def test_audio_labels_assigned_only_for_voice_ref_subjects() -> None:
+    subjects = _subjects()
+    subjects[0]["voice_ref_path"] = "/refs/grandma_voice.wav"  # id 7 (sort_order 0)
+    # subjects[1] (id 9, Rex) has no voice_ref_path key at all.
+    scene = _scene()
+
+    refplan = assign_reference_labels(subjects, scene)
+    assert refplan.audio_labels == ((7, "Audio 1"),)
+
+
+def test_audio_definition_and_retention_for_speaking_subject_only() -> None:
+    subjects = _subjects()
+    subjects[0]["voice_ref_path"] = "/refs/grandma_voice.wav"  # id 7, speaks
+    subjects[1]["voice_ref_path"] = "/refs/rex_voice.wav"  # id 9, silent
+    scene = _scene()
+    beats = _beats()  # beat 0 dialog subject_id=7; beat 1 dialog is an
+    # unnamed voice (subject_id=None) -- subject 9 never actually speaks.
+    refplan = assign_reference_labels(subjects, scene)
+    speakers = assign_speakers(beats, subjects, refplan)
+    assert refplan.audio_labels == ((7, "Audio 1"), (9, "Audio 2"))
+
+    definition_lines = render_audio_definition_lines(refplan, speakers, subjects)
+    assert definition_lines == [
+        "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)."
+    ]
+
+    retention_lines = render_audio_retention_lines(refplan, speakers, subjects)
+    assert retention_lines == [
+        "<Audio 1>: reference - the target speaker follows <Audio 1>'s "
+        "voice timbre and delivery without copying the original signal."
+    ]
+
+    active = active_audio_refs(refplan, speakers, subjects)
+    assert active == [("/refs/grandma_voice.wav", "Audio 1")]
+
+
+def test_active_audio_refs_order_and_paths() -> None:
+    """Audio labels are numbered by subject sort_order, independent of the
+    order subjects actually speak in -- active_audio_refs/definition lines
+    must follow label order (Audio 1, Audio 2, ...), not speaker-id order."""
+    subjects = [
+        {
+            "id": 3,
+            "name": "Uncle Theo",
+            "description": "a gruff man with a beard",
+            "voice": "gruff baritone",
+            "reference_path": None,
+            "reference_path_2": None,
+            "sort_order": 2,
+            "voice_ref_path": "/refs/theo_voice.wav",
+        },
+        {
+            "id": 1,
+            "name": "Grandma Rose",
+            "description": "an elderly woman",
+            "voice": "warm voice",
+            "reference_path": None,
+            "reference_path_2": None,
+            "sort_order": 0,
+            "voice_ref_path": "/refs/grandma_voice.wav",
+        },
+        {
+            "id": 2,
+            "name": "Rex",
+            "description": "a scruffy terrier",
+            "voice": None,
+            "reference_path": None,
+            "reference_path_2": None,
+            "sort_order": 1,
+        },
+    ]
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    # sort_order: id1 -> Subject 1, id2 -> Subject 2, id3 -> Subject 3.
+    assert refplan.audio_labels == ((1, "Audio 1"), (3, "Audio 2"))
+
+    beats = [
+        {
+            "duration_s": 2.0,
+            "action": "Theo speaks first",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": 3,
+                    "voice": None,
+                    "delivery": None,
+                    "language": "English",
+                    "text": "Hello there.",
+                }
+            ],
+            "sound": None,
+        },
+        {
+            "duration_s": 2.0,
+            "action": "Grandma replies",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": 1,
+                    "voice": None,
+                    "delivery": None,
+                    "language": "English",
+                    "text": "Good morning.",
+                }
+            ],
+            "sound": None,
+        },
+    ]
+    speakers = assign_speakers(beats, subjects, refplan)
+    # Theo (Subject 3) speaks first -> S1; Grandma (Subject 1) -> S2.
+    assert speakers.voice_by_id["S1"] == "gruff baritone"
+    assert speakers.voice_by_id["S2"] == "warm voice"
+
+    active = active_audio_refs(refplan, speakers, subjects)
+    assert active == [
+        ("/refs/grandma_voice.wav", "Audio 1"),
+        ("/refs/theo_voice.wav", "Audio 2"),
+    ]
+
+    definition_lines = render_audio_definition_lines(refplan, speakers, subjects)
+    assert definition_lines == [
+        "<Audio 1> is the voice-timbre reference for <Subject 1> (S2).",
+        "<Audio 2> is the voice-timbre reference for <Subject 3> (S1).",
+    ]
 
 
 def test_scaffold_contains_beats_dialog_and_timecodes() -> None:

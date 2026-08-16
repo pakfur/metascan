@@ -648,6 +648,7 @@ class StoryboardRunner:
                     video_prompt_source="compiled",
                     video_prompt_locked=0,
                     video_prompt_warnings=json.dumps([i.message for i in issues]),
+                    video_compiled_anchor=panel.get("video_anchor"),
                 )
                 async with progress_lock:
                     done += 1
@@ -723,6 +724,20 @@ class StoryboardRunner:
         retention_analysis = h3.render_retention_analysis(
             refplan, subjects, scene, timeline
         )
+
+        audio_definition_lines = h3.render_audio_definition_lines(
+            refplan, speakers, subjects
+        )
+        if audio_definition_lines:
+            subject_definitions = "\n".join(
+                [subject_definitions, *audio_definition_lines]
+            )
+        audio_retention_lines = h3.render_audio_retention_lines(
+            refplan, speakers, subjects
+        )
+        if audio_retention_lines:
+            retention_analysis = "\n".join([retention_analysis, *audio_retention_lines])
+
         expect = h3.build_expectations(refplan, speakers, timeline, mode, beats=beats)
 
         def _fallback_body() -> str:
