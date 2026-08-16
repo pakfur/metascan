@@ -12,7 +12,7 @@ here is exercised by dict literals in tests.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 # Titles metascan looks for. Values are the widget keys each node must
@@ -23,6 +23,13 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_LATENT": ("width", "height", "batch_size"),
     "MS_LORA": ("lora_name", "strength_model", "strength_clip"),
     "MS_REF_IMAGE": ("image",),
+    "MS_REF_IMAGE_2": ("image",),
+    "MS_REF_IMAGE_3": ("image",),
+    "MS_FIRST_FRAME": ("image",),
+    "MS_LAST_FRAME": ("image",),
+    "MS_AUDIO": ("audio",),
+    "MS_AUDIO_2": ("audio",),
+    "MS_DURATION": ("value",),
     # MS_SEED is special-cased: either "seed" or "noise_seed".
     # MS_SAVE is an output node; metascan only needs its id.
 }
@@ -30,6 +37,7 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
 _REQUIRED_TITLES: Dict[str, Tuple[str, ...]] = {
     "t2i": ("MS_POSITIVE", "MS_SEED", "MS_LATENT", "MS_SAVE"),
     "ref": ("MS_POSITIVE", "MS_SEED", "MS_LATENT", "MS_SAVE", "MS_REF_IMAGE"),
+    "ref2v": ("MS_POSITIVE", "MS_SEED", "MS_SAVE"),
 }
 
 KINDS: Tuple[str, ...] = tuple(_REQUIRED_TITLES)
@@ -50,11 +58,18 @@ class Bindings:
     positive: str
     seed: str
     seed_widget: str
-    latent: str
+    latent: Optional[str]
     save: str
     negative: Optional[str] = None
     lora: Optional[str] = None
     ref_image: Optional[str] = None
+    ref_image_2: Optional[str] = None
+    ref_image_3: Optional[str] = None
+    first_frame: Optional[str] = None
+    last_frame: Optional[str] = None
+    audio: Optional[str] = None
+    audio_2: Optional[str] = None
+    duration: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -146,11 +161,18 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
         positive=found["MS_POSITIVE"],
         seed=found["MS_SEED"],
         seed_widget=_seed_widget(workflow, found["MS_SEED"]),
-        latent=found["MS_LATENT"],
+        latent=found.get("MS_LATENT"),
         save=found["MS_SAVE"],
         negative=found.get("MS_NEGATIVE"),
         lora=found.get("MS_LORA"),
         ref_image=found.get("MS_REF_IMAGE"),
+        ref_image_2=found.get("MS_REF_IMAGE_2"),
+        ref_image_3=found.get("MS_REF_IMAGE_3"),
+        first_frame=found.get("MS_FIRST_FRAME"),
+        last_frame=found.get("MS_LAST_FRAME"),
+        audio=found.get("MS_AUDIO"),
+        audio_2=found.get("MS_AUDIO_2"),
+        duration=found.get("MS_DURATION"),
     )
 
 
@@ -171,6 +193,11 @@ class GenerationParams:
     lora_name: Optional[str] = None
     lora_strength: Optional[float] = None
     ref_image: Optional[str] = None
+    ref_images: List[str] = field(default_factory=list)
+    first_frame: Optional[str] = None
+    last_frame: Optional[str] = None
+    audio_refs: List[str] = field(default_factory=list)
+    duration_s: Optional[float] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -198,9 +225,10 @@ def apply_overrides(
 
     write(bindings.positive, "text", params.positive)
     write(bindings.seed, bindings.seed_widget, params.seed)
-    write(bindings.latent, "width", params.width)
-    write(bindings.latent, "height", params.height)
-    write(bindings.latent, "batch_size", params.batch_size)
+    if bindings.latent is not None:
+        write(bindings.latent, "width", params.width)
+        write(bindings.latent, "height", params.height)
+        write(bindings.latent, "batch_size", params.batch_size)
 
     if params.negative is not None:
         if bindings.negative is None:
@@ -221,6 +249,9 @@ def apply_overrides(
         write(bindings.lora, "strength_model", strength)
         write(bindings.lora, "strength_clip", strength)
 
+    if params.ref_image is not None and params.ref_images:
+        raise BindingError("Both ref_image and ref_images were supplied; use only one.")
+
     if params.ref_image is not None:
         if bindings.ref_image is None:
             raise BindingError(
@@ -228,6 +259,53 @@ def apply_overrides(
                 "MS_REF_IMAGE node. Register it with kind='ref'."
             )
         write(bindings.ref_image, "image", params.ref_image)
+
+    if params.ref_images:
+        slots = [
+            b
+            for b in (bindings.ref_image, bindings.ref_image_2, bindings.ref_image_3)
+            if b is not None
+        ]
+        if len(params.ref_images) > len(slots):
+            raise BindingError(
+                f"{len(params.ref_images)} reference images supplied but the "
+                f"workflow has only {len(slots)} MS_REF_IMAGE slot(s)"
+            )
+        for node_id, value in zip(slots, params.ref_images):
+            write(node_id, "image", value)
+
+    if params.first_frame is not None:
+        if bindings.first_frame is None:
+            raise BindingError(
+                "A first frame was supplied but this workflow has no "
+                "MS_FIRST_FRAME node."
+            )
+        write(bindings.first_frame, "image", params.first_frame)
+
+    if params.last_frame is not None:
+        if bindings.last_frame is None:
+            raise BindingError(
+                "A last frame was supplied but this workflow has no "
+                "MS_LAST_FRAME node."
+            )
+        write(bindings.last_frame, "image", params.last_frame)
+
+    if params.audio_refs:
+        slots = [b for b in (bindings.audio, bindings.audio_2) if b is not None]
+        if len(params.audio_refs) > len(slots):
+            raise BindingError(
+                f"{len(params.audio_refs)} audio references supplied but the "
+                f"workflow has only {len(slots)} MS_AUDIO slot(s)"
+            )
+        for node_id, value in zip(slots, params.audio_refs):
+            write(node_id, "audio", value)
+
+    if params.duration_s is not None:
+        if bindings.duration is None:
+            raise BindingError(
+                "A duration was supplied but this workflow has no " "MS_DURATION node."
+            )
+        write(bindings.duration, "value", params.duration_s)
 
     return graph
 
