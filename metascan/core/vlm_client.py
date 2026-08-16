@@ -18,7 +18,7 @@ import logging
 import socket
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -496,6 +496,7 @@ class VlmClient:
         system_prompt: str,
         user_prompt: str,
         image_path: Optional[Path] = None,
+        image_paths: Optional[Sequence[Path]] = None,
         temperature: float = 0.6,
         max_tokens: int = 250,
         timeout: float = 120.0,
@@ -508,10 +509,15 @@ class VlmClient:
         than swallowing it — playground / API callers want to surface errors
         to the user instead of silently returning empty.
 
-        When ``image_path`` is provided, the file is base64-encoded as JPEG
-        and attached as an ``image_url`` part. When ``None``, the request is
-        text-only — Qwen3-VL handles text-only inference fine, no model swap
-        is needed.
+        Pass at most one of ``image_path`` (a single image) or
+        ``image_paths`` (zero or more images) — passing both raises
+        ``ValueError``. Each path is base64-encoded as JPEG and attached as
+        its own ``image_url`` part, in the order given, after a single text
+        part — so the prompt can refer to "the first image", "the second
+        image", and so on. ``image_path=X`` is exactly equivalent to
+        ``image_paths=[X]``. When neither is given (or ``image_paths`` is
+        empty), the request is text-only — Qwen3-VL handles text-only
+        inference fine, no model swap is needed.
 
         ``grammar``, when given, is transported exactly like
         :meth:`generate_tags` does — a top-level ``"grammar"`` key in the
@@ -523,20 +529,28 @@ class VlmClient:
                 "call ensure_started() first"
             )
 
+        if image_path is not None and image_paths is not None:
+            raise ValueError("pass image_path or image_paths, not both")
+        paths: List[Path] = (
+            [image_path] if image_path is not None else list(image_paths or [])
+        )
         user_content: Any
-        if image_path is not None:
-            if not self.is_image_path(image_path):
-                raise VlmError(f"unsupported image type: {image_path.suffix}")
-            image_b64 = await asyncio.to_thread(self._encode_image_b64, image_path)
-            user_content = [
-                {"type": "text", "text": user_prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_b64}",
-                    },
-                },
-            ]
+        if paths:
+            for p in paths:
+                if not self.is_image_path(p):
+                    raise VlmError(f"unsupported image type: {p.suffix}")
+            parts: List[Dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+            for p in paths:
+                image_b64 = await asyncio.to_thread(self._encode_image_b64, p)
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}",
+                        },
+                    }
+                )
+            user_content = parts
         else:
             user_content = user_prompt
 
