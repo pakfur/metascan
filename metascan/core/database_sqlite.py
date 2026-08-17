@@ -544,6 +544,45 @@ class DatabaseManager:
             )
 
             # ---- Phase B: storyboard tables --------------------------------
+            # Shot/beat model reorganization (spec 2026-08-17): panels thin
+            # to H3-scene containers, beats carry framing/prompt/keeper,
+            # panel_images becomes beat_images. Read user_version once, up
+            # front -- this same value is reused below for the '<1'/'<2'
+            # one-shot migrations further down in this method; nothing
+            # writes the pragma in between. Dev data is disposable by
+            # decision -- drop and recreate the panel-tree tables, but
+            # first release what the old tables were holding: unhide media
+            # the old panel_images kept hidden, and purge panel-scoped
+            # generation_jobs so a restart can't re-adopt jobs for panels
+            # that no longer exist. This must run before the
+            # ``CREATE TABLE IF NOT EXISTS panels/beats/beat_images``
+            # statements below so the drop is followed by a clean re-create
+            # in this same _init_database call. ``PRAGMA user_version = 3``
+            # itself is written further down, alongside the other one-shot
+            # migration gates.
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+            user_version = int(version_row[0]) if version_row else 0
+            if user_version < 3:
+                old_tables = {
+                    r["name"]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "panel_images" in old_tables:
+                    conn.execute(
+                        "UPDATE media SET hidden = 0 WHERE file_path IN "
+                        "(SELECT file_path FROM panel_images)"
+                    )
+                if "generation_jobs" in old_tables:
+                    conn.execute(
+                        "DELETE FROM generation_jobs WHERE panel_id IS NOT NULL"
+                    )
+                conn.execute("DROP TABLE IF EXISTS panel_images")
+                conn.execute("DROP TABLE IF EXISTS beat_images")
+                conn.execute("DROP TABLE IF EXISTS beats")
+                conn.execute("DROP TABLE IF EXISTS panels")
+
             # storyboards.folder_id was originally declared INTEGER, but
             # folders.id is TEXT (a uuid4 string) -- a numeric-looking uuid
             # would silently coerce and corrupt add_folder_items lookups.
@@ -683,30 +722,55 @@ class DatabaseManager:
                     scene_id           INTEGER NOT NULL
                                        REFERENCES scenes(id) ON DELETE CASCADE,
                     sort_order         INTEGER NOT NULL DEFAULT 0,
-                    shot_size          TEXT,
-                    angle              TEXT,
-                    lens               TEXT,
                     action             TEXT NOT NULL,
-                    subject_ids        TEXT NOT NULL DEFAULT '[]',
-                    notes              TEXT,
-                    brief              TEXT,
-                    prompt             TEXT,
-                    prompt_locked      INTEGER NOT NULL DEFAULT 0,
-                    prompt_source      TEXT,
-                    negative           TEXT,
-                    selected_image_id  INTEGER REFERENCES panel_images(id)
-                                       ON DELETE SET NULL,
+                    duration_s         REAL NOT NULL DEFAULT 12.0,
                     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
             )
+            # beats.selected_image_id references beat_images, which in turn
+            # references beats -- a circular FK. SQLite allows forward
+            # references in DDL as long as both tables exist before rows
+            # are inserted, so creation order is beats -> beat_images
+            # (mirroring the old panels -> panel_images precedent, which
+            # had the same cycle).
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS panel_images (
+                CREATE TABLE IF NOT EXISTS beats (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    panel_id    INTEGER NOT NULL
+                                REFERENCES panels(id) ON DELETE CASCADE,
+                    sort_order  INTEGER NOT NULL DEFAULT 0,
+                    duration_s  REAL NOT NULL DEFAULT 4.0,
+                    action      TEXT NOT NULL,
+                    shot_size   TEXT,
+                    angle       TEXT,
+                    lens        TEXT,
+                    subject_ids TEXT NOT NULL DEFAULT '[]',
+                    camera_motion    TEXT,
+                    camera_amplitude TEXT,
+                    camera_speed     TEXT,
+                    is_cut      INTEGER NOT NULL DEFAULT 0,
+                    dialog      TEXT NOT NULL DEFAULT '[]',
+                    sound       TEXT,
+                    brief       TEXT,
+                    prompt      TEXT,
+                    prompt_locked INTEGER NOT NULL DEFAULT 0,
+                    prompt_source TEXT,
+                    selected_image_id INTEGER REFERENCES beat_images(id)
+                                      ON DELETE SET NULL,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS beat_images (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    panel_id        INTEGER NOT NULL
-                                    REFERENCES panels(id) ON DELETE CASCADE,
+                    beat_id         INTEGER NOT NULL
+                                    REFERENCES beats(id) ON DELETE CASCADE,
                     file_path       TEXT NOT NULL REFERENCES media(file_path)
                                     ON DELETE CASCADE,
                     seed            INTEGER,
@@ -719,10 +783,6 @@ class DatabaseManager:
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_panel_images_panel "
-                "ON panel_images(panel_id)"
-            )
-            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
             )
@@ -732,27 +792,6 @@ class DatabaseManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_subjects_storyboard "
                 "ON storyboard_subjects(storyboard_id)"
-            )
-
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS beats (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    panel_id    INTEGER NOT NULL
-                                REFERENCES panels(id) ON DELETE CASCADE,
-                    sort_order  INTEGER NOT NULL DEFAULT 0,
-                    duration_s  REAL NOT NULL DEFAULT 4.0,
-                    action      TEXT NOT NULL,
-                    camera_motion    TEXT,
-                    camera_amplitude TEXT,
-                    camera_speed     TEXT,
-                    is_cut      INTEGER NOT NULL DEFAULT 0,
-                    dialog      TEXT NOT NULL DEFAULT '[]',
-                    sound       TEXT,
-                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-                """
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beats_panel ON beats(panel_id)"
@@ -768,12 +807,6 @@ class DatabaseManager:
                 "storyboard_subjects",
                 "voice",
                 "ALTER TABLE storyboard_subjects ADD COLUMN voice TEXT",
-            )
-            _idempotent_add_column(
-                conn,
-                "panels",
-                "duration_s",
-                "ALTER TABLE panels ADD COLUMN duration_s REAL NOT NULL DEFAULT 12.0",
             )
             _idempotent_add_column(
                 conn,
@@ -854,6 +887,24 @@ class DatabaseManager:
                 # REFERENCES media(file_path) FK.
                 "ALTER TABLE storyboard_subjects ADD COLUMN voice_ref_path TEXT",
             )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "notes",
+                "ALTER TABLE storyboards ADD COLUMN notes TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "beat_id",
+                # Deliberately no REFERENCES clause -- same rationale as
+                # panel_id: the release helpers delete job rows explicitly.
+                "ALTER TABLE generation_jobs ADD COLUMN beat_id INTEGER",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
+                "ON beat_images(beat_id)"
+            )
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
@@ -864,8 +915,9 @@ class DatabaseManager:
             # (file mtime on disk) over as a reasonable proxy — it's the
             # closest signal we have to when the row really became part of
             # the library. Gated on ``PRAGMA user_version`` so it runs once.
-            version_row = conn.execute("PRAGMA user_version").fetchone()
-            user_version = int(version_row[0]) if version_row else 0
+            # (``user_version`` was already read once, up front, in the
+            # Phase B storyboard-tables section above -- nothing writes the
+            # pragma in between, so it's reused here rather than re-read.)
             if user_version < 1:
                 logger.info(
                     "Backfilling created_at from modified_at (one-time; "
@@ -918,6 +970,12 @@ class DatabaseManager:
                 # in get_thumbnail_cache_dir would otherwise re-attempt every
                 # launch. The wipe is best-effort by design (spec §5).
                 conn.execute("PRAGMA user_version = 2")
+
+            if user_version < 3:
+                # Writes the pragma for the shot/beat model reorganization
+                # whose drop-and-recreate ran up front, in the Phase B
+                # storyboard-tables section above.
+                conn.execute("PRAGMA user_version = 3")
 
             conn.commit()
 
@@ -1368,6 +1426,7 @@ class DatabaseManager:
             "aspect_ratio",
             "style_block",
             "negative",
+            "notes",
             "target_model",
             "architecture",
             "preset_id",
@@ -1410,18 +1469,7 @@ class DatabaseManager:
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
             "sort_order",
-            "shot_size",
-            "angle",
-            "lens",
             "action",
-            "subject_ids",
-            "notes",
-            "brief",
-            "prompt",
-            "prompt_locked",
-            "prompt_source",
-            "negative",
-            "selected_image_id",
             "duration_s",
             "video_prompt",
             "video_prompt_locked",
@@ -1431,17 +1479,27 @@ class DatabaseManager:
             "video_compiled_anchor",
         }
     )
+    # ``selected_image_id`` is deliberately absent -- keeper selection goes
+    # through ``select_beat_image``, mirroring the old panel rule.
     _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
             "sort_order",
             "duration_s",
             "action",
+            "shot_size",
+            "angle",
+            "lens",
+            "subject_ids",
             "camera_motion",
             "camera_amplitude",
             "camera_speed",
             "is_cut",
             "dialog",
             "sound",
+            "brief",
+            "prompt",
+            "prompt_locked",
+            "prompt_source",
         }
     )
 
