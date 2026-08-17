@@ -389,7 +389,11 @@ metascan/
   broadcast `folder_deleted` on the `folders` WS channel. The frontend
   prompts via `DeleteImagesDialog.vue` (purge / keep-in-library / cancel)
   on every beat, panel, scene, and storyboard delete that affects
-  generated images, and on a gated beats recompose confirm.
+  generated images. The gated beats-recompose confirm is a separate,
+  purpose-built inline banner in `BeatsEditor.vue` (its own
+  `confirmPending` ref, Continue/Cancel buttons) — not
+  `DeleteImagesDialog.vue` — that re-posts the compose call with
+  `confirm=true` on Continue.
   **No data migration for the reorg** — dev data is disposable by
   decision (spec §2.4): `user_version = 3` drops and recreates
   `panels`/`beats`/`panel_images→beat_images` inside `_init_database`
