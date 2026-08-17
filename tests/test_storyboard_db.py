@@ -44,19 +44,23 @@ def _build_tree(db):
         sc,
         action="hand rests on hull seam",
         sort_order=0,
-        shot_size="ECU",
-        subject_ids=[su],
     )
     return sb, su, sc, pa
 
 
 def test_create_and_get_tree(db):
     sb, su, sc, pa = _build_tree(db)
+    # shot_size/subject_ids/images now live on the beat, not the panel.
+    db.create_beat(
+        pa, action="hand rests on hull seam", shot_size="ECU", subject_ids=[su]
+    )
     tree = db.get_storyboard_tree(sb)
     assert tree["name"] == "Yard"
     assert tree["subjects"][0]["name"] == "MAYA"
-    assert tree["scenes"][0]["panels"][0]["subject_ids"] == [su]
-    assert tree["scenes"][0]["panels"][0]["images"] == []
+    beat = tree["scenes"][0]["panels"][0]["beats"][0]
+    assert beat["subject_ids"] == [su]
+    assert beat["shot_size"] == "ECU"
+    assert beat["images"] == []
 
 
 def test_get_storyboard_missing_returns_none(db):
@@ -153,38 +157,43 @@ def test_update_scene_and_delete(db):
     assert tree["scenes"] == []
 
 
-def test_delete_media_cascades_panel_image_and_nulls_selection(db):
+def test_delete_media_cascades_beat_image_and_nulls_selection(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
-    img_id = db.create_panel_image(pa, file_path="/pics/a.png", seed=1)
-    assert db.select_panel_image(pa, img_id) is True
-    panel = db.get_panel(pa)
-    assert panel["selected_image_id"] == img_id
+    img_id = db.create_beat_image(beat_id, file_path="/pics/a.png", seed=1)
+    assert db.select_beat_image(beat_id, img_id) is True
+    beat = db.get_beat(beat_id)
+    assert beat["selected_image_id"] == img_id
 
     assert db.delete_media(Path("/pics/a.png")) is True
 
     with db.lock, db._get_connection() as conn:
         n = conn.execute(
-            "SELECT COUNT(*) AS n FROM panel_images WHERE id = ?", (img_id,)
+            "SELECT COUNT(*) AS n FROM beat_images WHERE id = ?", (img_id,)
         ).fetchone()["n"]
         assert n == 0
 
+    beat = db.get_beat(beat_id)
+    assert beat is not None
+    assert beat["selected_image_id"] is None
     panel = db.get_panel(pa)
-    assert panel is not None
-    assert panel["selected_image_id"] is None
     assert panel["action"] == "hand rests on hull seam"
 
 
-def test_select_panel_image_swaps_hidden(db):
+def test_select_beat_image_swaps_hidden(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.save_media(_media("/pics/b.png"))
     db.set_media_hidden("/pics/a.png", True)
     db.set_media_hidden("/pics/b.png", True)
-    img_a = db.create_panel_image(pa, file_path="/pics/a.png", seed=1)
-    img_b = db.create_panel_image(pa, file_path="/pics/b.png", seed=2, variant_index=1)
+    img_a = db.create_beat_image(beat_id, file_path="/pics/a.png", seed=1)
+    img_b = db.create_beat_image(
+        beat_id, file_path="/pics/b.png", seed=2, variant_index=1
+    )
 
-    assert db.select_panel_image(pa, img_a) is True
+    assert db.select_beat_image(beat_id, img_a) is True
     rows = {
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
@@ -192,7 +201,7 @@ def test_select_panel_image_swaps_hidden(db):
     assert rows["/pics/a.png"] is False
     assert rows["/pics/b.png"] is True
 
-    assert db.select_panel_image(pa, img_b) is True
+    assert db.select_beat_image(beat_id, img_b) is True
     rows = {
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
@@ -200,27 +209,33 @@ def test_select_panel_image_swaps_hidden(db):
     assert rows["/pics/a.png"] is True
     assert rows["/pics/b.png"] is False
 
-    assert db.select_panel_image(pa, None) is True
+    assert db.select_beat_image(beat_id, None) is True
     rows = {
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
     }
     assert rows["/pics/a.png"] is True
     assert rows["/pics/b.png"] is True
-    panel = db.get_panel(pa)
-    assert panel["selected_image_id"] is None
+    beat = db.get_beat(beat_id)
+    assert beat["selected_image_id"] is None
 
 
-def test_select_panel_image_missing_panel_returns_false(db):
-    assert db.select_panel_image(999, None) is False
+def test_select_beat_image_missing_beat_returns_false(db):
+    assert db.select_beat_image(999, None) is False
 
 
-def test_select_panel_image_missing_image_returns_false(db):
+def test_select_beat_image_missing_image_returns_false(db):
     sb, su, sc, pa = _build_tree(db)
-    assert db.select_panel_image(pa, 999) is False
+    beat_id = db.create_beat(pa, action="a beat")
+    assert db.select_beat_image(beat_id, 999) is False
 
 
 def test_replace_structure_is_destructive_and_resolves_names(db):
+    """Subject-name resolution now only applies to subjects/scenes -- panels
+    carry just ``action``; per-panel framing/subject_ids live on beats
+    (populated later by the compose stages, not by replace_storyboard_
+    structure), so the parsed panel's ``shot_size``/``subjects`` fields are
+    simply ignored here rather than resolved."""
     sb, su, sc, pa = _build_tree(db)
     parsed = {
         "subjects": [{"name": "MAYA", "description": "d1"}],
@@ -250,7 +265,7 @@ def test_replace_structure_is_destructive_and_resolves_names(db):
     assert maya_id != su  # old subject rows were destroyed and replaced
     assert len(tree["scenes"]) == 1
     assert tree["scenes"][0]["name"] == "S1"
-    assert tree["scenes"][0]["panels"][0]["subject_ids"] == [maya_id]
+    assert tree["scenes"][0]["panels"][0]["action"] == "a1"
 
     # old scene/panel rows are gone
     with db.lock, db._get_connection() as conn:
@@ -280,16 +295,17 @@ def _hidden_by_path(db) -> dict:
 
 
 def test_delete_panel_unhides_media_and_purges_jobs(db):
-    """Every ingested storyboard variant is hidden=1; select_panel_image is
-    the only unhide path and needs a live panel. delete_panel destroys the
-    panel (cascading panel_images) -- it must unhide the affected media
-    first, or those files are hidden forever. It must also purge
+    """Every ingested storyboard variant is hidden=1; select_beat_image is
+    the only unhide path and needs a live beat. delete_panel destroys the
+    panel (cascading beats -> beat_images) -- it must unhide the affected
+    media first, or those files are hidden forever. It must also purge
     generation_jobs for the panel so a restart can't re-adopt a job for a
     panel that no longer exists."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
@@ -301,9 +317,10 @@ def test_delete_panel_unhides_media_and_purges_jobs(db):
 
 def test_delete_scene_unhides_media_and_purges_jobs(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
@@ -315,9 +332,10 @@ def test_delete_scene_unhides_media_and_purges_jobs(db):
 
 def test_delete_storyboard_unhides_media_and_purges_jobs(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
@@ -329,11 +347,12 @@ def test_delete_storyboard_unhides_media_and_purges_jobs(db):
 
 def test_replace_structure_unhides_media_and_purges_jobs(db):
     """A re-parse (replace_storyboard_structure) destroys the old
-    scene/panel tree exactly like a delete does -- same requirement."""
+    scene/panel/beat tree exactly like a delete does -- same requirement."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
@@ -349,34 +368,41 @@ def test_update_panel_whitelist_rejects_unknown(db):
         db.update_panel(pa, bogus="x")
 
 
-def test_update_panel_encodes_subject_ids(db):
+def test_update_beat_encodes_subject_ids(db):
+    """subject_ids/prompt/prompt_locked now live on the beat, not the
+    panel -- see _BEAT_UPDATABLE."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     su2 = db.create_subject(sb, name="GHOST", description="d")
-    db.update_panel(pa, subject_ids=[su2, su], prompt="a prompt", prompt_locked=True)
-    panel = db.get_panel(pa)
-    assert panel["subject_ids"] == [su2, su]
-    assert panel["prompt"] == "a prompt"
-    assert bool(panel["prompt_locked"]) is True
+    db.update_beat(
+        beat_id, subject_ids=[su2, su], prompt="a prompt", prompt_locked=True
+    )
+    beat = db.get_beat(beat_id)
+    assert beat["subject_ids"] == [su2, su]
+    assert beat["prompt"] == "a prompt"
+    assert bool(beat["prompt_locked"]) is True
 
 
 def test_get_panel_missing_returns_none(db):
     assert db.get_panel(999) is None
 
 
-def test_create_panel_image_missing_media_raises_integrity_error(db):
+def test_create_beat_image_missing_media_raises_integrity_error(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     with pytest.raises(sqlite3.IntegrityError):
-        db.create_panel_image(pa, file_path="/pics/does-not-exist.png")
+        db.create_beat_image(beat_id, file_path="/pics/does-not-exist.png")
 
 
-def test_list_and_count_panel_images(db):
+def test_list_and_count_beat_images(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.save_media(_media("/pics/b.png"))
-    db.create_panel_image(pa, file_path="/pics/a.png", variant_index=1)
-    db.create_panel_image(pa, file_path="/pics/b.png", variant_index=0)
-    assert db.count_panel_images(pa) == 2
-    images = db.list_panel_images(pa)
+    db.create_beat_image(beat_id, file_path="/pics/a.png", variant_index=1)
+    db.create_beat_image(beat_id, file_path="/pics/b.png", variant_index=0)
+    assert db.count_beat_images(beat_id) == 2
+    images = db.list_beat_images(beat_id)
     assert [i["file_path"] for i in images] == ["/pics/b.png", "/pics/a.png"]
 
 
@@ -410,9 +436,9 @@ def test_latest_jobs_for_panels_empty_list(db):
     assert db.latest_jobs_for_panels([]) == {}
 
 
-def test_get_storyboard_tree_and_list_panel_images_convert_paths(db, monkeypatch):
-    """panel_images.file_path is stored POSIX; get_storyboard_tree and
-    list_panel_images must return it through to_native_path, mirroring
+def test_get_storyboard_tree_and_list_beat_images_convert_paths(db, monkeypatch):
+    """beat_images.file_path is stored POSIX; get_storyboard_tree and
+    list_beat_images must return it through to_native_path, mirroring
     get_folder's precedent -- GET /api/storyboard/{id} and GET /api/media
     have to agree on path shape. Patch to_native_path with a
     distinguishable transform so the assertion can't pass merely because
@@ -426,14 +452,15 @@ def test_get_storyboard_tree_and_list_panel_images_convert_paths(db, monkeypatch
     monkeypatch.setattr("metascan.core.database_sqlite.to_native_path", fake_to_native)
 
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
 
     tree = db.get_storyboard_tree(sb)
-    img = tree["scenes"][0]["panels"][0]["images"][0]
+    img = tree["scenes"][0]["panels"][0]["beats"][0]["images"][0]
     assert img["file_path"] == "NATIVE::/pics/a.png"
 
-    images = db.list_panel_images(pa)
+    images = db.list_beat_images(beat_id)
     assert images[0]["file_path"] == "NATIVE::/pics/a.png"
     assert "/pics/a.png" in calls
 
@@ -525,9 +552,10 @@ def test_delete_panel_purge_images_deletes_media_rows(db):
     """purge_images=True deletes the media rows instead of unhiding them
     and returns the file paths so the service can remove the files."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
     jid = db.create_generation_job(pid, "{}", panel_id=pa)
 
@@ -541,10 +569,11 @@ def test_delete_panel_purge_images_deletes_media_rows(db):
 
 def test_delete_storyboard_purge_images_deletes_media_rows(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     for name in ("a", "b"):
         db.save_media(_media(f"/pics/{name}.png"))
         db.set_media_hidden(f"/pics/{name}.png", True)
-        db.create_panel_image(pa, file_path=f"/pics/{name}.png")
+        db.create_beat_image(beat_id, file_path=f"/pics/{name}.png")
 
     ok, purged, _folder = db.delete_storyboard(sb, purge_images=True)
 
@@ -555,9 +584,10 @@ def test_delete_storyboard_purge_images_deletes_media_rows(db):
 
 def test_delete_scene_purge_images_deletes_media_rows(db):
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
     db.set_media_hidden("/pics/a.png", True)
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
 
     ok, purged = db.delete_scene(sc, purge_images=True)
 
@@ -567,15 +597,17 @@ def test_delete_scene_purge_images_deletes_media_rows(db):
 
 
 def test_purge_spares_media_referenced_by_another_panel(db):
-    """A file shared with a surviving panel's panel_images must not be
-    deleted out from under it (FK) -- it is unhidden instead, and its
-    path is NOT returned for filesystem removal."""
+    """A file shared with a surviving panel's (beat's) beat_images must
+    not be deleted out from under it (FK) -- it is unhidden instead, and
+    its path is NOT returned for filesystem removal."""
     sb, su, sc, pa = _build_tree(db)
-    pa2 = db.create_panel(sc, action="second", sort_order=1, subject_ids=[su])
+    beat_id = db.create_beat(pa, action="a beat")
+    pa2 = db.create_panel(sc, action="second", sort_order=1)
+    beat2_id = db.create_beat(pa2, action="second beat", subject_ids=[su])
     db.save_media(_media("/pics/shared.png"))
     db.set_media_hidden("/pics/shared.png", True)
-    db.create_panel_image(pa, file_path="/pics/shared.png")
-    db.create_panel_image(pa2, file_path="/pics/shared.png")
+    db.create_beat_image(beat_id, file_path="/pics/shared.png")
+    db.create_beat_image(beat2_id, file_path="/pics/shared.png")
 
     ok, purged = db.delete_panel(pa, purge_images=True)
 
@@ -589,9 +621,10 @@ def test_purge_spares_media_used_as_subject_reference(db):
     different storyboard) survives a purge -- deleting its media row
     would break storyboard_subjects.reference_path's FK."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/ref.png"))
     db.set_media_hidden("/pics/ref.png", True)
-    db.create_panel_image(pa, file_path="/pics/ref.png")
+    db.create_beat_image(beat_id, file_path="/pics/ref.png")
     sb2 = db.create_storyboard(
         name="Other", target_model="sd", architecture="t2i", base_seed=1
     )
@@ -609,8 +642,9 @@ def test_delete_storyboard_removes_its_folder(db):
     storyboard (folder_items cascade), purge or not. The deleted folder id
     is returned so the route can broadcast folder_deleted."""
     sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/pics/a.png"))
-    db.create_panel_image(pa, file_path="/pics/a.png")
+    db.create_beat_image(beat_id, file_path="/pics/a.png")
     folder = db.create_folder(
         "22222222-2222-2222-2222-222222222222", "manual", "Storyboard: Yard"
     )
