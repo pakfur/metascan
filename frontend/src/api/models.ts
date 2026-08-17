@@ -20,6 +20,8 @@ export interface ModelRow {
   required_vram_mb: number | null
   embedding_dim?: number
   preload_at_startup: boolean
+  /** True for VLM (llama-server) rows — enables Load/Unload controls. */
+  is_vlm?: boolean
 }
 
 export interface ModelsStatusResponse {
