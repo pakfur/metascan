@@ -90,18 +90,18 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 
 ## Storyboards
 Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header action row), for scripting and generating multi-panel AI image sequences via a driven ComfyUI backend.
-- Create a storyboard with a name, aspect ratio, target model, and shared style block / negative prompt applied to every panel
-- Import a plain-text script and have it parsed into scenes and panels, or build the scene/panel tree by hand
+- Create a storyboard with a name, aspect ratio, target model, and shared style block / negative prompt applied to every shot
+- Import a plain-text script and have it parsed into scenes and panels (shots), or build the scene/panel tree by hand
 - **Story engine** — from a premise, AI-build the outline, scenes, shots, and beats in sequence; re-roll any single level, and every generated field is editable afterward
-- Define subjects (characters) with a LoRA and reference image, reused across panels
+- Define subjects (characters) with a LoRA and reference image, reused across beats
 - Attach up to two subject reference images plus a per-scene setting reference from the library, and have the VLM draft a description/voice or setting/lighting/mood suggestion for review before accepting it
-- Per-panel controls for shot size, camera angle, and lens; prompts can be locked to protect hand edits from re-synthesis
-- **Synthesize** — generates per-panel prompts (VLM-composed or a deterministic template fallback), respecting locked panels
-- **Generate** — submits panels to ComfyUI with deterministic per-panel/variant seeds; supports generating only failed panels and rerolling a single panel for a fresh variant
-- Live synthesis and per-panel job progress over WebSocket, with cancel-all support
-- Candidate picker per panel — every rendered variant is kept as a candidate thumbnail; click one to make it the keeper. Non-keeper variants are hidden from the main library grid until picked
+- Per-beat controls for shot size, camera angle, lens, and which subjects are on screen; prompts can be locked to protect hand edits from re-synthesis (a shot is the H3 generation unit — a video clip and its compiled prompt — while a beat is its internal timeline unit, carrying the framing, cast, and still-image keyframe)
+- **Synthesize** — generates per-beat still-image prompts (VLM-composed or a deterministic template fallback), respecting locked beats
+- **Generate** — submits beats to ComfyUI with deterministic per-beat/variant seeds; supports generating only failed beats and rerolling a single beat for a fresh variant
+- Live synthesis and per-beat job progress over WebSocket, with cancel-all support
+- Candidate picker per beat — every rendered variant is kept as a candidate thumbnail; click one to make it the keeper. Non-keeper variants are hidden from the main library grid until picked
 - Hidden-media toggle ("Show hidden" in the view menubar) reveals those in-progress/non-keeper variants in the grid, each marked with an eye-slash badge
-- **Compile** — compile shots into MiniMax H3 video prompts (six-section format) with lint warnings, editable in the side panel
+- **Compile** — compile shots into MiniMax H3 video prompts (six-section format), rendering each beat as its own `[Shot n]` section with its framing and cast, with lint warnings, editable in the side panel
 - **Generate video** — render shots to video via a local ComfyUI H3 workflow; clips land as hidden panel candidates for review/keeper selection/reroll
 
 ## Context Menu

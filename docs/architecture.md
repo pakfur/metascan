@@ -29,29 +29,38 @@ SQLite with WAL mode and a `threading.Lock` over a single connection.
 - **`media_hashes`** — perceptual hashes and CLIP embedding status.
 - **`folders`** — `(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)`.
 - **`folder_items`** — `(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides.
-- **`storyboards`** — script + render settings: `name`, `source_text`, `aspect_ratio`, `style_block`, `negative`, `target_model`, `architecture`, `preset_id` (→ `workflow_presets`), `base_seed`, `batch_size`, `folder_id` (→ `folders`, `ON DELETE SET NULL`).
-- **`storyboard_subjects`** — recurring characters/props: `storyboard_id` (`ON DELETE CASCADE`), `name`, `description`, `lora_name`, `lora_strength`, `reference_path` (→ `media.file_path`, `ON DELETE SET NULL`), `sort_order`.
-- **`scenes`** — `storyboard_id` (`ON DELETE CASCADE`), `sort_order`, `name`, `subtitle`, `setting`, `location`, `time_of_day`, `mood`, `lighting`, `notes`. `subtitle` is display-only; `setting` is woven into every panel brief (`SETTING:` line in `compose_brief`).
-- **`panels`** — one generated shot: `scene_id` (`ON DELETE CASCADE`), `sort_order`, `shot_size`, `angle`, `lens`, `action`, `subject_ids` (JSON array), `notes`, `brief`, `prompt`, `prompt_locked`, `prompt_source`, `negative`, `selected_image_id` (→ `panel_images.id`, `ON DELETE SET NULL`).
-- **`panel_images`** — one rendered variant: `panel_id` (`ON DELETE CASCADE`), `file_path` (→ `media.file_path`, `ON DELETE CASCADE`), `seed`, `variant_index`, `prompt_used`, `preset_id`, `comfy_prompt_id`.
+- **`storyboards`** — script + render settings: `name`, `source_text`, `aspect_ratio`, `style_block`, `negative`, `target_model`, `architecture`, `preset_id` (→ `workflow_presets`), `base_seed`, `batch_size`, `folder_id` (→ `folders`, `ON DELETE SET NULL`), `notes` (free-form, UI-only).
+- **`storyboard_subjects`** — recurring characters/props: `storyboard_id` (`ON DELETE CASCADE`), `name`, `description`, `lora_name`, `lora_strength`, `reference_path`/`reference_path_2` (→ `media.file_path`, `ON DELETE SET NULL`), `sort_order`, `voice`, `voice_ref_path`.
+- **`scenes`** — `storyboard_id` (`ON DELETE CASCADE`), `sort_order`, `name`, `subtitle`, `setting`, `location`, `time_of_day`, `mood`, `lighting`, `notes`, `reference_path`. `subtitle` is display-only; `setting` is woven into every beat brief (`SETTING:` line in `compose_brief`).
+- **`panels`** — one shot: `scene_id` (`ON DELETE CASCADE`), `sort_order`, `action`, `duration_s`, `video_prompt`, `video_prompt_locked`, `video_prompt_source`, `video_prompt_warnings`, `video_anchor`, `video_compiled_anchor`. Since the 2026-08-17 shot/beat reorg, a panel is a thin H3-scene-like container — the compiled per-shot video prompt lives here, but every per-shot *creative* field moved down to `beats`.
+- **`beats`** — one shot-internal timeline unit (one H3 `[Shot n]` section): `panel_id` (`ON DELETE CASCADE`), `sort_order`, `duration_s`, `action`, `shot_size`, `angle`, `lens`, `subject_ids` (JSON array), `camera_motion`, `camera_amplitude`, `camera_speed`, `is_cut`, `dialog` (JSON array), `sound`, `brief`, `prompt`, `prompt_locked`, `prompt_source`, `selected_image_id` (→ `beat_images.id`, `ON DELETE SET NULL`). This is where a shot's framing, cast, and still-image prompt/keeper now live — a metascan Shot (panel) maps to one H3 generation unit, a Beat maps to one H3 `[Shot n]` section.
+- **`beat_images`** — one rendered variant: `beat_id` (`ON DELETE CASCADE`), `file_path` (→ `media.file_path`, `ON DELETE CASCADE`), `seed`, `variant_index`, `prompt_used`, `preset_id`, `comfy_prompt_id`. Renamed and re-parented from `panel_images` in the shot/beat reorg.
 
 `media.hidden` (`INTEGER NOT NULL DEFAULT 0`) keeps storyboard-generated
 variants out of the main grid until curated: ingest inserts every rendered
-file hidden, selecting a panel's keeper unhides it and re-hides whatever
+file hidden, selecting a beat's keeper unhides it and re-hides whatever
 was selected before. `GET /api/media` filters `hidden = 0` by default;
 `include_hidden=true` opts back in. `hidden` is part of both grid covering
 indexes (see below) so the filter doesn't force a main-table scan.
 
-Deleting a panel/scene/storyboard releases its generated images into the
+Deleting a beat/panel/scene/storyboard releases its generated images into the
 library by default (media rows unhidden), or — with `purge_images=true` on
 the DELETE route — removes them entirely: media rows deleted in the same
 transaction (`DatabaseManager._purge_media_rows`), files moved to the OS
-trash by the service layer. Files still referenced by another panel's
-`panel_images` or a subject's `reference_path` are spared (unhidden
+trash by the service layer. Files still referenced by another beat's
+`beat_images`, a subject's `reference_path`, or a scene's `reference_path`
+are spared (unhidden
 instead) — the media FK's `ON DELETE CASCADE`/`SET NULL` would otherwise
 silently destroy those references. Deleting a storyboard also deletes its
 "Storyboard: <name>" folder (`folder_items` cascade) and broadcasts
 `folder_deleted`.
+
+No data was migrated when this schema shipped — dev-stage storyboard data
+is disposable by decision. A `PRAGMA user_version = 3` gate drops and
+recreates `panels`/`beats`/`panel_images→beat_images` once, unhiding any
+media the old `panel_images` table left hidden and discarding
+`generation_jobs` rows tied to the dropped panels first. Scenes,
+storyboards, subjects, and folders are untouched by the migration.
 
 Covering indexes (`idx_media_summary_added`, `idx_media_summary_modified`) include every column read by the grid list endpoint, which is the reason `/api/media` returns in ~6 ms instead of ~25 s on large libraries. One-shot data migrations are gated on `PRAGMA user_version`.
 
