@@ -13,7 +13,7 @@ import LazyThumb from './LazyThumb.vue'
 // allowDestructive defaults to true so every existing (desktop library)
 // mount stays byte-identical. The storyboard candidate picker
 // (PanelDetail.vue) passes false: its mediaList is synthesized from
-// PanelImage rows (stubbed is_favorite, no real Media row for
+// BeatImage rows (stubbed is_favorite, no real Media row for
 // mediaStore.selectMedia to resolve), so real-file delete, the favorite
 // toggle, and the library-metadata-panel selectMedia leak all need to be
 // off there.

@@ -86,7 +86,7 @@ function subtitle(scene: Scene): string {
 }
 
 function keeperSrc(panel: Panel): string | null {
-  const img = store.keeperImage(panel)
+  const img = store.firstBeatKeeper(panel)
   return img ? thumbnailUrl(img.file_path) : null
 }
 
@@ -101,7 +101,10 @@ function selectScene(scene: Scene): void {
 const deleteTarget = ref<Scene | null>(null)
 
 function sceneImageCount(scene: Scene): number {
-  return scene.panels.reduce((n, p) => n + p.images.length, 0)
+  return scene.panels.reduce(
+    (n, p) => n + p.beats.reduce((m, b) => m + b.images.length, 0),
+    0,
+  )
 }
 
 async function onDeleteScene(scene: Scene): Promise<void> {

@@ -23,7 +23,7 @@ const store = useStoryboardStore()
 // snapshot (no pending edit); `run()` updates both together on save so the
 // round trip doesn't get mistaken for a foreign change. Without this, a
 // background store.tree replacement unrelated to this dialog (refresh()
-// runs from several WS handlers -- synthesis_complete, panel_images_changed,
+// runs from several WS handlers -- synthesis_complete, beat_images_changed,
 // story_stage_complete, story_complete) would silently discard whatever the
 // user was mid-typing.
 const premise = ref('')
