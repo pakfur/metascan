@@ -252,3 +252,27 @@ def test_tree_beats_carry_images_and_subject_ids(
     assert beat["subject_ids"] == [3]
     assert len(beat["images"]) == 1
     assert "subject_ids" not in tree["scenes"][0]["panels"][0]
+
+
+def test_purge_spares_media_referenced_by_scene(db, panel_id, media_paths):
+    """A beat image whose file is also a scene's reference_path must
+    survive a purge delete -- deleting the media row would silently null
+    scenes.reference_path's FK (spec §4)."""
+    scene_id = db.get_panel(panel_id)["scene_id"]
+    db.update_scene(scene_id, reference_path=media_paths[0])
+    beat_id = db.create_beat(panel_id, action="a beat")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    db.set_media_hidden(media_paths[0], True)
+
+    ok, purged = db.delete_beat(beat_id, purge_images=True)
+
+    assert ok is True
+    assert purged == []
+    assert _hidden(db, media_paths[0]) == 0
+    with db._get_connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM media WHERE file_path = ?", (media_paths[0],)
+            ).fetchone()
+            is not None
+        )
