@@ -197,6 +197,7 @@ class StoryboardRunner:
         storyboard_id: int,
         stages: Sequence[str],
         scene_ids: Optional[List[int]],
+        panel_ids: Optional[List[int]],
         confirm: bool,
     ) -> None:
         """Synchronous-shaped gate check so the route can 409 before the
@@ -246,6 +247,25 @@ class StoryboardRunner:
                 )
                 exc._compose_stage = "shots"  # type: ignore[attr-defined]
                 raise exc
+        if "beats" in stages:
+            target_panels = [
+                p
+                for s in tree["scenes"]
+                for p in s["panels"]
+                if panel_ids is None or p["id"] in panel_ids
+            ]
+            dirty = any(
+                beat.get("images") or beat.get("prompt_locked")
+                for p in target_panels
+                for beat in (p.get("beats") or [])
+            )
+            if dirty:
+                exc = ConfirmRequiredError(
+                    "target shots have beats with generated images or locked "
+                    "prompts; recomposing destroys them — pass confirm=true"
+                )
+                exc._compose_stage = "beats"  # type: ignore[attr-defined]
+                raise exc
 
     async def compose_story(
         self,
@@ -292,7 +312,9 @@ class StoryboardRunner:
         vlm = self.get_vlm()
         if vlm is None:
             raise StoryboardError("no VLM client — composing requires a VLM")
-        await self.check_compose_gates(storyboard_id, stages, scene_ids, confirm)
+        await self.check_compose_gates(
+            storyboard_id, stages, scene_ids, panel_ids, confirm
+        )
 
         run_stages = [s for s in story.STAGES if s in set(stages)]
         counts: Dict[str, int] = {}
@@ -454,7 +476,6 @@ class StoryboardRunner:
                     else None
                 )
                 async with sem:
-                    # TODO(Task 5): full stage rework
                     panels = await generate_validated(
                         f"shots ({scene['name']})",
                         story.validate_shots_response,
@@ -502,15 +523,13 @@ class StoryboardRunner:
 
         async def _beats_for(scene: Dict[str, Any], panel: Dict[str, Any]) -> int:
             nonlocal done
-            subjects = [s for s in tree["subjects"] if s["id"] in panel["subject_ids"]]
             async with sem:
-                # TODO(Task 5): full stage rework
                 beats, warnings = await generate_validated(
                     f"beats (panel {panel['id']})",
                     lambda raw: story.validate_beats_response(raw, roster),
                     system_prompt=story.STORY_BEATS_SYSTEM,
                     user_prompt=story.build_beats_user_prompt(
-                        logline, scene, panel, subjects
+                        logline, scene, panel, tree["subjects"]
                     ),
                     grammar=story.BEATS_GRAMMAR,
                     temperature=0.6,

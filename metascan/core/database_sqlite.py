@@ -1349,12 +1349,13 @@ class DatabaseManager:
         params: str,
         panel_id: Optional[int] = None,
         output_dir: Optional[str] = None,
+        beat_id: Optional[int] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO generation_jobs (preset_id, params, panel_id, output_dir) "
-                "VALUES (?, ?, ?, ?)",
-                (preset_id, params, panel_id, output_dir),
+                "INSERT INTO generation_jobs (preset_id, params, panel_id, "
+                "output_dir, beat_id) VALUES (?, ?, ?, ?, ?)",
+                (preset_id, params, panel_id, output_dir, beat_id),
             )
             conn.commit()
             return int(cur.lastrowid)

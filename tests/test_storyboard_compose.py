@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media import Media
 from metascan.core.storyboard_runner import (
     ConfirmRequiredError,
     StoryboardError,
@@ -33,11 +36,7 @@ SCENES = [
 ]
 SHOTS = [
     {
-        "shot_size": "WS",
-        "angle": "eye",
-        "lens": None,
         "action": "Maya crosses",
-        "subjects": ["Maya"],
         "duration_s": 10,
     }
 ]
@@ -45,6 +44,10 @@ BEATS = [
     {
         "duration_s": 5,
         "action": "a1",
+        "shot_size": "WS",
+        "angle": "eye",
+        "lens": None,
+        "subjects": ["Maya"],
         "camera_motion": "static",
         "camera_amplitude": None,
         "camera_speed": None,
@@ -55,6 +58,10 @@ BEATS = [
     {
         "duration_s": 5,
         "action": "a2",
+        "shot_size": None,
+        "angle": None,
+        "lens": None,
+        "subjects": [],
         "camera_motion": None,
         "camera_amplitude": None,
         "camera_speed": None,
@@ -118,6 +125,34 @@ def _board(db, premise="A scavenger finds a ship."):
     return sb
 
 
+@pytest.fixture
+def storyboard_id(db):
+    return _board(db)
+
+
+@pytest.fixture
+def panel_id(db, storyboard_id):
+    scene = db.create_scene(storyboard_id, name="S1")
+    return db.create_panel(scene, action="she opens the door")
+
+
+@pytest.fixture
+def media(db):
+    path = "/pics/a.png"
+    db.save_media(
+        Media(
+            file_path=Path(path),
+            file_size=1,
+            width=8,
+            height=8,
+            format="png",
+            created_at=datetime.now(),
+            modified_at=datetime.now(),
+        )
+    )
+    return path
+
+
 def test_compose_requires_vlm(db, runner):
     sb = _board(db)
     with pytest.raises(StoryboardError, match="VLM"):
@@ -138,9 +173,10 @@ def test_full_cascade_builds_tree_and_emits(db, tmp_path):
     assert tree["subjects"][0]["name"] == "Maya"
     assert len(tree["scenes"]) == 1
     panel = tree["scenes"][0]["panels"][0]
-    assert panel["subject_ids"] == [tree["subjects"][0]["id"]]
     assert panel["duration_s"] == 10.0
     assert [b["action"] for b in panel["beats"]] == ["a1", "a2"]
+    assert panel["beats"][0]["subject_ids"] == [tree["subjects"][0]["id"]]
+    assert panel["beats"][0]["shot_size"] == "WS"
     assert counts["scenes"] == 1 and counts["beats"] == 2
     names = [e[1] for e in events if e[0] == "storyboard"]
     assert "story_complete" in names
@@ -155,7 +191,7 @@ def test_outline_confirm_gate(db, tmp_path):
     sb = _board(db)
     asyncio.run(runner.compose_story(sb, stages=("outline",)))
     with pytest.raises(ConfirmRequiredError):
-        asyncio.run(runner.check_compose_gates(sb, ("outline",), None, False))
+        asyncio.run(runner.check_compose_gates(sb, ("outline",), None, None, False))
     # confirm=True passes the gate and re-runs
     asyncio.run(runner.compose_story(sb, stages=("outline",), confirm=True))
 
@@ -185,7 +221,7 @@ def test_missing_premise_rejected(db, tmp_path):
     )
     sb = _board(db, premise="")
     with pytest.raises(StoryboardError, match="premise"):
-        asyncio.run(runner.check_compose_gates(sb, ("outline",), None, False))
+        asyncio.run(runner.check_compose_gates(sb, ("outline",), None, None, False))
 
 
 def test_beats_only_rerun_replaces_beats(db, tmp_path):
@@ -273,3 +309,33 @@ def test_stage_fails_after_second_invalid_json(db, tmp_path):
         asyncio.run(runner.compose_story(sb))
     errs = [d for ev, d in events if ev == "story_error"]
     assert len(errs) == 1 and errs[0]["stage"] == "shots"
+
+
+def test_beats_stage_gated_when_beats_have_identity(
+    runner, storyboard_id, panel_id, db, media
+):
+    beat_id = db.create_beat(panel_id, action="b")
+    db.create_beat_image(beat_id, file_path=media)
+    with pytest.raises(ConfirmRequiredError) as exc:
+        asyncio.run(
+            runner.check_compose_gates(storyboard_id, ("beats",), None, None, False)
+        )
+    assert getattr(exc.value, "_compose_stage", None) == "beats"
+
+
+def test_beats_stage_gated_on_locked_prompt(runner, storyboard_id, panel_id, db):
+    beat_id = db.create_beat(panel_id, action="b")
+    db.update_beat(
+        beat_id, prompt="hand-written", prompt_locked=1, prompt_source="user"
+    )
+    with pytest.raises(ConfirmRequiredError):
+        asyncio.run(
+            runner.check_compose_gates(storyboard_id, ("beats",), None, None, False)
+        )
+
+
+def test_beats_stage_open_for_plain_beats(runner, storyboard_id, panel_id, db):
+    db.create_beat(panel_id, action="cheap to reroll")
+    asyncio.run(
+        runner.check_compose_gates(storyboard_id, ("beats",), None, None, False)
+    )
