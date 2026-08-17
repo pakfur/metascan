@@ -21,9 +21,9 @@ from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bin
 from metascan.core import h3_compiler as h3
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
+    beat_seed,
     bucket_dims,
     compose_brief,
-    panel_seed,
     storyboard_slug,
 )
 from metascan.core.storyboard_parse import (
@@ -940,7 +940,10 @@ class StoryboardRunner:
                     for sid in panel["subject_ids"]
                     if sid in subjects_by_id
                 ]
-                brief = compose_brief(tree, scene, panel, subjects)
+                beat: Dict[str, Any] = (
+                    {}
+                )  # TODO(Task 6): pass actual beat from storyboard tree
+                brief = compose_brief(tree, scene, panel, beat, subjects)
                 text = brief
                 source = "brief"
                 if vlm is not None:
@@ -1121,7 +1124,9 @@ class StoryboardRunner:
                 limit=10000,
             )
             variant_base = committed + tree["batch_size"] * len(pending_jobs)
-            seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
+            seed = beat_seed(
+                tree["base_seed"], panel["sort_order"], 0, variant_base
+            )  # TODO(Task 7): real beat_sort_order
             effective_negative = panel.get("negative") or tree.get("negative")
             primary = _primary_subject(panel)
 
@@ -1442,7 +1447,9 @@ class StoryboardRunner:
                     limit=10000,
                 )
                 variant_base = committed + len(pending_jobs)
-                seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
+                seed = beat_seed(
+                    tree["base_seed"], panel["sort_order"], 0, variant_base
+                )  # TODO(Task 7): real beat_sort_order
 
                 params = GenerationParams(
                     positive=panel["video_prompt"],
