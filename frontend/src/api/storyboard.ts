@@ -214,11 +214,6 @@ export function createPanel(
   body: {
     action: string
     sort_order?: number
-    shot_size?: string | null
-    angle?: string | null
-    lens?: string | null
-    subject_ids?: number[]
-    notes?: string | null
   },
 ): Promise<{ id: number }> {
   return post<{ id: number }>(`/storyboard/scenes/${sceneId}/panels`, body)

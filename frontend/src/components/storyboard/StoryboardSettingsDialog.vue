@@ -21,6 +21,7 @@ const batchSize = ref(1)
 const baseSeed = ref(0)
 const styleBlock = ref('')
 const negative = ref('')
+const notes = ref('')
 const videoTarget = ref<string | null>(null)
 const videoMode = ref<string | null>(null)
 const videoPresetId = ref<number | null>(null)
@@ -42,6 +43,7 @@ let original = {
   baseSeed: 0,
   styleBlock: '',
   negativeVal: '',
+  notesVal: '',
   videoTarget: null as string | null,
   videoMode: null as string | null,
   videoPresetId: null as number | null,
@@ -58,6 +60,7 @@ function seedFromTree(): void {
   baseSeed.value = t.base_seed
   styleBlock.value = t.style_block ?? ''
   negative.value = t.negative ?? ''
+  notes.value = t.notes ?? ''
   videoTarget.value = t.video_target
   videoMode.value = t.video_mode
   videoPresetId.value = t.video_preset_id
@@ -70,6 +73,7 @@ function seedFromTree(): void {
     baseSeed: baseSeed.value,
     styleBlock: styleBlock.value,
     negativeVal: negative.value,
+    notesVal: notes.value,
     videoTarget: videoTarget.value,
     videoMode: videoMode.value,
     videoPresetId: videoPresetId.value,
@@ -110,6 +114,7 @@ async function saveFields(): Promise<void> {
     base_seed: number
     style_block: string
     negative: string
+    notes: string | null
     video_target: string | null
     video_mode: string | null
     video_preset_id: number | null
@@ -131,6 +136,7 @@ async function saveFields(): Promise<void> {
   if (baseSeed.value !== original.baseSeed) body.base_seed = baseSeed.value
   if (styleBlock.value !== original.styleBlock) body.style_block = styleBlock.value
   if (negative.value !== original.negativeVal) body.negative = negative.value
+  if (notes.value !== original.notesVal) body.notes = notes.value
   // Selecting "None" sends an explicit clear -- same null-diff handling as
   // preset_id above (the backend's exclude_unset=True honors it).
   if (videoTarget.value !== original.videoTarget) body.video_target = videoTarget.value
@@ -370,6 +376,11 @@ function close(): void {
         <div class="field">
           <label for="ss-negative">Negative</label>
           <textarea id="ss-negative" v-model="negative" rows="2" />
+        </div>
+
+        <div class="field">
+          <label for="ss-notes">Notes</label>
+          <textarea id="ss-notes" v-model="notes" rows="2" />
         </div>
 
         <div class="field-row">
