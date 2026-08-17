@@ -60,6 +60,6 @@ def test_pick_vlm_model_no_hardware(monkeypatch):
     class _Empty:
         model_id = None
 
-    monkeypatch.setattr(vlm_select, "_recommended_qwen_gate", lambda: None)
+    monkeypatch.setattr(vlm_select, "_recommended_vlm_gate", lambda: None)
     with pytest.raises(VlmSelectError):
         pick_vlm_model(_Empty())

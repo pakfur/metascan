@@ -249,8 +249,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_faiss())
 
+    from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+
     for preload_id in preload_list:
-        if preload_id.startswith("qwen3vl-"):
+        if preload_id in _VLM_REGISTRY:
             logger.info("Preloading VLM at startup: %s", preload_id)
 
             async def _preload_vlm(mid: str = preload_id) -> None:

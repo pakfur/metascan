@@ -22,9 +22,7 @@ def should_tag_with_vlm(report: HardwareReport) -> bool:
     if not binary_path().exists():
         return False
     gates = feature_gates(report)
-    recommended = [
-        mid for mid, g in gates.items() if mid.startswith("qwen3vl-") and g.recommended
-    ]
+    recommended = [mid for mid, g in gates.items() if mid in REGISTRY and g.recommended]
     if not recommended:
         return False
     spec = REGISTRY[recommended[0]]
@@ -37,12 +35,12 @@ def should_tag_with_vlm(report: HardwareReport) -> bool:
 def recommended_vlm_model_id(report: HardwareReport) -> Optional[str]:
     """Return the recommended VLM model id for this hardware, or None.
 
-    Iterates ``feature_gates`` and returns the first ``qwen3vl-*`` key
+    Iterates ``feature_gates`` and returns the first registered VLM key
     that is marked recommended. Returns None for CPU-only hosts (where no
     VLM size is recommended by ``feature_gates``).
     """
     gates = feature_gates(report)
     for mid, g in gates.items():
-        if mid.startswith("qwen3vl-") and g.recommended:
+        if mid in REGISTRY and g.recommended:
             return mid
     return None
