@@ -499,7 +499,12 @@ async def generate_storyboard(
     runner = _require_runner()
     try:
         job_ids = await runner.generate(
-            storyboard_id, panel_ids=body.panel_ids, only_failed=body.only_failed
+            # TODO(Task 9): GenerateRequest.panel_ids should become beat_ids
+            # at the API/request-schema layer; the runner now generates
+            # per beat, not per panel.
+            storyboard_id,
+            beat_ids=body.panel_ids,
+            only_failed=body.only_failed,
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

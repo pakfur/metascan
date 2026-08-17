@@ -2510,6 +2510,21 @@ class DatabaseManager:
             rows = conn.execute(sql, panel_ids).fetchall()
             return {int(r["panel_id"]): dict(r) for r in rows}
 
+    def latest_jobs_for_beats(self, beat_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Latest (max id) generation_jobs row per beat."""
+        if not beat_ids:
+            return {}
+        placeholders = ",".join("?" * len(beat_ids))
+        sql = (
+            "SELECT gj.* FROM generation_jobs gj "
+            "JOIN (SELECT beat_id, MAX(id) AS mid FROM generation_jobs "
+            f"WHERE beat_id IN ({placeholders}) GROUP BY beat_id) m "
+            "ON gj.id = m.mid"
+        )
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql, beat_ids).fetchall()
+            return {int(r["beat_id"]): dict(r) for r in rows}
+
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0
         with self.batch_writer() as conn:
