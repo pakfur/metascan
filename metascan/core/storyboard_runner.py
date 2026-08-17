@@ -50,16 +50,22 @@ EventCb = Callable[[str, str, Dict[str, Any]], None]
 _VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov"})
 
 
-def _panel_image_by_id(
-    panel: Dict[str, Any], image_id: Optional[int]
-) -> Optional[Dict[str, Any]]:
-    """Look up one of ``panel["images"]`` (as returned by
-    ``get_storyboard_tree``) by its ``panel_images.id``."""
+def _first_beat_keeper(panel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The keeper image of the shot's first beat (lowest sort_order) --
+    the resolution of video_anchor='keeper' since keyframes moved to
+    beats. None when there is no beat or no keeper."""
+    beats = panel.get("beats") or []
+    if not beats:
+        return None
+    first = beats[0]  # tree orders beats by sort_order, id
+    image_id = first.get("selected_image_id")
     if image_id is None:
         return None
-    return next(
-        (img for img in panel.get("images") or [] if img["id"] == image_id), None
-    )
+    images: List[Dict[str, Any]] = first.get("images") or []
+    for img in images:
+        if img.get("id") == image_id:
+            return img
+    return None
 
 
 def _is_video_file(path: str) -> bool:
@@ -554,25 +560,32 @@ class StoryboardRunner:
         self, tree: Dict[str, Any], panel: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """The subjects a panel's H3 compile -- and video generation --
-        must account for: the union of the panel's own ``subject_ids`` and
+        must account for: the union of every beat's ``subject_ids`` and
         every subject a beat's dialog names, in the board's subject
-        ``sort_order``.
+        ``sort_order``. Beats are the single source of casting truth since
+        the shot/beat reorg -- computing the union here (compile AND
+        upload both call this) makes the document/upload agreement
+        structural.
 
         Beat dialog subject_ids are picked from the whole board roster
         (BeatForm's picker + validate_beats_response), not just this
-        panel's subject_ids -- so an off-panel speaker still needs a real
-        ``<Subject N>`` definition/refplan entry. Factored out of
+        panel's beats' subject_ids -- so an off-beat speaker still needs a
+        real ``<Subject N>`` definition/refplan entry. Factored out of
         ``_compile_locked`` so compile's prompt text and
         ``generate_video``'s uploaded pixels can never disagree about who's
         in the shot.
         """
+        beats = panel.get("beats") or []
+        beat_subject_ids = {
+            sid for beat in beats for sid in (beat.get("subject_ids") or [])
+        }
         dialog_subject_ids = {
             d.get("subject_id")
-            for beat in (panel.get("beats") or [])
+            for beat in beats
             for d in (beat.get("dialog") or [])
             if d.get("subject_id") is not None
         }
-        wanted_ids = set(panel["subject_ids"]) | dialog_subject_ids
+        wanted_ids = beat_subject_ids | dialog_subject_ids
         return [s for s in tree["subjects"] if s["id"] in wanted_ids]
 
     # ---- compile (H3 video-prompt) --------------------------------------
@@ -1323,16 +1336,17 @@ class StoryboardRunner:
                     "MS_FIRST_FRAME node"
                 )
             if anchor == "keeper":
-                image = _panel_image_by_id(panel, panel.get("selected_image_id"))
+                image = _first_beat_keeper(panel)
                 if image is None:
                     issues.append(
-                        f"panel {pid}: video_anchor 'keeper' requires a "
-                        "selected still image"
+                        f"panel {pid}: video_anchor 'keeper' requires the "
+                        "shot's first beat to have a selected keeper image"
                     )
                 elif _is_video_file(image["file_path"]):
                     issues.append(
                         f"panel {pid}: video_anchor 'keeper' requires the "
-                        "selected image to be a still, not a video"
+                        "shot's first beat's selected image to be a still, "
+                        "not a video"
                     )
             elif anchor == "prev_last":
                 # idx == 0 (first panel on the board) and idx is None
@@ -1346,19 +1360,18 @@ class StoryboardRunner:
                         "previous panel"
                     )
                 else:
-                    prev_image = _panel_image_by_id(
-                        prev_panel, prev_panel.get("selected_image_id")
-                    )
+                    prev_image = _first_beat_keeper(prev_panel)
                     if prev_image is None:
                         issues.append(
                             f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel to have a selected video"
+                            "the previous panel's shot's first beat to have "
+                            "a selected keeper video"
                         )
                     elif not _is_video_file(prev_image["file_path"]):
                         issues.append(
                             f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel's selected image to be a "
-                            "video"
+                            "the previous panel's shot's first beat's "
+                            "selected image to be a video"
                         )
 
         if issues:
@@ -1435,9 +1448,7 @@ class StoryboardRunner:
                     first_frame: Optional[str] = None
                     anchor = panel.get("video_anchor")
                     if anchor == "keeper":
-                        image = _panel_image_by_id(
-                            panel, panel.get("selected_image_id")
-                        )
+                        image = _first_beat_keeper(panel)
                         assert image is not None  # validated above
                         first_frame = await self.comfy.upload_file(
                             Path(image["file_path"])
@@ -1445,9 +1456,7 @@ class StoryboardRunner:
                     elif anchor == "prev_last":
                         idx = panel_index[pid]
                         prev_panel = flat_panels[idx - 1][1]
-                        prev_image = _panel_image_by_id(
-                            prev_panel, prev_panel.get("selected_image_id")
-                        )
+                        prev_image = _first_beat_keeper(prev_panel)
                         assert prev_image is not None  # validated above
                         if tmp_dir is None:
                             tmp_dir = Path(tempfile.mkdtemp(prefix="ms-videogen-"))
@@ -1470,7 +1479,17 @@ class StoryboardRunner:
                     skipped.append({"panel_id": pid, "error": str(exc)})
                     continue
 
-                committed = await asyncio.to_thread(self.db.count_panel_images, pid)
+                # Rendered clips ingest onto the panel's first beat (see
+                # _ingest_outputs) -- count committed variants there, not on
+                # a panel-level images table that no longer exists.
+                panel_beats = panel.get("beats") or []
+                committed = (
+                    await asyncio.to_thread(
+                        self.db.count_beat_images, panel_beats[0]["id"]
+                    )
+                    if panel_beats
+                    else 0
+                )
                 pending_jobs = await asyncio.to_thread(
                     self.db.list_generation_jobs,
                     states=["queued", "running"],
