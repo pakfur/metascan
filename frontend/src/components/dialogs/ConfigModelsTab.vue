@@ -401,7 +401,7 @@ async function onRetagLibrary() {
               Delete
             </button>
             <button
-              v-if="row.id.startsWith('qwen3vl-')"
+              v-if="row.is_vlm"
               class="btn-small"
               :disabled="row.status !== 'available' || isVlmLoaded(row)"
               :title="row.status !== 'available'
@@ -414,7 +414,7 @@ async function onRetagLibrary() {
               {{ isVlmLoaded(row) ? 'Loaded' : 'Load' }}
             </button>
             <button
-              v-if="row.id.startsWith('qwen3vl-')"
+              v-if="row.is_vlm"
               class="btn-small"
               :disabled="!isVlmLoaded(row)"
               :title="isVlmLoaded(row)
