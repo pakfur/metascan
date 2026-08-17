@@ -206,7 +206,7 @@ TARGET_PRESETS: Final[dict[TargetModel, TargetPreset]] = {
     ),
     "minimax": TargetPreset(
         label="MiniMax",
-        prefix="",
+        prefix="For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\nintegrated_multimodal_description:\n [Shot 1] Live-action, cinematic, ",
         suffix="",
         has_negative=False,
     ),
