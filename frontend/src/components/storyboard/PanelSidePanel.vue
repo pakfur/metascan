@@ -50,9 +50,11 @@ async function copyScript(): Promise<void> {
   setTimeout(() => (scriptCopied.value = false), 1500)
 }
 
+// The image prompt now lives on the selected beat (shot->beat reorg), not
+// the panel.
 async function copyPrompt(): Promise<void> {
-  if (!panel.value?.prompt) return
-  if (!(await copyToClipboard(panel.value.prompt))) return
+  if (!store.selectedBeat?.prompt) return
+  if (!(await copyToClipboard(store.selectedBeat.prompt))) return
   promptCopied.value = true
   setTimeout(() => (promptCopied.value = false), 1500)
 }
@@ -281,13 +283,13 @@ async function renderVideo(): Promise<void> {
           <button
             type="button"
             class="sp-copy-btn"
-            :disabled="!panel?.prompt"
+            :disabled="!store.selectedBeat?.prompt"
             @click="copyPrompt"
           >
             {{ promptCopied ? 'Copied' : 'Copy' }}
           </button>
         </div>
-        <pre v-if="panel?.prompt" class="sp-script">{{ panel.prompt }}</pre>
+        <pre v-if="store.selectedBeat?.prompt" class="sp-script">{{ store.selectedBeat.prompt }}</pre>
         <p v-else class="sp-hint">No prompt synthesized yet.</p>
       </div>
     </div>

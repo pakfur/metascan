@@ -2,9 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import type {
   Beat,
+  BeatImage,
   ComposeStage,
   Panel,
-  PanelImage,
   Scene,
   StoryboardSummary,
   StoryboardTree,
@@ -28,7 +28,11 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   const selectedSceneId = ref<number | null>(null)
   const selectedPanelId = ref<number | null>(null)
   const selectedBeatId = ref<number | null>(null)
+  // job_id -> panel_id, for video-render jobs (generate-video is still
+  // per-panel) and the panelJobState progress-chip overlay below.
   const jobToPanel = ref<Map<number, number>>(new Map())
+  // job_id -> beat_id, for image-generation jobs (generate is now per-beat).
+  const jobToBeat = ref<Map<number, number>>(new Map())
   const panelJobState = ref<
     Map<number, { state: JobState; error: string | null; value?: number; max?: number }>
   >(new Map())
@@ -97,8 +101,28 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     return null
   }
 
-  function keeperImage(panel: Panel): PanelImage | null {
-    return panel.images.find((i) => i.id === panel.selected_image_id) ?? null
+  function keeperImage(beat: Beat): BeatImage | null {
+    return beat.images.find((i) => i.id === beat.selected_image_id) ?? null
+  }
+
+  // Panel thumbnails (grid tiles, scene strip) no longer have their own
+  // image -- the generated candidates live on each beat now. Until Task 11
+  // redesigns those tiles around beats directly, this surfaces the first
+  // beat's keeper as the panel's representative image.
+  function firstBeatKeeper(panel: Panel): BeatImage | null {
+    const beat = panel.beats[0]
+    return beat ? keeperImage(beat) : null
+  }
+
+  function findBeat(beatId: number): Beat | null {
+    if (!tree.value) return null
+    for (const scene of tree.value.scenes) {
+      for (const panel of scene.panels) {
+        const found = panel.beats.find((b) => b.id === beatId)
+        if (found) return found
+      }
+    }
+    return null
   }
 
   // Pick a default scene/panel selection for a freshly (re)loaded tree —
@@ -180,6 +204,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       selectedSceneId.value = null
       selectedPanelId.value = null
       jobToPanel.value = new Map()
+      jobToBeat.value = new Map()
       panelJobState.value = new Map()
     }
     try {
@@ -306,9 +331,11 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const snapshot = { ...panel }
     Object.assign(panel, body)
     try {
-      // patchPanel returns PanelWithoutImages -- Object.assign only touches
-      // keys present on the response, so the local `images` array (absent
-      // from the response) is left untouched.
+      // patchPanel's response (db.get_panel) never carries `beats` -- only
+      // get_storyboard_tree assembles that array -- so even though the
+      // return type is Panel, Object.assign only touches keys actually
+      // present on the response and the local `beats` array is left
+      // untouched.
       const res = await api.patchPanel(panelId, body)
       const current = panelById(panelId)
       if (current) Object.assign(current, res)
@@ -391,10 +418,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   // ---- actions: synthesis / generation ------------------------------------------
 
-  async function synthesize(panelIds?: number[], force?: boolean): Promise<void> {
+  async function synthesize(beatIds?: number[], force?: boolean): Promise<void> {
     if (!tree.value) return
-    const body: { panel_ids?: number[]; force?: boolean } = {}
-    if (panelIds !== undefined) body.panel_ids = panelIds
+    const body: { beat_ids?: number[]; force?: boolean } = {}
+    if (beatIds !== undefined) body.beat_ids = beatIds
     if (force !== undefined) body.force = force
     // Set the banner optimistically BEFORE the await: on a fast no-VLM
     // path the runner can broadcast synthesis_complete/synthesis_error
@@ -452,10 +479,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
-  async function generate(panelIds?: number[], onlyFailed?: boolean): Promise<void> {
+  async function generate(beatIds?: number[], onlyFailed?: boolean): Promise<void> {
     if (!tree.value) return
-    const body: { panel_ids?: number[]; only_failed?: boolean } = {}
-    if (panelIds !== undefined) body.panel_ids = panelIds
+    const body: { beat_ids?: number[]; only_failed?: boolean } = {}
+    if (beatIds !== undefined) body.beat_ids = beatIds
     if (onlyFailed !== undefined) body.only_failed = onlyFailed
     try {
       await api.generateStoryboard(tree.value.id, body)
@@ -467,7 +494,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
 
   // Mirrors generate(): calls the API then refreshActiveJobs() (video jobs
   // are ordinary generation_jobs -- the existing `comfy` channel jobToPanel
-  // overlay and `panel_images_changed` refresh already cover them, no new
+  // overlay and `beat_images_changed` refresh already cover them, no new
   // WS handling needed). Unlike generate(), returns the response so callers
   // can surface `skipped` entries (per-panel reasons that didn't fail the
   // whole request) themselves -- returns undefined on a thrown error (e.g.
@@ -501,45 +528,58 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
-  async function selectImage(panelId: number, imageId: number | null): Promise<void> {
+  async function selectImage(beatId: number, imageId: number | null): Promise<void> {
     try {
-      const res = await api.selectPanelImage(panelId, imageId)
-      const panel = panelById(panelId)
-      if (panel) Object.assign(panel, res)
+      const updated = await api.selectBeatImage(beatId, imageId)
+      const beat = findBeat(beatId)
+      // images survives: not present on the patch response, so
+      // Object.assign leaves the locally-loaded array untouched.
+      if (beat) Object.assign(beat, updated)
     } catch (e) {
       error.value = errMessage(e)
     }
   }
 
-  // Rebuilds jobToPanel/panelJobState from the server's queued+running job
-  // lists, filtered to panels belonging to the current tree. This is what
-  // survives a page reload mid-generation -- there's no other durable
-  // client-side record of in-flight jobs.
+  // Rebuilds jobToPanel/jobToBeat/panelJobState from the server's
+  // queued+running job lists, filtered to panels/beats belonging to the
+  // current tree. This is what survives a page reload mid-generation --
+  // there's no other durable client-side record of in-flight jobs.
   async function refreshActiveJobs(): Promise<void> {
     if (!tree.value) {
       jobToPanel.value = new Map()
+      jobToBeat.value = new Map()
       panelJobState.value = new Map()
       return
     }
     const panelIds = new Set<number>()
+    const beatIds = new Set<number>()
     for (const scene of tree.value.scenes) {
-      for (const p of scene.panels) panelIds.add(p.id)
+      for (const p of scene.panels) {
+        panelIds.add(p.id)
+        for (const b of p.beats) beatIds.add(b.id)
+      }
     }
     const [queued, running] = await Promise.all([
       comfyApi.listJobs('queued', 1000),
       comfyApi.listJobs('running', 1000),
     ])
     const nextJobToPanel = new Map<number, number>()
+    const nextJobToBeat = new Map<number, number>()
     const nextPanelJobState = new Map<
       number,
       { state: JobState; error: string | null; value?: number; max?: number }
     >()
     for (const job of [...queued, ...running]) {
-      if (job.panel_id == null || !panelIds.has(job.panel_id)) continue
-      nextJobToPanel.set(job.id, job.panel_id)
-      nextPanelJobState.set(job.panel_id, { state: job.state, error: null })
+      if (job.panel_id != null && panelIds.has(job.panel_id)) {
+        nextJobToPanel.set(job.id, job.panel_id)
+        nextPanelJobState.set(job.panel_id, { state: job.state, error: null })
+      }
+      if (job.beat_id != null && beatIds.has(job.beat_id)) {
+        nextJobToBeat.set(job.id, job.beat_id)
+      }
     }
     jobToPanel.value = nextJobToPanel
+    jobToBeat.value = nextJobToBeat
     panelJobState.value = nextPanelJobState
   }
 
@@ -578,12 +618,16 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     const panel = panelById(updated.panel_id)
     if (!panel) return
     const idx = panel.beats.findIndex((b) => b.id === beatId)
-    if (idx >= 0) panel.beats[idx] = updated
+    // patchBeat returns BeatWithoutImages -- merge onto the existing beat
+    // (rather than replacing it) so the locally-loaded `images` array
+    // survives, mirroring patchPanelFields' treatment of patchPanel's
+    // beats-less response above.
+    if (idx >= 0) Object.assign(panel.beats[idx], updated)
     panel.beats.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
   }
 
-  async function removeBeat(beatId: number): Promise<void> {
-    await api.deleteBeat(beatId)
+  async function removeBeat(beatId: number, purgeImages = false): Promise<void> {
+    await api.deleteBeat(beatId, purgeImages)
     for (const scene of tree.value?.scenes ?? [])
       for (const panel of scene.panels)
         panel.beats = panel.beats.filter((b) => b.id !== beatId)
@@ -634,8 +678,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
           total: synthesis.value.total,
           error: String(d.error ?? 'synthesis failed'),
         }
-      } else if (event === 'panel_images_changed') {
-        // No per-panel GET endpoint exists; a full tree refetch (which
+      } else if (event === 'beat_images_changed') {
+        // No per-beat GET endpoint exists; a full tree refetch (which
         // preserves selection) is the simplest correct way to pick up the
         // new image set.
         void refresh()
@@ -704,7 +748,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
           max: d.max as number,
         })
       }
-      // job_outputs: ignored -- the storyboard channel's panel_images_changed
+      // job_outputs: ignored -- the storyboard channel's beat_images_changed
       // event is what carries the panel-scoped refresh.
     })
   }
@@ -719,6 +763,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     selectedPanelId,
     selectedBeatId,
     jobToPanel,
+    jobToBeat,
     panelJobState,
     synthesis,
     compile,
@@ -730,6 +775,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     subjectsById,
     panelById,
     keeperImage,
+    firstBeatKeeper,
+    findBeat,
     // actions
     loadList,
     load,

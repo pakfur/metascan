@@ -1,8 +1,9 @@
 import { get, post, patch, del } from './client'
 import type {
   Beat,
+  BeatWithoutImages,
   ComposeStage,
-  PanelWithoutImages,
+  Panel,
   StoryboardSummary,
   StoryboardTree,
 } from '../types/storyboard'
@@ -49,6 +50,7 @@ export function patchStoryboard(
     video_target: string | null
     video_mode: string | null
     video_preset_id: number | null
+    notes: string | null
   }>,
 ): Promise<{ status: string }> {
   return patch<{ status: string }>(`/storyboard/${id}`, body)
@@ -91,7 +93,7 @@ export function composeStoryboard(
 
 export function synthesizeStoryboard(
   id: number,
-  body: { panel_ids?: number[]; force?: boolean } = {},
+  body: { beat_ids?: number[]; force?: boolean } = {},
 ): Promise<{ status: string; total: number }> {
   return post<{ status: string; total: number }>(`/storyboard/${id}/synthesize`, body)
 }
@@ -106,7 +108,7 @@ export function compileStoryboard(
 
 export function generateStoryboard(
   id: number,
-  body: { panel_ids?: number[]; only_failed?: boolean } = {},
+  body: { beat_ids?: number[]; only_failed?: boolean } = {},
 ): Promise<{ jobs: number[] }> {
   return post<{ jobs: number[] }>(`/storyboard/${id}/generate`, body)
 }
@@ -222,18 +224,16 @@ export function createPanel(
   return post<{ id: number }>(`/storyboard/scenes/${sceneId}/panels`, body)
 }
 
-// Backend returns `db.get_panel`, which never carries `images` (only
-// `get_storyboard_tree` assembles that array) -- callers must merge the
-// images they already have for this panel back onto the result. `body` also
-// accepts `video_prompt?: string | null` (non-null forces
-// video_prompt_locked=1/video_prompt_source='user' server-side; null clears
-// all three video-prompt fields), `video_prompt_locked?: 0 | 1`, and
-// `video_anchor?: 'keeper' | 'prev_last' | null`.
-export function patchPanel(
-  panelId: number,
-  body: Record<string, unknown>,
-): Promise<PanelWithoutImages> {
-  return patch<PanelWithoutImages>(`/storyboard/panels/${panelId}`, body)
+// Backend returns `db.get_panel` -- Panel no longer carries per-shot
+// generation fields (those live on Beat now), only sort_order/action/
+// duration_s/video_prompt*/video_anchor*/beats. `body` accepts
+// `sort_order?`, `action?`, `duration_s?`, `video_prompt?: string | null`
+// (non-null forces video_prompt_locked=1/video_prompt_source='user'
+// server-side; null clears all three video-prompt fields),
+// `video_prompt_locked?: 0 | 1`, and `video_anchor?: 'keeper' | 'prev_last'
+// | null`.
+export function patchPanel(panelId: number, body: Record<string, unknown>): Promise<Panel> {
+  return patch<Panel>(`/storyboard/panels/${panelId}`, body)
 }
 
 export function deletePanel(
@@ -245,15 +245,6 @@ export function deletePanel(
   )
 }
 
-export function selectPanelImage(
-  panelId: number,
-  imageId: number | null,
-): Promise<PanelWithoutImages> {
-  return post<PanelWithoutImages>(`/storyboard/panels/${panelId}/select`, {
-    image_id: imageId,
-  })
-}
-
 export function createBeat(
   panelId: number,
   body: Partial<Omit<Beat, 'id' | 'panel_id' | 'created_at' | 'updated_at'>> & {
@@ -263,13 +254,28 @@ export function createBeat(
   return post<{ id: number }>(`/storyboard/panels/${panelId}/beats`, body)
 }
 
+// Backend returns `db.get_beat`, which never carries `images` (only
+// `get_storyboard_tree` assembles that array) -- callers must merge the
+// images they already have for this beat back onto the result.
 export function patchBeat(
   beatId: number,
   body: Partial<Omit<Beat, 'id' | 'panel_id' | 'created_at' | 'updated_at'>>,
-): Promise<Beat> {
-  return patch<Beat>(`/storyboard/beats/${beatId}`, body)
+): Promise<BeatWithoutImages> {
+  return patch<BeatWithoutImages>(`/storyboard/beats/${beatId}`, body)
 }
 
-export function deleteBeat(beatId: number): Promise<{ status: string }> {
-  return del<{ status: string }>(`/storyboard/beats/${beatId}`)
+export function deleteBeat(beatId: number, purgeImages = false): Promise<{ status: string }> {
+  return del<{ status: string }>(
+    `/storyboard/beats/${beatId}?purge_images=${purgeImages}`,
+  )
+}
+
+// Backend returns `db.get_beat`, same shape/caveat as patchBeat.
+export function selectBeatImage(
+  beatId: number,
+  imageId: number | null,
+): Promise<BeatWithoutImages> {
+  return post<BeatWithoutImages>(`/storyboard/beats/${beatId}/select`, {
+    image_id: imageId,
+  })
 }

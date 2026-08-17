@@ -2,14 +2,14 @@
   <div v-if="panel" class="panel-detail">
     <div class="pd-header">
       <h4>
-        Panel {{ (panel.sort_order ?? 0) + 1 }} · {{ panel.shot_size ?? '—' }} ·
-        {{ panel.angle ?? '—' }}
+        Panel {{ (panel.sort_order ?? 0) + 1 }} · {{ beat?.shot_size ?? '—' }} ·
+        {{ beat?.angle ?? '—' }}
       </h4>
       <div class="pd-header-actions">
-        <button class="pd-btn" :disabled="hasActiveJob" @click="reroll">Reroll</button>
+        <button class="pd-btn" :disabled="hasActiveJob || !beat" @click="reroll">Reroll</button>
         <button
           class="pd-btn"
-          :disabled="hasActiveJob || store.synthesis.running"
+          :disabled="hasActiveJob || store.synthesis.running || !beat"
           @click="resynth"
         >
           Re-synth
@@ -24,24 +24,29 @@
           <input type="text" :value="actionVal" @change="commitAction" />
         </div>
 
+        <!-- The fields below (shot size / angle / lens / subjects / prompt /
+             candidates) belong to the selected beat now -- a beat is the
+             image-generation unit since the shot->beat reorg. They apply to
+             `store.selectedBeat`, not this panel; select a beat in the Beats
+             list below to edit them. -->
         <div class="pd-field-row">
           <div class="pd-field">
             <label class="pd-label">Shot size</label>
-            <select :value="shotSizeVal" @change="commitShotSize">
+            <select :value="shotSizeVal" :disabled="!beat" @change="commitShotSize">
               <option value="">—</option>
               <option v-for="s in SHOT_SIZES" :key="s" :value="s">{{ s }}</option>
             </select>
           </div>
           <div class="pd-field">
             <label class="pd-label">Angle</label>
-            <select :value="angleVal" @change="commitAngle">
+            <select :value="angleVal" :disabled="!beat" @change="commitAngle">
               <option value="">—</option>
               <option v-for="a in ANGLES" :key="a" :value="a">{{ a }}</option>
             </select>
           </div>
           <div class="pd-field">
             <label class="pd-label">Lens</label>
-            <select :value="lensVal" @change="commitLens">
+            <select :value="lensVal" :disabled="!beat" @change="commitLens">
               <option value="">—</option>
               <option v-for="l in LENSES" :key="l" :value="l">{{ l }}</option>
             </select>
@@ -50,48 +55,36 @@
 
         <div class="pd-field">
           <label class="pd-label">Subjects</label>
-          <div v-if="panel.subject_ids.length" class="subject-chips">
-            <button
-              v-for="(sid, i) in panel.subject_ids"
-              :key="sid"
-              type="button"
-              class="subject-chip"
-              :class="{ primary: i === 0 }"
-              :title="i === 0 ? 'Primary subject' : 'Click to make primary'"
-              @click="promoteSubject(sid)"
-            >
-              <span v-if="i === 0" class="subject-chip-star">★</span>
-              {{ subjectName(sid) }}
-            </button>
-          </div>
-          <div class="subject-checklist">
-            <label v-for="s in store.tree?.subjects ?? []" :key="s.id" class="subject-check">
-              <input
-                type="checkbox"
-                :checked="panel.subject_ids.includes(s.id)"
-                @change="toggleSubject(s.id)"
-              />
-              {{ s.name }}
-            </label>
-            <span v-if="(store.tree?.subjects.length ?? 0) === 0" class="pd-hint">
-              No subjects defined yet.
-            </span>
-          </div>
-        </div>
-
-        <div class="pd-field">
-          <label class="pd-label">Notes</label>
-          <input type="text" :value="notesVal" @change="commitNotes" />
-        </div>
-
-        <div class="pd-field">
-          <label class="pd-label">Negative</label>
-          <input
-            type="text"
-            :value="negativeVal"
-            placeholder="storyboard default"
-            @change="commitNegative"
-          />
+          <template v-if="beat">
+            <div v-if="beat.subject_ids.length" class="subject-chips">
+              <button
+                v-for="(sid, i) in beat.subject_ids"
+                :key="sid"
+                type="button"
+                class="subject-chip"
+                :class="{ primary: i === 0 }"
+                :title="i === 0 ? 'Primary subject' : 'Click to make primary'"
+                @click="promoteSubject(sid)"
+              >
+                <span v-if="i === 0" class="subject-chip-star">★</span>
+                {{ subjectName(sid) }}
+              </button>
+            </div>
+            <div class="subject-checklist">
+              <label v-for="s in store.tree?.subjects ?? []" :key="s.id" class="subject-check">
+                <input
+                  type="checkbox"
+                  :checked="beat.subject_ids.includes(s.id)"
+                  @change="toggleSubject(s.id)"
+                />
+                {{ s.name }}
+              </label>
+              <span v-if="(store.tree?.subjects.length ?? 0) === 0" class="pd-hint">
+                No subjects defined yet.
+              </span>
+            </div>
+          </template>
+          <span v-else class="pd-hint">Select a beat to edit subjects.</span>
         </div>
 
         <div class="pd-field">
@@ -99,7 +92,7 @@
             <label class="pd-label">Prompt</label>
             <span class="pd-prompt-status">{{ promptStatusLabel }}</span>
             <button
-              v-if="panel.prompt_locked === 1"
+              v-if="beat?.prompt_locked === 1"
               type="button"
               class="pd-link-btn"
               @click="unlockPrompt"
@@ -107,7 +100,7 @@
               Unlock
             </button>
           </div>
-          <textarea :value="promptVal" rows="4" @change="commitPrompt" />
+          <textarea :value="promptVal" rows="4" :disabled="!beat" @change="commitPrompt" />
         </div>
 
         <div class="pd-field">
@@ -128,15 +121,15 @@
         <label class="pd-label">Candidates</label>
         <div class="candidates-row">
           <div
-            v-for="(img, idx) in panel.images"
+            v-for="(img, idx) in beat?.images ?? []"
             :key="img.id"
             class="candidate-tile"
-            :class="{ selected: img.id === panel.selected_image_id }"
+            :class="{ selected: img.id === beat?.selected_image_id }"
             :title="candidateTooltip(img)"
             @click="onCandidateClick(img)"
           >
             <img :src="thumbnailUrl(img.file_path)" alt="" class="candidate-img" />
-            <span v-if="img.id === panel.selected_image_id" class="candidate-check">✓</span>
+            <span v-if="img.id === beat?.selected_image_id" class="candidate-check">✓</span>
             <button
               type="button"
               class="candidate-expand"
@@ -146,8 +139,8 @@
               <span class="pi pi-search-plus" />
             </button>
           </div>
-          <div v-if="panel.images.length === 0" class="candidates-empty">
-            No candidates yet.
+          <div v-if="!beat || beat.images.length === 0" class="candidates-empty">
+            {{ beat ? 'No candidates yet.' : 'Select a beat to see candidates.' }}
           </div>
         </div>
       </div>
@@ -168,7 +161,7 @@ import { computed, ref, watch, type Ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { SHOT_SIZES, ANGLES, LENSES } from '../../types/storyboard'
-import type { PanelImage } from '../../types/storyboard'
+import type { BeatImage } from '../../types/storyboard'
 import type { Media } from '../../types/media'
 import { isVideoPath } from '../../utils/path'
 import MediaViewer from '../viewer/MediaViewer.vue'
@@ -176,6 +169,10 @@ import BeatsEditor from './BeatsEditor.vue'
 
 const store = useStoryboardStore()
 const panel = computed(() => store.selectedPanel)
+// Shot-level fields (shot size / angle / lens / subjects / prompt /
+// candidates) now live on the beat, not the panel -- see the shot->beat
+// reorg. This tracks whichever beat is selected in the Beats list below.
+const beat = computed(() => store.selectedBeat)
 
 const hasActiveJob = computed(() =>
   panel.value ? store.panelJobState.has(panel.value.id) : false,
@@ -191,12 +188,10 @@ const hasActiveJob = computed(() =>
 // new server value when local === snapshot (no pending edit), leave it
 // alone otherwise (an uncommitted PATCH is in flight for that field).
 // Without this, a synthesis/VLM pass that rewrites e.g. `prompt` on the
-// CURRENTLY SELECTED panel would never reach the textarea (the old watcher
-// only fired on panel-id change), and a later blur would PATCH the stale
-// (often empty) local value back over the server's synthesized one.
+// CURRENTLY SELECTED beat would never reach the textarea, and a later blur
+// would PATCH the stale (often empty) local value back over the server's
+// synthesized one.
 const actionVal = ref('')
-const notesVal = ref('')
-const negativeVal = ref('')
 const promptVal = ref('')
 const shotSizeVal = ref('')
 const angleVal = ref('')
@@ -204,8 +199,6 @@ const lensVal = ref('')
 const durationVal = ref('0')
 
 const actionSnap = ref('')
-const notesSnap = ref('')
-const negativeSnap = ref('')
 const promptSnap = ref('')
 const shotSizeSnap = ref('')
 const angleSnap = ref('')
@@ -219,25 +212,25 @@ function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): vo
   }
 }
 
-// Resyncs on a panel switch (by id) AND on any server-side rewrite of the
-// CURRENTLY selected panel (detected via updated_at -- bumped on every
-// successful PATCH, including synthesis/VLM writes and edits from another
-// tab). Subject membership/order isn't tracked here: the template reads
-// `panel.subject_ids` directly rather than through a local cached copy, so
-// it's always current and needs no resync of its own.
+// Resyncs on a panel/beat switch (by id) AND on any server-side rewrite of
+// the CURRENTLY selected panel/beat (detected via updated_at -- bumped on
+// every successful PATCH, including synthesis/VLM writes and edits from
+// another tab). Subject membership/order isn't tracked here: the template
+// reads `beat.subject_ids` directly rather than through a local cached
+// copy, so it's always current and needs no resync of its own.
 watch(
-  () => [panel.value?.id, panel.value?.updated_at],
+  () => [panel.value?.id, panel.value?.updated_at, beat.value?.id, beat.value?.updated_at],
   () => {
     const p = panel.value
-    if (!p) return
-    syncField(actionVal, actionSnap, p.action ?? '')
-    syncField(notesVal, notesSnap, p.notes ?? '')
-    syncField(negativeVal, negativeSnap, p.negative ?? '')
-    syncField(promptVal, promptSnap, p.prompt ?? '')
-    syncField(shotSizeVal, shotSizeSnap, p.shot_size ?? '')
-    syncField(angleVal, angleSnap, p.angle ?? '')
-    syncField(lensVal, lensSnap, p.lens ?? '')
-    syncField(durationVal, durationSnap, String(p.duration_s))
+    if (p) {
+      syncField(actionVal, actionSnap, p.action ?? '')
+      syncField(durationVal, durationSnap, String(p.duration_s))
+    }
+    const b = beat.value
+    syncField(promptVal, promptSnap, b?.prompt ?? '')
+    syncField(shotSizeVal, shotSizeSnap, b?.shot_size ?? '')
+    syncField(angleVal, angleSnap, b?.angle ?? '')
+    syncField(lensVal, lensSnap, b?.lens ?? '')
   },
   { immediate: true },
 )
@@ -247,13 +240,13 @@ function subjectName(id: number): string {
 }
 
 function reroll(): void {
-  if (!panel.value) return
-  void store.generate([panel.value.id])
+  if (!beat.value) return
+  void store.generate([beat.value.id])
 }
 
 function resynth(): void {
-  if (!panel.value) return
-  void store.synthesize([panel.value.id], true)
+  if (!beat.value) return
+  void store.synthesize([beat.value.id], true)
 }
 
 // Every commit* handler updates its local ref AND snapshot together
@@ -268,68 +261,48 @@ function commitAction(e: Event): void {
   void store.patchPanelFields(panel.value.id, { action: val })
 }
 
-function commitNotes(e: Event): void {
-  const val = (e.target as HTMLInputElement).value
-  notesVal.value = val
-  notesSnap.value = val
-  if (!panel.value) return
-  const next = val.trim() || null
-  if (next === (panel.value.notes ?? null)) return
-  void store.patchPanelFields(panel.value.id, { notes: next })
-}
-
-function commitNegative(e: Event): void {
-  const val = (e.target as HTMLInputElement).value
-  negativeVal.value = val
-  negativeSnap.value = val
-  if (!panel.value) return
-  const next = val.trim() || null
-  if (next === (panel.value.negative ?? null)) return
-  void store.patchPanelFields(panel.value.id, { negative: next })
-}
-
 function commitPrompt(e: Event): void {
   const val = (e.target as HTMLTextAreaElement).value
   promptVal.value = val
   promptSnap.value = val
-  if (!panel.value) return
-  if (val === (panel.value.prompt ?? '')) return
-  void store.patchPanelFields(panel.value.id, { prompt: val })
+  if (!beat.value) return
+  if (val === (beat.value.prompt ?? '')) return
+  void store.patchBeatFields(beat.value.id, { prompt: val })
 }
 
 function unlockPrompt(): void {
-  if (!panel.value) return
-  void store.patchPanelFields(panel.value.id, { prompt_locked: false })
+  if (!beat.value) return
+  void store.patchBeatFields(beat.value.id, { prompt_locked: 0 })
 }
 
 function commitShotSize(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   shotSizeVal.value = val
   shotSizeSnap.value = val
-  if (!panel.value) return
+  if (!beat.value) return
   const next = val === '' ? null : val
-  if (next === panel.value.shot_size) return
-  void store.patchPanelFields(panel.value.id, { shot_size: next })
+  if (next === beat.value.shot_size) return
+  void store.patchBeatFields(beat.value.id, { shot_size: next })
 }
 
 function commitAngle(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   angleVal.value = val
   angleSnap.value = val
-  if (!panel.value) return
+  if (!beat.value) return
   const next = val === '' ? null : val
-  if (next === panel.value.angle) return
-  void store.patchPanelFields(panel.value.id, { angle: next })
+  if (next === beat.value.angle) return
+  void store.patchBeatFields(beat.value.id, { angle: next })
 }
 
 function commitLens(e: Event): void {
   const val = (e.target as HTMLSelectElement).value
   lensVal.value = val
   lensSnap.value = val
-  if (!panel.value) return
+  if (!beat.value) return
   const next = val === '' ? null : val
-  if (next === panel.value.lens) return
-  void store.patchPanelFields(panel.value.id, { lens: next })
+  if (next === beat.value.lens) return
+  void store.patchBeatFields(beat.value.id, { lens: next })
 }
 
 function commitDuration(e: Event): void {
@@ -343,43 +316,43 @@ function commitDuration(e: Event): void {
 }
 
 function toggleSubject(id: number): void {
-  if (!panel.value) return
-  const current = [...panel.value.subject_ids]
+  if (!beat.value) return
+  const current = [...beat.value.subject_ids]
   const idx = current.indexOf(id)
   if (idx >= 0) current.splice(idx, 1)
   else current.push(id)
-  void store.patchPanelFields(panel.value.id, { subject_ids: current })
+  void store.patchBeatFields(beat.value.id, { subject_ids: current })
 }
 
 function promoteSubject(id: number): void {
-  if (!panel.value) return
-  const current = panel.value.subject_ids.filter((x) => x !== id)
+  if (!beat.value) return
+  const current = beat.value.subject_ids.filter((x: number) => x !== id)
   current.unshift(id)
-  void store.patchPanelFields(panel.value.id, { subject_ids: current })
+  void store.patchBeatFields(beat.value.id, { subject_ids: current })
 }
 
 const promptStatusLabel = computed(() => {
-  const p = panel.value
-  if (!p) return '—'
-  if (p.prompt_locked === 1) return '🔒 edited'
-  if (p.prompt_source === 'brief') return 'brief fallback'
-  if (p.prompt_source === 'llm') return 'synthesized'
+  const b = beat.value
+  if (!b) return '—'
+  if (b.prompt_locked === 1) return '🔒 edited'
+  if (b.prompt_source === 'brief') return 'brief fallback'
+  if (b.prompt_source === 'llm') return 'synthesized'
   return '—'
 })
 
-function candidateTooltip(img: PanelImage): string {
+function candidateTooltip(img: BeatImage): string {
   return `seed ${img.seed ?? '—'} · variant ${img.variant_index}`
 }
 
-function onCandidateClick(img: PanelImage): void {
-  if (!panel.value) return
-  const next = panel.value.selected_image_id === img.id ? null : img.id
-  void store.selectImage(panel.value.id, next)
+function onCandidateClick(img: BeatImage): void {
+  if (!beat.value) return
+  const next = beat.value.selected_image_id === img.id ? null : img.id
+  void store.selectImage(beat.value.id, next)
 }
 
 const viewerIndex = ref<number | null>(null)
 const viewerMedia = computed<Media[]>(() =>
-  (store.selectedPanel?.images ?? []).map(
+  (store.selectedBeat?.images ?? []).map(
     (img) =>
       ({
         file_path: img.file_path,

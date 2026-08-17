@@ -63,8 +63,11 @@ export function buildShotScriptBlocks(
   scene: Scene,
   subjects: Subject[],
 ): ShotScriptBlocks {
-  const shotBits = [panel.shot_size, panel.angle, panel.lens].filter(
-    (v): v is string => v !== null && v !== '',
+  // Shot size/angle/lens now live on the beat, not the panel -- the header
+  // shows the first beat's values as a stand-in for the shot as a whole.
+  const firstBeat = panel.beats[0]
+  const shotBits = [firstBeat?.shot_size, firstBeat?.angle, firstBeat?.lens].filter(
+    (v): v is string => v !== null && v !== undefined && v !== '',
   )
   const shotLabel = shotBits.length ? ` (${shotBits.join(', ')})` : ''
   const header = [
