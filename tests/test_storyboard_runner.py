@@ -247,8 +247,6 @@ def board(db, preset_id) -> Board:
         scene_id,
         action="hand rests on hull seam",
         sort_order=0,
-        shot_size="ECU",
-        subject_ids=[subject_id],
     )
     panel1 = db.create_panel(
         scene_id, action="wide shot of the yard at dusk", sort_order=1
@@ -315,83 +313,122 @@ async def test_parse_without_vlm_raises(db, comfy, events, tmp_path, bare_board)
 
 
 async def test_synthesize_llm_path(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out == {"synthesized": 2, "fallback": 0, "skipped_locked": 0}
-    p = db.get_panel(board.panel0)
-    assert p["prompt"] == "a prompt, graphite sketch"
-    assert p["prompt_source"] == "llm"
-    assert p["brief"].startswith("SHOT:")
+    beat = db.get_beat(b0)
+    assert beat["prompt"] == "a prompt, graphite sketch"
+    assert beat["prompt_source"] == "llm"
+    assert beat["brief"].startswith("SHOT:")
     assert "SUBJECT" in vlm.calls[0]["user"]
 
 
 async def test_synthesize_fallback_on_vlm_error(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(fail=True)
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out["fallback"] == 2
-    p = db.get_panel(board.panel0)
-    assert p["prompt_source"] == "brief"
-    assert p["prompt"].startswith("SHOT:") and p["prompt"].endswith("graphite sketch")
+    beat = db.get_beat(b0)
+    assert beat["prompt_source"] == "brief"
+    assert beat["prompt"].startswith("SHOT:") and beat["prompt"].endswith(
+        "graphite sketch"
+    )
 
 
 async def test_synthesize_no_vlm_falls_back(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     runner = make_runner(db, comfy, None, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out == {"synthesized": 0, "fallback": 2, "skipped_locked": 0}
-    p = db.get_panel(board.panel0)
-    assert p["prompt_source"] == "brief"
+    beat = db.get_beat(b0)
+    assert beat["prompt_source"] == "brief"
 
 
 async def test_synthesize_skips_locked(db, comfy, events, tmp_path, board):
-    db.update_panel(
-        board.panel0, prompt="hand tuned", prompt_locked=1, prompt_source="user"
-    )
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.update_beat(b0, prompt="hand tuned", prompt_locked=1, prompt_source="user")
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out["skipped_locked"] == 1
-    assert db.get_panel(board.panel0)["prompt"] == "hand tuned"
+    assert db.get_beat(b0)["prompt"] == "hand tuned"
 
 
-async def test_synthesize_single_panel_force_overrides_lock(
-    db, comfy, events, tmp_path, board
-):
-    db.update_panel(
-        board.panel0, prompt="hand tuned", prompt_locked=1, prompt_source="user"
-    )
+async def test_synthesize_targets_beats(db, comfy, events, tmp_path, board):
+    """Locks and synthesis both act on beats, not panels -- one panel can
+    carry a mix of locked and unlocked beats."""
+    b1 = db.create_beat(board.panel0, action="first", subject_ids=[])
+    b2 = db.create_beat(board.panel0, action="second", subject_ids=[])
+    db.update_beat(b2, prompt="locked", prompt_locked=1, prompt_source="user")
     vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
-    out = await runner.synthesize(board.sb_id, panel_ids=[board.panel0], force=True)
+    counts = await runner.synthesize(board.sb_id)
+
+    assert counts["skipped_locked"] == 1
+    assert db.get_beat(b1)["prompt"]  # written
+    assert db.get_beat(b2)["prompt"] == "locked"  # untouched
+
+
+async def test_synthesize_single_beat_force_overrides_lock(
+    db, comfy, events, tmp_path, board
+):
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.update_beat(b0, prompt="hand tuned", prompt_locked=1, prompt_source="user")
+    vlm = StubVlm(responses=["a prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    out = await runner.synthesize(board.sb_id, beat_ids=[b0], force=True)
 
     assert out["synthesized"] == 1
-    p = db.get_panel(board.panel0)
-    assert p["prompt_locked"] == 0
+    beat = db.get_beat(b0)
+    assert beat["prompt_locked"] == 0
 
 
 async def test_synthesize_emits_progress(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    b1 = db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     await runner.synthesize(board.sb_id)
 
-    kinds = [(ch, ev) for ch, ev, _ in events]
-    assert ("storyboard", "synthesis_progress") in kinds
+    progress = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "synthesis_progress"
+    ]
+    assert progress
+    assert {d["beat_id"] for d in progress} == {b0, b1}
+    assert {d["panel_id"] for d in progress} == {board.panel0, board.panel1}
 
 
 async def test_synthesize_emits_complete_on_success(db, comfy, events, tmp_path, board):
     """POST .../synthesize is 202 fire-and-forget; synthesis_complete is
     the only signal a client gets that the background run finished."""
+    db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
@@ -413,6 +450,7 @@ async def test_synthesize_emits_error_and_reraises_on_failure(
     """If the background run raises (e.g. the VLM won't load), the runner
     must emit synthesis_error rather than fail silently, and still
     re-raise for any direct (non-route) caller."""
+    db.create_beat(board.panel0, action="hand rests", subject_ids=[])
 
     class ExplodingVlm(StubVlm):
         async def ensure_started(self, model_id):

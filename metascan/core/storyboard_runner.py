@@ -874,10 +874,10 @@ class StoryboardRunner:
     async def synthesize(
         self,
         storyboard_id: int,
-        panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
-        """Compose per-panel prompts, emitting a terminal WS event.
+        """Compose per-beat prompts, emitting a terminal WS event.
 
         The route fires this as a fire-and-forget background task (202
         response), so a failure here (e.g. the VLM won't load) would
@@ -888,7 +888,7 @@ class StoryboardRunner:
         failure.
         """
         try:
-            counts = await self._synthesize_locked(storyboard_id, panel_ids, force)
+            counts = await self._synthesize_locked(storyboard_id, beat_ids, force)
         except Exception as exc:
             self._emit(
                 "storyboard",
@@ -906,7 +906,7 @@ class StoryboardRunner:
     async def _synthesize_locked(
         self,
         storyboard_id: int,
-        panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
         async with self._synth_lock:
@@ -915,24 +915,25 @@ class StoryboardRunner:
                 raise StoryboardError(f"no storyboard with id {storyboard_id}")
             subjects_by_id = {s["id"]: s for s in tree["subjects"]}
 
-            explicit_ids = set(panel_ids) if panel_ids is not None else None
-            candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            explicit_ids = set(beat_ids) if beat_ids is not None else None
+            candidates: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
             for scene in tree["scenes"]:
                 for panel in scene["panels"]:
-                    if explicit_ids is not None and panel["id"] not in explicit_ids:
-                        continue
-                    candidates.append((scene, panel))
+                    for beat in panel.get("beats") or []:
+                        if explicit_ids is not None and beat["id"] not in explicit_ids:
+                            continue
+                        candidates.append((scene, panel, beat))
 
-            work: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            work: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
             skipped_locked = 0
-            for scene, panel in candidates:
+            for scene, panel, beat in candidates:
                 forced_override = (
-                    force and explicit_ids is not None and panel["id"] in explicit_ids
+                    force and explicit_ids is not None and beat["id"] in explicit_ids
                 )
-                if panel["prompt_locked"] and not forced_override:
+                if beat["prompt_locked"] and not forced_override:
                     skipped_locked += 1
                     continue
-                work.append((scene, panel))
+                work.append((scene, panel, beat))
 
             counts: Dict[str, int] = {
                 "synthesized": 0,
@@ -954,16 +955,15 @@ class StoryboardRunner:
             progress_lock = asyncio.Lock()
             done = 0
 
-            async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
+            async def _one(
+                scene: Dict[str, Any], panel: Dict[str, Any], beat: Dict[str, Any]
+            ) -> None:
                 nonlocal done
                 subjects = [
                     subjects_by_id[sid]
-                    for sid in panel["subject_ids"]
+                    for sid in beat["subject_ids"]
                     if sid in subjects_by_id
                 ]
-                beat: Dict[str, Any] = (
-                    {}
-                )  # TODO(Task 6): pass actual beat from storyboard tree
                 brief = compose_brief(tree, scene, panel, beat, subjects)
                 text = brief
                 source = "brief"
@@ -985,8 +985,8 @@ class StoryboardRunner:
                             source = "brief"
                 prompt = finalize_prompt(text, tree.get("style_block"))
                 await asyncio.to_thread(
-                    self.db.update_panel,
-                    panel["id"],
+                    self.db.update_beat,
+                    beat["id"],
                     brief=brief,
                     prompt=prompt,
                     prompt_source=source,
@@ -1002,13 +1002,16 @@ class StoryboardRunner:
                     {
                         "storyboard_id": storyboard_id,
                         "panel_id": panel["id"],
+                        "beat_id": beat["id"],
                         "done": done_snapshot,
                         "total": total,
                         "prompt_source": source,
                     },
                 )
 
-            await asyncio.gather(*(_one(scene, panel) for scene, panel in work))
+            await asyncio.gather(
+                *(_one(scene, panel, beat) for scene, panel, beat in work)
+            )
             return counts
 
     # ---- generate ------------------------------------------------------
