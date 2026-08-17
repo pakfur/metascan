@@ -538,7 +538,7 @@ async def compose_storyboard(
     stages = tuple(body.stages) if body.stages else story.STAGES
     try:
         await runner.check_compose_gates(
-            storyboard_id, stages, body.scene_ids, body.confirm
+            storyboard_id, stages, body.scene_ids, body.panel_ids, body.confirm
         )
     except ConfirmRequiredError as exc:
         # Must be caught before StoryboardError -- it's a subclass.

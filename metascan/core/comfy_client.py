@@ -442,6 +442,7 @@ class ComfyClient:
         panel_id: Optional[int] = None,
         priority: bool = False,
         output_dir: Optional[Path] = None,
+        beat_id: Optional[int] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -467,6 +468,7 @@ class ComfyClient:
                 params.to_json(),
                 panel_id,
                 str(output_dir) if output_dir else None,
+                beat_id,
             )
         )
         if priority:

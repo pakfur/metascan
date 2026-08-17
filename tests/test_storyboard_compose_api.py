@@ -37,7 +37,7 @@ class StubRunner:
     def handle_job_event(self, event, payload):
         pass
 
-    async def check_compose_gates(self, sb_id, stages, scene_ids, confirm):
+    async def check_compose_gates(self, sb_id, stages, scene_ids, panel_ids, confirm):
         if self.gate_error:
             raise self.gate_error
 
