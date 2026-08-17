@@ -80,10 +80,11 @@ def test_cuda_workstation_high_recommends_qwen38():
     assert g["qwen3vl-8b"].recommended is False
 
 
-def test_cuda_workstation_20gb_band_recommends_qwen38():
+def test_cuda_workstation_20gb_band_qwen38_unavailable_recommends_8b():
     g = feature_gates(_report(cuda_gb=20.0))
-    assert g["qwen38-27b"].available is True
-    assert g["qwen38-27b"].recommended is True
+    assert g["qwen38-27b"].available is False  # below its 22 GB floor
+    assert "22 GB" in g["qwen38-27b"].reason
+    assert g["qwen3vl-8b"].recommended is True
     assert g["qwen3vl-30b-a3b"].available is False  # below its 24 GB floor
 
 
@@ -91,7 +92,7 @@ def test_cuda_workstation_16gb_recommends_8b_qwen38_unavailable():
     g = feature_gates(_report(cuda_gb=16.0))
     assert g["qwen3vl-8b"].recommended is True
     assert g["qwen38-27b"].available is False
-    assert "20 GB" in g["qwen38-27b"].reason
+    assert "22 GB" in g["qwen38-27b"].reason
 
 
 def test_apple_silicon_recommends_4b_offers_all():

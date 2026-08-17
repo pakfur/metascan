@@ -416,7 +416,7 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
             recommended = False
         elif tier is Tier.CUDA_WORKSTATION:
             recommended = (
-                key == "qwen38-27b" if cuda_vram >= 20.0 else key == "qwen3vl-8b"
+                key == "qwen38-27b" if cuda_vram >= 22.0 else key == "qwen3vl-8b"
             )
         elif tier is Tier.CUDA_MAINSTREAM:
             recommended = key == "qwen3vl-4b"

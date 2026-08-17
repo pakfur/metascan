@@ -137,7 +137,7 @@ metascan/
   `metascan/core/vlm_models.REGISTRY` now spans two families — four
   Qwen3-VL Abliterated sizes (`qwen3vl-2b/4b/8b/30b-a3b`) plus
   `qwen38-27b` (Qwen3.8 27B Abliterated, dense hybrid Gated DeltaNet) —
-  and `qwen38-27b` is the `cuda_workstation` ≥20 GB VRAM recommendation
+  and `qwen38-27b` is the `cuda_workstation` ≥22 GB VRAM recommendation
   (`qwen3vl-8b` remains the pick below that floor).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
