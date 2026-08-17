@@ -1,14 +1,18 @@
-"""Registry of Qwen3-VL Abliterated model variants supported by metascan.
+"""Registry of VLM GGUF variants supported by metascan (Qwen3-VL Abliterated
++ Qwen3.8 Abliterated).
 
 Each entry pins a HuggingFace repo + GGUF filename that ships an Abliterated
 remix at the chosen quantization. The repos can be overridden at runtime via
-``config.models.qwen3vl_repos.<model_id>`` for users who want a different
-remix — but the GGUF/mmproj filenames must match.
+``config.models.vlm_repos.<model_id>`` for users who want a different
+remix — but the GGUF/mmproj filenames must match. The legacy key
+``config.models.qwen3vl_repos.<model_id>`` is still honored (Task 7 wires
+the override lookup).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,12 @@ class VlmModelSpec:
       - ``mmproj_repo_filename``: the filename inside the HF repo. All
         noctrex requantizations name it ``mmproj-F16.gguf``; the
         downloader renames on write to the local form.
+      - ``ctx_size``: TOTAL --ctx-size budget, split across
+        ``parallel_slots`` (each slot sees ctx_size / parallel_slots).
+      - ``extra_args``: extra llama-server argv appended verbatim
+        (KV-cache quant, reasoning control, …).
+      - ``cuda_gate_vram_gb``: CUDA availability floor for feature_gates;
+        None means "use min_vram_gb".
     """
 
     model_id: str
@@ -42,14 +52,20 @@ class VlmModelSpec:
     approx_vram_gb: float
     min_vram_gb: float
     parallel_slots: int
+    ctx_size: int = 32768
+    extra_args: tuple[str, ...] = ()
+    cuda_gate_vram_gb: Optional[float] = None
     mmproj_repo_filename: str = "mmproj-F16.gguf"
 
 
-# Source weights live under the ``huihui-ai`` namespace as safetensors;
-# noctrex publishes consistent GGUF requantizations of the four sizes we
-# target. Verified May 2026. A user override via
-# ``config.models.qwen3vl_repos.<model_id>`` can replace the repo for any
-# id (drop-in remix expected to keep matching filenames).
+# Source weights for the qwen3vl-* entries live under the ``huihui-ai``
+# namespace as safetensors; noctrex publishes consistent GGUF
+# requantizations of the four sizes we target. Verified May 2026. A user
+# override via ``config.models.vlm_repos.<model_id>`` (legacy
+# ``qwen3vl_repos`` also honored) can replace the repo for any id (drop-in
+# remix expected to keep matching filenames). The 27B entry (qwen38-27b)
+# ships from chimingw's OrcaRouter GGUF repo instead, with its mmproj
+# nested under an ``AUX/`` subdir upstream.
 REGISTRY: dict[str, VlmModelSpec] = {
     "qwen3vl-2b": VlmModelSpec(
         model_id="qwen3vl-2b",
@@ -83,6 +99,7 @@ REGISTRY: dict[str, VlmModelSpec] = {
         approx_vram_gb=9.5,
         min_vram_gb=9.0,
         parallel_slots=4,
+        cuda_gate_vram_gb=10.0,
     ),
     "qwen3vl-30b-a3b": VlmModelSpec(
         model_id="qwen3vl-30b-a3b",
@@ -94,6 +111,31 @@ REGISTRY: dict[str, VlmModelSpec] = {
         approx_vram_gb=22.0,
         min_vram_gb=20.0,
         parallel_slots=4,
+        extra_args=("--cache-type-k", "q8_0", "--cache-type-v", "q8_0"),
+        cuda_gate_vram_gb=24.0,
+    ),
+    "qwen38-27b": VlmModelSpec(
+        model_id="qwen38-27b",
+        display_name="Qwen3.8 27B (Abliterated)",
+        hf_repo="chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF",
+        gguf_filename="Qwen3.8-27B-Uncensored-OrcaRouter-Q4_K_M.gguf",
+        mmproj_filename="mmproj-qwen38-27b-F16.gguf",
+        quant="Q4_K_M",
+        approx_vram_gb=20.0,
+        min_vram_gb=18.0,
+        parallel_slots=4,
+        ctx_size=65536,
+        # Hybrid Gated DeltaNet model: KV cache is ~64 KB/token (only 16 of
+        # 64 layers are full attention), so 65536 ctx costs ~4 GB. Reasoning
+        # MUST stay disabled: llama.cpp grammar enforcement is inactive
+        # while thinking is enabled (ggml-org/llama.cpp#20345) and every
+        # metascan call is grammar-constrained. Jinja chat templating is
+        # default-enabled as of b10456, so no explicit --jinja flag is
+        # needed. Requires llama.cpp >= b10450 (DeltaNet CUDA fix) — see
+        # utils/llama_server.LLAMA_CPP_RELEASE.
+        extra_args=("--reasoning", "off"),
+        cuda_gate_vram_gb=20.0,
+        mmproj_repo_filename="AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf",
     ),
 }
 

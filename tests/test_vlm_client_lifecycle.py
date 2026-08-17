@@ -68,3 +68,23 @@ async def test_status_callback_fires_on_state_change():
     assert STATE_LOADING in events
     assert STATE_READY in events
     assert STATE_STOPPED in events
+
+
+def test_build_command_is_spec_driven():
+    from metascan.core.vlm_client import VlmClient
+    from metascan.core.vlm_models import REGISTRY
+
+    client = VlmClient()
+
+    cmd27 = client._build_command(REGISTRY["qwen38-27b"], 12345)
+    assert cmd27[cmd27.index("--ctx-size") + 1] == "65536"
+    for arg in REGISTRY["qwen38-27b"].extra_args:
+        assert arg in cmd27
+    assert "--cache-type-k" not in cmd27
+
+    cmd30 = client._build_command(REGISTRY["qwen3vl-30b-a3b"], 12345)
+    assert "--cache-type-k" in cmd30
+    assert cmd30[cmd30.index("--ctx-size") + 1] == "32768"
+
+    cmd4 = client._build_command(REGISTRY["qwen3vl-4b"], 12345)
+    assert "--cache-type-k" not in cmd4

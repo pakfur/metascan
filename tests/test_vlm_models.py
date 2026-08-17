@@ -5,8 +5,14 @@ import pytest
 from metascan.core.vlm_models import REGISTRY, VlmModelSpec, get_spec, resolve_repo
 
 
-def test_all_four_sizes_present():
-    expected = {"qwen3vl-2b", "qwen3vl-4b", "qwen3vl-8b", "qwen3vl-30b-a3b"}
+def test_all_five_entries_present():
+    expected = {
+        "qwen3vl-2b",
+        "qwen3vl-4b",
+        "qwen3vl-8b",
+        "qwen3vl-30b-a3b",
+        "qwen38-27b",
+    }
     assert set(REGISTRY.keys()) == expected
 
 
@@ -22,10 +28,28 @@ def test_specs_are_well_formed():
         assert spec.parallel_slots in (2, 4)
 
 
-def test_min_vram_is_monotonic_by_size():
+def test_min_vram_is_monotonic_within_qwen3vl_family():
     sizes = ["qwen3vl-2b", "qwen3vl-4b", "qwen3vl-8b", "qwen3vl-30b-a3b"]
     vrams = [REGISTRY[s].min_vram_gb for s in sizes]
     assert vrams == sorted(vrams)
+
+
+def test_qwen38_entry_shape():
+    spec = REGISTRY["qwen38-27b"]
+    assert spec.hf_repo == "chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF"
+    assert spec.gguf_filename == "Qwen3.8-27B-Uncensored-OrcaRouter-Q4_K_M.gguf"
+    # Repo path may carry a subdir; the local filename must be flat.
+    assert spec.mmproj_repo_filename.startswith("AUX/")
+    assert "/" not in spec.mmproj_filename
+    assert spec.ctx_size == 65536
+    # Reasoning must be disabled — grammar enforcement is inactive while
+    # thinking is enabled (ggml-org/llama.cpp#20345).
+    assert any("reasoning" in a or "enable_thinking" in a for a in spec.extra_args)
+
+
+def test_moe_kv_cache_quant_moved_to_extra_args():
+    assert "--cache-type-k" in REGISTRY["qwen3vl-30b-a3b"].extra_args
+    assert REGISTRY["qwen3vl-4b"].extra_args == ()
 
 
 def test_get_spec_returns_spec():
