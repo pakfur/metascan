@@ -72,6 +72,13 @@ export interface Panel {
   beats: Beat[]
 }
 
+// `db.get_panel` (used by the PATCH /panels/{id} route) returns every
+// panels-table column but never attaches `beats` -- that assembly only
+// happens in `get_storyboard_tree`. Mirrors the BeatWithoutImages
+// merge-caveat above: callers of patchPanel must merge the beats array
+// back in from whatever they already have loaded.
+export type PanelWithoutBeats = Omit<Panel, 'beats'>
+
 export const VIDEO_ANCHORS = ['keeper', 'prev_last'] as const
 
 // `db.get_beat` (used by the PATCH /beats/{id} and POST /beats/{id}/select

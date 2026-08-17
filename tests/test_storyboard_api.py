@@ -252,6 +252,12 @@ def test_storyboard_patch_notes(client, storyboard_id):
     assert r.status_code == 200
 
 
+def test_storyboard_create_persists_notes(client):
+    sid = _create_storyboard(client, notes="n")
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["notes"] == "n"
+
+
 def test_create_storyboard_defaults_base_seed_and_clamps_batch_size(client):
     r = client.post(
         "/api/storyboard",
