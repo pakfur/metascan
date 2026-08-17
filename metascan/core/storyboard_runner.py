@@ -454,9 +454,10 @@ class StoryboardRunner:
                     else None
                 )
                 async with sem:
-                    panels, warnings = await generate_validated(
+                    # TODO(Task 5): full stage rework
+                    panels = await generate_validated(
                         f"shots ({scene['name']})",
-                        lambda raw: story.validate_shots_response(raw, roster),
+                        story.validate_shots_response,
                         system_prompt=story.STORY_SHOTS_SYSTEM,
                         user_prompt=story.build_shots_user_prompt(
                             outline_json,
@@ -471,8 +472,6 @@ class StoryboardRunner:
                         max_tokens=1600,
                         timeout=300.0,
                     )
-                for w in warnings:
-                    logger.warning("compose shots (%s): %s", scene["name"], w)
                 await asyncio.to_thread(
                     self.db.replace_scene_panels, scene["id"], panels
                 )
@@ -505,7 +504,8 @@ class StoryboardRunner:
             nonlocal done
             subjects = [s for s in tree["subjects"] if s["id"] in panel["subject_ids"]]
             async with sem:
-                beats = await generate_validated(
+                # TODO(Task 5): full stage rework
+                beats, warnings = await generate_validated(
                     f"beats (panel {panel['id']})",
                     lambda raw: story.validate_beats_response(raw, roster),
                     system_prompt=story.STORY_BEATS_SYSTEM,
@@ -517,6 +517,8 @@ class StoryboardRunner:
                     max_tokens=1600,
                     timeout=300.0,
                 )
+            for w in warnings:
+                logger.warning("compose beats (panel %s): %s", panel["id"], w)
             story.rescale_beat_durations(beats, float(panel.get("duration_s") or 12.0))
             await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
             async with lock:
