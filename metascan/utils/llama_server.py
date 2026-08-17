@@ -69,14 +69,18 @@ def pick_release_asset(report: HardwareReport) -> str:
     rel = LLAMA_CPP_RELEASE
     if report.os == "Darwin":
         if report.machine != "arm64":
+            # Upstream does publish a macOS x64 build (e.g.
+            # llama-b10456-bin-macos-x64.tar.gz) — metascan simply doesn't
+            # support Intel Mac as a target, so this stays a hard error.
             raise NotImplementedError(
-                "macOS Intel (x86_64) llama-server builds are not published "
-                "by upstream; only macOS arm64 is supported."
+                "macOS Intel (x86_64) is not supported by metascan; only "
+                "macOS arm64 is supported."
             )
         return f"llama-{rel}-bin-macos-arm64.tar.gz"
     if report.os == "Windows":
         if report.cuda is not None:
-            # b6500 ships only the cu12.4 variant for Windows CUDA.
+            # b10456 ships both cu12.4 and cu13.3 (x64) Windows CUDA
+            # variants; we pin 12.4 for broader driver compatibility.
             return f"llama-{rel}-bin-win-cuda-12.4-x64.zip"
         if report.vulkan and report.vulkan.has_real_device:
             return f"llama-{rel}-bin-win-vulkan-x64.zip"

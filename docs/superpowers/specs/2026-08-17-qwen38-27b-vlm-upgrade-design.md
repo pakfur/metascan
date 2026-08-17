@@ -36,7 +36,7 @@ API-only flagship). Key properties:
 | Thinking | **On by default**, per-request control via `chat_template_kwargs {"enable_thinking": false}` / `reasoning_effort`; newer builds prefer startup `--reasoning on/off` | Must be OFF for us: llama.cpp grammar enforcement is inactive while thinking is enabled (ggml-org/llama.cpp#20345), and every metascan VLM call is GBNF-constrained |
 | Chat template | Jinja embedded in GGUF; "template trap" — some packs ship a corrected `chat_template.jinja`; `--jinja` behavior must be verified on the new binary | llama-server auto-detects; verify no flag needed on b10456 |
 | Quant sizes | Q4_K_M ≈ 17 GB disk; +0.9 GB mmproj-F16 | Fits RTX 5090 32 GB comfortably; ~19–20 GB working set |
-| Abliterated remix | `chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF` — OrcaRouter abliteration, vision retained, `AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-BF16.gguf`, Q4_K_M 16.8 GB | Matches the registry's existing all-abliterated convention (NSFW lanes) |
+| Abliterated remix | `chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF` — OrcaRouter abliteration, vision retained, `AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf`, Q4_K_M 16.8 GB | Matches the registry's existing all-abliterated convention (NSFW lanes) |
 | MTP | Optional `MTP-ONLY` draft GGUF (~3 GB Q8_0) for speculative decoding via `--model-draft … --spec-type draft-mtp` | Optional speedup, future work |
 
 **Conclusion:** Qwen3.8-27B is an *addition* (a new top tier), not a family
@@ -151,7 +151,7 @@ no workaround → stop and reassess.
   - `reasoning: str | None = None` — emits `--reasoning <val>`; 27B entry
     sets `"off"`.
   - `mmproj_repo_filename` already exists; it must tolerate a subdir path
-    (`"AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-BF16.gguf"`) — verify
+    (`"AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf"`) — verify
     the HF downloader passes it through as the repo path and renames on
     write to the flat local `mmproj_filename`.
 - Add entry:
@@ -161,8 +161,8 @@ no workaround → stop and reassess.
       display_name="Qwen3.8 27B (Abliterated)",
       hf_repo="chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF",
       gguf_filename="Qwen3.8-27B-Uncensored-OrcaRouter-Q4_K_M.gguf",  # verify exact name
-      mmproj_filename="mmproj-qwen38-27b-BF16.gguf",
-      mmproj_repo_filename="AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-BF16.gguf",
+      mmproj_filename="mmproj-qwen38-27b-F16.gguf",
+      mmproj_repo_filename="AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf",
       quant="Q4_K_M",
       approx_vram_gb=20.0,
       min_vram_gb=18.0,

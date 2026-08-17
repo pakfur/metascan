@@ -69,3 +69,89 @@ def test_recommended_model_id_for_workstation_high_is_qwen38():
     from backend.services.scan_dispatch import recommended_vlm_model_id
 
     assert recommended_vlm_model_id(_report(cuda_gb=32.0)) == "qwen38-27b"
+
+
+def _touch_weights(vlm_dir, model_id):
+    from metascan.core.vlm_models import REGISTRY
+
+    spec = REGISTRY[model_id]
+    vlm_dir.mkdir(parents=True, exist_ok=True)
+    (vlm_dir / spec.gguf_filename).touch()
+    (vlm_dir / spec.mmproj_filename).touch()
+
+
+def _touch_binary(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "llama-server").touch()
+
+
+def test_preferred_falls_back_to_installed_30b_when_qwen38_recommended_but_missing(
+    monkeypatch, tmp_path
+):
+    """Workstation-high recommends qwen38-27b, but only 30b-a3b weights are
+    installed (host hasn't run setup_models.py for the new model yet). The
+    scan must still VLM-tag using the model it actually has, not silently
+    fall back to CLIP.
+    """
+    from backend.services import scan_dispatch
+    from backend.services.scan_dispatch import (
+        preferred_vlm_model_id,
+        should_tag_with_vlm,
+    )
+
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(scan_dispatch, "get_data_dir", lambda: tmp_path)
+    _touch_binary(tmp_path)
+    _touch_weights(tmp_path / "models" / "vlm", "qwen3vl-30b-a3b")
+
+    report = _report(cuda_gb=32.0)
+    assert preferred_vlm_model_id(report) == "qwen3vl-30b-a3b"
+    assert should_tag_with_vlm(report) is True
+
+
+def test_preferred_prefers_recommended_qwen38_when_both_installed(
+    monkeypatch, tmp_path
+):
+    """Once qwen38-27b's weights are also on disk, it wins over the older
+    30b-a3b install (the hardware-recommended model always takes priority
+    when its weights are present).
+    """
+    from backend.services import scan_dispatch
+    from backend.services.scan_dispatch import preferred_vlm_model_id
+
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(scan_dispatch, "get_data_dir", lambda: tmp_path)
+    _touch_binary(tmp_path)
+    vlm_dir = tmp_path / "models" / "vlm"
+    _touch_weights(vlm_dir, "qwen3vl-30b-a3b")
+    _touch_weights(vlm_dir, "qwen38-27b")
+
+    assert preferred_vlm_model_id(_report(cuda_gb=32.0)) == "qwen38-27b"
+
+
+def test_preferred_none_when_no_weights_installed(monkeypatch, tmp_path):
+    from backend.services import scan_dispatch
+    from backend.services.scan_dispatch import should_tag_with_vlm
+
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(scan_dispatch, "get_data_dir", lambda: tmp_path)
+    _touch_binary(tmp_path)
+
+    assert should_tag_with_vlm(_report(cuda_gb=32.0)) is False
+
+
+def test_preferred_none_on_cpu_only_even_with_weights_installed(monkeypatch, tmp_path):
+    """cpu_only has no recommended VLM model at all, so preferred_vlm_model_id
+    must stay None regardless of what weights happen to be on disk — mirrors
+    the pre-existing "never VLM-tag on cpu_only" behavior.
+    """
+    from backend.services import scan_dispatch
+    from backend.services.scan_dispatch import preferred_vlm_model_id
+
+    monkeypatch.setattr("metascan.utils.llama_server.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(scan_dispatch, "get_data_dir", lambda: tmp_path)
+    _touch_binary(tmp_path)
+    _touch_weights(tmp_path / "models" / "vlm", "qwen3vl-2b")
+
+    assert preferred_vlm_model_id(_report()) is None

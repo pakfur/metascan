@@ -81,21 +81,15 @@ def get_models_config(config: dict) -> dict:
         {
             "preload_at_startup": ["clip-large", ...],  # model ids
             "huggingface_token": "<str>",               # "" if unset
-            "vlm_repos": {"<model_id>": "<hf_repo>", ...}  # {} if unset;
-                # legacy key "qwen3vl_repos" is also read
         }
     """
     raw = config.get("models", {}) or {}
     preload = raw.get("preload_at_startup") or []
     if not isinstance(preload, list):
         preload = []
-    vlm_repos = raw.get("vlm_repos") or raw.get("qwen3vl_repos") or {}
-    if not isinstance(vlm_repos, dict):
-        vlm_repos = {}
     return {
         "preload_at_startup": [str(x) for x in preload],
         "huggingface_token": str(raw.get("huggingface_token") or ""),
-        "vlm_repos": {str(k): str(v) for k, v in vlm_repos.items()},
     }
 
 

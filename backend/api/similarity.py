@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
 from backend.dependencies import get_db
-from backend.services.scan_dispatch import recommended_vlm_model_id, should_tag_with_vlm
+from backend.services.scan_dispatch import preferred_vlm_model_id, should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.embedding_queue import EmbeddingQueue
@@ -156,9 +156,9 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
         if client is None:
             logger.debug("VLM drain skipped: no VlmClient installed")
             return
-        mid = recommended_vlm_model_id(detect_hardware())
+        mid = preferred_vlm_model_id(detect_hardware())
         if not mid:
-            logger.debug("VLM drain skipped: no recommended VLM model for this host")
+            logger.debug("VLM drain skipped: no preferred VLM model for this host")
             return
         pump = VlmTagPump(
             queue_dir=eq.index_dir,

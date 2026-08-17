@@ -122,8 +122,8 @@ REGISTRY: dict[str, VlmModelSpec] = {
         gguf_filename="Qwen3.8-27B-Uncensored-OrcaRouter-Q4_K_M.gguf",
         mmproj_filename="mmproj-qwen38-27b-F16.gguf",
         quant="Q4_K_M",
-        approx_vram_gb=20.0,
-        min_vram_gb=18.0,
+        approx_vram_gb=22.0,
+        min_vram_gb=20.0,
         parallel_slots=4,
         ctx_size=65536,
         # Hybrid Gated DeltaNet model: KV cache is ~64 KB/token (only 16 of
@@ -135,7 +135,7 @@ REGISTRY: dict[str, VlmModelSpec] = {
         # needed. Requires llama.cpp >= b10450 (DeltaNet CUDA fix) — see
         # utils/llama_server.LLAMA_CPP_RELEASE.
         extra_args=("--reasoning", "off"),
-        cuda_gate_vram_gb=20.0,
+        cuda_gate_vram_gb=22.0,
         mmproj_repo_filename="AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf",
     ),
 }

@@ -21,14 +21,14 @@ onMounted(async () => {
   }
 })
 
-const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (Qwen3-VL)']
+const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)']
 
 const tierLabel = computed(() => TIER_LABEL[models.tier])
 const tierColor = computed(() => TIER_COLOR[models.tier])
 
-const grouped = computed<Record<ModelGroup, ModelRow[]>>(() => {
-  const out: Record<ModelGroup, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [], 'Tagging (Qwen3-VL)': [] }
-  for (const row of models.models) out[row.group].push(row)
+const grouped = computed<Record<string, ModelRow[]>>(() => {
+  const out: Record<string, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [], 'Tagging (VLM)': [] }
+  for (const row of models.models) (out[row.group] ??= []).push(row)
   return out
 })
 

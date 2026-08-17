@@ -130,7 +130,7 @@ async def _run_retag_job(job: "_RetagJob") -> None:
     from metascan.core.hardware import detect_hardware
     from metascan.core.vlm_client import VlmClient
     from metascan.core.vlm_models import REGISTRY
-    from backend.services.scan_dispatch import recommended_vlm_model_id
+    from backend.services.scan_dispatch import preferred_vlm_model_id
 
     client = _vlm_client
     db = get_db()
@@ -152,7 +152,7 @@ async def _run_retag_job(job: "_RetagJob") -> None:
     job.total = len(filtered)
 
     model_id = (
-        client.model_id or recommended_vlm_model_id(detect_hardware()) or "qwen3vl-4b"
+        client.model_id or preferred_vlm_model_id(detect_hardware()) or "qwen3vl-4b"
     )
     # ensure_started once up front; the per-request path no longer needs to
     # re-acquire the start lock for every image.

@@ -43,8 +43,9 @@ def test_qwen38_entry_shape():
     assert "/" not in spec.mmproj_filename
     assert spec.ctx_size == 65536
     # Reasoning must be disabled — grammar enforcement is inactive while
-    # thinking is enabled (ggml-org/llama.cpp#20345).
-    assert any("reasoning" in a or "enable_thinking" in a for a in spec.extra_args)
+    # thinking is enabled (ggml-org/llama.cpp#20345). Pin the exact value:
+    # reasoning-on silently disables grammar enforcement.
+    assert spec.extra_args == ("--reasoning", "off")
 
 
 def test_moe_kv_cache_quant_moved_to_extra_args():
