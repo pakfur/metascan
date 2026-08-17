@@ -436,6 +436,22 @@ def test_latest_jobs_for_panels_empty_list(db):
     assert db.latest_jobs_for_panels([]) == {}
 
 
+def test_latest_jobs_for_beats(db):
+    sb, su, sc, pa = _build_tree(db)
+    beat_id = db.create_beat(pa, action="a beat")
+    pid = db.create_workflow_preset("p", "t2i", "{}", "{}")
+    j1 = db.create_generation_job(pid, "{}", panel_id=pa, beat_id=beat_id)
+    j2 = db.create_generation_job(pid, "{}", panel_id=pa, beat_id=beat_id)
+    result = db.latest_jobs_for_beats([beat_id])
+    assert set(result.keys()) == {beat_id}
+    assert result[beat_id]["id"] == j2
+    assert j2 > j1
+
+
+def test_latest_jobs_for_beats_empty_list(db):
+    assert db.latest_jobs_for_beats([]) == {}
+
+
 def test_get_storyboard_tree_and_list_beat_images_convert_paths(db, monkeypatch):
     """beat_images.file_path is stored POSIX; get_storyboard_tree and
     list_beat_images must return it through to_native_path, mirroring
