@@ -47,8 +47,13 @@ Hosts are bucketed into one of five tiers based on the strongest GPU detected (C
 | `nltk-punkt` | NLTK ≥ 3.8.2 (replaced by `punkt_tab`) | NLTK < 3.8.2 |
 | `nltk-punkt-tab` | NLTK < 3.8.2 (legacy uses `punkt`) | NLTK ≥ 3.8.2 |
 | `nltk-stopwords` | Never | Always |
+| `qwen3vl-2b` | Never — smallest VLM, CPU-viable | `cuda_entry`; CPU when nothing else is recommended |
+| `qwen3vl-4b` | CPU-only with < 16 GB RAM | `cuda_mainstream`; `apple_silicon` |
+| `qwen3vl-8b` | CUDA < 10 GB VRAM; CPU-only (needs GPU acceleration) | `cuda_workstation` below the 20 GB `qwen38-27b` floor |
+| `qwen3vl-30b-a3b` (MoE) | CUDA < 24 GB VRAM; CPU-only | Never — available from 24 GB up, but `qwen38-27b` is preferred at that tier |
+| `qwen38-27b` | CUDA < 20 GB VRAM; CPU-only | `cuda_workstation` ≥ 20 GB VRAM |
 
-`clip-small` / `clip-medium` are also marked "available but not recommended" on CPU-only hosts — they'll run, just very slowly. The chip tooltip surfaces the reason ("ViT-H/14 is too slow on CPU.", "Requires 4 GB VRAM for 1080p; detected 2 GB.", etc.).
+`clip-small` / `clip-medium` are also marked "available but not recommended" on CPU-only hosts — they'll run, just very slowly. The chip tooltip surfaces the reason ("ViT-H/14 is too slow on CPU.", "Requires 4 GB VRAM for 1080p; detected 2 GB.", etc.). On Apple Silicon every VLM size is offered as available (opt-in) regardless of unified RAM headroom — there's no RAM-based cutoff for VLM sizes on Mac, unlike CLIP's ViT-H/14 gate.
 
 ## Auto-Warnings
 
