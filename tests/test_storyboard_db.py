@@ -632,3 +632,128 @@ def test_delete_storyboard_without_folder_returns_none_folder(db):
     ok, _purged, deleted_folder = db.delete_storyboard(sb)
     assert ok is True
     assert deleted_folder is None
+
+
+def test_v3_schema_shapes(db):
+    """Panels are thin containers; beats carry framing/prompt/keeper."""
+    with db._get_connection() as conn:
+        panel_cols = {r["name"] for r in conn.execute("PRAGMA table_info(panels)")}
+        beat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(beats)")}
+        sb_cols = {r["name"] for r in conn.execute("PRAGMA table_info(storyboards)")}
+        tables = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    for gone in (
+        "shot_size",
+        "angle",
+        "lens",
+        "notes",
+        "negative",
+        "brief",
+        "prompt",
+        "prompt_locked",
+        "prompt_source",
+        "subject_ids",
+        "selected_image_id",
+    ):
+        assert gone not in panel_cols, gone
+    for kept in (
+        "action",
+        "duration_s",
+        "video_prompt",
+        "video_anchor",
+        "video_compiled_anchor",
+    ):
+        assert kept in panel_cols, kept
+    for added in (
+        "shot_size",
+        "angle",
+        "lens",
+        "subject_ids",
+        "brief",
+        "prompt",
+        "prompt_locked",
+        "prompt_source",
+        "selected_image_id",
+    ):
+        assert added in beat_cols, added
+    assert "notes" in sb_cols
+    assert "beat_images" in tables
+    assert "panel_images" not in tables
+
+
+def test_v3_migration_from_v2_layout(tmp_path):
+    """A dev DB with the old panel-centric layout is dropped and rebuilt:
+    hidden media released, panel-scoped jobs purged."""
+    db_dir = tmp_path / "olddb"
+    db_dir.mkdir()
+    db_path = db_dir / "metascan.db"
+    conn = sqlite3.connect(db_path)
+    # The media table needs the full set of columns later migration steps
+    # (unrelated to this v3 gate) unconditionally reference -- this
+    # represents a dev DB that's already fully migrated on the media side,
+    # just not yet on the Phase-B panel/beat tables.
+    conn.executescript(
+        """
+        CREATE TABLE media (
+            file_path TEXT PRIMARY KEY,
+            data TEXT NOT NULL DEFAULT '{}',
+            is_favorite INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            playback_speed REAL,
+            width INTEGER,
+            height INTEGER,
+            file_size INTEGER,
+            frame_rate REAL,
+            duration REAL,
+            modified_at TEXT,
+            camera_make TEXT,
+            camera_model TEXT,
+            lens_model TEXT,
+            datetime_original TEXT,
+            gps_latitude REAL,
+            gps_longitude REAL,
+            gps_altitude REAL,
+            orientation INTEGER,
+            photo_exposure TEXT,
+            hidden INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE panels (id INTEGER PRIMARY KEY, prompt TEXT);
+        CREATE TABLE beats (id INTEGER PRIMARY KEY, panel_id INTEGER);
+        CREATE TABLE panel_images (id INTEGER PRIMARY KEY, panel_id INTEGER,
+            file_path TEXT);
+        CREATE TABLE generation_jobs (
+            id INTEGER PRIMARY KEY,
+            panel_id INTEGER,
+            state TEXT,
+            comfy_prompt_id TEXT
+        );
+        INSERT INTO media (file_path, data, hidden) VALUES ('a/x.png', '{}', 1);
+        INSERT INTO panel_images VALUES (1, 1, 'a/x.png');
+        INSERT INTO generation_jobs (id, panel_id) VALUES (7, 1);
+        PRAGMA user_version = 2;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = DatabaseManager(db_dir)
+    try:
+        with db._get_connection() as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] >= 3
+            assert (
+                c.execute(
+                    "SELECT hidden FROM media WHERE file_path='a/x.png'"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                c.execute(
+                    "SELECT COUNT(*) FROM generation_jobs WHERE panel_id IS NOT NULL"
+                ).fetchone()[0]
+                == 0
+            )
+    finally:
+        db.close()
