@@ -32,6 +32,8 @@ def test_cpu_only_recommends_clip_offers_2b_4b():
     assert g["qwen3vl-4b"].recommended is False
     assert g["qwen3vl-8b"].available is False
     assert g["qwen3vl-30b-a3b"].available is False
+    assert g["qwen38-27b"].available is False
+    assert g["qwen38-27b"].reason == "Requires GPU acceleration."
 
 
 def test_cpu_only_low_ram_only_2b():
@@ -66,14 +68,30 @@ def test_cuda_workstation_recommends_8b():
     g = feature_gates(_report(cuda_gb=16.0))
     assert g["qwen3vl-8b"].recommended is True
     assert g["qwen3vl-30b-a3b"].available is False  # below 24 GB
+    assert g["qwen38-27b"].available is False
 
 
-def test_cuda_workstation_high_recommends_30b():
+def test_cuda_workstation_high_recommends_qwen38():
     g = feature_gates(_report(cuda_gb=24.0))
+    assert g["qwen38-27b"].available is True
+    assert g["qwen38-27b"].recommended is True
     assert g["qwen3vl-30b-a3b"].available is True
-    assert g["qwen3vl-30b-a3b"].recommended is True
-    assert g["qwen3vl-8b"].available is True
+    assert g["qwen3vl-30b-a3b"].recommended is False
     assert g["qwen3vl-8b"].recommended is False
+
+
+def test_cuda_workstation_20gb_band_recommends_qwen38():
+    g = feature_gates(_report(cuda_gb=20.0))
+    assert g["qwen38-27b"].available is True
+    assert g["qwen38-27b"].recommended is True
+    assert g["qwen3vl-30b-a3b"].available is False  # below its 24 GB floor
+
+
+def test_cuda_workstation_16gb_recommends_8b_qwen38_unavailable():
+    g = feature_gates(_report(cuda_gb=16.0))
+    assert g["qwen3vl-8b"].recommended is True
+    assert g["qwen38-27b"].available is False
+    assert "20 GB" in g["qwen38-27b"].reason
 
 
 def test_apple_silicon_recommends_4b_offers_all():
@@ -83,6 +101,8 @@ def test_apple_silicon_recommends_4b_offers_all():
     assert g["qwen3vl-4b"].recommended is True
     assert g["qwen3vl-8b"].available is True
     assert g["qwen3vl-30b-a3b"].available is True
+    assert g["qwen38-27b"].available is True
+    assert g["qwen38-27b"].recommended is False
 
 
 def test_llama_server_gate_present():

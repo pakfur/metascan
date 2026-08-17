@@ -258,7 +258,7 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     Keys are the model ids surfaced by ``GET /api/models/status``:
     ``clip-{small,medium,large}``, ``resr-{x2,x4,x4-anime}``, ``gfpgan-v1.4``,
     ``rife``, ``nltk-punkt``, ``nltk-punkt-tab``, ``nltk-stopwords``,
-    ``qwen3vl-{2b,4b,8b,30b-a3b}``, ``llama-server``.
+    ``qwen3vl-{2b,4b,8b,30b-a3b}``, ``qwen38-27b``, ``llama-server``.
     """
     tier = classify_tier(report)
     gates: dict[str, Gate] = {}
@@ -382,7 +382,7 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
         )
     gates["nltk-stopwords"] = Gate(available=True, recommended=True, reason="")
 
-    # ---- Qwen3-VL Abliterated tagging ----
+    # ---- VLM tagging (Qwen3-VL + Qwen3.8 Abliterated) ----
     # min_vram_gb is the gate floor; recommended = the tier's default size.
     is_apple = report.mps and report.os == "Darwin" and report.machine == "arm64"
     ram_gb = report.ram_gb or 0.0
@@ -390,21 +390,13 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     for key, _spec in _VLM_REGISTRY.items():
         min_vram = _spec.min_vram_gb
         if report.cuda is not None:
-            if key == "qwen3vl-30b-a3b":
-                # 30B is gated on cuda_workstation >= 24 GB only.
-                available = cuda_vram >= 24.0
-                reason = "" if available else "Requires 24 GB VRAM."
-            elif key == "qwen3vl-8b":
-                # 8B starts at the cuda_mainstream high band (>=10 GB).
-                available = cuda_vram >= 10.0
-                reason = "" if available else "Requires 10 GB VRAM."
-            else:
-                available = cuda_vram >= min_vram
-                reason = (
-                    ""
-                    if available
-                    else f"Requires {min_vram:.0f} GB VRAM; detected {cuda_vram} GB."
-                )
+            floor = _spec.cuda_gate_vram_gb or min_vram
+            available = cuda_vram >= floor
+            reason = (
+                ""
+                if available
+                else f"Requires {floor:.0f} GB VRAM; detected {cuda_vram} GB."
+            )
         elif is_apple:
             available = True  # all sizes offered as opt-in on Apple Silicon
             reason = ""
@@ -424,7 +416,7 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
             recommended = False
         elif tier is Tier.CUDA_WORKSTATION:
             recommended = (
-                key == "qwen3vl-30b-a3b" if cuda_vram >= 24.0 else key == "qwen3vl-8b"
+                key == "qwen38-27b" if cuda_vram >= 20.0 else key == "qwen3vl-8b"
             )
         elif tier is Tier.CUDA_MAINSTREAM:
             recommended = key == "qwen3vl-4b"
