@@ -272,3 +272,41 @@ no workaround → stop and reassess.
 - https://github.com/ggml-org/llama.cpp/issues/20345 (grammar inactive while thinking enabled)
 - https://unsloth.ai/docs/models/qwen3.8 (quant/VRAM table, reasoning_effort)
 - https://dev.to/purpledoubled/run-qwen-38-27b-locally-real-gguf-sizes-the-kv-cache-trick-and-the-template-trap-114j (KV cache math, template trap)
+
+---
+
+## Validation results (2026-08-17, RTX 5090 32 GB / WSL2, llama.cpp b10456)
+
+Spike (Task 3) — all four gates passed on the local b10456 CUDA build:
+coherent text (no DeltaNet corruption), GBNF grammar enforced exactly with
+`--reasoning off` (finish_reason=stop, no think block), vision OK,
+vision+grammar tagging OK. Qwen3-VL 30B-A3B regression-checked clean on the
+same binary. GGUF sha256 verified against the repo's SHA256SUMS. VRAM:
+~21.7 GB for Q4_K_M + mmproj at `--ctx-size 65536 --parallel 4`.
+
+Task 10 — direct `VlmClient` runs through the real code paths (live
+prompts + grammars from `meta_prompt.yml`), 8 library thumbnails:
+
+- **Tagging quality:** `qwen38-27b` is clearly more accurate than
+  `qwen3vl-30b-a3b`. The 30B MoE misread one bedroom scene as a
+  bathroom/shower scene (invented towels, tile) and labeled adult women
+  "mother/daughter/child" on three images; the 27B read all eight scenes
+  correctly, picked up finer details (whiteboard, screen reflection,
+  tongue-out expression), and correctly emitted an `nsfw` tag where
+  warranted.
+- **Tagging throughput:** 30B-A3B is ~5× faster (~0.5 s/image vs
+  ~2.6 s/image) thanks to its 3.3B active params. Trade-off: the
+  workstation recommendation now favors quality (27B); users who scan very
+  large libraries can still Load the 30B from the Models tab for speed.
+- **Describe / story / sound paths:** subject describe
+  (`SUBJECT_DESCRIBE_GRAMMAR`), story outline (`OUTLINE_GRAMMAR` +
+  validator), and H3 sound (`SOUND_GRAMMAR` + validator) all parsed
+  cleanly on the first attempt. Outline quality was strong (coherent
+  noir logline, distinct subject voices, well-formed 5-beat arc). No
+  `meta_prompt.yml` changes were needed.
+- **Load times:** ~15 s cold load for the 27B; ~4.5 s swap to the 30B.
+- **Deferred:** the full in-app storyboard compose/compile pass (running
+  server + DB) was deliberately deferred to post-merge to avoid
+  restarting the live backend; the API surfaces exercised here are the
+  same ones the app calls. The b10456 local binary was promoted to
+  `data/bin/local` (previous build kept at `data/bin/local.pre-b10456`).
