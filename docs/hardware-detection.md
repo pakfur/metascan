@@ -47,8 +47,8 @@ Hosts are bucketed into one of five tiers based on the strongest GPU detected (C
 | `nltk-punkt` | NLTK ≥ 3.8.2 (replaced by `punkt_tab`) | NLTK < 3.8.2 |
 | `nltk-punkt-tab` | NLTK < 3.8.2 (legacy uses `punkt`) | NLTK ≥ 3.8.2 |
 | `nltk-stopwords` | Never | Always |
-| `qwen3vl-2b` | Never — smallest VLM, CPU-viable | `cuda_entry`; CPU when nothing else is recommended |
-| `qwen3vl-4b` | CPU-only with < 16 GB RAM | `cuda_mainstream`; `apple_silicon` |
+| `qwen3vl-2b` | CUDA < 3 GB VRAM; always available on CPU-only | `cuda_entry` |
+| `qwen3vl-4b` | CUDA < 5 GB VRAM; CPU-only with < 16 GB RAM | `cuda_mainstream`; `apple_silicon` |
 | `qwen3vl-8b` | CUDA < 10 GB VRAM; CPU-only (needs GPU acceleration) | `cuda_workstation` below the 20 GB `qwen38-27b` floor |
 | `qwen3vl-30b-a3b` (MoE) | CUDA < 24 GB VRAM; CPU-only | Never — available from 24 GB up, but `qwen38-27b` is preferred at that tier |
 | `qwen38-27b` | CUDA < 20 GB VRAM; CPU-only | `cuda_workstation` ≥ 20 GB VRAM |
