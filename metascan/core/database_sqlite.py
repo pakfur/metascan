@@ -1931,10 +1931,10 @@ class DatabaseManager:
 
         Must run after the panels'/beats' cascade delete, in the same
         transaction. A path still referenced by a surviving beat_images
-        row (another beat's variant) or by a
-        storyboard_subjects.reference_path is NOT deleted -- the media
-        FK's ON DELETE CASCADE / SET NULL would silently destroy that
-        other beat's image row or null the subject's reference -- it is
+        row (another beat's variant), a storyboard_subjects.reference_path,
+        or a scenes.reference_path is NOT deleted -- the media FK's ON
+        DELETE CASCADE / SET NULL would silently destroy that other
+        beat's image row or null the subject's/scene's reference -- it is
         unhidden instead, the same release-into-the-library semantics as
         a non-purge delete. Deleting a media row cascades its indices
         and folder_items rows.
@@ -1950,6 +1950,11 @@ class DatabaseManager:
                 or conn.execute(
                     "SELECT 1 FROM storyboard_subjects "
                     "WHERE reference_path = ? LIMIT 1",
+                    (path,),
+                ).fetchone()
+                is not None
+                or conn.execute(
+                    "SELECT 1 FROM scenes WHERE reference_path = ? LIMIT 1",
                     (path,),
                 ).fetchone()
                 is not None
