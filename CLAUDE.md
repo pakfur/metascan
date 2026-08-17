@@ -134,6 +134,11 @@ metascan/
   VLM-source tag rows survive CLIP rescans (the demote-on-rescan logic in
   `database_sqlite._update_indices` preserves them). Engine choice rationale
   is in `docs/superpowers/specs/2026-05-02-qwen3vl-tagging-design.md` §11.
+  `metascan/core/vlm_models.REGISTRY` now spans two families — four
+  Qwen3-VL Abliterated sizes (`qwen3vl-2b/4b/8b/30b-a3b`) plus
+  `qwen38-27b` (Qwen3.8 27B Abliterated, dense hybrid Gated DeltaNet) —
+  and `qwen38-27b` is the `cuda_workstation` ≥20 GB VRAM recommendation
+  (`qwen3vl-8b` remains the pick below that floor).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
@@ -160,16 +165,22 @@ metascan/
   bundled-asset download because both `_vlm_status_rows` and the
   downloader check `binary_path().exists()`. See
   `docs/build-llama-server.md`.
-- **llama.cpp release zip extraction must flatten `bin/`.** The release
-  archives ship the binary plus its sister shared libraries
+- **llama.cpp release archive extraction must flatten `bin/`.** The
+  release archives ship the binary plus its sister shared libraries
   (`libllama.so`, `libmtmd.so`, `libggml*.so`, …) under `build/bin/`.
   `llama-server`'s `RUNPATH` is `$ORIGIN`, so every `.so` must land in
   the same directory as the binary or it dies at startup with `error
-  while loading shared libraries`. b7400+ archives also include
-  symlinked SONAME chains (`libllama.so` → `libllama.so.0` →
-  `libllama.so.0.0.7400`) — preserve them via `os.symlink` (zip stores
-  the link target as the file content with `S_IFLNK` in
-  `external_attr`). Logic lives in `setup_models.py:_ensure_target`.
+  while loading shared libraries`. From `LLAMA_CPP_RELEASE = "b10456"`
+  onward, Linux/macOS assets are `.tar.gz` (Windows stays `.zip`) —
+  `setup_models.py` picks `_extract_flat_bin_targz` or
+  `_extract_flat_bin_zip` off the URL's suffix in `_ensure_target`.
+  Archives also include symlinked SONAME chains (`libllama.so` →
+  `libllama.so.0` → `libllama.so.0.0.<build>`) — the zip path preserves
+  them via `os.symlink` (zip stores the link target as the file content
+  with `S_IFLNK` in `external_attr`), the tar path via
+  `TarInfo.issym()`/`.linkname` (tar stores real symlink entries
+  natively). Both extractors defer symlink creation until after their
+  targets are written.
 - **Local llama.cpp builds need explicit RPATH + flat output.**
   `cmake` by default places shared libs alongside their target's
   source dir (`build/tools/mtmd/libmtmd.so`, `build/src/libllama.so`,
@@ -192,6 +203,19 @@ metascan/
   `rm -rf "${WORK_DIR}"` so any reliance on the build-tree rpath
   surfaces immediately rather than passing verify and failing on first
   user activation.
+- **Qwen3.8 reasoning must stay disabled.** `qwen38-27b`'s `extra_args`
+  disable thinking at server startup because llama.cpp grammar enforcement
+  is inactive while thinking is enabled (ggml-org/llama.cpp#20345) — and
+  every metascan VLM call is GBNF-constrained. Never remove those flags
+  without moving all call sites off grammars. The model also requires
+  llama.cpp >= ~b10450: older CUDA builds load it fine and silently emit
+  corrupted tokens (Gated DeltaNet kernel bug). `LLAMA_CPP_RELEASE` is
+  pinned accordingly; a stale `data/bin/local/llama-server` built from an
+  older tag reproduces the garbage-output failure even with a correct pin.
+- **Per-model llama-server flags live in `VlmModelSpec.extra_args`**, and
+  the context budget in `VlmModelSpec.ctx_size` — never re-introduce
+  model-id string matching in `vlm_client._build_command` or
+  `startswith("qwen3vl-")` filters in selection code; use `mid in REGISTRY`.
 - **Qwen3-VL pipeline DB writes must run in a worker thread.**
   Both `_run_retag_job` (`backend/api/vlm.py`) and `VlmTagPump.drain_once`
   (`backend/services/vlm_tag_pump.py`) wrap `db.add_tag_indices` with

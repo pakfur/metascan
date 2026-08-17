@@ -102,14 +102,24 @@ The Vite proxy forwards `/api/*` and `/ws` to the backend during development.
 - **DELETE endpoints return `{status: "deleted"}` (not 204).** The frontend `request<T>` wrapper calls `res.json()` on every response.
 - **Search is a filter layer, not a separate results view.** `useSearchStore` holds text search, Find Similar, and tag-AND path sets that the media store intersects with the folder/preset scope. The search endpoints return light unbounded `[{file_path, similarity_score}]` lists with the score threshold applied server-side, and a Relevance sort orders the grid by score while a search is active.
 
-## Qwen3-VL VLM tagger
+## Qwen3-VL / Qwen3.8 VLM tagger
 
 `VlmClient` (`metascan/core/vlm_client.py`) is an asyncio supervisor that
-manages a `llama-server` subprocess running an Abliterated Qwen3-VL GGUF.
+manages a `llama-server` subprocess running an Abliterated VLM GGUF.
 It mirrors `InferenceClient`'s state machine (idle → spawning → loading
 → ready → error/stopped) but talks HTTP to llama-server instead of NDJSON
 to a Python worker. Tag generation goes through `generate_tags(image_path)`
 which POSTs to `/v1/chat/completions` with a JSON-array grammar.
+
+`metascan/core/vlm_models.REGISTRY` holds five entries across two model
+families: four Qwen3-VL Abliterated sizes (`qwen3vl-2b/4b/8b/30b-a3b`)
+and `qwen38-27b` (Qwen3.8 27B Abliterated, a dense hybrid Gated
+DeltaNet model). Each `VlmModelSpec` carries `extra_args` (extra
+llama-server argv appended verbatim — e.g. `qwen38-27b` disables
+reasoning so its GBNF grammar constraints stay enforced) and `ctx_size`
+(the total `--ctx-size` budget, split across `parallel_slots`) alongside
+the download/VRAM metadata; `vlm_client._build_command` reads both
+fields off the active spec rather than switching on model id.
 
 The `models` WebSocket channel carries two new event types:
 - `vlm_status`: full snapshot when the supervisor's state changes.

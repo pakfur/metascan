@@ -2,7 +2,7 @@
 
 [← Back to README](../README.md)
 
-The Qwen3-VL VLM tagger runs inside a `llama-server` subprocess from
+The Qwen3-VL / Qwen3.8 VLM tagger runs inside a `llama-server` subprocess from
 [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp). Metascan
 ships an upstream prebuilt that auto-installs from the Models tab, but
 in some cases that prebuilt either doesn't exist or doesn't include the
@@ -74,7 +74,7 @@ venv first: `source venv/bin/activate`.
 
 The script:
 
-1. Reads the pinned release tag (currently `b7400`) from the runtime so
+1. Reads the pinned release tag (currently `b10456`) from the runtime so
    the build matches what the rest of metascan expects.
 2. Clones `ggml-org/llama.cpp` at that tag into a temp directory.
 3. Configures cmake with the appropriate accelerator flag.
@@ -157,6 +157,18 @@ both:
   binary that the local override has already replaced).
 
 `data/` is gitignored, so your build doesn't leak into commits.
+
+**Rebuild after every `LLAMA_CPP_RELEASE` pin bump.** The override check
+is presence-only — `binary_path()` never compares the local binary's
+version against the pin, it just prefers `data/bin/local/` if the file
+exists. A stale local build silently masks the bundled/downloaded binary
+at the new pin, and on this project the pin bumps aren't cosmetic: the
+Qwen3.8 registry entry (`qwen38-27b`) needs llama.cpp ≥ ~b10450 for a
+Gated DeltaNet CUDA kernel fix, and a build from an older tag still
+*loads* the model — it just emits corrupted output instead of failing
+loudly. After bumping the pin, re-run `./scripts/build_llama_server.sh`
+(or `rm -rf data/bin/local` to fall back to the bundled/downloaded
+binary) rather than assuming the existing local build still applies.
 
 ## Verify it's loaded
 

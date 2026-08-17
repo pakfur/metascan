@@ -31,7 +31,8 @@ Configuration is stored in `config.json` in the application directory.
   },
   "models": {
     "preload_at_startup": ["clip-large"],
-    "huggingface_token": ""
+    "huggingface_token": "",
+    "vlm_repos": {}
   },
   "comfy": {
     "base_url": "http://127.0.0.1:8188",
@@ -69,8 +70,9 @@ Managed by the Models tab in the config dialog. Both fields are surfaced via the
 
 - **`preload_at_startup`** — model ids to preload on server start. The lifespan loop reads this; supplying `clip-<key>` triggers a CLIP weights load before the first request.
 - **`huggingface_token`** — masked in the UI; injected as `HF_TOKEN` into subprocess env so embedding/inference workers can pull gated weights.
+- **`vlm_repos`** — `{"<model_id>": "<hf-repo>"}`, one entry per VLM registry id (`qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`) to override the default HuggingFace repo `setup_models.py` downloads from — e.g. to point at a different quant or remix. The GGUF/mmproj filenames still have to match what the registry expects. Defaults to `{}` (use the registry's built-in repo for every model). The legacy key `qwen3vl_repos` is still read for backward compatibility if `vlm_repos` is absent.
 
-Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version.
+Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`, `qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version. The VLM ids are also the valid keys for `vlm_repos` above.
 
 ## `comfy`
 

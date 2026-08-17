@@ -3,7 +3,7 @@
 A reservoir of feature ideas for leveraging Qwen3-VL (multimodal) and a
 potential Qwen3 (text-only) companion model in metascan. Captured from
 brainstorming on 2026-05-03. Items have stable IDs (TA-, TB-, CC-, FN-,
-CI-, REC-) so future discussions can reference them by label.
+CI-, REC-, EN-) so future discussions can reference them by label.
 
 This is an idea reservoir, not a roadmap. Inclusion here implies the
 idea is worth remembering, not committed to delivery.
@@ -211,6 +211,31 @@ FN-1..FN-4 being in place.
   caption styles.
 - **CI-6: `MetascanI2VPromptPicker`.** Image + Prompt generated from
   prompt playground (TA-10). 
+
+---
+
+## Engine / Infra Ideas
+
+Ideas about the VLM engine itself rather than a user-facing feature.
+
+- **EN-1: MTP speculative decoding for `qwen38-27b`.** The chimingw
+  `qwen38-27b` repo also ships a draft model,
+  `MTP/Qwen3.8-27B-Uncensored-OrcaRouter-MTP-Q8_0.gguf` (~3 GB), sized
+  for llama-server's speculative-decoding path
+  (`--model-draft <path> --spec-type draft-mtp`). Could meaningfully
+  speed up tagging throughput on `cuda_workstation` hosts already
+  running the 27B model. Would need a new `draft_gguf_filename` field
+  on `VlmModelSpec`, a download target for it in `setup_models.py`, and
+  the extra flags composed into `vlm_client._build_command` alongside
+  the existing `extra_args`/`ctx_size` handling.
+- **EN-2: VLM video tagging via sampled frames.** Qwen3.8 (and Qwen3-VL
+  generally) understands video natively, but llama.cpp's mtmd vision
+  path is still frame-based and immature for video specifically — no
+  true temporal token compression yet. `VlmClient`'s
+  `_SUPPORTED_IMAGE_EXTS` guard deliberately excludes videos for now.
+  Once llama.cpp's video support matures, tagging could sample N frames
+  from a video, feed them as an ordered image sequence in one chat
+  request, and merge the result into the same tag-index path images use.
 
 ---
 
