@@ -442,7 +442,8 @@ async def synthesize_storyboard(
         total = len(all_panel_ids)
 
     task = asyncio.create_task(
-        runner.synthesize(storyboard_id, panel_ids=body.panel_ids, force=body.force)
+        # TODO(Task 9): rename request field to beat_ids
+        runner.synthesize(storyboard_id, beat_ids=body.panel_ids, force=body.force)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
