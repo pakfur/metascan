@@ -673,6 +673,54 @@ def test_render_detailed_description_voice_suffix_and_dialog_only_line() -> None
     )
 
 
+def test_detailed_description_renders_beat_framing() -> None:
+    """A beat carrying any of shot_size/angle/lens gets a trailing framing
+    sentence rendered from the SHOT_SIZES/ANGLES/LENSES phrase maps."""
+    beats: List[Dict[str, Any]] = [
+        {
+            "duration_s": 4.0,
+            "action": "She turns.",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "shot_size": "CU",
+            "angle": "low",
+            "lens": None,
+            "dialog": [],
+            "sound": None,
+        }
+    ]
+    refplan = RefPlan({}, "Subject 1", [], "Picture 1")
+    speakers = assign_speakers(beats, [], refplan)
+    timeline = compute_timeline(beats, 4.0, "ref2va", refplan)
+
+    dd = render_detailed_description("cinematic", beats, timeline, speakers)
+    assert "close-up" in dd and "low angle" in dd
+
+
+def test_detailed_description_no_framing_no_sentence() -> None:
+    """A beat with no shot_size/angle/lens gets no framing sentence."""
+    beats: List[Dict[str, Any]] = [
+        {
+            "duration_s": 4.0,
+            "action": "She turns.",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [],
+            "sound": None,
+        }
+    ]
+    refplan = RefPlan({}, "Subject 1", [], "Picture 1")
+    speakers = assign_speakers(beats, [], refplan)
+    timeline = compute_timeline(beats, 4.0, "ref2va", refplan)
+
+    dd = render_detailed_description("cinematic", beats, timeline, speakers)
+    assert "framed as" not in dd
+
+
 def test_assemble_order_and_alignment_first() -> None:
     doc = assemble(
         "ALIGN LINE",

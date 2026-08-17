@@ -192,25 +192,38 @@ def _bare_panel(
     video_anchor=None,
     duration_s=6.0,
 ) -> "tuple[int, int]":
-    """Create (or reuse) a scene + one panel with a valid video_prompt."""
+    """Create (or reuse) a scene + one panel with a valid video_prompt.
+
+    ``subject_ids`` moved to beats -- passing it here creates a single bare
+    beat carrying them (needed by refplan/ref-slot tests). Omitting it
+    leaves the panel beat-less, which some anchor-validation tests rely on
+    (no beat -> no first-beat keeper -> the expected failure)."""
     if scene_id is None:
         scene_id = db.create_scene(sb_id, name="Scene", sort_order=scene_sort_order)
     panel_id = db.create_panel(
         scene_id,
         action="something happens",
         sort_order=panel_sort_order,
-        subject_ids=subject_ids or [],
         duration_s=duration_s,
     )
     db.update_panel(panel_id, video_prompt=video_prompt, video_anchor=video_anchor)
+    if subject_ids:
+        db.create_beat(panel_id, action="", sort_order=0, subject_ids=list(subject_ids))
     return scene_id, panel_id
 
 
 def _video_image(db, panel_id, path, *, selected=True) -> int:
+    """Attach a keeper candidate to the panel's first beat (creating a bare
+    one if the panel has none yet) -- keeper resolution lives on the
+    shot's first beat since keyframes moved to beats."""
     db.save_media(_media(path))
-    image_id = db.create_panel_image(panel_id, file_path=path, variant_index=0)
+    beats = db.list_beats(panel_id)
+    beat_id = (
+        beats[0]["id"] if beats else db.create_beat(panel_id, action="", sort_order=0)
+    )
+    image_id = db.create_beat_image(beat_id, file_path=path, variant_index=0)
     if selected:
-        db.update_panel(panel_id, selected_image_id=image_id)
+        db.select_beat_image(beat_id, image_id)
     return image_id
 
 
@@ -234,6 +247,29 @@ async def test_validation_lists_all_failures(db, comfy, events, tmp_path):
     message = str(exc_info.value)
     assert f"panel {panel_a}" in message
     assert f"panel {panel_b}" in message
+    assert comfy.submitted == []
+
+
+async def test_keeper_anchor_fails_when_first_beat_has_no_keeper(
+    db, comfy, events, tmp_path
+):
+    """A panel whose first beat exists but has no selected keeper (as
+    opposed to no beat at all) must fail validation with a message naming
+    the shot's first beat, and must not reach comfy.submit."""
+    preset_id = _preset(db, first_frame=True)
+    sb_id = _storyboard(db, preset_id)
+
+    _, panel_id = _bare_panel(db, sb_id, video_anchor="keeper")
+    db.create_beat(panel_id, action="a shot", sort_order=0)
+
+    runner = make_runner(db, comfy, events, tmp_path)
+
+    with pytest.raises(StoryboardError) as exc_info:
+        await runner.generate_video(sb_id)
+
+    message = str(exc_info.value)
+    assert f"panel {panel_id}" in message
+    assert "first beat" in message
     assert comfy.submitted == []
 
 
@@ -293,11 +329,10 @@ async def test_uploads_follow_refplan_order_and_params_shape(
         scene_id,
         action="Maya speaks",
         sort_order=0,
-        subject_ids=[subject_id],
         duration_s=6.0,
     )
     db.update_panel(panel_id, video_prompt="a compiled prompt")
-    db.replace_panel_beats(
+    beat_ids = db.replace_panel_beats(
         panel_id,
         [
             {
@@ -307,6 +342,7 @@ async def test_uploads_follow_refplan_order_and_params_shape(
                 "camera_amplitude": None,
                 "camera_speed": None,
                 "is_cut": 0,
+                "subject_ids": [subject_id],
                 "dialog": [
                     {
                         "subject_id": subject_id,
@@ -321,10 +357,11 @@ async def test_uploads_follow_refplan_order_and_params_shape(
         ],
     )
 
-    # One already-ingested image (committed=1) + one still-pending job
-    # (queued) -- exercises variant_base = committed + 1*pending.
+    # One already-ingested image on the first beat (committed=1) + one
+    # still-pending job (queued) -- exercises variant_base = committed +
+    # 1*pending.
     db.save_media(_media("/pics/existing.mp4"))
-    db.create_panel_image(panel_id, file_path="/pics/existing.mp4", variant_index=0)
+    db.create_beat_image(beat_ids[0], file_path="/pics/existing.mp4", variant_index=0)
     db.create_generation_job(preset_id, "{}", panel_id=panel_id)
 
     runner = make_runner(db, comfy, events, tmp_path)
@@ -353,9 +390,11 @@ async def test_uploads_follow_refplan_order_and_params_shape(
     assert params.positive == "a compiled prompt"
     assert params.batch_size == 1
 
-    from metascan.core.storyboard_brief import panel_seed
+    from metascan.core.storyboard_brief import beat_seed
 
-    assert params.seed == panel_seed(1000, 0, 1 + 1 * 1)
+    # beat_sort_order is hardcoded 0 in generate_video's seed call pending
+    # real beat_sort_order plumbing (TODO in storyboard_runner.py).
+    assert params.seed == beat_seed(1000, 0, 0, 1 + 1 * 1)
 
 
 # ---- anchors -------------------------------------------------------------
