@@ -36,6 +36,13 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   const panelJobState = ref<
     Map<number, { state: JobState; error: string | null; value?: number; max?: number }>
   >(new Map())
+  // beat_id -> progress chip, mirroring panelJobState but for image-
+  // generation jobs (now beat-scoped). Fed the same way: rebuilt in
+  // refreshActiveJobs() from queued/running jobs, updated live by the
+  // `comfy` WS handler below.
+  const beatJobState = ref<
+    Map<number, { state: JobState; error: string | null; value?: number; max?: number }>
+  >(new Map())
   const synthesis = ref<{ running: boolean; done: number; total: number; error: string | null }>({
     running: false,
     done: 0,
@@ -112,6 +119,23 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   function firstBeatKeeper(panel: Panel): BeatImage | null {
     const beat = panel.beats[0]
     return beat ? keeperImage(beat) : null
+  }
+
+  // Panel-tile progress badge (PanelGrid): a panel's own video job (still
+  // panel-scoped) wins if present, else the first of its beats with an
+  // active image-generation job -- "surface a badge when any of its beats
+  // has an active job" from the brief, collapsed to the single overlay slot
+  // the existing tile markup has room for.
+  function panelJobBadge(
+    panel: Panel,
+  ): { state: JobState; error: string | null; value?: number; max?: number } | null {
+    const video = panelJobState.value.get(panel.id)
+    if (video) return video
+    for (const b of panel.beats) {
+      const beatState = beatJobState.value.get(b.id)
+      if (beatState) return beatState
+    }
+    return null
   }
 
   function findBeat(beatId: number): Beat | null {
@@ -206,6 +230,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       jobToPanel.value = new Map()
       jobToBeat.value = new Map()
       panelJobState.value = new Map()
+      beatJobState.value = new Map()
     }
     try {
       const t = await api.fetchStoryboard(id)
@@ -549,6 +574,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       jobToPanel.value = new Map()
       jobToBeat.value = new Map()
       panelJobState.value = new Map()
+      beatJobState.value = new Map()
       return
     }
     const panelIds = new Set<number>()
@@ -569,6 +595,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       number,
       { state: JobState; error: string | null; value?: number; max?: number }
     >()
+    const nextBeatJobState = new Map<
+      number,
+      { state: JobState; error: string | null; value?: number; max?: number }
+    >()
     for (const job of [...queued, ...running]) {
       if (job.panel_id != null && panelIds.has(job.panel_id)) {
         nextJobToPanel.set(job.id, job.panel_id)
@@ -576,11 +606,13 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       }
       if (job.beat_id != null && beatIds.has(job.beat_id)) {
         nextJobToBeat.set(job.id, job.beat_id)
+        nextBeatJobState.set(job.beat_id, { state: job.state, error: null })
       }
     }
     jobToPanel.value = nextJobToPanel
     jobToBeat.value = nextJobToBeat
     panelJobState.value = nextPanelJobState
+    beatJobState.value = nextBeatJobState
   }
 
   // ---- actions: subject CRUD ------------------------------------------
@@ -732,21 +764,36 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       const d = data as Record<string, unknown>
       const jobId = d.job_id as number
       const panelId = jobToPanel.value.get(jobId)
-      if (panelId === undefined) return
+      const beatId = jobToBeat.value.get(jobId)
+      if (panelId === undefined && beatId === undefined) return
       if (event === 'job_update') {
         const state = d.state as JobState
-        if (state === 'done' || state === 'cancelled') {
-          panelJobState.value.delete(panelId)
-        } else {
-          panelJobState.value.set(panelId, { state, error: (d.error as string) ?? null })
+        const done = state === 'done' || state === 'cancelled'
+        if (panelId !== undefined) {
+          if (done) panelJobState.value.delete(panelId)
+          else panelJobState.value.set(panelId, { state, error: (d.error as string) ?? null })
+        }
+        if (beatId !== undefined) {
+          if (done) beatJobState.value.delete(beatId)
+          else beatJobState.value.set(beatId, { state, error: (d.error as string) ?? null })
         }
       } else if (event === 'job_progress') {
-        panelJobState.value.set(panelId, {
-          state: 'running',
-          error: null,
-          value: d.value as number,
-          max: d.max as number,
-        })
+        if (panelId !== undefined) {
+          panelJobState.value.set(panelId, {
+            state: 'running',
+            error: null,
+            value: d.value as number,
+            max: d.max as number,
+          })
+        }
+        if (beatId !== undefined) {
+          beatJobState.value.set(beatId, {
+            state: 'running',
+            error: null,
+            value: d.value as number,
+            max: d.max as number,
+          })
+        }
       }
       // job_outputs: ignored -- the storyboard channel's beat_images_changed
       // event is what carries the panel-scoped refresh.
@@ -765,6 +812,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     jobToPanel,
     jobToBeat,
     panelJobState,
+    beatJobState,
     synthesis,
     compile,
     story,
@@ -776,6 +824,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     panelById,
     keeperImage,
     firstBeatKeeper,
+    panelJobBadge,
     findBeat,
     // actions
     loadList,

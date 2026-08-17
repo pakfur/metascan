@@ -106,8 +106,11 @@ const addingPanel = ref(false)
 const newPanelAction = ref('')
 const addPanelInput = ref<HTMLInputElement | null>(null)
 
+// A panel's own video job (still panel-scoped) wins if present, else any of
+// its beats' active image-generation job -- image jobs are beat-scoped
+// since the shot->beat reorg (see store.beatJobState / jobToBeat).
 function jobState(panel: Panel) {
-  return store.panelJobState.get(panel.id)
+  return store.panelJobBadge(panel)
 }
 
 function thumbSrc(panel: Panel): string | null {
