@@ -4,9 +4,9 @@ import pytest
 
 from metascan.core.storyboard_brief import (
     SUPPORTED_ASPECT_RATIOS,
+    beat_seed,
     bucket_dims,
     compose_brief,
-    panel_seed,
     storyboard_slug,
 )
 
@@ -52,15 +52,40 @@ def test_bucket_dims_rejects_unknown_ratio():
         bucket_dims("21:9", "sd")
 
 
-def test_panel_seed_formula_and_reroll_advance():
-    assert panel_seed(1000, 3, 0) == 4000
-    assert panel_seed(1000, 3, 4) == 4004
-    assert panel_seed(1000, 3, 4) == panel_seed(1000, 3, 4)  # reproducible
+def test_beat_seed_deterministic_and_collision_free():
+    assert beat_seed(1000, 0, 0, 0) == 1000
+    assert beat_seed(1000, 2, 3, 7) == 1000 + (2 * 100 + 3) * 1000 + 7
+    # distinct (panel, beat, variant) triples never collide in-range
+    seen = set()
+    for p in range(3):
+        for b in range(4):
+            for v in range(5):
+                s = beat_seed(0, p, b, v)
+                assert s not in seen
+                seen.add(s)
 
 
 def test_storyboard_slug():
     assert storyboard_slug(7, "Salvage Yard Sequence!") == "7-salvage-yard-sequence"
     assert storyboard_slug(9, "***") == "9-storyboard"
+
+
+def test_compose_brief_reads_framing_from_beat():
+    sb = {"aspect_ratio": "16:9"}
+    scene = {"setting": "a dim bar", "mood": "tense"}
+    panel = {"action": "The standoff"}
+    beat = {
+        "action": "She reaches for the glass",
+        "shot_size": "CU",
+        "angle": "low",
+        "lens": "tele",
+    }
+    subjects = [{"name": "Mara", "description": "a tired detective"}]
+    brief = compose_brief(sb, scene, panel, beat, subjects)
+    assert "close-up" in brief and "low angle" in brief and "telephoto" in brief
+    assert "She reaches for the glass" in brief
+    assert "SHOT CONTEXT: The standoff" in brief
+    assert "Mara" in brief
 
 
 def test_compose_brief_full():
@@ -72,18 +97,20 @@ def test_compose_brief_full():
         "mood": "tense",
         "lighting": "amber haze, long shadows",
     }
-    panel = {
+    panel = {"action": "her hand rests on the hull seam"}
+    beat = {
         "shot_size": "ECU",
         "angle": "eye",
         "lens": None,
-        "action": "her hand rests on the hull seam",
+        "action": "she examines the seam",
     }
     subjects = [{"name": "Maya", "description": "late 20s, shaved head, red scarf"}]
-    brief = compose_brief(storyboard, scene, panel, subjects)
+    brief = compose_brief(storyboard, scene, panel, beat, subjects)
     assert brief.splitlines() == [
         "SHOT: extreme close-up, eye level, 2.39:1",
         "SUBJECT Maya: late 20s, shaved head, red scarf",
-        "ACTION: her hand rests on the hull seam",
+        "ACTION: she examines the seam",
+        "SHOT CONTEXT: her hand rests on the hull seam",
         "SETTING: derelict orbital shipbreaking yard, zero-g debris",
         "LOCATION: salvage yard, twisted hulls",
         "LIGHT/MOOD: dusk, amber haze, long shadows, tense",
@@ -95,6 +122,7 @@ def test_compose_brief_omits_empty_lines():
     brief = compose_brief(
         {"aspect_ratio": "1:1", "style_block": None},
         {"location": None, "time_of_day": None, "mood": None, "lighting": None},
+        {"action": None},
         {"shot_size": None, "angle": None, "lens": None, "action": "a cat"},
         [],
     )
