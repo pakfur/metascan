@@ -216,19 +216,22 @@ class VlmClient:
             await self._wait_ready(ready_timeout)
 
     def _build_command(self, spec: VlmModelSpec, port: int) -> List[str]:
-        """Build the llama-server argv. KV-cache quant for 30B-A3B only."""
+        """Build the llama-server argv from the model spec."""
         models_dir = get_data_dir() / "models" / "vlm"
         gguf = models_dir / spec.gguf_filename
         mmproj = models_dir / spec.mmproj_filename
         # ``--ctx-size`` is the TOTAL context window split across
         # ``--parallel`` slots — each slot sees ctx_size / parallel_slots
-        # tokens. The 8B and 30B-A3B specs use 4 slots, so a 32768 budget
-        # gives 8192 per slot; 2B / 4B (2 slots) get 16384 per slot.
-        # The Qwen3-VL meta-prompts in ``meta_prompt_templates`` can run
-        # ~1300 tokens (Pony, longest) plus 1-2k for the image embedding
-        # plus the user-tunable max_tokens output (up to 1000), so the
-        # prior 8192 budget collapsed under parallel_slots=4 with
-        # "request exceeds the available context size" errors.
+        # tokens. The 8B and 30B-A3B specs use 4 slots, so the default
+        # 32768 budget (``spec.ctx_size``) gives 8192 per slot; 2B / 4B
+        # (2 slots) get 16384 per slot. The Qwen3-VL meta-prompts in
+        # ``meta_prompt_templates`` can run ~1300 tokens (Pony, longest)
+        # plus 1-2k for the image embedding plus the user-tunable
+        # max_tokens output (up to 1000), so the prior 8192 budget
+        # collapsed under parallel_slots=4 with "request exceeds the
+        # available context size" errors. ``qwen38-27b`` overrides
+        # ctx_size to 65536 — its hybrid attention makes KV cache cheap
+        # enough to afford the larger budget.
         cmd = [
             str(binary_path()),
             "--model",
@@ -242,12 +245,11 @@ class VlmClient:
             "--parallel",
             str(spec.parallel_slots),
             "--ctx-size",
-            "32768",
+            str(spec.ctx_size),
             "--n-gpu-layers",
             "99",
         ]
-        if spec.model_id == "qwen3vl-30b-a3b":
-            cmd += ["--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
+        cmd += list(spec.extra_args)
         return cmd
 
     async def _wait_ready(self, timeout: float) -> None:
