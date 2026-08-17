@@ -3,6 +3,7 @@
 Setup script to download required NLTK data and AI upscaling models
 """
 import argparse
+import json
 import nltk
 import shutil
 import ssl
@@ -41,24 +42,46 @@ class DownloadTarget:
     filename: Optional[str] = None
 
 
-def resolve_qwen3vl_targets(model_id: str) -> list[DownloadTarget]:
+def _config_json_path() -> Path:
+    """Path to the app config.json (patchable in tests)."""
+    from metascan.utils.app_paths import get_config_path
+
+    return get_config_path()
+
+
+def _load_vlm_repo_overrides() -> dict[str, str]:
+    """Read ``models.vlm_repos`` (legacy ``models.qwen3vl_repos``) from
+    config.json. Returns {} when the file or key is absent/malformed."""
+    try:
+        raw = json.loads(_config_json_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    models = raw.get("models") or {}
+    ov = models.get("vlm_repos") or models.get("qwen3vl_repos") or {}
+    if not isinstance(ov, dict):
+        return {}
+    return {str(k): str(v) for k, v in ov.items()}
+
+
+def resolve_vlm_targets(model_id: str) -> list[DownloadTarget]:
     """Return GGUF + mmproj + llama-server-binary download targets for ``model_id``."""
-    from metascan.core.vlm_models import REGISTRY
+    from metascan.core.vlm_models import REGISTRY, resolve_repo
     from metascan.utils.llama_server import binary_path, pick_release_asset, release_url
     from metascan.core.hardware import detect_hardware
 
     spec = REGISTRY[model_id]
+    repo = resolve_repo(model_id, _load_vlm_repo_overrides())
     vlm_dir = get_data_dir() / "models" / "vlm"
 
     rpt = detect_hardware()
     return [
         DownloadTarget(
-            repo=spec.hf_repo,
+            repo=repo,
             filename=spec.gguf_filename,
             dest=vlm_dir / spec.gguf_filename,
         ),
         DownloadTarget(
-            repo=spec.hf_repo,
+            repo=repo,
             filename=spec.mmproj_repo_filename,
             dest=vlm_dir / spec.mmproj_filename,
         ),
@@ -67,6 +90,10 @@ def resolve_qwen3vl_targets(model_id: str) -> list[DownloadTarget]:
             dest=binary_path(),
         ),
     ]
+
+
+# Backwards-compat alias (pre-Qwen3.8 name).
+resolve_qwen3vl_targets = resolve_vlm_targets
 
 
 def _ensure_target(t: DownloadTarget) -> bool:
@@ -229,11 +256,11 @@ def _extract_flat_bin_targz(tmp: Path, dest: Path, target_name: str) -> None:
 
 
 def download_qwen3vl(model_id: str) -> bool:
-    """Fetch all artefacts for the given Qwen3-VL model id."""
+    """Fetch all artefacts for the given VLM model id."""
     print("\n" + "=" * 60)
-    print(f"Setting up Qwen3-VL VLM tagger ({model_id})…")
+    print(f"Setting up VLM tagger ({model_id})…")
     print("=" * 60)
-    targets = resolve_qwen3vl_targets(model_id)
+    targets = resolve_vlm_targets(model_id)
     all_ok = True
     for t in targets:
         try:
@@ -318,8 +345,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--qwen3vl",
         metavar="MODEL_ID",
-        help="Also download the chosen Qwen3-VL GGUF + mmproj + llama-server binary "
-        "(e.g. qwen3vl-2b, qwen3vl-4b, qwen3vl-8b, qwen3vl-30b-a3b)",
+        help="Also download the chosen VLM GGUF + mmproj + llama-server binary "
+        "(e.g. qwen3vl-2b, qwen3vl-4b, qwen3vl-8b, qwen3vl-30b-a3b, qwen38-27b)",
+    )
+    parser.add_argument(
+        "--vlm",
+        dest="qwen3vl",
+        metavar="MODEL_ID",
+        help="Alias for --qwen3vl.",
     )
     parser.add_argument(
         "--skip-nltk",
