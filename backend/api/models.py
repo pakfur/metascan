@@ -504,11 +504,9 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
         asyncio.create_task(_download_nltk(mid))
         return {"status": "started", "id": mid}
 
-    if mid.startswith("qwen3vl-"):
-        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+    from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
 
-        if mid not in _VLM_REGISTRY:
-            raise HTTPException(status_code=404, detail=f"unknown VLM model: {mid}")
+    if mid in _VLM_REGISTRY:
         asyncio.create_task(_download_vlm(mid))
         return {"status": "started", "id": mid}
 
@@ -539,14 +537,10 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
             if path.exists():
                 await asyncio.to_thread(path.unlink)
             return {"ok": True}
-    if model_id.startswith("qwen3vl-"):
-        from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
-        from metascan.utils.app_paths import get_data_dir
+    from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+    from metascan.utils.app_paths import get_data_dir
 
-        if model_id not in _VLM_REGISTRY:
-            raise HTTPException(
-                status_code=404, detail=f"unknown VLM model: {model_id}"
-            )
+    if model_id in _VLM_REGISTRY:
         spec = _VLM_REGISTRY[model_id]
         vlm_dir = get_data_dir() / "models" / "vlm"
         for filename in (spec.gguf_filename, spec.mmproj_filename):

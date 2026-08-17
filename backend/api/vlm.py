@@ -75,12 +75,11 @@ async def tag_one(body: TagRequest) -> Dict[str, List[str]]:
 
     if client.model_id is None:
         from metascan.core.hardware import detect_hardware, feature_gates
+        from metascan.core.vlm_models import REGISTRY
 
         gates = feature_gates(detect_hardware())
         candidates = [
-            mid
-            for mid, g in gates.items()
-            if mid.startswith("qwen3vl-") and g.recommended
+            mid for mid, g in gates.items() if mid in REGISTRY and g.recommended
         ]
         if not candidates:
             raise HTTPException(
@@ -128,8 +127,10 @@ class RetagRequest(BaseModel):
 async def _run_retag_job(job: "_RetagJob") -> None:
     import time
 
+    from metascan.core.hardware import detect_hardware
     from metascan.core.vlm_client import VlmClient
     from metascan.core.vlm_models import REGISTRY
+    from backend.services.scan_dispatch import recommended_vlm_model_id
 
     client = _vlm_client
     db = get_db()
@@ -150,7 +151,9 @@ async def _run_retag_job(job: "_RetagJob") -> None:
     job.paths = filtered
     job.total = len(filtered)
 
-    model_id = client.model_id or "qwen3vl-4b"
+    model_id = (
+        client.model_id or recommended_vlm_model_id(detect_hardware()) or "qwen3vl-4b"
+    )
     # ensure_started once up front; the per-request path no longer needs to
     # re-acquire the start lock for every image.
     await client.ensure_started(model_id)
