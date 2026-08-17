@@ -357,10 +357,9 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     Object.assign(panel, body)
     try {
       // patchPanel's response (db.get_panel) never carries `beats` -- only
-      // get_storyboard_tree assembles that array -- so even though the
-      // return type is Panel, Object.assign only touches keys actually
-      // present on the response and the local `beats` array is left
-      // untouched.
+      // get_storyboard_tree assembles that array -- so the return type is
+      // PanelWithoutBeats, and Object.assign only touches keys actually
+      // present on the response, leaving the local `beats` array untouched.
       const res = await api.patchPanel(panelId, body)
       const current = panelById(panelId)
       if (current) Object.assign(current, res)

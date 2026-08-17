@@ -1521,13 +1521,14 @@ class DatabaseManager:
         base_seed: int = 0,
         batch_size: int = 4,
         source_text: Optional[str] = None,
+        notes: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO storyboards (name, source_text, aspect_ratio, "
                 "style_block, negative, target_model, architecture, "
-                "preset_id, base_seed, batch_size) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "preset_id, base_seed, batch_size, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     source_text,
@@ -1539,6 +1540,7 @@ class DatabaseManager:
                     preset_id,
                     base_seed,
                     batch_size,
+                    notes,
                 ),
             )
             conn.commit()
@@ -1583,8 +1585,8 @@ class DatabaseManager:
 
         Returns ``(deleted, purged_file_paths, deleted_folder_id)``.
 
-        Before the cascade (storyboards -> scenes -> panels ->
-        panel_images), unhides the media rows any curated panel_images
+        Before the cascade (storyboards -> scenes -> panels -> beats ->
+        beat_images), unhides the media rows any curated beat_images
         pointed at and purges generation_jobs for the panels being
         destroyed -- see _release_panels. With ``purge_images=True`` the
         media rows are deleted instead (unless still referenced elsewhere)
@@ -1768,9 +1770,9 @@ class DatabaseManager:
 
         Returns ``(deleted, purged_file_paths)``.
 
-        Before the cascade (scenes -> panels -> panel_images), unhides the
-        media rows any curated panel_images pointed at and purges
-        generation_jobs for the panels being destroyed -- see
+        Before the cascade (scenes -> panels -> beats -> beat_images),
+        unhides the media rows any curated beat_images pointed at and
+        purges generation_jobs for the panels being destroyed -- see
         _release_panels. With ``purge_images=True`` the media rows are
         deleted instead (unless still referenced elsewhere) and their
         native-format file paths returned so the caller can remove the

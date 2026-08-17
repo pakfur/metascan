@@ -3,7 +3,7 @@ import type {
   Beat,
   BeatWithoutImages,
   ComposeStage,
-  Panel,
+  PanelWithoutBeats,
   StoryboardSummary,
   StoryboardTree,
 } from '../types/storyboard'
@@ -226,9 +226,12 @@ export function createPanel(
 // (non-null forces video_prompt_locked=1/video_prompt_source='user'
 // server-side; null clears all three video-prompt fields),
 // `video_prompt_locked?: 0 | 1`, and `video_anchor?: 'keeper' | 'prev_last'
-// | null`.
-export function patchPanel(panelId: number, body: Record<string, unknown>): Promise<Panel> {
-  return patch<Panel>(`/storyboard/panels/${panelId}`, body)
+// | null`. `get_panel` never attaches `beats` -- see PanelWithoutBeats.
+export function patchPanel(
+  panelId: number,
+  body: Record<string, unknown>,
+): Promise<PanelWithoutBeats> {
+  return patch<PanelWithoutBeats>(`/storyboard/panels/${panelId}`, body)
 }
 
 export function deletePanel(

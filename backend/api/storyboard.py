@@ -327,6 +327,7 @@ async def create_storyboard(body: StoryboardCreate) -> Dict[str, int]:
         preset_id=body.preset_id,
         base_seed=base_seed,
         batch_size=batch_size,
+        notes=body.notes,
     )
     return {"id": storyboard_id}
 
