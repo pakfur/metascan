@@ -1,5 +1,7 @@
 """Scan dispatch sets tag_with_vlm based on hardware gates."""
 
+import pytest
+
 from metascan.core.hardware import CudaInfo, HardwareReport
 
 
@@ -63,3 +65,10 @@ def test_recommended_model_id_for_cpu_only_is_none():
     from backend.services.scan_dispatch import recommended_vlm_model_id
 
     assert recommended_vlm_model_id(_report()) is None
+
+
+@pytest.mark.xfail(reason="prefix filter removed in next task", strict=True)
+def test_recommended_model_id_for_workstation_high_is_qwen38():
+    from backend.services.scan_dispatch import recommended_vlm_model_id
+
+    assert recommended_vlm_model_id(_report(cuda_gb=32.0)) == "qwen38-27b"
