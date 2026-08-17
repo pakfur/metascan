@@ -544,6 +544,45 @@ class DatabaseManager:
             )
 
             # ---- Phase B: storyboard tables --------------------------------
+            # Shot/beat model reorganization (spec 2026-08-17): panels thin
+            # to H3-scene containers, beats carry framing/prompt/keeper,
+            # panel_images becomes beat_images. Read user_version once, up
+            # front -- this same value is reused below for the '<1'/'<2'
+            # one-shot migrations further down in this method; nothing
+            # writes the pragma in between. Dev data is disposable by
+            # decision -- drop and recreate the panel-tree tables, but
+            # first release what the old tables were holding: unhide media
+            # the old panel_images kept hidden, and purge panel-scoped
+            # generation_jobs so a restart can't re-adopt jobs for panels
+            # that no longer exist. This must run before the
+            # ``CREATE TABLE IF NOT EXISTS panels/beats/beat_images``
+            # statements below so the drop is followed by a clean re-create
+            # in this same _init_database call. ``PRAGMA user_version = 3``
+            # itself is written further down, alongside the other one-shot
+            # migration gates.
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+            user_version = int(version_row[0]) if version_row else 0
+            if user_version < 3:
+                old_tables = {
+                    r["name"]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "panel_images" in old_tables:
+                    conn.execute(
+                        "UPDATE media SET hidden = 0 WHERE file_path IN "
+                        "(SELECT file_path FROM panel_images)"
+                    )
+                if "generation_jobs" in old_tables:
+                    conn.execute(
+                        "DELETE FROM generation_jobs WHERE panel_id IS NOT NULL"
+                    )
+                conn.execute("DROP TABLE IF EXISTS panel_images")
+                conn.execute("DROP TABLE IF EXISTS beat_images")
+                conn.execute("DROP TABLE IF EXISTS beats")
+                conn.execute("DROP TABLE IF EXISTS panels")
+
             # storyboards.folder_id was originally declared INTEGER, but
             # folders.id is TEXT (a uuid4 string) -- a numeric-looking uuid
             # would silently coerce and corrupt add_folder_items lookups.
@@ -683,30 +722,55 @@ class DatabaseManager:
                     scene_id           INTEGER NOT NULL
                                        REFERENCES scenes(id) ON DELETE CASCADE,
                     sort_order         INTEGER NOT NULL DEFAULT 0,
-                    shot_size          TEXT,
-                    angle              TEXT,
-                    lens               TEXT,
                     action             TEXT NOT NULL,
-                    subject_ids        TEXT NOT NULL DEFAULT '[]',
-                    notes              TEXT,
-                    brief              TEXT,
-                    prompt             TEXT,
-                    prompt_locked      INTEGER NOT NULL DEFAULT 0,
-                    prompt_source      TEXT,
-                    negative           TEXT,
-                    selected_image_id  INTEGER REFERENCES panel_images(id)
-                                       ON DELETE SET NULL,
+                    duration_s         REAL NOT NULL DEFAULT 12.0,
                     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
             )
+            # beats.selected_image_id references beat_images, which in turn
+            # references beats -- a circular FK. SQLite allows forward
+            # references in DDL as long as both tables exist before rows
+            # are inserted, so creation order is beats -> beat_images
+            # (mirroring the old panels -> panel_images precedent, which
+            # had the same cycle).
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS panel_images (
+                CREATE TABLE IF NOT EXISTS beats (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    panel_id    INTEGER NOT NULL
+                                REFERENCES panels(id) ON DELETE CASCADE,
+                    sort_order  INTEGER NOT NULL DEFAULT 0,
+                    duration_s  REAL NOT NULL DEFAULT 4.0,
+                    action      TEXT NOT NULL,
+                    shot_size   TEXT,
+                    angle       TEXT,
+                    lens        TEXT,
+                    subject_ids TEXT NOT NULL DEFAULT '[]',
+                    camera_motion    TEXT,
+                    camera_amplitude TEXT,
+                    camera_speed     TEXT,
+                    is_cut      INTEGER NOT NULL DEFAULT 0,
+                    dialog      TEXT NOT NULL DEFAULT '[]',
+                    sound       TEXT,
+                    brief       TEXT,
+                    prompt      TEXT,
+                    prompt_locked INTEGER NOT NULL DEFAULT 0,
+                    prompt_source TEXT,
+                    selected_image_id INTEGER REFERENCES beat_images(id)
+                                      ON DELETE SET NULL,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS beat_images (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    panel_id        INTEGER NOT NULL
-                                    REFERENCES panels(id) ON DELETE CASCADE,
+                    beat_id         INTEGER NOT NULL
+                                    REFERENCES beats(id) ON DELETE CASCADE,
                     file_path       TEXT NOT NULL REFERENCES media(file_path)
                                     ON DELETE CASCADE,
                     seed            INTEGER,
@@ -719,10 +783,6 @@ class DatabaseManager:
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_panel_images_panel "
-                "ON panel_images(panel_id)"
-            )
-            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
             )
@@ -732,27 +792,6 @@ class DatabaseManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_subjects_storyboard "
                 "ON storyboard_subjects(storyboard_id)"
-            )
-
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS beats (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    panel_id    INTEGER NOT NULL
-                                REFERENCES panels(id) ON DELETE CASCADE,
-                    sort_order  INTEGER NOT NULL DEFAULT 0,
-                    duration_s  REAL NOT NULL DEFAULT 4.0,
-                    action      TEXT NOT NULL,
-                    camera_motion    TEXT,
-                    camera_amplitude TEXT,
-                    camera_speed     TEXT,
-                    is_cut      INTEGER NOT NULL DEFAULT 0,
-                    dialog      TEXT NOT NULL DEFAULT '[]',
-                    sound       TEXT,
-                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-                """
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beats_panel ON beats(panel_id)"
@@ -768,12 +807,6 @@ class DatabaseManager:
                 "storyboard_subjects",
                 "voice",
                 "ALTER TABLE storyboard_subjects ADD COLUMN voice TEXT",
-            )
-            _idempotent_add_column(
-                conn,
-                "panels",
-                "duration_s",
-                "ALTER TABLE panels ADD COLUMN duration_s REAL NOT NULL DEFAULT 12.0",
             )
             _idempotent_add_column(
                 conn,
@@ -854,6 +887,24 @@ class DatabaseManager:
                 # REFERENCES media(file_path) FK.
                 "ALTER TABLE storyboard_subjects ADD COLUMN voice_ref_path TEXT",
             )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "notes",
+                "ALTER TABLE storyboards ADD COLUMN notes TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "beat_id",
+                # Deliberately no REFERENCES clause -- same rationale as
+                # panel_id: the release helpers delete job rows explicitly.
+                "ALTER TABLE generation_jobs ADD COLUMN beat_id INTEGER",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
+                "ON beat_images(beat_id)"
+            )
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
@@ -864,8 +915,9 @@ class DatabaseManager:
             # (file mtime on disk) over as a reasonable proxy — it's the
             # closest signal we have to when the row really became part of
             # the library. Gated on ``PRAGMA user_version`` so it runs once.
-            version_row = conn.execute("PRAGMA user_version").fetchone()
-            user_version = int(version_row[0]) if version_row else 0
+            # (``user_version`` was already read once, up front, in the
+            # Phase B storyboard-tables section above -- nothing writes the
+            # pragma in between, so it's reused here rather than re-read.)
             if user_version < 1:
                 logger.info(
                     "Backfilling created_at from modified_at (one-time; "
@@ -918,6 +970,12 @@ class DatabaseManager:
                 # in get_thumbnail_cache_dir would otherwise re-attempt every
                 # launch. The wipe is best-effort by design (spec §5).
                 conn.execute("PRAGMA user_version = 2")
+
+            if user_version < 3:
+                # Writes the pragma for the shot/beat model reorganization
+                # whose drop-and-recreate ran up front, in the Phase B
+                # storyboard-tables section above.
+                conn.execute("PRAGMA user_version = 3")
 
             conn.commit()
 
@@ -1291,12 +1349,13 @@ class DatabaseManager:
         params: str,
         panel_id: Optional[int] = None,
         output_dir: Optional[str] = None,
+        beat_id: Optional[int] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO generation_jobs (preset_id, params, panel_id, output_dir) "
-                "VALUES (?, ?, ?, ?)",
-                (preset_id, params, panel_id, output_dir),
+                "INSERT INTO generation_jobs (preset_id, params, panel_id, "
+                "output_dir, beat_id) VALUES (?, ?, ?, ?, ?)",
+                (preset_id, params, panel_id, output_dir, beat_id),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -1342,6 +1401,7 @@ class DatabaseManager:
         states: Optional[List[str]] = None,
         limit: int = 100,
         panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM generation_jobs"
         conditions: List[str] = []
@@ -1352,6 +1412,9 @@ class DatabaseManager:
         if panel_ids:
             conditions.append("panel_id IN (" + ",".join("?" * len(panel_ids)) + ")")
             params.extend(panel_ids)
+        if beat_ids:
+            conditions.append("beat_id IN (" + ",".join("?" * len(beat_ids)) + ")")
+            params.extend(beat_ids)
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY id LIMIT ?"
@@ -1368,6 +1431,7 @@ class DatabaseManager:
             "aspect_ratio",
             "style_block",
             "negative",
+            "notes",
             "target_model",
             "architecture",
             "preset_id",
@@ -1410,18 +1474,7 @@ class DatabaseManager:
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
             "sort_order",
-            "shot_size",
-            "angle",
-            "lens",
             "action",
-            "subject_ids",
-            "notes",
-            "brief",
-            "prompt",
-            "prompt_locked",
-            "prompt_source",
-            "negative",
-            "selected_image_id",
             "duration_s",
             "video_prompt",
             "video_prompt_locked",
@@ -1431,17 +1484,27 @@ class DatabaseManager:
             "video_compiled_anchor",
         }
     )
+    # ``selected_image_id`` is deliberately absent -- keeper selection goes
+    # through ``select_beat_image``, mirroring the old panel rule.
     _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
             "sort_order",
             "duration_s",
             "action",
+            "shot_size",
+            "angle",
+            "lens",
+            "subject_ids",
             "camera_motion",
             "camera_amplitude",
             "camera_speed",
             "is_cut",
             "dialog",
             "sound",
+            "brief",
+            "prompt",
+            "prompt_locked",
+            "prompt_source",
         }
     )
 
@@ -1458,13 +1521,14 @@ class DatabaseManager:
         base_seed: int = 0,
         batch_size: int = 4,
         source_text: Optional[str] = None,
+        notes: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO storyboards (name, source_text, aspect_ratio, "
                 "style_block, negative, target_model, architecture, "
-                "preset_id, base_seed, batch_size) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "preset_id, base_seed, batch_size, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     name,
                     source_text,
@@ -1476,6 +1540,7 @@ class DatabaseManager:
                     preset_id,
                     base_seed,
                     batch_size,
+                    notes,
                 ),
             )
             conn.commit()
@@ -1520,8 +1585,8 @@ class DatabaseManager:
 
         Returns ``(deleted, purged_file_paths, deleted_folder_id)``.
 
-        Before the cascade (storyboards -> scenes -> panels ->
-        panel_images), unhides the media rows any curated panel_images
+        Before the cascade (storyboards -> scenes -> panels -> beats ->
+        beat_images), unhides the media rows any curated beat_images
         pointed at and purges generation_jobs for the panels being
         destroyed -- see _release_panels. With ``purge_images=True`` the
         media rows are deleted instead (unless still referenced elsewhere)
@@ -1705,9 +1770,9 @@ class DatabaseManager:
 
         Returns ``(deleted, purged_file_paths)``.
 
-        Before the cascade (scenes -> panels -> panel_images), unhides the
-        media rows any curated panel_images pointed at and purges
-        generation_jobs for the panels being destroyed -- see
+        Before the cascade (scenes -> panels -> beats -> beat_images),
+        unhides the media rows any curated beat_images pointed at and
+        purges generation_jobs for the panels being destroyed -- see
         _release_panels. With ``purge_images=True`` the media rows are
         deleted instead (unless still referenced elsewhere) and their
         native-format file paths returned so the caller can remove the
@@ -1734,45 +1799,23 @@ class DatabaseManager:
         *,
         action: str,
         sort_order: int = 0,
-        shot_size: Optional[str] = None,
-        angle: Optional[str] = None,
-        lens: Optional[str] = None,
-        subject_ids: Optional[List[int]] = None,
-        notes: Optional[str] = None,
         duration_s: float = 12.0,
     ) -> int:
-        import json as _json
-
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO panels (scene_id, sort_order, shot_size, angle, "
-                "lens, action, subject_ids, notes, duration_s) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    scene_id,
-                    sort_order,
-                    shot_size,
-                    angle,
-                    lens,
-                    action,
-                    _json.dumps(list(subject_ids or [])),
-                    notes,
-                    duration_s,
-                ),
+                "INSERT INTO panels (scene_id, sort_order, action, duration_s) "
+                "VALUES (?, ?, ?, ?)",
+                (scene_id, sort_order, action, duration_s),
             )
             conn.commit()
             return int(cur.lastrowid)
 
     def update_panel(self, panel_id: int, **fields: Any) -> None:
-        import json as _json
-
         unknown = set(fields) - self._PANEL_UPDATABLE
         if unknown:
             raise ValueError(f"Not updatable on panels: {', '.join(sorted(unknown))}")
         if not fields:
             return
-        if "subject_ids" in fields:
-            fields["subject_ids"] = _json.dumps(list(fields["subject_ids"] or []))
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [panel_id]
         with self.lock, self._get_connection() as conn:
@@ -1794,10 +1837,6 @@ class DatabaseManager:
                 return None
             d = dict(row)
             try:
-                d["subject_ids"] = _json.loads(d["subject_ids"] or "[]")
-            except (ValueError, TypeError):
-                d["subject_ids"] = []
-            try:
                 d["video_prompt_warnings"] = _json.loads(
                     d.get("video_prompt_warnings") or "[]"
                 )
@@ -1805,53 +1844,81 @@ class DatabaseManager:
                 d["video_prompt_warnings"] = []
             return d
 
+    def _release_beats(
+        self,
+        conn: sqlite3.Connection,
+        beat_ids: List[int],
+        purge_images: bool = False,
+    ) -> List[str]:
+        """Unhide beat_images' media rows and purge generation_jobs for
+        ``beat_ids``, before those beats (and their beat_images) are
+        cascade-deleted. Same transaction rule and purge contract as
+        _release_panels (which now delegates the image work here)."""
+        if not beat_ids:
+            return []
+        placeholders = ",".join("?" * len(beat_ids))
+        purged: List[str] = []
+        if purge_images:
+            purged = [
+                str(r["file_path"])
+                for r in conn.execute(
+                    f"SELECT DISTINCT file_path FROM beat_images "
+                    f"WHERE beat_id IN ({placeholders})",
+                    beat_ids,
+                ).fetchall()
+            ]
+        else:
+            conn.execute(
+                f"UPDATE media SET hidden = 0 WHERE file_path IN "
+                f"(SELECT file_path FROM beat_images "
+                f"WHERE beat_id IN ({placeholders}))",
+                beat_ids,
+            )
+        conn.execute(
+            f"DELETE FROM generation_jobs WHERE beat_id IN ({placeholders})",
+            beat_ids,
+        )
+        return purged
+
     def _release_panels(
         self,
         conn: sqlite3.Connection,
         panel_ids: List[int],
         purge_images: bool = False,
     ) -> List[str]:
-        """Unhide panel_images' media rows and purge generation_jobs for
-        ``panel_ids``, before those panels (and their panel_images) are
-        cascade-deleted.
+        """Release the panels' beats (unhiding beat_images' media rows and
+        purging beat-scoped generation_jobs via _release_beats), then purge
+        the panels' own (video) generation_jobs, before those panels (and
+        their beats/beat_images) are cascade-deleted.
 
         Must run in the same transaction as the delete/replace that
         follows -- see delete_panel / delete_scene / delete_storyboard /
-        replace_storyboard_structure. Without this, panel_images cascading
+        replace_storyboard_structure. Without this, beat_images cascading
         away leaves the underlying media rows permanently hidden=1 (nothing
         else ever flips them back once the panel is gone), and stale
-        generation_jobs rows for now-deleted panels could be re-adopted by
-        a restart (``ComfyClient._rehydrate_jobs``).
+        generation_jobs rows for now-deleted panels/beats could be
+        re-adopted by a restart (``ComfyClient._rehydrate_jobs``).
 
         With ``purge_images=True`` the unhide is skipped; instead the
-        panels' image paths (POSIX) are returned so the caller can run
+        beats' image paths (POSIX) are returned so the caller can run
         ``_purge_media_rows`` after the cascade delete. The media rows
-        must not be deleted here: panel_images FKs media(file_path) with
+        must not be deleted here: beat_images FKs media(file_path) with
         ON DELETE CASCADE, so removing a media row now would also take
-        out any *other* panel's panel_images row for a shared file --
+        out any *other* beat's beat_images row for a shared file --
         and the shared-reference checks in ``_purge_media_rows`` only
-        make sense once the doomed panels' own rows are gone.
+        make sense once the doomed beats' own rows are gone.
         """
         if not panel_ids:
             return []
         placeholders = ",".join("?" * len(panel_ids))
-        purged: List[str] = []
-        if purge_images:
-            purged = [
-                str(r["file_path"])
-                for r in conn.execute(
-                    f"SELECT DISTINCT file_path FROM panel_images "
-                    f"WHERE panel_id IN ({placeholders})",
-                    panel_ids,
-                ).fetchall()
-            ]
-        else:
-            conn.execute(
-                f"UPDATE media SET hidden = 0 WHERE file_path IN "
-                f"(SELECT file_path FROM panel_images "
-                f"WHERE panel_id IN ({placeholders}))",
+        beat_ids = [
+            int(r["id"])
+            for r in conn.execute(
+                f"SELECT id FROM beats WHERE panel_id IN ({placeholders})",
                 panel_ids,
-            )
+            ).fetchall()
+        ]
+        purged = self._release_beats(conn, beat_ids, purge_images)
         conn.execute(
             f"DELETE FROM generation_jobs WHERE panel_id IN ({placeholders})",
             panel_ids,
@@ -1861,16 +1928,16 @@ class DatabaseManager:
     def _purge_media_rows(
         self, conn: sqlite3.Connection, posix_paths: List[str]
     ) -> List[str]:
-        """Delete the media rows behind purged panel images; return the
+        """Delete the media rows behind purged beat images; return the
         native-format paths actually deleted (the caller removes those
         files from disk).
 
-        Must run after the panels' cascade delete, in the same
-        transaction. A path still referenced by a surviving panel_images
-        row (another panel's variant) or by a
-        storyboard_subjects.reference_path is NOT deleted -- the media
-        FK's ON DELETE CASCADE / SET NULL would silently destroy that
-        other panel's image row or null the subject's reference -- it is
+        Must run after the panels'/beats' cascade delete, in the same
+        transaction. A path still referenced by a surviving beat_images
+        row (another beat's variant), a storyboard_subjects.reference_path,
+        or a scenes.reference_path is NOT deleted -- the media FK's ON
+        DELETE CASCADE / SET NULL would silently destroy that other
+        beat's image row or null the subject's/scene's reference -- it is
         unhidden instead, the same release-into-the-library semantics as
         a non-purge delete. Deleting a media row cascades its indices
         and folder_items rows.
@@ -1879,13 +1946,18 @@ class DatabaseManager:
         for path in posix_paths:
             still_referenced = (
                 conn.execute(
-                    "SELECT 1 FROM panel_images WHERE file_path = ? LIMIT 1",
+                    "SELECT 1 FROM beat_images WHERE file_path = ? LIMIT 1",
                     (path,),
                 ).fetchone()
                 is not None
                 or conn.execute(
                     "SELECT 1 FROM storyboard_subjects "
                     "WHERE reference_path = ? LIMIT 1",
+                    (path,),
+                ).fetchone()
+                is not None
+                or conn.execute(
+                    "SELECT 1 FROM scenes WHERE reference_path = ? LIMIT 1",
                     (path,),
                 ).fetchone()
                 is not None
@@ -1926,6 +1998,13 @@ class DatabaseManager:
             ).fetchone()
             return int(row["sid"]) if row is not None else None
 
+    def panel_id_for_beat(self, beat_id: int) -> Optional[int]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT panel_id FROM beats WHERE id = ?", (beat_id,)
+            ).fetchone()
+            return int(row["panel_id"]) if row is not None else None
+
     def delete_panel(
         self, panel_id: int, purge_images: bool = False
     ) -> Tuple[bool, List[str]]:
@@ -1936,7 +2015,7 @@ class DatabaseManager:
         ``generation_jobs.panel_id`` carries no FK/cascade (see spec §4.1:
         the panels table didn't exist yet when generation_jobs was
         created), so the job rows are deleted explicitly first. Also
-        unhides the media rows any curated panel_images pointed at before
+        unhides the media rows any curated beat_images pointed at before
         they cascade away -- see _release_panels. With
         ``purge_images=True`` the media rows are deleted instead (unless
         still referenced elsewhere) and their native-format file paths
@@ -1961,6 +2040,10 @@ class DatabaseManager:
         action: str,
         sort_order: int = 0,
         duration_s: float = 4.0,
+        shot_size: Optional[str] = None,
+        angle: Optional[str] = None,
+        lens: Optional[str] = None,
+        subject_ids: Optional[List[int]] = None,
         camera_motion: Optional[str] = None,
         camera_amplitude: Optional[str] = None,
         camera_speed: Optional[str] = None,
@@ -1973,13 +2056,18 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO beats (panel_id, sort_order, duration_s, action, "
-                "camera_motion, camera_amplitude, camera_speed, is_cut, "
-                "dialog, sound) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "shot_size, angle, lens, subject_ids, camera_motion, "
+                "camera_amplitude, camera_speed, is_cut, dialog, sound) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     panel_id,
                     sort_order,
                     duration_s,
                     action,
+                    shot_size,
+                    angle,
+                    lens,
+                    _json.dumps(list(subject_ids or [])),
                     camera_motion,
                     camera_amplitude,
                     camera_speed,
@@ -2000,6 +2088,10 @@ class DatabaseManager:
             d["dialog"] = _json.loads(d["dialog"] or "[]")
         except (ValueError, TypeError):
             d["dialog"] = []
+        try:
+            d["subject_ids"] = _json.loads(d["subject_ids"] or "[]")
+        except (ValueError, TypeError):
+            d["subject_ids"] = []
         return d
 
     def get_beat(self, beat_id: int) -> Optional[Dict[str, Any]]:
@@ -2027,6 +2119,8 @@ class DatabaseManager:
             return
         if "dialog" in fields:
             fields["dialog"] = _json.dumps(list(fields["dialog"] or []))
+        if "subject_ids" in fields:
+            fields["subject_ids"] = _json.dumps(list(fields["subject_ids"] or []))
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [beat_id]
         with self.lock, self._get_connection() as conn:
@@ -2037,32 +2131,58 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def delete_beat(self, beat_id: int) -> bool:
+    def delete_beat(
+        self, beat_id: int, purge_images: bool = False
+    ) -> Tuple[bool, List[str]]:
+        """Delete a beat, releasing (or purging) its beat_images/jobs first.
+
+        Returns ``(deleted, purged_file_paths)`` -- same contract as
+        delete_panel.
+        """
         with self.lock, self._get_connection() as conn:
-            cur = conn.execute("DELETE FROM beats WHERE id = ?", (beat_id,))
+            cur = conn.execute("SELECT id FROM beats WHERE id = ?", (beat_id,))
+            if cur.fetchone() is None:
+                return False, []
+            purge_paths = self._release_beats(conn, [beat_id], purge_images)
+            conn.execute("DELETE FROM beats WHERE id = ?", (beat_id,))
+            deleted_files = self._purge_media_rows(conn, purge_paths)
             conn.commit()
-            return int(cur.rowcount) > 0
+            return True, deleted_files
 
     def replace_panel_beats(
         self, panel_id: int, beats: List[Dict[str, Any]]
     ) -> List[int]:
-        """Transactionally replace a panel's beats (compose stage 4)."""
+        """Transactionally replace a panel's beats (compose stage 4).
+        Releases the old beats' images/jobs first -- beats carry identity
+        (keepers, locked prompts) since the shot/beat reorg."""
         import json as _json
 
         with self.lock, self._get_connection() as conn:
+            old_ids = [
+                int(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM beats WHERE panel_id = ?", (panel_id,)
+                ).fetchall()
+            ]
+            self._release_beats(conn, old_ids)
             conn.execute("DELETE FROM beats WHERE panel_id = ?", (panel_id,))
             new_ids: List[int] = []
             for i, b in enumerate(beats):
                 cur = conn.execute(
                     "INSERT INTO beats (panel_id, sort_order, duration_s, "
-                    "action, camera_motion, camera_amplitude, camera_speed, "
+                    "action, shot_size, angle, lens, subject_ids, "
+                    "camera_motion, camera_amplitude, camera_speed, "
                     "is_cut, dialog, sound) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         panel_id,
                         b.get("sort_order", i),
                         b.get("duration_s", 4.0),
                         b["action"],
+                        b.get("shot_size"),
+                        b.get("angle"),
+                        b.get("lens"),
+                        _json.dumps(list(b.get("subject_ids") or [])),
                         b.get("camera_motion"),
                         b.get("camera_amplitude"),
                         b.get("camera_speed"),
@@ -2083,17 +2203,18 @@ class DatabaseManager:
         """Destructively replace subjects/scenes/panels from a parse result.
 
         ``parsed`` is the validated shape from storyboard_parse: subjects
-        carry name/description; panels reference subjects BY NAME
-        (case-insensitive); unknown names are dropped. One transaction.
+        carry name/description; panels carry only ``action`` -- subject
+        assignment now lives at the beat level (via ``subject_ids`` on
+        ``create_beat``/``replace_panel_beats``), so panel-level subject
+        name resolution no longer applies here. One transaction.
 
         Before the destructive delete (which cascades scenes -> panels ->
-        panel_images), unhides the media rows any curated panel_images
-        pointed at and purges generation_jobs for the panels being
-        destroyed -- see _release_panels. Re-parsing an existing storyboard
-        would otherwise leave those media rows hidden forever.
+        beats -> beat_images), unhides the media rows any curated
+        beat_images pointed at and purges generation_jobs for the panels
+        (and their beats) being destroyed -- see _release_panels.
+        Re-parsing an existing storyboard would otherwise leave those
+        media rows hidden forever.
         """
-        import json as _json
-
         with self.lock:
             with self._get_connection() as conn:
                 panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
@@ -2105,15 +2226,13 @@ class DatabaseManager:
                 conn.execute(
                     "DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,)
                 )
-                name_to_id: Dict[str, int] = {}
                 for i, subj in enumerate(parsed.get("subjects") or []):
-                    cur = conn.execute(
+                    conn.execute(
                         "INSERT INTO storyboard_subjects "
                         "(storyboard_id, name, description, sort_order) "
                         "VALUES (?, ?, ?, ?)",
                         (storyboard_id, subj["name"], subj["description"], i),
                     )
-                    name_to_id[subj["name"].strip().lower()] = int(cur.lastrowid)
                 for si, scene in enumerate(parsed.get("scenes") or []):
                     cur = conn.execute(
                         "INSERT INTO scenes (storyboard_id, sort_order, name, "
@@ -2131,24 +2250,10 @@ class DatabaseManager:
                     )
                     scene_id = int(cur.lastrowid)
                     for pi, panel in enumerate(scene.get("panels") or []):
-                        ids = [
-                            name_to_id[n.strip().lower()]
-                            for n in (panel.get("subjects") or [])
-                            if n.strip().lower() in name_to_id
-                        ]
                         conn.execute(
-                            "INSERT INTO panels (scene_id, sort_order, "
-                            "shot_size, angle, lens, action, subject_ids) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                scene_id,
-                                pi,
-                                panel.get("shot_size"),
-                                panel.get("angle"),
-                                panel.get("lens"),
-                                panel["action"],
-                                _json.dumps(ids),
-                            ),
+                            "INSERT INTO panels (scene_id, sort_order, action) "
+                            "VALUES (?, ?, ?)",
+                            (scene_id, pi, panel["action"]),
                         )
                 conn.execute(
                     "UPDATE storyboards SET updated_at = datetime('now') "
@@ -2197,9 +2302,8 @@ class DatabaseManager:
         self, scene_id: int, panels: List[Dict[str, Any]]
     ) -> List[int]:
         """Destructively replace one scene's panels (compose stage 3).
-        ``panels`` carry resolved subject_ids + duration_s."""
-        import json as _json
-
+        ``panels`` carry ``action`` + ``duration_s`` -- framing/subject_ids
+        now live at the beat level."""
         with self.lock, self._get_connection() as conn:
             old_ids = [
                 int(r["id"])
@@ -2212,17 +2316,12 @@ class DatabaseManager:
             new_ids: List[int] = []
             for i, p in enumerate(panels):
                 cur = conn.execute(
-                    "INSERT INTO panels (scene_id, sort_order, shot_size, "
-                    "angle, lens, action, subject_ids, duration_s) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO panels (scene_id, sort_order, action, "
+                    "duration_s) VALUES (?, ?, ?, ?)",
                     (
                         scene_id,
                         i,
-                        p.get("shot_size"),
-                        p.get("angle"),
-                        p.get("lens"),
                         p["action"],
-                        _json.dumps(list(p.get("subject_ids") or [])),
                         p.get("duration_s", 12.0),
                     ),
                 )
@@ -2268,44 +2367,40 @@ class DatabaseManager:
                 for panel_row in panel_rows:
                     panel = dict(panel_row)
                     try:
-                        panel["subject_ids"] = _json.loads(panel["subject_ids"] or "[]")
-                    except (ValueError, TypeError):
-                        panel["subject_ids"] = []
-                    try:
                         panel["video_prompt_warnings"] = _json.loads(
                             panel.get("video_prompt_warnings") or "[]"
                         )
                     except (ValueError, TypeError):
                         panel["video_prompt_warnings"] = []
-                    images = []
-                    for r in conn.execute(
-                        "SELECT * FROM panel_images WHERE panel_id = ? "
-                        "ORDER BY variant_index, id",
+                    beats = []
+                    for br in conn.execute(
+                        "SELECT * FROM beats WHERE panel_id = ? "
+                        "ORDER BY sort_order, id",
                         (panel["id"],),
                     ).fetchall():
-                        image = dict(r)
-                        image["file_path"] = to_native_path(image["file_path"])
-                        images.append(image)
-                    panel["images"] = images
-                    panel["beats"] = [
-                        self._decode_beat_row(r)
-                        for r in conn.execute(
-                            "SELECT * FROM beats WHERE panel_id = ? "
-                            "ORDER BY sort_order, id",
-                            (panel["id"],),
-                        ).fetchall()
-                    ]
+                        beat = self._decode_beat_row(br)
+                        beat["images"] = []
+                        for ir in conn.execute(
+                            "SELECT * FROM beat_images WHERE beat_id = ? "
+                            "ORDER BY variant_index, id",
+                            (beat["id"],),
+                        ).fetchall():
+                            image = dict(ir)
+                            image["file_path"] = to_native_path(image["file_path"])
+                            beat["images"].append(image)
+                        beats.append(beat)
+                    panel["beats"] = beats
                     panels.append(panel)
                 scene["panels"] = panels
                 scenes.append(scene)
             tree["scenes"] = scenes
             return tree
 
-    # ---- Panel images -----------------------------------------------------
+    # ---- Beat images -----------------------------------------------------
 
-    def create_panel_image(
+    def create_beat_image(
         self,
-        panel_id: int,
+        beat_id: int,
         *,
         file_path: str,
         seed: Optional[int] = None,
@@ -2317,11 +2412,11 @@ class DatabaseManager:
         posix_path = to_posix_path(file_path)
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
-                "INSERT INTO panel_images (panel_id, file_path, seed, "
+                "INSERT INTO beat_images (beat_id, file_path, seed, "
                 "variant_index, prompt_used, preset_id, comfy_prompt_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    panel_id,
+                    beat_id,
                     posix_path,
                     seed,
                     variant_index,
@@ -2333,12 +2428,12 @@ class DatabaseManager:
             conn.commit()
             return int(cur.lastrowid)
 
-    def list_panel_images(self, panel_id: int) -> List[Dict[str, Any]]:
+    def list_beat_images(self, beat_id: int) -> List[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM panel_images WHERE panel_id = ? "
+                "SELECT * FROM beat_images WHERE beat_id = ? "
                 "ORDER BY variant_index, id",
-                (panel_id,),
+                (beat_id,),
             ).fetchall()
             out = []
             for r in rows:
@@ -2347,39 +2442,39 @@ class DatabaseManager:
                 out.append(d)
             return out
 
-    def count_panel_images(self, panel_id: int) -> int:
+    def count_beat_images(self, beat_id: int) -> int:
         with self.lock, self._get_connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM panel_images WHERE panel_id = ?",
-                (panel_id,),
+                "SELECT COUNT(*) AS n FROM beat_images WHERE beat_id = ?",
+                (beat_id,),
             ).fetchone()
             return int(row["n"]) if row else 0
 
-    def select_panel_image(self, panel_id: int, image_id: Optional[int]) -> bool:
-        """Set a panel's keeper. Unhides the new keeper's media row, re-hides
+    def select_beat_image(self, beat_id: int, image_id: Optional[int]) -> bool:
+        """Set a beat's keeper. Unhides the new keeper's media row, re-hides
         the previous keeper's. image_id=None clears the selection."""
         with self.lock:
             with self._get_connection() as conn:
-                panel = conn.execute(
-                    "SELECT selected_image_id FROM panels WHERE id = ?",
-                    (panel_id,),
+                beat = conn.execute(
+                    "SELECT selected_image_id FROM beats WHERE id = ?",
+                    (beat_id,),
                 ).fetchone()
-                if panel is None:
+                if beat is None:
                     return False
                 new_path = None
                 if image_id is not None:
                     row = conn.execute(
-                        "SELECT file_path FROM panel_images "
-                        "WHERE id = ? AND panel_id = ?",
-                        (image_id, panel_id),
+                        "SELECT file_path FROM beat_images "
+                        "WHERE id = ? AND beat_id = ?",
+                        (image_id, beat_id),
                     ).fetchone()
                     if row is None:
                         return False
                     new_path = row["file_path"]
-                old_id = panel["selected_image_id"]
+                old_id = beat["selected_image_id"]
                 if old_id is not None and old_id != image_id:
                     old = conn.execute(
-                        "SELECT file_path FROM panel_images WHERE id = ?",
+                        "SELECT file_path FROM beat_images WHERE id = ?",
                         (old_id,),
                     ).fetchone()
                     if old is not None:
@@ -2393,9 +2488,9 @@ class DatabaseManager:
                         (new_path,),
                     )
                 conn.execute(
-                    "UPDATE panels SET selected_image_id = ?, "
+                    "UPDATE beats SET selected_image_id = ?, "
                     "updated_at = datetime('now') WHERE id = ?",
-                    (image_id, panel_id),
+                    (image_id, beat_id),
                 )
                 conn.commit()
                 return True
@@ -2416,6 +2511,21 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(sql, panel_ids).fetchall()
             return {int(r["panel_id"]): dict(r) for r in rows}
+
+    def latest_jobs_for_beats(self, beat_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Latest (max id) generation_jobs row per beat."""
+        if not beat_ids:
+            return {}
+        placeholders = ",".join("?" * len(beat_ids))
+        sql = (
+            "SELECT gj.* FROM generation_jobs gj "
+            "JOIN (SELECT beat_id, MAX(id) AS mid FROM generation_jobs "
+            f"WHERE beat_id IN ({placeholders}) GROUP BY beat_id) m "
+            "ON gj.id = m.mid"
+        )
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql, beat_ids).fetchall()
+            return {int(r["beat_id"]): dict(r) for r in rows}
 
     def save_media_batch(self, media_list: List[Media]) -> int:
         saved_count = 0

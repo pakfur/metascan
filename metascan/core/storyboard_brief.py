@@ -71,9 +71,12 @@ def bucket_dims(aspect_ratio: str, target_model: str) -> tuple[int, int]:
     return (int(w), int(h))
 
 
-def panel_seed(base_seed: int, panel_sort_order: int, variant_index: int) -> int:
-    """Deterministic per-panel seed; a reroll advances variant_index."""
-    return base_seed + panel_sort_order * 1000 + variant_index
+def beat_seed(
+    base_seed: int, panel_sort_order: int, beat_sort_order: int, variant_index: int
+) -> int:
+    """Deterministic per-beat seed; a reroll advances variant_index.
+    Collision-free for < 100 beats/shot and < 1000 variants/beat."""
+    return base_seed + (panel_sort_order * 100 + beat_sort_order) * 1000 + variant_index
 
 
 def storyboard_slug(storyboard_id: int, name: str) -> str:
@@ -86,22 +89,25 @@ def compose_brief(
     storyboard: Mapping[str, Any],
     scene: Mapping[str, Any],
     panel: Mapping[str, Any],
+    beat: Mapping[str, Any],
     subjects: Sequence[Mapping[str, Any]],
 ) -> str:
-    """Deterministic panel brief. The style block is deliberately absent:
+    """Deterministic beat brief. The style block is deliberately absent:
     it is concatenated onto the final prompt outside the LLM call so the
     global look cannot drift through paraphrase (spec §7.2)."""
     shot_bits = [
-        SHOT_SIZES.get(panel.get("shot_size") or ""),
-        ANGLES.get(panel.get("angle") or ""),
-        LENSES.get(panel.get("lens") or ""),
+        SHOT_SIZES.get(beat.get("shot_size") or ""),
+        ANGLES.get(beat.get("angle") or ""),
+        LENSES.get(beat.get("lens") or ""),
         storyboard.get("aspect_ratio"),
     ]
     lines = [f"SHOT: {', '.join(b for b in shot_bits if b)}"]
     for subj in subjects:
         lines.append(f"SUBJECT {subj['name']}: {subj['description']}")
+    if beat.get("action"):
+        lines.append(f"ACTION: {beat['action']}")
     if panel.get("action"):
-        lines.append(f"ACTION: {panel['action']}")
+        lines.append(f"SHOT CONTEXT: {panel['action']}")
     if scene.get("setting"):
         lines.append(f"SETTING: {scene['setting']}")
     if scene.get("location"):

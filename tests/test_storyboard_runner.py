@@ -89,15 +89,31 @@ class StubComfy:
 
     def __init__(self, db=None):
         self.db = db
-        self.submitted = []  # (preset_id, params, panel_id, priority, output_dir)
+        self.submitted = []  # dicts: preset_id, params, panel_id, beat_id,
+        # priority, output_dir
         self.cancelled = []
         self.uploaded = []
         self._next_job_id = 100
 
     async def submit(
-        self, preset_id, params, panel_id=None, priority=False, output_dir=None
+        self,
+        preset_id,
+        params,
+        panel_id=None,
+        priority=False,
+        output_dir=None,
+        beat_id=None,
     ):
-        self.submitted.append((preset_id, params, panel_id, priority, output_dir))
+        self.submitted.append(
+            {
+                "preset_id": preset_id,
+                "params": params,
+                "panel_id": panel_id,
+                "beat_id": beat_id,
+                "priority": priority,
+                "output_dir": output_dir,
+            }
+        )
         if self.db is not None:
             return int(
                 self.db.create_generation_job(
@@ -105,6 +121,7 @@ class StubComfy:
                     params.to_json(),
                     panel_id,
                     str(output_dir) if output_dir else None,
+                    beat_id,
                 )
             )
         self._next_job_id += 1
@@ -247,8 +264,6 @@ def board(db, preset_id) -> Board:
         scene_id,
         action="hand rests on hull seam",
         sort_order=0,
-        shot_size="ECU",
-        subject_ids=[subject_id],
     )
     panel1 = db.create_panel(
         scene_id, action="wide shot of the yard at dusk", sort_order=1
@@ -315,83 +330,122 @@ async def test_parse_without_vlm_raises(db, comfy, events, tmp_path, bare_board)
 
 
 async def test_synthesize_llm_path(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out == {"synthesized": 2, "fallback": 0, "skipped_locked": 0}
-    p = db.get_panel(board.panel0)
-    assert p["prompt"] == "a prompt, graphite sketch"
-    assert p["prompt_source"] == "llm"
-    assert p["brief"].startswith("SHOT:")
+    beat = db.get_beat(b0)
+    assert beat["prompt"] == "a prompt, graphite sketch"
+    assert beat["prompt_source"] == "llm"
+    assert beat["brief"].startswith("SHOT:")
     assert "SUBJECT" in vlm.calls[0]["user"]
 
 
 async def test_synthesize_fallback_on_vlm_error(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(fail=True)
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out["fallback"] == 2
-    p = db.get_panel(board.panel0)
-    assert p["prompt_source"] == "brief"
-    assert p["prompt"].startswith("SHOT:") and p["prompt"].endswith("graphite sketch")
+    beat = db.get_beat(b0)
+    assert beat["prompt_source"] == "brief"
+    assert beat["prompt"].startswith("SHOT:") and beat["prompt"].endswith(
+        "graphite sketch"
+    )
 
 
 async def test_synthesize_no_vlm_falls_back(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(
+        board.panel0, action="hand rests", subject_ids=[board.subject_id]
+    )
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     runner = make_runner(db, comfy, None, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out == {"synthesized": 0, "fallback": 2, "skipped_locked": 0}
-    p = db.get_panel(board.panel0)
-    assert p["prompt_source"] == "brief"
+    beat = db.get_beat(b0)
+    assert beat["prompt_source"] == "brief"
 
 
 async def test_synthesize_skips_locked(db, comfy, events, tmp_path, board):
-    db.update_panel(
-        board.panel0, prompt="hand tuned", prompt_locked=1, prompt_source="user"
-    )
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.update_beat(b0, prompt="hand tuned", prompt_locked=1, prompt_source="user")
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     out = await runner.synthesize(board.sb_id)
 
     assert out["skipped_locked"] == 1
-    assert db.get_panel(board.panel0)["prompt"] == "hand tuned"
+    assert db.get_beat(b0)["prompt"] == "hand tuned"
 
 
-async def test_synthesize_single_panel_force_overrides_lock(
-    db, comfy, events, tmp_path, board
-):
-    db.update_panel(
-        board.panel0, prompt="hand tuned", prompt_locked=1, prompt_source="user"
-    )
+async def test_synthesize_targets_beats(db, comfy, events, tmp_path, board):
+    """Locks and synthesis both act on beats, not panels -- one panel can
+    carry a mix of locked and unlocked beats."""
+    b1 = db.create_beat(board.panel0, action="first", subject_ids=[])
+    b2 = db.create_beat(board.panel0, action="second", subject_ids=[])
+    db.update_beat(b2, prompt="locked", prompt_locked=1, prompt_source="user")
     vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
-    out = await runner.synthesize(board.sb_id, panel_ids=[board.panel0], force=True)
+    counts = await runner.synthesize(board.sb_id)
+
+    assert counts["skipped_locked"] == 1
+    assert db.get_beat(b1)["prompt"]  # written
+    assert db.get_beat(b2)["prompt"] == "locked"  # untouched
+
+
+async def test_synthesize_single_beat_force_overrides_lock(
+    db, comfy, events, tmp_path, board
+):
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.update_beat(b0, prompt="hand tuned", prompt_locked=1, prompt_source="user")
+    vlm = StubVlm(responses=["a prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    out = await runner.synthesize(board.sb_id, beat_ids=[b0], force=True)
 
     assert out["synthesized"] == 1
-    p = db.get_panel(board.panel0)
-    assert p["prompt_locked"] == 0
+    beat = db.get_beat(b0)
+    assert beat["prompt_locked"] == 0
 
 
 async def test_synthesize_emits_progress(db, comfy, events, tmp_path, board):
+    b0 = db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    b1 = db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
     await runner.synthesize(board.sb_id)
 
-    kinds = [(ch, ev) for ch, ev, _ in events]
-    assert ("storyboard", "synthesis_progress") in kinds
+    progress = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "synthesis_progress"
+    ]
+    assert progress
+    assert {d["beat_id"] for d in progress} == {b0, b1}
+    assert {d["panel_id"] for d in progress} == {board.panel0, board.panel1}
 
 
 async def test_synthesize_emits_complete_on_success(db, comfy, events, tmp_path, board):
     """POST .../synthesize is 202 fire-and-forget; synthesis_complete is
     the only signal a client gets that the background run finished."""
+    db.create_beat(board.panel0, action="hand rests", subject_ids=[])
+    db.create_beat(board.panel1, action="wide shot", subject_ids=[])
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
@@ -413,6 +467,7 @@ async def test_synthesize_emits_error_and_reraises_on_failure(
     """If the background run raises (e.g. the VLM won't load), the runner
     must emit synthesis_error rather than fail silently, and still
     re-raise for any direct (non-route) caller."""
+    db.create_beat(board.panel0, action="hand rests", subject_ids=[])
 
     class ExplodingVlm(StubVlm):
         async def ensure_started(self, model_id):
@@ -439,23 +494,53 @@ async def test_synthesize_emits_error_and_reraises_on_failure(
 
 
 async def test_generate_submits_with_derived_params(db, comfy, events, tmp_path, board):
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+    await runner.synthesize(board.sb_id)  # gives the beat a prompt
+
+    jobs = await runner.generate(board.sb_id)
+
+    assert len(jobs) == 1
+    submitted = comfy.submitted[0]
+    params = submitted["params"]
+    assert params.width == 1344 and params.height == 768  # 16:9 on sd
+    assert params.batch_size == 2
+    assert params.seed == 1000 + (0 * 100 + 0) * 1000 + 0  # beat_seed
+    assert submitted["priority"] is False
+    output_dir = str(submitted["output_dir"])
+    assert "scene_00" in output_dir
+    assert "panel_00" in output_dir
+    assert "beat_00" in output_dir
+
+
+async def test_generate_submits_per_beat_with_beat_seed(
+    db, comfy, events, tmp_path, board
+):
+    """generate() submits one job per beat (not per panel), with a
+    beat_seed keyed on both panel and beat sort_order, and an output_dir
+    that carries a per-beat suffix."""
+    beat_a = db.create_beat(board.panel1, action="first", sort_order=0)
+    beat_b = db.create_beat(board.panel1, action="second", sort_order=1)
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
-    await runner.synthesize(board.sb_id)  # gives panels prompts
+    await runner.synthesize(board.sb_id)
 
     jobs = await runner.generate(board.sb_id)
 
     assert len(jobs) == 2
-    preset_id, params, panel_id, priority, output_dir = comfy.submitted[0]
-    assert params.width == 1344 and params.height == 768  # 16:9 on sd
-    assert params.batch_size == 2
-    assert params.seed == 1000 + 0 * 1000 + 0  # panel_seed
-    assert priority is False
-    assert "scene_00" in str(output_dir) and "panel_00" in str(output_dir)
+    submitted = comfy.submitted
+    assert [s["beat_id"] for s in submitted] == [beat_a, beat_b]
+    assert submitted[0]["params"].seed == 1000 + (1 * 100 + 0) * 1000
+    assert submitted[1]["params"].seed == 1000 + (1 * 100 + 1) * 1000
+    assert str(submitted[1]["output_dir"]).endswith(
+        str(Path("scene_00") / "panel_01" / "beat_01")
+    )
 
 
 async def test_generate_creates_folder_once(db, comfy, events, tmp_path, board):
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
@@ -483,7 +568,8 @@ async def test_generate_concurrent_calls_create_folder_once(
     """Two concurrent generate() calls for the same storyboard must not
     race the folder-ensure step: exactly one folder gets created, no
     orphan folder is left behind, and folder_created fires exactly once."""
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
@@ -508,7 +594,8 @@ async def test_generate_concurrent_calls_create_folder_once(
     assert created_events[0][2]["folder"]["id"] == fid
 
 
-async def test_generate_skips_panels_without_prompt(db, comfy, events, tmp_path, board):
+async def test_generate_skips_beats_without_prompt(db, comfy, events, tmp_path, board):
+    db.create_beat(board.panel0, action="hand rests")
     vlm = StubVlm(responses=[])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
@@ -517,45 +604,43 @@ async def test_generate_skips_panels_without_prompt(db, comfy, events, tmp_path,
     assert jobs == [] and comfy.submitted == []
 
 
-async def test_generate_single_panel_is_priority_and_advances_seed(
+async def test_generate_single_beat_is_priority_and_advances_seed(
     db, comfy, events, tmp_path, board
 ):
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    beat_id = db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
     db.save_media(_media("/pics/v0.png"))
     db.save_media(_media("/pics/v1.png"))
-    db.create_panel_image(board.panel0, file_path="/pics/v0.png", variant_index=0)
-    db.create_panel_image(board.panel0, file_path="/pics/v1.png", variant_index=1)
+    db.create_beat_image(beat_id, file_path="/pics/v0.png", variant_index=0)
+    db.create_beat_image(beat_id, file_path="/pics/v1.png", variant_index=1)
 
-    jobs = await runner.generate(board.sb_id, panel_ids=[board.panel0])
+    jobs = await runner.generate(board.sb_id, beat_ids=[beat_id])
 
     assert len(jobs) == 1
-    _, params, _, priority, _ = comfy.submitted[0]
-    assert priority is True
-    assert params.seed == 1000 + 0 + 2  # variant base = existing count
+    submitted = comfy.submitted[0]
+    assert submitted["priority"] is True
+    assert submitted["params"].seed == 1000 + 0 + 2  # variant base = existing count
 
 
 async def test_generate_reroll_before_ingest_advances_seed(
     db, comfy, events, tmp_path, board
 ):
-    """Two generate() calls for the same panel *before the first has
-    ingested* (no panel_images pre-seeded, and StubComfy never fires
-    job_outputs) must not submit the same seed twice -- count_panel_images
+    """Two generate() calls for the same beat *before the first has
+    ingested* (no beat_images pre-seeded, and StubComfy never fires
+    job_outputs) must not submit the same seed twice -- count_beat_images
     alone can't see the first call's still-queued job."""
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    beat_id = db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
-    await runner.generate(board.sb_id, panel_ids=[board.panel0])
-    await runner.generate(board.sb_id, panel_ids=[board.panel0])
+    await runner.generate(board.sb_id, beat_ids=[beat_id])
+    await runner.generate(board.sb_id, beat_ids=[beat_id])
 
-    seeds = [
-        params.seed
-        for _, params, panel_id, _, _ in comfy.submitted
-        if panel_id == board.panel0
-    ]
+    seeds = [s["params"].seed for s in comfy.submitted if s["beat_id"] == beat_id]
     assert len(seeds) == 2
     assert seeds[0] != seeds[1]
     # board fixture's batch_size=2 (see the `board` fixture docstring).
@@ -563,23 +648,26 @@ async def test_generate_reroll_before_ingest_advances_seed(
 
 
 async def test_generate_only_failed(db, comfy, events, tmp_path, board, preset_id):
+    beat0 = db.create_beat(board.panel0, action="hand rests")
+    beat1 = db.create_beat(board.panel1, action="wide shot")
     vlm = StubVlm(responses=["a prompt", "b prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
-    j0 = db.create_generation_job(preset_id, "{}", panel_id=board.panel0)
+    j0 = db.create_generation_job(preset_id, "{}", panel_id=board.panel0, beat_id=beat0)
     db.update_generation_job(j0, state="failed")
-    j1 = db.create_generation_job(preset_id, "{}", panel_id=board.panel1)
+    j1 = db.create_generation_job(preset_id, "{}", panel_id=board.panel1, beat_id=beat1)
     db.update_generation_job(j1, state="done")
 
     jobs = await runner.generate(board.sb_id, only_failed=True)
 
-    assert [s[2] for s in comfy.submitted] == [board.panel0]
+    assert [s["beat_id"] for s in comfy.submitted] == [beat0]
     assert jobs
 
 
 async def test_generate_unloads_vlm(db, comfy, events, tmp_path, board):
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
 
@@ -597,7 +685,8 @@ async def test_generate_waits_for_synth_lock_before_unloading_vlm(
     in the test itself: while held, generate() must not be able to finish
     (asyncio.Lock guarantees vlm.shutdown() can't run), and once released
     it must proceed and unload."""
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
     await runner.generate(board.sb_id)  # pre-create the folder so the
@@ -627,7 +716,8 @@ async def test_generate_waits_for_synth_lock_before_unloading_vlm(
 async def test_generate_negative_without_binding_fails_before_submitting(
     db, comfy, events, tmp_path, board
 ):
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
     db.update_storyboard(board.sb_id, negative="blurry")
@@ -644,7 +734,9 @@ async def test_generate_carries_negative_and_lora_through(
     """Happy path for negative/LoRA -- exercised against a preset whose
     workflow actually binds MS_NEGATIVE/MS_LORA (t2i_workflow(), used by
     every other generate() test, deliberately omits both so the
-    missing-binding validation tests mean something)."""
+    missing-binding validation tests mean something). Negative is
+    storyboard-level only (panels/beats carry none); LoRA comes from the
+    beat's primary subject."""
     sb_id = db.create_storyboard(
         name="Full Params",
         target_model="sd",
@@ -664,19 +756,12 @@ async def test_generate_carries_negative_and_lora_through(
         lora_strength=0.65,
     )
     scene_id = db.create_scene(sb_id, name="Yard", sort_order=0)
-    panel0 = db.create_panel(
-        scene_id,
-        action="close on her hands",
-        sort_order=0,
-        subject_ids=[subject_id],
+    panel0 = db.create_panel(scene_id, action="close on her hands", sort_order=0)
+    panel1 = db.create_panel(scene_id, action="wide shot", sort_order=1)
+    beat0 = db.create_beat(
+        panel0, action="close on her hands", subject_ids=[subject_id]
     )
-    panel1 = db.create_panel(
-        scene_id,
-        action="wide shot",
-        sort_order=1,
-        subject_ids=[subject_id],
-    )
-    db.update_panel(panel1, negative="panel-level smoke")  # overrides storyboard
+    beat1 = db.create_beat(panel1, action="wide shot", subject_ids=[subject_id])
 
     vlm = StubVlm(responses=["prompt one", "prompt two"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
@@ -684,15 +769,15 @@ async def test_generate_carries_negative_and_lora_through(
 
     await runner.generate(sb_id)
 
-    by_panel = {submitted[2]: submitted[1] for submitted in comfy.submitted}
-    p0 = by_panel[panel0]
-    p1 = by_panel[panel1]
+    by_beat = {s["beat_id"]: s["params"] for s in comfy.submitted}
+    p0 = by_beat[beat0]
+    p1 = by_beat[beat1]
 
     assert p0.negative == "storyboard-level blur"
     assert p0.lora_name == "maya_lora"
     assert p0.lora_strength == 0.65
 
-    assert p1.negative == "panel-level smoke"  # panel overrides storyboard
+    assert p1.negative == "storyboard-level blur"
     assert p1.lora_name == "maya_lora"
     assert p1.lora_strength == 0.65
 
@@ -700,8 +785,11 @@ async def test_generate_carries_negative_and_lora_through(
 # ---- ingest ------------------------------------------------------------
 
 
-async def test_ingest_on_job_outputs(db, comfy, events, tmp_path, board, preset_id):
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+async def test_ingest_writes_beat_images_and_emits(
+    db, comfy, events, tmp_path, board, preset_id
+):
+    beat_id = db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
     await runner.generate(board.sb_id)  # establishes the storyboard's folder
@@ -714,7 +802,7 @@ async def test_ingest_on_job_outputs(db, comfy, events, tmp_path, board, preset_
         batch_size=2,
     )
     job_id = db.create_generation_job(
-        preset_id, params.to_json(), panel_id=board.panel0
+        preset_id, params.to_json(), panel_id=board.panel0, beat_id=beat_id
     )
     job_row = db.get_generation_job(job_id)
 
@@ -730,7 +818,8 @@ async def test_ingest_on_job_outputs(db, comfy, events, tmp_path, board, preset_
     )
     await runner.aclose()  # drains the ingest task
 
-    imgs = db.list_panel_images(board.panel0)
+    assert db.count_beat_images(beat_id) == 2
+    imgs = db.list_beat_images(beat_id)
     assert [i["variant_index"] for i in imgs] == [0, 1]
     assert imgs[0]["seed"] == json.loads(job_row["params"])["seed"]
     assert imgs[0]["prompt_used"] == json.loads(job_row["params"])["positive"]
@@ -741,15 +830,21 @@ async def test_ingest_on_job_outputs(db, comfy, events, tmp_path, board, preset_
     # folder membership:
     fid = db.get_storyboard(board.sb_id)["folder_id"]
     assert set(p["file_path"] for p in imgs) <= set(db.get_folder(fid)["items"])
-    assert ("storyboard", "panel_images_changed") in [(c, e) for c, e, _ in events]
+    evt = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "beat_images_changed"
+    ][-1]
+    assert evt["beat_id"] == beat_id
+    assert evt["panel_id"] == board.panel0
 
 
 async def test_ingest_event_payload_uses_normalized_paths(
     db, comfy, events, tmp_path, board, preset_id, monkeypatch
 ):
-    """panel_images_changed's ``files`` must reflect the SAME normalized
+    """beat_images_changed's ``files`` must reflect the SAME normalized
     (to_posix_path-stored, then to_native_path-converted) value that was
-    actually inserted into panel_images -- not the raw pre-conversion
+    actually inserted into beat_images -- not the raw pre-conversion
     string from the comfy job_outputs payload. Patch to_native_path with a
     distinguishable transform (mirroring the DB-layer test) so the
     assertion can't pass merely because POSIX round-trips as a no-op on a
@@ -762,7 +857,8 @@ async def test_ingest_event_payload_uses_normalized_paths(
         "metascan.core.storyboard_runner.to_native_path", fake_to_native
     )
 
-    vlm = StubVlm(responses=["a prompt", "b prompt"])
+    beat_id = db.create_beat(board.panel0, action="hand rests")
+    vlm = StubVlm(responses=["a prompt"])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
     await runner.synthesize(board.sb_id)
     await runner.generate(board.sb_id)
@@ -775,7 +871,7 @@ async def test_ingest_event_payload_uses_normalized_paths(
         batch_size=1,
     )
     job_id = db.create_generation_job(
-        preset_id, params.to_json(), panel_id=board.panel0
+        preset_id, params.to_json(), panel_id=board.panel0, beat_id=beat_id
     )
 
     f1 = tmp_path / "raw_from_comfy.png"
@@ -788,13 +884,69 @@ async def test_ingest_event_payload_uses_normalized_paths(
     changed = [
         data
         for ch, ev, data in events
-        if ch == "storyboard" and ev == "panel_images_changed" and data["files"]
+        if ch == "storyboard" and ev == "beat_images_changed" and data["files"]
     ]
     assert changed
     assert changed[-1]["files"] == [f"NATIVE::{str(f1)}"]
 
 
-async def test_ingest_ignores_jobs_without_panel(
+async def test_ingest_video_job_lands_on_panels_first_beat(
+    db, comfy, events, tmp_path, board, preset_id
+):
+    """A job carrying panel_id but no beat_id (the video-generation path --
+    Task 8) ingests its output(s) against the panel's first beat by
+    sort_order, not the panel itself."""
+    beat0 = db.create_beat(board.panel0, action="first", sort_order=0)
+    db.create_beat(board.panel0, action="second", sort_order=1)
+    vlm = StubVlm(responses=[])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    job_id = db.create_generation_job(preset_id, "{}", panel_id=board.panel0)
+
+    f1 = tmp_path / "clip.mp4"
+    f1.write_bytes(b"x")
+    db.save_media(_media(str(f1)))
+
+    runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
+    await runner.aclose()
+
+    assert db.count_beat_images(beat0) == 1
+    evt = [
+        data
+        for ch, ev, data in events
+        if ch == "storyboard" and ev == "beat_images_changed"
+    ][-1]
+    assert evt["beat_id"] == beat0
+    assert evt["panel_id"] == board.panel0
+
+
+async def test_ingest_video_job_warns_when_panel_has_no_beats(
+    db, comfy, events, tmp_path, board, preset_id, caplog
+):
+    """A panel-only job against a beat-less panel can't ingest anywhere --
+    logs a warning and leaves no beat_images / beat_images_changed behind,
+    rather than raising."""
+    vlm = StubVlm(responses=[])
+    runner = make_runner(db, comfy, vlm, events, tmp_path)
+
+    job_id = db.create_generation_job(preset_id, "{}", panel_id=board.panel0)
+
+    f1 = tmp_path / "clip.mp4"
+    f1.write_bytes(b"x")
+    db.save_media(_media(str(f1)))
+
+    with caplog.at_level("WARNING"):
+        runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
+        await runner.aclose()
+
+    assert "no beats to ingest into" in caplog.text
+    assert not any(ev == "beat_images_changed" for _, ev, _ in events)
+    with db.lock, db._get_connection() as conn:
+        n = conn.execute("SELECT COUNT(*) AS n FROM beat_images").fetchone()["n"]
+        assert n == 0
+
+
+async def test_ingest_ignores_jobs_without_panel_or_beat(
     db, comfy, events, tmp_path, board, preset_id
 ):
     vlm = StubVlm(responses=[])
@@ -802,10 +954,10 @@ async def test_ingest_ignores_jobs_without_panel(
 
     bare_job_id = db.create_generation_job(preset_id, "{}", panel_id=None)
     runner.handle_job_event("job_outputs", {"job_id": bare_job_id, "files": ["/x.png"]})
-    await runner.aclose()  # no exception, no panel_images rows
+    await runner.aclose()  # no exception, no beat_images rows
 
     with db.lock, db._get_connection() as conn:
-        n = conn.execute("SELECT COUNT(*) AS n FROM panel_images").fetchone()["n"]
+        n = conn.execute("SELECT COUNT(*) AS n FROM beat_images").fetchone()["n"]
         assert n == 0
 
 

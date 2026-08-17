@@ -21,9 +21,9 @@ from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bin
 from metascan.core import h3_compiler as h3
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
+    beat_seed,
     bucket_dims,
     compose_brief,
-    panel_seed,
     storyboard_slug,
 )
 from metascan.core.storyboard_parse import (
@@ -50,16 +50,22 @@ EventCb = Callable[[str, str, Dict[str, Any]], None]
 _VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov"})
 
 
-def _panel_image_by_id(
-    panel: Dict[str, Any], image_id: Optional[int]
-) -> Optional[Dict[str, Any]]:
-    """Look up one of ``panel["images"]`` (as returned by
-    ``get_storyboard_tree``) by its ``panel_images.id``."""
+def _first_beat_keeper(panel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The keeper image of the shot's first beat (lowest sort_order) --
+    the resolution of video_anchor='keeper' since keyframes moved to
+    beats. None when there is no beat or no keeper."""
+    beats = panel.get("beats") or []
+    if not beats:
+        return None
+    first = beats[0]  # tree orders beats by sort_order, id
+    image_id = first.get("selected_image_id")
     if image_id is None:
         return None
-    return next(
-        (img for img in panel.get("images") or [] if img["id"] == image_id), None
-    )
+    images: List[Dict[str, Any]] = first.get("images") or []
+    for img in images:
+        if img.get("id") == image_id:
+            return img
+    return None
 
 
 def _is_video_file(path: str) -> bool:
@@ -197,6 +203,7 @@ class StoryboardRunner:
         storyboard_id: int,
         stages: Sequence[str],
         scene_ids: Optional[List[int]],
+        panel_ids: Optional[List[int]],
         confirm: bool,
     ) -> None:
         """Synchronous-shaped gate check so the route can 409 before the
@@ -246,6 +253,25 @@ class StoryboardRunner:
                 )
                 exc._compose_stage = "shots"  # type: ignore[attr-defined]
                 raise exc
+        if "beats" in stages:
+            target_panels = [
+                p
+                for s in tree["scenes"]
+                for p in s["panels"]
+                if panel_ids is None or p["id"] in panel_ids
+            ]
+            dirty = any(
+                beat.get("images") or beat.get("prompt_locked")
+                for p in target_panels
+                for beat in (p.get("beats") or [])
+            )
+            if dirty:
+                exc = ConfirmRequiredError(
+                    "target shots have beats with generated images or locked "
+                    "prompts; recomposing destroys them — pass confirm=true"
+                )
+                exc._compose_stage = "beats"  # type: ignore[attr-defined]
+                raise exc
 
     async def compose_story(
         self,
@@ -292,7 +318,9 @@ class StoryboardRunner:
         vlm = self.get_vlm()
         if vlm is None:
             raise StoryboardError("no VLM client — composing requires a VLM")
-        await self.check_compose_gates(storyboard_id, stages, scene_ids, confirm)
+        await self.check_compose_gates(
+            storyboard_id, stages, scene_ids, panel_ids, confirm
+        )
 
         run_stages = [s for s in story.STAGES if s in set(stages)]
         counts: Dict[str, int] = {}
@@ -454,9 +482,9 @@ class StoryboardRunner:
                     else None
                 )
                 async with sem:
-                    panels, warnings = await generate_validated(
+                    panels = await generate_validated(
                         f"shots ({scene['name']})",
-                        lambda raw: story.validate_shots_response(raw, roster),
+                        story.validate_shots_response,
                         system_prompt=story.STORY_SHOTS_SYSTEM,
                         user_prompt=story.build_shots_user_prompt(
                             outline_json,
@@ -471,8 +499,6 @@ class StoryboardRunner:
                         max_tokens=1600,
                         timeout=300.0,
                     )
-                for w in warnings:
-                    logger.warning("compose shots (%s): %s", scene["name"], w)
                 await asyncio.to_thread(
                     self.db.replace_scene_panels, scene["id"], panels
                 )
@@ -503,20 +529,21 @@ class StoryboardRunner:
 
         async def _beats_for(scene: Dict[str, Any], panel: Dict[str, Any]) -> int:
             nonlocal done
-            subjects = [s for s in tree["subjects"] if s["id"] in panel["subject_ids"]]
             async with sem:
-                beats = await generate_validated(
+                beats, warnings = await generate_validated(
                     f"beats (panel {panel['id']})",
                     lambda raw: story.validate_beats_response(raw, roster),
                     system_prompt=story.STORY_BEATS_SYSTEM,
                     user_prompt=story.build_beats_user_prompt(
-                        logline, scene, panel, subjects
+                        logline, scene, panel, tree["subjects"]
                     ),
                     grammar=story.BEATS_GRAMMAR,
                     temperature=0.6,
                     max_tokens=1600,
                     timeout=300.0,
                 )
+            for w in warnings:
+                logger.warning("compose beats (panel %s): %s", panel["id"], w)
             story.rescale_beat_durations(beats, float(panel.get("duration_s") or 12.0))
             await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
             async with lock:
@@ -533,25 +560,32 @@ class StoryboardRunner:
         self, tree: Dict[str, Any], panel: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """The subjects a panel's H3 compile -- and video generation --
-        must account for: the union of the panel's own ``subject_ids`` and
+        must account for: the union of every beat's ``subject_ids`` and
         every subject a beat's dialog names, in the board's subject
-        ``sort_order``.
+        ``sort_order``. Beats are the single source of casting truth since
+        the shot/beat reorg -- computing the union here (compile AND
+        upload both call this) makes the document/upload agreement
+        structural.
 
         Beat dialog subject_ids are picked from the whole board roster
         (BeatForm's picker + validate_beats_response), not just this
-        panel's subject_ids -- so an off-panel speaker still needs a real
-        ``<Subject N>`` definition/refplan entry. Factored out of
+        panel's beats' subject_ids -- so an off-beat speaker still needs a
+        real ``<Subject N>`` definition/refplan entry. Factored out of
         ``_compile_locked`` so compile's prompt text and
         ``generate_video``'s uploaded pixels can never disagree about who's
         in the shot.
         """
+        beats = panel.get("beats") or []
+        beat_subject_ids = {
+            sid for beat in beats for sid in (beat.get("subject_ids") or [])
+        }
         dialog_subject_ids = {
             d.get("subject_id")
-            for beat in (panel.get("beats") or [])
+            for beat in beats
             for d in (beat.get("dialog") or [])
             if d.get("subject_id") is not None
         }
-        wanted_ids = set(panel["subject_ids"]) | dialog_subject_ids
+        wanted_ids = beat_subject_ids | dialog_subject_ids
         return [s for s in tree["subjects"] if s["id"] in wanted_ids]
 
     # ---- compile (H3 video-prompt) --------------------------------------
@@ -853,10 +887,10 @@ class StoryboardRunner:
     async def synthesize(
         self,
         storyboard_id: int,
-        panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
-        """Compose per-panel prompts, emitting a terminal WS event.
+        """Compose per-beat prompts, emitting a terminal WS event.
 
         The route fires this as a fire-and-forget background task (202
         response), so a failure here (e.g. the VLM won't load) would
@@ -867,7 +901,7 @@ class StoryboardRunner:
         failure.
         """
         try:
-            counts = await self._synthesize_locked(storyboard_id, panel_ids, force)
+            counts = await self._synthesize_locked(storyboard_id, beat_ids, force)
         except Exception as exc:
             self._emit(
                 "storyboard",
@@ -885,7 +919,7 @@ class StoryboardRunner:
     async def _synthesize_locked(
         self,
         storyboard_id: int,
-        panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
         async with self._synth_lock:
@@ -894,24 +928,25 @@ class StoryboardRunner:
                 raise StoryboardError(f"no storyboard with id {storyboard_id}")
             subjects_by_id = {s["id"]: s for s in tree["subjects"]}
 
-            explicit_ids = set(panel_ids) if panel_ids is not None else None
-            candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            explicit_ids = set(beat_ids) if beat_ids is not None else None
+            candidates: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
             for scene in tree["scenes"]:
                 for panel in scene["panels"]:
-                    if explicit_ids is not None and panel["id"] not in explicit_ids:
-                        continue
-                    candidates.append((scene, panel))
+                    for beat in panel.get("beats") or []:
+                        if explicit_ids is not None and beat["id"] not in explicit_ids:
+                            continue
+                        candidates.append((scene, panel, beat))
 
-            work: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            work: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
             skipped_locked = 0
-            for scene, panel in candidates:
+            for scene, panel, beat in candidates:
                 forced_override = (
-                    force and explicit_ids is not None and panel["id"] in explicit_ids
+                    force and explicit_ids is not None and beat["id"] in explicit_ids
                 )
-                if panel["prompt_locked"] and not forced_override:
+                if beat["prompt_locked"] and not forced_override:
                     skipped_locked += 1
                     continue
-                work.append((scene, panel))
+                work.append((scene, panel, beat))
 
             counts: Dict[str, int] = {
                 "synthesized": 0,
@@ -933,14 +968,16 @@ class StoryboardRunner:
             progress_lock = asyncio.Lock()
             done = 0
 
-            async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
+            async def _one(
+                scene: Dict[str, Any], panel: Dict[str, Any], beat: Dict[str, Any]
+            ) -> None:
                 nonlocal done
                 subjects = [
                     subjects_by_id[sid]
-                    for sid in panel["subject_ids"]
+                    for sid in beat["subject_ids"]
                     if sid in subjects_by_id
                 ]
-                brief = compose_brief(tree, scene, panel, subjects)
+                brief = compose_brief(tree, scene, panel, beat, subjects)
                 text = brief
                 source = "brief"
                 if vlm is not None:
@@ -961,8 +998,8 @@ class StoryboardRunner:
                             source = "brief"
                 prompt = finalize_prompt(text, tree.get("style_block"))
                 await asyncio.to_thread(
-                    self.db.update_panel,
-                    panel["id"],
+                    self.db.update_beat,
+                    beat["id"],
                     brief=brief,
                     prompt=prompt,
                     prompt_source=source,
@@ -978,13 +1015,16 @@ class StoryboardRunner:
                     {
                         "storyboard_id": storyboard_id,
                         "panel_id": panel["id"],
+                        "beat_id": beat["id"],
                         "done": done_snapshot,
                         "total": total,
                         "prompt_source": source,
                     },
                 )
 
-            await asyncio.gather(*(_one(scene, panel) for scene, panel in work))
+            await asyncio.gather(
+                *(_one(scene, panel, beat) for scene, panel, beat in work)
+            )
             return counts
 
     # ---- generate ------------------------------------------------------
@@ -992,7 +1032,7 @@ class StoryboardRunner:
     async def generate(
         self,
         storyboard_id: int,
-        panel_ids: Optional[List[int]] = None,
+        beat_ids: Optional[List[int]] = None,
         only_failed: bool = False,
     ) -> List[int]:
         tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
@@ -1008,55 +1048,61 @@ class StoryboardRunner:
         kind = preset["kind"]
 
         subjects_by_id = {s["id"]: s for s in tree["subjects"]}
-        all_panels: List[Tuple[Dict[str, Any], Dict[str, Any]]] = [
-            (scene, panel) for scene in tree["scenes"] for panel in scene["panels"]
+        all_beats: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = [
+            (scene, panel, beat)
+            for scene in tree["scenes"]
+            for panel in scene["panels"]
+            for beat in (panel.get("beats") or [])
         ]
-        if panel_ids is not None:
-            wanted = set(panel_ids)
-            all_panels = [(s, p) for s, p in all_panels if p["id"] in wanted]
-        targets = [(s, p) for s, p in all_panels if p.get("prompt")]
+        if beat_ids is not None:
+            wanted = set(beat_ids)
+            all_beats = [(s, p, b) for s, p, b in all_beats if b["id"] in wanted]
+        targets = [(s, p, b) for s, p, b in all_beats if b.get("prompt")]
 
         if only_failed:
-            ids = [p["id"] for _, p in targets]
-            latest = await asyncio.to_thread(self.db.latest_jobs_for_panels, ids)
+            ids = [b["id"] for _, _, b in targets]
+            latest = await asyncio.to_thread(self.db.latest_jobs_for_beats, ids)
             targets = [
-                (s, p)
-                for s, p in targets
-                if (latest.get(p["id"]) or {}).get("state") == "failed"
+                (s, p, b)
+                for s, p, b in targets
+                if (latest.get(b["id"]) or {}).get("state") == "failed"
             ]
 
         if not targets:
             return []
 
-        def _primary_subject(panel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-            subject_ids = panel.get("subject_ids") or []
+        def _primary_subject(beat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            subject_ids = beat.get("subject_ids") or []
             if not subject_ids:
                 return None
             return subjects_by_id.get(subject_ids[0])
 
+        # Negative is now storyboard-level only (beats/panels carry none),
+        # so this is checked exactly once rather than per-target.
+        effective_negative = tree.get("negative")
+        if effective_negative is not None and bindings.negative is None:
+            raise StoryboardError(
+                f"storyboard {storyboard_id} has a negative prompt but "
+                f"preset {preset_id} has no MS_NEGATIVE node"
+            )
+
         # Validate everything before submitting anything (spec §9: half-run
         # avoidance). A bad binding discovered mid-loop would leave earlier
-        # panels already queued in ComfyUI with no way to undo that.
-        for scene, panel in targets:
-            effective_negative = panel.get("negative") or tree.get("negative")
-            if effective_negative is not None and bindings.negative is None:
-                raise StoryboardError(
-                    f"storyboard {storyboard_id} has a negative prompt but "
-                    f"preset {preset_id} has no MS_NEGATIVE node"
-                )
-            primary = _primary_subject(panel)
+        # beats already queued in ComfyUI with no way to undo that.
+        for scene, panel, beat in targets:
+            primary = _primary_subject(beat)
             if (
                 primary is not None
                 and primary.get("lora_name")
                 and bindings.lora is None
             ):
                 raise StoryboardError(
-                    f"panel {panel['id']}'s subject {primary.get('name')!r} has "
+                    f"beat {beat['id']}'s subject {primary.get('name')!r} has "
                     f"a LoRA but preset {preset_id} has no MS_LORA node"
                 )
             if kind == "ref" and (primary is None or not primary.get("reference_path")):
                 raise StoryboardError(
-                    f"panel {panel['id']} has no subject reference image for "
+                    f"beat {beat['id']} has no subject reference image for "
                     f"a 'ref' kind preset"
                 )
 
@@ -1102,28 +1148,29 @@ class StoryboardRunner:
 
         width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
         slug = storyboard_slug(storyboard_id, tree["name"])
-        priority = panel_ids is not None and len(panel_ids) == 1
+        priority = beat_ids is not None and len(beat_ids) == 1
 
         job_ids: List[int] = []
-        for scene, panel in targets:
-            committed = await asyncio.to_thread(self.db.count_panel_images, panel["id"])
-            # count_panel_images only sees rows already ingested from a
-            # finished job. Two generate() calls for the same panel before
+        for scene, panel, beat in targets:
+            committed = await asyncio.to_thread(self.db.count_beat_images, beat["id"])
+            # count_beat_images only sees rows already ingested from a
+            # finished job. Two generate() calls for the same beat before
             # the first has ingested (e.g. two rerolls back-to-back) would
             # otherwise both read the same committed count and submit an
             # identical seed. Fold in batch_size for every still-pending
-            # (queued/running) job against this panel so a second reroll
+            # (queued/running) job against this beat so a second reroll
             # advances the seed even before the first one's outputs land.
             pending_jobs = await asyncio.to_thread(
                 self.db.list_generation_jobs,
                 states=["queued", "running"],
-                panel_ids=[panel["id"]],
+                beat_ids=[beat["id"]],
                 limit=10000,
             )
             variant_base = committed + tree["batch_size"] * len(pending_jobs)
-            seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
-            effective_negative = panel.get("negative") or tree.get("negative")
-            primary = _primary_subject(panel)
+            seed = beat_seed(
+                tree["base_seed"], panel["sort_order"], beat["sort_order"], variant_base
+            )
+            primary = _primary_subject(beat)
 
             ref_name: Optional[str] = None
             if kind == "ref" and primary is not None:
@@ -1132,7 +1179,7 @@ class StoryboardRunner:
                     ref_name = await self.comfy.upload_image(Path(ref_path))
 
             params = GenerationParams(
-                positive=panel["prompt"],
+                positive=beat["prompt"],
                 seed=seed,
                 width=width,
                 height=height,
@@ -1149,11 +1196,13 @@ class StoryboardRunner:
                 / slug
                 / f"scene_{scene['sort_order']:02d}"
                 / f"panel_{panel['sort_order']:02d}"
+                / f"beat_{beat['sort_order']:02d}"
             )
             job_id = await self.comfy.submit(
                 preset_id,
                 params,
                 panel_id=panel["id"],
+                beat_id=beat["id"],
                 priority=priority,
                 output_dir=output_dir,
             )
@@ -1287,16 +1336,17 @@ class StoryboardRunner:
                     "MS_FIRST_FRAME node"
                 )
             if anchor == "keeper":
-                image = _panel_image_by_id(panel, panel.get("selected_image_id"))
+                image = _first_beat_keeper(panel)
                 if image is None:
                     issues.append(
-                        f"panel {pid}: video_anchor 'keeper' requires a "
-                        "selected still image"
+                        f"panel {pid}: video_anchor 'keeper' requires the "
+                        "shot's first beat to have a selected keeper image"
                     )
                 elif _is_video_file(image["file_path"]):
                     issues.append(
                         f"panel {pid}: video_anchor 'keeper' requires the "
-                        "selected image to be a still, not a video"
+                        "shot's first beat's selected image to be a still, "
+                        "not a video"
                     )
             elif anchor == "prev_last":
                 # idx == 0 (first panel on the board) and idx is None
@@ -1310,19 +1360,18 @@ class StoryboardRunner:
                         "previous panel"
                     )
                 else:
-                    prev_image = _panel_image_by_id(
-                        prev_panel, prev_panel.get("selected_image_id")
-                    )
+                    prev_image = _first_beat_keeper(prev_panel)
                     if prev_image is None:
                         issues.append(
                             f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel to have a selected video"
+                            "the previous panel's shot's first beat to have "
+                            "a selected keeper video"
                         )
                     elif not _is_video_file(prev_image["file_path"]):
                         issues.append(
                             f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel's selected image to be a "
-                            "video"
+                            "the previous panel's shot's first beat's "
+                            "selected image to be a video"
                         )
 
         if issues:
@@ -1399,9 +1448,7 @@ class StoryboardRunner:
                     first_frame: Optional[str] = None
                     anchor = panel.get("video_anchor")
                     if anchor == "keeper":
-                        image = _panel_image_by_id(
-                            panel, panel.get("selected_image_id")
-                        )
+                        image = _first_beat_keeper(panel)
                         assert image is not None  # validated above
                         first_frame = await self.comfy.upload_file(
                             Path(image["file_path"])
@@ -1409,9 +1456,7 @@ class StoryboardRunner:
                     elif anchor == "prev_last":
                         idx = panel_index[pid]
                         prev_panel = flat_panels[idx - 1][1]
-                        prev_image = _panel_image_by_id(
-                            prev_panel, prev_panel.get("selected_image_id")
-                        )
+                        prev_image = _first_beat_keeper(prev_panel)
                         assert prev_image is not None  # validated above
                         if tmp_dir is None:
                             tmp_dir = Path(tempfile.mkdtemp(prefix="ms-videogen-"))
@@ -1434,7 +1479,17 @@ class StoryboardRunner:
                     skipped.append({"panel_id": pid, "error": str(exc)})
                     continue
 
-                committed = await asyncio.to_thread(self.db.count_panel_images, pid)
+                # Rendered clips ingest onto the panel's first beat (see
+                # _ingest_outputs) -- count committed variants there, not on
+                # a panel-level images table that no longer exists.
+                panel_beats = panel.get("beats") or []
+                committed = (
+                    await asyncio.to_thread(
+                        self.db.count_beat_images, panel_beats[0]["id"]
+                    )
+                    if panel_beats
+                    else 0
+                )
                 pending_jobs = await asyncio.to_thread(
                     self.db.list_generation_jobs,
                     states=["queued", "running"],
@@ -1442,7 +1497,9 @@ class StoryboardRunner:
                     limit=10000,
                 )
                 variant_base = committed + len(pending_jobs)
-                seed = panel_seed(tree["base_seed"], panel["sort_order"], variant_base)
+                seed = beat_seed(
+                    tree["base_seed"], panel["sort_order"], 0, variant_base
+                )  # TODO(Task 7): real beat_sort_order
 
                 params = GenerationParams(
                     positive=panel["video_prompt"],
@@ -1500,12 +1557,27 @@ class StoryboardRunner:
         if job_id is None:
             return
         job = await asyncio.to_thread(self.db.get_generation_job, job_id)
-        if job is None or job.get("panel_id") is None:
+        if job is None:
             return
-        panel_id = job["panel_id"]
-        panel = await asyncio.to_thread(self.db.get_panel, panel_id)
-        if panel is None:
+
+        beat_id = job.get("beat_id")
+        if beat_id is None:
+            # Video jobs carry panel_id only (no beat_id) -- their rendered
+            # clips still ingest through this same path, keyed onto the
+            # panel's first beat (spec §3.5).
+            panel_id = job.get("panel_id")
+            if panel_id is None:
+                return
+            beats = await asyncio.to_thread(self.db.list_beats, panel_id)
+            if not beats:
+                logger.warning("job %s has no beats to ingest into", job_id)
+                return
+            beat_id = beats[0]["id"]
+
+        beat = await asyncio.to_thread(self.db.get_beat, beat_id)
+        if beat is None:
             return
+        panel_id = beat["panel_id"]
 
         storyboard_id = await asyncio.to_thread(
             self.db.storyboard_id_for_panel, panel_id
@@ -1520,10 +1592,10 @@ class StoryboardRunner:
             params = json.loads(job["params"])
         except (TypeError, ValueError):
             params = {}
-        base = await asyncio.to_thread(self.db.count_panel_images, panel_id)
+        base = await asyncio.to_thread(self.db.count_beat_images, beat_id)
 
         # POSIX-normalized paths, used for every internal DB write
-        # (set_media_hidden / create_panel_image / add_folder_items all
+        # (set_media_hidden / create_beat_image / add_folder_items all
         # expect -- and themselves normalize to -- the stored form). Kept
         # separate from the WS-facing list below so a to_native_path
         # conversion never leaks into an FK lookup.
@@ -1533,8 +1605,8 @@ class StoryboardRunner:
             try:
                 await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
                 await asyncio.to_thread(
-                    self.db.create_panel_image,
-                    panel_id,
+                    self.db.create_beat_image,
+                    beat_id,
                     file_path=posix_path,
                     seed=params.get("seed"),
                     variant_index=base + i,
@@ -1545,7 +1617,7 @@ class StoryboardRunner:
                 inserted.append(posix_path)
             except Exception:
                 logger.warning(
-                    "Could not ingest panel image %s for job %s",
+                    "Could not ingest beat image %s for job %s",
                     f,
                     job_id,
                     exc_info=True,
@@ -1564,10 +1636,11 @@ class StoryboardRunner:
         # comfy job_outputs event.
         self._emit(
             "storyboard",
-            "panel_images_changed",
+            "beat_images_changed",
             {
                 "storyboard_id": storyboard_id,
                 "panel_id": panel_id,
+                "beat_id": beat_id,
                 "files": [to_native_path(p) for p in inserted],
             },
         )

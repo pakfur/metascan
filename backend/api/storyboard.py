@@ -6,7 +6,7 @@ synthesize, generate, cancel) fail fast with 503 when it is missing; CRUD
 endpoints go straight through StoryboardService and don't need it.
 
 The runner already broadcasts folder_created / folder_items_changed /
-panel_images_changed / synthesis_progress through its own on_event
+beat_images_changed / synthesis_progress through its own on_event
 callback (wired in the lifespan) -- routes here must not re-broadcast
 those, only translate exceptions into HTTP responses.
 """
@@ -56,17 +56,18 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
 _SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
 _PANEL_NOT_NULLABLE = frozenset(
-    {
-        "sort_order",
-        "action",
-        "subject_ids",
-        "prompt_locked",
-        "duration_s",
-        "video_prompt_locked",
-    }
+    {"sort_order", "action", "duration_s", "video_prompt_locked"}
 )
 _BEAT_NOT_NULLABLE = frozenset(
-    {"sort_order", "duration_s", "action", "is_cut", "dialog"}
+    {
+        "sort_order",
+        "duration_s",
+        "action",
+        "is_cut",
+        "dialog",
+        "subject_ids",
+        "prompt_locked",
+    }
 )
 
 # H3 compiler only supports the "minimax" video target for now; "ltx" is a
@@ -128,6 +129,7 @@ class StoryboardCreate(BaseModel):
     preset_id: Optional[int] = None
     base_seed: Optional[int] = None
     batch_size: int = 4
+    notes: Optional[str] = None
 
 
 class StoryboardPatch(BaseModel):
@@ -145,6 +147,7 @@ class StoryboardPatch(BaseModel):
     video_target: Optional[str] = None
     video_mode: Optional[str] = None
     video_preset_id: Optional[int] = None
+    notes: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -200,34 +203,16 @@ class ScenePatch(BaseModel):
 class PanelCreate(BaseModel):
     action: str
     sort_order: int = 0
-    shot_size: Optional[str] = None
-    angle: Optional[str] = None
-    lens: Optional[str] = None
-    subject_ids: Optional[List[int]] = None
-    notes: Optional[str] = None
+    duration_s: float = 12.0
 
 
 class PanelPatch(BaseModel):
     sort_order: Optional[int] = None
-    shot_size: Optional[str] = None
-    angle: Optional[str] = None
-    lens: Optional[str] = None
     action: Optional[str] = None
-    subject_ids: Optional[List[int]] = None
-    notes: Optional[str] = None
-    brief: Optional[str] = None
-    prompt: Optional[str] = None
-    prompt_locked: Optional[bool] = None
-    prompt_source: Optional[str] = None
-    negative: Optional[str] = None
     duration_s: Optional[float] = None
     video_prompt: Optional[str] = None
     video_prompt_locked: Optional[int] = None
     video_anchor: Optional[str] = None
-    # selected_image_id is deliberately NOT exposed here: selecting a
-    # panel's keeper toggles media.hidden on the old/new keeper via
-    # db.select_panel_image, and a raw PATCH would bypass that. Use
-    # POST /panels/{pid}/select instead.
 
 
 class ParseRequest(BaseModel):
@@ -236,7 +221,7 @@ class ParseRequest(BaseModel):
 
 
 class SynthesizeRequest(BaseModel):
-    panel_ids: Optional[List[int]] = None
+    beat_ids: Optional[List[int]] = None
     force: bool = False
 
 
@@ -246,6 +231,11 @@ class CompileRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    beat_ids: Optional[List[int]] = None
+    only_failed: bool = False
+
+
+class GenerateVideoRequest(BaseModel):
     panel_ids: Optional[List[int]] = None
     only_failed: bool = False
 
@@ -269,6 +259,10 @@ class BeatCreate(BaseModel):
     action: str
     sort_order: int = 0
     duration_s: float = 4.0
+    shot_size: Optional[str] = None
+    angle: Optional[str] = None
+    lens: Optional[str] = None
+    subject_ids: Optional[List[int]] = None
     camera_motion: Optional[str] = None
     camera_amplitude: Optional[str] = None
     camera_speed: Optional[str] = None
@@ -281,12 +275,22 @@ class BeatPatch(BaseModel):
     action: Optional[str] = None
     sort_order: Optional[int] = None
     duration_s: Optional[float] = None
+    shot_size: Optional[str] = None
+    angle: Optional[str] = None
+    lens: Optional[str] = None
+    subject_ids: Optional[List[int]] = None
     camera_motion: Optional[str] = None
     camera_amplitude: Optional[str] = None
     camera_speed: Optional[str] = None
     is_cut: Optional[int] = None
     dialog: Optional[List[DialogLine]] = None
     sound: Optional[str] = None
+    brief: Optional[str] = None
+    prompt: Optional[str] = None
+    prompt_locked: Optional[int] = None
+    prompt_source: Optional[str] = None
+    # selected_image_id deliberately NOT exposed: keeper selection toggles
+    # media.hidden via db.select_beat_image. Use POST /beats/{id}/select.
 
 
 class SelectRequest(BaseModel):
@@ -323,6 +327,7 @@ async def create_storyboard(body: StoryboardCreate) -> Dict[str, int]:
         preset_id=body.preset_id,
         base_seed=base_seed,
         batch_size=batch_size,
+        notes=body.notes,
     )
     return {"id": storyboard_id}
 
@@ -434,15 +439,20 @@ async def synthesize_storyboard(
     if tree is None:
         raise HTTPException(status_code=404, detail=f"No storyboard {storyboard_id}")
 
-    all_panel_ids = [p["id"] for scene in tree["scenes"] for p in scene["panels"]]
-    if body.panel_ids is not None:
-        wanted = set(body.panel_ids)
-        total = len([pid for pid in all_panel_ids if pid in wanted])
+    all_beat_ids = [
+        b["id"]
+        for scene in tree["scenes"]
+        for p in scene["panels"]
+        for b in (p.get("beats") or [])
+    ]
+    if body.beat_ids is not None:
+        wanted = set(body.beat_ids)
+        total = len([bid for bid in all_beat_ids if bid in wanted])
     else:
-        total = len(all_panel_ids)
+        total = len(all_beat_ids)
 
     task = asyncio.create_task(
-        runner.synthesize(storyboard_id, panel_ids=body.panel_ids, force=body.force)
+        runner.synthesize(storyboard_id, beat_ids=body.beat_ids, force=body.force)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -498,7 +508,9 @@ async def generate_storyboard(
     runner = _require_runner()
     try:
         job_ids = await runner.generate(
-            storyboard_id, panel_ids=body.panel_ids, only_failed=body.only_failed
+            storyboard_id,
+            beat_ids=body.beat_ids,
+            only_failed=body.only_failed,
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -507,7 +519,7 @@ async def generate_storyboard(
 
 @router.post("/{storyboard_id}/generate-video")
 async def generate_storyboard_video(
-    storyboard_id: int, body: GenerateRequest
+    storyboard_id: int, body: GenerateVideoRequest
 ) -> Dict[str, Any]:
     """Submit ref2v (H3/MiniMax) jobs for a storyboard's panels.
 
@@ -538,7 +550,7 @@ async def compose_storyboard(
     stages = tuple(body.stages) if body.stages else story.STAGES
     try:
         await runner.check_compose_gates(
-            storyboard_id, stages, body.scene_ids, body.confirm
+            storyboard_id, stages, body.scene_ids, body.panel_ids, body.confirm
         )
     except ConfirmRequiredError as exc:
         # Must be caught before StoryboardError -- it's a subclass.
@@ -765,11 +777,7 @@ async def create_panel(scene_id: int, body: PanelCreate) -> Dict[str, int]:
             scene_id,
             action=body.action,
             sort_order=body.sort_order,
-            shot_size=body.shot_size,
-            angle=body.angle,
-            lens=body.lens,
-            subject_ids=body.subject_ids,
-            notes=body.notes,
+            duration_s=body.duration_s,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -794,12 +802,6 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
             detail=f"video_anchor {fields['video_anchor']!r} is not one of "
             f"{sorted(_VIDEO_ANCHORS)}",
         )
-    if body.prompt is not None:
-        # Server wins: a user-supplied prompt always locks, regardless of
-        # whatever prompt_locked/prompt_source the caller also sent.
-        fields["prompt_locked"] = 1
-        fields["prompt_source"] = "user"
-
     if "video_prompt" in fields:
         if fields["video_prompt"] is not None:
             # Server wins: mirror the prompt block above. A user edit also
@@ -829,22 +831,6 @@ async def delete_panel(panel_id: int, purge_images: bool = False) -> Dict[str, s
     return {"status": "deleted"}
 
 
-@router.post("/panels/{panel_id}/select")
-async def select_panel_image(panel_id: int, body: SelectRequest) -> Dict[str, Any]:
-    svc = _service()
-    ok = await svc.select_panel_image(panel_id, body.image_id)
-    if not ok:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No panel {panel_id}, or image {body.image_id} does not "
-            "belong to it",
-        )
-    updated = await svc.get_panel(panel_id)
-    if updated is None:
-        raise HTTPException(status_code=404, detail=f"No panel {panel_id}")
-    return updated
-
-
 # ---- beats ------------------------------------------------------------------
 
 
@@ -861,20 +847,43 @@ async def create_beat(panel_id: int, body: BeatCreate) -> Dict[str, int]:
 @router.patch("/beats/{beat_id}")
 async def patch_beat(beat_id: int, body: BeatPatch) -> Dict[str, Any]:
     svc = _service()
-    fields = body.model_dump(exclude_unset=True)
-    _reject_null_for_required(fields, _BEAT_NOT_NULLABLE)
     existing = await svc.get_beat(beat_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"No beat {beat_id}")
+
+    fields = body.model_dump(exclude_unset=True)
+    _reject_null_for_required(fields, _BEAT_NOT_NULLABLE)
+    if body.prompt is not None:
+        # Server wins: a user-supplied prompt always locks, regardless of
+        # whatever prompt_locked/prompt_source the caller also sent.
+        fields["prompt_locked"] = 1
+        fields["prompt_source"] = "user"
+
     if fields:
         await svc.update_beat(beat_id, **fields)
     updated = await svc.get_beat(beat_id)
     return updated if updated is not None else existing
 
 
+@router.post("/beats/{beat_id}/select")
+async def select_beat_image(beat_id: int, body: SelectRequest) -> Dict[str, Any]:
+    svc = _service()
+    ok = await svc.select_beat_image(beat_id, body.image_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No beat {beat_id}, or image {body.image_id} does not "
+            "belong to it",
+        )
+    updated = await svc.get_beat(beat_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"No beat {beat_id}")
+    return updated
+
+
 @router.delete("/beats/{beat_id}")
-async def delete_beat(beat_id: int) -> Dict[str, str]:
-    ok = await _service().delete_beat(beat_id)
+async def delete_beat(beat_id: int, purge_images: bool = False) -> Dict[str, str]:
+    ok = await _service().delete_beat(beat_id, purge_images)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No beat {beat_id}")
     return {"status": "deleted"}

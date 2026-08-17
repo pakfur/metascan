@@ -34,6 +34,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
+from metascan.core.storyboard_brief import ANGLES, LENSES, SHOT_SIZES
 from metascan.core.storyboard_story import CAMERA_MOTION_VALUES
 
 _PROMPT_KEYS = frozenset({"H3_BODY_SYSTEM", "H3_SOUND_SYSTEM"})
@@ -565,7 +566,11 @@ def render_detailed_description(
     every shot after the first carries its ``At MM:SS.mmm`` start
     timestamp per the ref-guide §5 cut-time convention. Each shot block
     is the beat's action prose (roster-name mentions swapped for their
-    ``<Subject N>`` labels), its canonical camera phrase, its dialog as
+    ``<Subject N>`` labels), an optional framing sentence rendered from
+    the beat's ``shot_size``/``angle``/``lens`` (via the
+    ``SHOT_SIZES``/``ANGLES``/``LENSES`` phrase maps in
+    ``storyboard_brief``; omitted entirely when the beat carries none of
+    the three), its canonical camera phrase, its dialog as
     ``(Sx)``-tagged ``<d>`` spans, and its sound event."""
 
     def _labeled(text: str) -> str:
@@ -595,6 +600,14 @@ def render_detailed_description(
         action = _sentence(_labeled(str(beat.get("action") or "")))
         if action:
             sentences.append(action)
+        framing_bits = [
+            SHOT_SIZES.get(beat.get("shot_size") or ""),
+            ANGLES.get(beat.get("angle") or ""),
+            LENSES.get(beat.get("lens") or ""),
+        ]
+        framing = ", ".join(b for b in framing_bits if b)
+        if framing:
+            sentences.append(f"The shot is framed as a {framing}.")
         camera = render_camera(
             beat.get("camera_motion"),
             beat.get("camera_amplitude"),

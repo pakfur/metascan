@@ -955,7 +955,9 @@ git add metascan/core/storyboard_story.py data/meta_prompt.yml tests/test_storyb
 git commit -m "feat(story): framing+subjects move from shots grammar to beats grammar"
 ```
 
----### Task 5: Runner — compose stages + beats gate
+---
+
+### Task 5: Runner — compose stages + beats gate
 
 **Files:**
 - Modify: `metascan/core/storyboard_runner.py:195-528` (`check_compose_gates`, `_run_stage`), `metascan/core/comfy_client.py` (`submit` signature + job INSERT)
