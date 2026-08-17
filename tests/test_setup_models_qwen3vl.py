@@ -7,7 +7,7 @@ shapes so a future user-installed setup_models will compose URLs correctly.
 
 import pytest
 
-from setup_models import resolve_qwen3vl_targets
+from setup_models import resolve_qwen3vl_targets, resolve_vlm_targets
 
 
 def test_resolve_targets_for_4b():
@@ -34,3 +34,39 @@ def test_resolve_targets_2b_uses_huihui_repo():
     assert len(hf_targets) == 2
     for t in hf_targets:
         assert "Qwen3-VL-2B" in t.repo
+
+
+def test_resolve_targets_qwen38_flattens_mmproj_subdir():
+    targets = resolve_vlm_targets("qwen38-27b")
+    assert len(targets) == 3
+    mm = next(t for t in targets if t.filename and "mmproj" in t.filename.lower())
+    assert mm.filename == "AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf"
+    assert mm.dest.name == "mmproj-qwen38-27b-F16.gguf"
+
+
+def test_resolve_targets_applies_vlm_repos_override(tmp_path, monkeypatch):
+    import setup_models
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"models": {"vlm_repos": {"qwen38-27b": "me/my-remix"}}}')
+    monkeypatch.setattr(setup_models, "_config_json_path", lambda: cfg)
+
+    targets = resolve_vlm_targets("qwen38-27b")
+    gguf = next(t for t in targets if t.filename and t.filename.endswith("Q4_K_M.gguf"))
+    assert gguf.repo == "me/my-remix"
+
+
+def test_resolve_targets_honors_legacy_qwen3vl_repos_key(tmp_path, monkeypatch):
+    import setup_models
+
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"models": {"qwen3vl_repos": {"qwen3vl-4b": "me/legacy-remix"}}}')
+    monkeypatch.setattr(setup_models, "_config_json_path", lambda: cfg)
+
+    targets = resolve_vlm_targets("qwen3vl-4b")
+    gguf = next(
+        t
+        for t in targets
+        if t.filename and t.filename.endswith(".gguf") and "mmproj" not in t.filename
+    )
+    assert gguf.repo == "me/legacy-remix"

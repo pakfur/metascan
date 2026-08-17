@@ -220,7 +220,7 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
 
 
 def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
-    """Status rows for the four Qwen3-VL Abliterated variants.
+    """Status rows for the registered VLM variants.
 
     A row is ``available`` only when GGUF, mmproj, AND the shared
     llama-server binary all exist — without the binary the weights can't
@@ -243,7 +243,7 @@ def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
         rows.append(
             {
                 "id": mid,
-                "group": "Tagging (Qwen3-VL)",
+                "group": "Tagging (VLM)",
                 "name": spec.display_name,
                 "description": f"{spec.quant} GGUF, ~{spec.approx_vram_gb:.1f} GB VRAM",
                 "status": "available" if present else "missing",
@@ -251,6 +251,7 @@ def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
                 "cache_path": str(gguf) if weights_present else None,
                 "required_vram_mb": int(spec.min_vram_gb * 1024),
                 "preload_at_startup": mid in preload,
+                "is_vlm": True,
             }
         )
     return rows
@@ -633,16 +634,16 @@ async def _download_nltk(mid: str) -> None:
 
 
 async def _download_vlm(mid: str) -> None:
-    """Fetch a Qwen3-VL GGUF + mmproj from HuggingFace and the llama-server
+    """Fetch a VLM GGUF + mmproj from HuggingFace and the llama-server
     binary from the pinned llama.cpp release. Reuses the resolver and
     downloader from ``setup_models`` so the CLI and the Models tab agree on
     target paths and archive layout."""
     _broadcast_download(mid, "download_progress", stage="starting", percent=0.0)
 
     def _run() -> None:
-        from setup_models import _ensure_target, resolve_qwen3vl_targets
+        from setup_models import _ensure_target, resolve_vlm_targets
 
-        targets = resolve_qwen3vl_targets(mid)
+        targets = resolve_vlm_targets(mid)
         for i, target in enumerate(targets):
             ws_manager.broadcast_sync(
                 "models",

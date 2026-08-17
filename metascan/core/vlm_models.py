@@ -5,8 +5,8 @@ Each entry pins a HuggingFace repo + GGUF filename that ships an Abliterated
 remix at the chosen quantization. The repos can be overridden at runtime via
 ``config.models.vlm_repos.<model_id>`` for users who want a different
 remix — but the GGUF/mmproj filenames must match. The legacy key
-``config.models.qwen3vl_repos.<model_id>`` is still honored (Task 7 wires
-the override lookup).
+``config.models.qwen3vl_repos.<model_id>`` is still honored by the loader
+in ``setup_models.py``.
 """
 
 from __future__ import annotations
@@ -17,14 +17,15 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class VlmModelSpec:
-    """Static metadata for one Qwen3-VL Abliterated GGUF variant.
+    """Static metadata for one VLM GGUF variant.
 
     Field units:
       - ``approx_vram_gb`` / ``min_vram_gb``: gigabytes (GB).
       - ``parallel_slots``: integer count passed to llama-server's
         ``--parallel`` flag.
       - ``hf_repo``: HuggingFace repo id; can be overridden at runtime
-        via ``config.models.qwen3vl_repos.<model_id>``.
+        via ``config.models.vlm_repos.<model_id>`` (legacy
+        ``qwen3vl_repos`` also honored).
 
     Filename fields:
       - ``gguf_filename``: identical upstream + local (each repo's GGUF
