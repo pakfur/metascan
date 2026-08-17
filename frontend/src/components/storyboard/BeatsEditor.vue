@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
+import { ApiError } from '../../api/client'
 import { VIDEO_TARGET_CAPS, DEFAULT_SHOT_CAP, type Panel } from '../../types/storyboard'
 import BeatRow from './BeatRow.vue'
 
@@ -15,8 +16,32 @@ const shotCap = computed(
 const overH3 = computed(() => total.value > shotCap.value)
 const composing = computed(() => store.story.running)
 
-async function rebeat(): Promise<void> {
-  await store.composeStory({ stages: ['beats'], panel_ids: [props.panel.id] })
+// `check_compose_gates` 409s the beats stage (confirm_required) whenever any
+// target beat already has generated images or a locked prompt -- recomposing
+// would destroy them. Mirrors OutlineDialog.vue's confirmPending/run() shape
+// (same ApiError inspection), scoped down to this one panel/stage instead of
+// the dialog's general multi-stage picker. Without this, store.composeStory's
+// re-thrown 409 was an unhandled promise rejection: no dialog, no message,
+// nothing recomposed.
+const confirmPending = ref(false)
+const rebeatError = ref<string | null>(null)
+
+async function rebeat(confirm = false): Promise<void> {
+  rebeatError.value = null
+  confirmPending.value = false
+  try {
+    await store.composeStory({ stages: ['beats'], panel_ids: [props.panel.id], confirm })
+  } catch (e: unknown) {
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail as { code?: string } | undefined)?.code === 'confirm_required'
+    ) {
+      confirmPending.value = true
+    } else {
+      rebeatError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
 }
 
 async function add(): Promise<void> {
@@ -74,10 +99,33 @@ async function moveBeat(index: number, dir: -1 | 1): Promise<void> {
     </div>
     <div class="beats-actions">
       <button type="button" class="pd-btn" @click="add">+ Beat</button>
-      <button type="button" class="pd-btn" :disabled="composing" @click="rebeat">
+      <button type="button" class="pd-btn" :disabled="composing" @click="rebeat()">
         Re-beat shot
       </button>
     </div>
+
+    <p v-if="confirmPending" class="beats-confirm">
+      Beats have generated images or locked prompts — recompose anyway?
+      <span class="beats-confirm-actions">
+        <button
+          type="button"
+          class="pd-btn pd-btn-danger"
+          :disabled="composing"
+          @click="rebeat(true)"
+        >
+          Continue
+        </button>
+        <button
+          type="button"
+          class="pd-btn"
+          :disabled="composing"
+          @click="confirmPending = false"
+        >
+          Cancel
+        </button>
+      </span>
+    </p>
+    <p v-else-if="rebeatError" class="beats-error">{{ rebeatError }}</p>
   </div>
 </template>
 
@@ -137,5 +185,36 @@ async function moveBeat(index: number, dir: -1 | 1): Promise<void> {
 .pd-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.pd-btn-danger {
+  border-color: var(--danger-color, #e53e3e);
+  color: var(--danger-color, #e53e3e);
+}
+
+.pd-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-color, #e53e3e) 12%, transparent);
+}
+
+.beats-confirm {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--danger-color, #e53e3e) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger-color, #e53e3e) 40%, transparent);
+}
+
+.beats-confirm-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.beats-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--danger-color, #e53e3e);
 }
 </style>

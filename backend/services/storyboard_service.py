@@ -198,9 +198,6 @@ class StoryboardService:
             await asyncio.to_thread(_remove_files_sync, purged_files)
         return ok
 
-    async def select_panel_image(self, panel_id: int, image_id: Optional[int]) -> bool:
-        return await asyncio.to_thread(self.db.select_panel_image, panel_id, image_id)
-
     async def panel_exists(self, panel_id: int) -> bool:
         return await asyncio.to_thread(_row_exists_sync, self.db, "panels", panel_id)
 
@@ -215,5 +212,14 @@ class StoryboardService:
     async def update_beat(self, beat_id: int, **fields: Any) -> None:
         await asyncio.to_thread(self.db.update_beat, beat_id, **fields)
 
-    async def delete_beat(self, beat_id: int) -> bool:
-        return await asyncio.to_thread(self.db.delete_beat, beat_id)
+    async def delete_beat(self, beat_id: int, purge_images: bool = False) -> bool:
+        ok, purged = await asyncio.to_thread(self.db.delete_beat, beat_id, purge_images)
+        if purged:
+            await asyncio.to_thread(_remove_files_sync, purged)
+        return ok
+
+    async def select_beat_image(self, beat_id: int, image_id: Optional[int]) -> bool:
+        return await asyncio.to_thread(self.db.select_beat_image, beat_id, image_id)
+
+    async def beat_exists(self, beat_id: int) -> bool:
+        return await asyncio.to_thread(_row_exists_sync, self.db, "beats", beat_id)

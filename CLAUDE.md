@@ -106,14 +106,14 @@ metascan/
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
 - **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
-- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, done, total, prompt_source}`), `synthesis_complete` (`{storyboard_id, synthesized, fallback, skipped_locked}`), `synthesis_error` (`{storyboard_id, error}`), and `panel_images_changed` (`{storyboard_id, panel_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`. `POST /api/storyboard/{id}/synthesize` is 202 fire-and-forget (`asyncio.create_task`); `synthesis_complete`/`synthesis_error` are the only signal a client gets that the background run actually finished or died — `StoryboardRunner.synthesize` wraps the real work and always emits exactly one of the two, re-raising after `synthesis_error` so a direct (non-route) caller still sees the exception.
+- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, beat_id, done, total, prompt_source}`), `synthesis_complete` (`{storyboard_id, synthesized, fallback, skipped_locked}`), `synthesis_error` (`{storyboard_id, error}`), and `beat_images_changed` (`{storyboard_id, panel_id, beat_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`. `POST /api/storyboard/{id}/synthesize` is 202 fire-and-forget (`asyncio.create_task`); `synthesis_complete`/`synthesis_error` are the only signal a client gets that the background run actually finished or died — `StoryboardRunner.synthesize` wraps the real work and always emits exactly one of the two, re-raising after `synthesis_error` so a direct (non-route) caller still sees the exception.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in `stores/folders.ts::evaluateCondition`. Tag conditions can't rely on `m.tags` because the summary endpoint omits it — the store fetches only the tag keys referenced by saved smart folders via `POST /api/filters/tag_paths` with `{keys: […]}` and evaluates against those path sets. A previous bulk-GET version fetched the entire inverted index and blocked the media list endpoint for 20+ s; never restore that shape.
 - **`modified_at` / `created_at` carry two historical shapes.** New rows write an ISO-8601 (or SQL-timestamp) string; rows back-filled from the pre-existing `Media` JSON blob hold a unix-epoch float stringified (e.g. `"1775691760.0"`). The smart-folder "Modified" / "Added" evaluator tries `Number(raw)` first (epoch seconds × 1000) and falls back to `Date.parse`. Both backend and frontend must tolerate either shape.
 - **`save_media` uses a true upsert** — `INSERT … ON CONFLICT(file_path) DO UPDATE SET …`, **not** `INSERT OR REPLACE`. The latter is DELETE+INSERT under the hood, which re-fires `created_at`'s `DEFAULT CURRENT_TIMESTAMP` every rescan and collapsed the "Added" smart-folder rule onto a single date. The ON CONFLICT path preserves the original ingest time across rescans.
 - **Covering indexes must include every SELECT column.** `idx_media_summary_added` and `idx_media_summary_modified` back the grid list endpoint and are the reason `/api/media` returns in ~6 ms instead of ~25 s (the `data` JSON blob has 700+ MB of overflow pages on large libraries). When you add a new column to the summary SELECT, extend both indexes. `_init_database` rebuilds any index whose DDL is missing a currently-required column by reading `sqlite_master`.
-- **One-shot data migrations are gated on `PRAGMA user_version`.** e.g. `user_version = 1` is the "`created_at` backfilled from `modified_at` on existing rows" migration. Bump the version when adding new backfills; the gate prevents re-running and silently double-writing on every launch.
+- **One-shot data migrations are gated on `PRAGMA user_version`.** e.g. `user_version = 1` is the "`created_at` backfilled from `modified_at` on existing rows" migration; `user_version = 2` is the thumbnail-cache wipe for EXIF-orientation handling; `user_version = 3` is the shot/beat model reorganization — drops and recreates `panels`/`beats`/`panel_images→beat_images` (dev data is disposable by decision, no column copying), first unhiding media the old `panel_images` table left hidden and deleting `generation_jobs` rows with a non-NULL `panel_id` so a restart can't re-adopt jobs for panels that no longer exist. Bump the version when adding new backfills; the gate prevents re-running and silently double-writing on every launch.
 - **DELETE endpoints return `{status: "deleted"}` (not 204).** The frontend `request<T>` wrapper in `api/client.ts` calls `res.json()` on every response; 204 No Content would fail the parse. If you need a DELETE with a body, use the `del(path, body)` helper added for `/api/folders/{id}/items`.
 - **Search is a filter layer, not a separate results view.** `useSearchStore` (`frontend/src/stores/search.ts`) holds text search, Find-Similar, and tag-AND as independent path-set layers that `mediaStore.displayedMedia` intersects with the folder/preset scope — there is no dedicated search results screen. The backend endpoints are light and unbounded (`[{file_path, similarity_score}]`, threshold applied server-side), and a Relevance sort option orders by `similarity_score` when a search layer is active. `SearchSection.vue` (in `components/filters/`, top of the left panel) is the only UI: it renders the query/chip input, the "Similar to …" chip, and the threshold slider. **Similarity threshold is bimodal.** Text↔image search uses `searchStore.textThreshold` (default 0.2, slider 0-0.45) because CLIP text/image cosine scores live on a much lower scale than image↔image, which uses `searchStore.imageThreshold` (default 0.7, slider 0-1). `SearchSection.vue` switches slider range + formatting based on `isTextSearch`.
 - **The Similarity Settings dialog has no pHash/CLIP threshold controls.** They were removed because nothing consumed the saved values: the duplicate finder hardcodes a Hamming distance of 10 in `backend/api/duplicates.py`, and similarity search uses `useSearchStore`'s in-memory `textThreshold` / `imageThreshold` per-session, never the persisted `clip_threshold`. If you re-add a threshold UI, wire it through to those consumers — don't just round-trip through `/api/similarity/settings`.
@@ -325,12 +325,23 @@ metascan/
   `PRAGMA foreign_keys = ON`, an INSERT naming a foreign key to a missing
   table fails at runtime, and SQLite cannot add a foreign key to an existing
   table without rebuilding it.
-- **Storyboard domain (Phase B): five tables layered on top of ComfyUI's
-  `workflow_presets`/`generation_jobs`.** `storyboards` (script + render
-  settings) → `storyboard_subjects` (characters, LoRA + reference image) and
-  `scenes` (ON DELETE CASCADE from storyboards) → `panels` (ON DELETE
-  CASCADE from scenes, carries `subject_ids` as a JSON array) → `panel_images`
-  (ON DELETE CASCADE from panels, FK'd to `media(file_path)`). `storyboards.folder_id`
+- **Storyboard domain (Phase B, reorganized 2026-08-17): six tables layered
+  on top of ComfyUI's `workflow_presets`/`generation_jobs`.**
+  `storyboards` (script + render settings, gained a free-form `notes TEXT`
+  in the reorg) → `storyboard_subjects` (characters, LoRA + reference
+  image) and `scenes` (ON DELETE CASCADE from storyboards) → `panels`
+  (ON DELETE CASCADE from scenes) → `beats` (ON DELETE CASCADE from
+  panels) → `beat_images` (ON DELETE CASCADE from beats, FK'd to
+  `media(file_path)`). Since the shot/beat reorg, `panels` are thin
+  H3-scene containers — `id`, `scene_id`, `sort_order`, `action`,
+  `duration_s`, the `video_*` columns, timestamps — and every per-shot
+  creative field (`shot_size`/`angle`/`lens`, `subject_ids`, `brief`,
+  `prompt`/`prompt_locked`/`prompt_source`, `selected_image_id`) lives on
+  `beats` instead: a metascan Shot (panel) maps to one H3 generation unit,
+  a Beat maps to one H3 `[Shot n]` section, and keyframes/prompts are a
+  per-beat concern. `panels.negative` and `panels.notes` were dropped —
+  `storyboards.negative` is now the only negative prompt and `notes` is
+  UI-only, consumed by no pipeline stage. `storyboards.folder_id`
   is `TEXT REFERENCES folders(id)` — `folders.id` is a uuid4 string, so this
   must never be declared `INTEGER` (a numeric-looking uuid would silently
   coerce and corrupt `add_folder_items` lookups); `_init_database` detects
@@ -339,40 +350,59 @@ metascan/
   `sqlite_master`. `media.hidden`
   (INTEGER, default 0) keeps generated variants out of the main grid until
   curated: `StoryboardRunner._ingest_outputs` inserts every rendered file
-  hidden, `db.select_panel_image` unhides the chosen keeper and re-hides
+  hidden, `db.select_beat_image` unhides the chosen keeper and re-hides
   whatever was previously selected, and swapping the keeper is symmetric
   (old keeper re-hidden, new keeper unhidden). `GET /api/media` defaults to
   `hidden = 0`; pass `include_hidden=true` to see everything. `hidden` was
   added to both grid covering indexes (`idx_media_summary_added`,
   `idx_media_summary_modified`) alongside the column itself — see the
   covering-index rule above. **Every destructive path that cascades
-  `panel_images` away must unhide their media rows first**, or the
+  `beat_images` away must unhide their media rows first**, or the
   underlying files become permanently hidden with no path back (the only
-  other unhide is `select_panel_image`, which needs a live panel to act
-  on). `DatabaseManager._release_panels(conn, panel_ids, purge_images=False)`
+  other unhide is `select_beat_image`, which needs a live beat to act
+  on). `DatabaseManager._release_beats(conn, beat_ids, purge_images=False)`
   is the shared helper — it runs `UPDATE media SET hidden = 0` for the
-  affected `panel_images.file_path`s and deletes the panels'
-  `generation_jobs` rows (so a restart can't re-adopt jobs for panels that
-  no longer exist) — and is called, inside the same transaction as the
-  delete, from `delete_panel`, `delete_scene`, `delete_storyboard`, and
-  `replace_storyboard_structure` (a re-parse destroys the old scene/panel
-  tree the same way a delete does — always keep/unhide, never purge).
+  affected `beat_images.file_path`s and deletes the beats'
+  `generation_jobs` rows (keyed by `beat_id`, so a restart can't re-adopt
+  jobs for beats that no longer exist).
+  `DatabaseManager._release_panels(conn, panel_ids, purge_images=False)`
+  delegates to `_release_beats` for the panels' beats first, then deletes
+  the panels' own (video) `generation_jobs` rows (keyed by `panel_id`).
+  Both are called, inside the same transaction as the delete, from
+  `delete_beat`/`delete_panel`/`delete_scene`/`delete_storyboard`, and
+  `replace_storyboard_structure`/`replace_panel_beats` (a re-parse or beats
+  recompose destroys the old tree the same way a delete does — always
+  keep/unhide, never purge).
   With `purge_images=True` (the `?purge_images=true` query flag on the
-  three DELETE routes) the unhide is replaced by
+  storyboard/scene/panel/beat DELETE routes) the unhide is replaced by
   `_purge_media_rows`, run *after* the cascade delete in the same
   transaction: media rows are deleted (indices + `folder_items` cascade)
   and the native file paths returned up through `StoryboardService`,
   which moves the files to the OS trash (`send2trash`, unlink fallback).
-  Files still referenced by a surviving `panel_images` row or a
-  `storyboard_subjects.reference_path` are unhidden instead of deleted —
+  Files still referenced by a surviving `beat_images` row, a
+  `storyboard_subjects.reference_path`, or a `scenes.reference_path` are
+  unhidden instead of deleted —
   the media FK's `ON DELETE CASCADE`/`SET NULL` would silently destroy
-  the other panel's image row / null the subject reference.
+  the other beat's image row / null the subject or scene reference.
   `delete_storyboard` also deletes the storyboard's "Storyboard: <name>"
   folder in the same transaction and returns its id so the route can
   broadcast `folder_deleted` on the `folders` WS channel. The frontend
   prompts via `DeleteImagesDialog.vue` (purge / keep-in-library / cancel)
-  on every panel, scene, and storyboard delete that affects generated
-  images.
+  on every beat, panel, scene, and storyboard delete that affects
+  generated images. The gated beats-recompose confirm is a separate,
+  purpose-built inline banner in `BeatsEditor.vue` (its own
+  `confirmPending` ref, Continue/Cancel buttons) — not
+  `DeleteImagesDialog.vue` — that re-posts the compose call with
+  `confirm=true` on Continue.
+  **No data migration for the reorg** — dev data is disposable by
+  decision (spec §2.4): `user_version = 3` drops and recreates
+  `panels`/`beats`/`panel_images→beat_images` inside `_init_database`
+  (in FK-safe order, before the `CREATE TABLE IF NOT EXISTS` statements
+  that follow), first unhiding any media the old `panel_images` table
+  left hidden and deleting `generation_jobs` rows with a non-NULL
+  `panel_id` (their panels are gone; a restart must not re-adopt them).
+  Scenes, storyboards, subjects, and folders survive; users re-run the
+  shots/beats stages. Idempotent — gated on the pragma, so it runs once.
 - **Story engine composes outline → scenes → shots → beats as four staged
   VLM calls.** `StoryboardRunner.compose_story` runs the requested stages
   (a subset of `storyboard_story.STAGES`) inside `_compose_locked`, which
@@ -388,11 +418,21 @@ metascan/
   fire-and-forget task — outline (already has one) and scenes (rebuilding
   destroys panel identity) are gated whenever content already exists,
   shots are gated only when the target scenes already have panels, and
-  beats are never gated (rerolling beats is cheap and non-destructive).
-  The `beats` table (`ON DELETE CASCADE` from `panels`) stores dialog as a
+  **beats are gated too, since the shot/beat reorg gave them identity**:
+  409 `confirm_required` when any target panel's beats already have
+  `beat_images` rows or a locked prompt (`check_compose_gates` checks
+  `beat.get("images") or beat.get("prompt_locked")` over the target
+  panels' beats) — recomposing beats would otherwise silently destroy
+  generated keepers and hand-edited prompts. The `beats` table
+  (`ON DELETE CASCADE` from `panels`) stores dialog as a
   JSON array column and camera fields as free-text columns whose values
   `storyboard_story.py`'s validators constrain to a fixed enum, dropping
-  anything else to NULL rather than raising. Beat durations are rescaled
+  anything else to NULL rather than raising. `subject_ids` also lives only
+  on beats now — the beats-stage grammar gains per-beat `subjects` (roster
+  names, validated and mapped to ids, unknown names dropped) and
+  `shot_size`/`angle`/`lens`; the shots stage no longer emits a
+  per-shot `subjects` field at all, since nothing stores it above the beat
+  level. Beat durations are rescaled
   to fit each panel's `duration_s` entirely in code
   (`rescale_beat_durations`), never by the VLM. Grammars (`OUTLINE_GRAMMAR`,
   `SCENES_GRAMMAR`, `SHOTS_GRAMMAR`, `BEATS_GRAMMAR`) live in Python in
@@ -488,12 +528,14 @@ metascan/
   naming every failing panel before submitting anything; only frame
   extraction/upload are runtime-only failures, and those skip just that
   panel (`generate_video` returns `{"jobs": [...], "skipped": [{panel_id,
-  error}, ...]}`, not a hard failure). `_panel_subjects` (the panel
-  `subject_ids` ∪ beat-dialog subject union) is factored out of
+  error}, ...]}`, not a hard failure). `_panel_subjects` — since the
+  shot/beat reorg, the union of every one of the panel's beats'
+  `subject_ids` ∪ every subject a beat's dialog names (panel-level
+  `subject_ids` no longer exists) — is factored out of
   `_compile_panel` specifically so `compile_video`'s prompt text and
   `generate_video`'s uploaded reference pictures/audio can never disagree
   about who's in the shot. Rendered clips ingest through the same
-  `_ingest_outputs` path still images use — `panel_images` needed no
+  `_ingest_outputs` path still images use — `beat_images` needed no
   video-specific handling. The side panel's "Anchor changed since the last
   compile" chip compares live `video_anchor` against `video_compiled_anchor`
   (the anchor recorded at compile time), not against re-validating the
@@ -515,12 +557,12 @@ metascan/
   but nothing in the runner ever sets `GenerationParams.last_frame`, so an
   `fl2va` workflow needing its second anchor must supply it by hand in
   ComfyUI.
-- **Stored paths vs. API paths in the storyboard tree.** `panel_images.file_path`
+- **Stored paths vs. API paths in the storyboard tree.** `beat_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
-  `get_storyboard_tree` and `list_panel_images` convert it through
+  `get_storyboard_tree` and `list_beat_images` convert it through
   `to_native_path` before returning, mirroring `get_folder`'s precedent —
   `GET /api/storyboard/{id}` and `GET /api/media` must agree on path shape.
-  `StoryboardRunner._ingest_outputs` builds its `panel_images_changed` WS
+  `StoryboardRunner._ingest_outputs` builds its `beat_images_changed` WS
   payload from the same `to_posix_path`-normalized value it inserted
   (converted back with `to_native_path`), not the raw pre-conversion string
   from the ComfyUI `job_outputs` event. `storyboard_subjects.reference_path`
@@ -528,11 +570,12 @@ metascan/
   run it through `to_posix_path` before the INSERT/UPDATE, and an unknown
   path (raw `sqlite3.IntegrityError` from SQLite) is translated to
   `InvalidReferenceError` → HTTP 400 in `StoryboardService`, not a 500.
-- **`panels.prompt_locked` / `prompt_source` gate re-synthesis.**
+- **`beats.prompt_locked` / `prompt_source` gate re-synthesis.** Moved down
+  from panels in the shot/beat reorg — keyframes are a per-beat concern now.
   `prompt_source` is one of `'brief'` (deterministic template, no VLM),
   `'llm'` (VLM-composed), or `'user'` (hand-edited). `StoryboardRunner.synthesize`
-  skips any panel with `prompt_locked=1` unless the caller explicitly named
-  it in `panel_ids` with `force=true`. `PATCH /api/storyboard/panels/{id}`
+  skips any beat with `prompt_locked=1` unless the caller explicitly named
+  it in `beat_ids` with `force=true`. `PATCH /api/storyboard/beats/{id}`
   sets `prompt_locked=1, prompt_source="user"` server-side whenever the body
   includes `prompt` — the caller cannot leave a hand-edited prompt unlocked
   by also sending `prompt_locked=false` in the same request; the server wins.
@@ -543,11 +586,14 @@ metascan/
   prompt, appending the style block verbatim. This keeps the global
   look-and-feel from drifting through paraphrase across dozens of separate
   LLM calls (spec §7.2).
-- **Deterministic per-panel seeds.** `panel_seed(base_seed, panel_sort_order,
-  variant_index) = base_seed + panel_sort_order * 1000 + variant_index`
-  (`metascan/core/storyboard_brief.py`). A reroll just advances
-  `variant_index` (read from `count_panel_images(panel_id)` at submit time),
-  so the same panel always starts from the same seed run-to-run.
+- **Deterministic per-beat seeds.** `beat_seed(base_seed, panel_sort_order,
+  beat_sort_order, variant_index) = base_seed + (panel_sort_order * 100 +
+  beat_sort_order) * 1000 + variant_index`
+  (`metascan/core/storyboard_brief.py`, replaces the old `panel_seed`).
+  Collision-free for < 100 beats/shot and < 1000 variants/beat. A reroll
+  just advances `variant_index` (read from `count_beat_images(beat_id)`
+  plus in-flight jobs at submit time — see below), so the same beat always
+  starts from the same seed run-to-run.
 - **`bucket_dims` is keyed on `TargetModel`, not architecture.** `sd` and
   `pony` (`SDXL_TARGETS`) snap to the nearest of five trained SDXL buckets;
   every other target (Flux and later) computes the nearest multiple-of-16
@@ -557,22 +603,25 @@ metascan/
   ratio — validation happens at save time, not at generate time.
 - **Runner layering keeps the ComfyUI driver storyboard-agnostic.**
   `StoryboardRunner` (`metascan/core/storyboard_runner.py`) is the only
-  layer that knows about subjects/scenes/panels; `comfy_client.py` stays a
-  generic job driver with no storyboard imports. Correlation flows one way:
-  `generate()` passes `panel_id` into `ComfyClient.submit(..., panel_id=...)`,
-  which round-trips it onto `generation_jobs.panel_id`; when ComfyUI
+  layer that knows about subjects/scenes/panels/beats; `comfy_client.py`
+  stays a generic job driver with no storyboard imports. Correlation flows
+  one way: `generate()` passes both `panel_id` and `beat_id` into
+  `ComfyClient.submit(..., panel_id=..., beat_id=...)`,
+  which round-trips them onto `generation_jobs.panel_id`/`.beat_id` (still
+  images set both; video jobs set `panel_id` only, `beat_id` NULL — video
+  stays per shot); when ComfyUI
   finishes, `handle_job_event` (registered via `comfy_client.on_job_event`
   in the lifespan) reads the `job_outputs` payload, looks up the job's
-  `panel_id`, and ingests the produced files as `panel_images` rows. Events
+  `beat_id`, and ingests the produced files as `beat_images` rows. Events
   the runner emits (`folder_created`, `folder_items_changed`,
-  `panel_images_changed`, `synthesis_progress`) go out through its own
+  `beat_images_changed`, `synthesis_progress`) go out through its own
   `on_event` callback list, wired straight to `ws_manager.broadcast_sync` in
   the lifespan — `backend/api/storyboard.py` never re-broadcasts them, only
   translates exceptions to HTTP.
-- **`generation_jobs.output_dir`** holds the per-panel directory
+- **`generation_jobs.output_dir`** holds the per-beat directory
   `StoryboardRunner.generate` computes
-  (`<comfy.output_root>/<storyboard-slug>/scene_NN/panel_NN/`) so a job's
-  files land next to their panel instead of a flat `comfy.output_root`.
+  (`<comfy.output_root>/<storyboard-slug>/scene_NN/panel_NN/beat_NN/`) so a
+  job's files land next to their beat instead of a flat `comfy.output_root`.
   Non-storyboard submits (`POST /api/comfy/submit`) leave it NULL and the
   ComfyUI driver falls back to `comfy.output_root` directly.
 - **Lifespan shuts the event source down before its consumer.** The
@@ -584,20 +633,23 @@ metascan/
   fire-and-forget ingest task; closing the runner first would leave a
   window where a collect task completing between the two shutdowns spawns
   an ingest task nobody ever awaits.
-- **`generate()`'s per-panel seed accounts for in-flight jobs, not just
-  ingested ones.** `panel_seed`'s `variant_index` used to come from
-  `count_panel_images(panel_id)` alone, which only counts rows already
+- **`generate()`'s per-beat seed accounts for in-flight jobs, not just
+  ingested ones.** `beat_seed`'s `variant_index` used to come from
+  `count_beat_images(beat_id)` alone (`panel_seed`/`count_panel_images`
+  before the shot/beat reorg), which only counts rows already
   ingested from a *finished* job — two `generate()` calls (e.g. two
-  rerolls) for the same panel before the first has ingested read the same
+  rerolls) for the same beat before the first has ingested read the same
   count and submitted identical seeds. `variant_base` is now
-  `count_panel_images(panel_id) + batch_size * len(queued/running jobs for
-  that panel)`. Relatedly, every `StoryboardRunner` call into
+  `count_beat_images(beat_id) + batch_size * len(queued/running jobs for
+  that beat)`. Relatedly, every `StoryboardRunner` call into
   `db.list_generation_jobs` (this one, plus `cancel()`) passes
   `limit=10000` explicitly — the default `limit=100` silently truncates and
   would under-cancel or under-count on a storyboard with more in-flight
   jobs than that (mirrors `ComfyClient._rehydrate_jobs`'s precedent).
-  `latest_jobs_for_panels` (used by `only_failed`) has no `limit` — it's
-  one row per panel by construction, so it's exempt.
+  `latest_jobs_for_beats` (used by `generate()`'s `only_failed`) and
+  `latest_jobs_for_panels` (used by `generate_video()`'s `only_failed`,
+  which still targets panels — video is per shot) both have no `limit` —
+  each is one row per beat/panel by construction, so both are exempt.
 - **`generate()` waits for a live `synthesize()` before unloading the
   VLM.** Both share `StoryboardRunner._synth_lock`: `synthesize()` holds it
   for its entire run, `generate()` acquires it only around the
@@ -605,16 +657,18 @@ metascan/
   loop — submits don't need the VLM and shouldn't block on synthesis of an
   unrelated panel). Without this, `generate()` could tear the VLM out from
   under an in-progress `synthesize()` call.
-- **`stores/storyboard.ts` correlates ComfyUI jobs to panels client-side.**
-  `refreshActiveJobs()` rebuilds `jobToPanel` from `GET /api/comfy/jobs`
+- **`stores/storyboard.ts` correlates ComfyUI jobs to panels/beats
+  client-side.** `refreshActiveJobs()` rebuilds `jobToPanel` and
+  `jobToBeat` from `GET /api/comfy/jobs`
   (`comfyApi.listJobs('queued'|'running', 1000)`) filtered to the current
-  tree's panel ids — this is what survives a page reload mid-generation,
-  since there's no other durable client record of in-flight jobs. Live
+  tree's panel ids and beat ids — this is what survives a page reload
+  mid-generation, since there's no other durable client record of
+  in-flight jobs. Live
   updates then come off the `comfy` WS channel: `job_update` moves a panel
   in/out of `panelJobState` (`done`/`cancelled` clears it), `job_progress`
   sets `{state: 'running', value, max}`; `job_outputs` is ignored on this
   channel — image ingestion is signaled separately. The `storyboard` channel
-  drives refreshes: `panel_images_changed` and `synthesis_complete` both
+  drives refreshes: `beat_images_changed` and `synthesis_complete` both
   trigger a full `refresh()` (no per-panel GET exists, and refresh preserves
   selection), `synthesis_progress` updates the running counter in place, and
   `synthesis_error` surfaces the message without refetching. Both handlers
@@ -622,16 +676,22 @@ metascan/
   — necessary because `attachWs()` is called from `StoryboardView`'s
   `<script setup>` on every mount (no module-level "already attached"
   guard), so switching boards must not let a stale board's events leak in.
-  Keeper selection always goes through `selectImage()` →
-  `POST /panels/{id}/select` — never `PATCH /api/storyboard/panels/{id}`,
-  which has no concept of `panel_images` and cannot flip `media.hidden` on
+  Keeper selection always goes through `selectImage(beatId, …)` →
+  `POST /api/storyboard/beats/{id}/select` — never
+  `PATCH /api/storyboard/beats/{id}`,
+  which has no concept of `beat_images` and cannot flip `media.hidden` on
   the old/new keeper.
 - **Detail editors with local commit-on-change copies must resync on id +
-  updated_at, not id alone.** `PanelDetail.vue` keeps a local editable ref
+  updated_at, not id alone.** `PanelDetail.vue` (the shot pane — action,
+  duration, video section) and `BeatForm.vue` (framing, subject picker,
+  prompt + lock, camera/dialog/sound — the per-beat editing surface since
+  the shot/beat reorg moved those fields off panels) each keep a local
+  editable ref
   per text/select field (bound `:value` + `@change`, not `v-model`) so an
   in-flight edit survives the store's optimistic `Object.assign`. Resyncing
-  only when the selected panel's *id* changes misses every server-side
-  rewrite of the panel currently open — a synthesis or VLM-tagging pass
+  only when the selected panel's/beat's *id* changes misses every
+  server-side rewrite of the panel/beat currently open — a synthesis or
+  VLM-tagging pass
   that rewrites `prompt` (or any other field) in place never reaches the
   textarea, and a later blur then PATCHes the stale (often empty) local
   value back over the server's write, destroying it. Each field pairs its
@@ -644,8 +704,8 @@ metascan/
   other detail editor that caches server fields in local commit-on-change
   refs.
 - **Storyboard PATCH routes use `exclude_unset`, not `exclude_none`.**
-  `backend/api/storyboard.py`'s four PATCH routes (storyboard, subject,
-  scene, panel) call `body.model_dump(exclude_unset=True)` so an explicit
+  `backend/api/storyboard.py`'s five PATCH routes (storyboard, subject,
+  scene, panel, beat) call `body.model_dump(exclude_unset=True)` so an explicit
   JSON `null` in the request body clears a nullable column (`preset_id`,
   `shot_size`, `notes`, `lora_name`, …) instead of being silently dropped —
   a field simply absent from the body is still left untouched. Each route
@@ -654,7 +714,10 @@ metascan/
   (`name`/`aspect_ratio`/`target_model`/`architecture`/`base_seed`/
   `batch_size` on storyboards; `name`/`description`/`sort_order` on
   subjects; `name`/`sort_order` on scenes; `sort_order`/`action`/
-  `subject_ids`/`prompt_locked` on panels) — otherwise that would reach
+  `duration_s`/`video_prompt_locked` on panels; `sort_order`/`duration_s`/
+  `action`/`is_cut`/`dialog`/`subject_ids`/`prompt_locked` on beats —
+  `subject_ids`/`prompt_locked` moved from the panel list to the beat list
+  in the shot/beat reorg) — otherwise that would reach
   SQLite as a raw NOT NULL constraint violation (500). Frontend callers
   that want to send an explicit clear (e.g. `StoryboardSettingsDialog`'s
   preset picker sending `preset_id: null` for "None") must diff against

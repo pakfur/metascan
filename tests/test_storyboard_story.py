@@ -99,25 +99,43 @@ def test_validate_scenes_happy_and_empty():
         validate_scenes_response("[]")
 
 
-def test_validate_shots_resolves_roster_and_warns_on_unknown():
-    raw = json.dumps(
-        [
-            {
-                "shot_size": "WS",
-                "angle": "eye",
-                "lens": "wide",
-                "action": "Maya crosses the yard",
-                "subjects": ["maya", "Ghost"],
-                "duration_s": 12,
-            },
-        ]
-    )
-    panels, warnings = validate_shots_response(raw, {"maya": 7})
-    assert panels[0]["subject_ids"] == [7]
-    assert panels[0]["duration_s"] == 12.0
-    assert any("Ghost" in w for w in warnings)
+def test_shots_validator_slim_shape():
+    raw = '[{"action": "The chase begins", "duration_s": 10}]'
+    panels = story.validate_shots_response(raw)
+    assert panels == [{"action": "The chase begins", "duration_s": 10.0}]
+
+
+def test_shots_grammar_has_no_framing_or_subjects():
+    for gone in ("shot_size", "subjects", "angle", "lens"):
+        assert gone not in story.SHOTS_GRAMMAR
+
+
+def test_validate_shots_raises_on_empty():
     with pytest.raises(StoryError):
-        validate_shots_response("[]", {})
+        validate_shots_response("[]")
+
+
+def test_beats_validator_maps_subjects_and_framing():
+    roster = {"mara": 3, "june": 5}
+    raw = (
+        '[{"duration_s": 4, "action": "Mara turns", '
+        '"shot_size": "CU", "angle": "low", "lens": "bogus", '
+        '"subjects": ["Mara", "Nobody"], '
+        '"camera_motion": "static", "camera_amplitude": null, '
+        '"camera_speed": null, "is_cut": false, "sound": null, '
+        '"dialog": []}]'
+    )
+    beats, warnings = story.validate_beats_response(raw, roster)
+    assert beats[0]["shot_size"] == "CU"
+    assert beats[0]["angle"] == "low"
+    assert beats[0]["lens"] is None  # bogus enum drops to NULL
+    assert beats[0]["subject_ids"] == [3]  # unknown name dropped
+    assert any("Nobody" in w for w in warnings)
+
+
+def test_beats_grammar_carries_framing_and_subjects():
+    for needed in ("shot_size", "angle", "lens", "subjects"):
+        assert needed in story.BEATS_GRAMMAR
 
 
 def test_validate_beats_camera_enums_and_dialog_roster():
@@ -153,7 +171,7 @@ def test_validate_beats_camera_enums_and_dialog_roster():
             },
         ]
     )
-    beats = validate_beats_response(raw, {"maya": 7})
+    beats, warnings = validate_beats_response(raw, {"maya": 7})
     assert beats[0]["camera_motion"] == "push_in"
     assert beats[0]["dialog"][0]["subject_id"] == 7
     assert beats[0]["dialog"][0]["text"] == "Hello, old girl."
@@ -212,15 +230,12 @@ def test_system_prompts_resolve_from_store():
 
 def test_invalid_json_truncation_hint():
     # Long response cut mid-string (the max_tokens signature) gets the hint...
-    truncated = (
-        '[{"shot_size": "WS", "angle": "eye", "lens": null, "action": "'
-        + "she walks through the yard " * 10
-    )
+    truncated = '[{"action": "' + "she walks through the yard " * 10
     with pytest.raises(StoryError, match="truncated"):
-        validate_shots_response(truncated, {})
+        validate_shots_response(truncated)
     # ...but short garbage does not claim truncation.
     try:
-        validate_shots_response("not json", {})
+        validate_shots_response("not json")
     except StoryError as e:
         assert "truncated" not in str(e)
 
@@ -246,20 +261,18 @@ def test_grammars_carry_repetition_bounds():
 
 
 def test_truncated_shots_array_salvages_leading_elements():
-    good = (
-        '{"shot_size": "WS", "angle": "eye", "lens": null, '
-        '"action": "Maya crosses the yard", "subjects": ["maya"], '
-        '"duration_s": 10}'
-    )
-    truncated = f'[{good}, {good}, {{"shot_size": "CU", "angle": "eye", "lens": null, "action": "she rea'
-    panels, warnings = validate_shots_response(truncated, {"maya": 7})
+    good = '{"action": "Maya crosses the yard", "duration_s": 10}'
+    truncated = f'[{good}, {good}, {{"action": "she rea'
+    panels = validate_shots_response(truncated)
     assert len(panels) == 2
-    assert panels[0]["subject_ids"] == [7]
+    assert panels[0]["duration_s"] == 10.0
 
 
 def test_truncated_beats_array_salvages_across_nested_dialog():
     beat = (
-        '{"duration_s": 4, "action": "she kneels", "camera_motion": null, '
+        '{"duration_s": 4, "action": "she kneels", "shot_size": null, '
+        '"angle": null, "lens": null, "subjects": [], '
+        '"camera_motion": null, '
         '"camera_amplitude": null, "camera_speed": null, "is_cut": false, '
         '"sound": null, "dialog": [{"subject": null, "voice": "low voice", '
         '"delivery": null, "language": "English", "text": "Easy now."}]}'
@@ -272,6 +285,6 @@ def test_truncated_beats_array_salvages_across_nested_dialog():
         f'"camera_speed": null, "is_cut": true, "sound": null, '
         f'"dialog": [{{"subject": null, "voice": "gravel'
     )
-    beats = validate_beats_response(truncated, {})
+    beats, warnings = validate_beats_response(truncated, {})
     assert len(beats) == 1
     assert beats[0]["dialog"][0]["text"] == "Easy now."

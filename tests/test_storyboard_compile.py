@@ -74,9 +74,7 @@ def _make_panel(
         setting="a sunlit farmhouse kitchen with a wooden table",
         location="Farmhouse",
     )
-    panel_id = db.create_panel(
-        scene_id, action=action, subject_ids=[subject_id], duration_s=duration_s
-    )
+    panel_id = db.create_panel(scene_id, action=action, duration_s=duration_s)
     if with_beats:
         beats = [
             {
@@ -86,6 +84,7 @@ def _make_panel(
                 "camera_amplitude": "small",
                 "camera_speed": "slow",
                 "is_cut": 0,
+                "subject_ids": [subject_id],
                 "dialog": [
                     {
                         "subject_id": subject_id,
@@ -104,6 +103,7 @@ def _make_panel(
                 "camera_amplitude": None,
                 "camera_speed": None,
                 "is_cut": 0,
+                "subject_ids": [],
                 "dialog": [],
                 "sound": None,
             },
@@ -363,8 +363,8 @@ def test_h3_error_marks_panel_failed_not_run(db, tmp_path):
 
 def test_offpanel_dialog_subject_gets_definition_no_crash(db, tmp_path):
     """Beat dialog subject_ids are picked from the whole board roster
-    (BeatForm's picker + validate_beats_response), not just the panel's
-    own subject_ids. A dialog line naming an off-panel subject must not
+    (BeatForm's picker + validate_beats_response), not just the beat's
+    own subject_ids. A dialog line naming an off-beat subject must not
     raise -- it gets a real <Subject N> definition and the panel compiles
     normally, with no compile_error escaping the run."""
     sb = _make_storyboard(db)
@@ -388,10 +388,8 @@ def test_offpanel_dialog_subject_gets_definition_no_crash(db, tmp_path):
         setting="a sunlit farmhouse kitchen with a wooden table",
         location="Farmhouse",
     )
-    # Panel only lists subject_a -- subject_b is off-panel.
-    panel_id = db.create_panel(
-        scene_id, action="Grandma putters", subject_ids=[subject_a], duration_s=8.0
-    )
+    # Beat's subject_ids only lists subject_a -- subject_b is off-beat.
+    panel_id = db.create_panel(scene_id, action="Grandma putters", duration_s=8.0)
     beats = [
         {
             "duration_s": 8.0,
@@ -400,9 +398,10 @@ def test_offpanel_dialog_subject_gets_definition_no_crash(db, tmp_path):
             "camera_amplitude": None,
             "camera_speed": None,
             "is_cut": 0,
+            "subject_ids": [subject_a],
             "dialog": [
                 {
-                    "subject_id": subject_b,  # off-panel speaker
+                    "subject_id": subject_b,  # off-beat speaker
                     "voice": None,
                     "delivery": "loud",
                     "language": "English",

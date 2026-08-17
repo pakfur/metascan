@@ -132,8 +132,11 @@
             title="Drag to resize"
             @pointerdown="startDetailDrag"
           />
-          <!-- PanelDetail is multi-root (detail div + MediaViewer), so Vue
-               drops :style fallthrough on it — the wrapper owns the height. -->
+          <!-- PanelDetail is wrapped by a `v-if="store.selectedPanel"` sibling
+               of the divider above, so :style lives on this wrapper (which
+               always exists whenever the divider does) rather than on
+               PanelDetail's own root, which only renders while a panel is
+               selected. -->
           <div
             v-if="store.selectedPanel"
             class="sb-detail-wrap"

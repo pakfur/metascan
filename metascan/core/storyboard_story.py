@@ -106,26 +106,20 @@ scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws
     + _COMMON_RULES
 ).format()
 
-_SHOTS_TEMPLATE = (
+SHOTS_GRAMMAR = (
     r"""root ::= "[" ws shot (ws "," ws shot){{0,5}} ws "]"
-shot ::= "{{" ws "\"shot_size\"" ws ":" ws shotsize ws "," ws "\"angle\"" ws ":" ws angle ws "," ws "\"lens\"" ws ":" ws lens ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"subjects\"" ws ":" ws namelist ws "," ws "\"duration_s\"" ws ":" ws number ws "}}"
+shot ::= "{{" ws "\"action\"" ws ":" ws string ws "," ws "\"duration_s\"" ws ":" ws number ws "}}"
+"""
+    + _COMMON_RULES
+).format()
+
+_BEATS_TEMPLATE = (
+    r"""root ::= "[" ws beat (ws "," ws beat){{1,5}} ws "]"
+beat ::= "{{" ws "\"duration_s\"" ws ":" ws number ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"shot_size\"" ws ":" ws shotsize ws "," ws "\"angle\"" ws ":" ws angle ws "," ws "\"lens\"" ws ":" ws lens ws "," ws "\"subjects\"" ws ":" ws namelist ws "," ws "\"camera_motion\"" ws ":" ws motion ws "," ws "\"camera_amplitude\"" ws ":" ws amplitude ws "," ws "\"camera_speed\"" ws ":" ws speed ws "," ws "\"is_cut\"" ws ":" ws boolean ws "," ws "\"sound\"" ws ":" ws nullable ws "," ws "\"dialog\"" ws ":" ws dialog ws "}}"
 shotsize ::= {shotsize_alts}
 angle ::= {angle_alts}
 lens ::= {lens_alts}
 namelist ::= "[" ws (string (ws "," ws string){{0,5}})? ws "]"
-"""
-    + _COMMON_RULES
-)
-
-SHOTS_GRAMMAR = _SHOTS_TEMPLATE.format(
-    shotsize_alts=_alts(SHOT_SIZE_VALUES),
-    angle_alts=_alts(ANGLE_VALUES),
-    lens_alts=_alts(LENS_VALUES),
-)
-
-_BEATS_TEMPLATE = (
-    r"""root ::= "[" ws beat (ws "," ws beat){{1,5}} ws "]"
-beat ::= "{{" ws "\"duration_s\"" ws ":" ws number ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"camera_motion\"" ws ":" ws motion ws "," ws "\"camera_amplitude\"" ws ":" ws amplitude ws "," ws "\"camera_speed\"" ws ":" ws speed ws "," ws "\"is_cut\"" ws ":" ws boolean ws "," ws "\"sound\"" ws ":" ws nullable ws "," ws "\"dialog\"" ws ":" ws dialog ws "}}"
 motion ::= {motion_alts}
 amplitude ::= {amplitude_alts}
 speed ::= {speed_alts}
@@ -136,6 +130,9 @@ line ::= "{{" ws "\"subject\"" ws ":" ws nullable ws "," ws "\"voice\"" ws ":" w
 )
 
 BEATS_GRAMMAR = _BEATS_TEMPLATE.format(
+    shotsize_alts=_alts(SHOT_SIZE_VALUES),
+    angle_alts=_alts(ANGLE_VALUES),
+    lens_alts=_alts(LENS_VALUES),
     motion_alts=_alts(CAMERA_MOTION_VALUES),
     amplitude_alts=_alts(CAMERA_AMPLITUDE_VALUES),
     speed_alts=_alts(CAMERA_SPEED_VALUES),
@@ -200,7 +197,7 @@ def build_beats_user_prompt(
         f"Scene: {scene['name']} — mood {scene.get('mood') or 'unspecified'}\n"
         f"Shot: {panel['action']}\n"
         f"Target duration: {panel.get('duration_s') or 12.0} seconds\n"
-        f"Subjects in shot (exact names):\n{_roster_lines(subjects)}\n\n"
+        f"Subject roster (assign per beat; exact names):\n{_roster_lines(subjects)}\n\n"
         "Write the beat list JSON."
     )
 
@@ -332,59 +329,40 @@ def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
     return scenes
 
 
-def validate_shots_response(
-    raw: str, roster: Mapping[str, int]
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+def validate_shots_response(raw: str) -> List[Dict[str, Any]]:
     data = _loads_array(raw)
     if not isinstance(data, list):
         raise StoryError("shots response is not a JSON array")
     panels: List[Dict[str, Any]] = []
-    warnings: List[str] = []
     for p in data:
         if not isinstance(p, dict):
             continue
         action = _clean(p.get("action"))
         if not action:
             continue
-        ids: List[int] = []
-        for n in p.get("subjects") or []:
-            if not isinstance(n, str):
-                continue
-            key = n.strip().lower()
-            if key in roster:
-                ids.append(roster[key])
-            elif key:
-                warnings.append(f"unknown subject {n!r} dropped")
         try:
             duration = float(p.get("duration_s") or 0)
         except (TypeError, ValueError):
             duration = 0.0
         panels.append(
             {
-                "shot_size": (
-                    p.get("shot_size")
-                    if p.get("shot_size") in SHOT_SIZE_VALUES
-                    else None
-                ),
-                "angle": p.get("angle") if p.get("angle") in ANGLE_VALUES else None,
-                "lens": p.get("lens") if p.get("lens") in LENS_VALUES else None,
                 "action": action,
-                "subject_ids": ids,
                 "duration_s": duration if duration > 0 else 12.0,
             }
         )
     if not panels:
         raise StoryError("no shots in the response")
-    return panels, warnings
+    return panels
 
 
 def validate_beats_response(
     raw: str, roster: Mapping[str, int]
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     data = _loads_array(raw)
     if not isinstance(data, list):
         raise StoryError("beats response is not a JSON array")
     beats: List[Dict[str, Any]] = []
+    warnings: List[str] = []
     for b in data:
         if not isinstance(b, dict):
             continue
@@ -395,6 +373,15 @@ def validate_beats_response(
             duration = float(b.get("duration_s") or 0)
         except (TypeError, ValueError):
             duration = 0.0
+        ids: List[int] = []
+        for n in b.get("subjects") or []:
+            if not isinstance(n, str):
+                continue
+            key = n.strip().lower()
+            if key in roster:
+                ids.append(roster[key])
+            elif key:
+                warnings.append(f"unknown subject {n!r} dropped")
         dialog = []
         for line in b.get("dialog") or []:
             if not isinstance(line, dict):
@@ -416,6 +403,14 @@ def validate_beats_response(
             {
                 "duration_s": duration if duration > 0 else 4.0,
                 "action": action,
+                "shot_size": (
+                    b.get("shot_size")
+                    if b.get("shot_size") in SHOT_SIZE_VALUES
+                    else None
+                ),
+                "angle": b.get("angle") if b.get("angle") in ANGLE_VALUES else None,
+                "lens": b.get("lens") if b.get("lens") in LENS_VALUES else None,
+                "subject_ids": ids,
                 "camera_motion": (
                     b.get("camera_motion")
                     if b.get("camera_motion") in CAMERA_MOTION_VALUES
@@ -438,7 +433,7 @@ def validate_beats_response(
         )
     if not beats:
         raise StoryError("no beats in the response")
-    return beats
+    return beats, warnings
 
 
 def rescale_beat_durations(

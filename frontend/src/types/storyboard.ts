@@ -1,6 +1,6 @@
-export interface PanelImage {
+export interface BeatImage {
   id: number
-  panel_id: number
+  beat_id: number
   file_path: string
   seed: number | null
   variant_index: number
@@ -24,12 +24,22 @@ export interface Beat {
   sort_order: number
   duration_s: number
   action: string
+  shot_size: string | null
+  angle: string | null
+  lens: string | null
+  subject_ids: number[]
   camera_motion: string | null
   camera_amplitude: string | null
   camera_speed: string | null
   is_cut: 0 | 1
   dialog: DialogLine[]
   sound: string | null
+  brief: string | null
+  prompt: string | null
+  prompt_locked: number // 0 | 1 from SQLite
+  prompt_source: 'llm' | 'brief' | 'user' | null
+  selected_image_id: number | null
+  images: BeatImage[]
   created_at: string
   updated_at: string
 }
@@ -49,20 +59,7 @@ export interface Panel {
   id: number
   scene_id: number
   sort_order: number
-  shot_size: string | null
-  angle: string | null
-  lens: string | null
   action: string
-  subject_ids: number[]
-  notes: string | null
-  brief: string | null
-  prompt: string | null
-  prompt_locked: number // 0 | 1 from SQLite
-  prompt_source: 'llm' | 'brief' | 'user' | null
-  negative: string | null
-  selected_image_id: number | null
-  created_at: string
-  updated_at: string
   duration_s: number
   video_prompt: string | null
   video_prompt_locked: 0 | 1
@@ -70,22 +67,28 @@ export interface Panel {
   video_prompt_warnings: string[]
   video_anchor: string | null
   video_compiled_anchor: string | null
-  images: PanelImage[]
+  created_at: string
+  updated_at: string
   beats: Beat[]
 }
 
+// `db.get_panel` (used by the PATCH /panels/{id} route) returns every
+// panels-table column but never attaches `beats` -- that assembly only
+// happens in `get_storyboard_tree`. Mirrors the BeatWithoutImages
+// merge-caveat above: callers of patchPanel must merge the beats array
+// back in from whatever they already have loaded.
+export type PanelWithoutBeats = Omit<Panel, 'beats'>
+
 export const VIDEO_ANCHORS = ['keeper', 'prev_last'] as const
 
-// `db.get_panel` (used by the PATCH /panels/{id} and POST
-// /panels/{id}/select routes) returns every panels-table column but never
-// attaches `images` -- that assembly only happens in `get_storyboard_tree`.
-// Callers of patchPanel/selectPanelImage must merge the images array back
-// in from whatever they already have loaded. The same is true of `beats`
-// (also assembled only in get_storyboard_tree) -- it's deliberately NOT
-// added to the Omit<> below, and callers merging a PanelWithoutImages
-// response onto a live Panel via Object.assign never delete either key
-// since Object.assign only overwrites keys present on the source object.
-export type PanelWithoutImages = Omit<Panel, 'images'>
+// `db.get_beat` (used by the PATCH /beats/{id} and POST /beats/{id}/select
+// routes) returns every beats-table column but never attaches `images` --
+// that assembly only happens in `get_storyboard_tree`. Callers of
+// patchBeat/selectBeatImage must merge the images array back in from
+// whatever they already have loaded (Object.assign only overwrites keys
+// present on the source object, so the local `images` array is left
+// untouched by that merge).
+export type BeatWithoutImages = Omit<Beat, 'images'>
 
 export interface Scene {
   id: number
@@ -130,6 +133,7 @@ export interface StoryboardSummary {
   video_target: string | null
   video_mode: string | null
   video_preset_id: number | null
+  notes: string | null
   created_at: string
   updated_at: string
 }
@@ -178,6 +182,7 @@ export interface GenerationJob {
   id: number
   preset_id: number
   panel_id: number | null
+  beat_id: number | null
   state: JobState
   comfy_prompt_id: string | null
   params: string

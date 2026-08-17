@@ -18,11 +18,15 @@
             :src="thumbSrc(panel)!"
             alt=""
             class="panel-thumb-img"
-            :class="{ dimmed: !store.keeperImage(panel) }"
+            :class="{ dimmed: !store.firstBeatKeeper(panel) }"
           />
           <div v-else class="panel-thumb-empty" />
 
-          <span v-if="panel.prompt_locked === 1" class="panel-lock" title="Prompt locked">🔒</span>
+          <span
+            v-if="panel.beats[0]?.prompt_locked === 1"
+            class="panel-lock"
+            title="Prompt locked"
+          >🔒</span>
 
           <span
             v-if="jobState(panel)?.state === 'queued'"
@@ -81,7 +85,7 @@
       v-if="deleteTarget"
       title="Delete panel?"
       message="This panel has generated images. Delete them permanently, or keep them visible in the media library?"
-      :image-count="deleteTarget.images.length"
+      :image-count="panelImageCount(deleteTarget)"
       @purge="confirmDelete(true)"
       @keep="confirmDelete(false)"
       @cancel="deleteTarget = null"
@@ -102,24 +106,34 @@ const addingPanel = ref(false)
 const newPanelAction = ref('')
 const addPanelInput = ref<HTMLInputElement | null>(null)
 
+// A panel's own video job (still panel-scoped) wins if present, else any of
+// its beats' active image-generation job -- image jobs are beat-scoped
+// since the shot->beat reorg (see store.beatJobState / jobToBeat).
 function jobState(panel: Panel) {
-  return store.panelJobState.get(panel.id)
+  return store.panelJobBadge(panel)
 }
 
 function thumbSrc(panel: Panel): string | null {
-  const keeper = store.keeperImage(panel)
+  const keeper = store.firstBeatKeeper(panel)
   if (keeper) return thumbnailUrl(keeper.file_path)
-  const first = panel.images[0]
+  const first = panel.beats[0]?.images[0]
   return first ? thumbnailUrl(first.file_path) : null
 }
 
+// Panel-level shot/subject captioning now reads off the first beat -- shots
+// (shot size, subjects) are beat-scoped since the shot->beat reorg.
 function caption(panel: Panel): string {
-  const shot = panel.shot_size ?? '—'
-  const names = panel.subject_ids
-    .map((id) => store.subjectsById.get(id)?.name)
+  const firstBeat = panel.beats[0]
+  const shot = firstBeat?.shot_size ?? '—'
+  const names = (firstBeat?.subject_ids ?? [])
+    .map((id: number) => store.subjectsById.get(id)?.name)
     .filter((n): n is string => !!n)
     .join(', ')
   return names ? `${shot} · ${names}` : shot
+}
+
+function panelImageCount(panel: Panel): number {
+  return panel.beats.reduce((n, b) => n + b.images.length, 0)
 }
 
 // Deleting a panel with generated images asks what happens to them
@@ -128,7 +142,7 @@ function caption(panel: Panel): string {
 const deleteTarget = ref<Panel | null>(null)
 
 async function onDeletePanel(panel: Panel): Promise<void> {
-  if (panel.images.length === 0) {
+  if (panelImageCount(panel) === 0) {
     if (!confirm('Delete this panel?')) return
     await store.removePanel(panel.id)
     return

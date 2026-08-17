@@ -68,14 +68,14 @@ class StubRunner:
             raise self.parse_exc
         return self.parse_result
 
-    async def synthesize(self, storyboard_id, panel_ids=None, force=False):
-        self.calls.append(("synthesize", storyboard_id, panel_ids, force))
+    async def synthesize(self, storyboard_id, beat_ids=None, force=False):
+        self.calls.append(("synthesize", storyboard_id, beat_ids, force))
         if self.synthesize_exc is not None:
             raise self.synthesize_exc
         return self.synthesize_result
 
-    async def generate(self, storyboard_id, panel_ids=None, only_failed=False):
-        self.calls.append(("generate", storyboard_id, panel_ids, only_failed))
+    async def generate(self, storyboard_id, beat_ids=None, only_failed=False):
+        self.calls.append(("generate", storyboard_id, beat_ids, only_failed))
         if self.generate_exc is not None:
             raise self.generate_exc
         return self.generate_result
@@ -131,6 +131,38 @@ def _create_storyboard(client, **overrides) -> int:
     r = client.post("/api/storyboard", json=body)
     assert r.status_code == 200, r.text
     return r.json()["id"]
+
+
+@pytest.fixture
+def storyboard_id(client) -> int:
+    return _create_storyboard(client)
+
+
+@pytest.fixture
+def panel_id(client, storyboard_id) -> int:
+    return _make_panel(client, storyboard_id)
+
+
+@pytest.fixture
+def beat_id(client, panel_id) -> int:
+    return _make_beat(client, panel_id)
+
+
+@pytest.fixture
+def beat_image_id(client, beat_id) -> int:
+    path = "/tmp/beat-fixture-image.png"
+    client.db.save_media(
+        Media(
+            file_path=Path(path),
+            file_size=1,
+            width=8,
+            height=8,
+            format="png",
+            created_at=datetime.now(),
+            modified_at=datetime.now(),
+        )
+    )
+    return client.db.create_beat_image(beat_id, file_path=path)
 
 
 # ---- storyboard CRUD round-trip -------------------------------------------
@@ -215,6 +247,17 @@ def test_patch_storyboard_null_name_is_400(client):
     assert "name" in r.json()["detail"]
 
 
+def test_storyboard_patch_notes(client, storyboard_id):
+    r = client.patch(f"/api/storyboard/{storyboard_id}", json={"notes": "n"})
+    assert r.status_code == 200
+
+
+def test_storyboard_create_persists_notes(client):
+    sid = _create_storyboard(client, notes="n")
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["notes"] == "n"
+
+
 def test_create_storyboard_defaults_base_seed_and_clamps_batch_size(client):
     r = client.post(
         "/api/storyboard",
@@ -284,15 +327,18 @@ def test_synthesize_returns_202_started_with_total(client):
     p2 = client.post(
         f"/api/storyboard/scenes/{scene_id}/panels", json={"action": "runs"}
     ).json()["id"]
+    b1 = client.post(
+        f"/api/storyboard/panels/{p1}/beats", json={"action": "she kneels"}
+    ).json()["id"]
+    client.post(f"/api/storyboard/panels/{p2}/beats", json={"action": "she stands"})
 
     r = client.post(f"/api/storyboard/{sid}/synthesize", json={})
     assert r.status_code == 202
     assert r.json() == {"status": "started", "total": 2}
 
-    r2 = client.post(f"/api/storyboard/{sid}/synthesize", json={"panel_ids": [p1]})
+    r2 = client.post(f"/api/storyboard/{sid}/synthesize", json={"beat_ids": [b1]})
     assert r2.status_code == 202
     assert r2.json() == {"status": "started", "total": 1}
-    assert p2  # keep flake8 happy about unused var while documenting intent
 
 
 def test_synthesize_without_runner_is_503(client):
@@ -574,48 +620,6 @@ def test_delete_unknown_panel_is_404(client):
     assert client.delete("/api/storyboard/panels/9999").status_code == 404
 
 
-def test_panel_patch_with_prompt_locks_it(client):
-    sid = _create_storyboard(client)
-    panel_id = _make_panel(client, sid)
-
-    r = client.patch(
-        f"/api/storyboard/panels/{panel_id}",
-        json={
-            "prompt": "a cat on a wall",
-            "prompt_locked": False,
-            "prompt_source": "llm",
-        },
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["prompt"] == "a cat on a wall"
-    assert body["prompt_locked"] == 1
-    assert body["prompt_source"] == "user"
-
-    # And it's really in the DB, not just the response.
-    tree = client.get(f"/api/storyboard/{sid}").json()
-    panel = tree["scenes"][0]["panels"][0]
-    assert panel["prompt_locked"] == 1
-    assert panel["prompt_source"] == "user"
-
-
-def test_patch_panel_null_shot_size_clears_column(client):
-    sid = _create_storyboard(client)
-    panel_id = _make_panel(client, sid)
-
-    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": "CU"})
-    assert r.status_code == 200
-    assert r.json()["shot_size"] == "CU"
-
-    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": None})
-    assert r.status_code == 200
-    assert r.json()["shot_size"] is None
-
-    tree = client.get(f"/api/storyboard/{sid}").json()
-    panel = tree["scenes"][0]["panels"][0]
-    assert panel["shot_size"] is None
-
-
 def test_patch_panel_null_action_is_400(client):
     sid = _create_storyboard(client)
     panel_id = _make_panel(client, sid)
@@ -625,52 +629,78 @@ def test_patch_panel_null_action_is_400(client):
     assert "action" in r.json()["detail"]
 
 
+def test_panel_patch_rejects_dropped_fields(client, panel_id):
+    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": "CU"})
+    # Pydantic ignores unknown fields by default -> field silently absent;
+    # assert the response carries no shot_size key
+    assert "shot_size" not in r.json()
+
+
+# ---- beats --------------------------------------------------------------------
+
+
+def _make_beat(client, panel_id: int, action: str = "she kneels") -> int:
+    r = client.post(f"/api/storyboard/panels/{panel_id}/beats", json={"action": action})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_beat_patch_server_wins_lock(client, beat_id):
+    r = client.patch(
+        f"/api/storyboard/beats/{beat_id}",
+        json={"prompt": "hand-written", "prompt_locked": 0},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["prompt_locked"] == 1 and body["prompt_source"] == "user"
+
+
+def test_patch_beat_null_shot_size_clears_column(client, beat_id):
+    r = client.patch(f"/api/storyboard/beats/{beat_id}", json={"shot_size": "CU"})
+    assert r.status_code == 200
+    assert r.json()["shot_size"] == "CU"
+
+    r = client.patch(f"/api/storyboard/beats/{beat_id}", json={"shot_size": None})
+    assert r.status_code == 200
+    assert r.json()["shot_size"] is None
+
+
 # ---- select -----------------------------------------------------------------
 
 
-def test_select_panel_image(client):
-    sid = _create_storyboard(client)
-    panel_id = _make_panel(client, sid)
-
-    # No media/panel_images rows exist yet -- selecting a real id that
-    # doesn't belong to this panel is a 404.
+def test_beat_select_route(client, beat_id, beat_image_id):
     r = client.post(
-        f"/api/storyboard/panels/{panel_id}/select", json={"image_id": 9999}
+        f"/api/storyboard/beats/{beat_id}/select", json={"image_id": beat_image_id}
     )
+    assert r.status_code == 200
+    assert r.json()["selected_image_id"] == beat_image_id
+
+
+def test_select_beat_image_unknown_id_is_404(client, beat_id):
+    # No media/beat_images rows exist yet -- selecting a real id that
+    # doesn't belong to this beat is a 404.
+    r = client.post(f"/api/storyboard/beats/{beat_id}/select", json={"image_id": 9999})
     assert r.status_code == 404
 
 
-def test_select_panel_image_none_clears_selection(client):
-    sid = _create_storyboard(client)
-    panel_id = _make_panel(client, sid)
-
-    r = client.post(
-        f"/api/storyboard/panels/{panel_id}/select", json={"image_id": None}
-    )
+def test_select_beat_image_none_clears_selection(client, beat_id):
+    r = client.post(f"/api/storyboard/beats/{beat_id}/select", json={"image_id": None})
     assert r.status_code == 200
-    assert r.json()["id"] == panel_id
+    assert r.json()["id"] == beat_id
     assert r.json()["selected_image_id"] is None
 
 
-def test_select_unknown_panel_is_404(client):
-    r = client.post("/api/storyboard/panels/9999/select", json={"image_id": None})
+def test_select_unknown_beat_is_404(client):
+    r = client.post("/api/storyboard/beats/9999/select", json={"image_id": None})
     assert r.status_code == 404
 
 
-def test_select_image_from_a_different_panel_is_404(client):
-    sid = _create_storyboard(client)
-    scene_id = client.post(
-        f"/api/storyboard/{sid}/scenes", json={"name": "Scene 1"}
-    ).json()["id"]
-    panel_a = client.post(
-        f"/api/storyboard/scenes/{scene_id}/panels", json={"action": "a"}
-    ).json()["id"]
-    panel_b = client.post(
-        f"/api/storyboard/scenes/{scene_id}/panels", json={"action": "b"}
-    ).json()["id"]
+def test_select_image_from_a_different_beat_is_404(client, panel_id):
+    beat_a = _make_beat(client, panel_id, "a")
+    beat_b = _make_beat(client, panel_id, "b")
 
-    # panel_images.file_path is FK'd to media(file_path), so a real media
-    # row has to exist before create_panel_image will take it.
+    # beat_images.file_path is FK'd to media(file_path), so a real media
+    # row has to exist before create_beat_image will take it.
     client.db.save_media(
         Media(
             file_path=Path("/tmp/does-not-matter.png"),
@@ -682,16 +712,19 @@ def test_select_image_from_a_different_panel_is_404(client):
             modified_at=datetime.now(),
         )
     )
-    # Insert a real panel_images row for panel_a directly via the DB, then
-    # try to select it from panel_b.
-    image_id = client.db.create_panel_image(
-        panel_a, file_path="/tmp/does-not-matter.png"
-    )
+    # Insert a real beat_images row for beat_a directly via the DB, then
+    # try to select it from beat_b.
+    image_id = client.db.create_beat_image(beat_a, file_path="/tmp/does-not-matter.png")
 
     r = client.post(
-        f"/api/storyboard/panels/{panel_b}/select", json={"image_id": image_id}
+        f"/api/storyboard/beats/{beat_b}/select", json={"image_id": image_id}
     )
     assert r.status_code == 404
+
+
+def test_delete_beat_purge_flag(client, beat_id):
+    r = client.delete(f"/api/storyboard/beats/{beat_id}?purge_images=true")
+    assert r.status_code == 200 and r.json() == {"status": "deleted"}
 
 
 # ---- purge_images + folder removal ----------------------------------------
@@ -705,6 +738,9 @@ def _seed_panel_with_image(client, path: str):
     panel_id = client.post(
         f"/api/storyboard/scenes/{scene_id}/panels", json={"action": "a"}
     ).json()["id"]
+    beat_id = client.post(
+        f"/api/storyboard/panels/{panel_id}/beats", json={"action": "a"}
+    ).json()["id"]
     client.db.save_media(
         Media(
             file_path=Path(path),
@@ -717,7 +753,7 @@ def _seed_panel_with_image(client, path: str):
         )
     )
     client.db.set_media_hidden(path, True)
-    client.db.create_panel_image(panel_id, file_path=path)
+    client.db.create_beat_image(beat_id, file_path=path)
     return sid, scene_id, panel_id
 
 
