@@ -43,44 +43,32 @@ def test_binary_filename_windows():
 
 
 def test_pick_release_asset_linux_cuda_falls_back_to_vulkan():
-    # Upstream ships no Linux CUDA prebuilt, so Linux+CUDA hosts with a real
-    # Vulkan device get the Vulkan build.
-    rpt = _report(cuda=True, has_real_vk=True)
-    asset = pick_release_asset(rpt)
-    assert "ubuntu-vulkan" in asset.lower()
-    assert "cuda" not in asset.lower()
+    asset = pick_release_asset(_report(cuda=True, has_real_vk=True))
+    assert asset == f"llama-{LLAMA_CPP_RELEASE}-bin-ubuntu-vulkan-x64.tar.gz"
 
 
 def test_pick_release_asset_linux_cuda_no_vulkan_falls_back_to_cpu():
-    # Linux+CUDA without Vulkan (e.g. WSL2 with no real Vulkan device) falls
-    # back to the CPU ubuntu build.
-    rpt = _report(cuda=True, has_real_vk=False)
-    asset = pick_release_asset(rpt)
-    assert "ubuntu" in asset.lower()
-    assert "cuda" not in asset.lower()
-    assert "vulkan" not in asset.lower()
+    asset = pick_release_asset(_report(cuda=True, has_real_vk=False))
+    assert asset == f"llama-{LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz"
 
 
 def test_pick_release_asset_macos_arm64():
-    rpt = _report(os_="Darwin", machine="arm64")
-    asset = pick_release_asset(rpt)
-    assert "macos" in asset.lower() or "darwin" in asset.lower()
-    assert "arm64" in asset.lower()
+    asset = pick_release_asset(_report(os_="Darwin", machine="arm64"))
+    assert asset == f"llama-{LLAMA_CPP_RELEASE}-bin-macos-arm64.tar.gz"
 
 
 def test_pick_release_asset_linux_vulkan_no_cuda():
-    rpt = _report(has_real_vk=True)
-    asset = pick_release_asset(rpt)
-    assert "vulkan" in asset.lower()
+    asset = pick_release_asset(_report(has_real_vk=True))
+    assert asset == f"llama-{LLAMA_CPP_RELEASE}-bin-ubuntu-vulkan-x64.tar.gz"
 
 
 def test_pick_release_asset_linux_cpu_fallback():
-    rpt = _report()
-    asset = pick_release_asset(rpt)
-    assert "ubuntu" in asset.lower()
-    # CPU build identifier varies; just assert it's the non-cuda non-vulkan path
-    assert "cuda" not in asset.lower()
-    assert "vulkan" not in asset.lower()
+    asset = pick_release_asset(_report())
+    assert asset == f"llama-{LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz"
+
+
+def test_pinned_release_is_b10456():
+    assert LLAMA_CPP_RELEASE == "b10456"
 
 
 def test_binary_path_lives_in_data_dir():

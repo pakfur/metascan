@@ -21,12 +21,13 @@ from metascan.core.hardware import HardwareReport, detect_hardware
 from metascan.utils.app_paths import get_data_dir
 
 # Pinned upstream release. Bump only deliberately — model compatibility and
-# command-line flags evolve between releases. b7400 (2025-12-14) is the
-# latest release that still ships uniformly ``.zip`` assets across every
-# platform we target while including the Qwen3-VL architecture (added in
-# llama.cpp PR #16780, merged 2025-10-30). Later releases switched
-# Linux/macOS to ``.tar.gz`` which would require a separate extractor path.
-LLAMA_CPP_RELEASE = "b7400"
+# command-line flags evolve between releases. b10456 (2026-08-17) is pinned
+# because Qwen3.8's Gated DeltaNet CUDA kernels were broken before ≈b10450:
+# older builds load the model, use normal VRAM, and silently emit corrupted
+# tokens (ggml-org/llama.cpp discussion #27164). b10456 retains Qwen3-VL
+# support. From this release line Linux/macOS assets are ``.tar.gz`` and
+# Windows stays ``.zip`` — ``setup_models._ensure_target`` handles both.
+LLAMA_CPP_RELEASE = "b10456"
 
 
 def binary_filename() -> str:
@@ -72,7 +73,7 @@ def pick_release_asset(report: HardwareReport) -> str:
                 "macOS Intel (x86_64) llama-server builds are not published "
                 "by upstream; only macOS arm64 is supported."
             )
-        return f"llama-{rel}-bin-macos-arm64.zip"
+        return f"llama-{rel}-bin-macos-arm64.tar.gz"
     if report.os == "Windows":
         if report.cuda is not None:
             # b6500 ships only the cu12.4 variant for Windows CUDA.
@@ -82,8 +83,8 @@ def pick_release_asset(report: HardwareReport) -> str:
         return f"llama-{rel}-bin-win-cpu-x64.zip"
     # Linux: no upstream CUDA prebuilt — Vulkan first, then CPU.
     if report.vulkan and report.vulkan.has_real_device:
-        return f"llama-{rel}-bin-ubuntu-vulkan-x64.zip"
-    return f"llama-{rel}-bin-ubuntu-x64.zip"
+        return f"llama-{rel}-bin-ubuntu-vulkan-x64.tar.gz"
+    return f"llama-{rel}-bin-ubuntu-x64.tar.gz"
 
 
 def release_url(asset: str) -> str:
