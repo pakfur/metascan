@@ -4,10 +4,24 @@
 
 This guide walks you through getting Metascan running from a clean machine, end to end. If you already have Python 3.11, Node.js 18+, FFmpeg, and Git installed, you can skip ahead to [Clone and bootstrap](#3-clone-and-bootstrap).
 
-> **Why Python 3.11?** Several AI dependencies (torch, FAISS, open_clip) do not yet have wheels for Python 3.13, and 3.12 is missing `distutils` which some upscaler packages still require. Stick with **3.11** even if your system ships something newer.
+## Why Python 3.11?
+
+Metascan supports **Python 3.11.x and nothing else** — not 3.12, not 3.13 or newer.
+`setup.py` declares `python_requires=">=3.11,<3.12"`, CI builds and tests only 3.11,
+and `install.sh` refuses to build a virtual environment with any other interpreter.
+
+- **3.13 and newer cannot work.** The pinned `Pillow==10.2.0` publishes no wheel past
+  `cp312`, and building its sdist fails outright. Other pinned AI dependencies are in
+  the same position.
+- **3.12 is untested.** Its wheels resolve, but nothing in CI exercises that
+  combination, so it is not a supported configuration.
+
+Stick with 3.11 even if your system ships something newer — installing it alongside
+your system Python is safe, and the steps below show how per platform.
 
 ## Contents
 
+- [Why Python 3.11?](#why-python-311)
 - [1. Install system prerequisites](#1-install-system-prerequisites)
   - [macOS (Apple Silicon and Intel)](#macos-apple-silicon-and-intel)
   - [Windows 10 / 11](#windows-10--11)

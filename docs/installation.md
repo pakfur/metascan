@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- **Python 3.11** (required for package compatibility — 3.13 is not supported)
+- **Python 3.11** — 3.11.x only. Not 3.12, and not 3.13+ (see [why](first_time_setup.md#why-python-311)).
 - **Node.js 18+** (for the Vue frontend)
 - **FFMPEG** — required for video thumbnail generation and upscaling
   - macOS: `brew install ffmpeg`
@@ -18,6 +18,12 @@
    git clone <repository-url>
    cd metascan
    ```
+
+   > **Shortcut:** `./install.sh` performs steps 2–4 below in one pass — it locates a
+   > Python 3.11 interpreter (refusing anything else), builds `venv/`, installs backend
+   > and frontend dependencies, downloads the AI models, and verifies the result. Run
+   > `./install.sh --help` for options. The manual steps below are the same work done
+   > by hand.
 
 2. **Set up Python backend:**
    ```bash
