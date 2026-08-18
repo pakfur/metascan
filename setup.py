@@ -10,5 +10,5 @@ setup(
     author="Metascan",
     packages=find_packages(),
     install_requires=requirements,
-    python_requires=">=3.11,<3.13",
+    python_requires=">=3.11,<3.12",
 )
