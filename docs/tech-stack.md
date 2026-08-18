@@ -3,7 +3,7 @@
 [← Back to README](../README.md)
 
 ## Backend
-- **Python 3.11** - Core application language
+- **Python 3.11** - Core application language (3.11.x only; see [Installation](installation.md))
 - **FastAPI** - Async REST API and WebSocket server
 - **Uvicorn** - ASGI server
 - **SQLite** - Local database with WAL mode for concurrency

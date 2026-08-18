@@ -6,14 +6,14 @@
 - Linux (Ubuntu 20.04+, Fedora 34+, or similar)
 
 ## Python Requirements
-- Python 3.11 or higher
+- Python 3.11 (3.11.x only — not 3.12 or newer)
 - pip package manager
 - venv module (usually included with Python)
 
 ## System Dependencies
 
 ### Required
-- **Python 3.11+**: Core runtime environment
+- **Python 3.11**: Core runtime environment (3.11.x only — not 3.12 or newer)
 
 ### Optional (for enhanced functionality)
 - **FFmpeg**: For video thumbnail generation

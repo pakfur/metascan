@@ -730,7 +730,7 @@ metascan/
 - **Linter:** `flake8` on `metascan/ backend/ tests/` — fatal errors (E9, F63, F7, F82) must be zero; style warnings are non-fatal (`--exit-zero`)
 - **Type checker:** `mypy` with `python_version = 3.11`, strict on `metascan/core/*`
 - **Tests:** `pytest` — 175 tests, all must pass. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
-- **Python version:** 3.11+ required (3.13 not supported)
+- **Python version:** 3.11.x only — not 3.12, not 3.13+. `setup.py` declares `python_requires=">=3.11,<3.12"`, CI builds 3.11, and `install.sh` refuses anything else. 3.13+ cannot work (pinned Pillow 10.2.0 has no wheel past cp312 and its sdist fails to build); 3.12 resolves but is untested, so it is not supported.
 - **Imports in core/:** Never import any UI/desktop framework (`PyQt6`, `qt_material`, `tkinter`, etc.)
 
 ### Frontend
