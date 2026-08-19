@@ -2651,6 +2651,24 @@ class DatabaseManager:
             ).fetchone()
             return int(row["n"]) if row else 0
 
+    def delete_panel_video(self, video_id: int) -> Tuple[bool, List[str]]:
+        """Delete one rendered clip completely: its panel_videos row, then
+        its media row (indices/folder_items cascade with it) via
+        _purge_media_rows' survival rules -- a file another take, subject
+        reference, or scene reference still points at is unhidden instead
+        of deleted. Returns ``(deleted, purged_file_paths)`` with
+        native-format paths for the caller to remove from disk."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM panel_videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            if row is None:
+                return False, []
+            conn.execute("DELETE FROM panel_videos WHERE id = ?", (video_id,))
+            deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.commit()
+            return True, deleted_files
+
     def select_beat_image(self, beat_id: int, image_id: Optional[int]) -> bool:
         """Set a beat's keeper. Unhides the new keeper's media row, re-hides
         the previous keeper's. image_id=None clears the selection."""

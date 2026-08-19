@@ -424,6 +424,15 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  async function removePanelVideo(videoId: number): Promise<void> {
+    try {
+      await api.deletePanelVideo(videoId)
+      await refresh()
+    } catch (e) {
+      error.value = errMessage(e)
+    }
+  }
+
   // Replaces the tree wholesale and resets selection. Deliberately rethrows
   // (ApiError in particular) so the import dialog can catch the 409
   // confirm_required response and re-call with confirm=true.
@@ -838,6 +847,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     addPanel,
     removeScene,
     removePanel,
+    removePanelVideo,
     importText,
     synthesize,
     compileVideo,

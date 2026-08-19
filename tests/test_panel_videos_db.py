@@ -138,3 +138,41 @@ def test_delete_panel_purges_clip_media(db):
             "SELECT COUNT(*) AS n FROM media WHERE file_path = '/vids/take.mp4'"
         ).fetchone()["n"]
     assert n == 0
+
+
+def test_delete_panel_video_purges_single_clip(db):
+    _, _, panel_id = _tree(db)
+    db.save_media(_media("/vids/take1.mp4"))
+    db.save_media(_media("/vids/take2.mp4"))
+    v1 = db.create_panel_video(panel_id, file_path="/vids/take1.mp4", variant_index=0)
+    db.create_panel_video(panel_id, file_path="/vids/take2.mp4", variant_index=1)
+
+    deleted, purged = db.delete_panel_video(v1)
+    assert deleted
+    assert [Path(p).name for p in purged] == ["take1.mp4"]
+    assert [Path(v["file_path"]).name for v in db.list_panel_videos(panel_id)] == [
+        "take2.mp4"
+    ]
+    with db.lock, db._get_connection() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM media WHERE file_path = '/vids/take1.mp4'"
+        ).fetchone()["n"]
+    assert n == 0
+
+    assert db.delete_panel_video(9999) == (False, [])
+
+
+def test_delete_panel_video_spares_still_referenced_file(db):
+    """A file another take still points at is unhidden, not deleted."""
+    _, _, panel_id = _tree(db)
+    db.save_media(_media("/vids/shared.mp4"))
+    v1 = db.create_panel_video(panel_id, file_path="/vids/shared.mp4", variant_index=0)
+    db.create_panel_video(panel_id, file_path="/vids/shared.mp4", variant_index=1)
+
+    deleted, purged = db.delete_panel_video(v1)
+    assert deleted and purged == []
+    with db.lock, db._get_connection() as conn:
+        row = conn.execute(
+            "SELECT hidden FROM media WHERE file_path = '/vids/shared.mp4'"
+        ).fetchone()
+    assert row is not None and row["hidden"] == 0
