@@ -115,6 +115,7 @@ class StubComfy:
         priority=False,
         output_dir=None,
         beat_id=None,
+        output_prefix=None,
     ):
         self.submitted.append(
             {

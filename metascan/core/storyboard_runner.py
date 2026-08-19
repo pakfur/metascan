@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
@@ -48,6 +50,23 @@ EventCb = Callable[[str, str, Dict[str, Any]], None]
 # duplicate_detection.VIDEO_EXTENSIONS -- there's no single shared constant
 # for this across the codebase, so this mirrors the existing precedent).
 _VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov"})
+
+# Characters that may not appear in an expanded filename prefix (Windows
+# filename rules plus path separators and control characters).
+_PREFIX_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def expand_name_template(template: Optional[str]) -> Optional[str]:
+    """Expand strftime tokens (%m, %d, %y, ...) in a filename-prefix
+    template and sanitize the result to a single safe filename fragment.
+
+    Returns None for a missing/blank template so callers can pass the
+    result straight through as an optional job field.
+    """
+    if not template or not template.strip():
+        return None
+    expanded = datetime.now().strftime(template.strip())
+    return _PREFIX_ILLEGAL.sub("-", expanded)
 
 
 def _first_beat_keeper(panel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1216,6 +1235,7 @@ class StoryboardRunner:
                 beat_id=beat["id"],
                 priority=priority,
                 output_dir=output_dir,
+                output_prefix=expand_name_template(tree.get("image_name_template")),
             )
             job_ids.append(job_id)
         return job_ids
@@ -1433,6 +1453,15 @@ class StoryboardRunner:
 
         width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
         slug = storyboard_slug(storyboard_id, tree["name"])
+        # Rendered clips land under the storyboard's configured library
+        # directory when one is set (validated against config at PATCH
+        # time), falling back to comfy.output_root otherwise.
+        video_root = (
+            Path(tree["video_output_dir"])
+            if tree.get("video_output_dir")
+            else self.output_root
+        )
+        video_prefix = expand_name_template(tree.get("video_name_template"))
 
         jobs: List[int] = []
         skipped: List[Dict[str, Any]] = []
@@ -1536,7 +1565,7 @@ class StoryboardRunner:
                     ),
                 )
                 output_dir = (
-                    self.output_root
+                    video_root
                     / slug
                     / f"scene_{scene['sort_order']:02d}"
                     / f"panel_{panel['sort_order']:02d}"
@@ -1546,6 +1575,7 @@ class StoryboardRunner:
                     params,
                     panel_id=pid,
                     output_dir=output_dir,
+                    output_prefix=video_prefix,
                 )
                 jobs.append(job_id)
 
@@ -1621,8 +1651,14 @@ class StoryboardRunner:
         inserted: List[str] = []
         for i, f in enumerate(payload.get("files") or []):
             posix_path = to_posix_path(f)
+            # Images hide until curated (select_beat_image unhides the
+            # keeper); rendered video clips are the final product with no
+            # curation gate, so they stay visible in the library — reachable
+            # through the storyboard's folder — from the moment they ingest.
+            is_video = Path(posix_path).suffix.lower() in _VIDEO_EXTS
             try:
-                await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
+                if not is_video:
+                    await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
                 await asyncio.to_thread(
                     self.db.create_beat_image,
                     beat_id,
