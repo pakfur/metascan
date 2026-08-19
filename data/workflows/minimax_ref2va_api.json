@@ -283,7 +283,7 @@
     "inputs": {
       "text": ""
     },
-    "class_type": "Textbox",
+    "class_type": "JWStringMultiline",
     "_meta": {
       "title": "MS_POSITIVE"
     }
