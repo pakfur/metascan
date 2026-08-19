@@ -4,7 +4,7 @@ How to create a distributable version of MetaScan using PyInstaller.
 
 ## Prerequisites
 
-1. Python 3.11+ with all dependencies installed (`pip install -r requirements.txt`)
+1. Python 3.11 (3.11.x only) with all dependencies installed (`pip install -r requirements.txt`)
 2. PyInstaller installed (`pip install pyinstaller`)
 3. For macOS: Xcode Command Line Tools (for `iconutil`)
 

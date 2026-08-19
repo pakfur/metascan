@@ -53,7 +53,7 @@ memorize the list. For reference, the full set:
   (verify with `vulkaninfo --summary`).
 - **Metal** is on by default on macOS arm64; nothing extra to install.
 
-A Python 3.11+ interpreter (the project's `venv` is fine) is needed at
+A Python 3.11 interpreter (the project's `venv` is fine) is needed at
 build-script time so the script can read the pinned llama.cpp release
 tag from `metascan.utils.llama_server.LLAMA_CPP_RELEASE`. Activate the
 venv first: `source venv/bin/activate`.
