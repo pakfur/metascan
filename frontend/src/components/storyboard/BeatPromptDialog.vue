@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Beat } from '../../types/storyboard'
 import { copyToClipboard } from '../../utils/clipboard'
@@ -10,8 +10,23 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const store = useStoryboardStore()
 
 const draft = ref(props.beat.prompt ?? '')
-const dirty = computed(() => draft.value !== (props.beat.prompt ?? ''))
+// Last-synced server value. `dirty` compares against this snapshot, not the
+// live prop, so a server-side rewrite (e.g. a Re-synth completing) doesn't
+// masquerade as a user edit. Resynced together with `draft` only when there
+// is no pending uncommitted edit -- see the watcher below.
+const snap = ref(props.beat.prompt ?? '')
+const dirty = computed(() => draft.value !== snap.value)
 const words = computed(() => (draft.value.trim() ? draft.value.trim().split(/\s+/).length : 0))
+
+watch(
+  () => [props.beat.id, props.beat.updated_at],
+  () => {
+    if (draft.value === snap.value) {
+      draft.value = props.beat.prompt ?? ''
+      snap.value = props.beat.prompt ?? ''
+    }
+  },
+)
 
 const status = computed(() => {
   if (props.beat.prompt_locked === 1) return '🔒 edited'
@@ -32,7 +47,10 @@ function unlock(): void {
 function commit(): void {
   // Server forces prompt_locked=1 / prompt_source='user' when `prompt` is in
   // the PATCH body -- send only the prompt (see Global Constraints).
-  if (dirty.value) void store.patchBeatFields(props.beat.id, { prompt: draft.value })
+  if (dirty.value) {
+    void store.patchBeatFields(props.beat.id, { prompt: draft.value })
+    snap.value = draft.value
+  }
   emit('close')
 }
 
