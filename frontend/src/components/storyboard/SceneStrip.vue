@@ -129,8 +129,10 @@ function selectScene(scene: Scene): void {
 const deleteTarget = ref<Scene | null>(null)
 
 function sceneImageCount(scene: Scene): number {
+  // Panel-scoped rendered clips ride the same delete/purge flow as beat
+  // images, so they count toward the dialog's total too.
   return scene.panels.reduce(
-    (n, p) => n + p.beats.reduce((m, b) => m + b.images.length, 0),
+    (n, p) => n + p.videos.length + p.beats.reduce((m, b) => m + b.images.length, 0),
     0,
   )
 }

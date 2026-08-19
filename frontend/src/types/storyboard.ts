@@ -10,6 +10,20 @@ export interface BeatImage {
   created_at: string
 }
 
+// Rendered clips are panel-scoped (one clip covers the whole shot), unlike
+// the per-beat keyframe images above.
+export interface PanelVideo {
+  id: number
+  panel_id: number
+  file_path: string
+  seed: number | null
+  variant_index: number
+  prompt_used: string | null
+  preset_id: number | null
+  comfy_prompt_id: string | null
+  created_at: string
+}
+
 export interface DialogLine {
   subject_id: number | null
   voice: string | null
@@ -79,6 +93,7 @@ export interface Panel {
   created_at: string
   updated_at: string
   beats: Beat[]
+  videos: PanelVideo[]
 }
 
 // `db.get_panel` (used by the PATCH /panels/{id} route) returns every
@@ -86,7 +101,7 @@ export interface Panel {
 // happens in `get_storyboard_tree`. Mirrors the BeatWithoutImages
 // merge-caveat above: callers of patchPanel must merge the beats array
 // back in from whatever they already have loaded.
-export type PanelWithoutBeats = Omit<Panel, 'beats'>
+export type PanelWithoutBeats = Omit<Panel, 'beats' | 'videos'>
 
 export const VIDEO_ANCHORS = ['keeper', 'prev_last'] as const
 

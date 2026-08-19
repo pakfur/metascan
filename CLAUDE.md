@@ -537,9 +537,21 @@ metascan/
   `subject_ids` no longer exists) — is factored out of
   `_compile_panel` specifically so `compile_video`'s prompt text and
   `generate_video`'s uploaded reference pictures/audio can never disagree
-  about who's in the shot. Rendered clips ingest through the same
-  `_ingest_outputs` path still images use — `beat_images` needed no
-  video-specific handling. The side panel's "Anchor changed since the last
+  about who's in the shot. Rendered clips ingest as **`panel_videos`** rows
+  (`_ingest_video_outputs` — a clip covers the whole shot, so it is
+  panel-scoped, never a beat candidate) with their media left visible
+  (no hidden-until-keeper flow for clips); `_init_database` idempotently
+  relocates any video-suffixed `beat_images` rows left by the pre-
+  `panel_videos` first-beat keying, unhiding them and clearing keeper
+  pointers that referenced them. `_release_panels` unhides/purges
+  `panel_videos` media the same way `_release_beats` handles beat images,
+  and `_purge_media_rows`'s survival checks include `panel_videos` —
+  while beats-recompose (`replace_panel_beats`) leaves clips untouched,
+  which is the point of panel scoping. The `storyboard` WS channel's
+  `panel_videos_changed` (`{storyboard_id, panel_id, files}`) signals new
+  clips; the frontend shows them in `PanelVideos.vue` (the shot pane's
+  "Video takes" strip) and the panel grid tile's 🎬 badge/dblclick.
+  The side panel's "Anchor changed since the last
   compile" chip compares live `video_anchor` against `video_compiled_anchor`
   (the anchor recorded at compile time), not against re-validating the
   actual anchor prerequisites. `<Audio N>` reference/retention lines
@@ -638,9 +650,11 @@ metascan/
   stays per shot); when ComfyUI
   finishes, `handle_job_event` (registered via `comfy_client.on_job_event`
   in the lifespan) reads the `job_outputs` payload, looks up the job's
-  `beat_id`, and ingests the produced files as `beat_images` rows. Events
+  `beat_id`, and ingests the produced files as `beat_images` rows (image
+  jobs) or `panel_videos` rows (`beat_id` NULL — video jobs). Events
   the runner emits (`folder_created`, `folder_items_changed`,
-  `beat_images_changed`, `synthesis_progress`) go out through its own
+  `beat_images_changed`, `panel_videos_changed`, `synthesis_progress`) go
+  out through its own
   `on_event` callback list, wired straight to `ws_manager.broadcast_sync` in
   the lifespan — `backend/api/storyboard.py` never re-broadcasts them, only
   translates exceptions to HTTP.

@@ -30,6 +30,12 @@
           >🔒</span>
 
           <span
+            v-if="panel.videos.length > 0"
+            class="panel-video-badge"
+            :title="`${panel.videos.length} video take(s) — double-click to play`"
+          >🎬</span>
+
+          <span
             v-if="jobState(panel)?.state === 'queued'"
             class="panel-overlay panel-overlay--queued"
           >
@@ -132,14 +138,35 @@ function thumbSrc(panel: Panel): string | null {
   return first ? thumbnailUrl(first.file_path) : null
 }
 
-// Double-click opens the tile's media in the viewer — the only way to
-// *play* a rendered clip from the grid (video clips ingest as first-beat
-// images, same list the tile's thumbnail is drawn from). Opens on the
-// keeper when one is selected, else the first candidate. Single-click
-// selection is local and idempotent, so no debounce is needed.
+// Double-click opens the shot's media in the viewer. A shot with rendered
+// clips (panel_videos) opens over its takes — the clip is the shot's
+// product, and this is how it gets *played* from the grid. Otherwise it
+// opens over the first beat's image candidates, starting at the keeper.
+// Single-click selection is local and idempotent, so no debounce is needed.
 const viewer = ref<{ list: Media[]; index: number } | null>(null)
 
+function toMedia(filePath: string): Media {
+  return {
+    file_path: filePath,
+    is_favorite: false,
+    is_video: isVideoPath(filePath),
+    playback_speed: null,
+    width: 0,
+    height: 0,
+    file_size: 0,
+    frame_rate: null,
+    duration: null,
+  } as Media
+}
+
 function openViewer(panel: Panel): void {
+  if (panel.videos.length > 0) {
+    viewer.value = {
+      list: panel.videos.map((v) => toMedia(v.file_path)),
+      index: panel.videos.length - 1, // latest take
+    }
+    return
+  }
   const imgs = panel.beats[0]?.images ?? []
   if (imgs.length === 0) return
   const keeperId = panel.beats[0]?.selected_image_id
@@ -147,23 +174,7 @@ function openViewer(panel: Panel): void {
     0,
     imgs.findIndex((i) => i.id === keeperId),
   )
-  viewer.value = {
-    list: imgs.map(
-      (img) =>
-        ({
-          file_path: img.file_path,
-          is_favorite: false,
-          is_video: isVideoPath(img.file_path),
-          playback_speed: null,
-          width: 0,
-          height: 0,
-          file_size: 0,
-          frame_rate: null,
-          duration: null,
-        }) as Media,
-    ),
-    index: idx,
-  }
+  viewer.value = { list: imgs.map((i) => toMedia(i.file_path)), index: idx }
 }
 
 // Panel-level shot/subject captioning now reads off the first beat -- shots
@@ -179,7 +190,9 @@ function caption(panel: Panel): string {
 }
 
 function panelImageCount(panel: Panel): number {
-  return panel.beats.reduce((n, b) => n + b.images.length, 0)
+  // Rendered clips (panel_videos) are purged/released by the same delete
+  // flow as beat images, so they count toward the dialog's total too.
+  return panel.beats.reduce((n, b) => n + b.images.length, panel.videos.length)
 }
 
 // Deleting a panel with generated images asks what happens to them
@@ -316,6 +329,14 @@ function cancelPanel(): void {
 .panel-lock {
   position: absolute;
   top: 4px;
+  left: 4px;
+  font-size: 12px;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+}
+
+.panel-video-badge {
+  position: absolute;
+  bottom: 4px;
   left: 4px;
   font-size: 12px;
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));

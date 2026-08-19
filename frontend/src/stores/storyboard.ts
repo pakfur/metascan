@@ -709,10 +709,10 @@ export const useStoryboardStore = defineStore('storyboard', () => {
           total: synthesis.value.total,
           error: String(d.error ?? 'synthesis failed'),
         }
-      } else if (event === 'beat_images_changed') {
-        // No per-beat GET endpoint exists; a full tree refetch (which
-        // preserves selection) is the simplest correct way to pick up the
-        // new image set.
+      } else if (event === 'beat_images_changed' || event === 'panel_videos_changed') {
+        // No per-beat/per-panel GET endpoint exists; a full tree refetch
+        // (which preserves selection) is the simplest correct way to pick
+        // up the new image/clip set.
         void refresh()
       } else if (event === 'story_progress') {
         story.value = {

@@ -996,14 +996,13 @@ async def test_ingest_event_payload_uses_normalized_paths(
     assert changed[-1]["files"] == [f"NATIVE::{str(f1)}"]
 
 
-async def test_ingest_video_job_lands_on_panels_first_beat(
+async def test_ingest_video_job_lands_on_panel_videos(
     db, comfy, events, tmp_path, board, preset_id
 ):
-    """A job carrying panel_id but no beat_id (the video-generation path --
-    Task 8) ingests its output(s) against the panel's first beat by
-    sort_order, not the panel itself."""
+    """A job carrying panel_id but no beat_id (the video-generation path)
+    ingests its output(s) as panel_videos rows -- a clip covers the whole
+    shot -- leaving beat_images untouched and the clip's media visible."""
     beat0 = db.create_beat(board.panel0, action="first", sort_order=0)
-    db.create_beat(board.panel0, action="second", sort_order=1)
     vlm = StubVlm(responses=[])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
@@ -1016,22 +1015,28 @@ async def test_ingest_video_job_lands_on_panels_first_beat(
     runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
     await runner.aclose()
 
-    assert db.count_beat_images(beat0) == 1
+    assert db.count_panel_videos(board.panel0) == 1
+    assert db.count_beat_images(beat0) == 0
     evt = [
         data
         for ch, ev, data in events
-        if ch == "storyboard" and ev == "beat_images_changed"
+        if ch == "storyboard" and ev == "panel_videos_changed"
     ][-1]
-    assert evt["beat_id"] == beat0
     assert evt["panel_id"] == board.panel0
+    assert evt["files"] == [str(f1)]
+    assert not any(ev == "beat_images_changed" for _, ev, _ in events)
+    with db.lock, db._get_connection() as conn:
+        hidden = conn.execute(
+            "SELECT hidden FROM media LIMIT 1",
+        ).fetchone()["hidden"]
+    assert hidden == 0
 
 
-async def test_ingest_video_job_warns_when_panel_has_no_beats(
-    db, comfy, events, tmp_path, board, preset_id, caplog
+async def test_ingest_video_job_works_without_beats(
+    db, comfy, events, tmp_path, board, preset_id
 ):
-    """A panel-only job against a beat-less panel can't ingest anywhere --
-    logs a warning and leaves no beat_images / beat_images_changed behind,
-    rather than raising."""
+    """Clips are panel-scoped, so a beat-less panel ingests fine (the old
+    first-beat keying required at least one beat and warned otherwise)."""
     vlm = StubVlm(responses=[])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
 
@@ -1041,15 +1046,11 @@ async def test_ingest_video_job_warns_when_panel_has_no_beats(
     f1.write_bytes(b"x")
     db.save_media(_media(str(f1)))
 
-    with caplog.at_level("WARNING"):
-        runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
-        await runner.aclose()
+    runner.handle_job_event("job_outputs", {"job_id": job_id, "files": [str(f1)]})
+    await runner.aclose()
 
-    assert "no beats to ingest into" in caplog.text
-    assert not any(ev == "beat_images_changed" for _, ev, _ in events)
-    with db.lock, db._get_connection() as conn:
-        n = conn.execute("SELECT COUNT(*) AS n FROM beat_images").fetchone()["n"]
-        assert n == 0
+    assert db.count_panel_videos(board.panel0) == 1
+    assert any(ev == "panel_videos_changed" for _, ev, _ in events)
 
 
 async def test_ingest_ignores_jobs_without_panel_or_beat(
