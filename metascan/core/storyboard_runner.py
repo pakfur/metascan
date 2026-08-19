@@ -1526,17 +1526,9 @@ class StoryboardRunner:
                     skipped.append({"panel_id": pid, "error": str(exc)})
                     continue
 
-                # Rendered clips ingest onto the panel's first beat (see
-                # _ingest_outputs) -- count committed variants there, not on
-                # a panel-level images table that no longer exists.
-                panel_beats = panel.get("beats") or []
-                committed = (
-                    await asyncio.to_thread(
-                        self.db.count_beat_images, panel_beats[0]["id"]
-                    )
-                    if panel_beats
-                    else 0
-                )
+                # Rendered clips ingest as panel_videos rows (see
+                # _ingest_video_outputs) -- count committed takes there.
+                committed = await asyncio.to_thread(self.db.count_panel_videos, pid)
                 pending_jobs = await asyncio.to_thread(
                     self.db.list_generation_jobs,
                     states=["queued", "running"],
@@ -1611,17 +1603,11 @@ class StoryboardRunner:
 
         beat_id = job.get("beat_id")
         if beat_id is None:
-            # Video jobs carry panel_id only (no beat_id) -- their rendered
-            # clips still ingest through this same path, keyed onto the
-            # panel's first beat (spec §3.5).
-            panel_id = job.get("panel_id")
-            if panel_id is None:
-                return
-            beats = await asyncio.to_thread(self.db.list_beats, panel_id)
-            if not beats:
-                logger.warning("job %s has no beats to ingest into", job_id)
-                return
-            beat_id = beats[0]["id"]
+            # Video jobs carry panel_id only (no beat_id): a rendered clip
+            # covers the whole shot, so it ingests as a panel_videos row,
+            # not into any beat's candidate list.
+            await self._ingest_video_outputs(job, payload)
+            return
 
         beat = await asyncio.to_thread(self.db.get_beat, beat_id)
         if beat is None:
@@ -1696,6 +1682,76 @@ class StoryboardRunner:
                 "storyboard_id": storyboard_id,
                 "panel_id": panel_id,
                 "beat_id": beat_id,
+                "files": [to_native_path(p) for p in inserted],
+            },
+        )
+
+    async def _ingest_video_outputs(
+        self, job: Dict[str, Any], payload: Dict[str, Any]
+    ) -> None:
+        """Ingest a video job's rendered clips as panel_videos rows.
+
+        Mirrors _ingest_outputs' beat-image path, panel-scoped: no
+        set_media_hidden (clips are the final product and stay visible in
+        the library), same folder membership, and its own
+        ``panel_videos_changed`` WS event.
+        """
+        panel_id = job.get("panel_id")
+        if panel_id is None:
+            return
+        job_id = job.get("job_id") or job.get("id")
+
+        storyboard_id = await asyncio.to_thread(
+            self.db.storyboard_id_for_panel, panel_id
+        )
+        folder_id: Optional[str] = None
+        if storyboard_id is not None:
+            storyboard = await asyncio.to_thread(self.db.get_storyboard, storyboard_id)
+            if storyboard is not None:
+                folder_id = storyboard.get("folder_id")
+
+        try:
+            params = json.loads(job["params"])
+        except (TypeError, ValueError):
+            params = {}
+        base = await asyncio.to_thread(self.db.count_panel_videos, panel_id)
+
+        inserted: List[str] = []
+        for i, f in enumerate(payload.get("files") or []):
+            posix_path = to_posix_path(f)
+            try:
+                await asyncio.to_thread(
+                    self.db.create_panel_video,
+                    panel_id,
+                    file_path=posix_path,
+                    seed=params.get("seed"),
+                    variant_index=base + i,
+                    prompt_used=params.get("positive"),
+                    preset_id=job.get("preset_id"),
+                    comfy_prompt_id=job.get("comfy_prompt_id"),
+                )
+                inserted.append(posix_path)
+            except Exception:
+                logger.warning(
+                    "Could not ingest panel video %s for job %s",
+                    f,
+                    job_id,
+                    exc_info=True,
+                )
+
+        if not inserted:
+            return
+
+        if folder_id is not None:
+            await asyncio.to_thread(self.db.add_folder_items, folder_id, inserted)
+            self._emit("folders", "folder_items_changed", {"folder_id": folder_id})
+
+        self._emit(
+            "storyboard",
+            "panel_videos_changed",
+            {
+                "storyboard_id": storyboard_id,
+                "panel_id": panel_id,
                 "files": [to_native_path(p) for p in inserted],
             },
         )

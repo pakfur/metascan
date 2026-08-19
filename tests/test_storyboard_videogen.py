@@ -374,11 +374,11 @@ async def test_uploads_follow_refplan_order_and_params_shape(
         ],
     )
 
-    # One already-ingested image on the first beat (committed=1) + one
+    # One already-ingested clip on the panel (committed=1) + one
     # still-pending job (queued) -- exercises variant_base = committed +
     # 1*pending.
     db.save_media(_media("/pics/existing.mp4"))
-    db.create_beat_image(beat_ids[0], file_path="/pics/existing.mp4", variant_index=0)
+    db.create_panel_video(panel_id, file_path="/pics/existing.mp4", variant_index=0)
     db.create_generation_job(preset_id, "{}", panel_id=panel_id)
 
     runner = make_runner(db, comfy, events, tmp_path)

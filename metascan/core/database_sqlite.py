@@ -799,6 +799,26 @@ class DatabaseManager:
                 """
             )
             conn.execute(
+                # Rendered clips are panel-scoped (one clip covers the whole
+                # shot / all its beats), unlike the per-beat keyframe images
+                # above. Mirrors beat_images otherwise.
+                """
+                CREATE TABLE IF NOT EXISTS panel_videos (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    panel_id        INTEGER NOT NULL
+                                    REFERENCES panels(id) ON DELETE CASCADE,
+                    file_path       TEXT NOT NULL REFERENCES media(file_path)
+                                    ON DELETE CASCADE,
+                    seed            INTEGER,
+                    variant_index   INTEGER NOT NULL DEFAULT 0,
+                    prompt_used     TEXT,
+                    preset_id       INTEGER REFERENCES workflow_presets(id),
+                    comfy_prompt_id TEXT,
+                    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
             )
@@ -951,6 +971,43 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
                 "ON beat_images(beat_id)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_panel_videos_panel "
+                "ON panel_videos(panel_id)"
+            )
+
+            # Data move: rendered clips used to ingest as beat_images rows
+            # on the panel's first beat (the only container that existed
+            # before panel_videos). Relocate them to their panel. Idempotent
+            # by construction -- after the move no video-suffixed rows
+            # remain in beat_images. The keeper pointer is cleared first
+            # where it referenced a moved clip, and the clips' media rows
+            # are unhidden (clips are the final product; the
+            # hidden-until-keeper flow only applies to images).
+            _video_pred = (
+                "(lower(file_path) LIKE '%.mp4' OR lower(file_path) "
+                "LIKE '%.webm' OR lower(file_path) LIKE '%.mov')"
+            )
+            conn.execute(
+                "UPDATE beats SET selected_image_id = NULL "
+                "WHERE selected_image_id IN "
+                f"(SELECT id FROM beat_images WHERE {_video_pred})"
+            )
+            conn.execute(
+                "UPDATE media SET hidden = 0 WHERE file_path IN "
+                f"(SELECT file_path FROM beat_images WHERE {_video_pred})"
+            )
+            conn.execute(
+                "INSERT INTO panel_videos (panel_id, file_path, seed, "
+                "variant_index, prompt_used, preset_id, comfy_prompt_id, "
+                "created_at) "
+                "SELECT b.panel_id, bi.file_path, bi.seed, bi.variant_index, "
+                "bi.prompt_used, bi.preset_id, bi.comfy_prompt_id, "
+                "bi.created_at "
+                "FROM beat_images bi JOIN beats b ON b.id = bi.beat_id "
+                f"WHERE {_video_pred.replace('file_path', 'bi.file_path')}"
+            )
+            conn.execute(f"DELETE FROM beat_images WHERE {_video_pred}")
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
@@ -1978,6 +2035,27 @@ class DatabaseManager:
             ).fetchall()
         ]
         purged = self._release_beats(conn, beat_ids, purge_images)
+        # The panels' own rendered clips (panel_videos) follow the same
+        # contract as beat images: purge collects their paths for
+        # _purge_media_rows, release unhides (a no-op for clips, which
+        # ingest visible -- but a pre-panel_videos clip may still be
+        # hidden).
+        if purge_images:
+            purged.extend(
+                str(r["file_path"])
+                for r in conn.execute(
+                    f"SELECT DISTINCT file_path FROM panel_videos "
+                    f"WHERE panel_id IN ({placeholders})",
+                    panel_ids,
+                ).fetchall()
+            )
+        else:
+            conn.execute(
+                f"UPDATE media SET hidden = 0 WHERE file_path IN "
+                f"(SELECT file_path FROM panel_videos "
+                f"WHERE panel_id IN ({placeholders}))",
+                panel_ids,
+            )
         conn.execute(
             f"DELETE FROM generation_jobs WHERE panel_id IN ({placeholders})",
             panel_ids,
@@ -2006,6 +2084,11 @@ class DatabaseManager:
             still_referenced = (
                 conn.execute(
                     "SELECT 1 FROM beat_images WHERE file_path = ? LIMIT 1",
+                    (path,),
+                ).fetchone()
+                is not None
+                or conn.execute(
+                    "SELECT 1 FROM panel_videos WHERE file_path = ? LIMIT 1",
                     (path,),
                 ).fetchone()
                 is not None
@@ -2441,6 +2524,15 @@ class DatabaseManager:
                             beat["images"].append(image)
                         beats.append(beat)
                     panel["beats"] = beats
+                    panel["videos"] = []
+                    for vr in conn.execute(
+                        "SELECT * FROM panel_videos WHERE panel_id = ? "
+                        "ORDER BY variant_index, id",
+                        (panel["id"],),
+                    ).fetchall():
+                        video = dict(vr)
+                        video["file_path"] = to_native_path(video["file_path"])
+                        panel["videos"].append(video)
                     panels.append(panel)
                 scene["panels"] = panels
                 scenes.append(scene)
@@ -2498,6 +2590,60 @@ class DatabaseManager:
             row = conn.execute(
                 "SELECT COUNT(*) AS n FROM beat_images WHERE beat_id = ?",
                 (beat_id,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    # ---- Panel videos ----------------------------------------------------
+
+    def create_panel_video(
+        self,
+        panel_id: int,
+        *,
+        file_path: str,
+        seed: Optional[int] = None,
+        variant_index: int = 0,
+        prompt_used: Optional[str] = None,
+        preset_id: Optional[int] = None,
+        comfy_prompt_id: Optional[str] = None,
+    ) -> int:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO panel_videos (panel_id, file_path, seed, "
+                "variant_index, prompt_used, preset_id, comfy_prompt_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    panel_id,
+                    posix_path,
+                    seed,
+                    variant_index,
+                    prompt_used,
+                    preset_id,
+                    comfy_prompt_id,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def list_panel_videos(self, panel_id: int) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM panel_videos WHERE panel_id = ? "
+                "ORDER BY variant_index, id",
+                (panel_id,),
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["file_path"] = to_native_path(d["file_path"])
+                out.append(d)
+            return out
+
+    def count_panel_videos(self, panel_id: int) -> int:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM panel_videos WHERE panel_id = ?",
+                (panel_id,),
             ).fetchone()
             return int(row["n"]) if row else 0
 

@@ -53,6 +53,13 @@
         />
       </div>
 
+      <!-- Rendered clips are shot-scoped (panel_videos), so their strip
+           lives here on the shot pane — the per-beat Candidates row in
+           BeatForm carries images only. -->
+      <div class="pd-field">
+        <PanelVideos :panel="panel" />
+      </div>
+
       <!-- Per-beat framing/subjects/prompt/candidates now live in BeatForm.vue
            (PanelSidePanel's Edit tab) -- a beat is the image-generation unit
            since the shot->beat reorg. "Reroll shot" / "Re-synth shot" above
@@ -70,6 +77,7 @@ import { useStoryboardStore } from '../../stores/storyboard'
 import type { LoraEntry } from '../../types/storyboard'
 import BeatsEditor from './BeatsEditor.vue'
 import LoraListEditor from './LoraListEditor.vue'
+import PanelVideos from './PanelVideos.vue'
 
 const store = useStoryboardStore()
 const panel = computed(() => store.selectedPanel)
