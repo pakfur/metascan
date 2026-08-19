@@ -2222,8 +2222,30 @@ class DatabaseManager:
                     sound,
                 ),
             )
+            self._sync_panel_duration(conn, panel_id)
             conn.commit()
             return int(cur.lastrowid)
+
+    def _sync_panel_duration(self, conn: sqlite3.Connection, panel_id: int) -> None:
+        """panels.duration_s is derived whenever the panel has beats: the
+        sum of its beats' durations. Called (same transaction) from every
+        beat mutation -- create/update/delete/replace. A beat-less panel
+        keeps its stored value: that number is the beats-compose rescale
+        target (``rescale_beat_durations``), not a leftover. Bumps
+        panels.updated_at so detail editors resync (see the CLAUDE.md
+        commit-on-change rule)."""
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(duration_s), 0) AS total "
+            "FROM beats WHERE panel_id = ?",
+            (panel_id,),
+        ).fetchone()
+        if row is None or int(row["n"]) == 0:
+            return
+        conn.execute(
+            "UPDATE panels SET duration_s = ?, updated_at = datetime('now') "
+            "WHERE id = ? AND duration_s != ?",
+            (round(float(row["total"]), 1), panel_id, round(float(row["total"]), 1)),
+        )
 
     @staticmethod
     def _decode_beat_row(row: sqlite3.Row) -> Dict[str, Any]:
@@ -2275,6 +2297,12 @@ class DatabaseManager:
                 "updated_at = datetime('now') WHERE id = ?",
                 values,
             )
+            if "duration_s" in fields:
+                row = conn.execute(
+                    "SELECT panel_id FROM beats WHERE id = ?", (beat_id,)
+                ).fetchone()
+                if row is not None:
+                    self._sync_panel_duration(conn, int(row["panel_id"]))
             conn.commit()
 
     def delete_beat(
@@ -2286,11 +2314,15 @@ class DatabaseManager:
         delete_panel.
         """
         with self.lock, self._get_connection() as conn:
-            cur = conn.execute("SELECT id FROM beats WHERE id = ?", (beat_id,))
-            if cur.fetchone() is None:
+            cur = conn.execute(
+                "SELECT id, panel_id FROM beats WHERE id = ?", (beat_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
                 return False, []
             purge_paths = self._release_beats(conn, [beat_id], purge_images)
             conn.execute("DELETE FROM beats WHERE id = ?", (beat_id,))
+            self._sync_panel_duration(conn, int(row["panel_id"]))
             deleted_files = self._purge_media_rows(conn, purge_paths)
             conn.commit()
             return True, deleted_files
@@ -2338,6 +2370,7 @@ class DatabaseManager:
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
+            self._sync_panel_duration(conn, panel_id)
             conn.commit()
             return new_ids
 
