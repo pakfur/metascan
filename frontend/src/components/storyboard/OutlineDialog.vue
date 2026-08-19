@@ -265,7 +265,7 @@ h3 {
 }
 
 .outline-textarea {
-  font-family: var(--font-family-mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
