@@ -212,3 +212,26 @@ async def test_collect_outputs_images_only_unchanged(
 
     ingested_names = {p.name for p in started_client.scanner.ingested}
     assert ingested_names == {f.name for f in files}
+
+
+async def test_collect_outputs_applies_output_prefix(
+    started_client, fake_comfy  # noqa: F811
+):
+    """A job's output_prefix is prepended to ComfyUI's filename on the
+    local copy; a path-shaped prefix keeps only its final component."""
+    fake_comfy.output_override = {
+        "gifs": [{"filename": "clip_00001.mp4", "subfolder": "", "type": "output"}]
+    }
+    pid = await started_client.register_preset("wan", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params(), output_prefix="08-19-26_take_")
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "done"
+
+    files = list(started_client.output_dir_for(job_id).glob("*.mp4"))
+    assert [f.name for f in files] == ["08-19-26_take_clip_00001.mp4"]
+
+    evil_job_id = await started_client.submit(pid, params(), output_prefix="../escape_")
+    job = await started_client.wait_for_job(evil_job_id, timeout=10.0)
+    assert job["state"] == "done"
+    files = list(started_client.output_dir_for(evil_job_id).glob("*.mp4"))
+    assert [f.name for f in files] == ["escape_clip_00001.mp4"]

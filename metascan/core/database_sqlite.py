@@ -917,6 +917,36 @@ class DatabaseManager:
                 # panel_id: the release helpers delete job rows explicitly.
                 "ALTER TABLE generation_jobs ADD COLUMN beat_id INTEGER",
             )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "video_output_dir",
+                # A configured library directory (validated at the API
+                # layer); rendered clips land under it instead of
+                # comfy.output_root when set.
+                "ALTER TABLE storyboards ADD COLUMN video_output_dir TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "video_name_template",
+                "ALTER TABLE storyboards ADD COLUMN video_name_template TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "image_name_template",
+                "ALTER TABLE storyboards ADD COLUMN image_name_template TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "output_prefix",
+                # Expanded (strftime) filename prefix computed by the
+                # runner at submit time; collect_outputs prepends it to
+                # ComfyUI's filename when writing the local copy.
+                "ALTER TABLE generation_jobs ADD COLUMN output_prefix TEXT",
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
                 "ON beat_images(beat_id)"
@@ -1366,12 +1396,13 @@ class DatabaseManager:
         panel_id: Optional[int] = None,
         output_dir: Optional[str] = None,
         beat_id: Optional[int] = None,
+        output_prefix: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs (preset_id, params, panel_id, "
-                "output_dir, beat_id) VALUES (?, ?, ?, ?, ?)",
-                (preset_id, params, panel_id, output_dir, beat_id),
+                "output_dir, beat_id, output_prefix) VALUES (?, ?, ?, ?, ?, ?)",
+                (preset_id, params, panel_id, output_dir, beat_id, output_prefix),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -1458,6 +1489,9 @@ class DatabaseManager:
             "video_target",
             "video_mode",
             "video_preset_id",
+            "video_output_dir",
+            "video_name_template",
+            "image_name_template",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(

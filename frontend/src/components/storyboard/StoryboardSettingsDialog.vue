@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
+import { fetchConfig } from '../../api/config'
 import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
@@ -25,6 +26,13 @@ const notes = ref('')
 const videoTarget = ref<string | null>(null)
 const videoMode = ref<string | null>(null)
 const videoPresetId = ref<number | null>(null)
+const videoOutputDir = ref<string | null>(null)
+const videoNameTemplate = ref('')
+const imageNameTemplate = ref('')
+
+// Library directories from config.json — the only valid choices for the
+// video output directory (the backend 400s anything else).
+const libraryDirs = ref<string[]>([])
 
 const presets = ref<WorkflowPreset[]>([])
 const presetsLoading = ref(true)
@@ -47,6 +55,9 @@ let original = {
   videoTarget: null as string | null,
   videoMode: null as string | null,
   videoPresetId: null as number | null,
+  videoOutputDir: null as string | null,
+  videoNameTemplate: '',
+  imageNameTemplate: '',
 }
 
 function seedFromTree(): void {
@@ -64,6 +75,9 @@ function seedFromTree(): void {
   videoTarget.value = t.video_target
   videoMode.value = t.video_mode
   videoPresetId.value = t.video_preset_id
+  videoOutputDir.value = t.video_output_dir
+  videoNameTemplate.value = t.video_name_template ?? ''
+  imageNameTemplate.value = t.image_name_template ?? ''
   original = {
     name: name.value,
     aspectRatio: aspectRatio.value,
@@ -77,6 +91,9 @@ function seedFromTree(): void {
     videoTarget: videoTarget.value,
     videoMode: videoMode.value,
     videoPresetId: videoPresetId.value,
+    videoOutputDir: videoOutputDir.value,
+    videoNameTemplate: videoNameTemplate.value,
+    imageNameTemplate: imageNameTemplate.value,
   }
 }
 
@@ -92,6 +109,14 @@ onMounted(async () => {
     presets.value = []
   } finally {
     presetsLoading.value = false
+  }
+  try {
+    const config = await fetchConfig()
+    const dirs = (config.directories as { filepath: string }[] | undefined) ?? []
+    libraryDirs.value = dirs.map((d) => d.filepath).filter(Boolean)
+  } catch {
+    // Non-fatal: the dir select falls back to "Default" + the existing value.
+    libraryDirs.value = []
   }
 })
 
@@ -118,6 +143,9 @@ async function saveFields(): Promise<void> {
     video_target: string | null
     video_mode: string | null
     video_preset_id: number | null
+    video_output_dir: string | null
+    video_name_template: string | null
+    image_name_template: string | null
   }> = {}
 
   const trimmedName = name.value.trim()
@@ -144,6 +172,16 @@ async function saveFields(): Promise<void> {
   // Same "None" -> explicit-clear diff handling as preset_id above.
   if (videoPresetId.value !== original.videoPresetId) {
     body.video_preset_id = videoPresetId.value
+  }
+  if (videoOutputDir.value !== original.videoOutputDir) {
+    body.video_output_dir = videoOutputDir.value
+  }
+  // Blank template -> explicit null clear (nullable columns).
+  if (videoNameTemplate.value.trim() !== original.videoNameTemplate) {
+    body.video_name_template = videoNameTemplate.value.trim() || null
+  }
+  if (imageNameTemplate.value.trim() !== original.imageNameTemplate) {
+    body.image_name_template = imageNameTemplate.value.trim() || null
   }
 
   if (Object.keys(body).length === 0) return
@@ -409,6 +447,45 @@ function close(): void {
             </option>
           </select>
         </div>
+
+        <div class="field">
+          <label for="ss-video-dir">Video output directory</label>
+          <select id="ss-video-dir" v-model="videoOutputDir">
+            <option :value="null">Default (metascan data directory)</option>
+            <option v-for="d in libraryDirs" :key="d" :value="d">{{ d }}</option>
+            <option
+              v-if="videoOutputDir && !libraryDirs.includes(videoOutputDir)"
+              :value="videoOutputDir"
+            >
+              {{ videoOutputDir }} (no longer configured)
+            </option>
+          </select>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="ss-video-name">Video name prefix</label>
+            <input
+              id="ss-video-name"
+              v-model="videoNameTemplate"
+              type="text"
+              placeholder="e.g. %m-%d-%y_"
+            />
+          </div>
+          <div class="field">
+            <label for="ss-image-name">Image name prefix</label>
+            <input
+              id="ss-image-name"
+              v-model="imageNameTemplate"
+              type="text"
+              placeholder="e.g. %m-%d-%y_"
+            />
+          </div>
+        </div>
+        <span class="hint">
+          Prefixes are prepended to generated filenames and expand strftime date
+          tokens (%m, %d, %y, %Y, %H, %M) at generation time.
+        </span>
 
         <p v-if="fieldsError" class="error">{{ fieldsError }}</p>
 

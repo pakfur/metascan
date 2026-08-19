@@ -96,7 +96,13 @@ class FakeComfy:
         return f"uploaded-{self._n}-{path.name}"
 
     async def submit(
-        self, preset_id, params, panel_id=None, priority=False, output_dir=None
+        self,
+        preset_id,
+        params,
+        panel_id=None,
+        priority=False,
+        output_dir=None,
+        output_prefix=None,
     ):
         preset = self.db.get_workflow_preset(preset_id)
         workflow = json.loads(preset["workflow_json"])

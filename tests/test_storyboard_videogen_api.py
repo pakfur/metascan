@@ -239,3 +239,54 @@ def test_patch_subject_voice_ref_path(client):
     tree2 = client.get(f"/api/storyboard/{sid}").json()
     subject2 = next(s for s in tree2["subjects"] if s["id"] == subject_id)
     assert subject2["voice_ref_path"] is None
+
+
+# ---- PATCH /storyboard video_output_dir + name templates ---------------------
+
+
+def test_patch_storyboard_video_output_dir_validated_against_config(
+    client, monkeypatch
+):
+    sid = _create_storyboard(client)
+    monkeypatch.setattr(
+        "backend.api.storyboard.load_app_config",
+        lambda: {
+            "directories": [{"filepath": "/lib/media", "search_subfolders": True}]
+        },
+    )
+
+    r = client.patch(f"/api/storyboard/{sid}", json={"video_output_dir": "/lib/media"})
+    assert r.status_code == 200, r.text
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["video_output_dir"] == "/lib/media"
+
+    r = client.patch(f"/api/storyboard/{sid}", json={"video_output_dir": "/elsewhere"})
+    assert r.status_code == 400
+    assert "not a configured library directory" in r.json()["detail"]
+
+    # Explicit null clear needs no config membership.
+    r = client.patch(f"/api/storyboard/{sid}", json={"video_output_dir": None})
+    assert r.status_code == 200, r.text
+    assert client.get(f"/api/storyboard/{sid}").json()["video_output_dir"] is None
+
+
+def test_patch_storyboard_name_templates_set_and_clear(client):
+    sid = _create_storyboard(client)
+
+    r = client.patch(
+        f"/api/storyboard/{sid}",
+        json={"video_name_template": "%m-%d-%y_", "image_name_template": "img_"},
+    )
+    assert r.status_code == 200, r.text
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["video_name_template"] == "%m-%d-%y_"
+    assert tree["image_name_template"] == "img_"
+
+    r = client.patch(
+        f"/api/storyboard/{sid}",
+        json={"video_name_template": None, "image_name_template": None},
+    )
+    assert r.status_code == 200, r.text
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["video_name_template"] is None
+    assert tree["image_name_template"] is None

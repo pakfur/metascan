@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.config import load_app_config
 from backend.dependencies import get_db
 from backend.ws.manager import ws_manager
 from backend.services.comfy_service import ComfyService
@@ -155,6 +156,9 @@ class StoryboardPatch(BaseModel):
     video_mode: Optional[str] = None
     video_preset_id: Optional[int] = None
     notes: Optional[str] = None
+    video_output_dir: Optional[str] = None
+    video_name_template: Optional[str] = None
+    image_name_template: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -396,6 +400,20 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
             raise HTTPException(
                 status_code=400,
                 detail=f"no workflow preset with id {fields['video_preset_id']}",
+            )
+    if fields.get("video_output_dir") is not None:
+        # Must be one of the configured library directories — the point of
+        # the setting is that rendered clips land inside the library.
+        configured = {
+            str(d.get("filepath"))
+            for d in (load_app_config().get("directories") or [])
+            if isinstance(d, dict) and d.get("filepath")
+        }
+        if fields["video_output_dir"] not in configured:
+            raise HTTPException(
+                status_code=400,
+                detail=f"video_output_dir {fields['video_output_dir']!r} is not "
+                "a configured library directory",
             )
 
     if fields:

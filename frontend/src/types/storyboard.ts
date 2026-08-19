@@ -143,6 +143,9 @@ export interface StoryboardSummary {
   video_mode: string | null
   video_preset_id: number | null
   notes: string | null
+  video_output_dir: string | null
+  video_name_template: string | null
+  image_name_template: string | null
   created_at: string
   updated_at: string
 }

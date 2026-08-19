@@ -467,9 +467,14 @@ class ComfyClient:
         priority: bool = False,
         output_dir: Optional[Path] = None,
         beat_id: Optional[int] = None,
+        output_prefix: Optional[str] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
+
+        ``output_prefix`` is an already-expanded filename fragment the
+        collector prepends to ComfyUI's own filename when writing the
+        local copy -- callers own any template expansion/sanitizing.
 
         The preset is validated up front -- both that it exists
         (PresetNotFoundError) and that `params` binds cleanly against it
@@ -493,6 +498,7 @@ class ComfyClient:
                 panel_id,
                 str(output_dir) if output_dir else None,
                 beat_id,
+                output_prefix,
             )
         )
         if priority:
@@ -1163,7 +1169,11 @@ class ComfyClient:
             name = Path(str(entry_item.get("filename") or "")).name
             if not name or name in (".", ".."):
                 continue
-            target = target_dir / name
+            # Same traversal guard as `name`: the prefix is caller-supplied
+            # (an expanded storyboard template), so keep only a final path
+            # component of it too.
+            prefix = Path(str(job.get("output_prefix") or "")).name
+            target = target_dir / f"{prefix}{name}"
             await self._download_image(entry_item, target)
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):
