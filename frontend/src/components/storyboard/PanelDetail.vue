@@ -45,6 +45,14 @@
         />
       </div>
 
+      <div class="pd-field">
+        <LoraListEditor
+          label="Video LoRAs"
+          :entries="panel.video_loras"
+          @change="commitVideoLoras"
+        />
+      </div>
+
       <!-- Per-beat framing/subjects/prompt/candidates now live in BeatForm.vue
            (PanelSidePanel's Edit tab) -- a beat is the image-generation unit
            since the shot->beat reorg. "Reroll shot" / "Re-synth shot" above
@@ -142,6 +150,11 @@ function commitAction(e: Event): void {
 function commitImageLoras(entries: LoraEntry[]): void {
   if (!panel.value) return
   void store.patchPanelFields(panel.value.id, { image_loras: entries })
+}
+
+function commitVideoLoras(entries: LoraEntry[]): void {
+  if (!panel.value) return
+  void store.patchPanelFields(panel.value.id, { video_loras: entries })
 }
 
 function commitDuration(e: Event): void {

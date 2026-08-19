@@ -608,8 +608,9 @@ metascan/
   artifact only), so presets registered before a new optional `MS_*`
   title existed pick it up without re-registration. `GET /api/comfy/loras`
   proxies ComfyUI's `/object_info/LoraLoader` for the frontend picker
-  (`LoraListEditor.vue`, mounted in `PanelDetail.vue` for image loras and
-  `PanelSidePanel.vue`'s video section for video loras); it returns `[]`
+  (`LoraListEditor.vue`, mounted twice in `PanelDetail.vue`'s shot pane —
+  image loras and video loras side by side, ungated, so both are always
+  editable with the shot); it returns `[]`
   when ComfyUI is unreachable and the picker degrades to free text.
 - **Deterministic per-beat seeds.** `beat_seed(base_seed, panel_sort_order,
   beat_sort_order, variant_index) = base_seed + (panel_sort_order * 100 +
