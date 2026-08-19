@@ -3,8 +3,9 @@ import { computed, nextTick, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { buildShotScript, buildShotScriptBlocks } from '../../utils/shotScript'
 import { copyToClipboard } from '../../utils/clipboard'
-import { VIDEO_ANCHORS } from '../../types/storyboard'
+import { VIDEO_ANCHORS, type LoraEntry } from '../../types/storyboard'
 import BeatForm from './BeatForm.vue'
+import LoraListEditor from './LoraListEditor.vue'
 
 type TabKey = 'edit' | 'preview'
 
@@ -137,6 +138,13 @@ function onAnchorChange(e: Event): void {
   void store.patchPanelFields(panel.value.id, { video_anchor: val || null })
 }
 
+// LoraListEditor is fully controlled + commit-on-change: every change event
+// carries the complete next list, so no local snapshot is needed.
+function commitVideoLoras(entries: LoraEntry[]): void {
+  if (!panel.value) return
+  void store.patchPanelFields(panel.value.id, { video_loras: entries })
+}
+
 // The anchor picks the first-frame source ComfyUI is given (keeper image /
 // previous shot's last frame) — that only exists for the keyframe modes.
 // In ref2va/t2va it contributes nothing, so hide the control entirely.
@@ -220,6 +228,13 @@ async function renderVideo(): Promise<void> {
             <option value="">None</option>
             <option v-for="a in VIDEO_ANCHORS" :key="a" :value="a">{{ ANCHOR_LABELS[a] }}</option>
           </select>
+        </div>
+        <div class="sp-field">
+          <LoraListEditor
+            label="Video LoRAs"
+            :entries="panel?.video_loras ?? []"
+            @change="commitVideoLoras"
+          />
         </div>
         <textarea
           class="sp-video-textarea"

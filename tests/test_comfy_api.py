@@ -50,7 +50,11 @@ class StubComfy:
         self.submitted = []
         self.cancelled = []
         self.listeners = []
+        self.loras = []
         self.raise_on_register = None
+
+    async def list_loras(self):
+        return list(self.loras)
 
     async def start(self):
         return None
@@ -141,6 +145,20 @@ def test_status_without_a_client_is_not_an_error(client):
     r = client.get("/api/comfy/status")
     assert r.status_code == 200
     assert r.json()["base_url"] is None
+
+
+def test_list_loras_returns_client_result(client):
+    client.stub.loras = ["style.safetensors"]
+    r = client.get("/api/comfy/loras")
+    assert r.status_code == 200
+    assert r.json() == ["style.safetensors"]
+
+
+def test_list_loras_without_a_client_is_empty(client):
+    comfy_api.set_comfy_client(None)
+    r = client.get("/api/comfy/loras")
+    assert r.status_code == 200
+    assert r.json() == []
 
 
 def test_register_a_preset(client):

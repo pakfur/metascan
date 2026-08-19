@@ -78,6 +78,17 @@ async def status() -> Dict[str, Any]:
     return client.snapshot()
 
 
+@router.get("/loras")
+async def list_loras() -> List[str]:
+    """Loras installed on the connected ComfyUI server. Empty when no
+    client is configured or the server is unreachable -- the frontend
+    picker falls back to free text."""
+    client = _comfy_client
+    if client is None:
+        return []
+    return await client.list_loras()
+
+
 @router.get("/presets")
 async def list_presets() -> List[Dict[str, Any]]:
     return await _service().list_presets()

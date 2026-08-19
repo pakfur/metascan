@@ -37,6 +37,14 @@
         />
       </div>
 
+      <div class="pd-field">
+        <LoraListEditor
+          label="Image LoRAs"
+          :entries="panel.image_loras"
+          @change="commitImageLoras"
+        />
+      </div>
+
       <!-- Per-beat framing/subjects/prompt/candidates now live in BeatForm.vue
            (PanelSidePanel's Edit tab) -- a beat is the image-generation unit
            since the shot->beat reorg. "Reroll shot" / "Re-synth shot" above
@@ -51,7 +59,9 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
+import type { LoraEntry } from '../../types/storyboard'
 import BeatsEditor from './BeatsEditor.vue'
+import LoraListEditor from './LoraListEditor.vue'
 
 const store = useStoryboardStore()
 const panel = computed(() => store.selectedPanel)
@@ -124,6 +134,14 @@ function commitAction(e: Event): void {
   actionSnap.value = val
   if (!panel.value || val === panel.value.action) return
   void store.patchPanelFields(panel.value.id, { action: val })
+}
+
+// LoraListEditor rows are fully controlled + commit-on-change, so unlike
+// the text fields above there is no local copy to snapshot -- every change
+// event already carries the complete next list.
+function commitImageLoras(entries: LoraEntry[]): void {
+  if (!panel.value) return
+  void store.patchPanelFields(panel.value.id, { image_loras: entries })
 }
 
 function commitDuration(e: Event): void {

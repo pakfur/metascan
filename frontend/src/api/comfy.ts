@@ -17,6 +17,12 @@ export function deletePreset(id: number): Promise<{ status: string }> {
   return del<{ status: string }>(`/comfy/presets/${id}`)
 }
 
+// Lora filenames installed on the connected ComfyUI server. Empty when the
+// server is unreachable -- pickers fall back to free-text entry.
+export function listLoras(): Promise<string[]> {
+  return get<string[]>('/comfy/loras')
+}
+
 export function listJobs(state?: JobState, limit = 100): Promise<GenerationJob[]> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (state) params.set('state', state)

@@ -724,10 +724,26 @@ class DatabaseManager:
                     sort_order         INTEGER NOT NULL DEFAULT 0,
                     action             TEXT NOT NULL,
                     duration_s         REAL NOT NULL DEFAULT 12.0,
+                    image_loras        TEXT NOT NULL DEFAULT '[]',
+                    video_loras        TEXT NOT NULL DEFAULT '[]',
                     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "image_loras",
+                "ALTER TABLE panels ADD COLUMN image_loras "
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_loras",
+                "ALTER TABLE panels ADD COLUMN video_loras "
+                "TEXT NOT NULL DEFAULT '[]'",
             )
             # beats.selected_image_id references beat_images, which in turn
             # references beats -- a circular FK. SQLite allows forward
@@ -1476,6 +1492,8 @@ class DatabaseManager:
             "sort_order",
             "action",
             "duration_s",
+            "image_loras",
+            "video_loras",
             "video_prompt",
             "video_prompt_locked",
             "video_prompt_source",
@@ -1811,11 +1829,16 @@ class DatabaseManager:
             return int(cur.lastrowid)
 
     def update_panel(self, panel_id: int, **fields: Any) -> None:
+        import json as _json
+
         unknown = set(fields) - self._PANEL_UPDATABLE
         if unknown:
             raise ValueError(f"Not updatable on panels: {', '.join(sorted(unknown))}")
         if not fields:
             return
+        for key in ("image_loras", "video_loras"):
+            if key in fields:
+                fields[key] = _json.dumps(list(fields[key] or []))
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [panel_id]
         with self.lock, self._get_connection() as conn:
@@ -1826,23 +1849,25 @@ class DatabaseManager:
             )
             conn.commit()
 
-    def get_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _decode_panel_row(row: sqlite3.Row) -> Dict[str, Any]:
         import json as _json
 
+        d = dict(row)
+        for key in ("video_prompt_warnings", "image_loras", "video_loras"):
+            try:
+                decoded = _json.loads(d.get(key) or "[]")
+            except (ValueError, TypeError):
+                decoded = []
+            d[key] = decoded if isinstance(decoded, list) else []
+        return d
+
+    def get_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:
             row = conn.execute(
                 "SELECT * FROM panels WHERE id = ?", (panel_id,)
             ).fetchone()
-            if row is None:
-                return None
-            d = dict(row)
-            try:
-                d["video_prompt_warnings"] = _json.loads(
-                    d.get("video_prompt_warnings") or "[]"
-                )
-            except (ValueError, TypeError):
-                d["video_prompt_warnings"] = []
-            return d
+            return self._decode_panel_row(row) if row is not None else None
 
     def _release_beats(
         self,
@@ -2330,8 +2355,6 @@ class DatabaseManager:
             return new_ids
 
     def get_storyboard_tree(self, storyboard_id: int) -> Optional[Dict[str, Any]]:
-        import json as _json
-
         with self.lock, self._get_connection() as conn:
             sb_row = conn.execute(
                 "SELECT * FROM storyboards WHERE id = ?", (storyboard_id,)
@@ -2365,13 +2388,7 @@ class DatabaseManager:
                 ).fetchall()
                 panels = []
                 for panel_row in panel_rows:
-                    panel = dict(panel_row)
-                    try:
-                        panel["video_prompt_warnings"] = _json.loads(
-                            panel.get("video_prompt_warnings") or "[]"
-                        )
-                    except (ValueError, TypeError):
-                        panel["video_prompt_warnings"] = []
+                    panel = self._decode_panel_row(panel_row)
                     beats = []
                     for br in conn.execute(
                         "SELECT * FROM beats WHERE panel_id = ? "
