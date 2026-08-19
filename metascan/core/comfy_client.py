@@ -247,7 +247,13 @@ class ComfyClient:
         row = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if row is None:
             raise PresetNotFoundError(f"No workflow preset with id {preset_id}")
-        return json.loads(row["workflow_json"]), Bindings.from_json(row["bindings"])
+        # Resolve from workflow_json rather than deserializing the stored
+        # bindings snapshot: a preset registered before a newer optional
+        # MS_* title existed (e.g. MS_LORA_STACK) would otherwise never
+        # bind the node without re-registration. The snapshot remains a
+        # registration-time validation artifact.
+        workflow = json.loads(row["workflow_json"])
+        return workflow, resolve_bindings(workflow, row["kind"])
 
     # ---- submission --------------------------------------------------
 
@@ -429,6 +435,24 @@ class ComfyClient:
 
     # Callers unchanged: upload_image was the original (image-only) name.
     upload_image = upload_file
+
+    async def list_loras(self) -> List[str]:
+        """Lora filenames installed on the ComfyUI server, for pickers.
+
+        Best-effort: any failure (unreachable server, unexpected payload
+        shape) returns [] rather than raising -- the UI degrades to a
+        free-text field.
+        """
+        try:
+            resp = await self._http.get(f"{self.base_url}/object_info/LoraLoader")
+            resp.raise_for_status()
+            choices = resp.json()["LoraLoader"]["input"]["required"]["lora_name"][0]
+        except Exception as exc:
+            logger.warning("list_loras: cannot query %s: %s", self.base_url, exc)
+            return []
+        if not isinstance(choices, list):
+            return []
+        return [str(c) for c in choices]
 
     # ---- queue ---------------------------------------------------------
 

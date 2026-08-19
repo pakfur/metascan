@@ -12,6 +12,7 @@ here is exercised by dict literals in tests.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +23,9 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_NEGATIVE": ("text",),
     "MS_LATENT": ("width", "height", "batch_size"),
     "MS_LORA": ("lora_name", "strength_model", "strength_clip"),
+    # MS_LORA_STACK has no required widgets: a stackable loader's lora_N
+    # entries are dynamic (rgthree Power Lora Loader), so an empty stack
+    # node is a valid binding target.
     "MS_REF_IMAGE": ("image",),
     "MS_REF_IMAGE_2": ("image",),
     "MS_REF_IMAGE_3": ("image",),
@@ -62,6 +66,7 @@ class Bindings:
     save: str
     negative: Optional[str] = None
     lora: Optional[str] = None
+    lora_stack: Optional[str] = None
     ref_image: Optional[str] = None
     ref_image_2: Optional[str] = None
     ref_image_3: Optional[str] = None
@@ -165,6 +170,7 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
         save=found["MS_SAVE"],
         negative=found.get("MS_NEGATIVE"),
         lora=found.get("MS_LORA"),
+        lora_stack=found.get("MS_LORA_STACK"),
         ref_image=found.get("MS_REF_IMAGE"),
         ref_image_2=found.get("MS_REF_IMAGE_2"),
         ref_image_3=found.get("MS_REF_IMAGE_3"),
@@ -192,6 +198,7 @@ class GenerationParams:
     negative: Optional[str] = None
     lora_name: Optional[str] = None
     lora_strength: Optional[float] = None
+    loras: List[Dict[str, Any]] = field(default_factory=list)
     ref_image: Optional[str] = None
     ref_images: List[str] = field(default_factory=list)
     first_frame: Optional[str] = None
@@ -205,6 +212,21 @@ class GenerationParams:
     @classmethod
     def from_json(cls, raw: str) -> "GenerationParams":
         return cls(**json.loads(raw))
+
+
+_LORA_ENTRY_KEY = re.compile(r"^lora_\d+$")
+
+
+def _is_lora_entry(key: str, value: Any) -> bool:
+    """True for a stackable-loader lora entry input.
+
+    Matches both the ``lora_N`` key convention and any dict value carrying
+    a ``lora`` widget (covers stackers with other key spellings), while
+    leaving link inputs and UI-only widgets (header, add-button) alone.
+    """
+    if _LORA_ENTRY_KEY.match(key):
+        return True
+    return isinstance(value, dict) and "lora" in value
 
 
 def apply_overrides(
@@ -248,6 +270,26 @@ def apply_overrides(
         write(bindings.lora, "lora_name", params.lora_name)
         write(bindings.lora, "strength_model", strength)
         write(bindings.lora, "strength_clip", strength)
+
+    if params.loras and bindings.lora_stack is None:
+        raise BindingError(
+            f"{len(params.loras)} stack lora(s) were supplied but this "
+            "workflow has no MS_LORA_STACK node. Add a stackable lora "
+            "loader (e.g. Power Lora Loader) titled MS_LORA_STACK, or "
+            "clear the shot's loras."
+        )
+    if bindings.lora_stack is not None:
+        # Metascan owns the stack node: baked-in entries are replaced with
+        # exactly the supplied list (possibly none), never appended to.
+        inputs = graph[bindings.lora_stack]["inputs"]
+        for key in [k for k, v in inputs.items() if _is_lora_entry(k, v)]:
+            del inputs[key]
+        for i, entry in enumerate(params.loras, start=1):
+            inputs[f"lora_{i}"] = {
+                "on": True,
+                "lora": entry["name"],
+                "strength": entry["strength"],
+            }
 
     if params.ref_image is not None and params.ref_images:
         raise BindingError("Both ref_image and ref_images were supplied; use only one.")

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
+from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core import h3_compiler as h3
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
@@ -1044,8 +1044,12 @@ class StoryboardRunner:
         preset = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if preset is None:
             raise StoryboardError(f"no workflow preset with id {preset_id}")
-        bindings = Bindings.from_json(preset["bindings"])
         kind = preset["kind"]
+        # Resolve from workflow_json rather than the stored bindings
+        # snapshot (mirrors generate_video): a preset registered before a
+        # newer optional MS_* title existed would otherwise never see the
+        # node without re-registration.
+        bindings = resolve_bindings(json.loads(preset["workflow_json"]), kind)
 
         subjects_by_id = {s["id"]: s for s in tree["subjects"]}
         all_beats: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = [
@@ -1099,6 +1103,12 @@ class StoryboardRunner:
                 raise StoryboardError(
                     f"beat {beat['id']}'s subject {primary.get('name')!r} has "
                     f"a LoRA but preset {preset_id} has no MS_LORA node"
+                )
+            if panel.get("image_loras") and bindings.lora_stack is None:
+                raise StoryboardError(
+                    f"panel {panel['id']} has "
+                    f"{len(panel['image_loras'])} image lora(s) but preset "
+                    f"{preset_id} has no MS_LORA_STACK node"
                 )
             if kind == "ref" and (primary is None or not primary.get("reference_path")):
                 raise StoryboardError(
@@ -1189,6 +1199,7 @@ class StoryboardRunner:
                 lora_strength=(
                     primary.get("lora_strength") if primary is not None else None
                 ),
+                loras=panel.get("image_loras") or [],
                 ref_image=ref_name,
             )
             output_dir = (
@@ -1300,6 +1311,13 @@ class StoryboardRunner:
             pid = panel["id"]
             if not (panel.get("video_prompt") or "").strip():
                 issues.append(f"panel {pid}: no compiled video_prompt")
+
+            if panel.get("video_loras") and bindings.lora_stack is None:
+                issues.append(
+                    f"panel {pid}: {len(panel['video_loras'])} video "
+                    f"lora(s) but preset {video_preset_id} has no "
+                    "MS_LORA_STACK node"
+                )
 
             subjects = self._panel_subjects(tree, panel)
             refplan = h3.assign_reference_labels(subjects, scene)
@@ -1507,6 +1525,7 @@ class StoryboardRunner:
                     width=width,
                     height=height,
                     batch_size=1,
+                    loras=panel.get("video_loras") or [],
                     ref_images=ref_images,
                     first_frame=first_frame,
                     audio_refs=audio_refs,

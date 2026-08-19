@@ -55,12 +55,21 @@ export const CAMERA_SPEEDS = ['slow', 'fast'] as const
 export const COMPOSE_STAGES = ['outline', 'scenes', 'shots', 'beats'] as const
 export type ComposeStage = (typeof COMPOSE_STAGES)[number]
 
+// One entry in a shot's stackable-lora list (panels.image_loras /
+// panels.video_loras), injected into the preset's MS_LORA_STACK node.
+export interface LoraEntry {
+  name: string
+  strength: number
+}
+
 export interface Panel {
   id: number
   scene_id: number
   sort_order: number
   action: string
   duration_s: number
+  image_loras: LoraEntry[]
+  video_loras: LoraEntry[]
   video_prompt: string | null
   video_prompt_locked: 0 | 1
   video_prompt_source: 'compiled' | 'user' | null

@@ -262,7 +262,8 @@ metascan/
   `metascan/extractors/comfyui*.py` remain read-only metadata parsers, a
   separate concern). A workflow is registered as an API-format graph whose
   nodes are titled with the `MS_*` convention (`MS_POSITIVE`, `MS_NEGATIVE`,
-  `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_REF_IMAGE`);
+  `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_LORA_STACK` /
+  `MS_REF_IMAGE`);
   `comfy_bindings.resolve_bindings` maps titles to node ids at registration
   time and **fails loudly** on a missing required title. Titles are used
   rather than node ids because ComfyUI renumbers nodes on re-save.
@@ -334,7 +335,9 @@ metascan/
   panels) → `beat_images` (ON DELETE CASCADE from beats, FK'd to
   `media(file_path)`). Since the shot/beat reorg, `panels` are thin
   H3-scene containers — `id`, `scene_id`, `sort_order`, `action`,
-  `duration_s`, the `video_*` columns, timestamps — and every per-shot
+  `duration_s`, `image_loras`/`video_loras` (JSON lists, see the
+  per-shot lora-stack bullet below), the `video_*` columns, timestamps —
+  and every per-shot
   creative field (`shot_size`/`angle`/`lens`, `subject_ids`, `brief`,
   `prompt`/`prompt_locked`/`prompt_source`, `selected_image_id`) lives on
   `beats` instead: a metascan Shot (panel) maps to one H3 generation unit,
@@ -586,6 +589,28 @@ metascan/
   prompt, appending the style block verbatim. This keeps the global
   look-and-feel from drifting through paraphrase across dozens of separate
   LLM calls (spec §7.2).
+- **Per-shot lora stacks live on `panels.image_loras` / `panels.video_loras`**
+  (JSON `[{name, strength}, ...]`, `NOT NULL DEFAULT '[]'`; PATCH rejects
+  `null` — clear with `[]`). `generate()` injects `image_loras`,
+  `generate_video()` injects `video_loras`, both via
+  `GenerationParams.loras` into the preset's **`MS_LORA_STACK`** node — a
+  stackable loader (rgthree Power Lora Loader) with dynamic `lora_N`
+  entries, so the title has no required-widget check. `apply_overrides`
+  **owns** that node: baked-in `lora_N` entries are cleared and replaced
+  with exactly the supplied list (an empty list clears them), and loras
+  supplied against a preset with no `MS_LORA_STACK` raise `BindingError`
+  (runner validation catches this upfront per panel). The single-lora
+  `MS_LORA` + subject `lora_name` path is unchanged and coexists.
+  Bindings are resolved from `workflow_json` at use time —
+  `ComfyClient._load_preset` and `StoryboardRunner.generate` both call
+  `resolve_bindings` instead of deserializing the stored
+  `workflow_presets.bindings` snapshot (registration-time validation
+  artifact only), so presets registered before a new optional `MS_*`
+  title existed pick it up without re-registration. `GET /api/comfy/loras`
+  proxies ComfyUI's `/object_info/LoraLoader` for the frontend picker
+  (`LoraListEditor.vue`, mounted in `PanelDetail.vue` for image loras and
+  `PanelSidePanel.vue`'s video section for video loras); it returns `[]`
+  when ComfyUI is unreachable and the picker degrades to free text.
 - **Deterministic per-beat seeds.** `beat_seed(base_seed, panel_sort_order,
   beat_sort_order, variant_index) = base_seed + (panel_sort_order * 100 +
   beat_sort_order) * 1000 + variant_index`

@@ -112,6 +112,8 @@ class FakeComfy:
         # When True, /ws accepts the handshake and immediately closes —
         # simulates a flapping server for reconnect-backoff tests.
         self.close_after_connect: bool = False
+        # Lora filenames served by GET /object_info/LoraLoader.
+        self.loras: List[str] = []
 
         # Observability for assertions.
         self.submitted: List[Dict[str, Any]] = []
@@ -154,6 +156,7 @@ class FakeComfy:
         app = web.Application()
         app.router.add_post("/prompt", self._post_prompt)
         app.router.add_get("/history/{prompt_id}", self._get_history)
+        app.router.add_get("/object_info/LoraLoader", self._get_lora_object_info)
         app.router.add_get("/view", self._get_view)
         app.router.add_post("/upload/image", self._post_upload)
         app.router.add_post("/queue", self._post_queue)
@@ -203,6 +206,21 @@ class FakeComfy:
         prompt_id = request.match_info["prompt_id"]
         entry = self._history.get(prompt_id)
         return web.json_response({prompt_id: entry} if entry else {})
+
+    async def _get_lora_object_info(self, request: web.Request) -> web.Response:
+        # Mirrors ComfyUI's /object_info/<class> envelope: the class name
+        # keys an entry whose input.required.lora_name is [choices, config].
+        return web.json_response(
+            {
+                "LoraLoader": {
+                    "input": {
+                        "required": {
+                            "lora_name": [list(self.loras), {}],
+                        }
+                    }
+                }
+            }
+        )
 
     async def _get_view(self, request: web.Request) -> web.Response:
         filename = request.query.get("filename", "")

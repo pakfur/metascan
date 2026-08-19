@@ -629,6 +629,55 @@ def test_patch_panel_null_action_is_400(client):
     assert "action" in r.json()["detail"]
 
 
+def test_patch_panel_round_trips_lora_lists(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(
+        f"/api/storyboard/panels/{panel_id}",
+        json={
+            "image_loras": [{"name": "style.safetensors", "strength": 0.7}],
+            "video_loras": [{"name": "motion.safetensors", "strength": 1.0}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["image_loras"] == [{"name": "style.safetensors", "strength": 0.7}]
+    assert body["video_loras"] == [{"name": "motion.safetensors", "strength": 1.0}]
+
+
+def test_patch_panel_lora_strength_defaults_to_one(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(
+        f"/api/storyboard/panels/{panel_id}",
+        json={"image_loras": [{"name": "style.safetensors"}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["image_loras"] == [{"name": "style.safetensors", "strength": 1.0}]
+
+
+def test_patch_panel_null_lora_list_is_400(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"image_loras": None})
+    assert r.status_code == 400
+    assert "image_loras" in r.json()["detail"]
+
+
+def test_patch_panel_lora_entry_without_name_is_422(client):
+    sid = _create_storyboard(client)
+    panel_id = _make_panel(client, sid)
+
+    r = client.patch(
+        f"/api/storyboard/panels/{panel_id}",
+        json={"video_loras": [{"strength": 0.5}]},
+    )
+    assert r.status_code == 422
+
+
 def test_panel_patch_rejects_dropped_fields(client, panel_id):
     r = client.patch(f"/api/storyboard/panels/{panel_id}", json={"shot_size": "CU"})
     # Pydantic ignores unknown fields by default -> field silently absent;

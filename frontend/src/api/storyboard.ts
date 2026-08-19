@@ -221,8 +221,10 @@ export function createPanel(
 
 // Backend returns `db.get_panel` -- Panel no longer carries per-shot
 // generation fields (those live on Beat now), only sort_order/action/
-// duration_s/video_prompt*/video_anchor*/beats. `body` accepts
-// `sort_order?`, `action?`, `duration_s?`, `video_prompt?: string | null`
+// duration_s/image_loras/video_loras/video_prompt*/video_anchor*/beats.
+// `body` accepts `sort_order?`, `action?`, `duration_s?`,
+// `image_loras?: LoraEntry[]`, `video_loras?: LoraEntry[]` (never null --
+// clear with []), `video_prompt?: string | null`
 // (non-null forces video_prompt_locked=1/video_prompt_source='user'
 // server-side; null clears all three video-prompt fields),
 // `video_prompt_locked?: 0 | 1`, and `video_anchor?: 'keeper' | 'prev_last'

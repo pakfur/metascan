@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import tempfile
 import threading
 from pathlib import Path
@@ -11,7 +12,11 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from metascan.core.comfy_bindings import BindingError, GenerationParams
+from metascan.core.comfy_bindings import (
+    BindingError,
+    GenerationParams,
+    resolve_bindings,
+)
 from metascan.core.comfy_client import (
     ComfyClient,
     ComfyError,
@@ -111,6 +116,34 @@ async def test_submit_now_sends_the_overridden_graph(client, fake_comfy):  # noq
     assert sent["5"]["inputs"]["batch_size"] == 2
     # the stored preset is untouched
     assert '"text": ""' in client.db.get_workflow_preset(pid)["workflow_json"]
+
+
+async def test_submit_uses_workflow_bindings_not_stored_snapshot(client, fake_comfy):
+    """A preset whose stored bindings snapshot predates a newer optional
+    MS_* title (here MS_LORA_STACK) must still bind the node at dispatch
+    time: bindings are resolved from workflow_json, the snapshot is only a
+    registration-time validation artifact. Otherwise generate()'s
+    validation (which re-resolves) would accept loras that dispatch then
+    rejects."""
+    wf = t2i_workflow()
+    wf["10"] = _node(
+        "Power Lora Loader (rgthree)", "MS_LORA_STACK", {"model": ["4", 0]}
+    )
+    stale_bindings = resolve_bindings(t2i_workflow(), "t2i")  # no stack node
+    pid = client.db.create_workflow_preset(
+        "stale", "t2i", json.dumps(wf), stale_bindings.to_json()
+    )
+
+    await client.submit_now(
+        pid, params(loras=[{"name": "style.safetensors", "strength": 0.7}])
+    )
+
+    sent = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert sent["10"]["inputs"]["lora_1"] == {
+        "on": True,
+        "lora": "style.safetensors",
+        "strength": 0.7,
+    }
 
 
 async def test_submit_now_records_a_running_job(client):
@@ -1438,5 +1471,30 @@ async def test_a_cancelled_job_emits_no_job_outputs_event(
 
         assert db.get_generation_job(job_id)["state"] == "cancelled"
         assert [p for e, p in seen if e == "job_outputs"] == []
+    finally:
+        await c.aclose()
+
+
+# ---- lora listing ------------------------------------------------------
+
+
+async def test_list_loras_returns_server_lora_names(client, fake_comfy):
+    fake_comfy.loras = ["style.safetensors", "sub/detail.safetensors"]
+    assert await client.list_loras() == [
+        "style.safetensors",
+        "sub/detail.safetensors",
+    ]
+
+
+async def test_list_loras_unreachable_server_returns_empty(workspace):
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url="http://127.0.0.1:9",  # nothing listens here
+        output_root=workspace / "out",
+        db=db,
+        in_flight=2,
+    )
+    try:
+        assert await c.list_loras() == []
     finally:
         await c.aclose()

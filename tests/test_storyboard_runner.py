@@ -63,6 +63,18 @@ def t2i_workflow_full() -> dict:
     return wf
 
 
+def t2i_workflow_stack() -> dict:
+    """``t2i_workflow()`` plus an MS_LORA_STACK Power-Lora-Loader-style
+    node, for the per-shot image_loras tests."""
+    wf = t2i_workflow()
+    wf["10"] = _node(
+        "Power Lora Loader (rgthree)",
+        "MS_LORA_STACK",
+        {"model": ["4", 0], "clip": ["4", 1]},
+    )
+    return wf
+
+
 def _media(path: str) -> Media:
     return Media(
         file_path=Path(path),
@@ -780,6 +792,99 @@ async def test_generate_carries_negative_and_lora_through(
     assert p1.negative == "storyboard-level blur"
     assert p1.lora_name == "maya_lora"
     assert p1.lora_strength == 0.65
+
+
+def _stack_board(db, preset):
+    """Storyboard with one panel/beat, prompt pre-set, using ``preset``."""
+    sb_id = db.create_storyboard(
+        name="Stack",
+        target_model="sd",
+        architecture="t2i",
+        preset_id=preset,
+        base_seed=100,
+        batch_size=1,
+    )
+    scene_id = db.create_scene(sb_id, name="Yard", sort_order=0)
+    panel0 = db.create_panel(scene_id, action="close on hands", sort_order=0)
+    beat0 = db.create_beat(panel0, action="close on hands")
+    db.update_beat(beat0, prompt="a prompt", prompt_source="user", prompt_locked=1)
+    return sb_id, panel0, beat0
+
+
+async def test_generate_carries_image_loras_through(db, comfy, events, tmp_path):
+    workflow = t2i_workflow_stack()
+    preset = db.create_workflow_preset(
+        "sdxl-stack",
+        "t2i",
+        json.dumps(workflow),
+        resolve_bindings(workflow, "t2i").to_json(),
+    )
+    sb_id, panel0, beat0 = _stack_board(db, preset)
+    image_loras = [
+        {"name": "style.safetensors", "strength": 0.7},
+        {"name": "detail.safetensors", "strength": 1.0},
+    ]
+    db.update_panel(panel0, image_loras=image_loras)
+    # video_loras must NOT leak into still-image jobs
+    db.update_panel(
+        panel0, video_loras=[{"name": "motion.safetensors", "strength": 1.0}]
+    )
+
+    runner = make_runner(db, comfy, StubVlm(), events, tmp_path)
+    await runner.generate(sb_id)
+
+    assert comfy.submitted[0]["params"].loras == image_loras
+
+
+async def test_generate_image_loras_without_stack_fails_before_submitting(
+    db, comfy, events, tmp_path
+):
+    workflow = t2i_workflow()
+    preset = db.create_workflow_preset(
+        "sdxl",
+        "t2i",
+        json.dumps(workflow),
+        resolve_bindings(workflow, "t2i").to_json(),
+    )
+    sb_id, panel0, _ = _stack_board(db, preset)
+    db.update_panel(
+        panel0, image_loras=[{"name": "style.safetensors", "strength": 1.0}]
+    )
+
+    runner = make_runner(db, comfy, StubVlm(), events, tmp_path)
+    with pytest.raises(StoryboardError, match="MS_LORA_STACK"):
+        await runner.generate(sb_id)
+
+    assert comfy.submitted == []
+
+
+async def test_generate_resolves_bindings_from_workflow_not_stored_snapshot(
+    db, comfy, events, tmp_path
+):
+    """A preset registered before MS_LORA_STACK existed has a stored
+    bindings snapshot without lora_stack even though its workflow carries
+    the node. generate() must resolve from workflow_json (as
+    generate_video already does) so such presets work without
+    re-registration."""
+    workflow = t2i_workflow_stack()
+    stale = t2i_workflow()  # bindings snapshot resolved without the stack node
+    preset = db.create_workflow_preset(
+        "sdxl-stale",
+        "t2i",
+        json.dumps(workflow),
+        resolve_bindings(stale, "t2i").to_json(),
+    )
+    sb_id, panel0, _ = _stack_board(db, preset)
+    db.update_panel(
+        panel0, image_loras=[{"name": "style.safetensors", "strength": 1.0}]
+    )
+
+    runner = make_runner(db, comfy, StubVlm(), events, tmp_path)
+    await runner.generate(sb_id)
+
+    assert comfy.submitted[0]["params"].loras == [
+        {"name": "style.safetensors", "strength": 1.0}
+    ]
 
 
 # ---- ingest ------------------------------------------------------------

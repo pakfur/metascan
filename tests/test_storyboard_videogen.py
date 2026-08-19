@@ -32,12 +32,17 @@ def _ref2v_workflow(
     n_audio: int = 0,
     first_frame: bool = False,
     duration: bool = False,
+    lora_stack: bool = False,
 ) -> dict:
     wf = {
         "1": _node("KSamplerAdvanced", "MS_SEED", {"noise_seed": 0}),
         "2": _node("CLIPTextEncode", "MS_POSITIVE", {"text": ""}),
         "3": _node("VHS_VideoCombine", "MS_SAVE", {"filename_prefix": "ms"}),
     }
+    if lora_stack:
+        wf["stack"] = _node(
+            "Power Lora Loader (rgthree)", "MS_LORA_STACK", {"model": ["4", 0]}
+        )
     ref_titles = ["MS_REF_IMAGE", "MS_REF_IMAGE_2", "MS_REF_IMAGE_3"]
     for i in range(n_ref):
         wf[f"ref{i}"] = _node("LoadImage", ref_titles[i], {"image": ""})
@@ -141,13 +146,19 @@ def make_runner(db, comfy, events, tmp_path, unload_vlm=False) -> StoryboardRunn
     return runner
 
 
-def _preset(db, n_ref=0, n_audio=0, first_frame=False, duration=False) -> int:
+def _preset(
+    db, n_ref=0, n_audio=0, first_frame=False, duration=False, lora_stack=False
+) -> int:
     workflow = _ref2v_workflow(
-        n_ref=n_ref, n_audio=n_audio, first_frame=first_frame, duration=duration
+        n_ref=n_ref,
+        n_audio=n_audio,
+        first_frame=first_frame,
+        duration=duration,
+        lora_stack=lora_stack,
     )
     bindings = resolve_bindings(workflow, "ref2v")
     return db.create_workflow_preset(
-        f"h3-{n_ref}-{n_audio}-{int(duration)}",
+        f"h3-{n_ref}-{n_audio}-{int(duration)}-{int(lora_stack)}",
         "ref2v",
         json.dumps(workflow),
         bindings.to_json(),
@@ -395,6 +406,42 @@ async def test_uploads_follow_refplan_order_and_params_shape(
     # beat_sort_order is hardcoded 0 in generate_video's seed call pending
     # real beat_sort_order plumbing (TODO in storyboard_runner.py).
     assert params.seed == beat_seed(1000, 0, 0, 1 + 1 * 1)
+
+
+async def test_generate_video_carries_video_loras_through(db, comfy, events, tmp_path):
+    preset_id = _preset(db, lora_stack=True)
+    sb_id = _storyboard(db, preset_id)
+    _, panel_id = _bare_panel(db, sb_id)
+    video_loras = [{"name": "motion.safetensors", "strength": 0.8}]
+    db.update_panel(panel_id, video_loras=video_loras)
+    # image_loras must NOT leak into video jobs
+    db.update_panel(
+        panel_id, image_loras=[{"name": "style.safetensors", "strength": 1.0}]
+    )
+
+    runner = make_runner(db, comfy, events, tmp_path)
+    result = await runner.generate_video(sb_id)
+
+    assert result["skipped"] == []
+    _, params, _, _ = comfy.submitted[0]
+    assert params.loras == video_loras
+
+
+async def test_generate_video_loras_without_stack_is_validation_failure(
+    db, comfy, events, tmp_path
+):
+    preset_id = _preset(db)
+    sb_id = _storyboard(db, preset_id)
+    _, panel_id = _bare_panel(db, sb_id)
+    db.update_panel(
+        panel_id, video_loras=[{"name": "motion.safetensors", "strength": 1.0}]
+    )
+
+    runner = make_runner(db, comfy, events, tmp_path)
+    with pytest.raises(StoryboardError, match="MS_LORA_STACK"):
+        await runner.generate_video(sb_id)
+
+    assert comfy.submitted == []
 
 
 # ---- anchors -------------------------------------------------------------

@@ -56,7 +56,14 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
 _SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
 _PANEL_NOT_NULLABLE = frozenset(
-    {"sort_order", "action", "duration_s", "video_prompt_locked"}
+    {
+        "sort_order",
+        "action",
+        "duration_s",
+        "image_loras",
+        "video_loras",
+        "video_prompt_locked",
+    }
 )
 _BEAT_NOT_NULLABLE = frozenset(
     {
@@ -206,10 +213,17 @@ class PanelCreate(BaseModel):
     duration_s: float = 12.0
 
 
+class LoraEntry(BaseModel):
+    name: str
+    strength: float = 1.0
+
+
 class PanelPatch(BaseModel):
     sort_order: Optional[int] = None
     action: Optional[str] = None
     duration_s: Optional[float] = None
+    image_loras: Optional[List[LoraEntry]] = None
+    video_loras: Optional[List[LoraEntry]] = None
     video_prompt: Optional[str] = None
     video_prompt_locked: Optional[int] = None
     video_anchor: Optional[str] = None
@@ -793,6 +807,11 @@ async def patch_panel(panel_id: int, body: PanelPatch) -> Dict[str, Any]:
 
     fields = body.model_dump(exclude_unset=True)
     _reject_null_for_required(fields, _PANEL_NOT_NULLABLE)
+    # exclude_unset propagates into nested models, silently dropping the
+    # defaulted `strength` from a lora entry -- re-dump the entries in full.
+    for key in ("image_loras", "video_loras"):
+        if fields.get(key) is not None:
+            fields[key] = [e.model_dump() for e in getattr(body, key) or []]
     if (
         fields.get("video_anchor") is not None
         and fields["video_anchor"] not in _VIDEO_ANCHORS

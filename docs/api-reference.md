@@ -43,6 +43,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/models/status` | Per-model availability rows + tier + gates |
 | GET | `/api/models/hardware` | Full hardware probe report |
 | GET | `/api/comfy/status` | ComfyUI driver connection snapshot |
+| GET | `/api/comfy/loras` | Lora filenames installed on the ComfyUI server |
 | GET | `/api/comfy/presets` | List registered workflow presets |
 | POST | `/api/comfy/presets` | Register a workflow preset |
 | DELETE | `/api/comfy/presets/{id}` | Delete a workflow preset |
@@ -149,6 +150,13 @@ identifies this metascan instance to ComfyUI's websocket. `output_root`,
 `unload_vlm_during_generation`, and `request_timeout_s` are not included.
 When no client is installed, returns `{base_url: null, client_id: null,
 in_flight: 0}` with a 200 — this endpoint never errors.
+
+### `GET /api/comfy/loras`
+Returns the lora filenames installed on the connected ComfyUI server
+(`["style.safetensors", ...]`), read live from ComfyUI's
+`/object_info/LoraLoader`. Best-effort: an unreachable server or missing
+client returns `[]` with a 200 — the frontend lora picker degrades to
+free-text entry.
 
 ### `GET /api/comfy/presets`
 Returns registered workflow presets, summary shape (omits the workflow
@@ -338,7 +346,8 @@ with a composed `prompt` to ComfyUI via the storyboard's `preset_id`.
 Returns `{jobs: [job_id, ...]}` once every beat has been submitted (or
 none, if none qualified). **400** if generation can't proceed — no
 workflow preset, a negative prompt with no `MS_NEGATIVE` node, a subject
-LoRA with no `MS_LORA` node, or a `ref`-kind preset with no subject
+LoRA with no `MS_LORA` node, shot `image_loras` with no `MS_LORA_STACK`
+node, or a `ref`-kind preset with no subject
 reference image. Validation runs over every targeted beat before any
 job is submitted, so a bad beat never leaves earlier ones half-queued.
 
@@ -370,7 +379,10 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
   lighting, notes, sort_order, reference_path).
 - `POST /api/storyboard/scenes/{id}/panels` · `PATCH
   /api/storyboard/panels/{id}` · `DELETE /api/storyboard/panels/{id}` —
-  panel (shot) CRUD: `action`, `duration_s`, `sort_order`, the `video_*`
+  panel (shot) CRUD: `action`, `duration_s`, `sort_order`, `image_loras`
+  / `video_loras` (lists of `{name, strength}` injected into the still /
+  video preset's `MS_LORA_STACK` node; never `null` — clear with `[]`),
+  the `video_*`
   fields (`video_prompt`, `video_prompt_locked`, `video_anchor`). A
   `PATCH` whose body includes `video_prompt` also sets
   `video_prompt_locked=1, video_prompt_source="user"` server-side (and
