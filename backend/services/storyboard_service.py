@@ -201,6 +201,12 @@ class StoryboardService:
     async def panel_exists(self, panel_id: int) -> bool:
         return await asyncio.to_thread(_row_exists_sync, self.db, "panels", panel_id)
 
+    async def delete_panel_video(self, video_id: int) -> bool:
+        ok, purged_files = await asyncio.to_thread(self.db.delete_panel_video, video_id)
+        if purged_files:
+            await asyncio.to_thread(_remove_files_sync, purged_files)
+        return ok
+
     # ---- beats ------------------------------------------------------------
 
     async def create_beat(self, panel_id: int, **fields: Any) -> int:

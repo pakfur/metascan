@@ -1,17 +1,29 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
+import { useStoryboardStore } from '../../stores/storyboard'
 import type { Panel, PanelVideo } from '../../types/storyboard'
 import type { Media } from '../../types/media'
 import MediaViewer from '../viewer/MediaViewer.vue'
 
 // Rendered clips for the whole shot (panel_videos) — panel-scoped, unlike
-// the per-beat image candidates in BeatImages.vue. No keeper concept: every
-// take stays visible in the library; this strip is for reviewing them.
+// the per-beat image candidates in BeatImages.vue. No keeper concept; this
+// strip is for reviewing takes and discarding the bad ones.
 const props = defineProps<{ panel: Panel }>()
+const store = useStoryboardStore()
 
 function tooltip(v: PanelVideo): string {
   return `seed ${v.seed ?? '—'} · take ${v.variant_index + 1}`
+}
+
+// Delete is total: panel_videos row, media row, and the file to the OS
+// trash — hence the confirm.
+async function onDelete(video: PanelVideo): Promise<void> {
+  const name = video.file_path.split(/[\\/]/).pop() ?? video.file_path
+  if (!confirm(`Delete take ${video.variant_index + 1} (${name})?\nThis removes it from the library and moves the file to the trash.`)) {
+    return
+  }
+  await store.removePanelVideo(video.id)
 }
 
 const viewerIndex = ref<number | null>(null)
@@ -46,6 +58,14 @@ const viewerMedia = computed<Media[]>(() =>
       >
         <img :src="thumbnailUrl(video.file_path)" alt="" class="pv-img" />
         <span class="pv-play" title="Play" @click.stop="viewerIndex = idx">▶</span>
+        <button
+          type="button"
+          class="pv-delete"
+          title="Delete take"
+          @click.stop="onDelete(video)"
+        >
+          ×
+        </button>
       </div>
     </div>
   </div>
@@ -114,5 +134,32 @@ const viewerMedia = computed<Media[]>(() =>
 
 .pv-tile:hover .pv-play {
   opacity: 1;
+}
+
+.pv-delete {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 1;
+}
+
+.pv-tile:hover .pv-delete {
+  opacity: 1;
+}
+
+.pv-delete:hover {
+  background: color-mix(in srgb, var(--danger-color, #e53e3e) 75%, black);
 }
 </style>

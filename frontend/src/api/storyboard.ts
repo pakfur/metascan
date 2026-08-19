@@ -273,6 +273,11 @@ export function deleteBeat(beatId: number, purgeImages = false): Promise<{ statu
   )
 }
 
+// Fully removes the clip: panel_videos row, media row, file to OS trash.
+export function deletePanelVideo(videoId: number): Promise<{ status: string }> {
+  return del<{ status: string }>(`/storyboard/videos/${videoId}`)
+}
+
 // Backend returns `db.get_beat`, same shape/caveat as patchBeat.
 export function selectBeatImage(
   beatId: number,

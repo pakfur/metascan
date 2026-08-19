@@ -868,6 +868,16 @@ async def delete_panel(panel_id: int, purge_images: bool = False) -> Dict[str, s
     return {"status": "deleted"}
 
 
+@router.delete("/videos/{video_id}")
+async def delete_panel_video(video_id: int) -> Dict[str, str]:
+    """Fully remove one rendered clip: panel_videos row, media row
+    (unless still referenced elsewhere), and the file to the OS trash."""
+    ok = await _service().delete_panel_video(video_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No panel video {video_id}")
+    return {"status": "deleted"}
+
+
 # ---- beats ------------------------------------------------------------------
 
 
