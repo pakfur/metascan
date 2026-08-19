@@ -7,6 +7,7 @@
         class="panel-tile"
         :class="{ active: panel.id === store.selectedPanelId }"
         @click="store.selectedPanelId = panel.id"
+        @dblclick="openViewer(panel)"
       >
         <button class="panel-delete" title="Delete panel" @click.stop="onDeletePanel(panel)">
           ×
@@ -90,6 +91,14 @@
       @keep="confirmDelete(false)"
       @cancel="deleteTarget = null"
     />
+
+    <MediaViewer
+      v-if="viewer"
+      :media-list="viewer.list"
+      :initial-index="viewer.index"
+      :allow-destructive="false"
+      @close="viewer = null"
+    />
   </div>
 </template>
 
@@ -98,7 +107,10 @@ import { nextTick, ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Panel } from '../../types/storyboard'
+import type { Media } from '../../types/media'
+import { isVideoPath } from '../../utils/path'
 import DeleteImagesDialog from './DeleteImagesDialog.vue'
+import MediaViewer from '../viewer/MediaViewer.vue'
 
 const store = useStoryboardStore()
 
@@ -118,6 +130,40 @@ function thumbSrc(panel: Panel): string | null {
   if (keeper) return thumbnailUrl(keeper.file_path)
   const first = panel.beats[0]?.images[0]
   return first ? thumbnailUrl(first.file_path) : null
+}
+
+// Double-click opens the tile's media in the viewer — the only way to
+// *play* a rendered clip from the grid (video clips ingest as first-beat
+// images, same list the tile's thumbnail is drawn from). Opens on the
+// keeper when one is selected, else the first candidate. Single-click
+// selection is local and idempotent, so no debounce is needed.
+const viewer = ref<{ list: Media[]; index: number } | null>(null)
+
+function openViewer(panel: Panel): void {
+  const imgs = panel.beats[0]?.images ?? []
+  if (imgs.length === 0) return
+  const keeperId = panel.beats[0]?.selected_image_id
+  const idx = Math.max(
+    0,
+    imgs.findIndex((i) => i.id === keeperId),
+  )
+  viewer.value = {
+    list: imgs.map(
+      (img) =>
+        ({
+          file_path: img.file_path,
+          is_favorite: false,
+          is_video: isVideoPath(img.file_path),
+          playback_speed: null,
+          width: 0,
+          height: 0,
+          file_size: 0,
+          frame_rate: null,
+          duration: null,
+        }) as Media,
+    ),
+    index: idx,
+  }
 }
 
 // Panel-level shot/subject captioning now reads off the first beat -- shots
