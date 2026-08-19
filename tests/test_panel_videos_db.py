@@ -69,8 +69,9 @@ def test_tree_includes_panel_videos(db):
 
 def test_migration_moves_video_beat_images_to_panel(tmp_path):
     """Re-initializing an existing DB relocates video-suffixed beat_images
-    rows to panel_videos, unhides their media, and clears any keeper
-    pointer that referenced a moved clip."""
+    rows to panel_videos, keeps their media hidden (clips are folder-only
+    in the library), and clears any keeper pointer that referenced a
+    moved clip."""
     db = DatabaseManager(tmp_path / "db")
     _, _, panel_id = _tree(db)
     beat_id = db.create_beat(panel_id, action="", sort_order=0)
@@ -101,7 +102,7 @@ def test_migration_moves_video_beat_images_to_panel(tmp_path):
             keeper = conn.execute(
                 "SELECT selected_image_id FROM beats WHERE id = ?", (beat_id,)
             ).fetchone()["selected_image_id"]
-        assert hidden == 0
+        assert hidden == 1
         assert keeper is None
     finally:
         db2.close()

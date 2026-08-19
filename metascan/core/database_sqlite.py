@@ -981,9 +981,7 @@ class DatabaseManager:
             # before panel_videos). Relocate them to their panel. Idempotent
             # by construction -- after the move no video-suffixed rows
             # remain in beat_images. The keeper pointer is cleared first
-            # where it referenced a moved clip, and the clips' media rows
-            # are unhidden (clips are the final product; the
-            # hidden-until-keeper flow only applies to images).
+            # where it referenced a moved clip.
             _video_pred = (
                 "(lower(file_path) LIKE '%.mp4' OR lower(file_path) "
                 "LIKE '%.webm' OR lower(file_path) LIKE '%.mov')"
@@ -992,10 +990,6 @@ class DatabaseManager:
                 "UPDATE beats SET selected_image_id = NULL "
                 "WHERE selected_image_id IN "
                 f"(SELECT id FROM beat_images WHERE {_video_pred})"
-            )
-            conn.execute(
-                "UPDATE media SET hidden = 0 WHERE file_path IN "
-                f"(SELECT file_path FROM beat_images WHERE {_video_pred})"
             )
             conn.execute(
                 "INSERT INTO panel_videos (panel_id, file_path, seed, "
@@ -1008,6 +1002,16 @@ class DatabaseManager:
                 f"WHERE {_video_pred.replace('file_path', 'bi.file_path')}"
             )
             conn.execute(f"DELETE FROM beat_images WHERE {_video_pred}")
+            # Invariant enforcement, not a one-shot: a clip attached to a
+            # live panel stays hidden -- the frontend surfaces it only
+            # inside the storyboard's folder view. Release paths (panel /
+            # storyboard delete with keep-in-library) remove the
+            # panel_videos rows in the same transaction they unhide, so
+            # released clips are never re-hidden here.
+            conn.execute(
+                "UPDATE media SET hidden = 1 WHERE file_path IN "
+                "(SELECT file_path FROM panel_videos)"
+            )
 
             # One-shot backfill: ``created_at`` previously tracked the last
             # rescan (INSERT OR REPLACE was DELETE+INSERT, firing the
