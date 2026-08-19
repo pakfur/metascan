@@ -9,6 +9,15 @@
         @click="selectScene(scene)"
       >
         <div class="scene-corner">
+          <button
+            v-if="videoReady"
+            class="scene-render"
+            :disabled="sceneRendering(scene) || scene.panels.length === 0"
+            :title="sceneRendering(scene) ? 'Rendering…' : 'Render scene videos'"
+            @click.stop="renderScene(scene)"
+          >
+            ▶
+          </button>
           <button class="scene-edit" title="Edit scene" @click.stop="openEditor(scene)">
             ✎
           </button>
@@ -64,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Panel, Scene } from '../../types/storyboard'
@@ -88,6 +97,25 @@ function subtitle(scene: Scene): string {
 function keeperSrc(panel: Panel): string | null {
   const img = store.firstBeatKeeper(panel)
   return img ? thumbnailUrl(img.file_path) : null
+}
+
+// Scene-card render action — same semantics as the side panel's "Render
+// scene" button: every shot in the scene through generateVideo(panelIds),
+// skipped entries folded into the header error banner. Only shown when the
+// storyboard is video-ready (target + preset), mirroring the header button.
+const videoReady = computed(
+  () => !!store.tree?.video_target && !!store.tree?.video_preset_id,
+)
+
+function sceneRendering(scene: Scene): boolean {
+  return scene.panels.some((p) => store.panelJobState.get(p.id) !== undefined)
+}
+
+async function renderScene(scene: Scene): Promise<void> {
+  const res = await store.generateVideo(scene.panels.map((p) => p.id))
+  if (res && res.skipped.length > 0) {
+    store.error = res.skipped.map((s) => `panel ${s.panel_id}: ${s.error}`).join('\n')
+  }
 }
 
 function selectScene(scene: Scene): void {
@@ -178,6 +206,7 @@ function openEditor(scene: Scene): void {
   opacity: 1;
 }
 
+.scene-render,
 .scene-edit,
 .scene-delete {
   width: 18px;
@@ -193,6 +222,20 @@ function openEditor(scene: Scene): void {
 
 .scene-edit {
   font-size: 10px;
+}
+
+.scene-render {
+  font-size: 8px;
+}
+
+.scene-render:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+  color: var(--primary-color);
+}
+
+.scene-render:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .scene-delete {
