@@ -24,10 +24,26 @@ function candidateTooltip(img: BeatImage): string {
 
 // Keeper click toggles selection: clicking the current keeper again clears
 // it (selected_image_id -> null), matching the pre-reorg PanelDetail
-// behavior this was lifted from.
+// behavior this was lifted from. The toggle is deferred briefly so a
+// double-click (open in viewer — the only way to *play* a video candidate)
+// doesn't also fire the toggle twice.
+let clickTimer: number | null = null
+
 function onCandidateClick(img: BeatImage): void {
-  const next = props.beat.selected_image_id === img.id ? null : img.id
-  void store.selectImage(props.beat.id, next)
+  if (clickTimer !== null) clearTimeout(clickTimer)
+  clickTimer = window.setTimeout(() => {
+    clickTimer = null
+    const next = props.beat.selected_image_id === img.id ? null : img.id
+    void store.selectImage(props.beat.id, next)
+  }, 250)
+}
+
+function onCandidateDblClick(idx: number): void {
+  if (clickTimer !== null) {
+    clearTimeout(clickTimer)
+    clickTimer = null
+  }
+  viewerIndex.value = idx
 }
 
 const viewerIndex = ref<number | null>(null)
@@ -65,6 +81,7 @@ const viewerMedia = computed<Media[]>(() =>
         :class="{ selected: img.id === beat.selected_image_id }"
         :title="candidateTooltip(img)"
         @click="onCandidateClick(img)"
+        @dblclick="onCandidateDblClick(idx)"
       >
         <img :src="thumbnailUrl(img.file_path)" alt="" class="candidate-img" />
         <span v-if="img.id === beat.selected_image_id" class="candidate-check">✓</span>
