@@ -25,6 +25,20 @@ export const useMediaStore = defineStore('media', () => {
   const displayedMedia = computed(() => {
     let items = allMedia.value
 
+    // allMedia is always fetched with include_hidden=true; visibility is a
+    // client-side rule so folder scope can make exceptions. Hidden media
+    // stay out of the grid, except storyboard video clips (hidden at
+    // ingest, panel_videos rows) which surface inside the manual folder
+    // that contains them — i.e. the storyboard's own folder view.
+    if (!showHidden.value) {
+      const folderSet = useFoldersStore().activeManualItemSet
+      items = items.filter(
+        (m) =>
+          !m.hidden ||
+          (m.is_video && folderSet !== null && folderSet.has(m.file_path)),
+      )
+    }
+
     if (favoritesOnly.value) {
       items = items.filter((m) => m.is_favorite)
     }
@@ -69,7 +83,7 @@ export const useMediaStore = defineStore('media', () => {
   async function loadAllMedia() {
     loading.value = true
     try {
-      const data = await fetchAllMedia(sortOrder.value, false, showHidden.value)
+      const data = await fetchAllMedia(sortOrder.value, false, true)
       allMedia.value = data
       favoritePaths.value = new Set(
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
@@ -79,14 +93,11 @@ export const useMediaStore = defineStore('media', () => {
     }
   }
 
-  // Hidden media (generated storyboard variants that haven't been picked as
-  // the panel keeper) are excluded server-side by default. Toggling this
-  // refetches with include_hidden=true rather than filtering client-side, so
-  // the grid's item count and hidden badges reflect the same data the server
-  // considers "hidden".
+  // Hidden media (unpicked storyboard variants + rendered clips) are always
+  // fetched; visibility is the client-side rule in displayedMedia above, so
+  // toggling needs no refetch.
   function toggleShowHidden() {
     showHidden.value = !showHidden.value
-    loadAllMedia()
   }
 
   async function applyActiveFilters(filters: ActiveFilters) {

@@ -1637,14 +1637,8 @@ class StoryboardRunner:
         inserted: List[str] = []
         for i, f in enumerate(payload.get("files") or []):
             posix_path = to_posix_path(f)
-            # Images hide until curated (select_beat_image unhides the
-            # keeper); rendered video clips are the final product with no
-            # curation gate, so they stay visible in the library — reachable
-            # through the storyboard's folder — from the moment they ingest.
-            is_video = Path(posix_path).suffix.lower() in _VIDEO_EXTS
             try:
-                if not is_video:
-                    await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
+                await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
                 await asyncio.to_thread(
                     self.db.create_beat_image,
                     beat_id,
@@ -1691,9 +1685,10 @@ class StoryboardRunner:
     ) -> None:
         """Ingest a video job's rendered clips as panel_videos rows.
 
-        Mirrors _ingest_outputs' beat-image path, panel-scoped: no
-        set_media_hidden (clips are the final product and stay visible in
-        the library), same folder membership, and its own
+        Mirrors _ingest_outputs' beat-image path, panel-scoped: clips
+        ingest hidden like images do — the frontend surfaces hidden clips
+        only inside the storyboard's folder view, keeping the main library
+        grid clean — with the same folder membership and its own
         ``panel_videos_changed`` WS event.
         """
         panel_id = job.get("panel_id")
@@ -1720,6 +1715,7 @@ class StoryboardRunner:
         for i, f in enumerate(payload.get("files") or []):
             posix_path = to_posix_path(f)
             try:
+                await asyncio.to_thread(self.db.set_media_hidden, posix_path, True)
                 await asyncio.to_thread(
                     self.db.create_panel_video,
                     panel_id,

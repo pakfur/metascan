@@ -1001,7 +1001,8 @@ async def test_ingest_video_job_lands_on_panel_videos(
 ):
     """A job carrying panel_id but no beat_id (the video-generation path)
     ingests its output(s) as panel_videos rows -- a clip covers the whole
-    shot -- leaving beat_images untouched and the clip's media visible."""
+    shot -- leaving beat_images untouched. The clip's media ingests hidden
+    (the frontend surfaces it only inside the storyboard's folder view)."""
     beat0 = db.create_beat(board.panel0, action="first", sort_order=0)
     vlm = StubVlm(responses=[])
     runner = make_runner(db, comfy, vlm, events, tmp_path)
@@ -1029,7 +1030,7 @@ async def test_ingest_video_job_lands_on_panel_videos(
         hidden = conn.execute(
             "SELECT hidden FROM media LIMIT 1",
         ).fetchone()["hidden"]
-    assert hidden == 0
+    assert hidden == 1
 
 
 async def test_ingest_video_job_works_without_beats(

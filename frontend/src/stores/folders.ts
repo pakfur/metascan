@@ -360,6 +360,16 @@ export const useFoldersStore = defineStore('folders', () => {
     scope.value = next
   }
 
+  // Item path-set of the active *manual* folder, else null. Used by the
+  // media store's hidden-clip exception: hidden storyboard clips surface
+  // only when the folder that contains them is the open scope.
+  const activeManualItemSet = computed<Set<string> | null>(() => {
+    const s = scope.value
+    if (s.kind !== 'manual') return null
+    const f = manualFolders.value.find((x) => x.id === s.id)
+    return f ? new Set(f.items) : null
+  })
+
   function scopeMedia(all: Media[]): Media[] {
     void tagPathsVersion.value
     const s = scope.value
@@ -679,6 +689,7 @@ export const useFoldersStore = defineStore('folders', () => {
     isLibraryScope,
     tagPathsVersion,
     activeFolder,
+    activeManualItemSet,
     setScope,
     scopeMedia,
     scopeCount,

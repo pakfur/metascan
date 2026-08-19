@@ -539,11 +539,16 @@ metascan/
   `generate_video`'s uploaded reference pictures/audio can never disagree
   about who's in the shot. Rendered clips ingest as **`panel_videos`** rows
   (`_ingest_video_outputs` — a clip covers the whole shot, so it is
-  panel-scoped, never a beat candidate) with their media left visible
-  (no hidden-until-keeper flow for clips); `_init_database` idempotently
+  panel-scoped, never a beat candidate), hidden like images — but the
+  frontend surfaces hidden *clips* inside the storyboard's manual-folder
+  view (`stores/media.ts` fetches `include_hidden=true` always and
+  `displayedMedia` excepts `hidden && is_video && ∈ activeManualItemSet`),
+  so clips are folder-only in the library. `_init_database` idempotently
   relocates any video-suffixed `beat_images` rows left by the pre-
-  `panel_videos` first-beat keying, unhiding them and clearing keeper
-  pointers that referenced them. `_release_panels` unhides/purges
+  `panel_videos` first-beat keying (clearing keeper pointers that
+  referenced them) and re-asserts `hidden = 1` for every path in
+  `panel_videos` on each start — release paths delete the rows in the
+  same transaction they unhide, so released clips are never re-hidden. `_release_panels` unhides/purges
   `panel_videos` media the same way `_release_beats` handles beat images,
   and `_purge_media_rows`'s survival checks include `panel_videos` —
   while beats-recompose (`replace_panel_beats`) leaves clips untouched,
