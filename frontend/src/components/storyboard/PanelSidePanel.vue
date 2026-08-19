@@ -172,6 +172,29 @@ async function renderVideo(): Promise<void> {
     store.error = res.skipped.map((s) => s.error).join('\n')
   }
 }
+
+// Scene-scoped render: every shot in the selected panel's scene, through
+// the same generateVideo path. Regenerating is the same call — each render
+// produces a new clip variant. Skipped entries name their panel since this
+// targets several.
+const sceneHasActiveVideoJob = computed(
+  () =>
+    !!scene.value &&
+    scene.value.panels.some((p) => store.panelJobState.get(p.id) !== undefined),
+)
+
+const canRenderScene = computed(
+  () =>
+    !!store.tree?.video_preset_id && (scene.value?.panels.length ?? 0) > 0,
+)
+
+async function renderSceneVideos(): Promise<void> {
+  if (!scene.value) return
+  const res = await store.generateVideo(scene.value.panels.map((p) => p.id))
+  if (res && res.skipped.length > 0) {
+    store.error = res.skipped.map((s) => `panel ${s.panel_id}: ${s.error}`).join('\n')
+  }
+}
 </script>
 
 <template>
@@ -252,6 +275,15 @@ async function renderVideo(): Promise<void> {
             @click="renderVideo"
           >
             {{ hasActiveVideoJob ? 'Rendering…' : 'Render video' }}
+          </button>
+          <button
+            type="button"
+            class="sp-copy-btn"
+            :disabled="!canRenderScene || sceneHasActiveVideoJob"
+            title="Render video for every shot in this scene"
+            @click="renderSceneVideos"
+          >
+            {{ sceneHasActiveVideoJob ? 'Rendering…' : 'Render scene' }}
           </button>
         </div>
       </div>
