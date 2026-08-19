@@ -8,8 +8,10 @@ import BeatRow from './BeatRow.vue'
 const props = defineProps<{ panel: Panel }>()
 const store = useStoryboardStore()
 
+// The shot's duration IS this sum now (panels.duration_s is derived
+// server-side on every beat mutation), so there's no separate target to
+// exceed — only the video dialect's hard clip cap below.
 const total = computed(() => props.panel.beats.reduce((s, b) => s + b.duration_s, 0))
-const overShot = computed(() => total.value > props.panel.duration_s + 0.5)
 const shotCap = computed(
   () => VIDEO_TARGET_CAPS[store.tree?.video_target ?? ''] ?? DEFAULT_SHOT_CAP,
 )
@@ -79,9 +81,8 @@ async function moveBeat(index: number, dir: -1 | 1): Promise<void> {
 <template>
   <div class="pd-field beats-editor">
     <label class="pd-label">
-      Beats — {{ total.toFixed(1) }}s / {{ panel.duration_s }}s
+      Beats — {{ total.toFixed(1) }}s
       <span v-if="overH3" class="beats-warn">exceeds H3 15s clip cap</span>
-      <span v-else-if="overShot" class="beats-warn">exceeds shot duration</span>
     </label>
     <div class="beats-list">
       <BeatRow

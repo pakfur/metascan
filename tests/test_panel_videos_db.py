@@ -176,3 +176,47 @@ def test_delete_panel_video_spares_still_referenced_file(db):
             "SELECT hidden FROM media WHERE file_path = '/vids/shared.mp4'"
         ).fetchone()
     assert row is not None and row["hidden"] == 0
+
+
+# ---- derived panel duration (sum of beats) -----------------------------------
+
+
+def test_panel_duration_tracks_beat_mutations(db):
+    _, _, panel_id = _tree(db)  # created with duration_s=5.0, no beats yet
+
+    # Beat-less panel keeps its stored value (the beats-compose target).
+    assert db.get_panel(panel_id)["duration_s"] == 5.0
+
+    b1 = db.create_beat(panel_id, action="a", sort_order=0, duration_s=3.0)
+    assert db.get_panel(panel_id)["duration_s"] == 3.0
+
+    b2 = db.create_beat(panel_id, action="b", sort_order=1, duration_s=4.5)
+    assert db.get_panel(panel_id)["duration_s"] == 7.5
+
+    db.update_beat(b1, duration_s=1.0)
+    assert db.get_panel(panel_id)["duration_s"] == 5.5
+
+    # Non-duration edits don't touch the panel (or bump its updated_at).
+    before = db.get_panel(panel_id)["updated_at"]
+    db.update_beat(b1, action="changed")
+    after = db.get_panel(panel_id)
+    assert after["duration_s"] == 5.5 and after["updated_at"] == before
+
+    db.delete_beat(b2)
+    assert db.get_panel(panel_id)["duration_s"] == 1.0
+
+    # Deleting the last beat leaves the last derived value in place.
+    db.delete_beat(b1)
+    assert db.get_panel(panel_id)["duration_s"] == 1.0
+
+
+def test_panel_duration_synced_by_replace_panel_beats(db):
+    _, _, panel_id = _tree(db)
+    db.replace_panel_beats(
+        panel_id,
+        [
+            {"action": "a", "duration_s": 2.0},
+            {"action": "b", "duration_s": 2.5},
+        ],
+    )
+    assert db.get_panel(panel_id)["duration_s"] == 4.5

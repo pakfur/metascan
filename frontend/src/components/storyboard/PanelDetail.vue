@@ -29,11 +29,12 @@
       <div class="pd-field">
         <label class="pd-label">Duration (s)</label>
         <input
-          type="number"
-          step="0.5"
-          min="0.5"
-          :value="durationVal"
-          @change="commitDuration"
+          type="text"
+          class="pd-readonly"
+          readonly
+          tabindex="-1"
+          :value="durationDisplay"
+          title="Derived from the sum of this shot's beat durations. Edit the beats to change it."
         />
       </div>
 
@@ -101,10 +102,19 @@ const hasActiveGenJob = computed(() =>
 // pending edit), leave it alone otherwise (an uncommitted PATCH is in
 // flight for that field).
 const actionVal = ref('')
-const durationVal = ref('0')
-
 const actionSnap = ref('')
-const durationSnap = ref('0')
+
+// Duration is read-only and derived: the server recomputes
+// panels.duration_s as the sum of beat durations on every beat mutation;
+// this computes the same sum from the loaded beats so the display updates
+// live on optimistic beat edits without waiting for a refresh. A beat-less
+// panel shows its stored value (the beats-compose rescale target).
+const durationDisplay = computed(() => {
+  const p = panel.value
+  if (!p) return '—'
+  const sum = p.beats.reduce((s, b) => s + b.duration_s, 0)
+  return (p.beats.length > 0 ? sum : p.duration_s).toFixed(1)
+})
 
 function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): void {
   if (local.value === snap.value) {
@@ -122,7 +132,6 @@ watch(
     const p = panel.value
     if (!p) return
     syncField(actionVal, actionSnap, p.action ?? '')
-    syncField(durationVal, durationSnap, String(p.duration_s))
   },
   { immediate: true },
 )
@@ -165,15 +174,6 @@ function commitVideoLoras(entries: LoraEntry[]): void {
   void store.patchPanelFields(panel.value.id, { video_loras: entries })
 }
 
-function commitDuration(e: Event): void {
-  const val = (e.target as HTMLInputElement).value
-  durationVal.value = val
-  durationSnap.value = val
-  if (!panel.value) return
-  const next = Math.max(0.5, Number(val) || panel.value.duration_s)
-  if (next === panel.value.duration_s) return
-  void store.patchPanelFields(panel.value.id, { duration_s: next })
-}
 </script>
 
 <style scoped>
@@ -265,5 +265,13 @@ input[type='text']:focus,
 input[type='number']:focus {
   outline: none;
   border-color: var(--primary-color);
+}
+
+input.pd-readonly,
+input.pd-readonly:focus {
+  color: var(--text-color-secondary);
+  border-color: var(--surface-border);
+  cursor: default;
+  max-width: 120px;
 }
 </style>
