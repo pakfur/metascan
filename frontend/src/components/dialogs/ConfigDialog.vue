@@ -20,11 +20,19 @@ const directories = ref<DirEntry[]>([])
 const newPath = ref('')
 const loading = ref(true)
 
+// The comfy section carries more keys than the one we expose (in_flight,
+// output_root, ...); keep the raw object so saving merges base_url into it
+// instead of clobbering the rest (PUT /api/config is a shallow update).
+const comfyRaw = ref<Record<string, unknown>>({})
+const comfyUrl = ref('')
+
 onMounted(async () => {
   loading.value = true
   try {
     const config = await fetchConfig()
     directories.value = (config.directories as DirEntry[]) || []
+    comfyRaw.value = (config.comfy as Record<string, unknown>) || {}
+    comfyUrl.value = String(comfyRaw.value.base_url ?? 'http://127.0.0.1:8188')
   } finally {
     loading.value = false
   }
@@ -47,7 +55,8 @@ function toggleSubfolders(idx: number) {
 }
 
 async function saveDirectories() {
-  await updateConfig({ directories: directories.value })
+  const comfy = { ...comfyRaw.value, base_url: comfyUrl.value.trim().replace(/\/+$/, '') }
+  await updateConfig({ directories: directories.value, comfy })
   emit('close')
 }
 </script>
@@ -114,6 +123,20 @@ async function saveDirectories() {
           </div>
 
           <p class="hint">Check the box to include subfolders when scanning.</p>
+
+          <h4>ComfyUI Server</h4>
+          <div class="add-row">
+            <input
+              v-model="comfyUrl"
+              type="text"
+              placeholder="http://127.0.0.1:8188"
+              class="add-input"
+            />
+          </div>
+          <p class="hint">
+            URL of the ComfyUI server used for storyboard generation. Takes effect
+            after a backend restart.
+          </p>
 
           <div class="dialog-actions">
             <button class="btn-primary" @click="saveDirectories">Save</button>
