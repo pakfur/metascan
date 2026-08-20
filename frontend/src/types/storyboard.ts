@@ -54,10 +54,22 @@ export interface Beat {
   prompt_source: 'llm' | 'brief' | 'user' | null
   selected_image_id: number | null
   images: BeatImage[]
+  composition: string | null
+  light_quality: string | null
+  emotional_intent: string | null
+  reveals: string | null
+  movement_motivation: string | null
   created_at: string
   updated_at: string
 }
 
+export const COMPOSITIONS = [
+  'thirds_left', 'thirds_right', 'centered', 'symmetrical',
+  'negative_space', 'frame_in_frame', 'leading_lines', 'deep_staging',
+] as const
+export const LIGHT_QUALITIES = [
+  'hard', 'soft', 'dappled', 'practical', 'window', 'firelight', 'ambient',
+] as const
 export const CAMERA_MOTIONS = [
   'zoom_in', 'zoom_out', 'push_in', 'pull_out', 'pan_left', 'pan_right',
   'truck_left', 'truck_right', 'tilt_up', 'tilt_down', 'pedestal_up',
@@ -82,6 +94,8 @@ export interface Panel {
   sort_order: number
   action: string
   duration_s: number
+  is_turn: 0 | 1
+  subtext: string | null
   image_loras: LoraEntry[]
   video_loras: LoraEntry[]
   video_prompt: string | null
@@ -127,6 +141,9 @@ export interface Scene {
   lighting: string | null
   notes: string | null
   reference_path: string | null
+  arc_beats: string[]
+  charge_in: number | null
+  charge_out: number | null
   panels: Panel[]
 }
 
@@ -153,6 +170,7 @@ export interface StoryboardSummary {
   preset_id: number | null
   base_seed: number
   batch_size: number
+  pacing: string
   folder_id: string | null
   video_target: string | null
   video_mode: string | null
@@ -179,6 +197,7 @@ export const ANGLES = ['eye', 'low', 'high', 'overhead', 'dutch', 'ots', 'pov'] 
 export const LENSES = ['wide', 'normal', 'tele', 'macro'] as const
 export const ASPECT_RATIOS = ['1:1', '4:3', '16:9', '2.39:1', '9:16'] as const
 export const TARGET_MODELS = ['sd', 'pony', 'flux1', 'flux2', 'zimage', 'chroma', 'qwen'] as const
+export const PACINGS = ['contemplative', 'standard', 'propulsive'] as const
 
 // ---- H3 video prompt compiler ----
 
