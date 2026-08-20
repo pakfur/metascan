@@ -425,3 +425,124 @@ def test_new_grammars_carry_new_fields():
         r"\"movement_motivation\"",
     ):
         assert token in story.BEATS_GRAMMAR
+
+
+def _scene(name, arc_beats, cin, cout):
+    return {"name": name, "arc_beats": arc_beats, "charge_in": cin, "charge_out": cout}
+
+
+def test_lint_scene_charges_happy_path():
+    arc = [{"beat": "setup"}, {"beat": "turn"}, {"beat": "resolution"}]
+    scenes = [
+        _scene("A", ["setup"], -1, -3),
+        _scene("B", ["turn", "resolution"], -3, 2),
+    ]
+    assert story.lint_scene_charges(scenes, arc) == []
+
+
+def test_lint_scene_charges_catches_each_rule():
+    arc = [{"beat": "setup"}, {"beat": "turn"}]
+    # broken chain + missing charge
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], -1, -2), _scene("B", ["turn"], 1, None)], arc
+    )
+    assert any("chain must be continuous" in m for m in v)
+    assert any("missing charge" in m for m in v)
+    # coverage: arc stage never lands / wrong order
+    v = story.lint_scene_charges([_scene("A", ["turn", "setup"], 0, 4)], arc)
+    assert any("arc_beats" in m for m in v)
+    # turn scene must swing hardest
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], -4, 4), _scene("B", ["turn"], 4, 3)], arc
+    )
+    assert any("largest charge swing" in m for m in v)
+    # polarity flip
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], 2, 4), _scene("B", ["turn"], 4, 1)], arc
+    )
+    assert any("polarity" in m for m in v)
+    # neutral open (0) never trips the polarity rule
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], 0, 2), _scene("B", ["turn"], 2, 4)], arc
+    )
+    assert not any("polarity" in m for m in v)
+
+
+def test_lint_shots_turn_and_subtext():
+    ok = [
+        {"action": "she waits", "subtext": "she is afraid to knock", "is_turn": 0},
+        {"action": "he opens", "subtext": "he knew she'd come", "is_turn": 1},
+    ]
+    assert story.lint_shots(ok, scene_is_turn=True) == []
+    v = story.lint_shots(ok, scene_is_turn=False)
+    assert v == []  # stray turns are zeroed mechanically, not linted
+    two_turns = [dict(ok[0], is_turn=1), ok[1]]
+    v = story.lint_shots(two_turns, scene_is_turn=True)
+    assert any("exactly one shot" in m for m in v)
+    v = story.lint_shots(
+        [{"action": "she waits", "subtext": " She Waits ", "is_turn": 1}],
+        scene_is_turn=True,
+    )
+    assert any("restates" in m for m in v)
+    v = story.lint_shots([{"action": "a", "subtext": None, "is_turn": 1}], True)
+    assert any("empty subtext" in m for m in v)
+
+
+def _beat(size, motion=None, motivation=None, reveals="something new"):
+    return {
+        "shot_size": size,
+        "camera_motion": motion,
+        "movement_motivation": motivation,
+        "reveals": reveals,
+    }
+
+
+def test_lint_beats_rules():
+    # triple repeat, including across the panel boundary
+    v = story.lint_beats(
+        [_beat("MCU"), _beat("MCU")],
+        is_turn_panel=False,
+        is_scene_opener=False,
+        prev_shot_sizes=["MCU"],
+    )
+    assert any("three consecutive" in m for m in v)
+    # opener must be wide
+    v = story.lint_beats([_beat("CU")], is_turn_panel=False, is_scene_opener=True)
+    assert any("establish" in m for m in v)
+    assert (
+        story.lint_beats([_beat("WS")], is_turn_panel=False, is_scene_opener=True) == []
+    )
+    # unmotivated move
+    v = story.lint_beats(
+        [_beat("WS", motion="push_in")], is_turn_panel=False, is_scene_opener=False
+    )
+    assert any("movement_motivation" in m for m in v)
+    # empty reveals
+    v = story.lint_beats(
+        [_beat("WS", reveals=None)], is_turn_panel=False, is_scene_opener=False
+    )
+    assert any("reveals" in m for m in v)
+    # turn panel: tightest framing must not sit on beat 1
+    v = story.lint_beats(
+        [_beat("ECU"), _beat("WS")], is_turn_panel=True, is_scene_opener=False
+    )
+    assert any("tightest" in m for m in v)
+    assert (
+        story.lint_beats(
+            [_beat("WS"), _beat("ECU")], is_turn_panel=True, is_scene_opener=False
+        )
+        == []
+    )
+
+
+def test_describe_beat_framing():
+    assert story.describe_beat_framing(
+        {
+            "shot_size": "MCU",
+            "angle": "low",
+            "lens": None,
+            "composition": "centered",
+            "light_quality": "soft",
+        }
+    ) == ("MCU, low, centered, soft")
+    assert story.describe_beat_framing({}) == "unspecified framing"
