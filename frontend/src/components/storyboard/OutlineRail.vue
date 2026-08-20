@@ -257,7 +257,10 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   color: var(--text-color-secondary);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s;
+  transition:
+    opacity 0.15s,
+    background 0.15s,
+    color 0.15s;
 }
 
 .or-scene-head:hover .or-kebab {
@@ -283,6 +286,7 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   cursor: pointer;
   color: var(--text-color);
   font-family: inherit;
+  transition: background 0.15s;
 }
 
 .or-shot.active {

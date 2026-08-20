@@ -124,6 +124,9 @@ async function addBeat(): Promise<void> {
   background: none;
   color: var(--text-color-secondary);
   cursor: pointer;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
 }
 
 .sd-add:hover {

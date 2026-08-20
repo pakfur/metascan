@@ -718,6 +718,9 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
   align-items: center;
   justify-content: center;
   padding: 0;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .bc-icon-btn:hover {
@@ -820,6 +823,7 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
   color: var(--text-color);
   font-size: 12px;
   cursor: pointer;
+  transition: background 0.15s;
 }
 
 .subject-chip:hover {
@@ -892,6 +896,7 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
   font-size: 11px;
   cursor: pointer;
   flex-shrink: 0;
+  transition: background 0.15s;
 }
 
 .bc-xs-btn:hover:not(:disabled) {
@@ -938,6 +943,9 @@ textarea {
   font-size: 12px;
   cursor: pointer;
   flex-shrink: 0;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .bc-cut-btn.active {
@@ -1068,6 +1076,9 @@ textarea {
   color: var(--text-color-secondary);
   font-size: 11px;
   cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .bc-dialog-add-btn:hover {
