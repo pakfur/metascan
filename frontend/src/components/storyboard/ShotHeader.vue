@@ -376,6 +376,9 @@ async function renderVideo(): Promise<void> {
   color: var(--text-color);
   font-size: 12px;
   cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 
 .sh-btn:hover:not(:disabled) {
@@ -582,7 +585,9 @@ input[type='text']:focus {
   line-height: 18px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s;
+  transition:
+    opacity 0.15s,
+    background 0.15s;
   z-index: 1;
 }
 

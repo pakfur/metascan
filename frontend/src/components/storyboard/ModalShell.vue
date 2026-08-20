@@ -50,6 +50,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
   background: var(--surface-ground);
   color: var(--text-color);
   cursor: pointer;
+  transition: background 0.15s;
 }
 
 .msh-actions :deep(.msh-btn:hover:not(:disabled)) {
