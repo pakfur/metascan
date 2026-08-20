@@ -286,7 +286,6 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   cursor: pointer;
   color: var(--text-color);
   font-family: inherit;
-  transition: background 0.15s;
 }
 
 .or-shot.active {

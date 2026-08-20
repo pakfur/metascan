@@ -943,9 +943,6 @@ textarea {
   font-size: 12px;
   cursor: pointer;
   flex-shrink: 0;
-  transition:
-    background 0.15s,
-    color 0.15s;
 }
 
 .bc-cut-btn.active {

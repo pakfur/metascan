@@ -74,6 +74,7 @@ async function renderVideo(): Promise<void> {
         :value="panel.video_anchor ?? ''"
         @change="onAnchorChange"
       >
+        <option value="">None</option>
         <option v-for="a in VIDEO_ANCHORS" :key="a" :value="a">{{ ANCHOR_LABELS[a] }}</option>
       </select>
       <span class="vpd-hint vpd-meta">

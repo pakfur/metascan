@@ -318,7 +318,13 @@ async function renderVideo(): Promise<void> {
     :index="index"
     @close="videoPromptOpen = false"
   />
-  <ShotScriptDialog v-if="scriptOpen" :panel="panel" :scene="scene" @close="scriptOpen = false" />
+  <ShotScriptDialog
+    v-if="scriptOpen"
+    :panel="panel"
+    :scene="scene"
+    :index="index"
+    @close="scriptOpen = false"
+  />
 
   <MediaViewer
     v-if="viewerIndex !== null"
@@ -376,9 +382,7 @@ async function renderVideo(): Promise<void> {
   color: var(--text-color);
   font-size: 12px;
   cursor: pointer;
-  transition:
-    background 0.15s,
-    color 0.15s;
+  transition: background 0.15s;
 }
 
 .sh-btn:hover:not(:disabled) {
