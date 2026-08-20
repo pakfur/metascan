@@ -44,6 +44,26 @@ CAMERA_MOTION_VALUES = (
 CAMERA_AMPLITUDE_VALUES = ("small", "large")
 CAMERA_SPEED_VALUES = ("slow", "fast")
 ARC_BEAT_VALUES = ("setup", "rising", "turn", "climax", "resolution")
+PACING_VALUES = ("contemplative", "standard", "propulsive")
+COMPOSITION_VALUES = (
+    "thirds_left",
+    "thirds_right",
+    "centered",
+    "symmetrical",
+    "negative_space",
+    "frame_in_frame",
+    "leading_lines",
+    "deep_staging",
+)
+LIGHT_QUALITY_VALUES = (
+    "hard",
+    "soft",
+    "dappled",
+    "practical",
+    "window",
+    "firelight",
+    "ambient",
+)
 
 _PROMPT_KEYS = frozenset(
     {
@@ -65,6 +85,48 @@ def __getattr__(name: str) -> str:
 
 class StoryError(ValueError):
     """A stage response could not be validated."""
+
+
+# ASL-derived guidance (spec §4). Beats are the film-shot unit (one beat ==
+# one H3 [Shot n]); panels are generation containers capped by shot_cap.
+_PACING_TABLE: Dict[str, Dict[str, float]] = {
+    "contemplative": {
+        "panel_min_s": 10.0,
+        "panel_max_s": 15.0,
+        "shots_min": 1,
+        "shots_max": 3,
+        "beats_min": 1,
+        "beats_max": 3,
+        "beat_asl_s": 7.0,
+    },
+    "standard": {
+        "panel_min_s": 8.0,
+        "panel_max_s": 15.0,
+        "shots_min": 2,
+        "shots_max": 4,
+        "beats_min": 2,
+        "beats_max": 4,
+        "beat_asl_s": 4.5,
+    },
+    "propulsive": {
+        "panel_min_s": 6.0,
+        "panel_max_s": 12.0,
+        "shots_min": 3,
+        "shots_max": 6,
+        "beats_min": 3,
+        "beats_max": 5,
+        "beat_asl_s": 2.5,
+    },
+}
+
+
+def pacing_guidance(pacing: str, shot_cap: float) -> Dict[str, float]:
+    """Per-call prompt numbers for the shots/beats stages. Unknown pacing
+    falls back to standard; panel bounds clamp to the video target's cap."""
+    row = dict(_PACING_TABLE.get(pacing, _PACING_TABLE["standard"]))
+    row["panel_max_s"] = min(row["panel_max_s"], float(shot_cap))
+    row["panel_min_s"] = min(row["panel_min_s"], row["panel_max_s"])
+    return row
 
 
 # -- Grammar building blocks (str.format templates; literal JSON braces
