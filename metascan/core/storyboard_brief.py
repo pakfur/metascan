@@ -49,6 +49,25 @@ LENSES: Mapping[str, str] = {
     "tele": "telephoto lens",
     "macro": "macro lens",
 }
+COMPOSITIONS: Mapping[str, str] = {
+    "thirds_left": "subject on the left third",
+    "thirds_right": "subject on the right third",
+    "centered": "centered composition",
+    "symmetrical": "symmetrical composition",
+    "negative_space": "negative space composition",
+    "frame_in_frame": "frame-within-frame composition",
+    "leading_lines": "leading lines composition",
+    "deep_staging": "deep staging, layered depth",
+}
+LIGHT_QUALITIES: Mapping[str, str] = {
+    "hard": "hard light",
+    "soft": "soft diffused light",
+    "dappled": "dappled light",
+    "practical": "practical light sources",
+    "window": "motivated window light",
+    "firelight": "firelight",
+    "ambient": "ambient light",
+}
 
 
 def _aspect_value(aspect_ratio: str) -> float:
@@ -99,6 +118,7 @@ def compose_brief(
         SHOT_SIZES.get(beat.get("shot_size") or ""),
         ANGLES.get(beat.get("angle") or ""),
         LENSES.get(beat.get("lens") or ""),
+        COMPOSITIONS.get(beat.get("composition") or ""),
         storyboard.get("aspect_ratio"),
     ]
     lines = [f"SHOT: {', '.join(b for b in shot_bits if b)}"]
@@ -108,11 +128,18 @@ def compose_brief(
         lines.append(f"ACTION: {beat['action']}")
     if panel.get("action"):
         lines.append(f"SHOT CONTEXT: {panel['action']}")
+    if beat.get("emotional_intent"):
+        lines.append(f"PERFORMANCE: {beat['emotional_intent']}")
     if scene.get("setting"):
         lines.append(f"SETTING: {scene['setting']}")
     if scene.get("location"):
         lines.append(f"LOCATION: {scene['location']}")
-    light_bits = [scene.get("time_of_day"), scene.get("lighting"), scene.get("mood")]
+    light_bits = [
+        LIGHT_QUALITIES.get(beat.get("light_quality") or ""),
+        scene.get("time_of_day"),
+        scene.get("lighting"),
+        scene.get("mood"),
+    ]
     light = ", ".join(b for b in light_bits if b)
     if light:
         lines.append(f"LIGHT/MOOD: {light}")
