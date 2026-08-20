@@ -837,7 +837,7 @@ class StoryboardRunner:
         timeline = h3.compute_timeline(beats, duration_s, mode, refplan)
 
         subject_definitions = h3.render_subject_definitions(refplan, subjects, scene)
-        summary = h3.render_summary(refplan, panel, subjects, mode)
+        summary = h3.render_summary(refplan, panel, subjects, mode, scene)
         retention_analysis = h3.render_retention_analysis(
             refplan, subjects, scene, timeline
         )
