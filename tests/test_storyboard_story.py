@@ -198,25 +198,78 @@ def test_rescale_beat_durations_only_outside_tolerance():
     assert [b["duration_s"] for b in beats2] == [5.0, 6.0]
 
 
-def test_build_shots_user_prompt_states_max_shot_seconds():
-    prompt = story.build_shots_user_prompt(
-        json.dumps({"logline": "L"}),
-        {"name": "Yard", "setting": "hulls"},
+def _guidance():
+    return story.pacing_guidance("standard", 15.0)
+
+
+def test_build_shots_user_prompt_carries_spine_and_pacing():
+    scene = {
+        "name": "Yard",
+        "setting": "hulls",
+        "mood": "tense",
+        "lighting": None,
+        "time_of_day": "dusk",
+        "arc_beats": ["turn"],
+        "charge_in": -3,
+        "charge_out": 2,
+    }
+    p = story.build_shots_user_prompt(
+        "{}", scene, [], None, None, _guidance(), is_turn_scene=True
+    )
+    assert "Arc stages this scene covers: turn" in p
+    assert "opens at -3, closes at 2" in p
+    assert "exactly one shot must set is_turn to true" in p.lower()
+    assert "between 2 and 4 shots" in p
+    assert "8 and 15 seconds" in p
+    p2 = story.build_shots_user_prompt(
+        "{}",
+        dict(scene, arc_beats=["setup"]),
         [],
         None,
         None,
-        max_shot_s=10.0,
+        _guidance(),
+        is_turn_scene=False,
     )
-    assert "at most 10 seconds" in prompt
-    # default stays 15s when the caller doesn't override it.
-    default_prompt = story.build_shots_user_prompt(
-        json.dumps({"logline": "L"}),
-        {"name": "Yard", "setting": "hulls"},
+    assert "every shot sets is_turn false" in p2.lower()
+
+
+def test_build_beats_user_prompt_reinjects_bible_and_context():
+    outline = {"logline": "L", "tone": "grim"}
+    scene = {
+        "name": "Yard",
+        "setting": "rusting hulls",
+        "location": None,
+        "time_of_day": "dusk",
+        "mood": "tense",
+        "lighting": "sodium lamps",
+    }
+    panel = {
+        "action": "Maya crosses",
+        "duration_s": 10.0,
+        "subtext": "she is afraid",
+        "is_turn": 1,
+    }
+    p = story.build_beats_user_prompt(
+        outline,
+        scene,
+        panel,
         [],
-        None,
-        None,
+        _guidance(),
+        prev_panel_action="He watches",
+        prev_beat_summary="MCU, low, soft",
     )
-    assert "at most 15 seconds" in default_prompt
+    assert "Tone: grim" in p
+    assert "rusting hulls" in p and "sodium lamps" in p and "dusk" in p
+    assert "Shot subtext: she is afraid" in p
+    assert "tightest" in p.lower()  # turn directive
+    assert "Previous shot in this scene: He watches" in p
+    assert "MCU, low, soft" in p
+    assert "2 to 4 beats" in p
+    # opener variant
+    p2 = story.build_beats_user_prompt(
+        outline, scene, dict(panel, is_turn=0), [], _guidance(), None, None
+    )
+    assert "opening shot" in p2 and "WS or EWS" in p2
 
 
 def test_camera_vocabulary_matches_spec():

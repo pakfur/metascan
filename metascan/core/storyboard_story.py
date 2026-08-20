@@ -244,8 +244,18 @@ def build_shots_user_prompt(
     subjects: Sequence[Mapping[str, Any]],
     prev_scene_name: Optional[str],
     next_scene_name: Optional[str],
-    max_shot_s: float = 15.0,
+    guidance: Mapping[str, float],
+    is_turn_scene: bool,
 ) -> str:
+    arc = ", ".join(scene.get("arc_beats") or []) or "unspecified"
+    turn_directive = (
+        "This scene contains the story's TURN: exactly one shot must set "
+        "is_turn to true — the shot where the scene's emotional value "
+        "reverses. Every other shot sets is_turn false.\n"
+        if is_turn_scene
+        else "This scene does not contain the story's turn: every shot "
+        "sets is_turn false.\n"
+    )
     return (
         f"Story outline:\n{outline_json}\n\n"
         f"Scene to break into shots: {scene['name']}"
@@ -253,26 +263,66 @@ def build_shots_user_prompt(
         f"Mood: {scene.get('mood') or 'unspecified'}; "
         f"lighting: {scene.get('lighting') or 'unspecified'}; "
         f"time: {scene.get('time_of_day') or 'unspecified'}\n"
+        f"Arc stages this scene covers: {arc}\n"
+        f"Emotional charge (protagonist's POV, -5..+5): opens at "
+        f"{scene.get('charge_in')}, closes at {scene.get('charge_out')}\n"
         f"Previous scene: {prev_scene_name or '(story opening)'}\n"
         f"Next scene: {next_scene_name or '(story ending)'}\n\n"
         f"Subjects (use these exact names):\n{_roster_lines(subjects)}\n\n"
+        f"{turn_directive}"
         "Write the shot list JSON.\n"
-        f"Each shot must be at most {max_shot_s:.0f} seconds long."
+        f"Produce between {int(guidance['shots_min'])} and "
+        f"{int(guidance['shots_max'])} shots, each lasting between "
+        f"{guidance['panel_min_s']:.0f} and {guidance['panel_max_s']:.0f} "
+        "seconds."
     )
 
 
 def build_beats_user_prompt(
-    logline: str,
+    outline: Mapping[str, Any],
     scene: Mapping[str, Any],
     panel: Mapping[str, Any],
     subjects: Sequence[Mapping[str, Any]],
+    guidance: Mapping[str, float],
+    prev_panel_action: Optional[str],
+    prev_beat_summary: Optional[str],
 ) -> str:
+    duration = float(panel.get("duration_s") or 12.0)
+    turn_line = (
+        "This shot is the story's TURN: reserve its tightest framing for "
+        "the beat where the turn lands.\n"
+        if panel.get("is_turn")
+        else ""
+    )
+    if prev_panel_action:
+        prev_block = f"Previous shot in this scene: {prev_panel_action}\n"
+        if prev_beat_summary:
+            prev_block += (
+                f"The previous shot's last beat ended on: {prev_beat_summary}\n"
+            )
+    else:
+        prev_block = (
+            "This is the scene's opening shot: the first beat must "
+            "establish the space wide (WS or EWS).\n"
+        )
     return (
-        f"Story logline: {logline}\n"
-        f"Scene: {scene['name']} — mood {scene.get('mood') or 'unspecified'}\n"
+        f"Story logline: {outline.get('logline') or ''}\n"
+        f"Tone: {outline.get('tone') or 'unspecified'}\n"
+        f"Scene: {scene['name']} — setting: "
+        f"{scene.get('setting') or scene.get('location') or 'unspecified'}\n"
+        f"Time: {scene.get('time_of_day') or 'unspecified'}; "
+        f"lighting: {scene.get('lighting') or 'unspecified'}; "
+        f"mood: {scene.get('mood') or 'unspecified'}\n"
         f"Shot: {panel['action']}\n"
-        f"Target duration: {panel.get('duration_s') or 12.0} seconds\n"
-        f"Subject roster (assign per beat; exact names):\n{_roster_lines(subjects)}\n\n"
+        f"Shot subtext: {panel.get('subtext') or 'unspecified'}\n"
+        f"{turn_line}"
+        f"{prev_block}"
+        f"Target duration: {duration:.0f} seconds\n"
+        f"Produce {int(guidance['beats_min'])} to "
+        f"{int(guidance['beats_max'])} beats of roughly "
+        f"{guidance['beat_asl_s']:.0f} seconds each.\n"
+        f"Subject roster (assign per beat; exact names):\n"
+        f"{_roster_lines(subjects)}\n\n"
         "Write the beat list JSON."
     )
 
