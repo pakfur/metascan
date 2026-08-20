@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch, type Ref } from 'vue'
-import { thumbnailUrl } from '../../api/client'
+import { ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
-import type { Beat, BeatImage, DialogLine, Subject } from '../../types/storyboard'
+import type { Beat, DialogLine, Subject } from '../../types/storyboard'
 import {
   ANGLES,
   CAMERA_AMPLITUDES,
@@ -13,11 +12,7 @@ import {
   LIGHT_QUALITIES,
   SHOT_SIZES,
 } from '../../types/storyboard'
-import type { Media } from '../../types/media'
-import { isVideoPath } from '../../utils/path'
-import BeatPromptDialog from './BeatPromptDialog.vue'
 import DeleteImagesDialog from './DeleteImagesDialog.vue'
-import MediaViewer from '../viewer/MediaViewer.vue'
 
 const props = defineProps<{
   beat: Beat
@@ -41,16 +36,14 @@ const durationVal = ref('0')
 const durationSnap = ref('0')
 const soundVal = ref('')
 const soundSnap = ref('')
-// Framing + prompt fields moved down from PanelDetail.vue -- these are now
-// beat-scoped (each beat frames and prompts its own image), not panel-scoped.
+// Framing fields moved down from PanelDetail.vue -- these are now
+// beat-scoped (each beat frames its own [Shot n] section), not panel-scoped.
 const shotSizeVal = ref('')
 const shotSizeSnap = ref('')
 const angleVal = ref('')
 const angleSnap = ref('')
 const lensVal = ref('')
 const lensSnap = ref('')
-const promptVal = ref('')
-const promptSnap = ref('')
 // Composition/light framing selects + free-text cinematography fields --
 // same beat-scoped commit-on-change pattern as the framing selects above.
 const compositionVal = ref('')
@@ -94,11 +87,6 @@ function sync(): void {
     lensVal.value = lens
     lensSnap.value = lens
   }
-  const prompt = props.beat.prompt ?? ''
-  if (promptVal.value === promptSnap.value) {
-    promptVal.value = prompt
-    promptSnap.value = prompt
-  }
   const comp = props.beat.composition ?? ''
   if (compositionVal.value === compositionSnap.value) {
     compositionVal.value = comp
@@ -126,9 +114,8 @@ function sync(): void {
   }
 }
 // Keyed on id + updated_at (not just id) so a server-side rewrite of the
-// currently-open beat -- e.g. a re-beat pass, or a synthesis run rewriting
-// `prompt` -- still reaches the fields, not just a switch to a different
-// beat.
+// currently-open beat -- e.g. a re-beat pass -- still reaches the fields,
+// not just a switch to a different beat.
 watch(() => [props.beat.id, props.beat.updated_at], sync, { immediate: true })
 
 function subjectName(id: number): string {
@@ -220,31 +207,6 @@ function commitReveals(e: Event): void {
 }
 function commitMotivation(e: Event): void {
   commitCineText('movement_motivation', motivationVal, motivationSnap, e)
-}
-
-function commitPrompt(e: Event): void {
-  const val = (e.target as HTMLTextAreaElement).value
-  promptVal.value = val
-  promptSnap.value = val
-  if (val === (props.beat.prompt ?? '')) return
-  void store.patchBeatFields(props.beat.id, { prompt: val })
-}
-
-function unlockPrompt(): void {
-  void store.patchBeatFields(props.beat.id, { prompt_locked: 0 })
-}
-
-const promptStatusLabel = computed(() => {
-  if (props.beat.prompt_locked === 1) return '🔒 edited'
-  if (props.beat.prompt_source === 'brief') return 'brief fallback'
-  if (props.beat.prompt_source === 'llm') return 'synthesized'
-  return '—'
-})
-
-const hasActiveJob = computed(() => store.beatJobState.has(props.beat.id))
-
-function resynth(): void {
-  void store.synthesize([props.beat.id], true)
 }
 
 async function commit(field: 'action' | 'duration_s' | 'sound', raw: string): Promise<void> {
@@ -364,60 +326,6 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   pendingDelete.value = false
   await store.removeBeat(props.beat.id, purgeImages)
 }
-
-// ---- ported from BeatImages.vue -----------------------------------------
-
-function candidateTooltip(img: BeatImage): string {
-  return `seed ${img.seed ?? '—'} · variant ${img.variant_index}`
-}
-
-// Keeper click toggles selection: clicking the current keeper again clears
-// it (selected_image_id -> null), matching the pre-reorg PanelDetail
-// behavior this was lifted from. The toggle is deferred briefly so a
-// double-click (open in viewer -- the only way to *play* a video candidate)
-// doesn't also fire the toggle twice.
-let clickTimer: number | null = null
-
-function onCandidateClick(img: BeatImage): void {
-  if (clickTimer !== null) clearTimeout(clickTimer)
-  clickTimer = window.setTimeout(() => {
-    clickTimer = null
-    const next = props.beat.selected_image_id === img.id ? null : img.id
-    void store.selectImage(props.beat.id, next)
-  }, 250)
-}
-
-function onCandidateDblClick(idx: number): void {
-  if (clickTimer !== null) {
-    clearTimeout(clickTimer)
-    clickTimer = null
-  }
-  viewerIndex.value = idx
-}
-
-const viewerIndex = ref<number | null>(null)
-const viewerMedia = computed<Media[]>(() =>
-  props.beat.images.map(
-    (img) =>
-      ({
-        file_path: img.file_path,
-        is_favorite: false,
-        is_video: isVideoPath(img.file_path),
-        playback_speed: null,
-        width: 0,
-        height: 0,
-        file_size: 0,
-        frame_rate: null,
-        duration: null,
-      }) as Media,
-  ),
-)
-
-// ---- new to the card ------------------------------------------------------
-
-const promptOpen = ref(false)
-
-const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? null)
 </script>
 
 <template>
@@ -426,7 +334,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
       <span class="bc-label" :class="{ selected }">BEAT {{ index + 1 }}</span>
       <span v-if="beat.is_cut === 1" class="bc-cut-flag">hard cut</span>
       <span class="bc-duration">{{ beat.duration_s.toFixed(1) }}s</span>
-      <span v-if="jobChip" class="bc-chip">{{ jobChip }}</span>
       <div class="bc-head-actions">
         <button
           type="button"
@@ -615,75 +522,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
 
       <div class="bc-col-right">
         <div class="bc-field">
-          <div class="bc-prompt-header">
-            <label class="bc-label-eyebrow">Prompt</label>
-            <span class="bc-prompt-status">{{ promptStatusLabel }}</span>
-            <button
-              v-if="beat.prompt_locked === 1"
-              type="button"
-              class="bc-link-btn"
-              @click="unlockPrompt"
-            >
-              Unlock
-            </button>
-            <button
-              type="button"
-              class="bc-icon-btn"
-              title="Open prompt in a larger editor"
-              @click.stop="promptOpen = true"
-            >
-              <span class="pi pi-window-maximize" />
-            </button>
-          </div>
-          <textarea :value="promptVal" rows="6" @change="commitPrompt" />
-        </div>
-
-        <div class="bc-field">
-          <div class="bc-candidates-header">
-            <label class="bc-label-eyebrow bc-flex1">Candidates</label>
-            <button
-              type="button"
-              class="bc-xs-btn"
-              :disabled="hasActiveJob || store.synthesis.running"
-              @click="resynth"
-            >
-              Re-synth
-            </button>
-            <button
-              type="button"
-              class="bc-xs-btn"
-              :disabled="hasActiveJob"
-              @click="store.generate([beat.id])"
-            >
-              {{ hasActiveJob ? 'Generating…' : 'Reroll' }}
-            </button>
-          </div>
-          <div class="candidates-row">
-            <div
-              v-for="(img, idx) in beat.images"
-              :key="img.id"
-              class="candidate-tile"
-              :class="{ selected: img.id === beat.selected_image_id }"
-              :title="candidateTooltip(img)"
-              @click="onCandidateClick(img)"
-              @dblclick="onCandidateDblClick(idx)"
-            >
-              <img :src="thumbnailUrl(img.file_path)" alt="" class="candidate-img" />
-              <span v-if="img.id === beat.selected_image_id" class="candidate-check">✓</span>
-              <button
-                type="button"
-                class="candidate-expand"
-                title="View full size"
-                @click.stop="viewerIndex = idx"
-              >
-                <span class="pi pi-search-plus" />
-              </button>
-            </div>
-            <div v-if="beat.images.length === 0" class="candidates-empty">No candidates yet.</div>
-          </div>
-        </div>
-
-        <div class="bc-field">
           <label class="bc-label-eyebrow">Sound</label>
           <textarea
             rows="2"
@@ -755,8 +593,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
     </div>
   </article>
 
-  <BeatPromptDialog v-if="promptOpen" :beat="beat" :index="index" @close="promptOpen = false" />
-
   <DeleteImagesDialog
     v-if="pendingDelete"
     title="Delete beat?"
@@ -765,14 +601,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
     @purge="confirmDelete(true)"
     @keep="confirmDelete(false)"
     @cancel="pendingDelete = false"
-  />
-
-  <MediaViewer
-    v-if="viewerIndex !== null"
-    :media-list="viewerMedia"
-    :initial-index="viewerIndex"
-    :allow-destructive="false"
-    @close="viewerIndex = null"
   />
 </template>
 
@@ -819,14 +647,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
   font-size: 11px;
   color: var(--text-color-secondary);
   font-variant-numeric: tabular-nums;
-}
-
-.bc-chip {
-  font-size: 12px;
-  color: var(--text-color-secondary);
-  background: var(--surface-hover);
-  padding: 4px 10px;
-  border-radius: 999px;
 }
 
 .bc-head-actions {
@@ -1012,59 +832,6 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
   cursor: pointer;
 }
 
-.bc-prompt-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.bc-prompt-status {
-  font-size: 11px;
-  color: var(--text-color-secondary);
-  flex: 1;
-}
-
-.bc-link-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--primary-color);
-  cursor: pointer;
-  font-size: 11px;
-  text-decoration: underline;
-}
-
-.bc-candidates-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.bc-flex1 {
-  flex: 1;
-}
-
-.bc-xs-btn {
-  padding: 3px 10px;
-  border: 1px solid var(--surface-border);
-  border-radius: 6px;
-  background: var(--surface-ground);
-  color: var(--text-color);
-  font-size: 11px;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.bc-xs-btn:hover:not(:disabled) {
-  background: var(--surface-hover);
-}
-
-.bc-xs-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 input[type='text'],
 input[type='number'],
 select,
@@ -1106,79 +873,6 @@ textarea {
   border-color: var(--primary-color);
   color: var(--primary-color);
   background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-}
-
-.candidates-row {
-  display: flex;
-  gap: 10px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-
-.candidate-tile {
-  position: relative;
-  flex: 0 0 auto;
-  width: 96px;
-  height: 96px;
-  border-radius: 6px;
-  overflow: hidden;
-  border: 2px solid transparent;
-  background: var(--surface-ground);
-  cursor: pointer;
-}
-
-.candidate-tile.selected {
-  border-color: var(--primary-color);
-}
-
-.candidate-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.candidate-check {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--primary-color);
-  color: #fff;
-  font-size: 11px;
-  line-height: 18px;
-  text-align: center;
-}
-
-.candidate-expand {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.candidate-tile:hover .candidate-expand {
-  opacity: 1;
-}
-
-.candidates-empty {
-  color: var(--text-color-secondary);
-  font-size: 12px;
-  padding: 8px 0;
 }
 
 .bc-dialog {

@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import {
   DEFAULT_SHOT_CAP,
   VIDEO_TARGET_CAPS,
   type Beat,
-  type BeatImage,
   type Panel,
 } from '../../types/storyboard'
-import JobBadge from './JobBadge.vue'
 
 const props = defineProps<{ panel: Panel }>()
 const emit = defineEmits<{ (e: 'select-beat', beatId: number): void }>()
@@ -34,9 +31,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => ro?.disconnect())
 
-function keeper(b: Beat): BeatImage | null {
-  return b.images.find((i) => i.id === b.selected_image_id) ?? b.images[0] ?? null
-}
 function pct(b: Beat): number {
   return (b.duration_s / scale.value) * 100
 }
@@ -61,23 +55,11 @@ function segTitle(b: Beat): string {
         :title="segTitle(b)"
         @click="emit('select-beat', b.id)"
       >
-        <img
-          v-if="keeper(b)"
-          :src="thumbnailUrl(keeper(b)!.file_path)"
-          alt=""
-          class="ps-img"
-          :style="{ opacity: b.selected_image_id != null ? 1 : 0.45 }"
-        />
-        <span v-else class="ps-empty" />
+        <span class="ps-empty" />
         <span class="ps-label">
           <span>{{ i + 1 }}</span>
           <span v-if="showDuration(b)">{{ b.duration_s.toFixed(1) }}s</span>
         </span>
-        <JobBadge
-          v-if="store.beatJobState.get(b.id)"
-          :state="store.beatJobState.get(b.id)!.state"
-          :error="store.beatJobState.get(b.id)!.error"
-        />
       </button>
       <div
         v-if="!over && total < cap"
@@ -126,13 +108,6 @@ function segTitle(b: Beat): string {
 
 .ps-seg.cut {
   border-left: 3px solid var(--warn);
-}
-
-.ps-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
 }
 
 .ps-empty {

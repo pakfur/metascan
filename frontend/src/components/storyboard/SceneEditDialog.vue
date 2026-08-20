@@ -208,7 +208,7 @@ async function save(): Promise<void> {
           id="se-setting"
           v-model="setting"
           rows="7"
-          placeholder="Common setting and background for every panel in this scene — woven into each synthesized prompt"
+          placeholder="Common setting and background for every panel in this scene"
         />
       </div>
 

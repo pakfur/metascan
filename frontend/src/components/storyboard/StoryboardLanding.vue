@@ -93,8 +93,7 @@ function formatDate(raw: string): string {
         <div class="board-info">
           <div class="board-name">{{ b.name }}</div>
           <div class="board-meta">
-            {{ b.aspect_ratio }} &middot; {{ b.target_model }} &middot; updated
-            {{ formatDate(b.updated_at) }}
+            {{ b.aspect_ratio }} &middot; updated {{ formatDate(b.updated_at) }}
           </div>
         </div>
         <div class="board-actions">

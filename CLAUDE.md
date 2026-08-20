@@ -82,7 +82,7 @@ metascan/
         metadata/       # MetadataPanel, MetadataField
         viewer/         # MediaViewer (allowDestructive prop, default true, gates
                         #   delete/favorite/library-selectMedia for non-library
-                        #   callers like PanelDetail's candidate picker),
+                        #   callers like the storyboard takes viewer),
                         #   ImageViewer, VideoPlayer, SlideshowViewer
         dialogs/        # ScanDialog, SimilaritySettings, DuplicateFinder,
                         # UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab),
@@ -393,7 +393,7 @@ metascan/
   prompts via `DeleteImagesDialog.vue` (purge / keep-in-library / cancel)
   on every beat, panel, scene, and storyboard delete that affects
   generated images. The gated beats-recompose confirm is a separate,
-  purpose-built inline banner in `BeatsEditor.vue` (its own
+  purpose-built inline banner in `ShotHeader.vue` (its own
   `confirmPending` ref, Continue/Cancel buttons) — not
   `DeleteImagesDialog.vue` — that re-posts the compose call with
   `confirm=true` on Continue.
@@ -497,9 +497,9 @@ metascan/
   202 fire-and-forget task. `metascan/core/video_targets.py::shot_cap` is
   the single coupling between story composition and the video dialect — the
   shots-composition stage reads it for per-shot duration guidance and the
-  frontend's `BeatsEditor.vue` mirrors the same constant
+  frontend's `PacingStrip.vue` mirrors the same constant
   (`VIDEO_TARGET_CAPS`/`DEFAULT_SHOT_CAP` in `types/storyboard.ts`) to warn
-  when a beat's duration exceeds the target's cap. The two MiniMax H3
+  when a shot's beats exceed the target's clip cap. The two MiniMax H3
   prompt-format guides are vendored verbatim at
   `data/prompt_guides/minimax-h3/` and are the format authority every
   renderer in `h3_compiler.py` follows.
@@ -554,8 +554,8 @@ metascan/
   while beats-recompose (`replace_panel_beats`) leaves clips untouched,
   which is the point of panel scoping. The `storyboard` WS channel's
   `panel_videos_changed` (`{storyboard_id, panel_id, files}`) signals new
-  clips; the frontend shows them in `PanelVideos.vue` (the shot pane's
-  "Video takes" strip) and the panel grid tile's 🎬 badge/dblclick.
+  clips; the frontend shows them in `ShotHeader.vue`'s "Takes" strip and
+  the outline rail's per-shot 🎬 count.
   The side panel's "Anchor changed since the last
   compile" chip compares live `video_anchor` against `video_compiled_anchor`
   (the anchor recorded at compile time), not against re-validating the
@@ -625,9 +625,9 @@ metascan/
   artifact only), so presets registered before a new optional `MS_*`
   title existed pick it up without re-registration. `GET /api/comfy/loras`
   proxies ComfyUI's `/object_info/LoraLoader` for the frontend picker
-  (`LoraListEditor.vue`, mounted twice in `PanelDetail.vue`'s shot pane —
-  image loras and video loras side by side, ungated, so both are always
-  editable with the shot); it returns `[]`
+  (`LoraListEditor.vue`, mounted once in `ShotHeader.vue` for the shot's
+  video loras — `image_loras` remain in the schema and PATCH API but have
+  no UI editor since the video-only UX pass); it returns `[]`
   when ComfyUI is unreachable and the picker degrades to free text.
 - **Deterministic per-beat seeds.** `beat_seed(base_seed, panel_sort_order,
   beat_sort_order, variant_index) = base_seed + (panel_sort_order * 100 +
@@ -725,19 +725,36 @@ metascan/
   `POST /api/storyboard/beats/{id}/select` — never
   `PATCH /api/storyboard/beats/{id}`,
   which has no concept of `beat_images` and cannot flip `media.hidden` on
-  the old/new keeper.
+  the old/new keeper. (No UI calls `selectImage` since the video-only UX
+  pass removed the keeper strip; the rule binds any reintroduction.)
+- **Storyboard UX is video-only (2026-08-20).** All image-generation UX
+  was removed from the frontend: the "Generate all" / per-beat Reroll /
+  Re-synth buttons, the per-beat prompt editor (+ `BeatPromptDialog.vue`,
+  deleted), the candidates/keeper strip and keeper thumbnails
+  (`PacingStrip.vue` segments and the outline rail no longer render
+  images), the Image LoRAs editor, the subject LoRA name/strength inputs,
+  and the create/settings dialog fields that only fed the image path
+  (target model, stills preset, batch size, style block, negative, image
+  name prefix — verified: `generate_video` reads `base_seed` but not
+  `negative`/`style_block`). `PresetRegistrationDialog.vue` registers
+  `ref2v` only. This was strictly a frontend pass: the backend endpoints
+  (`/synthesize`, `generate()`, `/beats/{id}/select`), the store actions,
+  and the DB columns all remain — `CreateStoryboardDialog.vue` silently
+  sends a default `target_model` because the column is NOT NULL, and the
+  `DeleteImagesDialog.vue` purge/keep flows are kept because legacy
+  boards still hold generated images the delete cascades must handle.
 - **Detail editors with local commit-on-change copies must resync on id +
-  updated_at, not id alone.** `PanelDetail.vue` (the shot pane — action,
-  duration, video section) and `BeatForm.vue` (framing, subject picker,
-  prompt + lock, camera/dialog/sound — the per-beat editing surface since
-  the shot/beat reorg moved those fields off panels) each keep a local
+  updated_at, not id alone.** `ShotHeader.vue` (the shot header — action,
+  subtext) and `BeatCard.vue` (framing, subject picker, camera/dialog/
+  sound — the per-beat editing surface since the shot/beat reorg moved
+  those fields off panels) each keep a local
   editable ref
   per text/select field (bound `:value` + `@change`, not `v-model`) so an
   in-flight edit survives the store's optimistic `Object.assign`. Resyncing
   only when the selected panel's/beat's *id* changes misses every
-  server-side rewrite of the panel/beat currently open — a synthesis or
-  VLM-tagging pass
-  that rewrites `prompt` (or any other field) in place never reaches the
+  server-side rewrite of the panel/beat currently open — a compose pass
+  or another tab's PATCH
+  that rewrites a field in place never reaches the
   textarea, and a later blur then PATCHes the stale (often empty) local
   value back over the server's write, destroying it. Each field pairs its
   local ref with a "last synced from server" snapshot ref, updated

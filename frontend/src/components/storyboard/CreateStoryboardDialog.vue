@@ -16,14 +16,9 @@ const emit = defineEmits<{
 const store = useStoryboardStore()
 
 const name = ref('')
-const targetModel = ref<string>(TARGET_MODELS[0])
 const aspectRatio = ref<string>('16:9')
-const presetId = ref<number | null>(null)
-const batchSize = ref(4)
-const styleBlock = ref('')
-const negative = ref('')
 
-const videoTarget = ref<string>('')
+const videoTarget = ref<string>('minimax')
 const videoMode = ref<string>('ref2va')
 const videoPresetId = ref<number | null>(null)
 
@@ -32,9 +27,6 @@ const presetsLoading = ref(true)
 const submitting = ref(false)
 const errorMsg = ref<string | null>(null)
 
-// The stills preset drives image renders; ref2v presets only make sense
-// as the video workflow — keep the two selects from cross-contaminating.
-const stillsPresets = computed(() => presets.value.filter((p) => p.kind !== 'ref2v'))
 const videoPresets = computed(() => presets.value.filter((p) => p.kind === 'ref2v'))
 
 onMounted(async () => {
@@ -48,11 +40,6 @@ onMounted(async () => {
     presetsLoading.value = false
   }
 })
-
-function clampBatchSize() {
-  const n = Math.round(batchSize.value)
-  batchSize.value = Number.isFinite(n) ? Math.min(16, Math.max(1, n)) : 4
-}
 
 function close() {
   emit('close')
@@ -68,29 +55,21 @@ function openPresets() {
 async function submit() {
   const trimmedName = name.value.trim()
   if (!trimmedName) return
-  clampBatchSize()
   errorMsg.value = null
   submitting.value = true
   try {
+    // target_model is required by the create route (NOT NULL column) but no
+    // longer user-facing -- the UX is video-only, so a default is sent
+    // silently and only aspect_ratio remains a real choice.
     const body: {
       name: string
       target_model: string
       aspect_ratio: string
-      batch_size: number
-      style_block?: string
-      negative?: string
-      preset_id?: number
     } = {
       name: trimmedName,
-      target_model: targetModel.value,
+      target_model: TARGET_MODELS[0],
       aspect_ratio: aspectRatio.value,
-      batch_size: batchSize.value,
     }
-    const style = styleBlock.value.trim()
-    if (style) body.style_block = style
-    const neg = negative.value.trim()
-    if (neg) body.negative = neg
-    if (presetId.value !== null) body.preset_id = presetId.value
 
     const id = await store.create(body)
     if (videoTarget.value) {
@@ -127,40 +106,17 @@ async function submit() {
         <InputText id="sb-name" v-model="name" placeholder="e.g. Coffee shop meet-cute" />
       </div>
 
-      <div class="field-row">
-        <div class="field">
-          <label for="sb-model">Target model</label>
-          <select id="sb-model" v-model="targetModel">
-            <option v-for="m in TARGET_MODELS" :key="m" :value="m">{{ m }}</option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label for="sb-ar">Aspect ratio</label>
-          <select id="sb-ar" v-model="aspectRatio">
-            <option v-for="ar in ASPECT_RATIOS" :key="ar" :value="ar">{{ ar }}</option>
-          </select>
-        </div>
-      </div>
-
       <div class="field">
-        <label for="sb-preset">Workflow preset</label>
-        <select id="sb-preset" v-model="presetId" :disabled="presetsLoading">
-          <option :value="null">None</option>
-          <option v-for="p in stillsPresets" :key="p.id" :value="p.id">
-            {{ p.name }} ({{ p.kind }})
-          </option>
+        <label for="sb-ar">Aspect ratio</label>
+        <select id="sb-ar" v-model="aspectRatio">
+          <option v-for="ar in ASPECT_RATIOS" :key="ar" :value="ar">{{ ar }}</option>
         </select>
-        <p v-if="!presetsLoading && presets.length === 0" class="hint">
-          No presets yet.
-          <button type="button" class="link-btn" @click="openPresets">Register one</button>
-        </p>
       </div>
 
       <div class="field">
-        <label for="sb-video-target">Video target (optional)</label>
+        <label for="sb-video-target">Video target</label>
         <select id="sb-video-target" v-model="videoTarget">
-          <option value="">None — stills only</option>
+          <option value="">None</option>
           <option value="minimax">MiniMax H3</option>
         </select>
       </div>
@@ -186,33 +142,6 @@ async function submit() {
             <button type="button" class="link-btn" @click="openPresets">Register one</button>
           </p>
         </div>
-      </div>
-
-      <div class="field">
-        <label for="sb-batch">Batch size</label>
-        <input
-          id="sb-batch"
-          v-model.number="batchSize"
-          type="number"
-          min="1"
-          max="16"
-          @blur="clampBatchSize"
-        />
-      </div>
-
-      <div class="field">
-        <label for="sb-style">Style block (optional)</label>
-        <textarea
-          id="sb-style"
-          v-model="styleBlock"
-          rows="3"
-          placeholder="Shared style/quality tags applied to every panel prompt"
-        />
-      </div>
-
-      <div class="field">
-        <label for="sb-negative">Negative prompt (optional)</label>
-        <textarea id="sb-negative" v-model="negative" rows="2" placeholder="Things to avoid" />
       </div>
 
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>

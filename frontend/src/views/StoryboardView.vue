@@ -22,16 +22,6 @@
         >
           {{ videoLabel }}
         </span>
-        <span v-if="store.synthesis.running" class="sb-chip">
-          synthesizing {{ store.synthesis.done }}/{{ store.synthesis.total }}
-        </span>
-        <span
-          v-else-if="store.synthesis.error"
-          class="sb-chip sb-chip--error"
-          :title="store.synthesis.error"
-        >
-          synthesis failed
-        </span>
         <span v-if="store.story.running" class="sb-chip">
           Composing {{ store.story.stage }} {{ store.story.done }}/{{ store.story.total }}
         </span>
@@ -72,17 +62,11 @@
             @click="composeOpen = true"
           />
           <Button
-            label="Generate all"
-            icon="pi pi-play"
-            :disabled="store.loading || !store.tree"
-            @click="store.generate()"
-          />
-          <Button
             icon="pi pi-ellipsis-h"
             text
             rounded
             aria-label="More actions"
-            title="Import text, synthesize, compile, render, cancel"
+            title="Import text, compile, render, cancel"
             :disabled="!store.tree"
             @click="overflowMenu?.toggle($event)"
           />
@@ -134,9 +118,7 @@ const composeOpen = ref(false)
 const settingsOpen = ref(false)
 const overflowMenu = ref<InstanceType<typeof Menu> | null>(null)
 
-const stageBusy = computed(
-  () => store.compile.running || store.synthesis.running || store.story.running,
-)
+const stageBusy = computed(() => store.compile.running || store.story.running)
 
 const overflowItems = computed<MenuItem[]>(() => {
   const items: MenuItem[] = [
@@ -145,12 +127,6 @@ const overflowItems = computed<MenuItem[]>(() => {
       icon: 'pi pi-file-import',
       disabled: !store.tree,
       command: () => (importOpen.value = true),
-    },
-    {
-      label: 'Synthesize',
-      icon: 'pi pi-sparkles',
-      disabled: store.loading || !store.tree,
-      command: () => void store.synthesize(),
     },
   ]
   if (store.tree?.video_target) {
