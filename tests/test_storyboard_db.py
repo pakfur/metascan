@@ -807,3 +807,63 @@ def test_v3_migration_from_v2_layout(tmp_path):
             )
     finally:
         db.close()
+
+
+def test_cinematic_columns_roundtrip(db):
+    sb = db.create_storyboard(
+        name="C", target_model="sd", architecture="t2i", base_seed=1
+    )
+    assert db.get_storyboard(sb)["pacing"] == "standard"
+    db.update_storyboard(sb, pacing="propulsive")
+    assert db.get_storyboard(sb)["pacing"] == "propulsive"
+
+    sids = db.replace_storyboard_scenes(
+        sb,
+        [
+            {
+                "name": "S1",
+                "arc_beats": ["setup", "turn"],
+                "charge_in": 0,
+                "charge_out": -4,
+            }
+        ],
+    )
+    tree = db.get_storyboard_tree(sb)
+    scene = tree["scenes"][0]
+    assert scene["arc_beats"] == ["setup", "turn"]
+    assert scene["charge_in"] == 0 and scene["charge_out"] == -4
+    db.update_scene(sids[0], arc_beats=["setup"], charge_in=1)
+    scene = db.get_storyboard_tree(sb)["scenes"][0]
+    assert scene["arc_beats"] == ["setup"] and scene["charge_in"] == 1
+
+    pids = db.replace_scene_panels(
+        sids[0],
+        [{"action": "a", "duration_s": 10.0, "is_turn": 1, "subtext": "hidden"}],
+    )
+    panel = db.get_panel(pids[0])
+    assert panel["is_turn"] == 1 and panel["subtext"] == "hidden"
+    db.update_panel(pids[0], is_turn=0, subtext=None)
+    panel = db.get_panel(pids[0])
+    assert panel["is_turn"] == 0 and panel["subtext"] is None
+
+    bids = db.replace_panel_beats(
+        pids[0],
+        [
+            {
+                "action": "b",
+                "composition": "centered",
+                "light_quality": "soft",
+                "emotional_intent": "jaw set",
+                "reveals": "the room",
+                "movement_motivation": None,
+            }
+        ],
+    )
+    beat = db.get_beat(bids[0])
+    assert beat["composition"] == "centered"
+    assert beat["light_quality"] == "soft"
+    assert beat["emotional_intent"] == "jaw set"
+    assert beat["reveals"] == "the room"
+    assert beat["movement_motivation"] is None
+    db.update_beat(bids[0], movement_motivation="she pulls away")
+    assert db.get_beat(bids[0])["movement_motivation"] == "she pulls away"
