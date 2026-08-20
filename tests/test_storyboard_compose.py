@@ -18,6 +18,7 @@ from metascan.core.storyboard_runner import (
 OUTLINE = {
     "logline": "L",
     "tone": "T",
+    "pacing": "standard",
     "duration_target_s": 60,
     "subjects": [{"name": "Maya", "description": "desc", "voice": None}],
     "arc": [{"beat": "setup", "summary": "s"}],
@@ -32,25 +33,35 @@ SCENES = [
         "mood": "tense",
         "lighting": None,
         "notes": None,
+        "arc_beats": ["setup"],
+        "charge_in": 0,
+        "charge_out": -2,
     }
 ]
 SHOTS = [
     {
         "action": "Maya crosses",
         "duration_s": 10,
+        "subtext": "she hopes no one sees her",
+        "is_turn": False,
     }
 ]
 BEATS = [
     {
         "duration_s": 5,
         "action": "a1",
+        "reveals": "the yard's scale",
+        "emotional_intent": "shoulders squared",
         "shot_size": "WS",
         "angle": "eye",
         "lens": None,
+        "composition": "centered",
+        "light_quality": "soft",
         "subjects": ["Maya"],
         "camera_motion": "static",
         "camera_amplitude": None,
         "camera_speed": None,
+        "movement_motivation": None,
         "is_cut": False,
         "sound": None,
         "dialog": [],
@@ -58,13 +69,18 @@ BEATS = [
     {
         "duration_s": 5,
         "action": "a2",
-        "shot_size": None,
+        "reveals": "her face",
+        "emotional_intent": "jaw set",
+        "shot_size": "MCU",
         "angle": None,
         "lens": None,
+        "composition": None,
+        "light_quality": None,
         "subjects": [],
         "camera_motion": None,
         "camera_amplitude": None,
         "camera_speed": None,
+        "movement_motivation": None,
         "is_cut": False,
         "sound": None,
         "dialog": [],
@@ -77,6 +93,7 @@ class FakeVlm:
 
     def __init__(self):
         self.calls = []
+        self.prompts = []
 
     async def ensure_started(self, model_id):
         pass
@@ -97,6 +114,7 @@ class FakeVlm:
         from metascan.core import storyboard_story as story
 
         self.calls.append(grammar)
+        self.prompts.append(user_prompt)
         if grammar == story.OUTLINE_GRAMMAR:
             return json.dumps(OUTLINE)
         if grammar == story.SCENES_GRAMMAR:
@@ -339,3 +357,126 @@ def test_beats_stage_open_for_plain_beats(runner, storyboard_id, panel_id, db):
     asyncio.run(
         runner.check_compose_gates(storyboard_id, ("beats",), None, None, False)
     )
+
+
+def _events(runner):
+    seen = []
+    runner.on_event(lambda ch, ev, data: seen.append((ch, ev, data)))
+    return seen
+
+
+def test_compose_writes_pacing(db, storyboard_id):
+    vlm = FakeVlm()
+    r = StoryboardRunner(db=db, comfy=None, get_vlm=lambda: vlm, output_root=Path("."))
+    asyncio.run(r.compose_story(storyboard_id, stages=["outline"]))
+    assert db.get_storyboard(storyboard_id)["pacing"] == "standard"
+
+
+def test_scenes_lint_reroll_names_violation(db, storyboard_id):
+    broken = [dict(SCENES[0], charge_in=None, charge_out=None)]
+
+    class Vlm(FakeVlm):
+        def __init__(self):
+            super().__init__()
+            self.scene_calls = 0
+
+        async def generate_text(self, *, grammar=None, user_prompt="", **kw):
+            from metascan.core import storyboard_story as story
+
+            self.prompts.append(user_prompt)
+            if grammar == story.OUTLINE_GRAMMAR:
+                return json.dumps(OUTLINE)
+            if grammar == story.SCENES_GRAMMAR:
+                self.scene_calls += 1
+                return json.dumps(broken if self.scene_calls == 1 else SCENES)
+            raise AssertionError("unexpected stage")
+
+    vlm = Vlm()
+    r = StoryboardRunner(db=db, comfy=None, get_vlm=lambda: vlm, output_root=Path("."))
+    seen = _events(r)
+    asyncio.run(r.compose_story(storyboard_id, stages=["outline", "scenes"]))
+    assert vlm.scene_calls == 2
+    assert "missing charge" in vlm.prompts[-1]  # violation named in re-roll
+    done = [
+        d
+        for _, ev, d in seen
+        if ev == "story_stage_complete" and d["stage"] == "scenes"
+    ]
+    assert done and done[0]["warnings"] == []  # second response was clean
+
+
+def test_lint_leftovers_accepted_as_warnings(db, storyboard_id):
+    broken = [dict(SCENES[0], charge_in=None, charge_out=None)]
+
+    class Vlm(FakeVlm):
+        async def generate_text(self, *, grammar=None, user_prompt="", **kw):
+            from metascan.core import storyboard_story as story
+
+            if grammar == story.OUTLINE_GRAMMAR:
+                return json.dumps(OUTLINE)
+            return json.dumps(broken)  # violates every time
+
+    r = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: Vlm(), output_root=Path(".")
+    )
+    seen = _events(r)
+    asyncio.run(r.compose_story(storyboard_id, stages=["outline", "scenes"]))
+    done = [
+        d
+        for _, ev, d in seen
+        if ev == "story_stage_complete" and d["stage"] == "scenes"
+    ]
+    assert done and any("missing charge" in w for w in done[0]["warnings"])
+    # compose still landed the scenes despite the style violation
+    assert db.get_storyboard_tree(storyboard_id)["scenes"]
+
+
+def test_stray_is_turn_zeroed_outside_turn_scene(db, storyboard_id):
+    stray = [dict(SHOTS[0], is_turn=True)]
+
+    class Vlm(FakeVlm):
+        async def generate_text(self, *, grammar=None, user_prompt="", **kw):
+            from metascan.core import storyboard_story as story
+
+            self.prompts.append(user_prompt)
+            if grammar == story.OUTLINE_GRAMMAR:
+                return json.dumps(OUTLINE)
+            if grammar == story.SCENES_GRAMMAR:
+                return json.dumps(SCENES)  # arc_beats == ["setup"], no turn
+            return json.dumps(stray)
+
+    r = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: Vlm(), output_root=Path(".")
+    )
+    asyncio.run(r.compose_story(storyboard_id, stages=["outline", "scenes", "shots"]))
+    tree = db.get_storyboard_tree(storyboard_id)
+    assert all(p["is_turn"] == 0 for p in tree["scenes"][0]["panels"])
+
+
+def test_beats_sequential_with_prev_context(db, storyboard_id):
+    two_shots = [
+        dict(SHOTS[0]),
+        dict(SHOTS[0], action="Maya stops", subtext="she heard something"),
+    ]
+
+    class Vlm(FakeVlm):
+        async def generate_text(self, *, grammar=None, user_prompt="", **kw):
+            from metascan.core import storyboard_story as story
+
+            if grammar == story.OUTLINE_GRAMMAR:
+                return json.dumps(OUTLINE)
+            if grammar == story.SCENES_GRAMMAR:
+                return json.dumps(SCENES)
+            if grammar == story.SHOTS_GRAMMAR:
+                return json.dumps(two_shots)
+            self.prompts.append(user_prompt)
+            return json.dumps(BEATS)
+
+    vlm = Vlm()
+    r = StoryboardRunner(db=db, comfy=None, get_vlm=lambda: vlm, output_root=Path("."))
+    asyncio.run(r.compose_story(storyboard_id))
+    assert len(vlm.prompts) == 2  # one beats call per panel
+    assert "opening shot" in vlm.prompts[0]
+    assert "Previous shot in this scene: Maya crosses" in vlm.prompts[1]
+    # last BEATS beat is MCU — its framing summary reaches the second call
+    assert "MCU" in vlm.prompts[1]

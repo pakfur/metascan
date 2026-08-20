@@ -873,3 +873,73 @@ def test_delete_storyboard_removes_folder(client):
 
     assert r.status_code == 200
     assert client.db.get_folder(folder["id"]) is None
+
+
+# ---- cinematic fields (pacing / spine / visual grammar) ----------------------
+
+
+def test_patch_cinematic_fields(client):
+    sb = _create_storyboard(client)
+    r = client.patch(f"/api/storyboard/{sb}", json={"pacing": "propulsive"})
+    assert r.status_code == 200
+    assert client.get(f"/api/storyboard/{sb}").json()["pacing"] == "propulsive"
+    assert (
+        client.patch(f"/api/storyboard/{sb}", json={"pacing": "glacial"}).status_code
+        == 400
+    )
+    assert (
+        client.patch(f"/api/storyboard/{sb}", json={"pacing": None}).status_code == 400
+    )
+
+    scene = client.post(f"/api/storyboard/{sb}/scenes", json={"name": "S"}).json()["id"]
+    r = client.patch(
+        f"/api/storyboard/scenes/{scene}",
+        json={"arc_beats": ["setup", "turn"], "charge_in": -1, "charge_out": 3},
+    )
+    assert r.status_code == 200
+    tree = client.get(f"/api/storyboard/{sb}").json()
+    assert tree["scenes"][0]["arc_beats"] == ["setup", "turn"]
+    assert tree["scenes"][0]["charge_out"] == 3
+    assert (
+        client.patch(
+            f"/api/storyboard/scenes/{scene}", json={"arc_beats": None}
+        ).status_code
+        == 400
+    )
+
+    panel = client.post(
+        f"/api/storyboard/scenes/{scene}/panels", json={"action": "a"}
+    ).json()["id"]
+    r = client.patch(
+        f"/api/storyboard/panels/{panel}",
+        json={"is_turn": 1, "subtext": "hidden meaning"},
+    )
+    assert r.status_code == 200
+    assert r.json()["is_turn"] == 1 and r.json()["subtext"] == "hidden meaning"
+    assert (
+        client.patch(
+            f"/api/storyboard/panels/{panel}", json={"is_turn": None}
+        ).status_code
+        == 400
+    )
+
+    beat = client.post(
+        f"/api/storyboard/panels/{panel}/beats", json={"action": "b"}
+    ).json()["id"]
+    r = client.patch(
+        f"/api/storyboard/beats/{beat}",
+        json={
+            "composition": "centered",
+            "light_quality": "soft",
+            "emotional_intent": "jaw set",
+            "reveals": "the door",
+            "movement_motivation": "she leans in",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["composition"] == "centered"
+    assert body["movement_motivation"] == "she leans in"
+    # explicit null clears a nullable field
+    r = client.patch(f"/api/storyboard/beats/{beat}", json={"reveals": None})
+    assert r.status_code == 200 and r.json()["reveals"] is None

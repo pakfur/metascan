@@ -102,7 +102,14 @@ def test_validate_scenes_happy_and_empty():
 def test_shots_validator_slim_shape():
     raw = '[{"action": "The chase begins", "duration_s": 10}]'
     panels = story.validate_shots_response(raw)
-    assert panels == [{"action": "The chase begins", "duration_s": 10.0}]
+    assert panels == [
+        {
+            "action": "The chase begins",
+            "duration_s": 10.0,
+            "subtext": None,
+            "is_turn": 0,
+        }
+    ]
 
 
 def test_shots_grammar_has_no_framing_or_subjects():
@@ -191,25 +198,78 @@ def test_rescale_beat_durations_only_outside_tolerance():
     assert [b["duration_s"] for b in beats2] == [5.0, 6.0]
 
 
-def test_build_shots_user_prompt_states_max_shot_seconds():
-    prompt = story.build_shots_user_prompt(
-        json.dumps({"logline": "L"}),
-        {"name": "Yard", "setting": "hulls"},
+def _guidance():
+    return story.pacing_guidance("standard", 15.0)
+
+
+def test_build_shots_user_prompt_carries_spine_and_pacing():
+    scene = {
+        "name": "Yard",
+        "setting": "hulls",
+        "mood": "tense",
+        "lighting": None,
+        "time_of_day": "dusk",
+        "arc_beats": ["turn"],
+        "charge_in": -3,
+        "charge_out": 2,
+    }
+    p = story.build_shots_user_prompt(
+        "{}", scene, [], None, None, _guidance(), is_turn_scene=True
+    )
+    assert "Arc stages this scene covers: turn" in p
+    assert "opens at -3, closes at 2" in p
+    assert "exactly one shot must set is_turn to true" in p.lower()
+    assert "between 2 and 4 shots" in p
+    assert "8 and 15 seconds" in p
+    p2 = story.build_shots_user_prompt(
+        "{}",
+        dict(scene, arc_beats=["setup"]),
         [],
         None,
         None,
-        max_shot_s=10.0,
+        _guidance(),
+        is_turn_scene=False,
     )
-    assert "at most 10 seconds" in prompt
-    # default stays 15s when the caller doesn't override it.
-    default_prompt = story.build_shots_user_prompt(
-        json.dumps({"logline": "L"}),
-        {"name": "Yard", "setting": "hulls"},
+    assert "every shot sets is_turn false" in p2.lower()
+
+
+def test_build_beats_user_prompt_reinjects_bible_and_context():
+    outline = {"logline": "L", "tone": "grim"}
+    scene = {
+        "name": "Yard",
+        "setting": "rusting hulls",
+        "location": None,
+        "time_of_day": "dusk",
+        "mood": "tense",
+        "lighting": "sodium lamps",
+    }
+    panel = {
+        "action": "Maya crosses",
+        "duration_s": 10.0,
+        "subtext": "she is afraid",
+        "is_turn": 1,
+    }
+    p = story.build_beats_user_prompt(
+        outline,
+        scene,
+        panel,
         [],
-        None,
-        None,
+        _guidance(),
+        prev_panel_action="He watches",
+        prev_beat_summary="MCU, low, soft",
     )
-    assert "at most 15 seconds" in default_prompt
+    assert "Tone: grim" in p
+    assert "rusting hulls" in p and "sodium lamps" in p and "dusk" in p
+    assert "Shot subtext: she is afraid" in p
+    assert "tightest" in p.lower()  # turn directive
+    assert "Previous shot in this scene: He watches" in p
+    assert "MCU, low, soft" in p
+    assert "2 to 4 beats" in p
+    # opener variant
+    p2 = story.build_beats_user_prompt(
+        outline, scene, dict(panel, is_turn=0), [], _guidance(), None, None
+    )
+    assert "opening shot" in p2 and "WS or EWS" in p2
 
 
 def test_camera_vocabulary_matches_spec():
@@ -288,3 +348,254 @@ def test_truncated_beats_array_salvages_across_nested_dialog():
     beats, warnings = validate_beats_response(truncated, {})
     assert len(beats) == 1
     assert beats[0]["dialog"][0]["text"] == "Easy now."
+
+
+def test_pacing_table_and_shot_cap_clamp():
+    g = story.pacing_guidance("standard", 15.0)
+    assert g["panel_min_s"] == 8.0 and g["panel_max_s"] == 15.0
+    assert g["shots_min"] == 2 and g["shots_max"] == 4
+    assert g["beats_min"] == 2 and g["beats_max"] == 4
+    assert g["beat_asl_s"] == 4.5
+    clamped = story.pacing_guidance("contemplative", 8.0)
+    assert clamped["panel_max_s"] == 8.0
+    assert clamped["panel_min_s"] == 8.0  # min never exceeds max
+    assert story.pacing_guidance("bogus", 15.0) == story.pacing_guidance(
+        "standard", 15.0
+    )
+
+
+def test_new_vocabularies_match_spec():
+    assert story.PACING_VALUES == ("contemplative", "standard", "propulsive")
+    assert "negative_space" in story.COMPOSITION_VALUES
+    assert len(story.COMPOSITION_VALUES) == 8
+    assert story.LIGHT_QUALITY_VALUES == (
+        "hard",
+        "soft",
+        "dappled",
+        "practical",
+        "window",
+        "firelight",
+        "ambient",
+    )
+
+
+def test_outline_pacing_validated_with_fallback():
+    base = {
+        "logline": "L",
+        "tone": "T",
+        "duration_target_s": 60,
+        "subjects": [],
+        "arc": [{"beat": "setup", "summary": "s"}],
+    }
+    good = dict(base, pacing="propulsive")
+    assert story.validate_outline_response(json.dumps(good))["pacing"] == "propulsive"
+    bad = dict(base, pacing="glacial")
+    assert story.validate_outline_response(json.dumps(bad))["pacing"] == "standard"
+    assert story.validate_outline_response(json.dumps(base))["pacing"] == "standard"
+
+
+def test_scenes_dramatic_fields_validated():
+    raw = json.dumps(
+        [
+            {
+                "name": "A",
+                "arc_beats": ["setup", "bogus", "turn"],
+                "charge_in": -2,
+                "charge_out": 3,
+            },
+            {"name": "B", "charge_in": 99, "charge_out": "x"},
+        ]
+    )
+    scenes = story.validate_scenes_response(raw)
+    assert scenes[0]["arc_beats"] == ["setup", "turn"]  # unknown stage dropped
+    assert scenes[0]["charge_in"] == -2 and scenes[0]["charge_out"] == 3
+    assert scenes[1]["arc_beats"] == []
+    assert scenes[1]["charge_in"] is None  # out of range
+    assert scenes[1]["charge_out"] is None  # garbage
+
+
+def test_shots_subtext_and_is_turn():
+    raw = json.dumps(
+        [
+            {"action": "a", "duration_s": 8, "subtext": " hides it ", "is_turn": True},
+            {"action": "b", "duration_s": 8},
+        ]
+    )
+    panels = story.validate_shots_response(raw)
+    assert panels[0]["subtext"] == "hides it" and panels[0]["is_turn"] == 1
+    assert panels[1]["subtext"] is None and panels[1]["is_turn"] == 0
+
+
+def test_beats_visual_grammar_fields_and_static_nulling():
+    beat = {
+        "duration_s": 3,
+        "action": "a",
+        "shot_size": "CU",
+        "angle": None,
+        "lens": None,
+        "subjects": [],
+        "camera_motion": "static",
+        "camera_amplitude": "large",
+        "camera_speed": "fast",
+        "movement_motivation": "won't matter",
+        "is_cut": False,
+        "sound": None,
+        "dialog": [],
+        "composition": "negative_space",
+        "light_quality": "firelight",
+        "emotional_intent": "jaw set",
+        "reveals": "the empty chair",
+    }
+    beats, _ = story.validate_beats_response(json.dumps([beat]), {})
+    b = beats[0]
+    assert b["composition"] == "negative_space"
+    assert b["light_quality"] == "firelight"
+    assert b["emotional_intent"] == "jaw set"
+    assert b["reveals"] == "the empty chair"
+    # static motion mechanically nulls amplitude/speed/motivation
+    assert b["camera_amplitude"] is None
+    assert b["camera_speed"] is None
+    assert b["movement_motivation"] is None
+    bad = dict(beat, composition="rule_of_odds", light_quality="neon")
+    beats, _ = story.validate_beats_response(json.dumps([bad]), {})
+    assert beats[0]["composition"] is None and beats[0]["light_quality"] is None
+
+
+def test_new_grammars_carry_new_fields():
+    # Field names are GBNF string literals, so the JSON quotes are
+    # backslash-escaped in the grammar source (matches every existing
+    # field, e.g. \"logline\") — not bare '"pacing"'.
+    assert r"\"pacing\"" in story.OUTLINE_GRAMMAR
+    for token in (r"\"arc_beats\"", r"\"charge_in\"", r"\"charge_out\""):
+        assert token in story.SCENES_GRAMMAR
+    for token in (r"\"subtext\"", r"\"is_turn\""):
+        assert token in story.SHOTS_GRAMMAR
+    for token in (
+        r"\"composition\"",
+        r"\"light_quality\"",
+        r"\"emotional_intent\"",
+        r"\"reveals\"",
+        r"\"movement_motivation\"",
+    ):
+        assert token in story.BEATS_GRAMMAR
+
+
+def _scene(name, arc_beats, cin, cout):
+    return {"name": name, "arc_beats": arc_beats, "charge_in": cin, "charge_out": cout}
+
+
+def test_lint_scene_charges_happy_path():
+    arc = [{"beat": "setup"}, {"beat": "turn"}, {"beat": "resolution"}]
+    scenes = [
+        _scene("A", ["setup"], -1, -3),
+        _scene("B", ["turn", "resolution"], -3, 2),
+    ]
+    assert story.lint_scene_charges(scenes, arc) == []
+
+
+def test_lint_scene_charges_catches_each_rule():
+    arc = [{"beat": "setup"}, {"beat": "turn"}]
+    # broken chain + missing charge
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], -1, -2), _scene("B", ["turn"], 1, None)], arc
+    )
+    assert any("chain must be continuous" in m for m in v)
+    assert any("missing charge" in m for m in v)
+    # coverage: arc stage never lands / wrong order
+    v = story.lint_scene_charges([_scene("A", ["turn", "setup"], 0, 4)], arc)
+    assert any("arc_beats" in m for m in v)
+    # turn scene must swing hardest
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], -4, 4), _scene("B", ["turn"], 4, 3)], arc
+    )
+    assert any("largest charge swing" in m for m in v)
+    # polarity flip
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], 2, 4), _scene("B", ["turn"], 4, 1)], arc
+    )
+    assert any("polarity" in m for m in v)
+    # neutral open (0) never trips the polarity rule
+    v = story.lint_scene_charges(
+        [_scene("A", ["setup"], 0, 2), _scene("B", ["turn"], 2, 4)], arc
+    )
+    assert not any("polarity" in m for m in v)
+
+
+def test_lint_shots_turn_and_subtext():
+    ok = [
+        {"action": "she waits", "subtext": "she is afraid to knock", "is_turn": 0},
+        {"action": "he opens", "subtext": "he knew she'd come", "is_turn": 1},
+    ]
+    assert story.lint_shots(ok, scene_is_turn=True) == []
+    v = story.lint_shots(ok, scene_is_turn=False)
+    assert v == []  # stray turns are zeroed mechanically, not linted
+    two_turns = [dict(ok[0], is_turn=1), ok[1]]
+    v = story.lint_shots(two_turns, scene_is_turn=True)
+    assert any("exactly one shot" in m for m in v)
+    v = story.lint_shots(
+        [{"action": "she waits", "subtext": " She Waits ", "is_turn": 1}],
+        scene_is_turn=True,
+    )
+    assert any("restates" in m for m in v)
+    v = story.lint_shots([{"action": "a", "subtext": None, "is_turn": 1}], True)
+    assert any("empty subtext" in m for m in v)
+
+
+def _beat(size, motion=None, motivation=None, reveals="something new"):
+    return {
+        "shot_size": size,
+        "camera_motion": motion,
+        "movement_motivation": motivation,
+        "reveals": reveals,
+    }
+
+
+def test_lint_beats_rules():
+    # triple repeat, including across the panel boundary
+    v = story.lint_beats(
+        [_beat("MCU"), _beat("MCU")],
+        is_turn_panel=False,
+        is_scene_opener=False,
+        prev_shot_sizes=["MCU"],
+    )
+    assert any("three consecutive" in m for m in v)
+    # opener must be wide
+    v = story.lint_beats([_beat("CU")], is_turn_panel=False, is_scene_opener=True)
+    assert any("establish" in m for m in v)
+    assert (
+        story.lint_beats([_beat("WS")], is_turn_panel=False, is_scene_opener=True) == []
+    )
+    # unmotivated move
+    v = story.lint_beats(
+        [_beat("WS", motion="push_in")], is_turn_panel=False, is_scene_opener=False
+    )
+    assert any("movement_motivation" in m for m in v)
+    # empty reveals
+    v = story.lint_beats(
+        [_beat("WS", reveals=None)], is_turn_panel=False, is_scene_opener=False
+    )
+    assert any("reveals" in m for m in v)
+    # turn panel: tightest framing must not sit on beat 1
+    v = story.lint_beats(
+        [_beat("ECU"), _beat("WS")], is_turn_panel=True, is_scene_opener=False
+    )
+    assert any("tightest" in m for m in v)
+    assert (
+        story.lint_beats(
+            [_beat("WS"), _beat("ECU")], is_turn_panel=True, is_scene_opener=False
+        )
+        == []
+    )
+
+
+def test_describe_beat_framing():
+    assert story.describe_beat_framing(
+        {
+            "shot_size": "MCU",
+            "angle": "low",
+            "lens": None,
+            "composition": "centered",
+            "light_quality": "soft",
+        }
+    ) == ("MCU, low, centered, soft")
+    assert story.describe_beat_framing({}) == "unspecified framing"

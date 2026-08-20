@@ -6,8 +6,20 @@ import { fetchConfig } from '../../api/config'
 import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
-import { ASPECT_RATIOS, TARGET_MODELS, VIDEO_TARGETS, VIDEO_MODES } from '../../types/storyboard'
+import {
+  ASPECT_RATIOS,
+  TARGET_MODELS,
+  VIDEO_TARGETS,
+  VIDEO_MODES,
+  PACINGS,
+} from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
+
+const PACING_LABELS: Record<string, string> = {
+  contemplative: 'Contemplative — long held shots, ~6–8s per beat',
+  standard: 'Standard — most drama, ~4–5s per beat',
+  propulsive: 'Propulsive — chase/argument energy, ~2–3s per beat',
+}
 
 const emit = defineEmits<{ close: [] }>()
 const store = useStoryboardStore()
@@ -17,6 +29,7 @@ const store = useStoryboardStore()
 const name = ref('')
 const aspectRatio = ref('')
 const targetModel = ref('')
+const pacing = ref('standard')
 const presetId = ref<number | null>(null)
 const batchSize = ref(1)
 const baseSeed = ref(0)
@@ -46,6 +59,7 @@ let original = {
   name: '',
   aspectRatio: '',
   targetModel: '',
+  pacing: 'standard',
   presetId: null as number | null,
   batchSize: 1,
   baseSeed: 0,
@@ -66,6 +80,7 @@ function seedFromTree(): void {
   name.value = t.name
   aspectRatio.value = t.aspect_ratio
   targetModel.value = t.target_model
+  pacing.value = t.pacing
   presetId.value = t.preset_id
   batchSize.value = t.batch_size
   baseSeed.value = t.base_seed
@@ -82,6 +97,7 @@ function seedFromTree(): void {
     name: name.value,
     aspectRatio: aspectRatio.value,
     targetModel: targetModel.value,
+    pacing: pacing.value,
     presetId: presetId.value,
     batchSize: batchSize.value,
     baseSeed: baseSeed.value,
@@ -134,6 +150,7 @@ async function saveFields(): Promise<void> {
     name: string
     aspect_ratio: string
     target_model: string
+    pacing: string
     preset_id: number | null
     batch_size: number
     base_seed: number
@@ -152,6 +169,7 @@ async function saveFields(): Promise<void> {
   if (trimmedName !== original.name) body.name = trimmedName
   if (aspectRatio.value !== original.aspectRatio) body.aspect_ratio = aspectRatio.value
   if (targetModel.value !== original.targetModel) body.target_model = targetModel.value
+  if (pacing.value !== original.pacing) body.pacing = pacing.value
   // Selecting "None" sends an explicit `preset_id: null` clear -- the
   // backend now honors that (exclude_unset=True) instead of silently
   // dropping it, so this must count as a real changed field too, or
@@ -376,6 +394,13 @@ function close(): void {
               <option v-for="m in TARGET_MODELS" :key="m" :value="m">{{ m }}</option>
             </select>
           </div>
+        </div>
+
+        <div class="field">
+          <label for="ss-pacing">Pacing</label>
+          <select id="ss-pacing" v-model="pacing">
+            <option v-for="p in PACINGS" :key="p" :value="p">{{ PACING_LABELS[p] }}</option>
+          </select>
         </div>
 
         <div class="field">

@@ -7,6 +7,12 @@
             {{ collapsed.has(scene.id) ? '▶' : '▼' }}
           </button>
           <span class="or-scene-name">{{ scene.name }}</span>
+          <span
+            v-if="scene.charge_in !== null && scene.charge_out !== null"
+            class="or-charge"
+            :class="chargeClass(scene)"
+            :title="`Emotional charge ${scene.charge_in} → ${scene.charge_out}`"
+          >{{ scene.charge_in }} → {{ scene.charge_out }}</span>
           <span class="or-scene-count">{{ scene.panels.length }}</span>
           <button
             type="button"
@@ -33,7 +39,10 @@
               <JobBadge v-if="rowJob(p)" :state="rowJob(p)!.state" :error="rowJob(p)!.error" />
             </span>
             <span class="or-shot-text">
-              <span class="or-shot-line1">{{ i + 1 }}. {{ p.action }}</span>
+              <span class="or-shot-line1">
+                <span v-if="p.is_turn === 1" class="or-turn" title="Story turn">★</span>
+                {{ i + 1 }}. {{ p.action }}
+              </span>
               <span class="or-shot-line2">
                 {{ p.beats.length }} beats · {{ shotSecs(p).toFixed(1) }}s
                 <template v-if="p.videos.length"> · 🎬{{ p.videos.length }}</template>
@@ -99,6 +108,12 @@ function firstBeatKeeperSrc(p: Panel): string | null {
 
 function shotSecs(p: Panel): number {
   return p.beats.reduce((s, b) => s + b.duration_s, 0)
+}
+
+function chargeClass(scene: Scene): string {
+  const ci = scene.charge_in ?? 0
+  const co = scene.charge_out ?? 0
+  return co > ci ? 'up' : co < ci ? 'down' : 'flat'
 }
 
 // A shot row's job badge: the panel's own video job wins, else the first
@@ -246,6 +261,27 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   font-variant-numeric: tabular-nums;
 }
 
+.or-charge {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.or-charge.up {
+  color: var(--ok, #4caf50);
+}
+
+.or-charge.down {
+  color: var(--danger-color, #e57373);
+}
+
+.or-charge.flat {
+  color: var(--text-color-secondary);
+  opacity: 0.5;
+}
+
 .or-kebab {
   width: 18px;
   height: 18px;
@@ -329,6 +365,11 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.or-turn {
+  color: var(--primary-color);
+  margin-right: 2px;
 }
 
 .or-shot-line2 {

@@ -36,6 +36,7 @@ from metascan.core.comfy_client import ComfyError
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
+from metascan.core.storyboard_story import PACING_VALUES
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path
@@ -52,10 +53,18 @@ router = APIRouter(prefix="/api/storyboard", tags=["storyboard"])
 # sqlite3 as a raw NOT NULL constraint violation (500). Reject it as a 400
 # instead, naming the offending field(s).
 _STORYBOARD_NOT_NULLABLE = frozenset(
-    {"name", "aspect_ratio", "target_model", "architecture", "base_seed", "batch_size"}
+    {
+        "name",
+        "aspect_ratio",
+        "target_model",
+        "architecture",
+        "base_seed",
+        "batch_size",
+        "pacing",
+    }
 )
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
-_SCENE_NOT_NULLABLE = frozenset({"name", "sort_order"})
+_SCENE_NOT_NULLABLE = frozenset({"name", "sort_order", "arc_beats"})
 _PANEL_NOT_NULLABLE = frozenset(
     {
         "sort_order",
@@ -64,6 +73,7 @@ _PANEL_NOT_NULLABLE = frozenset(
         "image_loras",
         "video_loras",
         "video_prompt_locked",
+        "is_turn",
     }
 )
 _BEAT_NOT_NULLABLE = frozenset(
@@ -159,6 +169,7 @@ class StoryboardPatch(BaseModel):
     video_output_dir: Optional[str] = None
     video_name_template: Optional[str] = None
     image_name_template: Optional[str] = None
+    pacing: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -209,6 +220,9 @@ class ScenePatch(BaseModel):
     lighting: Optional[str] = None
     notes: Optional[str] = None
     reference_path: Optional[str] = None
+    arc_beats: Optional[List[str]] = None
+    charge_in: Optional[int] = None
+    charge_out: Optional[int] = None
 
 
 class PanelCreate(BaseModel):
@@ -231,6 +245,8 @@ class PanelPatch(BaseModel):
     video_prompt: Optional[str] = None
     video_prompt_locked: Optional[int] = None
     video_anchor: Optional[str] = None
+    is_turn: Optional[int] = None
+    subtext: Optional[str] = None
 
 
 class ParseRequest(BaseModel):
@@ -307,6 +323,11 @@ class BeatPatch(BaseModel):
     prompt: Optional[str] = None
     prompt_locked: Optional[int] = None
     prompt_source: Optional[str] = None
+    composition: Optional[str] = None
+    light_quality: Optional[str] = None
+    emotional_intent: Optional[str] = None
+    reveals: Optional[str] = None
+    movement_motivation: Optional[str] = None
     # selected_image_id deliberately NOT exposed: keeper selection toggles
     # media.hidden via db.select_beat_image. Use POST /beats/{id}/select.
 
@@ -367,6 +388,11 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
 
     fields = body.model_dump(exclude_unset=True)
     _reject_null_for_required(fields, _STORYBOARD_NOT_NULLABLE)
+    if "pacing" in fields and fields["pacing"] not in PACING_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"pacing must be one of: {', '.join(PACING_VALUES)}",
+        )
     if "aspect_ratio" in fields or "target_model" in fields:
         effective_aspect = fields.get("aspect_ratio", existing["aspect_ratio"])
         effective_target = fields.get("target_model", existing["target_model"])

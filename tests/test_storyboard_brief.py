@@ -127,3 +127,32 @@ def test_compose_brief_omits_empty_lines():
         [],
     )
     assert brief == "SHOT: 1:1\nACTION: a cat"
+
+
+def test_compose_brief_carries_cinematic_fields():
+    storyboard = {"aspect_ratio": "16:9"}
+    scene = {"setting": "yard", "time_of_day": "dusk", "lighting": None, "mood": None}
+    panel = {"action": "she crosses"}
+    beat = {
+        "shot_size": "MCU",
+        "angle": "low",
+        "lens": None,
+        "composition": "negative_space",
+        "light_quality": "window",
+        "emotional_intent": "jaw set, eyes on the floor",
+        "action": "she stops",
+    }
+    brief = compose_brief(storyboard, scene, panel, beat, [])
+    assert "negative space composition" in brief
+    assert "PERFORMANCE: jaw set, eyes on the floor" in brief
+    assert "motivated window light" in brief
+    # light quality joins the LIGHT/MOOD line ahead of scene values
+    light_line = next(l for l in brief.splitlines() if l.startswith("LIGHT/MOOD"))
+    assert light_line.index("window") < light_line.index("dusk")
+
+
+def test_compose_brief_omits_absent_cinematic_fields():
+    brief = compose_brief(
+        {"aspect_ratio": "16:9"}, {}, {"action": "a"}, {"action": "b"}, []
+    )
+    assert "PERFORMANCE" not in brief and "composition" not in brief
