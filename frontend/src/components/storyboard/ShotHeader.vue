@@ -29,6 +29,8 @@ const hasActiveGenJob = computed(() => props.panel.beats.some((b) => store.beatJ
 // (an uncommitted PATCH is in flight for that field).
 const actionVal = ref('')
 const actionSnap = ref('')
+const subtextVal = ref('')
+const subtextSnap = ref('')
 
 function syncField(local: Ref<string>, snap: Ref<string>, serverVal: string): void {
   if (local.value === snap.value) {
@@ -44,6 +46,7 @@ watch(
   () => [props.panel.id, props.panel.updated_at],
   () => {
     syncField(actionVal, actionSnap, props.panel.action ?? '')
+    syncField(subtextVal, subtextSnap, props.panel.subtext ?? '')
   },
   { immediate: true },
 )
@@ -67,6 +70,21 @@ function commitAction(e: Event): void {
   actionSnap.value = val
   if (val === props.panel.action) return
   void store.patchPanelFields(props.panel.id, { action: val })
+}
+
+function commitSubtext(e: Event): void {
+  const val = (e.target as HTMLInputElement).value
+  subtextVal.value = val
+  subtextSnap.value = val
+  const next = val.trim() || null
+  if (next === (props.panel.subtext ?? null)) return
+  void store.patchPanelFields(props.panel.id, { subtext: next })
+}
+
+function toggleTurn(): void {
+  void store.patchPanelFields(props.panel.id, {
+    is_turn: props.panel.is_turn ? 0 : 1,
+  })
 }
 
 // LoraListEditor rows are fully controlled + commit-on-change, so unlike
@@ -231,7 +249,18 @@ async function renderVideo(): Promise<void> {
     <div class="sh-row3">
       <div class="sh-field sh-action-field">
         <label class="sh-label">Shot action</label>
-        <input type="text" :value="actionVal" @change="commitAction" />
+        <div class="sh-action-row">
+          <input type="text" :value="actionVal" @change="commitAction" />
+          <button
+            type="button"
+            class="sh-turn"
+            :class="{ on: panel.is_turn === 1 }"
+            title="Mark as the story's turn"
+            @click="toggleTurn"
+          >
+            ★ Turn
+          </button>
+        </div>
       </div>
 
       <div class="sh-video-group">
@@ -276,6 +305,16 @@ async function renderVideo(): Promise<void> {
         </template>
       </div>
     </div>
+
+    <label class="sh-field">
+      <span class="sh-label">Subtext</span>
+      <input
+        type="text"
+        :value="subtextVal"
+        placeholder="what the shot means but doesn't show"
+        @change="commitSubtext"
+      />
+    </label>
 
     <div class="sh-row4">
       <div class="sh-lora-wrap">
@@ -448,6 +487,41 @@ async function renderVideo(): Promise<void> {
 .sh-action-field {
   flex: 1;
   min-width: 220px;
+}
+
+.sh-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sh-action-row input[type='text'] {
+  flex: 1;
+}
+
+.sh-turn {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-ground);
+  color: var(--text-color-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    color 0.15s,
+    border-color 0.15s;
+}
+
+.sh-turn:hover {
+  background: var(--surface-hover);
+}
+
+.sh-turn.on {
+  color: var(--warn, #ffb300);
+  border-color: var(--warn, #ffb300);
+  background: color-mix(in srgb, var(--warn, #ffb300) 14%, transparent);
 }
 
 .sh-label {
