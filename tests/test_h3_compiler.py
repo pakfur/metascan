@@ -321,10 +321,13 @@ def test_subject_definitions_verbatim_and_env() -> None:
         "location": "Farmhouse",
         "reference_path": None,
     }
+    # No scene reference_path -> the environment is not referenced content,
+    # so it gets no Subject slot and no definition line at all.
     refplan2 = assign_reference_labels([], scene_no_setting)
+    assert refplan2.environment_label is None
     text2 = render_subject_definitions(refplan2, [], scene_no_setting)
-    assert "<Subject 1> is the Kitchen environment: Farmhouse." in text2
-    assert "in <Picture" not in text2  # no scene reference_path -> no citation
+    assert "environment" not in text2
+    assert "in <Picture" not in text2
 
 
 def test_summary_prefix_modes() -> None:
@@ -1213,3 +1216,67 @@ def test_render_detailed_description_substitutes_subject_labels():
     dd = render_detailed_description("cinematic", beats, tl, speakers, subs, plan)
     assert "<Subject 2> waves at <Subject 1>'s reflection" in dd
     assert "Young Escort" not in dd and "Business Woman" not in dd
+
+
+# -- Environment subject is emitted only for referenced scenes -----------
+
+
+def _scene_no_ref() -> Dict[str, Any]:
+    return {
+        "id": 1,
+        "name": "Kitchen",
+        "setting": "a sunlit farmhouse kitchen with a wooden table",
+        "location": "Farmhouse",
+        "reference_path": None,
+    }
+
+
+def test_environment_label_none_without_scene_reference() -> None:
+    refplan = assign_reference_labels(_subjects(), _scene_no_ref())
+    assert refplan.environment_label is None
+    # Picture numbering is unaffected: two subject refs, then the keyframe.
+    assert refplan.keyframe_picture_label == "Picture 3"
+
+
+def test_definitions_and_retention_omit_unreferenced_environment() -> None:
+    subjects = _subjects()
+    scene = _scene_no_ref()
+    refplan = assign_reference_labels(subjects, scene)
+
+    text = render_subject_definitions(refplan, subjects, scene)
+    assert "environment" not in text
+    assert "<Subject 3>" not in text
+
+    timeline = compute_timeline(_beats(), 6.0, "ref2va", refplan)
+    retention = render_retention_analysis(refplan, subjects, scene, timeline)
+    assert "environment" not in retention
+    assert "<Subject 3>" not in retention
+
+
+def test_summary_names_scene_in_prose_without_environment_subject() -> None:
+    subjects = _subjects()
+    refplan = assign_reference_labels(subjects, _scene_no_ref())
+    summary = render_summary(
+        refplan,
+        {"action": "share a quiet morning together"},
+        subjects,
+        "ref2va",
+        _scene_no_ref(),
+    )
+    assert (
+        "The target video shows <Subject 1> and <Subject 2> in the Kitchen "
+        "setting: share a quiet morning together." in summary
+    )
+    assert "<Subject 3>" not in summary
+
+
+def test_expectations_exclude_skipped_environment_label() -> None:
+    subjects = _subjects()
+    scene = _scene_no_ref()
+    refplan = assign_reference_labels(subjects, scene)
+    beats = _beats()
+    timeline = compute_timeline(beats, 6.0, "ref2va", refplan)
+    speakers = assign_speakers(beats, subjects, refplan)
+    expectations = build_expectations(refplan, speakers, timeline, "ref2va", beats)
+    assert "Subject 3" not in expectations.subject_labels
+    assert "Subject 1" in expectations.subject_labels

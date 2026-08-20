@@ -66,7 +66,11 @@ class H3Error(ValueError):
 @dataclass(frozen=True)
 class RefPlan:
     subject_labels: Dict[int, str]  # subject_id -> "Subject 1"
-    environment_label: str  # "Subject K+1" (scene environment)
+    # "Subject K+1" for a scene with a reference image; None when the scene
+    # has no reference -- an unreferenced environment is not "referenced
+    # content that must be tracked separately" (ref-guide SS2), so it gets no
+    # Subject slot and the summary names the scene in prose instead.
+    environment_label: Optional[str]
     picture_labels: List[Tuple[str, str]]  # [(posix_path, "Picture 1"), ...]
     keyframe_picture_label: str  # next free "Picture N" (i2va/fl2va anchors)
     # (subject_id, "Audio N") -- numbered 1.. in subject sort_order, assigned
@@ -172,8 +176,13 @@ def assign_reference_labels(
     """Number subjects, the scene environment, every reference picture, and
     every voice-timbre audio reference.
 
-    ref-guide §2.1 makes environments Subjects: the scene always becomes
-    the final ``<Subject K+1>``. Pictures are numbered in upload order:
+    ref-guide §2.1 admits environments as Subjects; a scene becomes the
+    final ``<Subject K+1>`` only when it carries a reference image (it is
+    then genuinely referenced content to track). An unreferenced scene gets
+    ``environment_label=None`` and is named in prose by the summary
+    instead -- a picture-less environment Subject only duplicated whatever
+    roster subject already covered the room. Pictures are numbered in
+    upload order:
     each subject's ``reference_path`` then ``reference_path_2`` (subject
     order), then the scene's ``reference_path``. ``<Audio N>`` labels
     (ref-guide §2.4) are numbered separately, in subject ``sort_order``,
@@ -202,7 +211,7 @@ def assign_reference_labels(
         picture_labels.append((scene_ref, f"Picture {next_picture}"))
         next_picture += 1
 
-    environment_label = f"Subject {len(subject_labels) + 1}"
+    environment_label = f"Subject {len(subject_labels) + 1}" if scene_ref else None
     keyframe_picture_label = f"Picture {next_picture}"
     return RefPlan(
         subject_labels=subject_labels,
@@ -404,19 +413,21 @@ def render_subject_definitions(
         else:
             lines.append(f"<{label}> is the {name}: {description}.")
 
-    scene_name = scene.get("name", "scene")
-    setting = _fallback_setting(scene)
-    scene_ref = scene.get("reference_path")
-    env_pic = pic_by_path.get(scene_ref) if scene_ref else None
-    if env_pic:
-        lines.append(
-            f"<{refplan.environment_label}> is the {scene_name} environment "
-            f"in <{env_pic}>, {setting}."
-        )
-    else:
-        lines.append(
-            f"<{refplan.environment_label}> is the {scene_name} environment: {setting}."
-        )
+    if refplan.environment_label is not None:
+        scene_name = scene.get("name", "scene")
+        setting = _fallback_setting(scene)
+        scene_ref = scene.get("reference_path")
+        env_pic = pic_by_path.get(scene_ref) if scene_ref else None
+        if env_pic:
+            lines.append(
+                f"<{refplan.environment_label}> is the {scene_name} environment "
+                f"in <{env_pic}>, {setting}."
+            )
+        else:
+            lines.append(
+                f"<{refplan.environment_label}> is the {scene_name} "
+                f"environment: {setting}."
+            )
     return "\n".join(lines)
 
 
@@ -425,6 +436,7 @@ def render_summary(
     panel: Mapping[str, Any],
     subjects: Sequence[Mapping[str, Any]],
     mode: str,
+    scene: Optional[Mapping[str, Any]] = None,
 ) -> str:
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     labels = [f"<{refplan.subject_labels[s['id']]}>" for s in ordered]
@@ -441,10 +453,14 @@ def render_summary(
         else "[reference generation]"
     )
     action = _substitute_subject_labels(str(panel.get("action", "")), subjects, refplan)
-    return (
-        f"{prefix} The target video shows {joined} in "
-        f"<{refplan.environment_label}>: {action}."
-    )
+    if refplan.environment_label is not None:
+        where = f"<{refplan.environment_label}>"
+    else:
+        # No environment Subject (unreferenced scene): name the scene in
+        # prose so the summary still situates the shot.
+        scene_name = str(scene.get("name") or "") if scene else ""
+        where = f"the {scene_name} setting" if scene_name else "the scene setting"
+    return f"{prefix} The target video shows {joined} in {where}: {action}."
 
 
 def _first_words(text: str, n: int = 12) -> str:
@@ -468,11 +484,12 @@ def render_retention_analysis(
             f"<{label}> (appears in {shot_list}): fully_preserved - {descriptor}."
         )
 
-    env_descriptor = _first_words(_fallback_setting(scene))
-    lines.append(
-        f"<{refplan.environment_label}> (appears in {shot_list}): "
-        f"fully_preserved - {env_descriptor}."
-    )
+    if refplan.environment_label is not None:
+        env_descriptor = _first_words(_fallback_setting(scene))
+        lines.append(
+            f"<{refplan.environment_label}> (appears in {shot_list}): "
+            f"fully_preserved - {env_descriptor}."
+        )
 
     if timeline.alignment_line is not None:
         kf = refplan.keyframe_picture_label
@@ -966,7 +983,8 @@ def build_expectations(
     ``camera_motion`` fields actually called for.
     """
     subject_labels = set(refplan.subject_labels.values())
-    subject_labels.add(refplan.environment_label)
+    if refplan.environment_label is not None:
+        subject_labels.add(refplan.environment_label)
 
     picture_labels = {label for _, label in refplan.picture_labels}
     if mode in _KEYFRAME_MODES:
