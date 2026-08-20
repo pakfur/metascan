@@ -559,3 +559,154 @@ def rescale_beat_durations(
     for b in beats:
         b["duration_s"] = round(float(b["duration_s"]) * factor, 1)
     return beats
+
+
+# -- Cinematic lints (spec §6) ------------------------------------------------
+# Each returns human-readable violations phrased as instructions: the
+# runner appends them verbatim to a targeted re-roll prompt, and small
+# models correct well against specific complaints.
+
+_TIGHTNESS: Dict[str, int] = {v: i for i, v in enumerate(SHOT_SIZE_VALUES)}
+
+
+def describe_beat_framing(beat: Mapping[str, Any]) -> str:
+    """Short framing summary for re-injection into the next beats call."""
+    bits = [
+        beat.get("shot_size"),
+        beat.get("angle"),
+        beat.get("lens"),
+        beat.get("composition"),
+        beat.get("light_quality"),
+    ]
+    present = [str(b) for b in bits if b]
+    return ", ".join(present) or "unspecified framing"
+
+
+def lint_scene_charges(
+    scenes: Sequence[Mapping[str, Any]], arc: Sequence[Mapping[str, Any]]
+) -> List[str]:
+    out: List[str] = []
+    expected = [a["beat"] for a in arc if isinstance(a, dict) and a.get("beat")]
+    got = [b for sc in scenes for b in (sc.get("arc_beats") or [])]
+    if expected and got != expected:
+        out.append(
+            "the scenes' arc_beats concatenated in scene order must be "
+            f"exactly {expected} (every outline arc entry in exactly one "
+            f"scene, in story order, no gaps); you produced {got}"
+        )
+    charges = [(sc.get("charge_in"), sc.get("charge_out")) for sc in scenes]
+    for i, (cin, cout) in enumerate(charges, 1):
+        if cin is None or cout is None:
+            out.append(f"scene {i} is missing charge_in/charge_out")
+    for i in range(1, len(charges)):
+        prev_out, cur_in = charges[i - 1][1], charges[i][0]
+        if prev_out is not None and cur_in is not None and prev_out != cur_in:
+            out.append(
+                f"scene {i + 1} charge_in={cur_in} but scene {i} "
+                f"charge_out={prev_out} — the chain must be continuous"
+            )
+    swings = [
+        abs(cout - cin) for cin, cout in charges if cin is not None and cout is not None
+    ]
+    turn_idx = next(
+        (i for i, sc in enumerate(scenes) if "turn" in (sc.get("arc_beats") or [])),
+        None,
+    )
+    if turn_idx is not None and swings:
+        cin, cout = charges[turn_idx]
+        if cin is not None and cout is not None and abs(cout - cin) < max(swings):
+            out.append(
+                f"the turn scene (scene {turn_idx + 1}) must have the "
+                "largest charge swing of any scene; another scene swings "
+                "harder"
+            )
+    first_in = charges[0][0] if charges else None
+    last_out = charges[-1][1] if charges else None
+    if (
+        first_in is not None
+        and last_out is not None
+        and first_in != 0
+        and last_out != 0
+        and (first_in > 0) == (last_out > 0)
+    ):
+        out.append("the story must not end on the same charge polarity it opened on")
+    return out
+
+
+def lint_shots(panels: Sequence[Mapping[str, Any]], scene_is_turn: bool) -> List[str]:
+    out: List[str] = []
+    if scene_is_turn:
+        turns = sum(1 for p in panels if p.get("is_turn"))
+        if turns != 1:
+            out.append(
+                "this scene contains the story's turn: exactly one shot "
+                f"must set is_turn true (you marked {turns})"
+            )
+    for i, p in enumerate(panels, 1):
+        sub = (p.get("subtext") or "").strip()
+        if not sub:
+            out.append(f"shot {i} has an empty subtext")
+        elif sub.lower() == (p.get("action") or "").strip().lower():
+            out.append(
+                f"shot {i}'s subtext restates its action — subtext is what "
+                "the shot means but does not show"
+            )
+    return out
+
+
+def lint_beats(
+    beats: Sequence[Mapping[str, Any]],
+    *,
+    is_turn_panel: bool,
+    is_scene_opener: bool,
+    prev_shot_sizes: Sequence[Optional[str]] = (),
+) -> List[str]:
+    out: List[str] = []
+    sizes = list(prev_shot_sizes) + [b.get("shot_size") for b in beats]
+    run = 1
+    for i in range(1, len(sizes)):
+        if sizes[i] is not None and sizes[i] == sizes[i - 1]:
+            run += 1
+        else:
+            run = 1
+        if run == 3:
+            out.append(
+                f'three consecutive beats use shot_size "{sizes[i]}" — '
+                "never the same shot size three beats running; vary the "
+                "framing"
+            )
+    if is_scene_opener and beats:
+        if beats[0].get("shot_size") not in ("WS", "EWS"):
+            out.append(
+                "the first beat of a scene's opening shot must establish "
+                "the space wide: use WS or EWS"
+            )
+    for i, b in enumerate(beats, 1):
+        motion = b.get("camera_motion")
+        if (
+            motion
+            and motion != "static"
+            and not (b.get("movement_motivation") or "").strip()
+        ):
+            out.append(
+                f'beat {i} has camera_motion "{motion}" but empty '
+                "movement_motivation — name what in the subject's behavior "
+                'or emotional state pulls the camera, or use "static"'
+            )
+        if not (b.get("reveals") or "").strip():
+            out.append(
+                f"beat {i} has an empty reveals — state what this beat "
+                "shows that the previous beat did not"
+            )
+    if is_turn_panel and len(beats) > 1:
+        indexed = [
+            (i, _TIGHTNESS[b["shot_size"]])
+            for i, b in enumerate(beats)
+            if b.get("shot_size") in _TIGHTNESS
+        ]
+        if indexed and min(indexed, key=lambda t: t[1])[0] == 0:
+            out.append(
+                "this shot is the story's turn: its tightest framing must "
+                "land on the beat where the turn hits, not on beat 1"
+            )
+    return out
