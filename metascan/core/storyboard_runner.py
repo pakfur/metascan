@@ -357,14 +357,18 @@ class StoryboardRunner:
                 sem = asyncio.Semaphore(slots)
 
                 for current in run_stages:
-                    n = await self._run_stage(
+                    n, stage_warnings = await self._run_stage(
                         current, vlm, sem, storyboard_id, scene_ids, panel_ids
                     )
                     counts[current] = n
                     self._emit(
                         "storyboard",
                         "story_stage_complete",
-                        {"storyboard_id": storyboard_id, "stage": current},
+                        {
+                            "storyboard_id": storyboard_id,
+                            "stage": current,
+                            "warnings": stage_warnings,
+                        },
                     )
         except Exception as exc:
             exc._compose_stage = current  # type: ignore[attr-defined]
@@ -379,7 +383,7 @@ class StoryboardRunner:
         storyboard_id: int,
         scene_ids: Optional[List[int]],
         panel_ids: Optional[List[int]],
-    ) -> int:
+    ) -> Tuple[int, List[str]]:
         tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
         assert tree is not None
         roster = {s["name"].strip().lower(): int(s["id"]) for s in tree["subjects"]}
@@ -397,18 +401,19 @@ class StoryboardRunner:
             )
 
         async def generate_validated(
-            unit: str, validate: Any, **gen_kwargs: Any
+            unit: str,
+            validate: Any,
+            lint: Optional[Any] = None,
+            **gen_kwargs: Any,
         ) -> Any:
-            """One VLM call + validation, retried once on StoryError.
-
-            Grammar-constrained output only fails validation when the
-            sampler truncated it at max_tokens (or produced empty fields)
-            — both stochastic, so a single fresh sample usually recovers.
-            The second failure propagates and fails the stage.
+            """One VLM call + validation (retried once on StoryError), then an
+            optional cinematic lint with ONE targeted re-roll: the violations
+            are appended verbatim to the user turn (spec §6). Style rules
+            never hard-fail — leftovers return as warnings.
             """
             raw = await vlm.generate_text(**gen_kwargs)
             try:
-                return validate(raw)
+                result = validate(raw)
             except story.StoryError as exc:
                 logger.warning(
                     "compose %s: invalid response (%s); retrying once. "
@@ -417,11 +422,32 @@ class StoryboardRunner:
                     exc,
                     raw[-300:],
                 )
-                return validate(await vlm.generate_text(**gen_kwargs))
+                result = validate(await vlm.generate_text(**gen_kwargs))
+            if lint is None:
+                return result, []
+            violations = lint(result)
+            if not violations:
+                return result, []
+            logger.info(
+                "compose %s: %d style violation(s); targeted re-roll",
+                unit,
+                len(violations),
+            )
+            retry_kwargs = dict(gen_kwargs)
+            retry_kwargs["user_prompt"] = gen_kwargs[
+                "user_prompt"
+            ] + "\n\nYour previous response violated these rules — regenerate " "the full JSON, fixing each:\n" + "\n".join(
+                f"- {v}" for v in violations
+            )
+            try:
+                second = validate(await vlm.generate_text(**retry_kwargs))
+            except story.StoryError:
+                return result, violations
+            return second, lint(second)
 
         if stage == "outline":
             progress(0, 1)
-            outline = await generate_validated(
+            outline, _ = await generate_validated(
                 "outline",
                 story.validate_outline_response,
                 system_prompt=story.STORY_OUTLINE_SYSTEM,
@@ -437,6 +463,7 @@ class StoryboardRunner:
                 self.db.update_storyboard,
                 storyboard_id,
                 outline=json.dumps(outline),
+                pacing=outline["pacing"],
             )
             created = 0
             for i, subj in enumerate(outline["subjects"]):
@@ -452,7 +479,7 @@ class StoryboardRunner:
                 )
                 created += 1
             progress(1, 1)
-            return 1
+            return 1, []
 
         outline_json = tree.get("outline") or ""
         if not outline_json:
@@ -460,9 +487,15 @@ class StoryboardRunner:
 
         if stage == "scenes":
             progress(0, 1)
-            scenes = await generate_validated(
+            arc: List[Dict[str, Any]] = []
+            try:
+                arc = json.loads(outline_json).get("arc") or []
+            except (TypeError, ValueError):
+                pass
+            scenes, stage_warnings = await generate_validated(
                 "scenes",
                 story.validate_scenes_response,
+                lint=lambda sc: story.lint_scene_charges(sc, arc),
                 system_prompt=story.STORY_SCENES_SYSTEM,
                 user_prompt=story.build_scenes_user_prompt(outline_json),
                 grammar=story.SCENES_GRAMMAR,
@@ -474,14 +507,15 @@ class StoryboardRunner:
                 self.db.replace_storyboard_scenes, storyboard_id, scenes
             )
             progress(1, 1)
-            return len(scenes)
+            return len(scenes), stage_warnings
 
         if stage == "shots":
             # spec §10.3: the shots stage's per-shot duration guidance is
             # coupled to the storyboard's video target so H3 (max ~15s per
             # clip) and future dialects with a different cap both steer the
             # LLM toward shots the compiler can actually render as one clip.
-            cap = shot_cap(tree.get("video_target"))
+            pacing = str(tree.get("pacing") or "standard")
+            guidance = story.pacing_guidance(pacing, shot_cap(tree.get("video_target")))
             targets = [
                 (i, s)
                 for i, s in enumerate(tree["scenes"])
@@ -491,6 +525,7 @@ class StoryboardRunner:
             done = 0
             lock = asyncio.Lock()
             made = 0
+            shots_warnings: List[str] = []
 
             async def _shots_for(idx: int, scene: Dict[str, Any]) -> int:
                 nonlocal done
@@ -500,10 +535,12 @@ class StoryboardRunner:
                     if idx + 1 < len(tree["scenes"])
                     else None
                 )
+                is_turn_scene = "turn" in (scene.get("arc_beats") or [])
                 async with sem:
-                    panels = await generate_validated(
+                    panels, warns = await generate_validated(
                         f"shots ({scene['name']})",
                         story.validate_shots_response,
+                        lint=lambda ps: story.lint_shots(ps, is_turn_scene),
                         system_prompt=story.STORY_SHOTS_SYSTEM,
                         user_prompt=story.build_shots_user_prompt(
                             outline_json,
@@ -511,67 +548,122 @@ class StoryboardRunner:
                             tree["subjects"],
                             prev_name,
                             next_name,
-                            max_shot_s=cap,
+                            guidance,
+                            is_turn_scene,
                         ),
                         grammar=story.SHOTS_GRAMMAR,
                         temperature=0.6,
                         max_tokens=1600,
                         timeout=300.0,
                     )
+                if not is_turn_scene:
+                    for p in panels:
+                        p["is_turn"] = 0
                 await asyncio.to_thread(
                     self.db.replace_scene_panels, scene["id"], panels
                 )
                 async with lock:
                     done += 1
                     progress(done, total)
+                    shots_warnings.extend(warns)
                 return len(panels)
 
             results = await asyncio.gather(*(_shots_for(i, s) for i, s in targets))
             made = sum(results)
-            return made
+            return made, shots_warnings
 
-        # stage == "beats"
-        work = [
-            (scene, panel)
-            for scene in tree["scenes"]
-            for panel in scene["panels"]
-            if panel_ids is None or panel["id"] in panel_ids
-        ]
-        logline = ""
+        # stage == "beats" -- sequential within a scene (each beats call
+        # sees the previous shot's action + closing framing for continuity),
+        # parallel across scenes.
+        outline_data: Dict[str, Any] = {}
         try:
-            logline = json.loads(outline_json).get("logline", "")
+            outline_data = json.loads(outline_json) or {}
         except (TypeError, ValueError):
             pass
-        total = len(work)
+        pacing = str(tree.get("pacing") or "standard")
+        guidance = story.pacing_guidance(pacing, shot_cap(tree.get("video_target")))
+        scene_work = [
+            (
+                scene,
+                [
+                    p["id"]
+                    for p in scene["panels"]
+                    if panel_ids is None or p["id"] in panel_ids
+                ],
+            )
+            for scene in tree["scenes"]
+        ]
+        scene_work = [(s, ids) for s, ids in scene_work if ids]
+        total = sum(len(ids) for _, ids in scene_work)
         done = 0
         lock = asyncio.Lock()
+        beats_warnings: List[str] = []
 
-        async def _beats_for(scene: Dict[str, Any], panel: Dict[str, Any]) -> int:
+        async def _beats_for_scene(scene: Dict[str, Any], target_ids: List[int]) -> int:
             nonlocal done
-            async with sem:
-                beats, warnings = await generate_validated(
-                    f"beats (panel {panel['id']})",
-                    lambda raw: story.validate_beats_response(raw, roster),
-                    system_prompt=story.STORY_BEATS_SYSTEM,
-                    user_prompt=story.build_beats_user_prompt(
-                        logline, scene, panel, tree["subjects"]
-                    ),
-                    grammar=story.BEATS_GRAMMAR,
-                    temperature=0.6,
-                    max_tokens=1600,
-                    timeout=300.0,
+            made = 0
+            prev_action: Optional[str] = None
+            prev_summary: Optional[str] = None
+            prev_sizes: List[Optional[str]] = []
+            for idx, panel in enumerate(scene["panels"]):
+                if panel["id"] not in target_ids:
+                    # Skipped panel: its existing beats still feed continuity.
+                    existing = panel.get("beats") or []
+                    prev_action = panel.get("action")
+                    if existing:
+                        prev_summary = story.describe_beat_framing(existing[-1])
+                        prev_sizes = [b.get("shot_size") for b in existing[-2:]]
+                    continue
+                is_opener = idx == 0
+                is_turn_panel = bool(panel.get("is_turn"))
+                async with sem:
+                    (beats, roster_warns), lint_warns = await generate_validated(
+                        f"beats (panel {panel['id']})",
+                        lambda raw: story.validate_beats_response(raw, roster),
+                        lint=lambda res: story.lint_beats(
+                            res[0],
+                            is_turn_panel=is_turn_panel,
+                            is_scene_opener=is_opener,
+                            prev_shot_sizes=prev_sizes,
+                        ),
+                        system_prompt=story.STORY_BEATS_SYSTEM,
+                        user_prompt=story.build_beats_user_prompt(
+                            outline_data,
+                            scene,
+                            panel,
+                            tree["subjects"],
+                            guidance,
+                            prev_action,
+                            prev_summary,
+                        ),
+                        grammar=story.BEATS_GRAMMAR,
+                        temperature=0.6,
+                        max_tokens=1600,
+                        timeout=300.0,
+                    )
+                for w in roster_warns:
+                    logger.warning("compose beats (panel %s): %s", panel["id"], w)
+                story.rescale_beat_durations(
+                    beats, float(panel.get("duration_s") or 12.0)
                 )
-            for w in warnings:
-                logger.warning("compose beats (panel %s): %s", panel["id"], w)
-            story.rescale_beat_durations(beats, float(panel.get("duration_s") or 12.0))
-            await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
-            async with lock:
-                done += 1
-                progress(done, total)
-            return len(beats)
+                await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
+                prev_action = panel.get("action")
+                if beats:
+                    prev_summary = story.describe_beat_framing(beats[-1])
+                    prev_sizes = [b.get("shot_size") for b in beats[-2:]]
+                made += len(beats)
+                async with lock:
+                    done += 1
+                    progress(done, total)
+                    beats_warnings.extend(
+                        f"panel {panel['id']}: {w}" for w in lint_warns
+                    )
+            return made
 
-        results = await asyncio.gather(*(_beats_for(s, p) for s, p in work))
-        return sum(results)
+        results = await asyncio.gather(
+            *(_beats_for_scene(s, ids) for s, ids in scene_work)
+        )
+        return sum(results), beats_warnings
 
     # ---- shared panel helpers --------------------------------------------
 
