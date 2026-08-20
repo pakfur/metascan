@@ -665,9 +665,17 @@ class DatabaseManager:
                     folder_id     TEXT REFERENCES folders(id)
                                   ON DELETE SET NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    pacing        TEXT NOT NULL DEFAULT 'standard'
                 )
                 """
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "pacing",
+                "ALTER TABLE storyboards ADD COLUMN pacing "
+                "TEXT NOT NULL DEFAULT 'standard'",
             )
             conn.execute(
                 """
@@ -699,7 +707,10 @@ class DatabaseManager:
                     time_of_day   TEXT,
                     mood          TEXT,
                     lighting      TEXT,
-                    notes         TEXT
+                    notes         TEXT,
+                    arc_beats     TEXT NOT NULL DEFAULT '[]',
+                    charge_in     INTEGER,
+                    charge_out    INTEGER
                 )
                 """
             )
@@ -715,6 +726,24 @@ class DatabaseManager:
                 "setting",
                 "ALTER TABLE scenes ADD COLUMN setting TEXT",
             )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "arc_beats",
+                "ALTER TABLE scenes ADD COLUMN arc_beats " "TEXT NOT NULL DEFAULT '[]'",
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "charge_in",
+                "ALTER TABLE scenes ADD COLUMN charge_in INTEGER",
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "charge_out",
+                "ALTER TABLE scenes ADD COLUMN charge_out INTEGER",
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS panels (
@@ -726,6 +755,8 @@ class DatabaseManager:
                     duration_s         REAL NOT NULL DEFAULT 12.0,
                     image_loras        TEXT NOT NULL DEFAULT '[]',
                     video_loras        TEXT NOT NULL DEFAULT '[]',
+                    is_turn            INTEGER NOT NULL DEFAULT 0,
+                    subtext            TEXT,
                     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
                 )
@@ -744,6 +775,18 @@ class DatabaseManager:
                 "video_loras",
                 "ALTER TABLE panels ADD COLUMN video_loras "
                 "TEXT NOT NULL DEFAULT '[]'",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "is_turn",
+                "ALTER TABLE panels ADD COLUMN is_turn " "INTEGER NOT NULL DEFAULT 0",
+            )
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "subtext",
+                "ALTER TABLE panels ADD COLUMN subtext TEXT",
             )
             # beats.selected_image_id references beat_images, which in turn
             # references beats -- a circular FK. SQLite allows forward
@@ -776,10 +819,45 @@ class DatabaseManager:
                     prompt_source TEXT,
                     selected_image_id INTEGER REFERENCES beat_images(id)
                                       ON DELETE SET NULL,
+                    composition TEXT,
+                    light_quality TEXT,
+                    emotional_intent TEXT,
+                    reveals     TEXT,
+                    movement_motivation TEXT,
                     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
+            )
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "composition",
+                "ALTER TABLE beats ADD COLUMN composition TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "light_quality",
+                "ALTER TABLE beats ADD COLUMN light_quality TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "emotional_intent",
+                "ALTER TABLE beats ADD COLUMN emotional_intent TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "reveals",
+                "ALTER TABLE beats ADD COLUMN reveals TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "movement_motivation",
+                "ALTER TABLE beats ADD COLUMN movement_motivation TEXT",
             )
             conn.execute(
                 """
@@ -1553,6 +1631,7 @@ class DatabaseManager:
             "video_output_dir",
             "video_name_template",
             "image_name_template",
+            "pacing",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1580,6 +1659,9 @@ class DatabaseManager:
             "lighting",
             "notes",
             "reference_path",
+            "arc_beats",
+            "charge_in",
+            "charge_out",
         }
     )
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -1595,6 +1677,8 @@ class DatabaseManager:
             "video_prompt_warnings",
             "video_anchor",
             "video_compiled_anchor",
+            "is_turn",
+            "subtext",
         }
     )
     # ``selected_image_id`` is deliberately absent -- keeper selection goes
@@ -1618,6 +1702,11 @@ class DatabaseManager:
             "prompt",
             "prompt_locked",
             "prompt_source",
+            "composition",
+            "light_quality",
+            "emotional_intent",
+            "reveals",
+            "movement_motivation",
         }
     )
 
@@ -1863,6 +1952,10 @@ class DatabaseManager:
             return
         if fields.get("reference_path"):
             fields["reference_path"] = to_posix_path(fields["reference_path"])
+        if "arc_beats" in fields:
+            import json as _json
+
+            fields["arc_beats"] = _json.dumps(list(fields["arc_beats"] or []))
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [scene_id]
         with self.lock, self._get_connection() as conn:
@@ -1874,7 +1967,7 @@ class DatabaseManager:
             row = conn.execute(
                 "SELECT * FROM scenes WHERE id = ?", (scene_id,)
             ).fetchone()
-            return dict(row) if row else None
+            return self._decode_scene_row(row) if row else None
 
     def delete_scene(
         self, scene_id: int, purge_images: bool = False
@@ -1955,6 +2048,18 @@ class DatabaseManager:
             except (ValueError, TypeError):
                 decoded = []
             d[key] = decoded if isinstance(decoded, list) else []
+        return d
+
+    @staticmethod
+    def _decode_scene_row(row: sqlite3.Row) -> Dict[str, Any]:
+        import json as _json
+
+        d = dict(row)
+        try:
+            decoded = _json.loads(d.get("arc_beats") or "[]")
+        except (ValueError, TypeError):
+            decoded = []
+        d["arc_beats"] = decoded if isinstance(decoded, list) else []
         return d
 
     def get_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
@@ -2350,8 +2455,10 @@ class DatabaseManager:
                     "INSERT INTO beats (panel_id, sort_order, duration_s, "
                     "action, shot_size, angle, lens, subject_ids, "
                     "camera_motion, camera_amplitude, camera_speed, "
-                    "is_cut, dialog, sound) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "is_cut, dialog, sound, composition, light_quality, "
+                    "emotional_intent, reveals, movement_motivation) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?)",
                     (
                         panel_id,
                         b.get("sort_order", i),
@@ -2367,6 +2474,11 @@ class DatabaseManager:
                         int(b.get("is_cut", 0)),
                         _json.dumps(list(b.get("dialog") or [])),
                         b.get("sound"),
+                        b.get("composition"),
+                        b.get("light_quality"),
+                        b.get("emotional_intent"),
+                        b.get("reveals"),
+                        b.get("movement_motivation"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
@@ -2446,6 +2558,8 @@ class DatabaseManager:
     ) -> List[int]:
         """Destructively replace all scenes (compose stage 2); subjects are
         untouched. Releases panel media/jobs first — see _release_panels."""
+        import json as _json
+
         with self.lock, self._get_connection() as conn:
             panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
             self._release_panels(conn, panel_ids)
@@ -2455,7 +2569,8 @@ class DatabaseManager:
                 cur = conn.execute(
                     "INSERT INTO scenes (storyboard_id, sort_order, name, "
                     "subtitle, setting, location, time_of_day, mood, "
-                    "lighting, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "lighting, notes, arc_beats, charge_in, charge_out) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         storyboard_id,
                         i,
@@ -2467,6 +2582,9 @@ class DatabaseManager:
                         sc.get("mood"),
                         sc.get("lighting"),
                         sc.get("notes"),
+                        _json.dumps(list(sc.get("arc_beats") or [])),
+                        sc.get("charge_in"),
+                        sc.get("charge_out"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
@@ -2496,12 +2614,14 @@ class DatabaseManager:
             for i, p in enumerate(panels):
                 cur = conn.execute(
                     "INSERT INTO panels (scene_id, sort_order, action, "
-                    "duration_s) VALUES (?, ?, ?, ?)",
+                    "duration_s, is_turn, subtext) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         scene_id,
                         i,
                         p["action"],
                         p.get("duration_s", 12.0),
+                        int(p.get("is_turn", 0)),
+                        p.get("subtext"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
@@ -2534,7 +2654,7 @@ class DatabaseManager:
             ).fetchall()
             scenes = []
             for scene_row in scene_rows:
-                scene = dict(scene_row)
+                scene = self._decode_scene_row(scene_row)
                 panel_rows = conn.execute(
                     "SELECT * FROM panels WHERE scene_id = ? "
                     "ORDER BY sort_order, id",

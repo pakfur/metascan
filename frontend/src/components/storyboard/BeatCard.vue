@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
 import type { Beat, BeatImage, DialogLine, Subject } from '../../types/storyboard'
@@ -8,7 +8,9 @@ import {
   CAMERA_AMPLITUDES,
   CAMERA_MOTIONS,
   CAMERA_SPEEDS,
+  COMPOSITIONS,
   LENSES,
+  LIGHT_QUALITIES,
   SHOT_SIZES,
 } from '../../types/storyboard'
 import type { Media } from '../../types/media'
@@ -49,6 +51,18 @@ const lensVal = ref('')
 const lensSnap = ref('')
 const promptVal = ref('')
 const promptSnap = ref('')
+// Composition/light framing selects + free-text cinematography fields --
+// same beat-scoped commit-on-change pattern as the framing selects above.
+const compositionVal = ref('')
+const compositionSnap = ref('')
+const lightQualityVal = ref('')
+const lightQualitySnap = ref('')
+const emotionalVal = ref('')
+const emotionalSnap = ref('')
+const revealsVal = ref('')
+const revealsSnap = ref('')
+const motivationVal = ref('')
+const motivationSnap = ref('')
 
 function sync(): void {
   if (actionVal.value === actionSnap.value) {
@@ -84,6 +98,31 @@ function sync(): void {
   if (promptVal.value === promptSnap.value) {
     promptVal.value = prompt
     promptSnap.value = prompt
+  }
+  const comp = props.beat.composition ?? ''
+  if (compositionVal.value === compositionSnap.value) {
+    compositionVal.value = comp
+    compositionSnap.value = comp
+  }
+  const light = props.beat.light_quality ?? ''
+  if (lightQualityVal.value === lightQualitySnap.value) {
+    lightQualityVal.value = light
+    lightQualitySnap.value = light
+  }
+  const emotional = props.beat.emotional_intent ?? ''
+  if (emotionalVal.value === emotionalSnap.value) {
+    emotionalVal.value = emotional
+    emotionalSnap.value = emotional
+  }
+  const reveals = props.beat.reveals ?? ''
+  if (revealsVal.value === revealsSnap.value) {
+    revealsVal.value = reveals
+    revealsSnap.value = reveals
+  }
+  const motivation = props.beat.movement_motivation ?? ''
+  if (motivationVal.value === motivationSnap.value) {
+    motivationVal.value = motivation
+    motivationSnap.value = motivation
   }
 }
 // Keyed on id + updated_at (not just id) so a server-side rewrite of the
@@ -135,6 +174,52 @@ function commitLens(e: Event): void {
   const next = val === '' ? null : val
   if (next === props.beat.lens) return
   void store.patchBeatFields(props.beat.id, { lens: next })
+}
+
+function commitComposition(e: Event): void {
+  const val = (e.target as HTMLSelectElement).value
+  compositionVal.value = val
+  compositionSnap.value = val
+  const next = val === '' ? null : val
+  if (next === props.beat.composition) return
+  void store.patchBeatFields(props.beat.id, { composition: next })
+}
+
+function commitLightQuality(e: Event): void {
+  const val = (e.target as HTMLSelectElement).value
+  lightQualityVal.value = val
+  lightQualitySnap.value = val
+  const next = val === '' ? null : val
+  if (next === props.beat.light_quality) return
+  void store.patchBeatFields(props.beat.id, { light_quality: next })
+}
+
+// Template refs auto-unwrap to plain strings, so the local/snapshot Ref
+// objects can't be passed in from the template the way the brief's
+// prototype suggested -- commitCineText stays script-internal and each
+// field gets a thin template-facing wrapper.
+function commitCineText(
+  field: 'emotional_intent' | 'reveals' | 'movement_motivation',
+  local: Ref<string>,
+  snap: Ref<string>,
+  e: Event,
+): void {
+  const val = (e.target as HTMLInputElement).value
+  local.value = val
+  snap.value = val
+  const next = val.trim() || null
+  if (next === (props.beat[field] ?? null)) return
+  void store.patchBeatFields(props.beat.id, { [field]: next })
+}
+
+function commitEmotional(e: Event): void {
+  commitCineText('emotional_intent', emotionalVal, emotionalSnap, e)
+}
+function commitReveals(e: Event): void {
+  commitCineText('reveals', revealsVal, revealsSnap, e)
+}
+function commitMotivation(e: Event): void {
+  commitCineText('movement_motivation', motivationVal, motivationSnap, e)
 }
 
 function commitPrompt(e: Event): void {
@@ -401,6 +486,20 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
               <option v-for="l in LENSES" :key="l" :value="l">{{ l }}</option>
             </select>
           </div>
+          <div class="bc-field bc-field-flex1">
+            <label class="bc-label-eyebrow">Comp</label>
+            <select :value="compositionVal" @change="commitComposition">
+              <option value="">—</option>
+              <option v-for="c in COMPOSITIONS" :key="c" :value="c">{{ c.replace(/_/g, ' ') }}</option>
+            </select>
+          </div>
+          <div class="bc-field bc-field-flex1">
+            <label class="bc-label-eyebrow">Light</label>
+            <select :value="lightQualityVal" @change="commitLightQuality">
+              <option value="">—</option>
+              <option v-for="l in LIGHT_QUALITIES" :key="l" :value="l">{{ l }}</option>
+            </select>
+          </div>
           <div class="bc-field bc-field-duration">
             <label class="bc-label-eyebrow">Dur (s)</label>
             <input
@@ -452,6 +551,37 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
             </select>
           </div>
         </div>
+
+        <details class="bc-field bc-cine">
+          <summary class="bc-label-eyebrow">Cinematography</summary>
+          <div class="bc-field">
+            <label class="bc-label-eyebrow">Intent</label>
+            <input
+              type="text"
+              :value="emotionalVal"
+              placeholder="visible physical evidence — never an emotion label"
+              @change="commitEmotional"
+            />
+          </div>
+          <div class="bc-field">
+            <label class="bc-label-eyebrow">Reveals</label>
+            <input
+              type="text"
+              :value="revealsVal"
+              placeholder="what this beat shows that the last one didn't"
+              @change="commitReveals"
+            />
+          </div>
+          <div class="bc-field">
+            <label class="bc-label-eyebrow">Move why</label>
+            <input
+              type="text"
+              :value="motivationVal"
+              placeholder="what pulls the camera (required for any move)"
+              @change="commitMotivation"
+            />
+          </div>
+        </details>
 
         <div class="bc-field">
           <label class="bc-label-eyebrow">Cast</label>
@@ -803,6 +933,33 @@ const jobChip = computed(() => store.beatJobState.get(props.beat.id)?.state ?? n
 .bc-camera-amp,
 .bc-camera-speed {
   flex: 1;
+}
+
+.bc-cine {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bc-cine summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.bc-cine summary::-webkit-details-marker {
+  display: none;
+}
+
+.bc-cine summary::before {
+  content: '▸ ';
+}
+
+.bc-cine[open] summary::before {
+  content: '▾ ';
+}
+
+.bc-cine .bc-field {
+  margin-top: 4px;
 }
 
 .subject-chips {
