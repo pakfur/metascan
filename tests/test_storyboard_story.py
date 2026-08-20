@@ -102,7 +102,14 @@ def test_validate_scenes_happy_and_empty():
 def test_shots_validator_slim_shape():
     raw = '[{"action": "The chase begins", "duration_s": 10}]'
     panels = story.validate_shots_response(raw)
-    assert panels == [{"action": "The chase begins", "duration_s": 10.0}]
+    assert panels == [
+        {
+            "action": "The chase begins",
+            "duration_s": 10.0,
+            "subtext": None,
+            "is_turn": 0,
+        }
+    ]
 
 
 def test_shots_grammar_has_no_framing_or_subjects():
@@ -317,3 +324,104 @@ def test_new_vocabularies_match_spec():
         "firelight",
         "ambient",
     )
+
+
+def test_outline_pacing_validated_with_fallback():
+    base = {
+        "logline": "L",
+        "tone": "T",
+        "duration_target_s": 60,
+        "subjects": [],
+        "arc": [{"beat": "setup", "summary": "s"}],
+    }
+    good = dict(base, pacing="propulsive")
+    assert story.validate_outline_response(json.dumps(good))["pacing"] == "propulsive"
+    bad = dict(base, pacing="glacial")
+    assert story.validate_outline_response(json.dumps(bad))["pacing"] == "standard"
+    assert story.validate_outline_response(json.dumps(base))["pacing"] == "standard"
+
+
+def test_scenes_dramatic_fields_validated():
+    raw = json.dumps(
+        [
+            {
+                "name": "A",
+                "arc_beats": ["setup", "bogus", "turn"],
+                "charge_in": -2,
+                "charge_out": 3,
+            },
+            {"name": "B", "charge_in": 99, "charge_out": "x"},
+        ]
+    )
+    scenes = story.validate_scenes_response(raw)
+    assert scenes[0]["arc_beats"] == ["setup", "turn"]  # unknown stage dropped
+    assert scenes[0]["charge_in"] == -2 and scenes[0]["charge_out"] == 3
+    assert scenes[1]["arc_beats"] == []
+    assert scenes[1]["charge_in"] is None  # out of range
+    assert scenes[1]["charge_out"] is None  # garbage
+
+
+def test_shots_subtext_and_is_turn():
+    raw = json.dumps(
+        [
+            {"action": "a", "duration_s": 8, "subtext": " hides it ", "is_turn": True},
+            {"action": "b", "duration_s": 8},
+        ]
+    )
+    panels = story.validate_shots_response(raw)
+    assert panels[0]["subtext"] == "hides it" and panels[0]["is_turn"] == 1
+    assert panels[1]["subtext"] is None and panels[1]["is_turn"] == 0
+
+
+def test_beats_visual_grammar_fields_and_static_nulling():
+    beat = {
+        "duration_s": 3,
+        "action": "a",
+        "shot_size": "CU",
+        "angle": None,
+        "lens": None,
+        "subjects": [],
+        "camera_motion": "static",
+        "camera_amplitude": "large",
+        "camera_speed": "fast",
+        "movement_motivation": "won't matter",
+        "is_cut": False,
+        "sound": None,
+        "dialog": [],
+        "composition": "negative_space",
+        "light_quality": "firelight",
+        "emotional_intent": "jaw set",
+        "reveals": "the empty chair",
+    }
+    beats, _ = story.validate_beats_response(json.dumps([beat]), {})
+    b = beats[0]
+    assert b["composition"] == "negative_space"
+    assert b["light_quality"] == "firelight"
+    assert b["emotional_intent"] == "jaw set"
+    assert b["reveals"] == "the empty chair"
+    # static motion mechanically nulls amplitude/speed/motivation
+    assert b["camera_amplitude"] is None
+    assert b["camera_speed"] is None
+    assert b["movement_motivation"] is None
+    bad = dict(beat, composition="rule_of_odds", light_quality="neon")
+    beats, _ = story.validate_beats_response(json.dumps([bad]), {})
+    assert beats[0]["composition"] is None and beats[0]["light_quality"] is None
+
+
+def test_new_grammars_carry_new_fields():
+    # Field names are GBNF string literals, so the JSON quotes are
+    # backslash-escaped in the grammar source (matches every existing
+    # field, e.g. \"logline\") — not bare '"pacing"'.
+    assert r"\"pacing\"" in story.OUTLINE_GRAMMAR
+    for token in (r"\"arc_beats\"", r"\"charge_in\"", r"\"charge_out\""):
+        assert token in story.SCENES_GRAMMAR
+    for token in (r"\"subtext\"", r"\"is_turn\""):
+        assert token in story.SHOTS_GRAMMAR
+    for token in (
+        r"\"composition\"",
+        r"\"light_quality\"",
+        r"\"emotional_intent\"",
+        r"\"reveals\"",
+        r"\"movement_motivation\"",
+    ):
+        assert token in story.BEATS_GRAMMAR

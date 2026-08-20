@@ -147,40 +147,51 @@ def _alts(values: Tuple[str, ...], with_null: bool = True) -> str:
 
 
 _OUTLINE_TEMPLATE = (
-    r"""root ::= "{{" ws "\"logline\"" ws ":" ws string ws "," ws "\"tone\"" ws ":" ws string ws "," ws "\"duration_target_s\"" ws ":" ws number ws "," ws "\"subjects\"" ws ":" ws subjects ws "," ws "\"arc\"" ws ":" ws arc ws "}}"
+    r"""root ::= "{{" ws "\"logline\"" ws ":" ws string ws "," ws "\"tone\"" ws ":" ws string ws "," ws "\"pacing\"" ws ":" ws pacingv ws "," ws "\"duration_target_s\"" ws ":" ws number ws "," ws "\"subjects\"" ws ":" ws subjects ws "," ws "\"arc\"" ws ":" ws arc ws "}}"
 subjects ::= "[" ws subject (ws "," ws subject){{0,5}} ws "]"
 subject ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"description\"" ws ":" ws string ws "," ws "\"voice\"" ws ":" ws nullable ws "}}"
 arc ::= "[" ws arcitem (ws "," ws arcitem){{1,6}} ws "]"
 arcitem ::= "{{" ws "\"beat\"" ws ":" ws arcbeat ws "," ws "\"summary\"" ws ":" ws string ws "}}"
 arcbeat ::= {arcbeat_alts}
+pacingv ::= {pacing_alts}
 """
     + _COMMON_RULES
 )
 
 OUTLINE_GRAMMAR = _OUTLINE_TEMPLATE.format(
+    arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False),
+    pacing_alts=_alts(PACING_VALUES, with_null=False),
+)
+
+_SCENES_TEMPLATE = (
+    r"""root ::= "[" ws scene (ws "," ws scene){{1,7}} ws "]"
+scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "}}"
+arcbeats ::= "[" ws (arcbeat (ws "," ws arcbeat){{0,4}})? ws "]"
+arcbeat ::= {arcbeat_alts}
+charge ::= "-"? [0-5]
+"""
+    + _COMMON_RULES
+)
+
+SCENES_GRAMMAR = _SCENES_TEMPLATE.format(
     arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False)
 )
 
-SCENES_GRAMMAR = (
-    r"""root ::= "[" ws scene (ws "," ws scene){{1,7}} ws "]"
-scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "}}"
-"""
-    + _COMMON_RULES
-).format()
-
 SHOTS_GRAMMAR = (
     r"""root ::= "[" ws shot (ws "," ws shot){{0,5}} ws "]"
-shot ::= "{{" ws "\"action\"" ws ":" ws string ws "," ws "\"duration_s\"" ws ":" ws number ws "}}"
+shot ::= "{{" ws "\"action\"" ws ":" ws string ws "," ws "\"duration_s\"" ws ":" ws number ws "," ws "\"subtext\"" ws ":" ws string ws "," ws "\"is_turn\"" ws ":" ws boolean ws "}}"
 """
     + _COMMON_RULES
 ).format()
 
 _BEATS_TEMPLATE = (
     r"""root ::= "[" ws beat (ws "," ws beat){{1,5}} ws "]"
-beat ::= "{{" ws "\"duration_s\"" ws ":" ws number ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"shot_size\"" ws ":" ws shotsize ws "," ws "\"angle\"" ws ":" ws angle ws "," ws "\"lens\"" ws ":" ws lens ws "," ws "\"subjects\"" ws ":" ws namelist ws "," ws "\"camera_motion\"" ws ":" ws motion ws "," ws "\"camera_amplitude\"" ws ":" ws amplitude ws "," ws "\"camera_speed\"" ws ":" ws speed ws "," ws "\"is_cut\"" ws ":" ws boolean ws "," ws "\"sound\"" ws ":" ws nullable ws "," ws "\"dialog\"" ws ":" ws dialog ws "}}"
+beat ::= "{{" ws "\"duration_s\"" ws ":" ws number ws "," ws "\"action\"" ws ":" ws string ws "," ws "\"reveals\"" ws ":" ws string ws "," ws "\"emotional_intent\"" ws ":" ws string ws "," ws "\"shot_size\"" ws ":" ws shotsize ws "," ws "\"angle\"" ws ":" ws angle ws "," ws "\"lens\"" ws ":" ws lens ws "," ws "\"composition\"" ws ":" ws composition ws "," ws "\"light_quality\"" ws ":" ws lightq ws "," ws "\"subjects\"" ws ":" ws namelist ws "," ws "\"camera_motion\"" ws ":" ws motion ws "," ws "\"camera_amplitude\"" ws ":" ws amplitude ws "," ws "\"camera_speed\"" ws ":" ws speed ws "," ws "\"movement_motivation\"" ws ":" ws nullable ws "," ws "\"is_cut\"" ws ":" ws boolean ws "," ws "\"sound\"" ws ":" ws nullable ws "," ws "\"dialog\"" ws ":" ws dialog ws "}}"
 shotsize ::= {shotsize_alts}
 angle ::= {angle_alts}
 lens ::= {lens_alts}
+composition ::= {composition_alts}
+lightq ::= {lightq_alts}
 namelist ::= "[" ws (string (ws "," ws string){{0,5}})? ws "]"
 motion ::= {motion_alts}
 amplitude ::= {amplitude_alts}
@@ -195,6 +206,8 @@ BEATS_GRAMMAR = _BEATS_TEMPLATE.format(
     shotsize_alts=_alts(SHOT_SIZE_VALUES),
     angle_alts=_alts(ANGLE_VALUES),
     lens_alts=_alts(LENS_VALUES),
+    composition_alts=_alts(COMPOSITION_VALUES),
+    lightq_alts=_alts(LIGHT_QUALITY_VALUES),
     motion_alts=_alts(CAMERA_MOTION_VALUES),
     amplitude_alts=_alts(CAMERA_AMPLITUDE_VALUES),
     speed_alts=_alts(CAMERA_SPEED_VALUES),
@@ -354,13 +367,25 @@ def validate_outline_response(raw: str) -> Dict[str, Any]:
     ]
     if not arc:
         raise StoryError("outline has no arc entries")
+    pacing = data.get("pacing")
+    if pacing not in PACING_VALUES:
+        pacing = "standard"
     return {
         "logline": logline,
         "tone": tone,
+        "pacing": pacing,
         "duration_target_s": duration,
         "subjects": subjects,
         "arc": arc,
     }
+
+
+def _charge(v: Any) -> Optional[int]:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if -5 <= n <= 5 else None
 
 
 def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
@@ -384,6 +409,11 @@ def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
                 "mood": _clean(sc.get("mood")),
                 "lighting": _clean(sc.get("lighting")),
                 "notes": _clean(sc.get("notes")),
+                "arc_beats": [
+                    b for b in (sc.get("arc_beats") or []) if b in ARC_BEAT_VALUES
+                ],
+                "charge_in": _charge(sc.get("charge_in")),
+                "charge_out": _charge(sc.get("charge_out")),
             }
         )
     if not scenes:
@@ -410,6 +440,8 @@ def validate_shots_response(raw: str) -> List[Dict[str, Any]]:
             {
                 "action": action,
                 "duration_s": duration if duration > 0 else 12.0,
+                "subtext": _clean(p.get("subtext")),
+                "is_turn": 1 if p.get("is_turn") else 0,
             }
         )
     if not panels:
@@ -461,38 +493,52 @@ def validate_beats_response(
                     "text": text,
                 }
             )
-        beats.append(
-            {
-                "duration_s": duration if duration > 0 else 4.0,
-                "action": action,
-                "shot_size": (
-                    b.get("shot_size")
-                    if b.get("shot_size") in SHOT_SIZE_VALUES
-                    else None
-                ),
-                "angle": b.get("angle") if b.get("angle") in ANGLE_VALUES else None,
-                "lens": b.get("lens") if b.get("lens") in LENS_VALUES else None,
-                "subject_ids": ids,
-                "camera_motion": (
-                    b.get("camera_motion")
-                    if b.get("camera_motion") in CAMERA_MOTION_VALUES
-                    else None
-                ),
-                "camera_amplitude": (
-                    b.get("camera_amplitude")
-                    if b.get("camera_amplitude") in CAMERA_AMPLITUDE_VALUES
-                    else None
-                ),
-                "camera_speed": (
-                    b.get("camera_speed")
-                    if b.get("camera_speed") in CAMERA_SPEED_VALUES
-                    else None
-                ),
-                "is_cut": 1 if b.get("is_cut") else 0,
-                "sound": _clean(b.get("sound")),
-                "dialog": dialog,
-            }
-        )
+        beat = {
+            "duration_s": duration if duration > 0 else 4.0,
+            "action": action,
+            "shot_size": (
+                b.get("shot_size") if b.get("shot_size") in SHOT_SIZE_VALUES else None
+            ),
+            "angle": b.get("angle") if b.get("angle") in ANGLE_VALUES else None,
+            "lens": b.get("lens") if b.get("lens") in LENS_VALUES else None,
+            "subject_ids": ids,
+            "camera_motion": (
+                b.get("camera_motion")
+                if b.get("camera_motion") in CAMERA_MOTION_VALUES
+                else None
+            ),
+            "camera_amplitude": (
+                b.get("camera_amplitude")
+                if b.get("camera_amplitude") in CAMERA_AMPLITUDE_VALUES
+                else None
+            ),
+            "camera_speed": (
+                b.get("camera_speed")
+                if b.get("camera_speed") in CAMERA_SPEED_VALUES
+                else None
+            ),
+            "is_cut": 1 if b.get("is_cut") else 0,
+            "sound": _clean(b.get("sound")),
+            "dialog": dialog,
+            "composition": (
+                b.get("composition")
+                if b.get("composition") in COMPOSITION_VALUES
+                else None
+            ),
+            "light_quality": (
+                b.get("light_quality")
+                if b.get("light_quality") in LIGHT_QUALITY_VALUES
+                else None
+            ),
+            "emotional_intent": _clean(b.get("emotional_intent")),
+            "reveals": _clean(b.get("reveals")),
+            "movement_motivation": _clean(b.get("movement_motivation")),
+        }
+        if beat["camera_motion"] in (None, "static"):
+            beat["camera_amplitude"] = None
+            beat["camera_speed"] = None
+            beat["movement_motivation"] = None
+        beats.append(beat)
     if not beats:
         raise StoryError("no beats in the response")
     return beats, warnings
