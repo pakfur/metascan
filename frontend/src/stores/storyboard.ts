@@ -14,6 +14,7 @@ import type {
 import * as api from '../api/storyboard'
 import * as comfyApi from '../api/comfy'
 import { useWebSocket } from '../composables/useWebSocket'
+import { useToast } from '../composables/useToast'
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -732,6 +733,14 @@ export const useStoryboardStore = defineStore('storyboard', () => {
           error: null,
         }
       } else if (event === 'story_stage_complete') {
+        const warns = Array.isArray(d.warnings) ? (d.warnings as string[]) : []
+        if (warns.length) {
+          useToast().show(
+            `Composed ${String(d.stage)} with ${warns.length} style warning${warns.length === 1 ? '' : 's'} (see server log)`,
+            'warn',
+            4000,
+          )
+        }
         void refresh() // each stage lands reviewable state immediately
       } else if (event === 'story_complete') {
         story.value.running = false
