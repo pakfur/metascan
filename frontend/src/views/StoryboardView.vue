@@ -65,13 +65,6 @@
         </span>
         <div class="sb-actions">
           <Button
-            label="Import text"
-            icon="pi pi-file-import"
-            text
-            :disabled="!store.tree"
-            @click="importOpen = true"
-          />
-          <Button
             label="Compose"
             icon="pi pi-sparkles"
             text
@@ -79,36 +72,19 @@
             @click="composeOpen = true"
           />
           <Button
-            label="Synthesize"
-            text
-            :disabled="store.loading || !store.tree"
-            @click="store.synthesize()"
-          />
-          <Button
-            v-if="store.tree?.video_target"
-            label="Compile video prompts"
-            text
-            :disabled="store.compile.running || store.synthesis.running || store.story.running"
-            @click="store.compileVideo()"
-          />
-          <Button
             label="Generate all"
+            icon="pi pi-play"
             :disabled="store.loading || !store.tree"
             @click="store.generate()"
           />
           <Button
-            v-if="store.tree?.video_target && store.tree?.video_preset_id"
-            label="Generate video"
+            icon="pi pi-ellipsis-h"
             text
-            :disabled="store.compile.running || store.synthesis.running || store.story.running"
-            @click="onGenerateVideo"
-          />
-          <Button
-            label="Cancel"
-            severity="danger"
-            text
+            rounded
+            aria-label="More actions"
+            title="Import text, synthesize, compile, render, cancel"
             :disabled="!store.tree"
-            @click="store.cancelAll()"
+            @click="overflowMenu?.toggle($event)"
           />
           <Button
             icon="pi pi-cog"
@@ -119,34 +95,13 @@
             :disabled="!store.tree"
             @click="settingsOpen = true"
           />
+          <Menu ref="overflowMenu" :model="overflowItems" :popup="true" />
         </div>
       </header>
 
       <div v-if="store.tree" class="sb-body">
-        <div class="sb-main">
-          <SceneStrip />
-          <PanelGrid />
-          <div
-            v-if="store.selectedPanel"
-            class="sb-divider"
-            title="Drag to resize"
-            @pointerdown="startDetailDrag"
-          />
-          <!-- PanelDetail is wrapped by a `v-if="store.selectedPanel"` sibling
-               of the divider above, so :style lives on this wrapper (which
-               always exists whenever the divider does) rather than on
-               PanelDetail's own root, which only renders while a panel is
-               selected. -->
-          <div
-            v-if="store.selectedPanel"
-            class="sb-detail-wrap"
-            :class="{ resized: detailHeight !== null }"
-            :style="detailStyle"
-          >
-            <PanelDetail />
-          </div>
-        </div>
-        <PanelSidePanel v-if="store.selectedPanel" class="sb-side" />
+        <aside class="sb-rail"><OutlineRail /></aside>
+        <ShotDocument />
       </div>
       <div v-else-if="store.loading" class="sb-loading">Loading…</div>
     </div>
@@ -157,22 +112,16 @@
   </div>
 </template>
 
-<script lang="ts">
-// Module scope, not component state: the dragged detail-panel height
-// survives navigating between boards but resets with the page itself.
-let savedDetailHeight: number | null = null
-</script>
-
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
+import Menu from 'primevue/menu'
+import type { MenuItem } from 'primevue/menuitem'
 import { useViewport } from '../composables/useViewport'
 import { useStoryboardStore } from '../stores/storyboard'
 import StoryboardLanding from '../components/storyboard/StoryboardLanding.vue'
-import SceneStrip from '../components/storyboard/SceneStrip.vue'
-import PanelGrid from '../components/storyboard/PanelGrid.vue'
-import PanelDetail from '../components/storyboard/PanelDetail.vue'
-import PanelSidePanel from '../components/storyboard/PanelSidePanel.vue'
+import OutlineRail from '../components/storyboard/OutlineRail.vue'
+import ShotDocument from '../components/storyboard/ShotDocument.vue'
 import ImportTextDialog from '../components/storyboard/ImportTextDialog.vue'
 import OutlineDialog from '../components/storyboard/OutlineDialog.vue'
 import StoryboardSettingsDialog from '../components/storyboard/StoryboardSettingsDialog.vue'
@@ -183,44 +132,53 @@ const store = useStoryboardStore()
 const importOpen = ref(false)
 const composeOpen = ref(false)
 const settingsOpen = ref(false)
+const overflowMenu = ref<InstanceType<typeof Menu> | null>(null)
 
-const detailHeight = ref<number | null>(savedDetailHeight)
-
-// null = untouched: PanelDetail keeps its default auto height capped at
-// 44vh. Once dragged, the explicit height wins (max-height lifted).
-const detailStyle = computed(() =>
-  detailHeight.value === null
-    ? undefined
-    : { height: `${detailHeight.value}px`, maxHeight: 'none' },
+const stageBusy = computed(
+  () => store.compile.running || store.synthesis.running || store.story.running,
 )
 
-function startDetailDrag(down: PointerEvent): void {
-  const divider = down.currentTarget as HTMLElement
-  const detail = divider.nextElementSibling as HTMLElement | null
-  if (!detail) return
-  down.preventDefault()
-  const startY = down.clientY
-  const startHeight = detail.getBoundingClientRect().height
-  // Window-level listeners rather than pointer capture on the divider:
-  // capture proved unreliable here, and window always sees the moves.
-  const prevUserSelect = document.body.style.userSelect
-  document.body.style.userSelect = 'none'
-  const onMove = (move: PointerEvent) => {
-    const raw = startHeight + (startY - move.clientY)
-    const max = Math.max(120, window.innerHeight - 240)
-    detailHeight.value = Math.min(max, Math.max(120, Math.round(raw)))
-    savedDetailHeight = detailHeight.value
+const overflowItems = computed<MenuItem[]>(() => {
+  const items: MenuItem[] = [
+    {
+      label: 'Import text',
+      icon: 'pi pi-file-import',
+      disabled: !store.tree,
+      command: () => (importOpen.value = true),
+    },
+    {
+      label: 'Synthesize',
+      icon: 'pi pi-sparkles',
+      disabled: store.loading || !store.tree,
+      command: () => void store.synthesize(),
+    },
+  ]
+  if (store.tree?.video_target) {
+    items.push({
+      label: 'Compile video prompts',
+      icon: 'pi pi-file',
+      disabled: stageBusy.value,
+      command: () => void store.compileVideo(),
+    })
   }
-  const onUp = () => {
-    window.removeEventListener('pointermove', onMove)
-    window.removeEventListener('pointerup', onUp)
-    window.removeEventListener('pointercancel', onUp)
-    document.body.style.userSelect = prevUserSelect
+  if (store.tree?.video_target && store.tree?.video_preset_id) {
+    items.push({
+      label: 'Generate video',
+      icon: 'pi pi-video',
+      disabled: stageBusy.value,
+      command: () => void onGenerateVideo(),
+    })
   }
-  window.addEventListener('pointermove', onMove)
-  window.addEventListener('pointerup', onUp)
-  window.addEventListener('pointercancel', onUp)
-}
+  items.push({ separator: true })
+  items.push({
+    label: 'Cancel',
+    icon: 'pi pi-times',
+    class: 'sb-menu-danger',
+    disabled: !store.tree,
+    command: () => void store.cancelAll(),
+  })
+  return items
+})
 
 // attachWs() registers its cleanup via onUnmounted from inside setup, so it
 // must be called exactly once here in the script setup body -- never from
@@ -273,8 +231,8 @@ watch(
 
 <style scoped>
 /* #app is height:100% + overflow:hidden; without an explicit height here
-   the view grows with content and every inner overflow-y:auto (grid,
-   detail, side panel) has nothing to scroll within. */
+   the view grows with content and every inner overflow-y:auto (rail, shot
+   document) has nothing to scroll within. */
 .storyboard-view {
   height: 100%;
   min-height: 0;
@@ -287,45 +245,11 @@ watch(
   min-height: 0;
 }
 
-.sb-divider {
-  /* position:relative makes z-index effective — without it the grid and
-     detail panel overlap the hit strip left by the negative margins. */
-  position: relative;
-  z-index: 5;
-  flex-shrink: 0;
-  height: 7px;
-  margin: -3px 0;
-  cursor: row-resize;
-  touch-action: none;
-  background: transparent;
-  transition: background 0.15s;
-}
-
-.sb-divider:hover,
-.sb-divider:active {
-  background: var(--primary-color);
-}
-
-/* Untouched: auto height, PanelDetail's own 44vh cap applies. Once
-   dragged (.resized + inline height), the inner panel fills the wrapper. */
-.sb-detail-wrap {
-  flex-shrink: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.sb-detail-wrap.resized :deep(.panel-detail) {
-  flex: 1;
-  min-height: 0;
-  max-height: none;
-}
-
 .sb-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 20px;
+  gap: 12px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--surface-border);
   flex-shrink: 0;
 }
@@ -406,17 +330,11 @@ watch(
   min-height: 0;
 }
 
-.sb-main {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
+.sb-rail {
+  flex: 0 0 270px;
   min-height: 0;
-}
-
-.sb-side {
-  flex: 0 0 400px;
-  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--surface-border);
 }
 
 .sb-loading {
@@ -430,5 +348,14 @@ watch(
   height: 100%;
   overflow-y: auto;
   padding: 32px 20px;
+}
+</style>
+
+<style>
+/* Unscoped: the PrimeVue Menu teleports to <body>, outside this
+   component's scoped-style boundary. */
+.sb-menu-danger .p-menu-item-label,
+.sb-menu-danger .p-menu-item-icon {
+  color: var(--danger-color);
 }
 </style>
