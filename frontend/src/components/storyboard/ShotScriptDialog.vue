@@ -6,7 +6,7 @@ import { buildShotScript, buildShotScriptBlocks } from '../../utils/shotScript'
 import { copyToClipboard } from '../../utils/clipboard'
 import ModalShell from './ModalShell.vue'
 
-const props = defineProps<{ panel: Panel; scene: Scene }>()
+const props = defineProps<{ panel: Panel; scene: Scene; index: number }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 const store = useStoryboardStore()
 
@@ -25,7 +25,7 @@ async function copy(): Promise<void> {
 <template>
   <ModalShell @close="emit('close')">
     <div class="ssd-head">
-      <h3>Shot script — shot {{ (panel.sort_order ?? 0) + 1 }}</h3>
+      <h3>Shot script — shot {{ index + 1 }}</h3>
     </div>
     <div class="ssd-body">
       <pre class="ssd-block ssd-header-block">{{ blocks.header }}</pre>
