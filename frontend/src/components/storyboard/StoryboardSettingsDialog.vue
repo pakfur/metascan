@@ -6,13 +6,7 @@ import { fetchConfig } from '../../api/config'
 import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
-import {
-  ASPECT_RATIOS,
-  TARGET_MODELS,
-  VIDEO_TARGETS,
-  VIDEO_MODES,
-  PACINGS,
-} from '../../types/storyboard'
+import { ASPECT_RATIOS, VIDEO_TARGETS, VIDEO_MODES, PACINGS } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
 const PACING_LABELS: Record<string, string> = {
@@ -28,20 +22,14 @@ const store = useStoryboardStore()
 
 const name = ref('')
 const aspectRatio = ref('')
-const targetModel = ref('')
 const pacing = ref('standard')
-const presetId = ref<number | null>(null)
-const batchSize = ref(1)
 const baseSeed = ref(0)
-const styleBlock = ref('')
-const negative = ref('')
 const notes = ref('')
 const videoTarget = ref<string | null>(null)
 const videoMode = ref<string | null>(null)
 const videoPresetId = ref<number | null>(null)
 const videoOutputDir = ref<string | null>(null)
 const videoNameTemplate = ref('')
-const imageNameTemplate = ref('')
 
 // Library directories from config.json — the only valid choices for the
 // video output directory (the backend 400s anything else).
@@ -58,20 +46,14 @@ const fieldsError = ref<string | null>(null)
 let original = {
   name: '',
   aspectRatio: '',
-  targetModel: '',
   pacing: 'standard',
-  presetId: null as number | null,
-  batchSize: 1,
   baseSeed: 0,
-  styleBlock: '',
-  negativeVal: '',
   notesVal: '',
   videoTarget: null as string | null,
   videoMode: null as string | null,
   videoPresetId: null as number | null,
   videoOutputDir: null as string | null,
   videoNameTemplate: '',
-  imageNameTemplate: '',
 }
 
 function seedFromTree(): void {
@@ -79,37 +61,25 @@ function seedFromTree(): void {
   if (!t) return
   name.value = t.name
   aspectRatio.value = t.aspect_ratio
-  targetModel.value = t.target_model
   pacing.value = t.pacing
-  presetId.value = t.preset_id
-  batchSize.value = t.batch_size
   baseSeed.value = t.base_seed
-  styleBlock.value = t.style_block ?? ''
-  negative.value = t.negative ?? ''
   notes.value = t.notes ?? ''
   videoTarget.value = t.video_target
   videoMode.value = t.video_mode
   videoPresetId.value = t.video_preset_id
   videoOutputDir.value = t.video_output_dir
   videoNameTemplate.value = t.video_name_template ?? ''
-  imageNameTemplate.value = t.image_name_template ?? ''
   original = {
     name: name.value,
     aspectRatio: aspectRatio.value,
-    targetModel: targetModel.value,
     pacing: pacing.value,
-    presetId: presetId.value,
-    batchSize: batchSize.value,
     baseSeed: baseSeed.value,
-    styleBlock: styleBlock.value,
-    negativeVal: negative.value,
     notesVal: notes.value,
     videoTarget: videoTarget.value,
     videoMode: videoMode.value,
     videoPresetId: videoPresetId.value,
     videoOutputDir: videoOutputDir.value,
     videoNameTemplate: videoNameTemplate.value,
-    imageNameTemplate: imageNameTemplate.value,
   }
 }
 
@@ -136,70 +106,45 @@ onMounted(async () => {
   }
 })
 
-function clampBatchSize(): void {
-  const n = Math.round(batchSize.value)
-  batchSize.value = Number.isFinite(n) ? Math.min(16, Math.max(1, n)) : 1
-}
-
 async function saveFields(): Promise<void> {
   if (!store.tree) return
-  clampBatchSize()
   fieldsError.value = null
 
   const body: Partial<{
     name: string
     aspect_ratio: string
-    target_model: string
     pacing: string
-    preset_id: number | null
-    batch_size: number
     base_seed: number
-    style_block: string
-    negative: string
     notes: string | null
     video_target: string | null
     video_mode: string | null
     video_preset_id: number | null
     video_output_dir: string | null
     video_name_template: string | null
-    image_name_template: string | null
   }> = {}
 
   const trimmedName = name.value.trim()
   if (trimmedName !== original.name) body.name = trimmedName
   if (aspectRatio.value !== original.aspectRatio) body.aspect_ratio = aspectRatio.value
-  if (targetModel.value !== original.targetModel) body.target_model = targetModel.value
   if (pacing.value !== original.pacing) body.pacing = pacing.value
-  // Selecting "None" sends an explicit `preset_id: null` clear -- the
-  // backend now honors that (exclude_unset=True) instead of silently
-  // dropping it, so this must count as a real changed field too, or
-  // "None + nothing else changed" would hit the empty-body early return
-  // below and never save.
-  if (presetId.value !== original.presetId) {
-    body.preset_id = presetId.value
-  }
-  if (batchSize.value !== original.batchSize) body.batch_size = batchSize.value
   if (baseSeed.value !== original.baseSeed) body.base_seed = baseSeed.value
-  if (styleBlock.value !== original.styleBlock) body.style_block = styleBlock.value
-  if (negative.value !== original.negativeVal) body.negative = negative.value
   if (notes.value !== original.notesVal) body.notes = notes.value
-  // Selecting "None" sends an explicit clear -- same null-diff handling as
-  // preset_id above (the backend's exclude_unset=True honors it).
+  // Selecting "None" sends an explicit `null` clear -- the backend honors
+  // it (exclude_unset=True) instead of silently dropping it, so it must
+  // count as a real changed field too, or "None + nothing else changed"
+  // would hit the empty-body early return below and never save.
   if (videoTarget.value !== original.videoTarget) body.video_target = videoTarget.value
   if (videoMode.value !== original.videoMode) body.video_mode = videoMode.value
-  // Same "None" -> explicit-clear diff handling as preset_id above.
+  // Same "None" -> explicit-clear diff handling as video_target above.
   if (videoPresetId.value !== original.videoPresetId) {
     body.video_preset_id = videoPresetId.value
   }
   if (videoOutputDir.value !== original.videoOutputDir) {
     body.video_output_dir = videoOutputDir.value
   }
-  // Blank template -> explicit null clear (nullable columns).
+  // Blank template -> explicit null clear (nullable column).
   if (videoNameTemplate.value.trim() !== original.videoNameTemplate) {
     body.video_name_template = videoNameTemplate.value.trim() || null
-  }
-  if (imageNameTemplate.value.trim() !== original.imageNameTemplate) {
-    body.image_name_template = imageNameTemplate.value.trim() || null
   }
 
   if (Object.keys(body).length === 0) return
@@ -244,16 +189,6 @@ function onSubjectName(id: number, e: Event): void {
 
 function onSubjectDescription(id: number, e: Event): void {
   void commitSubjectField(id, { description: (e.target as HTMLInputElement).value })
-}
-
-function onSubjectLoraName(id: number, e: Event): void {
-  const val = (e.target as HTMLInputElement).value.trim()
-  void commitSubjectField(id, { lora_name: val || null })
-}
-
-function onSubjectLoraStrength(id: number, e: Event): void {
-  const raw = (e.target as HTMLInputElement).value
-  void commitSubjectField(id, { lora_strength: raw === '' ? null : Number(raw) })
 }
 
 function onSubjectVoice(id: number, e: Event): void {
@@ -389,10 +324,8 @@ function close(): void {
             </select>
           </div>
           <div class="field">
-            <label for="ss-model">Target model</label>
-            <select id="ss-model" v-model="targetModel">
-              <option v-for="m in TARGET_MODELS" :key="m" :value="m">{{ m }}</option>
-            </select>
+            <label for="ss-seed">Base seed</label>
+            <input id="ss-seed" v-model.number="baseSeed" type="number" />
           </div>
         </div>
 
@@ -401,44 +334,6 @@ function close(): void {
           <select id="ss-pacing" v-model="pacing">
             <option v-for="p in PACINGS" :key="p" :value="p">{{ PACING_LABELS[p] }}</option>
           </select>
-        </div>
-
-        <div class="field">
-          <label for="ss-preset">Workflow preset</label>
-          <select id="ss-preset" v-model="presetId" :disabled="presetsLoading">
-            <option :value="null">None</option>
-            <option v-for="p in presets" :key="p.id" :value="p.id">
-              {{ p.name }} ({{ p.kind }})
-            </option>
-          </select>
-        </div>
-
-        <div class="field-row">
-          <div class="field">
-            <label for="ss-batch">Batch size</label>
-            <input
-              id="ss-batch"
-              v-model.number="batchSize"
-              type="number"
-              min="1"
-              max="16"
-              @blur="clampBatchSize"
-            />
-          </div>
-          <div class="field">
-            <label for="ss-seed">Base seed</label>
-            <input id="ss-seed" v-model.number="baseSeed" type="number" />
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="ss-style">Style block</label>
-          <textarea id="ss-style" v-model="styleBlock" rows="3" />
-        </div>
-
-        <div class="field">
-          <label for="ss-negative">Negative</label>
-          <textarea id="ss-negative" v-model="negative" rows="2" />
         </div>
 
         <div class="field">
@@ -487,29 +382,18 @@ function close(): void {
           </select>
         </div>
 
-        <div class="field-row">
-          <div class="field">
-            <label for="ss-video-name">Video name prefix</label>
-            <input
-              id="ss-video-name"
-              v-model="videoNameTemplate"
-              type="text"
-              placeholder="e.g. %m-%d-%y_"
-            />
-          </div>
-          <div class="field">
-            <label for="ss-image-name">Image name prefix</label>
-            <input
-              id="ss-image-name"
-              v-model="imageNameTemplate"
-              type="text"
-              placeholder="e.g. %m-%d-%y_"
-            />
-          </div>
+        <div class="field">
+          <label for="ss-video-name">Video name prefix</label>
+          <input
+            id="ss-video-name"
+            v-model="videoNameTemplate"
+            type="text"
+            placeholder="e.g. %m-%d-%y_"
+          />
         </div>
         <span class="hint">
-          Prefixes are prepended to generated filenames and expand strftime date
-          tokens (%m, %d, %y, %Y, %H, %M) at generation time.
+          The prefix is prepended to rendered clip filenames and expands strftime
+          date tokens (%m, %d, %y, %Y, %H, %M) at generation time.
         </span>
 
         <p v-if="fieldsError" class="error">{{ fieldsError }}</p>
@@ -539,21 +423,6 @@ function close(): void {
               :value="s.description"
               placeholder="Description"
               @change="onSubjectDescription(s.id, $event)"
-            />
-            <input
-              type="text"
-              class="subject-lora"
-              :value="s.lora_name ?? ''"
-              placeholder="LoRA name"
-              @change="onSubjectLoraName(s.id, $event)"
-            />
-            <input
-              type="number"
-              step="0.05"
-              class="subject-strength"
-              :value="s.lora_strength ?? ''"
-              placeholder="Strength"
-              @change="onSubjectLoraStrength(s.id, $event)"
             />
             <button
               type="button"
@@ -826,19 +695,6 @@ textarea {
 .subject-desc {
   flex: 2;
   min-width: 0;
-}
-
-.subject-lora {
-  flex: 1;
-  min-width: 0;
-}
-
-.subject-strength {
-  /* flex-basis, not width: the generic input[type='number'] { width: 100% }
-     rule above outranks this class by specificity, and width:100% +
-     flex-shrink:0 made this input swallow the whole row, collapsing the
-     text inputs beside it to zero-width slivers. */
-  flex: 0 0 80px;
 }
 
 .subject-voice {

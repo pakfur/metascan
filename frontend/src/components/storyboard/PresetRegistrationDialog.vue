@@ -10,7 +10,6 @@ const emit = defineEmits<{
 }>()
 
 const name = ref('')
-const kind = ref<'t2i' | 'ref' | 'ref2v'>('t2i')
 const workflowText = ref('')
 
 const jsonError = ref<string | null>(null)
@@ -58,10 +57,11 @@ async function submit() {
 
   submitting.value = true
   try {
-    await createPreset({ name: trimmedName, kind: kind.value, workflow })
+    // The storyboard UX is video-only, so registration is fixed to the
+    // ref2v (video workflow) kind.
+    await createPreset({ name: trimmedName, kind: 'ref2v', workflow })
     name.value = ''
     workflowText.value = ''
-    kind.value = 't2i'
     emit('registered')
     await refreshPresets()
   } catch (e) {
@@ -94,25 +94,10 @@ function close() {
     <div class="dialog-card">
       <h3>Workflow presets</h3>
 
-      <h4>Register a new preset</h4>
+      <h4>Register a new video preset (ref2v)</h4>
       <div class="field">
         <label for="preset-name">Name</label>
-        <InputText id="preset-name" v-model="name" placeholder="e.g. Flux base t2i" />
-      </div>
-
-      <div class="field">
-        <label>Kind</label>
-        <div class="radio-row">
-          <label class="radio-label">
-            <input v-model="kind" type="radio" value="t2i" /> t2i
-          </label>
-          <label class="radio-label">
-            <input v-model="kind" type="radio" value="ref" /> ref
-          </label>
-          <label class="radio-label">
-            <input v-model="kind" type="radio" value="ref2v" /> Video (ref2v)
-          </label>
-        </div>
+        <InputText id="preset-name" v-model="name" placeholder="e.g. H3 ref2v" />
       </div>
 
       <div class="field">
@@ -211,22 +196,6 @@ label {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-color-secondary);
-}
-
-.radio-row {
-  display: flex;
-  gap: 16px;
-}
-
-.radio-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--text-color);
-  text-transform: none;
-  cursor: pointer;
 }
 
 input[type='file'] {

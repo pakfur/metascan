@@ -33,10 +33,8 @@
             :class="{ active: p.id === store.selectedPanelId }"
             @click="selectShot(scene, p)"
           >
-            <span class="or-thumb">
-              <img v-if="firstBeatKeeperSrc(p)" :src="firstBeatKeeperSrc(p)!" alt="" />
-              <span v-else class="or-thumb-empty" />
-              <JobBadge v-if="rowJob(p)" :state="rowJob(p)!.state" :error="rowJob(p)!.error" />
+            <span v-if="rowJob(p)" class="or-jobbox">
+              <JobBadge :state="rowJob(p)!.state" :error="rowJob(p)!.error" />
             </span>
             <span class="or-shot-text">
               <span class="or-shot-line1">
@@ -82,9 +80,8 @@
 import { computed, ref, nextTick } from 'vue'
 import Menu from 'primevue/menu'
 import type { MenuItem } from 'primevue/menuitem'
-import { thumbnailUrl } from '../../api/client'
 import { useStoryboardStore } from '../../stores/storyboard'
-import type { Beat, Panel, Scene } from '../../types/storyboard'
+import type { Panel, Scene } from '../../types/storyboard'
 import JobBadge from './JobBadge.vue'
 import SceneEditDialog from './SceneEditDialog.vue'
 import DeleteImagesDialog from './DeleteImagesDialog.vue'
@@ -100,12 +97,6 @@ function toggleScene(id: number): void {
   collapsed.value = next
 }
 
-function firstBeatKeeperSrc(p: Panel): string | null {
-  const beat: Beat | undefined = p.beats[0]
-  const img = beat ? store.keeperImage(beat) : null
-  return img ? thumbnailUrl(img.file_path) : null
-}
-
 function shotSecs(p: Panel): number {
   return p.beats.reduce((s, b) => s + b.duration_s, 0)
 }
@@ -116,16 +107,9 @@ function chargeClass(scene: Scene): string {
   return co > ci ? 'up' : co < ci ? 'down' : 'flat'
 }
 
-// A shot row's job badge: the panel's own video job wins, else the first
-// beat with an active image job (same collapse as the old panelJobBadge).
+// A shot row's job badge: the panel's active video job, if any.
 function rowJob(p: Panel) {
-  const video = store.panelJobState.get(p.id)
-  if (video) return video
-  for (const b of p.beats) {
-    const s = store.beatJobState.get(b.id)
-    if (s) return s
-  }
-  return null
+  return store.panelJobState.get(p.id) ?? null
 }
 
 // Selecting a shot: scene + panel synchronously; the store's
@@ -329,29 +313,14 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   background: color-mix(in srgb, var(--primary-color) 10%, transparent);
 }
 
-.or-thumb {
+.or-jobbox {
   position: relative;
   flex-shrink: 0;
-  width: 34px;
-  height: 34px;
+  width: 22px;
+  height: 22px;
   border-radius: 4px;
   overflow: hidden;
   background: var(--surface-ground);
-}
-
-.or-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.or-thumb-empty {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border: 1px dashed var(--surface-border);
-  box-sizing: border-box;
 }
 
 .or-shot-text {

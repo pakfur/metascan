@@ -16,10 +16,6 @@ const store = useStoryboardStore()
 
 // -- ported from PanelDetail.vue --------------------------------------
 
-// Any beat of this panel with an active image-generation job -- gates the
-// panel-scoped Reroll/Re-synth bulk actions in row 1.
-const hasActiveGenJob = computed(() => props.panel.beats.some((b) => store.beatJobState.has(b.id)))
-
 // Local editable copy of the "commit on change" action field, paired with a
 // "last synced from server" snapshot -- commitAction updates local + snapshot
 // together, so a field with no pending edit always has local === snapshot.
@@ -51,19 +47,6 @@ watch(
   { immediate: true },
 )
 
-function reroll(): void {
-  if (props.panel.beats.length === 0) return
-  void store.generate(props.panel.beats.map((b) => b.id))
-}
-
-function resynth(): void {
-  if (props.panel.beats.length === 0) return
-  void store.synthesize(
-    props.panel.beats.map((b) => b.id),
-    true,
-  )
-}
-
 function commitAction(e: Event): void {
   const val = (e.target as HTMLInputElement).value
   actionVal.value = val
@@ -90,10 +73,6 @@ function toggleTurn(): void {
 // LoraListEditor rows are fully controlled + commit-on-change, so unlike
 // the text field above there is no local copy to snapshot -- every change
 // event already carries the complete next list.
-function commitImageLoras(entries: LoraEntry[]): void {
-  void store.patchPanelFields(props.panel.id, { image_loras: entries })
-}
-
 function commitVideoLoras(entries: LoraEntry[]): void {
   void store.patchPanelFields(props.panel.id, { video_loras: entries })
 }
@@ -199,22 +178,6 @@ async function renderVideo(): Promise<void> {
       <h3 class="sh-title">Shot {{ index + 1 }}</h3>
       <span class="sh-meta">{{ panel.beats.length }} beats</span>
       <div class="sh-row1-actions">
-        <button
-          type="button"
-          class="sh-btn"
-          :disabled="hasActiveGenJob || panel.beats.length === 0"
-          @click="reroll"
-        >
-          Reroll shot
-        </button>
-        <button
-          type="button"
-          class="sh-btn"
-          :disabled="hasActiveGenJob || store.synthesis.running || panel.beats.length === 0"
-          @click="resynth"
-        >
-          Re-synth shot
-        </button>
         <button type="button" class="sh-btn" :disabled="store.story.running" @click="rebeat()">
           Re-beat shot
         </button>
@@ -317,9 +280,6 @@ async function renderVideo(): Promise<void> {
     </label>
 
     <div class="sh-row4">
-      <div class="sh-lora-wrap">
-        <LoraListEditor label="Image LoRAs" :entries="panel.image_loras" @change="commitImageLoras" />
-      </div>
       <div class="sh-lora-wrap">
         <LoraListEditor label="Video LoRAs" :entries="panel.video_loras" @change="commitVideoLoras" />
       </div>
