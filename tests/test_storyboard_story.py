@@ -288,3 +288,32 @@ def test_truncated_beats_array_salvages_across_nested_dialog():
     beats, warnings = validate_beats_response(truncated, {})
     assert len(beats) == 1
     assert beats[0]["dialog"][0]["text"] == "Easy now."
+
+
+def test_pacing_table_and_shot_cap_clamp():
+    g = story.pacing_guidance("standard", 15.0)
+    assert g["panel_min_s"] == 8.0 and g["panel_max_s"] == 15.0
+    assert g["shots_min"] == 2 and g["shots_max"] == 4
+    assert g["beats_min"] == 2 and g["beats_max"] == 4
+    assert g["beat_asl_s"] == 4.5
+    clamped = story.pacing_guidance("contemplative", 8.0)
+    assert clamped["panel_max_s"] == 8.0
+    assert clamped["panel_min_s"] == 8.0  # min never exceeds max
+    assert story.pacing_guidance("bogus", 15.0) == story.pacing_guidance(
+        "standard", 15.0
+    )
+
+
+def test_new_vocabularies_match_spec():
+    assert story.PACING_VALUES == ("contemplative", "standard", "propulsive")
+    assert "negative_space" in story.COMPOSITION_VALUES
+    assert len(story.COMPOSITION_VALUES) == 8
+    assert story.LIGHT_QUALITY_VALUES == (
+        "hard",
+        "soft",
+        "dappled",
+        "practical",
+        "window",
+        "firelight",
+        "ambient",
+    )
