@@ -281,11 +281,13 @@ Not persisted (§2 non-goals).
 - **`StoryboardSettingsDialog`**: `pacing` as a three-option select with
   one-line descriptions ("Contemplative — long held shots, ~6–8s per
   beat").
-- **`PanelDetail.vue`** (shot pane): `subtext` one-line text field;
-  `is_turn` as a toggleable ★ "Turn" badge in the shot header. Both follow
-  the mandatory local-ref + snapshot resync pattern (commit-on-change,
-  resync on `[id, updated_at]`) since compose rewrites them server-side.
-- **`BeatForm.vue`**: `composition` and `light_quality` selects alongside
+- **`ShotHeader.vue`** (the shot pane since the two-region workspace
+  redesign): `subtext` one-line text field; `is_turn` as a toggleable ★
+  "Turn" badge in the shot header. Both follow the mandatory local-ref +
+  snapshot resync pattern (commit-on-change, resync on `[id, updated_at]`)
+  since compose rewrites them server-side.
+- **`BeatCard.vue`** (the per-beat editing surface since the two-region
+  redesign): `composition` and `light_quality` selects alongside
   the existing shot_size/angle/lens row. `emotional_intent`, `reveals`,
   `movement_motivation` in a collapsed **"Cinematography"** disclosure
   section below the framing row — compose-authored metadata most editing
@@ -330,5 +332,5 @@ Not persisted (§2 non-goals).
 | sequencing, re-roll, pacing wiring, WS warnings | `metascan/core/storyboard_runner.py` |
 | columns, writers, tree, PATCH-required lists | `metascan/core/database_sqlite.py`, `backend/api/storyboard.py` |
 | brief lines | `metascan/core/storyboard_brief.py` |
-| UI | `frontend/src/types/storyboard.ts`, `BeatForm.vue`, `PanelDetail.vue`, `StoryboardSettingsDialog.vue`, outline rail component, `stores/storyboard.ts` |
+| UI | `frontend/src/types/storyboard.ts`, `BeatCard.vue`, `ShotHeader.vue`, `StoryboardSettingsDialog.vue`, `OutlineRail.vue`, `stores/storyboard.ts` |
 | tests | `tests/test_storyboard_story*.py` (extend), new lint/re-roll/sequencing tests |
