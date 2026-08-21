@@ -36,6 +36,7 @@ from metascan.core.storyboard_parse import (
 )
 from metascan.core.storyboard_synthesis import build_render_messages, finalize_prompt
 from metascan.core.video_targets import shot_cap
+from metascan.utils.trash import remove_files_to_trash
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_models import REGISTRY
 from metascan.utils.ffmpeg_utils import extract_last_frame
@@ -186,7 +187,8 @@ class StoryboardRunner:
         if tree["scenes"] and not confirm:
             raise ConfirmRequiredError(
                 "storyboard already has scenes; re-parsing destroys panel "
-                "identity — pass confirm=true"
+                "identity and moves generated media to the trash — pass "
+                "confirm=true"
             )
 
         model_id = self._pick_vlm_model(vlm)
@@ -202,9 +204,14 @@ class StoryboardRunner:
         # ParseError propagates to the caller (the route maps it to a 4xx).
         parsed = validate_parse_response(raw)
 
-        await asyncio.to_thread(
-            self.db.replace_storyboard_structure, storyboard_id, parsed
+        # A confirmed re-parse is a user-accepted destructive operation:
+        # the old tree's generated media is purged (files to the OS
+        # trash), not released into the library.
+        purged = await asyncio.to_thread(
+            self.db.replace_storyboard_structure, storyboard_id, parsed, confirm
         )
+        if purged:
+            await asyncio.to_thread(remove_files_to_trash, purged)
         await asyncio.to_thread(
             self.db.update_storyboard, storyboard_id, source_text=text
         )
@@ -258,7 +265,8 @@ class StoryboardRunner:
         if "scenes" in stages and tree["scenes"]:
             exc = ConfirmRequiredError(
                 "storyboard already has scenes; rebuilding destroys panel "
-                "identity — pass confirm=true"
+                "identity and moves generated media to the trash — pass "
+                "confirm=true"
             )
             exc._compose_stage = "scenes"  # type: ignore[attr-defined]
             raise exc
@@ -268,7 +276,8 @@ class StoryboardRunner:
             ]
             if any(s["panels"] for s in targets):
                 exc = ConfirmRequiredError(
-                    "target scenes already have shots — pass confirm=true"
+                    "target scenes already have shots; rebuilding moves their "
+                    "generated media to the trash — pass confirm=true"
                 )
                 exc._compose_stage = "shots"  # type: ignore[attr-defined]
                 raise exc
@@ -287,7 +296,8 @@ class StoryboardRunner:
             if dirty:
                 exc = ConfirmRequiredError(
                     "target shots have beats with generated images or locked "
-                    "prompts; recomposing destroys them — pass confirm=true"
+                    "prompts; recomposing deletes the images (moved to the "
+                    "trash) — pass confirm=true"
                 )
                 exc._compose_stage = "beats"  # type: ignore[attr-defined]
                 raise exc
@@ -358,7 +368,7 @@ class StoryboardRunner:
 
                 for current in run_stages:
                     n, stage_warnings = await self._run_stage(
-                        current, vlm, sem, storyboard_id, scene_ids, panel_ids
+                        current, vlm, sem, storyboard_id, scene_ids, panel_ids, confirm
                     )
                     counts[current] = n
                     self._emit(
@@ -383,7 +393,13 @@ class StoryboardRunner:
         storyboard_id: int,
         scene_ids: Optional[List[int]],
         panel_ids: Optional[List[int]],
+        purge: bool,
     ) -> Tuple[int, List[str]]:
+        # `purge` mirrors the compose call's `confirm`: a user-confirmed
+        # destructive recompose purges the destroyed tree's generated
+        # media (files to the OS trash) instead of releasing it into the
+        # library. When no gate fired, confirm is false and the replace
+        # calls purge nothing anyway.
         tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
         assert tree is not None
         roster = {s["name"].strip().lower(): int(s["id"]) for s in tree["subjects"]}
@@ -503,9 +519,11 @@ class StoryboardRunner:
                 max_tokens=2048,
                 timeout=300.0,
             )
-            await asyncio.to_thread(
-                self.db.replace_storyboard_scenes, storyboard_id, scenes
+            _, purged_files = await asyncio.to_thread(
+                self.db.replace_storyboard_scenes, storyboard_id, scenes, purge
             )
+            if purged_files:
+                await asyncio.to_thread(remove_files_to_trash, purged_files)
             progress(1, 1)
             return len(scenes), stage_warnings
 
@@ -559,9 +577,11 @@ class StoryboardRunner:
                 if not is_turn_scene:
                     for p in panels:
                         p["is_turn"] = 0
-                await asyncio.to_thread(
-                    self.db.replace_scene_panels, scene["id"], panels
+                _, purged_files = await asyncio.to_thread(
+                    self.db.replace_scene_panels, scene["id"], panels, purge
                 )
+                if purged_files:
+                    await asyncio.to_thread(remove_files_to_trash, purged_files)
                 async with lock:
                     done += 1
                     progress(done, total)
@@ -646,7 +666,11 @@ class StoryboardRunner:
                 story.rescale_beat_durations(
                     beats, float(panel.get("duration_s") or 12.0)
                 )
-                await asyncio.to_thread(self.db.replace_panel_beats, panel["id"], beats)
+                _, purged_files = await asyncio.to_thread(
+                    self.db.replace_panel_beats, panel["id"], beats, purge
+                )
+                if purged_files:
+                    await asyncio.to_thread(remove_files_to_trash, purged_files)
                 prev_action = panel.get("action")
                 if beats:
                     prev_summary = story.describe_beat_framing(beats[-1])

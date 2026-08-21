@@ -819,7 +819,7 @@ def test_delete_panel_purge_images_removes_media_and_trashes_file(
     img.write_bytes(b"x")
     trashed = []
     monkeypatch.setattr(
-        "backend.services.storyboard_service.send2trash",
+        "metascan.utils.trash.send2trash",
         lambda p: trashed.append(p),
     )
     _sid, _scene_id, panel_id = _seed_panel_with_image(client, str(img))
@@ -849,7 +849,7 @@ def test_delete_storyboard_purge_images_via_query_param(client, monkeypatch, tmp
     img.write_bytes(b"x")
     trashed = []
     monkeypatch.setattr(
-        "backend.services.storyboard_service.send2trash",
+        "metascan.utils.trash.send2trash",
         lambda p: trashed.append(p),
     )
     sid, _scene_id, _panel_id = _seed_panel_with_image(client, str(img))

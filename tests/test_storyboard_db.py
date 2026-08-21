@@ -817,7 +817,7 @@ def test_cinematic_columns_roundtrip(db):
     db.update_storyboard(sb, pacing="propulsive")
     assert db.get_storyboard(sb)["pacing"] == "propulsive"
 
-    sids = db.replace_storyboard_scenes(
+    sids, _ = db.replace_storyboard_scenes(
         sb,
         [
             {
@@ -836,7 +836,7 @@ def test_cinematic_columns_roundtrip(db):
     scene = db.get_storyboard_tree(sb)["scenes"][0]
     assert scene["arc_beats"] == ["setup"] and scene["charge_in"] == 1
 
-    pids = db.replace_scene_panels(
+    pids, _ = db.replace_scene_panels(
         sids[0],
         [{"action": "a", "duration_s": 10.0, "is_turn": 1, "subtext": "hidden"}],
     )
@@ -846,7 +846,7 @@ def test_cinematic_columns_roundtrip(db):
     panel = db.get_panel(pids[0])
     assert panel["is_turn"] == 0 and panel["subtext"] is None
 
-    bids = db.replace_panel_beats(
+    bids, _ = db.replace_panel_beats(
         pids[0],
         [
             {
