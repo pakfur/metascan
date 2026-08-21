@@ -7,7 +7,14 @@ import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import TextEditPopup from './TextEditPopup.vue'
-import { ASPECT_RATIOS, VIDEO_TARGETS, VIDEO_MODES, PACINGS } from '../../types/storyboard'
+import {
+  ASPECT_RATIOS,
+  VIDEO_TARGETS,
+  VIDEO_MODES,
+  PACINGS,
+  STORY_SCALES,
+  STORY_SCALE_LABELS,
+} from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
 const PACING_LABELS: Record<string, string> = {
@@ -24,6 +31,7 @@ const store = useStoryboardStore()
 const name = ref('')
 const aspectRatio = ref('')
 const pacing = ref('standard')
+const storyScale = ref('standard')
 const baseSeed = ref(0)
 const notes = ref('')
 const videoTarget = ref<string | null>(null)
@@ -48,6 +56,7 @@ let original = {
   name: '',
   aspectRatio: '',
   pacing: 'standard',
+  storyScale: 'standard',
   baseSeed: 0,
   notesVal: '',
   videoTarget: null as string | null,
@@ -63,6 +72,7 @@ function seedFromTree(): void {
   name.value = t.name
   aspectRatio.value = t.aspect_ratio
   pacing.value = t.pacing
+  storyScale.value = t.story_scale
   baseSeed.value = t.base_seed
   notes.value = t.notes ?? ''
   videoTarget.value = t.video_target
@@ -74,6 +84,7 @@ function seedFromTree(): void {
     name: name.value,
     aspectRatio: aspectRatio.value,
     pacing: pacing.value,
+    storyScale: storyScale.value,
     baseSeed: baseSeed.value,
     notesVal: notes.value,
     videoTarget: videoTarget.value,
@@ -115,6 +126,7 @@ async function saveFields(): Promise<void> {
     name: string
     aspect_ratio: string
     pacing: string
+    story_scale: string
     base_seed: number
     notes: string | null
     video_target: string | null
@@ -128,6 +140,7 @@ async function saveFields(): Promise<void> {
   if (trimmedName !== original.name) body.name = trimmedName
   if (aspectRatio.value !== original.aspectRatio) body.aspect_ratio = aspectRatio.value
   if (pacing.value !== original.pacing) body.pacing = pacing.value
+  if (storyScale.value !== original.storyScale) body.story_scale = storyScale.value
   if (baseSeed.value !== original.baseSeed) body.base_seed = baseSeed.value
   if (notes.value !== original.notesVal) body.notes = notes.value
   // Selecting "None" sends an explicit `null` clear -- the backend honors
@@ -337,6 +350,19 @@ function close(): void {
           <select id="ss-pacing" v-model="pacing">
             <option v-for="p in PACINGS" :key="p" :value="p">{{ PACING_LABELS[p] }}</option>
           </select>
+        </div>
+
+        <div class="field">
+          <label for="ss-scale">Story length</label>
+          <select id="ss-scale" v-model="storyScale">
+            <option v-for="s in STORY_SCALES" :key="s" :value="s">
+              {{ STORY_SCALE_LABELS[s] }}
+            </option>
+          </select>
+          <span class="hint">
+            Applies on the next Compose run — re-run outline/scenes/shots to regenerate the arc
+            at the new length.
+          </span>
         </div>
 
         <div class="field">

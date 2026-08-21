@@ -2,7 +2,12 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { ApiError } from '../../api/client'
-import { COMPOSE_STAGES, type ComposeStage } from '../../types/storyboard'
+import {
+  COMPOSE_STAGES,
+  STORY_SCALES,
+  STORY_SCALE_LABELS,
+  type ComposeStage,
+} from '../../types/storyboard'
 
 const STAGE_LABEL: Record<ComposeStage, string> = {
   outline: 'Outline',
@@ -115,6 +120,17 @@ async function run(stages: ComposeStage[], confirm = false): Promise<void> {
   }
 }
 
+// Story length is persisted immediately (like a settings field, one
+// source of truth on the storyboard) so the very next compose run —
+// including a confirm retry — picks it up. The select is fully
+// controlled from store.tree; a select has no in-progress edit state to
+// protect, so no local/snapshot pair is needed.
+function onScaleChange(e: Event): void {
+  const val = (e.target as HTMLSelectElement).value
+  if (val === store.tree?.story_scale) return
+  void store.patchStoryboardFields({ story_scale: val })
+}
+
 function close(): void {
   if (store.story.running) return
   emit('close')
@@ -132,6 +148,19 @@ function close(): void {
       <p v-if="store.tree?.video_target" class="hint video-echo">
         Video: MiniMax H3 · {{ store.tree.video_mode || 'ref2va' }} (change in Settings)
       </p>
+
+      <label class="field-label" for="od-scale">Story length</label>
+      <select
+        id="od-scale"
+        class="scale-select"
+        :value="store.tree?.story_scale ?? 'standard'"
+        :disabled="store.story.running"
+        @change="onScaleChange"
+      >
+        <option v-for="s in STORY_SCALES" :key="s" :value="s">
+          {{ STORY_SCALE_LABELS[s] }}
+        </option>
+      </select>
 
       <label class="field-label">Premise</label>
       <textarea
@@ -250,6 +279,28 @@ h3 {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-color-secondary);
+}
+
+.scale-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.scale-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.scale-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .import-textarea {
