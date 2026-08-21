@@ -253,6 +253,28 @@ function onClearReference(id: number, slot: 1 | 2 = 1): void {
 
 // ---- describe from refs --------------------------------------------------
 
+// Boilerplate description for a subject whose reference picture is a
+// three-view character sheet -- the H3 prompt guide's phrasing, inserted
+// verbatim rather than VLM-composed.
+const CHARACTER_SHEET_DESCRIPTION =
+  '<Subject 1> is the person shown in <Picture 1>, a three-view character ' +
+  'reference sheet (full front, full back, facial close-up) of one single ' +
+  'individual.'
+
+function onCharacterSheetDescribe(id: number): void {
+  const current = (
+    store.tree?.subjects.find((s) => s.id === id)?.description ?? ''
+  ).trim()
+  if (
+    current &&
+    current !== CHARACTER_SHEET_DESCRIPTION &&
+    !confirm('Replace the current description with the character-sheet boilerplate?')
+  ) {
+    return
+  }
+  void commitSubjectField(id, { description: CHARACTER_SHEET_DESCRIPTION })
+}
+
 const describing = ref<Record<number, boolean>>({})
 const describeResult = ref<Record<number, { description: string; voice: string | null }>>({})
 const describeErrors = ref<Record<number, string>>({})
@@ -593,6 +615,16 @@ function close(): void {
               {{ describing[s.id] ? 'Describing…' : 'Describe from refs' }}
             </button>
             <span class="hint">First call may take up to a minute while the model loads.</span>
+          </div>
+          <div class="describe-row">
+            <button
+              type="button"
+              class="describe-btn"
+              @click="onCharacterSheetDescribe(s.id)"
+            >
+              Describe as Character Sheet
+            </button>
+            <span class="hint">For a 3-image character sheet (full front, full back, face)</span>
           </div>
           <p v-if="describeErrors[s.id]" class="error inline">{{ describeErrors[s.id] }}</p>
 
