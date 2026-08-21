@@ -4,6 +4,7 @@ import { useStoryboardStore } from '../../stores/storyboard'
 import { describeScene } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
+import TextEditPopup from './TextEditPopup.vue'
 import type { Scene } from '../../types/storyboard'
 
 // `scene` null means create mode: Save POSTs a new scene. Otherwise Save
@@ -189,17 +190,21 @@ async function save(): Promise<void> {
 
       <div class="field">
         <label for="se-title">Title</label>
-        <input id="se-title" v-model="name" type="text" placeholder="Scene title" />
+        <TextEditPopup title="Title" :value="name" @save="name = $event">
+          <input id="se-title" v-model="name" type="text" placeholder="Scene title" />
+        </TextEditPopup>
       </div>
 
       <div class="field">
         <label for="se-subtitle">Subtitle</label>
-        <input
-          id="se-subtitle"
-          v-model="subtitle"
-          type="text"
-          placeholder="Short tagline shown under the title"
-        />
+        <TextEditPopup title="Subtitle" :value="subtitle" @save="subtitle = $event">
+          <input
+            id="se-subtitle"
+            v-model="subtitle"
+            type="text"
+            placeholder="Short tagline shown under the title"
+          />
+        </TextEditPopup>
       </div>
 
       <div class="field">
@@ -215,16 +220,20 @@ async function save(): Promise<void> {
       <div class="field-row">
         <div class="field">
           <label for="se-lighting">Lighting</label>
-          <input
-            id="se-lighting"
-            v-model="lighting"
-            type="text"
-            placeholder="e.g. golden hour, harsh fluorescent"
-          />
+          <TextEditPopup title="Lighting" :value="lighting" @save="lighting = $event">
+            <input
+              id="se-lighting"
+              v-model="lighting"
+              type="text"
+              placeholder="e.g. golden hour, harsh fluorescent"
+            />
+          </TextEditPopup>
         </div>
         <div class="field">
           <label for="se-mood">Mood</label>
-          <input id="se-mood" v-model="mood" type="text" placeholder="e.g. tense, melancholic" />
+          <TextEditPopup title="Mood" :value="mood" @save="mood = $event">
+            <input id="se-mood" v-model="mood" type="text" placeholder="e.g. tense, melancholic" />
+          </TextEditPopup>
         </div>
       </div>
 

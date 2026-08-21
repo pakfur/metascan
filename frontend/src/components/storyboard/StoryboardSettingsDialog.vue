@@ -6,6 +6,7 @@ import { fetchConfig } from '../../api/config'
 import { describeSubject } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
+import TextEditPopup from './TextEditPopup.vue'
 import { ASPECT_RATIOS, VIDEO_TARGETS, VIDEO_MODES, PACINGS } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
@@ -313,7 +314,9 @@ function close(): void {
 
         <div class="field">
           <label for="ss-name">Name</label>
-          <InputText id="ss-name" v-model="name" />
+          <TextEditPopup title="Name" :value="name" @save="name = $event">
+            <InputText id="ss-name" v-model="name" />
+          </TextEditPopup>
         </div>
 
         <div class="field-row">
@@ -384,12 +387,18 @@ function close(): void {
 
         <div class="field">
           <label for="ss-video-name">Video name prefix</label>
-          <input
-            id="ss-video-name"
-            v-model="videoNameTemplate"
-            type="text"
-            placeholder="e.g. %m-%d-%y_"
-          />
+          <TextEditPopup
+            title="Video name prefix"
+            :value="videoNameTemplate"
+            @save="videoNameTemplate = $event"
+          >
+            <input
+              id="ss-video-name"
+              v-model="videoNameTemplate"
+              type="text"
+              placeholder="e.g. %m-%d-%y_"
+            />
+          </TextEditPopup>
         </div>
         <span class="hint">
           The prefix is prepended to rendered clip filenames and expands strftime
@@ -410,20 +419,32 @@ function close(): void {
 
         <div v-for="s in store.tree?.subjects ?? []" :key="s.id" class="subject-row">
           <div class="subject-row-fields">
-            <input
-              type="text"
+            <TextEditPopup
               class="subject-name"
+              title="Subject name"
               :value="s.name"
-              placeholder="Name"
-              @change="onSubjectName(s.id, $event)"
-            />
-            <input
-              type="text"
+              @save="commitSubjectField(s.id, { name: $event })"
+            >
+              <input
+                type="text"
+                :value="s.name"
+                placeholder="Name"
+                @change="onSubjectName(s.id, $event)"
+              />
+            </TextEditPopup>
+            <TextEditPopup
               class="subject-desc"
+              title="Subject description"
               :value="s.description"
-              placeholder="Description"
-              @change="onSubjectDescription(s.id, $event)"
-            />
+              @save="commitSubjectField(s.id, { description: $event })"
+            >
+              <input
+                type="text"
+                :value="s.description"
+                placeholder="Description"
+                @change="onSubjectDescription(s.id, $event)"
+              />
+            </TextEditPopup>
             <button
               type="button"
               class="remove-btn"
@@ -434,20 +455,32 @@ function close(): void {
             </button>
           </div>
           <div class="subject-row-fields">
-            <input
-              type="text"
+            <TextEditPopup
               class="subject-voice"
-              :value="s.voice ?? ''"
-              placeholder="Voice (e.g. narrator, husky alto)"
-              @change="onSubjectVoice(s.id, $event)"
-            />
-            <input
-              type="text"
+              title="Voice"
+              :value="s.voice"
+              @save="commitSubjectField(s.id, { voice: $event.trim() || null })"
+            >
+              <input
+                type="text"
+                :value="s.voice ?? ''"
+                placeholder="Voice (e.g. narrator, husky alto)"
+                @change="onSubjectVoice(s.id, $event)"
+              />
+            </TextEditPopup>
+            <TextEditPopup
               class="subject-voice"
-              :value="s.voice_ref_path ?? ''"
-              placeholder="Voice ref (audio path)"
-              @change="onSubjectVoiceRefPath(s.id, $event)"
-            />
+              title="Voice ref (audio path)"
+              :value="s.voice_ref_path"
+              @save="commitSubjectField(s.id, { voice_ref_path: $event.trim() || null })"
+            >
+              <input
+                type="text"
+                :value="s.voice_ref_path ?? ''"
+                placeholder="Voice ref (audio path)"
+                @change="onSubjectVoiceRefPath(s.id, $event)"
+              />
+            </TextEditPopup>
           </div>
           <div class="subject-ref-row">
             <img
@@ -460,13 +493,19 @@ function close(): void {
             <div v-else class="ref-thumb ref-thumb-empty" title="No reference image">
               <span>—</span>
             </div>
-            <input
-              type="text"
+            <TextEditPopup
               class="subject-ref"
-              :value="s.reference_path ?? ''"
-              placeholder="Reference image path"
-              @change="onSubjectReferencePath(s.id, $event)"
-            />
+              title="Reference image path"
+              :value="s.reference_path"
+              @save="commitSubjectField(s.id, { reference_path: $event.trim() || null })"
+            >
+              <input
+                type="text"
+                :value="s.reference_path ?? ''"
+                placeholder="Reference image path"
+                @change="onSubjectReferencePath(s.id, $event)"
+              />
+            </TextEditPopup>
             <button type="button" class="browse-btn" @click="picker = { id: s.id, slot: 1 }">
               Browse…
             </button>
@@ -491,13 +530,19 @@ function close(): void {
             <div v-else class="ref-thumb ref-thumb-empty" title="No second reference image">
               <span>—</span>
             </div>
-            <input
-              type="text"
+            <TextEditPopup
               class="subject-ref"
-              :value="s.reference_path_2 ?? ''"
-              placeholder="Second reference image path"
-              @change="onSubjectReferencePath(s.id, $event, 2)"
-            />
+              title="Second reference image path"
+              :value="s.reference_path_2"
+              @save="commitSubjectField(s.id, { reference_path_2: $event.trim() || null })"
+            >
+              <input
+                type="text"
+                :value="s.reference_path_2 ?? ''"
+                placeholder="Second reference image path"
+                @change="onSubjectReferencePath(s.id, $event, 2)"
+              />
+            </TextEditPopup>
             <button type="button" class="browse-btn" @click="picker = { id: s.id, slot: 2 }">
               Browse…
             </button>
@@ -550,8 +595,22 @@ function close(): void {
         </div>
 
         <div class="add-subject-row">
-          <input v-model="newSubjectName" type="text" placeholder="Name" />
-          <input v-model="newSubjectDescription" type="text" placeholder="Description" />
+          <TextEditPopup
+            class="add-subject-grow"
+            title="Name"
+            :value="newSubjectName"
+            @save="newSubjectName = $event"
+          >
+            <input v-model="newSubjectName" type="text" placeholder="Name" />
+          </TextEditPopup>
+          <TextEditPopup
+            class="add-subject-grow"
+            title="Description"
+            :value="newSubjectDescription"
+            @save="newSubjectDescription = $event"
+          >
+            <input v-model="newSubjectDescription" type="text" placeholder="Description" />
+          </TextEditPopup>
           <button
             type="button"
             class="add-btn"
@@ -843,8 +902,10 @@ textarea {
   margin-top: 4px;
 }
 
-.add-subject-row input {
+/* TextEditPopup roots take over the inputs' old flex-item role. */
+.add-subject-grow {
   flex: 1;
+  min-width: 0;
 }
 
 .add-btn {

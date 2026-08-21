@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { listPresets, createPreset, deletePreset } from '../../api/comfy'
 import { ApiError } from '../../api/client'
 import type { WorkflowPreset } from '../../types/storyboard'
+import TextEditPopup from './TextEditPopup.vue'
 
 const emit = defineEmits<{
   close: []
@@ -97,7 +98,9 @@ function close() {
       <h4>Register a new video preset (ref2v)</h4>
       <div class="field">
         <label for="preset-name">Name</label>
-        <InputText id="preset-name" v-model="name" placeholder="e.g. H3 ref2v" />
+        <TextEditPopup title="Name" :value="name" @save="name = $event">
+          <InputText id="preset-name" v-model="name" placeholder="e.g. H3 ref2v" />
+        </TextEditPopup>
       </div>
 
       <div class="field">
