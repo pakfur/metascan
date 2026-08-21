@@ -6,6 +6,7 @@ import { patchStoryboard } from '../../api/storyboard'
 import { ApiError } from '../../api/client'
 import { ASPECT_RATIOS, TARGET_MODELS, VIDEO_MODES } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
+import TextEditPopup from './TextEditPopup.vue'
 
 const emit = defineEmits<{
   close: []
@@ -103,7 +104,9 @@ async function submit() {
 
       <div class="field">
         <label for="sb-name">Name</label>
-        <InputText id="sb-name" v-model="name" placeholder="e.g. Coffee shop meet-cute" />
+        <TextEditPopup title="Name" :value="name" @save="name = $event">
+          <InputText id="sb-name" v-model="name" placeholder="e.g. Coffee shop meet-cute" />
+        </TextEditPopup>
       </div>
 
       <div class="field">

@@ -2,13 +2,20 @@
   <div class="lle-root">
     <label class="lle-label">{{ label }}</label>
     <div v-for="(entry, i) in entries" :key="`${i}-${entry.name}`" class="lle-row">
-      <input
-        class="lle-name"
-        type="text"
-        :list="listId"
+      <TextEditPopup
+        class="lle-name-wrap"
+        title="LoRA name"
         :value="entry.name"
-        @change="commitName(i, $event)"
-      />
+        @save="commitNameVal(i, $event)"
+      >
+        <input
+          class="lle-name"
+          type="text"
+          :list="listId"
+          :value="entry.name"
+          @change="commitName(i, $event)"
+        />
+      </TextEditPopup>
       <input
         class="lle-strength"
         type="number"
@@ -55,6 +62,7 @@ let uid = 0
 
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue'
+import TextEditPopup from './TextEditPopup.vue'
 import type { LoraEntry } from '../../types/storyboard'
 
 const props = defineProps<{
@@ -91,18 +99,21 @@ function commitDraft(e: Event): void {
   emit('change', [...props.entries, { name, strength: 1.0 }])
 }
 
+function commitNameVal(i: number, raw: string): boolean {
+  const name = raw.trim()
+  if (!name) return false
+  if (name !== props.entries[i]?.name) {
+    emit(
+      'change',
+      props.entries.map((en, j) => (j === i ? { ...en, name } : en)),
+    )
+  }
+  return true
+}
+
 function commitName(i: number, e: Event): void {
   const input = e.target as HTMLInputElement
-  const name = input.value.trim()
-  if (!name) {
-    input.value = props.entries[i]?.name ?? ''
-    return
-  }
-  if (name === props.entries[i]?.name) return
-  emit(
-    'change',
-    props.entries.map((en, j) => (j === i ? { ...en, name } : en)),
-  )
+  if (!commitNameVal(i, input.value)) input.value = props.entries[i]?.name ?? ''
 }
 
 function commitStrength(i: number, e: Event): void {
@@ -161,6 +172,13 @@ function removeEntry(i: number): void {
 }
 
 .lle-name {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Committed rows wrap the name input in TextEditPopup — the wrapper takes
+   over the flex-item role (the draft row's bare input keeps .lle-name's). */
+.lle-name-wrap {
   flex: 1;
   min-width: 0;
 }

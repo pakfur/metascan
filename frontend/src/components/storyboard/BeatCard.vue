@@ -13,6 +13,7 @@ import {
   SHOT_SIZES,
 } from '../../types/storyboard'
 import DeleteImagesDialog from './DeleteImagesDialog.vue'
+import TextEditPopup from './TextEditPopup.vue'
 
 const props = defineProps<{
   beat: Beat
@@ -189,9 +190,8 @@ function commitCineText(
   field: 'emotional_intent' | 'reveals' | 'movement_motivation',
   local: Ref<string>,
   snap: Ref<string>,
-  e: Event,
+  val: string,
 ): void {
-  const val = (e.target as HTMLInputElement).value
   local.value = val
   snap.value = val
   const next = val.trim() || null
@@ -200,13 +200,22 @@ function commitCineText(
 }
 
 function commitEmotional(e: Event): void {
-  commitCineText('emotional_intent', emotionalVal, emotionalSnap, e)
+  commitCineText('emotional_intent', emotionalVal, emotionalSnap, (e.target as HTMLInputElement).value)
 }
 function commitReveals(e: Event): void {
-  commitCineText('reveals', revealsVal, revealsSnap, e)
+  commitCineText('reveals', revealsVal, revealsSnap, (e.target as HTMLInputElement).value)
 }
 function commitMotivation(e: Event): void {
-  commitCineText('movement_motivation', motivationVal, motivationSnap, e)
+  commitCineText('movement_motivation', motivationVal, motivationSnap, (e.target as HTMLInputElement).value)
+}
+function saveEmotional(val: string): void {
+  commitCineText('emotional_intent', emotionalVal, emotionalSnap, val)
+}
+function saveReveals(val: string): void {
+  commitCineText('reveals', revealsVal, revealsSnap, val)
+}
+function saveMotivation(val: string): void {
+  commitCineText('movement_motivation', motivationVal, motivationSnap, val)
 }
 
 async function commit(field: 'action' | 'duration_s' | 'sound', raw: string): Promise<void> {
@@ -463,30 +472,36 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
           <summary class="bc-label-eyebrow">Cinematography</summary>
           <div class="bc-field">
             <label class="bc-label-eyebrow">Intent</label>
-            <input
-              type="text"
-              :value="emotionalVal"
-              placeholder="visible physical evidence — never an emotion label"
-              @change="commitEmotional"
-            />
+            <TextEditPopup title="Intent" :value="emotionalVal" @save="saveEmotional">
+              <input
+                type="text"
+                :value="emotionalVal"
+                placeholder="visible physical evidence — never an emotion label"
+                @change="commitEmotional"
+              />
+            </TextEditPopup>
           </div>
           <div class="bc-field">
             <label class="bc-label-eyebrow">Reveals</label>
-            <input
-              type="text"
-              :value="revealsVal"
-              placeholder="what this beat shows that the last one didn't"
-              @change="commitReveals"
-            />
+            <TextEditPopup title="Reveals" :value="revealsVal" @save="saveReveals">
+              <input
+                type="text"
+                :value="revealsVal"
+                placeholder="what this beat shows that the last one didn't"
+                @change="commitReveals"
+              />
+            </TextEditPopup>
           </div>
           <div class="bc-field">
             <label class="bc-label-eyebrow">Move why</label>
-            <input
-              type="text"
-              :value="motivationVal"
-              placeholder="what pulls the camera (required for any move)"
-              @change="commitMotivation"
-            />
+            <TextEditPopup title="Move why" :value="motivationVal" @save="saveMotivation">
+              <input
+                type="text"
+                :value="motivationVal"
+                placeholder="what pulls the camera (required for any move)"
+                @change="commitMotivation"
+              />
+            </TextEditPopup>
           </div>
         </details>
 
@@ -545,28 +560,46 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
                   <option value="">other voice</option>
                   <option v-for="s in subjects" :key="s.id" :value="s.id">{{ s.name }}</option>
                 </select>
-                <input
+                <TextEditPopup
                   v-if="line.subject_id === null"
-                  type="text"
                   class="bc-dialog-voice"
-                  placeholder="voice"
-                  :value="line.voice ?? ''"
-                  @change="onDialogVoiceChange(i, $event)"
-                />
-                <input
-                  type="text"
+                  title="Voice"
+                  :value="line.voice"
+                  @save="commitDialogLine(i, { voice: $event.trim() || null })"
+                >
+                  <input
+                    type="text"
+                    placeholder="voice"
+                    :value="line.voice ?? ''"
+                    @change="onDialogVoiceChange(i, $event)"
+                  />
+                </TextEditPopup>
+                <TextEditPopup
                   class="bc-dialog-delivery"
-                  placeholder="delivery"
-                  :value="line.delivery ?? ''"
-                  @change="onDialogDeliveryChange(i, $event)"
-                />
-                <input
-                  type="text"
+                  title="Delivery"
+                  :value="line.delivery"
+                  @save="commitDialogLine(i, { delivery: $event.trim() || null })"
+                >
+                  <input
+                    type="text"
+                    placeholder="delivery"
+                    :value="line.delivery ?? ''"
+                    @change="onDialogDeliveryChange(i, $event)"
+                  />
+                </TextEditPopup>
+                <TextEditPopup
                   class="bc-dialog-language"
-                  placeholder="language"
+                  title="Language"
                   :value="line.language"
-                  @change="onDialogLanguageChange(i, $event)"
-                />
+                  @save="commitDialogLine(i, { language: $event })"
+                >
+                  <input
+                    type="text"
+                    placeholder="language"
+                    :value="line.language"
+                    @change="onDialogLanguageChange(i, $event)"
+                  />
+                </TextEditPopup>
                 <button
                   type="button"
                   class="bc-icon-btn"
@@ -899,16 +932,17 @@ textarea {
   flex: 1;
 }
 
+/* Sized for the input plus the popup-edit button now inside each wrapper. */
 .bc-dialog-voice {
-  flex: 0 0 64px;
+  flex: 0 0 90px;
 }
 
 .bc-dialog-delivery {
-  flex: 0 0 84px;
+  flex: 0 0 110px;
 }
 
 .bc-dialog-language {
-  flex: 0 0 64px;
+  flex: 0 0 90px;
 }
 
 .bc-dialog-text {

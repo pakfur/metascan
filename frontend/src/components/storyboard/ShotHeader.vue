@@ -6,6 +6,7 @@ import type { LoraEntry, Panel, PanelVideo, Scene } from '../../types/storyboard
 import type { Media } from '../../types/media'
 import PacingStrip from './PacingStrip.vue'
 import LoraListEditor from './LoraListEditor.vue'
+import TextEditPopup from './TextEditPopup.vue'
 import VideoPromptDialog from './VideoPromptDialog.vue'
 import ShotScriptDialog from './ShotScriptDialog.vue'
 import MediaViewer from '../viewer/MediaViewer.vue'
@@ -47,21 +48,27 @@ watch(
   { immediate: true },
 )
 
-function commitAction(e: Event): void {
-  const val = (e.target as HTMLInputElement).value
+function commitActionVal(val: string): void {
   actionVal.value = val
   actionSnap.value = val
   if (val === props.panel.action) return
   void store.patchPanelFields(props.panel.id, { action: val })
 }
 
-function commitSubtext(e: Event): void {
-  const val = (e.target as HTMLInputElement).value
+function commitAction(e: Event): void {
+  commitActionVal((e.target as HTMLInputElement).value)
+}
+
+function commitSubtextVal(val: string): void {
   subtextVal.value = val
   subtextSnap.value = val
   const next = val.trim() || null
   if (next === (props.panel.subtext ?? null)) return
   void store.patchPanelFields(props.panel.id, { subtext: next })
+}
+
+function commitSubtext(e: Event): void {
+  commitSubtextVal((e.target as HTMLInputElement).value)
 }
 
 function toggleTurn(): void {
@@ -185,7 +192,8 @@ async function renderVideo(): Promise<void> {
     </div>
 
     <p v-if="confirmPending" class="sh-confirm">
-      Beats have generated images or locked prompts — recompose anyway?
+      Beats have generated images or locked prompts — recomposing deletes the images (moved to
+      the OS trash). Continue?
       <span class="sh-confirm-actions">
         <button
           type="button"
@@ -213,7 +221,14 @@ async function renderVideo(): Promise<void> {
       <div class="sh-field sh-action-field">
         <label class="sh-label">Shot action</label>
         <div class="sh-action-row">
-          <input type="text" :value="actionVal" @change="commitAction" />
+          <TextEditPopup
+            class="sh-tep-grow"
+            title="Shot action"
+            :value="actionVal"
+            @save="commitActionVal"
+          >
+            <input type="text" :value="actionVal" @change="commitAction" />
+          </TextEditPopup>
           <button
             type="button"
             class="sh-turn"
@@ -271,12 +286,14 @@ async function renderVideo(): Promise<void> {
 
     <label class="sh-field">
       <span class="sh-label">Subtext</span>
-      <input
-        type="text"
-        :value="subtextVal"
-        placeholder="what the shot means but doesn't show"
-        @change="commitSubtext"
-      />
+      <TextEditPopup title="Subtext" :value="subtextVal" @save="commitSubtextVal">
+        <input
+          type="text"
+          :value="subtextVal"
+          placeholder="what the shot means but doesn't show"
+          @change="commitSubtext"
+        />
+      </TextEditPopup>
     </label>
 
     <div class="sh-row4">
@@ -455,8 +472,10 @@ async function renderVideo(): Promise<void> {
   align-items: center;
 }
 
-.sh-action-row input[type='text'] {
+/* TextEditPopup root takes over the input's old flex-item role. */
+.sh-tep-grow {
   flex: 1;
+  min-width: 0;
 }
 
 .sh-turn {
