@@ -498,6 +498,15 @@ metascan/
   deterministic sections (`subject_definitions`, `summary`,
   `retention_analysis`), builds the machine-readable scaffold, assembles
   the six-section document, and runs an expectation-driven lint over it.
+  **`storyboard_subjects.sheet_ref`** (INTEGER 0/1, checkbox in the
+  settings dialog's subject row) marks the first reference picture as a
+  three-view character sheet: `render_subject_definitions` emits the
+  sheet boilerplate ("…the person shown in `<Picture N>`, a three-view
+  character reference sheet (full front, full back, facial close-up) of
+  one single individual") with the panel's ACTUAL assigned labels and
+  appends the description after it for extra identity detail — never
+  hardcode `<Subject 1>`/`<Picture 1>` text into a description, the
+  labels are per-panel and upload-order dependent.
   **`detailed_description` is deterministic — the beat script IS the shot
   script.** `compute_timeline` maps every beat to its own `[Shot n]`
   (`is_cut` only tunes phrasing — "the shot cuts." vs "continuing without

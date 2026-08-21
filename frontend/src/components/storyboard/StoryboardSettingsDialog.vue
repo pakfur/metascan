@@ -253,26 +253,14 @@ function onClearReference(id: number, slot: 1 | 2 = 1): void {
 
 // ---- describe from refs --------------------------------------------------
 
-// Boilerplate description for a subject whose reference picture is a
-// three-view character sheet -- the H3 prompt guide's phrasing, inserted
-// verbatim rather than VLM-composed.
-const CHARACTER_SHEET_DESCRIPTION =
-  '<Subject 1> is the person shown in <Picture 1>, a three-view character ' +
-  'reference sheet (full front, full back, facial close-up) of one single ' +
-  'individual.'
-
-function onCharacterSheetDescribe(id: number): void {
-  const current = (
-    store.tree?.subjects.find((s) => s.id === id)?.description ?? ''
-  ).trim()
-  if (
-    current &&
-    current !== CHARACTER_SHEET_DESCRIPTION &&
-    !confirm('Replace the current description with the character-sheet boilerplate?')
-  ) {
-    return
-  }
-  void commitSubjectField(id, { description: CHARACTER_SHEET_DESCRIPTION })
+// storyboard_subjects.sheet_ref: the first reference picture is a
+// three-view character sheet. The H3 compiler emits the sheet boilerplate
+// with the panel's ACTUAL <Subject N>/<Picture N> labels and appends the
+// description after it — so the description holds only the extra identity
+// detail (clothing, props, ...), never the boilerplate itself.
+function onSheetRefChange(id: number, e: Event): void {
+  const checked = (e.target as HTMLInputElement).checked
+  void commitSubjectField(id, { sheet_ref: checked ? 1 : 0 })
 }
 
 const describing = ref<Record<number, boolean>>({})
@@ -617,14 +605,18 @@ function close(): void {
             <span class="hint">First call may take up to a minute while the model loads.</span>
           </div>
           <div class="describe-row">
-            <button
-              type="button"
-              class="describe-btn"
-              @click="onCharacterSheetDescribe(s.id)"
-            >
-              Describe as Character Sheet
-            </button>
-            <span class="hint">For a 3-image character sheet (full front, full back, face)</span>
+            <label class="sheet-check">
+              <input
+                type="checkbox"
+                :checked="s.sheet_ref === 1"
+                @change="onSheetRefChange(s.id, $event)"
+              />
+              Reference is a 3-view character sheet (full front, full back, face)
+            </label>
+            <span class="hint">
+              The video prompt describes the sheet itself; use Description for extra
+              identity detail (clothing, props).
+            </span>
           </div>
           <p v-if="describeErrors[s.id]" class="error inline">{{ describeErrors[s.id] }}</p>
 
@@ -831,6 +823,18 @@ textarea {
   align-items: center;
   gap: 10px;
   margin-top: 8px;
+}
+
+.sheet-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-color);
+  cursor: pointer;
+  flex-shrink: 0;
+  text-transform: none;
 }
 
 .describe-btn {
