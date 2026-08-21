@@ -159,6 +159,10 @@ export interface Subject {
   sort_order: number
   voice: string | null
   voice_ref_path: string | null
+  // 1 when the first reference picture is a three-view character sheet —
+  // the H3 compiler emits the sheet boilerplate (with the panel's actual
+  // <Subject N>/<Picture N> labels) and appends the description after it.
+  sheet_ref: 0 | 1
 }
 
 export interface StoryboardSummary {

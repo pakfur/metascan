@@ -939,6 +939,13 @@ class DatabaseManager:
             )
             _idempotent_add_column(
                 conn,
+                "storyboard_subjects",
+                "sheet_ref",
+                "ALTER TABLE storyboard_subjects ADD COLUMN sheet_ref "
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            _idempotent_add_column(
+                conn,
                 "scenes",
                 "reference_path",
                 "ALTER TABLE scenes ADD COLUMN reference_path "
@@ -1654,6 +1661,7 @@ class DatabaseManager:
             "sort_order",
             "voice",
             "voice_ref_path",
+            "sheet_ref",
         }
     )
     _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(

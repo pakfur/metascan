@@ -330,6 +330,59 @@ def test_subject_definitions_verbatim_and_env() -> None:
     assert "in <Picture" not in text2
 
 
+def test_subject_definitions_sheet_ref_boilerplate() -> None:
+    """sheet_ref emits the three-view character-sheet boilerplate with the
+    panel's ACTUAL labels (not a hardcoded "<Picture 1>"), appends the
+    description after it, and cites a second reference when present."""
+    subjects = _subjects()
+    # Make the SECOND subject a single-ref sheet so the assigned labels
+    # differ from "<Subject 1>"/"<Picture 1>".
+    subjects[1]["reference_path"] = "/refs/rex_sheet.png"
+    subjects[1]["sheet_ref"] = 1
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    text = render_subject_definitions(refplan, subjects, scene)
+    assert (
+        "<Subject 2> is Rex, the person shown in <Picture 3>, a three-view "
+        "character reference sheet (full front, full back, facial close-up) "
+        "of one single individual. a scruffy grey terrier with one floppy ear"
+    ) in text
+    # Subject 1 has no sheet_ref -- unchanged rendering.
+    assert "<Subject 1> is the Grandma Rose in <Picture 1> and <Picture 2>," in text
+
+    # A second reference picture rides along; an empty description appends
+    # nothing after the boilerplate sentence.
+    subjects[0]["sheet_ref"] = 1
+    subjects[0]["description"] = ""
+    refplan = assign_reference_labels(subjects, scene)
+    text = render_subject_definitions(refplan, subjects, scene)
+    assert (
+        "<Subject 1> is Grandma Rose, the person shown in <Picture 1>, "
+        "a three-view character reference sheet (full front, full back, "
+        "facial close-up) of one single individual, also shown in <Picture 2>."
+    ) in text
+
+    # sheet_ref without any reference picture falls back to the plain form.
+    bare = [
+        {
+            "id": 3,
+            "name": "Ghost",
+            "description": "d",
+            "sort_order": 0,
+            "reference_path": None,
+            "reference_path_2": None,
+            "sheet_ref": 1,
+        }
+    ]
+    refplan = assign_reference_labels(
+        bare, {"id": 1, "name": "S", "reference_path": None}
+    )
+    text = render_subject_definitions(
+        refplan, bare, {"id": 1, "name": "S", "reference_path": None}
+    )
+    assert "<Subject 1> is the Ghost: d." in text
+
+
 def test_summary_prefix_modes() -> None:
     subjects = _subjects()
     scene = _scene()

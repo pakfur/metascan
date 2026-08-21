@@ -407,7 +407,26 @@ def render_subject_definitions(
             for p in (subject.get("reference_path"), subject.get("reference_path_2"))
             if p and p in pic_by_path
         ]
-        if pics:
+        if subject.get("sheet_ref") and pics:
+            # storyboard_subjects.sheet_ref: the first reference picture is
+            # a three-view character sheet. The boilerplate carries the
+            # panel's ACTUAL labels (hardcoding "<Picture 1>" in a
+            # description would name the wrong picture for any subject that
+            # isn't first in upload order); the description is appended
+            # afterwards for extra identity detail (clothing, props, ...).
+            line = (
+                f"<{label}> is {name}, the person shown in <{pics[0]}>, "
+                "a three-view character reference sheet (full front, full "
+                "back, facial close-up) of one single individual"
+            )
+            if len(pics) > 1:
+                line += f", also shown in <{pics[1]}>"
+            line += "."
+            desc = description.strip()
+            if desc:
+                line += f" {desc}"
+            lines.append(line)
+        elif pics:
             pic_str = " and ".join(f"<{p}>" for p in pics)
             lines.append(f"<{label}> is the {name} in {pic_str}, {description}.")
         else:
