@@ -185,7 +185,8 @@ function close(): void {
       </template>
 
       <p v-if="confirmPending" class="warn">
-        This replaces existing content — continue?
+        This replaces existing content and deletes its generated images and clips (moved to the
+        OS trash) — continue?
         <span class="confirm-actions">
           <button class="btn-danger" :disabled="store.story.running" @click="run(confirmPending!, true)">
             Continue

@@ -2433,11 +2433,17 @@ class DatabaseManager:
             return True, deleted_files
 
     def replace_panel_beats(
-        self, panel_id: int, beats: List[Dict[str, Any]]
-    ) -> List[int]:
+        self, panel_id: int, beats: List[Dict[str, Any]], purge_images: bool = False
+    ) -> Tuple[List[int], List[str]]:
         """Transactionally replace a panel's beats (compose stage 4).
         Releases the old beats' images/jobs first -- beats carry identity
-        (keepers, locked prompts) since the shot/beat reorg."""
+        (keepers, locked prompts) since the shot/beat reorg. With
+        ``purge_images=True`` (a user-confirmed destructive recompose) the
+        old beats' image media rows are deleted via ``_purge_media_rows``
+        instead of unhidden; returns ``(new_beat_ids, purged_files)`` where
+        ``purged_files`` are native paths for the caller to trash. The
+        panel's rendered clips (panel_videos) are untouched either way --
+        clips are shot-scoped and survive a beats recompose."""
         import json as _json
 
         with self.lock, self._get_connection() as conn:
@@ -2447,8 +2453,11 @@ class DatabaseManager:
                     "SELECT id FROM beats WHERE panel_id = ?", (panel_id,)
                 ).fetchall()
             ]
-            self._release_beats(conn, old_ids)
+            purge_paths = self._release_beats(conn, old_ids, purge_images)
             conn.execute("DELETE FROM beats WHERE panel_id = ?", (panel_id,))
+            deleted_files = (
+                self._purge_media_rows(conn, purge_paths) if purge_images else []
+            )
             new_ids: List[int] = []
             for i, b in enumerate(beats):
                 cur = conn.execute(
@@ -2484,13 +2493,13 @@ class DatabaseManager:
                 new_ids.append(int(cur.lastrowid))
             self._sync_panel_duration(conn, panel_id)
             conn.commit()
-            return new_ids
+            return new_ids, deleted_files
 
     # ---- Structure replace + tree read -----------------------------------
 
     def replace_storyboard_structure(
-        self, storyboard_id: int, parsed: Dict[str, Any]
-    ) -> None:
+        self, storyboard_id: int, parsed: Dict[str, Any], purge_images: bool = False
+    ) -> List[str]:
         """Destructively replace subjects/scenes/panels from a parse result.
 
         ``parsed`` is the validated shape from storyboard_parse: subjects
@@ -2504,18 +2513,24 @@ class DatabaseManager:
         beat_images pointed at and purges generation_jobs for the panels
         (and their beats) being destroyed -- see _release_panels.
         Re-parsing an existing storyboard would otherwise leave those
-        media rows hidden forever.
+        media rows hidden forever. With ``purge_images=True`` (a
+        user-confirmed destructive re-parse) the generated media rows are
+        deleted via ``_purge_media_rows`` instead; returns the native
+        paths for the caller to trash (empty when not purging).
         """
         with self.lock:
             with self._get_connection() as conn:
                 panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
-                self._release_panels(conn, panel_ids)
+                purge_paths = self._release_panels(conn, panel_ids, purge_images)
                 conn.execute(
                     "DELETE FROM storyboard_subjects WHERE storyboard_id = ?",
                     (storyboard_id,),
                 )
                 conn.execute(
                     "DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,)
+                )
+                deleted_files = (
+                    self._purge_media_rows(conn, purge_paths) if purge_images else []
                 )
                 for i, subj in enumerate(parsed.get("subjects") or []):
                     conn.execute(
@@ -2552,18 +2567,28 @@ class DatabaseManager:
                     (storyboard_id,),
                 )
                 conn.commit()
+                return deleted_files
 
     def replace_storyboard_scenes(
-        self, storyboard_id: int, scenes: List[Dict[str, Any]]
-    ) -> List[int]:
+        self,
+        storyboard_id: int,
+        scenes: List[Dict[str, Any]],
+        purge_images: bool = False,
+    ) -> Tuple[List[int], List[str]]:
         """Destructively replace all scenes (compose stage 2); subjects are
-        untouched. Releases panel media/jobs first — see _release_panels."""
+        untouched. Releases panel media/jobs first — see _release_panels.
+        With ``purge_images=True`` (a user-confirmed destructive recompose)
+        the generated media rows are deleted via ``_purge_media_rows``
+        instead of unhidden; returns ``(new_scene_ids, purged_files)``."""
         import json as _json
 
         with self.lock, self._get_connection() as conn:
             panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
-            self._release_panels(conn, panel_ids)
+            purge_paths = self._release_panels(conn, panel_ids, purge_images)
             conn.execute("DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,))
+            deleted_files = (
+                self._purge_media_rows(conn, purge_paths) if purge_images else []
+            )
             new_ids: List[int] = []
             for i, sc in enumerate(scenes):
                 cur = conn.execute(
@@ -2593,14 +2618,18 @@ class DatabaseManager:
                 (storyboard_id,),
             )
             conn.commit()
-            return new_ids
+            return new_ids, deleted_files
 
     def replace_scene_panels(
-        self, scene_id: int, panels: List[Dict[str, Any]]
-    ) -> List[int]:
+        self, scene_id: int, panels: List[Dict[str, Any]], purge_images: bool = False
+    ) -> Tuple[List[int], List[str]]:
         """Destructively replace one scene's panels (compose stage 3).
         ``panels`` carry ``action`` + ``duration_s`` -- framing/subject_ids
-        now live at the beat level."""
+        now live at the beat level. With ``purge_images=True`` (a
+        user-confirmed destructive recompose) the panels' generated media
+        rows -- beat images and rendered clips -- are deleted via
+        ``_purge_media_rows`` instead of unhidden; returns
+        ``(new_panel_ids, purged_files)``."""
         with self.lock, self._get_connection() as conn:
             old_ids = [
                 int(r["id"])
@@ -2608,8 +2637,11 @@ class DatabaseManager:
                     "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
                 ).fetchall()
             ]
-            self._release_panels(conn, old_ids)
+            purge_paths = self._release_panels(conn, old_ids, purge_images)
             conn.execute("DELETE FROM panels WHERE scene_id = ?", (scene_id,))
+            deleted_files = (
+                self._purge_media_rows(conn, purge_paths) if purge_images else []
+            )
             new_ids: List[int] = []
             for i, p in enumerate(panels):
                 cur = conn.execute(
@@ -2626,7 +2658,7 @@ class DatabaseManager:
                 )
                 new_ids.append(int(cur.lastrowid))
             conn.commit()
-            return new_ids
+            return new_ids, deleted_files
 
     def get_storyboard_tree(self, storyboard_id: int) -> Optional[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:

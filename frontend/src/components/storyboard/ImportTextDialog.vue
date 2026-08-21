@@ -24,7 +24,7 @@ async function doImport(confirm: boolean): Promise<void> {
     if (e instanceof ApiError && e.status === 409) {
       confirmRequired.value = true
       confirmMessage.value =
-        'This storyboard already has scenes. Re-parsing replaces all scenes, panels and hand-edited prompts.'
+        'This storyboard already has scenes. Re-parsing replaces all scenes, panels and hand-edited prompts, and deletes their generated images and clips (moved to the OS trash).'
     } else if (e instanceof ApiError && e.status === 422) {
       errorMsg.value = `The model couldn't parse this text: ${e.message}`
     } else if (e instanceof ApiError && e.status === 503) {

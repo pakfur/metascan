@@ -349,7 +349,7 @@ async def test_uploads_follow_refplan_order_and_params_shape(
         duration_s=6.0,
     )
     db.update_panel(panel_id, video_prompt="a compiled prompt")
-    beat_ids = db.replace_panel_beats(
+    beat_ids, _ = db.replace_panel_beats(
         panel_id,
         [
             {

@@ -372,10 +372,22 @@ metascan/
   delegates to `_release_beats` for the panels' beats first, then deletes
   the panels' own (video) `generation_jobs` rows (keyed by `panel_id`).
   Both are called, inside the same transaction as the delete, from
-  `delete_beat`/`delete_panel`/`delete_scene`/`delete_storyboard`, and
-  `replace_storyboard_structure`/`replace_panel_beats` (a re-parse or beats
-  recompose destroys the old tree the same way a delete does — always
-  keep/unhide, never purge).
+  `delete_beat`/`delete_panel`/`delete_scene`/`delete_storyboard`, and from
+  the replace functions (`replace_storyboard_structure`,
+  `replace_storyboard_scenes`, `replace_scene_panels`,
+  `replace_panel_beats`) — a re-parse or recompose destroys the old tree
+  the same way a delete does. **Confirmed destructive recomposes purge
+  (2026-08-21):** each replace function takes `purge_images: bool = False`
+  and returns the purged native paths (tuple'd with the new ids); the
+  runner wires it to the compose/parse `confirm` flag — accepting a
+  `confirm_required` gate means the destroyed tree's generated media is
+  deleted via `_purge_media_rows` and the files go to the OS trash via
+  `metascan/utils/trash.py::remove_files_to_trash` (the shared helper
+  `StoryboardService`'s delete routes also use; tests monkeypatch
+  `metascan.utils.trash.send2trash`). The unconfirmed default keeps the
+  old release-into-the-library semantics. Beats recompose stays
+  beat-scoped either way — the shot's `panel_videos` clips survive it;
+  shots/scenes recompose purges clips too.
   With `purge_images=True` (the `?purge_images=true` query flag on the
   storyboard/scene/panel/beat DELETE routes) the unhide is replaced by
   `_purge_media_rows`, run *after* the cascade delete in the same

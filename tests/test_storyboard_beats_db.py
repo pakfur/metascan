@@ -129,7 +129,7 @@ def test_update_beat_rejects_unknown_field(db, panel_id):
 
 def test_replace_panel_beats_is_transactional(db, panel_id):
     db.create_beat(panel_id, action="old one")
-    ids = db.replace_panel_beats(
+    ids, _ = db.replace_panel_beats(
         panel_id,
         [
             {"action": "new a", "duration_s": 4.0, "sort_order": 0},
@@ -221,7 +221,7 @@ def test_replace_panel_beats_releases_old_beats(db, panel_id, media_paths):
     beat_id = db.create_beat(panel_id, action="old")
     db.create_beat_image(beat_id, file_path=media_paths[0])
     db.set_media_hidden(media_paths[0], True)
-    new_ids = db.replace_panel_beats(
+    new_ids, _ = db.replace_panel_beats(
         panel_id,
         [
             {"action": "new", "shot_size": "CU", "subject_ids": [1, 2]},
@@ -231,6 +231,132 @@ def test_replace_panel_beats_releases_old_beats(db, panel_id, media_paths):
     assert _hidden(db, media_paths[0]) == 0
     got = db.get_beat(new_ids[0])
     assert got["shot_size"] == "CU" and got["subject_ids"] == [1, 2]
+
+
+def test_replace_panel_beats_purges_images_on_confirm(db, panel_id, media_paths):
+    """A user-confirmed beats recompose purges the old beats' images:
+    media rows are deleted (native paths returned for trashing) instead
+    of released into the library."""
+    beat_id = db.create_beat(panel_id, action="old")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    db.set_media_hidden(media_paths[0], True)
+    new_ids, purged = db.replace_panel_beats(
+        panel_id, [{"action": "new"}], purge_images=True
+    )
+    assert len(new_ids) == 1
+    assert len(purged) == 1
+    with db.lock, db._get_connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM media WHERE file_path = ?", (media_paths[0],)
+            ).fetchone()
+            is None
+        )
+
+
+def test_replace_panel_beats_purge_spares_shared_file(db, panel_id, media_paths):
+    """A file another surviving beat still references (a different panel's
+    beat_images row) must survive the purge -- it is unhidden instead."""
+    doomed = db.create_beat(panel_id, action="doomed")
+    db.create_beat_image(doomed, file_path=media_paths[0])
+    sb = db.storyboard_id_for_panel(panel_id)
+    other_scene = db.create_scene(sb, name="S2")
+    other_panel = db.create_panel(other_scene, action="other")
+    survivor = db.create_beat(other_panel, action="keeps the file")
+    db.create_beat_image(survivor, file_path=media_paths[0])
+    db.set_media_hidden(media_paths[0], True)
+    _, purged = db.replace_panel_beats(panel_id, [{"action": "new"}], purge_images=True)
+    assert purged == []
+    assert _hidden(db, media_paths[0]) == 0
+
+
+def test_replace_panel_beats_purge_leaves_panel_videos(db, panel_id, media_paths):
+    """Beats recompose is beat-scoped: the shot's rendered clips survive a
+    confirmed purge untouched."""
+    db.save_media(_media("/vids/take.mp4"))
+    db.create_panel_video(panel_id, file_path="/vids/take.mp4")
+    beat_id = db.create_beat(panel_id, action="old")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    _, purged = db.replace_panel_beats(panel_id, [{"action": "new"}], purge_images=True)
+    assert purged and all("take.mp4" not in p for p in purged)
+    with db.lock, db._get_connection() as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM panel_videos WHERE panel_id = ?", (panel_id,)
+            ).fetchone()
+            is not None
+        )
+
+
+def test_replace_scene_panels_purges_images_and_clips(db, panel_id, media_paths):
+    """A confirmed shots recompose destroys the scene's panels -- their
+    beat images AND rendered clips purge together."""
+    db.save_media(_media("/vids/take.mp4"))
+    db.create_panel_video(panel_id, file_path="/vids/take.mp4")
+    beat_id = db.create_beat(panel_id, action="old")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    db.set_media_hidden(media_paths[0], True)
+    with db.lock, db._get_connection() as conn:
+        scene_id = int(
+            conn.execute(
+                "SELECT scene_id FROM panels WHERE id = ?", (panel_id,)
+            ).fetchone()["scene_id"]
+        )
+    new_ids, purged = db.replace_scene_panels(
+        scene_id, [{"action": "fresh"}], purge_images=True
+    )
+    assert len(new_ids) == 1
+    assert len(purged) == 2
+    with db.lock, db._get_connection() as conn:
+        for path in (media_paths[0], "/vids/take.mp4"):
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM media WHERE file_path = ?", (path,)
+                ).fetchone()
+                is None
+            )
+
+
+def test_replace_scene_panels_without_purge_still_releases(db, panel_id, media_paths):
+    """Default (unconfirmed) replace keeps the old behavior: media rows
+    survive, unhidden into the library."""
+    beat_id = db.create_beat(panel_id, action="old")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    db.set_media_hidden(media_paths[0], True)
+    with db.lock, db._get_connection() as conn:
+        scene_id = int(
+            conn.execute(
+                "SELECT scene_id FROM panels WHERE id = ?", (panel_id,)
+            ).fetchone()["scene_id"]
+        )
+    _, purged = db.replace_scene_panels(scene_id, [{"action": "fresh"}])
+    assert purged == []
+    assert _hidden(db, media_paths[0]) == 0
+
+
+def test_replace_structure_purges_on_confirmed_reparse(
+    db, panel_id, media_paths, storyboard_id
+):
+    """A confirmed re-parse (replace_storyboard_structure with
+    purge_images=True) purges the whole old tree's generated media."""
+    db.save_media(_media("/vids/take.mp4"))
+    db.create_panel_video(panel_id, file_path="/vids/take.mp4")
+    beat_id = db.create_beat(panel_id, action="old")
+    db.create_beat_image(beat_id, file_path=media_paths[0])
+    purged = db.replace_storyboard_structure(
+        storyboard_id,
+        {"subjects": [], "scenes": [{"name": "N", "panels": [{"action": "a"}]}]},
+        purge_images=True,
+    )
+    assert len(purged) == 2
+    with db.lock, db._get_connection() as conn:
+        for path in (media_paths[0], "/vids/take.mp4"):
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM media WHERE file_path = ?", (path,)
+                ).fetchone()
+                is None
+            )
 
 
 def test_delete_panel_releases_beat_images(db, panel_id, media_paths):
