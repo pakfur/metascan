@@ -171,6 +171,7 @@ export interface StoryboardSummary {
   base_seed: number
   batch_size: number
   pacing: string
+  story_scale: string
   folder_id: string | null
   video_target: string | null
   video_mode: string | null
@@ -198,6 +199,16 @@ export const LENSES = ['wide', 'normal', 'tele', 'macro'] as const
 export const ASPECT_RATIOS = ['1:1', '4:3', '16:9', '2.39:1', '9:16'] as const
 export const TARGET_MODELS = ['sd', 'pony', 'flux1', 'flux2', 'zimage', 'chroma', 'qwen'] as const
 export const PACINGS = ['contemplative', 'standard', 'propulsive'] as const
+
+// storyboards.story_scale — mirrors STORY_SCALES in
+// metascan/core/storyboard_story.py (grammar caps + shot-count guidance
+// + token budgets per compose run).
+export const STORY_SCALES = ['short', 'standard', 'extended'] as const
+export const STORY_SCALE_LABELS: Record<string, string> = {
+  short: 'Short — tight arc, 1–4 shots per scene',
+  standard: 'Standard — 2–4 shots per scene',
+  extended: 'Extended — long middle, up to 12 shots per scene',
+}
 
 // ---- H3 video prompt compiler ----
 

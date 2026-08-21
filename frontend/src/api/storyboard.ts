@@ -48,6 +48,7 @@ export function patchStoryboard(
     base_seed: number
     batch_size: number
     pacing: string
+    story_scale: string
     video_target: string | null
     video_mode: string | null
     video_preset_id: number | null

@@ -666,7 +666,8 @@ class DatabaseManager:
                                   ON DELETE SET NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                    pacing        TEXT NOT NULL DEFAULT 'standard'
+                    pacing        TEXT NOT NULL DEFAULT 'standard',
+                    story_scale   TEXT NOT NULL DEFAULT 'standard'
                 )
                 """
             )
@@ -675,6 +676,13 @@ class DatabaseManager:
                 "storyboards",
                 "pacing",
                 "ALTER TABLE storyboards ADD COLUMN pacing "
+                "TEXT NOT NULL DEFAULT 'standard'",
+            )
+            _idempotent_add_column(
+                conn,
+                "storyboards",
+                "story_scale",
+                "ALTER TABLE storyboards ADD COLUMN story_scale "
                 "TEXT NOT NULL DEFAULT 'standard'",
             )
             conn.execute(
@@ -1632,6 +1640,7 @@ class DatabaseManager:
             "video_name_template",
             "image_name_template",
             "pacing",
+            "story_scale",
         }
     )
     _SUBJECT_UPDATABLE: ClassVar[frozenset] = frozenset(

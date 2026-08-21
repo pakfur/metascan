@@ -320,6 +320,51 @@ def test_grammars_carry_repetition_bounds():
     assert '(ws "," ws arcitem){1,6}' in OUTLINE_GRAMMAR
 
 
+def test_story_scale_grammar_caps():
+    # "standard" must stay byte-identical to the constants (pre-scale
+    # behavior); unknown scales fall back to it.
+    assert story.outline_grammar("standard") == OUTLINE_GRAMMAR
+    assert story.scenes_grammar("standard") == SCENES_GRAMMAR
+    assert story.shots_grammar("standard") == SHOTS_GRAMMAR
+    assert story.shots_grammar("bogus") == SHOTS_GRAMMAR
+    # Per-scale hard ceilings.
+    assert '(ws "," ws shot){0,3}' in story.shots_grammar("short")
+    assert '(ws "," ws shot){0,11}' in story.shots_grammar("extended")
+    assert '(ws "," ws scene){0,3}' in story.scenes_grammar("short")
+    assert '(ws "," ws scene){1,11}' in story.scenes_grammar("extended")
+    assert '(ws "," ws arcitem){1,3}' in story.outline_grammar("short")
+    assert '(ws "," ws arcitem){1,11}' in story.outline_grammar("extended")
+
+
+def test_story_scale_shot_guidance_and_tokens():
+    std = story.pacing_guidance("standard", 15.0)
+    ext = story.pacing_guidance("standard", 15.0, "extended")
+    sht = story.pacing_guidance("standard", 15.0, "short")
+    assert (std["shots_min"], std["shots_max"]) == (2, 4)
+    assert (ext["shots_min"], ext["shots_max"]) == (4, 8)
+    assert (sht["shots_min"], sht["shots_max"]) == (1, 2)
+    # Extended propulsive hits the extended grammar ceiling of 12.
+    assert story.pacing_guidance("propulsive", 15.0, "extended")["shots_max"] == 12
+    # Beat guidance never scales -- beats are bounded by the clip cap.
+    assert ext["beats_min"] == std["beats_min"]
+    assert ext["beats_max"] == std["beats_max"]
+    assert ext["beat_asl_s"] == std["beat_asl_s"]
+    # Token budgets scale with the list caps; beats stay at 1600.
+    assert story.stage_max_tokens("shots", "standard") == 1600
+    assert story.stage_max_tokens("shots", "extended") == 3200
+    assert story.stage_max_tokens("scenes", "extended") == 4096
+    assert story.stage_max_tokens("beats", "extended") == 1600
+
+
+def test_outline_prompt_carries_scale_hint():
+    p_std = story.build_outline_user_prompt("a premise", [])
+    assert p_std == story.build_outline_user_prompt("a premise", [], "standard")
+    assert "extended middle" in story.build_outline_user_prompt(
+        "a premise", [], "extended"
+    )
+    assert "tight" in story.build_outline_user_prompt("a premise", [], "short")
+
+
 def test_truncated_shots_array_salvages_leading_elements():
     good = '{"action": "Maya crosses the yard", "duration_s": 10}'
     truncated = f'[{good}, {good}, {{"action": "she rea'

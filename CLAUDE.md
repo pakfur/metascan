@@ -454,7 +454,27 @@ metascan/
   `storyboard_story.py`; system prompts (`STORY_OUTLINE_SYSTEM`,
   `STORY_SCENES_SYSTEM`, `STORY_SHOTS_SYSTEM`, `STORY_BEATS_SYSTEM`) live in
   `data/meta_prompt.yml` and hot-reload through the same `PromptStore` as
-  the render pipeline's prompts.
+  the render pipeline's prompts. **Story length is scaled by
+  `storyboards.story_scale`** (`short`/`standard`/`extended`,
+  `STORY_SCALES` in `storyboard_story.py`, default `standard` = the
+  pre-scale behavior byte-for-byte). A scale moves three things together
+  per `_SCALE_SPECS`: the GBNF repetition caps (arc 2–4/2–7/2–12, scenes
+  1–4/2–8/2–12, shots per scene 1–4/1–6/1–12 — accessors
+  `outline_grammar(scale)`/`scenes_grammar(scale)`/`shots_grammar(scale)`;
+  the bare `*_GRAMMAR` constants stay the standard versions), the explicit
+  shot-count numbers in the shots prompt (`pacing_guidance`'s
+  `shot_factor` ×0.5/×1/×2 clamped to the scale's grammar ceiling — this
+  explicit instruction is what binds in practice; premise-level "make it
+  long" requests never beat it), and `stage_max_tokens(stage, scale)` so
+  extended output isn't tail-truncated through `_loads_array`'s salvage.
+  Beats never scale (bounded by the clip cap). The outline prompt gains a
+  scale hint (extended: repeat `rising` arc entries — the arc/scene lint
+  requires scenes' `arc_beats` to cover the outline arc exactly, so a
+  long middle expresses itself as more scenes). `PATCH
+  /api/storyboard/{id}` validates against `STORY_SCALES` (400); the UI
+  exposes it in the create dialog (rides the create-then-PATCH follow-up),
+  Settings, and the Compose dialog (commit-on-change PATCH, so changing
+  it there and rebuilding stages regenerates at the new length).
 - **Describe endpoints are review-only.** `POST /api/storyboard/subjects/{id}/describe`
   and `/scenes/{id}/describe` VLM-describe a subject/scene from its reference
   image(s) and return the parsed descriptor JSON without ever writing the
@@ -786,7 +806,8 @@ metascan/
   runs the result through `_reject_null_for_required` first, which 400s
   (naming the field) if the caller sent `null` for a `NOT NULL` column
   (`name`/`aspect_ratio`/`target_model`/`architecture`/`base_seed`/
-  `batch_size` on storyboards; `name`/`description`/`sort_order` on
+  `batch_size`/`pacing`/`story_scale` on storyboards;
+  `name`/`description`/`sort_order` on
   subjects; `name`/`sort_order` on scenes; `sort_order`/`action`/
   `duration_s`/`video_prompt_locked` on panels; `sort_order`/`duration_s`/
   `action`/`is_cut`/`dialog`/`subject_ids`/`prompt_locked` on beats —

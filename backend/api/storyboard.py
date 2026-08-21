@@ -36,7 +36,7 @@ from metascan.core.comfy_client import ComfyError
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
-from metascan.core.storyboard_story import PACING_VALUES
+from metascan.core.storyboard_story import PACING_VALUES, STORY_SCALES
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path
@@ -61,6 +61,7 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
         "base_seed",
         "batch_size",
         "pacing",
+        "story_scale",
     }
 )
 _SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order"})
@@ -170,6 +171,7 @@ class StoryboardPatch(BaseModel):
     video_name_template: Optional[str] = None
     image_name_template: Optional[str] = None
     pacing: Optional[str] = None
+    story_scale: Optional[str] = None
 
 
 class SubjectCreate(BaseModel):
@@ -392,6 +394,11 @@ async def patch_storyboard(storyboard_id: int, body: StoryboardPatch) -> Dict[st
         raise HTTPException(
             status_code=400,
             detail=f"pacing must be one of: {', '.join(PACING_VALUES)}",
+        )
+    if "story_scale" in fields and fields["story_scale"] not in STORY_SCALES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"story_scale must be one of: {', '.join(STORY_SCALES)}",
         )
     if "aspect_ratio" in fields or "target_model" in fields:
         effective_aspect = fields.get("aspect_ratio", existing["aspect_ratio"])

@@ -890,6 +890,17 @@ def test_patch_cinematic_fields(client):
     assert (
         client.patch(f"/api/storyboard/{sb}", json={"pacing": None}).status_code == 400
     )
+    r = client.patch(f"/api/storyboard/{sb}", json={"story_scale": "extended"})
+    assert r.status_code == 200
+    assert client.get(f"/api/storyboard/{sb}").json()["story_scale"] == "extended"
+    assert (
+        client.patch(f"/api/storyboard/{sb}", json={"story_scale": "epic"}).status_code
+        == 400
+    )
+    assert (
+        client.patch(f"/api/storyboard/{sb}", json={"story_scale": None}).status_code
+        == 400
+    )
 
     scene = client.post(f"/api/storyboard/{sb}/scenes", json={"name": "S"}).json()["id"]
     r = client.patch(

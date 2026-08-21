@@ -4,7 +4,13 @@ import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
 import { patchStoryboard } from '../../api/storyboard'
 import { ApiError } from '../../api/client'
-import { ASPECT_RATIOS, TARGET_MODELS, VIDEO_MODES } from '../../types/storyboard'
+import {
+  ASPECT_RATIOS,
+  TARGET_MODELS,
+  VIDEO_MODES,
+  STORY_SCALES,
+  STORY_SCALE_LABELS,
+} from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
 
@@ -18,6 +24,7 @@ const store = useStoryboardStore()
 
 const name = ref('')
 const aspectRatio = ref<string>('16:9')
+const storyScale = ref<string>('standard')
 
 const videoTarget = ref<string>('minimax')
 const videoMode = ref<string>('ref2va')
@@ -73,19 +80,24 @@ async function submit() {
     }
 
     const id = await store.create(body)
+    // Video config and story length ride a follow-up PATCH (the create
+    // route doesn't accept them). The board already exists at this
+    // point, so a failure here must not strand the user on the create
+    // dialog — Settings can finish the setup.
+    const patch: Record<string, unknown> = {}
     if (videoTarget.value) {
-      // Video config rides a follow-up PATCH (the create route is
-      // stills-only). The board already exists at this point, so a
-      // failure here must not strand the user on the create dialog —
-      // Settings can finish the video setup.
+      patch.video_target = videoTarget.value
+      patch.video_mode = videoMode.value
+      patch.video_preset_id = videoPresetId.value
+    }
+    if (storyScale.value !== 'standard') {
+      patch.story_scale = storyScale.value
+    }
+    if (Object.keys(patch).length > 0) {
       try {
-        await patchStoryboard(id, {
-          video_target: videoTarget.value,
-          video_mode: videoMode.value,
-          video_preset_id: videoPresetId.value,
-        })
+        await patchStoryboard(id, patch)
       } catch {
-        // Non-fatal: configure video later via Settings.
+        // Non-fatal: finish the setup later via Settings.
       }
     }
     emit('created', id)
@@ -113,6 +125,15 @@ async function submit() {
         <label for="sb-ar">Aspect ratio</label>
         <select id="sb-ar" v-model="aspectRatio">
           <option v-for="ar in ASPECT_RATIOS" :key="ar" :value="ar">{{ ar }}</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="sb-scale">Story length</label>
+        <select id="sb-scale" v-model="storyScale">
+          <option v-for="s in STORY_SCALES" :key="s" :value="s">
+            {{ STORY_SCALE_LABELS[s] }}
+          </option>
         </select>
       </div>
 

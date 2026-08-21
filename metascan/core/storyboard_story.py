@@ -19,6 +19,70 @@ from metascan.core.storyboard_parse import (
 
 STAGES = ("outline", "scenes", "shots", "beats")
 
+# Per-storyboard story length (storyboards.story_scale). "standard" must
+# stay byte-identical to the pre-scale behavior: same grammar caps, same
+# prompt text, same token budgets. The other scales change three things
+# together -- the GBNF repetition caps (a hard ceiling the model cannot
+# exceed), the explicit shot-count instruction in the shots prompt (the
+# binding constraint in practice), and max_tokens (so a long list isn't
+# silently tail-truncated through _loads_array's salvage).
+STORY_SCALES = ("short", "standard", "extended")
+
+_SCALE_SPECS: Dict[str, Dict[str, Any]] = {
+    "short": {
+        "arc_hi": 3,  # arc: 2-4 entries
+        "scene_lo": 0,  # scenes: 1-4
+        "scene_hi": 3,
+        "shot_hi": 3,  # shots: 1-4 per scene
+        "shot_factor": 0.5,
+        "shot_cap": 4,
+        "arc_hint": "Keep the arc tight: three or four arc entries.",
+        "outline_tokens": 2048,
+        "scenes_tokens": 2048,
+        "shots_tokens": 1600,
+    },
+    "standard": {
+        "arc_hi": 6,  # arc: 2-7 entries
+        "scene_lo": 1,  # scenes: 2-8
+        "scene_hi": 7,
+        "shot_hi": 5,  # shots: 1-6 per scene
+        "shot_factor": 1.0,
+        "shot_cap": 6,
+        "arc_hint": None,
+        "outline_tokens": 2048,
+        "scenes_tokens": 2048,
+        "shots_tokens": 1600,
+    },
+    "extended": {
+        "arc_hi": 11,  # arc: 2-12 entries
+        "scene_lo": 1,  # scenes: 2-12
+        "scene_hi": 11,
+        "shot_hi": 11,  # shots: 1-12 per scene
+        "shot_factor": 2.0,
+        "shot_cap": 12,
+        "arc_hint": (
+            "Give the story an extended middle: six to ten arc entries, "
+            "repeating 'rising' stages between setup and resolution as "
+            "the conflict escalates."
+        ),
+        "outline_tokens": 3072,
+        "scenes_tokens": 4096,
+        "shots_tokens": 3200,
+    },
+}
+
+
+def _scale_spec(scale: str) -> Dict[str, Any]:
+    return _SCALE_SPECS.get(scale, _SCALE_SPECS["standard"])
+
+
+def stage_max_tokens(stage: str, scale: str = "standard") -> int:
+    """Token budget for a compose stage at a story scale. Stages without
+    a scaled budget (beats -- per-panel, bounded by the clip cap) fall
+    back to the standard 1600."""
+    return int(_scale_spec(scale).get(f"{stage}_tokens", 1600))
+
+
 CAMERA_MOTION_VALUES = (
     "zoom_in",
     "zoom_out",
@@ -120,12 +184,24 @@ _PACING_TABLE: Dict[str, Dict[str, float]] = {
 }
 
 
-def pacing_guidance(pacing: str, shot_cap: float) -> Dict[str, float]:
+def pacing_guidance(
+    pacing: str, shot_cap: float, scale: str = "standard"
+) -> Dict[str, float]:
     """Per-call prompt numbers for the shots/beats stages. Unknown pacing
-    falls back to standard; panel bounds clamp to the video target's cap."""
+    falls back to standard; panel bounds clamp to the video target's cap.
+    ``scale`` (storyboards.story_scale) multiplies the shot-count range --
+    the explicit "produce between N and M shots" instruction is what
+    binds in practice -- clamped to that scale's grammar ceiling. Beat
+    guidance is deliberately unscaled (bounded by the clip cap)."""
     row = dict(_PACING_TABLE.get(pacing, _PACING_TABLE["standard"]))
     row["panel_max_s"] = min(row["panel_max_s"], float(shot_cap))
     row["panel_min_s"] = min(row["panel_min_s"], row["panel_max_s"])
+    spec = _scale_spec(scale)
+    factor = float(spec["shot_factor"])
+    hard_cap = float(spec["shot_cap"])
+    row["shots_min"] = max(1.0, float(round(row["shots_min"] * factor)))
+    row["shots_max"] = min(hard_cap, float(round(row["shots_max"] * factor)))
+    row["shots_min"] = min(row["shots_min"], row["shots_max"])
     return row
 
 
@@ -150,7 +226,7 @@ _OUTLINE_TEMPLATE = (
     r"""root ::= "{{" ws "\"logline\"" ws ":" ws string ws "," ws "\"tone\"" ws ":" ws string ws "," ws "\"pacing\"" ws ":" ws pacingv ws "," ws "\"duration_target_s\"" ws ":" ws number ws "," ws "\"subjects\"" ws ":" ws subjects ws "," ws "\"arc\"" ws ":" ws arc ws "}}"
 subjects ::= "[" ws subject (ws "," ws subject){{0,5}} ws "]"
 subject ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"description\"" ws ":" ws string ws "," ws "\"voice\"" ws ":" ws nullable ws "}}"
-arc ::= "[" ws arcitem (ws "," ws arcitem){{1,6}} ws "]"
+arc ::= "[" ws arcitem (ws "," ws arcitem){{1,{arc_hi}}} ws "]"
 arcitem ::= "{{" ws "\"beat\"" ws ":" ws arcbeat ws "," ws "\"summary\"" ws ":" ws string ws "}}"
 arcbeat ::= {arcbeat_alts}
 pacingv ::= {pacing_alts}
@@ -158,13 +234,8 @@ pacingv ::= {pacing_alts}
     + _COMMON_RULES
 )
 
-OUTLINE_GRAMMAR = _OUTLINE_TEMPLATE.format(
-    arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False),
-    pacing_alts=_alts(PACING_VALUES, with_null=False),
-)
-
 _SCENES_TEMPLATE = (
-    r"""root ::= "[" ws scene (ws "," ws scene){{1,7}} ws "]"
+    r"""root ::= "[" ws scene (ws "," ws scene){{{scene_lo},{scene_hi}}} ws "]"
 scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "}}"
 arcbeats ::= "[" ws (arcbeat (ws "," ws arcbeat){{0,4}})? ws "]"
 arcbeat ::= {arcbeat_alts}
@@ -173,16 +244,52 @@ charge ::= "-"? [0-5]
     + _COMMON_RULES
 )
 
-SCENES_GRAMMAR = _SCENES_TEMPLATE.format(
-    arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False)
-)
-
-SHOTS_GRAMMAR = (
-    r"""root ::= "[" ws shot (ws "," ws shot){{0,5}} ws "]"
+_SHOTS_TEMPLATE = (
+    r"""root ::= "[" ws shot (ws "," ws shot){{0,{shot_hi}}} ws "]"
 shot ::= "{{" ws "\"action\"" ws ":" ws string ws "," ws "\"duration_s\"" ws ":" ws number ws "," ws "\"subtext\"" ws ":" ws string ws "," ws "\"is_turn\"" ws ":" ws boolean ws "}}"
 """
     + _COMMON_RULES
-).format()
+)
+
+
+def _build_scale_grammars(scale: str) -> Dict[str, str]:
+    spec = _scale_spec(scale)
+    return {
+        "outline": _OUTLINE_TEMPLATE.format(
+            arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False),
+            pacing_alts=_alts(PACING_VALUES, with_null=False),
+            arc_hi=spec["arc_hi"],
+        ),
+        "scenes": _SCENES_TEMPLATE.format(
+            arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False),
+            scene_lo=spec["scene_lo"],
+            scene_hi=spec["scene_hi"],
+        ),
+        "shots": _SHOTS_TEMPLATE.format(shot_hi=spec["shot_hi"]),
+    }
+
+
+_SCALE_GRAMMARS: Dict[str, Dict[str, str]] = {
+    s: _build_scale_grammars(s) for s in STORY_SCALES
+}
+
+
+def outline_grammar(scale: str = "standard") -> str:
+    return _SCALE_GRAMMARS.get(scale, _SCALE_GRAMMARS["standard"])["outline"]
+
+
+def scenes_grammar(scale: str = "standard") -> str:
+    return _SCALE_GRAMMARS.get(scale, _SCALE_GRAMMARS["standard"])["scenes"]
+
+
+def shots_grammar(scale: str = "standard") -> str:
+    return _SCALE_GRAMMARS.get(scale, _SCALE_GRAMMARS["standard"])["shots"]
+
+
+# Standard-scale constants, kept for existing imports.
+OUTLINE_GRAMMAR = _SCALE_GRAMMARS["standard"]["outline"]
+SCENES_GRAMMAR = _SCALE_GRAMMARS["standard"]["scenes"]
+SHOTS_GRAMMAR = _SCALE_GRAMMARS["standard"]["shots"]
 
 _BEATS_TEMPLATE = (
     r"""root ::= "[" ws beat (ws "," ws beat){{1,5}} ws "]"
@@ -225,11 +332,14 @@ def _roster_lines(subjects: Sequence[Mapping[str, Any]]) -> str:
 
 
 def build_outline_user_prompt(
-    premise: str, subjects: Sequence[Mapping[str, Any]]
+    premise: str, subjects: Sequence[Mapping[str, Any]], scale: str = "standard"
 ) -> str:
+    hint = _scale_spec(scale)["arc_hint"]
+    hint_line = f"{hint}\n" if hint else ""
     return (
         f"Premise:\n{premise}\n\nExisting subjects (reuse names verbatim; "
         f"do not re-describe them):\n{_roster_lines(subjects)}\n\n"
+        f"{hint_line}"
         "Write the story outline JSON."
     )
 

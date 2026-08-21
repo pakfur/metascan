@@ -403,6 +403,12 @@ class StoryboardRunner:
         tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
         assert tree is not None
         roster = {s["name"].strip().lower(): int(s["id"]) for s in tree["subjects"]}
+        # storyboards.story_scale widens/narrows the outline/scenes/shots
+        # stages together: grammar caps, the explicit shot-count prompt
+        # numbers, and max_tokens. "standard" reproduces the pre-scale
+        # behavior exactly; beats are bounded by the clip cap and don't
+        # scale.
+        scale = str(tree.get("story_scale") or "standard")
 
         def progress(done: int, total: int) -> None:
             self._emit(
@@ -468,11 +474,11 @@ class StoryboardRunner:
                 story.validate_outline_response,
                 system_prompt=story.STORY_OUTLINE_SYSTEM,
                 user_prompt=story.build_outline_user_prompt(
-                    tree["source_text"], tree["subjects"]
+                    tree["source_text"], tree["subjects"], scale
                 ),
-                grammar=story.OUTLINE_GRAMMAR,
+                grammar=story.outline_grammar(scale),
                 temperature=0.7,
-                max_tokens=2048,
+                max_tokens=story.stage_max_tokens("outline", scale),
                 timeout=600.0,
             )
             await asyncio.to_thread(
@@ -514,9 +520,9 @@ class StoryboardRunner:
                 lint=lambda sc: story.lint_scene_charges(sc, arc),
                 system_prompt=story.STORY_SCENES_SYSTEM,
                 user_prompt=story.build_scenes_user_prompt(outline_json),
-                grammar=story.SCENES_GRAMMAR,
+                grammar=story.scenes_grammar(scale),
                 temperature=0.7,
-                max_tokens=2048,
+                max_tokens=story.stage_max_tokens("scenes", scale),
                 timeout=300.0,
             )
             _, purged_files = await asyncio.to_thread(
@@ -533,7 +539,9 @@ class StoryboardRunner:
             # clip) and future dialects with a different cap both steer the
             # LLM toward shots the compiler can actually render as one clip.
             pacing = str(tree.get("pacing") or "standard")
-            guidance = story.pacing_guidance(pacing, shot_cap(tree.get("video_target")))
+            guidance = story.pacing_guidance(
+                pacing, shot_cap(tree.get("video_target")), scale
+            )
             targets = [
                 (i, s)
                 for i, s in enumerate(tree["scenes"])
@@ -569,9 +577,9 @@ class StoryboardRunner:
                             guidance,
                             is_turn_scene,
                         ),
-                        grammar=story.SHOTS_GRAMMAR,
+                        grammar=story.shots_grammar(scale),
                         temperature=0.6,
-                        max_tokens=1600,
+                        max_tokens=story.stage_max_tokens("shots", scale),
                         timeout=300.0,
                     )
                 if not is_turn_scene:
