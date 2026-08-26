@@ -23,6 +23,8 @@ from metascan.core.h3_compiler import (
     compute_timeline,
     format_timecode,
     lint_h3_prompt,
+    pov_subject,
+    pov_warnings,
     render_audio_definition_lines,
     render_audio_retention_lines,
     render_camera,
@@ -1333,3 +1335,238 @@ def test_expectations_exclude_skipped_environment_label() -> None:
     expectations = build_expectations(refplan, speakers, timeline, "ref2va", beats)
     assert "Subject 3" not in expectations.subject_labels
     assert "Subject 1" in expectations.subject_labels
+
+
+# -- POV subjects (storyboard_subjects.pov_ref) -----------------------------
+
+
+def test_pov_timeline_merges_all_beats_into_shot_1() -> None:
+    """pov=True collapses the beat==shot mapping into a single [Shot 1]
+    covering every beat, with per-beat rescaled start times exposed on
+    ``Timeline.beat_starts`` so the prose can embed them."""
+    beats = _beats()
+    refplan = RefPlan({}, "Subject 1", [], "Picture 1")
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan, pov=True)
+
+    assert [(s.number, s.start_s, s.beat_indices) for s in timeline.shots] == [
+        (1, 0.0, [0, 1, 2])
+    ]
+    assert timeline.beat_starts == (0.0, 4.0, 8.0)
+    assert timeline.duration_s == 12.0
+
+    # Non-POV timelines expose the same per-beat starts (they equal the
+    # shot starts there).
+    normal = compute_timeline(beats, 12.0, "ref2va", refplan)
+    assert normal.beat_starts == (0.0, 4.0, 8.0)
+
+
+def test_pov_subject_picks_first_flagged_with_picture() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    assert pov_subject(subjects, refplan) is None
+
+    subjects[0]["pov_ref"] = 1
+    picked = pov_subject(subjects, refplan)
+    assert picked is not None
+    subject, pic = picked
+    assert subject["id"] == 7
+    assert pic == "Picture 1"
+
+    # A flagged subject with no reference picture cannot anchor the
+    # vantage -- POV compilation stays off.
+    subjects[0]["pov_ref"] = 0
+    subjects[1]["pov_ref"] = 1
+    assert pov_subject(subjects, refplan) is None
+
+
+def test_pov_subject_definitions_vantage_boilerplate() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    refplan = assign_reference_labels(subjects, scene)
+
+    text = render_subject_definitions(refplan, subjects, scene)
+    lines = text.split("\n")
+    assert lines[0] == (
+        "<Subject 1> is Grandma Rose, the first-person viewer whose point "
+        "of view the camera adopts; <Picture 1> shows this viewer's own "
+        "body from the video's camera vantage — eye height, lens, and "
+        "framing of the viewer's own point of view, also shown in "
+        "<Picture 2>. a kind elderly woman with silver hair, wearing a "
+        "floral apron"
+    )
+    # The non-POV subject renders unchanged.
+    assert lines[1] == (
+        "<Subject 2> is the Rex: a scruffy grey terrier with one floppy ear."
+    )
+
+
+def test_pov_summary_single_take_clause() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    refplan = assign_reference_labels(subjects, scene)
+
+    summary = render_summary(
+        refplan, {"action": "Grandma Rose pets Rex"}, subjects, "ref2va", scene
+    )
+    assert summary == (
+        "[reference generation] A continuous single-take POV shot from "
+        "the vantage defined by <Picture 1>, with timed action beats — "
+        "the target video shows <Subject 1> and <Subject 2> in "
+        "<Subject 3>: <Subject 1> pets <Subject 2>."
+    )
+
+
+def test_pov_retention_fixed_vantage_line() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    refplan = assign_reference_labels(subjects, scene)
+    timeline = compute_timeline(_beats(), 12.0, "ref2va", refplan, pov=True)
+
+    text = render_retention_analysis(refplan, subjects, scene, timeline)
+    lines = text.split("\n")
+    assert lines[0] == (
+        "<Subject 1> (appears in [Shot 1]): fully_preserved - serves as "
+        "the target video's first frame and as the fixed camera vantage "
+        "for the entire duration."
+    )
+    assert lines[1].startswith("<Subject 2> (appears in [Shot 1]): fully_preserved - ")
+
+
+def test_pov_detailed_description_single_shot_timed_prose() -> None:
+    """POV renders one [Shot 1] block: the vantage-lock opener, then every
+    beat as timed prose ("At MM:SS.mmm, ..." from the second beat on).
+    Per-beat camera/framing sentences and is_cut phrasing are suppressed;
+    dialog and sound render as usual."""
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    beats = _beats()
+    refplan = assign_reference_labels(subjects, scene)
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan, pov=True)
+
+    text = render_detailed_description(
+        "cinematic, live-action", beats, timeline, speakers, subjects, refplan
+    )
+    lines = text.split("\n")
+    assert lines[0] == "The target video is in a cinematic, live-action style."
+    assert len(lines) == 2  # style line + the single merged shot block
+    assert lines[1] == (
+        "[Shot 1] The shot begins from <Picture 1> and holds that exact "
+        "vantage for the whole video: POV, Static Shot, eye height and "
+        "lens unchanged, horizon line constant. Grandma pets the dog. "
+        "<Subject 1> (S1) says, soft, <d>[English] Hello, old girl.</d> "
+        "A kettle whistles. At 00:04.000, <Subject 2> barks at the door. "
+        "the gravelly voice (S2) says in a gravelly voice "
+        "<d>[English] Watch it!</d> At 00:08.000, Grandma opens the door."
+    )
+    assert "pushes in" not in text
+    assert "holds a static shot" not in text
+    assert "the shot cuts" not in text
+    assert "framed as" not in text
+
+
+def test_pov_timed_beat_with_no_action_prefixes_first_sentence() -> None:
+    """A later beat with an empty action still gets its timestamp: the
+    "At MM:SS.mmm, " prefix attaches to the beat's first sentence (here
+    the dialog clause)."""
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    refplan = assign_reference_labels(subjects, scene)
+    beats = [
+        {
+            "duration_s": 2.0,
+            "action": "She waits.",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [],
+            "sound": None,
+        },
+        {
+            "duration_s": 2.0,
+            "action": "",
+            "camera_motion": None,
+            "camera_amplitude": None,
+            "camera_speed": None,
+            "is_cut": 0,
+            "dialog": [
+                {
+                    "subject_id": None,
+                    "voice": "a low rasp",
+                    "delivery": None,
+                    "language": "English",
+                    "text": "Who's there?",
+                }
+            ],
+            "sound": None,
+        },
+    ]
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 4.0, "ref2va", refplan, pov=True)
+
+    text = render_detailed_description(
+        "noir", beats, timeline, speakers, subjects, refplan
+    )
+    assert (
+        "At 00:02.000, the a low rasp (S1) says in a a low rasp voice "
+        "<d>[English] Who's there?</d>" in text
+    )
+
+
+def test_pov_warnings_multiple_and_missing_picture() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    assert pov_warnings(subjects, refplan) == []
+
+    # Flagged subject with no reference picture -> pov_no_reference.
+    subjects[1]["pov_ref"] = 1
+    warnings = pov_warnings(subjects, refplan)
+    assert [w.code for w in warnings] == ["pov_no_reference"]
+    assert all(w.severity == "warning" for w in warnings)
+    assert "Rex" in warnings[0].message
+
+    # Two flagged subjects that BOTH have pictures -> pov_multiple (the
+    # first by sort_order wins the vantage).
+    subjects[1]["reference_path"] = "/refs/rex.png"
+    refplan = assign_reference_labels(subjects, scene)
+    subjects[0]["pov_ref"] = 1
+    warnings = pov_warnings(subjects, refplan)
+    assert [w.code for w in warnings] == ["pov_multiple"]
+    assert warnings[0].severity == "warning"
+    picked = pov_subject(subjects, refplan)
+    assert picked is not None and picked[0]["id"] == 7
+
+
+def test_pov_document_lints_clean() -> None:
+    subjects = _subjects()
+    scene = _scene()
+    subjects[0]["pov_ref"] = 1
+    beats = _beats()
+    refplan = assign_reference_labels(subjects, scene)
+    speakers = assign_speakers(beats, subjects, refplan)
+    timeline = compute_timeline(beats, 12.0, "ref2va", refplan, pov=True)
+
+    doc = assemble(
+        timeline.alignment_line,
+        render_subject_definitions(refplan, subjects, scene),
+        render_summary(
+            refplan, {"action": "Grandma Rose pets Rex"}, subjects, "ref2va", scene
+        ),
+        render_retention_analysis(refplan, subjects, scene, timeline),
+        render_detailed_description(
+            "cinematic", beats, timeline, speakers, subjects, refplan
+        ),
+        "Quiet kitchen ambience with a faint kettle whistle.",
+        "N/A",
+    )
+    expect = build_expectations(refplan, speakers, timeline, "ref2va")
+    errors = [e for e in lint_h3_prompt(doc, expect) if e.severity == "error"]
+    assert errors == []

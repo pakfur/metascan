@@ -109,6 +109,12 @@ class Timeline:
     shots: List[TimelineShot]
     duration_s: float
     alignment_line: Optional[str]  # None for t2va/ref2va
+    # Per-beat rescaled start times, index-aligned with the beats passed to
+    # compute_timeline. Equal to the shot starts in the normal beat==shot
+    # mapping; in POV mode (single merged [Shot 1]) these are what the
+    # prose renderer embeds as in-shot "At MM:SS.mmm" timestamps. Default
+    # keeps direct Timeline(...) constructions in older tests valid.
+    beat_starts: Tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -330,6 +336,7 @@ def compute_timeline(
     duration_s: float,
     mode: str,
     refplan: RefPlan,
+    pov: bool = False,
 ) -> Timeline:
     """Rescale beat durations to sum exactly to ``duration_s`` and map
     every beat to its own ``[Shot n]``.
@@ -340,7 +347,13 @@ def compute_timeline(
     timestamp (the end time of the previous beat). ``is_cut`` no longer
     changes the grouping; it only tunes the deterministic phrasing in
     ``render_detailed_description`` ("the shot cuts" vs a continuous
-    transition)."""
+    transition).
+
+    ``pov=True`` instead merges every beat into a single ``[Shot 1]``:
+    MiniMax only retains a first-person vantage when the whole video is
+    one continuous shot, so the beat timing moves into the shot's prose
+    ("At MM:SS.mmm, ...") via ``Timeline.beat_starts``, which carries the
+    per-beat rescaled start times in both modes."""
     n = len(beats)
     orig_durations = [float(b.get("duration_s") or 0.0) for b in beats]
     total = sum(orig_durations)
@@ -352,14 +365,27 @@ def compute_timeline(
     else:
         rescaled = []
 
-    shots: List[TimelineShot] = []
+    starts: List[float] = []
     cum = 0.0
     for i in range(n):
-        shots.append(TimelineShot(number=i + 1, start_s=cum, beat_indices=[i]))
+        starts.append(cum)
         cum += rescaled[i]
 
+    if pov and n > 0:
+        shots = [TimelineShot(number=1, start_s=0.0, beat_indices=list(range(n)))]
+    else:
+        shots = [
+            TimelineShot(number=i + 1, start_s=starts[i], beat_indices=[i])
+            for i in range(n)
+        ]
+
     alignment_line = _build_alignment_line(mode, refplan, duration_s, shots)
-    return Timeline(shots=shots, duration_s=duration_s, alignment_line=alignment_line)
+    return Timeline(
+        shots=shots,
+        duration_s=duration_s,
+        alignment_line=alignment_line,
+        beat_starts=tuple(starts),
+    )
 
 
 # -- Camera rendering --------------------------------------------------------
@@ -382,6 +408,75 @@ def render_camera(
     return ", ".join(parts)
 
 
+# -- POV subjects (storyboard_subjects.pov_ref) --------------------------
+
+
+def pov_subject(
+    subjects: Sequence[Mapping[str, Any]], refplan: RefPlan
+) -> Optional[Tuple[Mapping[str, Any], str]]:
+    """The subject whose reference picture anchors a POV compile, paired
+    with that picture's label.
+
+    First (by ``sort_order``) subject flagged ``pov_ref`` that has a
+    labeled reference picture. ``None`` when no subject qualifies — POV
+    compilation needs a picture to bind the vantage to, so a
+    flagged-but-pictureless subject does not activate it
+    (``pov_warnings`` surfaces that as ``pov_no_reference``)."""
+    pic_by_path = dict(refplan.picture_labels)
+    ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
+    for subject in ordered:
+        if not subject.get("pov_ref"):
+            continue
+        for key in ("reference_path", "reference_path_2"):
+            path = subject.get(key)
+            if path and path in pic_by_path:
+                return subject, pic_by_path[path]
+    return None
+
+
+def pov_warnings(
+    subjects: Sequence[Mapping[str, Any]], refplan: RefPlan
+) -> List[LintError]:
+    """Advisory-only POV misconfiguration warnings: a flagged subject with
+    no reference picture cannot anchor the vantage (``pov_no_reference``),
+    and when several flagged subjects have pictures only the first by
+    ``sort_order`` wins (``pov_multiple``). Never errors — a POV mishap
+    must not mark the panel failed."""
+    pic_by_path = dict(refplan.picture_labels)
+    ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
+    warnings: List[LintError] = []
+    anchored: List[Mapping[str, Any]] = []
+    for subject in ordered:
+        if not subject.get("pov_ref"):
+            continue
+        has_pic = any(
+            subject.get(key) and subject[key] in pic_by_path
+            for key in ("reference_path", "reference_path_2")
+        )
+        if has_pic:
+            anchored.append(subject)
+        else:
+            warnings.append(
+                LintError(
+                    "pov_no_reference",
+                    "warning",
+                    f"POV subject {subject.get('name', '?')!r} has no "
+                    "reference picture; it cannot anchor the vantage",
+                )
+            )
+    if len(anchored) > 1:
+        ignored = ", ".join(repr(s.get("name", "?")) for s in anchored[1:])
+        warnings.append(
+            LintError(
+                "pov_multiple",
+                "warning",
+                f"multiple POV subjects flagged; the vantage uses "
+                f"{anchored[0].get('name', '?')!r} and ignores: {ignored}",
+            )
+        )
+    return warnings
+
+
 # -- Deterministic section renderers -----------------------------------
 
 
@@ -396,6 +491,7 @@ def render_subject_definitions(
 ) -> str:
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     pic_by_path = dict(refplan.picture_labels)
+    pov = pov_subject(subjects, refplan)
     lines: List[str] = []
 
     for subject in ordered:
@@ -407,7 +503,28 @@ def render_subject_definitions(
             for p in (subject.get("reference_path"), subject.get("reference_path_2"))
             if p and p in pic_by_path
         ]
-        if subject.get("sheet_ref") and pics:
+        if pov is not None and subject["id"] == pov[0]["id"]:
+            # storyboard_subjects.pov_ref: this subject's picture (usually
+            # a partial torso view) IS the camera's own first-person
+            # vantage. Same actual-labels rule as sheet_ref below — the
+            # picture label is per-panel and upload-order dependent.
+            pov_pic = pov[1]
+            line = (
+                f"<{label}> is {name}, the first-person viewer whose point "
+                f"of view the camera adopts; <{pov_pic}> shows this "
+                "viewer's own body from the video's camera vantage — eye "
+                "height, lens, and framing of the viewer's own point of "
+                "view"
+            )
+            extra = [p for p in pics if p != pov_pic]
+            if extra:
+                line += f", also shown in <{extra[0]}>"
+            line += "."
+            desc = description.strip()
+            if desc:
+                line += f" {desc}"
+            lines.append(line)
+        elif subject.get("sheet_ref") and pics:
             # storyboard_subjects.sheet_ref: the first reference picture is
             # a three-view character sheet. The boilerplate carries the
             # panel's ACTUAL labels (hardcoding "<Picture 1>" in a
@@ -479,6 +596,16 @@ def render_summary(
         # prose so the summary still situates the shot.
         scene_name = str(scene.get("name") or "") if scene else ""
         where = f"the {scene_name} setting" if scene_name else "the scene setting"
+    pov = pov_subject(subjects, refplan)
+    if pov is not None:
+        # Ref-guide anchor phrasing: naming the vantage picture here and
+        # asserting it in retention_analysis is what keeps the POV camera
+        # sticky across the whole video.
+        return (
+            f"{prefix} A continuous single-take POV shot from the vantage "
+            f"defined by <{pov[1]}>, with timed action beats — the target "
+            f"video shows {joined} in {where}: {action}."
+        )
     return f"{prefix} The target video shows {joined} in {where}: {action}."
 
 
@@ -494,10 +621,20 @@ def render_retention_analysis(
 ) -> str:
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     shot_list = ", ".join(f"[Shot {shot.number}]" for shot in timeline.shots)
+    pov = pov_subject(subjects, refplan)
     lines: List[str] = []
 
     for subject in ordered:
         label = refplan.subject_labels[subject["id"]]
+        if pov is not None and subject["id"] == pov[0]["id"]:
+            # Frame-anchor assertion (ref-guide retention phrasing): the
+            # POV picture is both the first frame and the fixed vantage.
+            lines.append(
+                f"<{label}> (appears in {shot_list}): fully_preserved - "
+                "serves as the target video's first frame and as the "
+                "fixed camera vantage for the entire duration."
+            )
+            continue
         descriptor = _first_words(subject.get("description", ""))
         lines.append(
             f"<{label}> (appears in {shot_list}): fully_preserved - {descriptor}."
@@ -619,6 +756,39 @@ def render_detailed_description(
         lines_by_beat.setdefault(sl.beat_index, []).append(sl)
 
     parts = [f"The target video is in a {style} style."]
+
+    pov = pov_subject(subjects, refplan) if refplan is not None else None
+    if pov is not None:
+        # POV mode: one merged [Shot 1] (see compute_timeline's pov=True)
+        # whose opener locks the vantage once — per-beat camera/framing
+        # sentences and is_cut phrasing are suppressed because any later
+        # motion text would contradict the lock and drift the vantage.
+        # Beat timing is embedded as in-shot "At MM:SS.mmm, ..." prose,
+        # the guide's intra-shot timing convention.
+        pov_sentences: List[str] = [
+            f"[Shot 1] The shot begins from <{pov[1]}> and holds that "
+            "exact vantage for the whole video: POV, Static Shot, eye "
+            "height and lens unchanged, horizon line constant."
+        ]
+        for bi, beat in enumerate(beats):
+            pieces: List[Tuple[str, str]] = []
+            action = _labeled(str(beat.get("action") or "")).strip()
+            if action:
+                pieces.append(("sentence", action))
+            for sl in sorted(lines_by_beat.get(bi, []), key=lambda x: x.line_index):
+                pieces.append(("raw", _dialog_clause(sl)))
+            sound = beat.get("sound")
+            if sound:
+                pieces.append(("sentence", _labeled(str(sound))))
+            if not pieces:
+                continue
+            for j, (kind, piece) in enumerate(pieces):
+                if bi > 0 and j == 0 and bi < len(timeline.beat_starts):
+                    piece = f"At {format_timecode(timeline.beat_starts[bi])}, {piece}"
+                pov_sentences.append(_sentence(piece) if kind == "sentence" else piece)
+        parts.append(" ".join(pov_sentences))
+        return "\n".join(parts)
+
     for shot in timeline.shots:
         bi = shot.beat_indices[0]
         beat = beats[bi] if bi < len(beats) else {}

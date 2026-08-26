@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media import Media
 from metascan.core.storyboard_runner import StoryboardError, StoryboardRunner
 from metascan.core.vlm_client import VlmError
 
@@ -110,6 +113,22 @@ def _make_panel(
         ]
         db.replace_panel_beats(panel_id, beats)
     return scene_id, panel_id, subject_id
+
+
+def _add_media(db: DatabaseManager, posix_path: str) -> None:
+    # Mirrors tests/test_storyboard_refs_db.py -- satisfies the media FK
+    # prerequisite for storyboard_subjects.reference_path.
+    db.save_media(
+        Media(
+            file_path=Path(posix_path),
+            file_size=1,
+            width=8,
+            height=8,
+            format="png",
+            created_at=datetime.now(),
+            modified_at=datetime.now(),
+        )
+    )
 
 
 # -- FakeVlm ------------------------------------------------------------
@@ -242,6 +261,31 @@ def test_full_compile_writes_doc_and_events(db, tmp_path):
     complete = [e for e in events if e[1] == "compile_complete"]
     assert len(complete) == 1
     assert complete[0][2]["compiled"] == 1
+
+
+def test_pov_subject_compiles_single_shot_document(db, tmp_path):
+    """A subject flagged pov_ref with a reference picture flips the whole
+    panel into POV compilation: one merged [Shot 1] with the vantage-lock
+    opener and in-shot beat timestamps, no [Shot 2], and the beats'
+    camera-motion sentences suppressed."""
+    sb = _make_storyboard(db)
+    _, panel_id, subject_id = _make_panel(db, sb)
+    _add_media(db, "/refs/grandma1.png")
+    db.update_subject(subject_id, reference_path="/refs/grandma1.png", pov_ref=1)
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: None, output_root=tmp_path
+    )
+    counts = asyncio.run(runner.compile_video(sb, deterministic_only=True))
+    assert counts["compiled"] == 1 and counts["failed"] == 0
+
+    doc = db.get_panel(panel_id)["video_prompt"]
+    assert (
+        "[Shot 1] The shot begins from <Picture 1> and holds that exact "
+        "vantage for the whole video" in doc
+    )
+    assert "[Shot 2]" not in doc
+    assert "At 00:04.000," in doc  # second beat's timestamp, in-shot
+    assert "pushes in" not in doc  # beat 0's camera_motion is suppressed
 
 
 def test_word_count_shortfall_is_warning_not_failure(db, tmp_path):

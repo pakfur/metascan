@@ -507,6 +507,32 @@ metascan/
   appends the description after it for extra identity detail — never
   hardcode `<Subject 1>`/`<Picture 1>` text into a description, the
   labels are per-panel and upload-order dependent.
+  **`storyboard_subjects.pov_ref`** (INTEGER 0/1, checkbox next to
+  sheet_ref) marks a subject's reference picture as the shot's
+  first-person camera vantage (usually a partial torso view). Any panel
+  whose roster contains a pov_ref subject *with a labeled reference
+  picture* (`h3.pov_subject` — flagged-but-pictureless never activates,
+  it only warns) compiles in POV mode: `compute_timeline(pov=True)`
+  merges every beat into a single `[Shot 1]` (per-beat rescaled starts
+  live on `Timeline.beat_starts` in both modes),
+  `render_detailed_description` opens with the vantage lock ("The shot
+  begins from `<Picture N>` and holds that exact vantage … POV, Static
+  Shot, eye height and lens unchanged, horizon line constant") and
+  renders beats as in-shot "At MM:SS.mmm, …" prose — per-beat
+  camera/framing sentences and `is_cut` phrasing are deliberately
+  suppressed (any later motion text would drift the vantage); dialog and
+  sound render as usual. `render_subject_definitions`/`render_summary`/
+  `render_retention_analysis` each self-detect the POV subject and emit
+  the vantage boilerplate / "continuous single-take POV shot" clause /
+  first-frame-anchor retention line ("serves as the target video's first
+  frame and as the fixed camera vantage"). `_compile_panel` passes
+  `beats=None` to `build_expectations` in POV mode (camera_vocab must
+  not demand the suppressed motion phrases) and appends
+  `h3.pov_warnings` (advisory-only `pov_no_reference`/`pov_multiple`;
+  first flagged-with-picture subject by sort_order wins the vantage) to
+  the lint issues. MiniMax only retains a POV camera across beats when
+  the whole clip is one continuous shot with intra-shot timestamps —
+  that constraint is the entire reason for the merge.
   **`detailed_description` is deterministic — the beat script IS the shot
   script.** `compute_timeline` maps every beat to its own `[Shot n]`
   (`is_cut` only tunes phrasing — "the shot cuts." vs "continuing without
