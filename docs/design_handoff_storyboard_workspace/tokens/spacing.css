@@ -1,0 +1,22 @@
+/* Metascan does not snap to a 4px grid: 5px, 6px, 10px, 14px, 18px and 22px
+   all appear in production CSS. These are the real values. */
+:root{
+  --space-1:2px;--space-2:4px;--space-3:5px;--space-4:6px;--space-5:8px;
+  --space-6:10px;--space-7:12px;--space-8:14px;--space-9:16px;--space-10:18px;
+  --space-11:20px;--space-12:22px;--space-13:24px;--space-14:28px;--space-15:32px;
+
+  /* recurring layout measurements */
+  --gutter-view:20px;        /* header / grid / strip horizontal padding */
+  --gap-panel-grid:14px;     /* panel tile grid gap */
+  --gap-scene-strip:10px;    /* scene card gap */
+  --panel-tile-min:150px;    /* grid auto-fill minmax */
+  --scene-card-w:190px;
+  --candidate-tile:96px;
+  --video-take-w:128px;--video-take-h:72px;
+  --side-panel-w:400px;
+  --left-panel-w:250px;--right-panel-w:350px;
+  --gutter-drag:5px;         /* three-panel column gutter */
+  --divider-drag:7px;        /* storyboard detail row-resize strip */
+  --dialog-w-sm:480px;--dialog-w-md:640px;--dialog-w-lg:720px;
+  --content-max:720px;       /* storyboard landing measure */
+}

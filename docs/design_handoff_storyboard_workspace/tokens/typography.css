@@ -1,0 +1,28 @@
+/* Metascan has no webfont. The product ships the platform UI stack and a
+   monospace stack for prompts/scripts — both reproduced verbatim. */
+:root{
+  --font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --font-family-mono:var(--font-mono); /* alias used by OutlineDialog */
+
+  /* size scale — every value in the product, nothing invented */
+  --text-11:11px;  /* micro labels, badges, captions */
+  --text-12:12px;  /* secondary body, hints, dense controls */
+  --text-13:13px;  /* default body + control text */
+  --text-14:14px;  /* emphasis body, dialog buttons, panel titles */
+  --text-16:16px;  /* board title in the storyboard header */
+  --text-18:18px;  /* dialog heading */
+  --text-20:20px;  /* page heading */
+
+  --weight-regular:400;
+  --weight-semibold:600;
+
+  --leading-tight:1;
+  --leading-snug:1.5;
+
+  /* the eyebrow label treatment used by every field in the storyboard */
+  --label-size:11px;
+  --label-weight:600;
+  --label-tracking:0.4px;
+  --label-transform:uppercase; /* @kind other */
+}

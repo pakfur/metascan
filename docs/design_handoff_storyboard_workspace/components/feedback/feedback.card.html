@@ -1,0 +1,39 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Feedback" subtitle="Job badges and the inline confirm banner" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-ground);padding:14px 16px}.cap{font-size:10px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--text-color-secondary);margin:0 0 8px}.thumb{position:relative;width:120px;height:120px;border-radius:8px;overflow:hidden;background:var(--surface-ground);border:1px solid var(--surface-border)}.thumb img{width:100%;height:100%;object-fit:cover;display:block}.small{position:relative;width:28px;height:28px;border-radius:4px;overflow:hidden;background:var(--surface-card)}.small img{width:100%;height:100%;object-fit:cover;display:block}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { JobBadge, ConfirmBanner, Button } = window.MetascanDesignSystem_f2fbbd;
+const F = (n) => '../../assets/placeholders/frame-' + String(n).padStart(2,'0') + '.png';
+function Card(){return (<div>
+  <p className="cap">Job state — overlay layout on a shot tile</p>
+  <div style={{display:'flex',gap:12,marginBottom:14}}>
+    <div className="thumb"><img src={F(1)}/><JobBadge state="queued"/></div>
+    <div className="thumb"><img src={F(2)}/><JobBadge state="running" value={14} max={20}/></div>
+    <div className="thumb"><img src={F(3)}/><JobBadge state="failed" error="preset 3: node 12 missing input"/></div>
+    <div style={{display:'flex',flexDirection:'column',gap:8,justifyContent:'center'}}>
+      <p className="cap" style={{margin:0}}>fill layout — beat thumb</p>
+      <div style={{display:'flex',gap:8}}>
+        <span className="small"><img src={F(4)}/><JobBadge state="queued" layout="fill"/></span>
+        <span className="small"><img src={F(5)}/><JobBadge state="running" layout="fill"/></span>
+        <span className="small"><img src={F(6)}/><JobBadge state="failed" layout="fill"/></span>
+      </div>
+    </div>
+  </div>
+  <p className="cap">Inline confirm</p>
+  <ConfirmBanner message="Beats have generated images or locked prompts — recompose anyway?" actions={<><Button variant="danger" size="sm">Continue</Button><Button size="sm">Cancel</Button></>} />
+</div>);}
+ReactDOM.createRoot(document.getElementById('root')).render(<Card/>);
+</script>
+</body>
+</html>

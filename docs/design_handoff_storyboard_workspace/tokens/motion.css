@@ -1,0 +1,12 @@
+/* Short, linear-ish fades. No bounce, no spring, no scale-on-press. */
+:root{
+  --dur-fast:0.15s; /* @kind other */   /* hover reveals, gutter tint, opacity */
+  --dur-base:0.2s; /* @kind other */    /* toast enter/leave */
+  --dur-spin:0.8s; /* @kind other */    /* loading spinner rotation */
+  --ease-default:ease; /* @kind other */
+  --transition-reveal:opacity var(--dur-fast);
+  --transition-surface:background var(--dur-fast);
+  --transition-toast:opacity var(--dur-base),transform var(--dur-base);
+  --disabled-opacity:0.5; /* @kind other */
+  --dimmed-opacity:0.45; /* @kind other */ /* non-keeper candidate thumbnails */
+}

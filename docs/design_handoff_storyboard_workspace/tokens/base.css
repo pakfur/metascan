@@ -1,0 +1,10 @@
+/* Global resets, exactly as the product ships them. */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{font-family:var(--font-sans);background:var(--surface-ground);color:var(--text-color)}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--surface-border);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--text-color-secondary)}
+a{color:var(--primary-color);text-decoration:none}
+a:hover{color:var(--text-color)}
+@keyframes ms-spin{to{transform:rotate(360deg)}}
