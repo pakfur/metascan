@@ -263,6 +263,15 @@ function onSheetRefChange(id: number, e: Event): void {
   void commitSubjectField(id, { sheet_ref: checked ? 1 : 0 })
 }
 
+// storyboard_subjects.pov_ref: the reference picture is the shot's
+// first-person camera vantage (usually a partial torso view). Any shot
+// containing this subject compiles as a single merged [Shot 1] with
+// in-shot beat timestamps and an eye-height POV camera lock.
+function onPovRefChange(id: number, e: Event): void {
+  const checked = (e.target as HTMLInputElement).checked
+  void commitSubjectField(id, { pov_ref: checked ? 1 : 0 })
+}
+
 const describing = ref<Record<number, boolean>>({})
 const describeResult = ref<Record<number, { description: string; voice: string | null }>>({})
 const describeErrors = ref<Record<number, string>>({})
@@ -616,6 +625,20 @@ function close(): void {
             <span class="hint">
               The video prompt describes the sheet itself; use Description for extra
               identity detail (clothing, props).
+            </span>
+          </div>
+          <div class="describe-row">
+            <label class="sheet-check">
+              <input
+                type="checkbox"
+                :checked="s.pov_ref === 1"
+                @change="onPovRefChange(s.id, $event)"
+              />
+              Reference is the POV camera vantage (viewer's own body, e.g. torso)
+            </label>
+            <span class="hint">
+              Shots with this subject compile as one continuous eye-height POV
+              shot with timed beats.
             </span>
           </div>
           <p v-if="describeErrors[s.id]" class="error inline">{{ describeErrors[s.id] }}</p>

@@ -163,6 +163,11 @@ export interface Subject {
   // the H3 compiler emits the sheet boilerplate (with the panel's actual
   // <Subject N>/<Picture N> labels) and appends the description after it.
   sheet_ref: 0 | 1
+  // 1 when the reference picture is the shot's first-person camera vantage
+  // (usually a partial torso view) — the H3 compiler merges the shot's
+  // beats into a single [Shot 1] with in-shot timestamps and locks the
+  // camera to that vantage (POV, static, eye height) for the whole clip.
+  pov_ref: 0 | 1
 }
 
 export interface StoryboardSummary {

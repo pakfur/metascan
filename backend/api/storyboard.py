@@ -64,7 +64,9 @@ _STORYBOARD_NOT_NULLABLE = frozenset(
         "story_scale",
     }
 )
-_SUBJECT_NOT_NULLABLE = frozenset({"name", "description", "sort_order", "sheet_ref"})
+_SUBJECT_NOT_NULLABLE = frozenset(
+    {"name", "description", "sort_order", "sheet_ref", "pov_ref"}
+)
 _SCENE_NOT_NULLABLE = frozenset({"name", "sort_order", "arc_beats"})
 _PANEL_NOT_NULLABLE = frozenset(
     {
@@ -197,6 +199,7 @@ class SubjectPatch(BaseModel):
     voice: Optional[str] = None
     voice_ref_path: Optional[str] = None
     sheet_ref: Optional[int] = None
+    pov_ref: Optional[int] = None
 
 
 class SceneCreate(BaseModel):
@@ -686,6 +689,8 @@ async def patch_subject(subject_id: int, body: SubjectPatch) -> Dict[str, str]:
     _reject_null_for_required(fields, _SUBJECT_NOT_NULLABLE)
     if "sheet_ref" in fields and fields["sheet_ref"] not in (0, 1):
         raise HTTPException(status_code=400, detail="sheet_ref must be 0 or 1")
+    if "pov_ref" in fields and fields["pov_ref"] not in (0, 1):
+        raise HTTPException(status_code=400, detail="pov_ref must be 0 or 1")
     if fields:
         try:
             await svc.update_subject(subject_id, **fields)

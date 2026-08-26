@@ -958,7 +958,11 @@ class StoryboardRunner:
             or sum(float(b.get("duration_s") or 0) for b in beats)
             or 12.0
         )
-        timeline = h3.compute_timeline(beats, duration_s, mode, refplan)
+        # A pov_ref subject with a reference picture flips the whole panel
+        # into POV compilation: single merged [Shot 1] with in-shot beat
+        # timestamps (the renderers detect the POV subject themselves).
+        pov = h3.pov_subject(subjects, refplan) is not None
+        timeline = h3.compute_timeline(beats, duration_s, mode, refplan, pov=pov)
 
         subject_definitions = h3.render_subject_definitions(refplan, subjects, scene)
         summary = h3.render_summary(refplan, panel, subjects, mode, scene)
@@ -979,7 +983,11 @@ class StoryboardRunner:
         if audio_retention_lines:
             retention_analysis = "\n".join([retention_analysis, *audio_retention_lines])
 
-        expect = h3.build_expectations(refplan, speakers, timeline, mode, beats=beats)
+        # POV suppresses the beats' camera-motion sentences, so the
+        # camera_vocab expectations must not demand their phrases.
+        expect = h3.build_expectations(
+            refplan, speakers, timeline, mode, beats=None if pov else beats
+        )
 
         detailed_description = h3.render_detailed_description(
             tree.get("style_block") or "cinematic, live-action",
@@ -1023,6 +1031,7 @@ class StoryboardRunner:
             non_diegetic_music,
         )
         issues = h3.lint_h3_prompt(doc, expect)
+        issues.extend(h3.pov_warnings(subjects, refplan))
         return doc, issues
 
     # ---- synthesize ----------------------------------------------------

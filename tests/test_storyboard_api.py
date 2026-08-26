@@ -490,6 +490,30 @@ def test_patch_subject_sheet_ref(client):
     )
 
 
+def test_patch_subject_pov_ref(client):
+    sid = _create_storyboard(client)
+    subj_id = client.post(
+        f"/api/storyboard/{sid}/subjects",
+        json={"name": "Alice", "description": "x"},
+    ).json()["id"]
+    r = client.patch(f"/api/storyboard/subjects/{subj_id}", json={"pov_ref": 1})
+    assert r.status_code == 200
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert tree["subjects"][0]["pov_ref"] == 1
+    assert (
+        client.patch(
+            f"/api/storyboard/subjects/{subj_id}", json={"pov_ref": 2}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.patch(
+            f"/api/storyboard/subjects/{subj_id}", json={"pov_ref": None}
+        ).status_code
+        == 400
+    )
+
+
 def test_create_subject_unknown_storyboard_is_404(client):
     r = client.post(
         "/api/storyboard/9999/subjects",
