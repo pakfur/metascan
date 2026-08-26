@@ -42,8 +42,15 @@
         >
           compile failed
         </span>
-        <span v-if="store.error" class="sb-chip sb-chip--error" :title="store.error">
-          <span class="sb-chip-text">{{ store.error }}</span>
+        <span v-if="store.error" class="sb-chip sb-chip--error">
+          <button
+            type="button"
+            class="sb-chip-text sb-chip-open"
+            title="Click to view the full error"
+            @click="errorOpen = true"
+          >
+            {{ store.error }}
+          </button>
           <button
             type="button"
             class="sb-chip-dismiss"
@@ -93,6 +100,26 @@
     <ImportTextDialog v-if="importOpen" @close="importOpen = false" />
     <OutlineDialog v-if="composeOpen" :open="composeOpen" @close="composeOpen = false" />
     <StoryboardSettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+
+    <ModalShell v-if="errorOpen && store.error" width="640px" @close="errorOpen = false">
+      <h3 class="err-title">Error</h3>
+      <pre class="err-body">{{ store.error }}</pre>
+      <template #actions>
+        <button type="button" class="msh-btn" @click="copyError">
+          {{ errorCopied ? 'Copied' : 'Copy' }}
+        </button>
+        <button
+          type="button"
+          class="msh-btn"
+          @click="((store.error = null), (errorOpen = false))"
+        >
+          Dismiss
+        </button>
+        <button type="button" class="msh-btn msh-btn--primary" @click="errorOpen = false">
+          Close
+        </button>
+      </template>
+    </ModalShell>
   </div>
 </template>
 
@@ -103,6 +130,8 @@ import Menu from 'primevue/menu'
 import type { MenuItem } from 'primevue/menuitem'
 import { useViewport } from '../composables/useViewport'
 import { useStoryboardStore } from '../stores/storyboard'
+import { copyToClipboard } from '../utils/clipboard'
+import ModalShell from '../components/storyboard/ModalShell.vue'
 import StoryboardLanding from '../components/storyboard/StoryboardLanding.vue'
 import OutlineRail from '../components/storyboard/OutlineRail.vue'
 import ShotDocument from '../components/storyboard/ShotDocument.vue'
@@ -116,6 +145,19 @@ const store = useStoryboardStore()
 const importOpen = ref(false)
 const composeOpen = ref(false)
 const settingsOpen = ref(false)
+
+// Full-error viewer: the header chip truncates long messages (a
+// board-wide generate_video validation failure runs to many lines), so
+// clicking the chip opens the complete text in a modal.
+const errorOpen = ref(false)
+const errorCopied = ref(false)
+
+async function copyError(): Promise<void> {
+  if (!store.error) return
+  await copyToClipboard(store.error)
+  errorCopied.value = true
+  setTimeout(() => (errorCopied.value = false), 1500)
+}
 const overflowMenu = ref<InstanceType<typeof Menu> | null>(null)
 
 const stageBusy = computed(() => store.compile.running || store.story.running)
@@ -279,6 +321,41 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sb-chip-open {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.err-title {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--danger-color, #e53e3e);
+}
+
+.err-body {
+  margin: 0;
+  padding: 12px;
+  max-height: 50vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-ground);
+  color: var(--text-color);
 }
 
 .sb-chip-dismiss {

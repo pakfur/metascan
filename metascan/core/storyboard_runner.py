@@ -70,6 +70,23 @@ def expand_name_template(template: Optional[str]) -> Optional[str]:
     return _PREFIX_ILLEGAL.sub("-", expanded)
 
 
+def _format_panel_issues(issues: List[Tuple[int, str]]) -> str:
+    """One line per distinct reason, panels grouped -- a board-wide
+    problem reads as one sentence instead of one line per panel."""
+    grouped: Dict[str, List[int]] = {}
+    for pid, reason in issues:
+        grouped.setdefault(reason, []).append(pid)
+    lines: List[str] = []
+    for reason, pids in grouped.items():
+        if len(pids) == 1:
+            lines.append(f"panel {pids[0]}: {reason}")
+        else:
+            lines.append(
+                f"{len(pids)} panels ({', '.join(str(p) for p in pids)}): " f"{reason}"
+            )
+    return "\n".join(lines)
+
+
 def _first_beat_keeper(panel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The keeper image of the shot's first beat (lowest sort_order) --
     the resolution of video_anchor='keeper' since keyframes moved to
@@ -1414,6 +1431,21 @@ class StoryboardRunner:
                 f"preset {video_preset_id} has kind {preset['kind']!r}, "
                 "expected 'ref2v'"
             )
+        # A preset explicitly tagged for a dialect/mode must match the
+        # storyboard's -- an untagged (legacy) preset passes. This is what
+        # makes the workflow_presets.video_target/video_mode association
+        # binding rather than informational.
+        for column, expected in (
+            ("video_target", tree.get("video_target")),
+            ("video_mode", tree.get("video_mode")),
+        ):
+            tagged = preset.get(column)
+            if tagged and expected and tagged != expected:
+                raise StoryboardError(
+                    f"preset {video_preset_id} is tagged {column}="
+                    f"{tagged!r} but the storyboard uses {expected!r}; pick "
+                    "a matching preset in Settings"
+                )
         bindings = resolve_bindings(json.loads(preset["workflow_json"]), "ref2v")
 
         # Full board order (scene sort_order, then panel sort_order) --
@@ -1459,65 +1491,86 @@ class StoryboardRunner:
         audio_slots = len(
             [b for b in (bindings.audio, bindings.audio_2) if b is not None]
         )
-        issues: List[str] = []
+        # (panel_id, reason) pairs -- identical reasons are grouped into
+        # one line at raise time so a board-wide problem ("no compiled
+        # video_prompt" x 17 panels) reads as one sentence, not a wall.
+        issues: List[Tuple[int, str]] = []
         for scene, panel in targets:
             pid = panel["id"]
             if not (panel.get("video_prompt") or "").strip():
-                issues.append(f"panel {pid}: no compiled video_prompt")
+                issues.append((pid, "no compiled video_prompt — run Compile first"))
 
             if panel.get("video_loras") and bindings.lora_stack is None:
                 issues.append(
-                    f"panel {pid}: {len(panel['video_loras'])} video "
-                    f"lora(s) but preset {video_preset_id} has no "
-                    "MS_LORA_STACK node"
+                    (
+                        pid,
+                        f"{len(panel['video_loras'])} video "
+                        f"lora(s) but preset {video_preset_id} has no "
+                        "MS_LORA_STACK node",
+                    )
                 )
 
             subjects = self._panel_subjects(tree, panel)
             refplan = h3.assign_reference_labels(subjects, scene)
             if len(refplan.picture_labels) > ref_slots:
                 issues.append(
-                    f"panel {pid}: {len(refplan.picture_labels)} reference "
-                    f"picture(s) but preset {video_preset_id} provides "
-                    f"{ref_slots} ref-image slot(s)"
+                    (
+                        pid,
+                        f"{len(refplan.picture_labels)} reference "
+                        f"picture(s) but preset {video_preset_id} provides "
+                        f"{ref_slots} ref-image slot(s)",
+                    )
                 )
             beats = panel.get("beats") or []
             speakers = h3.assign_speakers(beats, subjects, refplan)
             active_audio = h3.active_audio_refs(refplan, speakers, subjects)
             if len(active_audio) > audio_slots:
                 issues.append(
-                    f"panel {pid}: {len(active_audio)} active audio "
-                    f"reference(s) but preset {video_preset_id} provides "
-                    f"{audio_slots} audio slot(s)"
+                    (
+                        pid,
+                        f"{len(active_audio)} active audio "
+                        f"reference(s) but preset {video_preset_id} provides "
+                        f"{audio_slots} audio slot(s)",
+                    )
                 )
             for voice_path, audio_label in active_audio:
                 if not Path(voice_path).exists():
                     issues.append(
-                        f"panel {pid}: voice reference for {audio_label} "
-                        f"({voice_path}) does not exist on disk"
+                        (
+                            pid,
+                            f"voice reference for {audio_label} "
+                            f"({voice_path}) does not exist on disk",
+                        )
                     )
 
             anchor = panel.get("video_anchor")
             if mode in ("i2va", "fl2va") and not anchor:
-                issues.append(
-                    f"panel {pid}: video_mode {mode!r} requires a video_anchor"
-                )
+                issues.append((pid, f"video_mode {mode!r} requires a video_anchor"))
             if (anchor or mode in ("i2va", "fl2va")) and bindings.first_frame is None:
                 issues.append(
-                    f"panel {pid}: anchor set but the video preset has no "
-                    "MS_FIRST_FRAME node"
+                    (
+                        pid,
+                        "anchor set but the video preset has no " "MS_FIRST_FRAME node",
+                    )
                 )
             if anchor == "keeper":
                 image = _first_beat_keeper(panel)
                 if image is None:
                     issues.append(
-                        f"panel {pid}: video_anchor 'keeper' requires the "
-                        "shot's first beat to have a selected keeper image"
+                        (
+                            pid,
+                            "video_anchor 'keeper' requires the "
+                            "shot's first beat to have a selected keeper image",
+                        )
                     )
                 elif _is_video_file(image["file_path"]):
                     issues.append(
-                        f"panel {pid}: video_anchor 'keeper' requires the "
-                        "shot's first beat's selected image to be a still, "
-                        "not a video"
+                        (
+                            pid,
+                            "video_anchor 'keeper' requires the "
+                            "shot's first beat's selected image to be a still, "
+                            "not a video",
+                        )
                     )
             elif anchor == "prev_last":
                 # idx == 0 (first panel on the board) and idx is None
@@ -1527,26 +1580,34 @@ class StoryboardRunner:
                 prev_panel = flat_panels[idx - 1][1] if idx else None
                 if prev_panel is None:
                     issues.append(
-                        f"panel {pid}: video_anchor 'prev_last' requires a "
-                        "previous panel"
+                        (
+                            pid,
+                            "video_anchor 'prev_last' requires a " "previous panel",
+                        )
                     )
                 else:
                     prev_image = _first_beat_keeper(prev_panel)
                     if prev_image is None:
                         issues.append(
-                            f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel's shot's first beat to have "
-                            "a selected keeper video"
+                            (
+                                pid,
+                                "video_anchor 'prev_last' requires "
+                                "the previous panel's shot's first beat to have "
+                                "a selected keeper video",
+                            )
                         )
                     elif not _is_video_file(prev_image["file_path"]):
                         issues.append(
-                            f"panel {pid}: video_anchor 'prev_last' requires "
-                            "the previous panel's shot's first beat's "
-                            "selected image to be a video"
+                            (
+                                pid,
+                                "video_anchor 'prev_last' requires "
+                                "the previous panel's shot's first beat's "
+                                "selected image to be a video",
+                            )
                         )
 
         if issues:
-            raise StoryboardError("\n".join(issues))
+            raise StoryboardError(_format_panel_issues(issues))
 
         if tree.get("folder_id") is None:
             async with self._folder_lock:

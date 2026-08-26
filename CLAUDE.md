@@ -570,6 +570,31 @@ metascan/
   prompt-format guides are vendored verbatim at
   `data/prompt_guides/minimax-h3/` and are the format authority every
   renderer in `h3_compiler.py` follows.
+- **Workflow presets carry an optional dialect tag and are validated per
+  (target, mode).** `workflow_presets.video_target`/`video_mode` (nullable
+  TEXT, idempotent adds that must stay AFTER the kind-CHECK rebuild block
+  in `_init_database` — the rebuild recreates the table from an explicit
+  column list and would silently drop columns added before it).
+  `metascan/core/workflow_validation.py` is the pure validation layer over
+  `comfy_bindings`: `validate_workflow(workflow, kind, target, mode)`
+  returns a `ValidationReport` of every error/warning at once (duplicate
+  titles, unknown `MS_*` titles, missing required titles, missing widgets)
+  plus `TitleFix` suggestions — the one auto-fix computable without
+  knowing a target's node classes is renaming a misspelled `MS_*` title
+  via fuzzy match (`apply_fixes`). Per-(target, mode) validators live in
+  its `_VALIDATORS` registry; only `("minimax", "ref2va")` is implemented
+  (warnings for missing `MS_REF_IMAGE`/`MS_AUDIO`/`MS_DURATION`, unused
+  keyframe slots) — an unregistered pair gets a single `no_validator`
+  warning, never an error, so future targets don't hard-fail. `POST
+  /api/comfy/presets` blocks on validation errors with a structured 400
+  (`{code:"validation_failed", findings, fixes, fixed_workflow?}`) and
+  returns `warnings` on success; `POST /api/comfy/presets/validate` is
+  the pure dry-run the registration dialog's Validate/Apply-fixes flow
+  uses. `StoryboardRunner.generate_video` rejects a preset whose tag
+  mismatches the storyboard's target/mode (untagged legacy presets pass),
+  which is what makes the association binding. `VIDEO_TARGETS`/
+  `VIDEO_MODES` in `workflow_validation.py` are the canonical axes to
+  extend when a new dialect (ltx, wan, …) lands.
 - **Video generation drives ComfyUI with a third preset kind, `ref2v`.**
   `workflow_presets.kind`'s CHECK gained `'ref2v'` alongside `t2i`/`ref`; a
   dev DB with the old two-value CHECK baked into its DDL is detected via

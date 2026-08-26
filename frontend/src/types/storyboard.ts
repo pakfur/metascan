@@ -238,8 +238,19 @@ export interface WorkflowPreset {
   name: string
   kind: 't2i' | 'ref' | 'ref2v'
   bindings: string
+  // Optional dialect association (metascan/core/workflow_validation.py):
+  // drives target-specific validation at registration and the mismatch
+  // guard in generate_video. Null on legacy/untagged presets.
+  video_target: string | null
+  video_mode: string | null
   created_at: string
   updated_at: string
+}
+
+// A preset row's dialect tag for list/picker labels, e.g. " (minimax·ref2va)".
+export function presetTag(p: WorkflowPreset): string {
+  if (!p.video_target && !p.video_mode) return ''
+  return ` (${[p.video_target, p.video_mode].filter(Boolean).join('·')})`
 }
 
 export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'

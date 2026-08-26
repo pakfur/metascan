@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { listPresets, createPreset, deletePreset } from '../../api/comfy'
+import { onMounted, ref, watch } from 'vue'
+import {
+  listPresets,
+  createPreset,
+  deletePreset,
+  validatePreset,
+  type ValidationResult,
+} from '../../api/comfy'
 import { ApiError } from '../../api/client'
+import { VIDEO_MODES, presetTag } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
 
@@ -12,10 +19,68 @@ const emit = defineEmits<{
 
 const name = ref('')
 const workflowText = ref('')
+// Dialect association (workflow_presets.video_target/video_mode) — drives
+// target-specific validation and the generate_video mismatch guard.
+// "" = untagged (legacy behavior, generic validation only).
+const videoTarget = ref('minimax')
+const videoMode = ref('ref2va')
 
 const jsonError = ref<string | null>(null)
 const submitError = ref<string | null>(null)
 const submitting = ref(false)
+
+// ---- validation ----------------------------------------------------------
+
+const validation = ref<ValidationResult | null>(null)
+const validating = ref(false)
+const registerWarnings = ref<string[]>([])
+
+// Any edit to the inputs stales the last report. registerWarnings is NOT
+// cleared here: submit() empties workflowText on success, and this
+// (batched) watcher would wipe the just-returned warnings — they are
+// cleared explicitly at the start of onValidate/submit instead.
+watch([workflowText, videoTarget, videoMode], () => {
+  validation.value = null
+})
+
+function parseWorkflow(): Record<string, unknown> | null {
+  jsonError.value = null
+  try {
+    return JSON.parse(workflowText.value)
+  } catch (e) {
+    jsonError.value = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`
+    return null
+  }
+}
+
+async function onValidate(): Promise<void> {
+  const workflow = parseWorkflow()
+  if (!workflow) return
+  submitError.value = null
+  registerWarnings.value = []
+  validating.value = true
+  try {
+    validation.value = await validatePreset({
+      kind: 'ref2v',
+      workflow,
+      video_target: videoTarget.value || null,
+      video_mode: videoMode.value || null,
+    })
+  } catch (e) {
+    submitError.value = e instanceof ApiError ? e.message : String(e)
+  } finally {
+    validating.value = false
+  }
+}
+
+async function onApplyFixes(): Promise<void> {
+  const fixed = validation.value?.fixed_workflow
+  if (!fixed) return
+  workflowText.value = JSON.stringify(fixed, null, 2)
+  // The watcher above just cleared the stale report — re-validate the
+  // repaired graph so the user sees what remains.
+  await onValidate()
+}
 
 const presets = ref<WorkflowPreset[]>([])
 const presetsLoading = ref(true)
@@ -43,30 +108,43 @@ async function onFileChange(e: Event) {
 }
 
 async function submit() {
-  jsonError.value = null
   submitError.value = null
+  registerWarnings.value = []
   const trimmedName = name.value.trim()
   if (!trimmedName) return
 
-  let workflow: Record<string, unknown>
-  try {
-    workflow = JSON.parse(workflowText.value)
-  } catch (e) {
-    jsonError.value = `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`
-    return
-  }
+  const workflow = parseWorkflow()
+  if (!workflow) return
 
   submitting.value = true
   try {
     // The storyboard UX is video-only, so registration is fixed to the
     // ref2v (video workflow) kind.
-    await createPreset({ name: trimmedName, kind: 'ref2v', workflow })
+    const res = await createPreset({
+      name: trimmedName,
+      kind: 'ref2v',
+      workflow,
+      video_target: videoTarget.value || null,
+      video_mode: videoMode.value || null,
+    })
+    registerWarnings.value = res.warnings ?? []
     name.value = ''
     workflowText.value = ''
     emit('registered')
     await refreshPresets()
   } catch (e) {
-    submitError.value = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+    if (
+      e instanceof ApiError &&
+      (e.detail as { code?: string } | undefined)?.code === 'validation_failed'
+    ) {
+      // Structured 400: render the findings and offer the fixes instead
+      // of one opaque message.
+      validation.value = e.detail as unknown as ValidationResult
+      submitError.value = 'Validation failed — fix the findings below and retry.'
+    } else {
+      submitError.value =
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+    }
   } finally {
     submitting.value = false
   }
@@ -103,6 +181,23 @@ function close() {
         </TextEditPopup>
       </div>
 
+      <div class="field-row">
+        <div class="field">
+          <label for="preset-target">Video model</label>
+          <select id="preset-target" v-model="videoTarget">
+            <option value="">Untagged</option>
+            <option value="minimax">MiniMax H3</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="preset-mode">Generation mode</label>
+          <select id="preset-mode" v-model="videoMode">
+            <option value="">Untagged</option>
+            <option v-for="m in VIDEO_MODES" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+      </div>
+
       <div class="field">
         <label for="preset-workflow">Workflow JSON</label>
         <input type="file" accept=".json" @change="onFileChange" />
@@ -118,6 +213,35 @@ function close() {
       <p v-if="jsonError" class="error">{{ jsonError }}</p>
       <p v-if="submitError" class="error">{{ submitError }}</p>
 
+      <div v-if="validation" class="validation-box">
+        <p v-if="validation.findings.length === 0" class="validation-ok">
+          ✓ Workflow satisfies the MS_* contract.
+        </p>
+        <ul v-else class="validation-list">
+          <li
+            v-for="(f, i) in validation.findings"
+            :key="i"
+            :class="f.level === 'error' ? 'v-error' : 'v-warning'"
+          >
+            <b>{{ f.level }}</b> · {{ f.message }}
+          </li>
+        </ul>
+        <button
+          v-if="validation.fixes.length > 0"
+          type="button"
+          class="btn-secondary fixes-btn"
+          @click="onApplyFixes"
+        >
+          Apply {{ validation.fixes.length }} fix{{ validation.fixes.length === 1 ? '' : 'es' }}
+        </button>
+      </div>
+
+      <p v-if="registerWarnings.length" class="register-warnings">
+        Registered with {{ registerWarnings.length }} warning{{
+          registerWarnings.length === 1 ? '' : 's'
+        }}: {{ registerWarnings.join(' ') }}
+      </p>
+
       <div class="dialog-actions">
         <button
           class="btn-primary"
@@ -125,6 +249,13 @@ function close() {
           @click="submit"
         >
           {{ submitting ? 'Registering…' : 'Register' }}
+        </button>
+        <button
+          class="btn-secondary"
+          :disabled="!workflowText.trim() || validating"
+          @click="onValidate"
+        >
+          {{ validating ? 'Validating…' : 'Validate' }}
         </button>
         <button class="btn-secondary" @click="close">Close</button>
       </div>
@@ -136,7 +267,7 @@ function close() {
         <div v-for="p in presets" :key="p.id" class="preset-row">
           <div class="preset-info">
             <div class="preset-name">{{ p.name }}</div>
-            <div class="preset-meta">{{ p.kind }}</div>
+            <div class="preset-meta">{{ p.kind }}{{ presetTag(p) }}</div>
           </div>
           <button class="btn-remove" title="Delete" @click="onDelete(p.id, p.name)">
             &times;
@@ -193,6 +324,73 @@ h4 {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.field-row .field {
+  flex: 1;
+}
+
+select {
+  padding: 6px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.validation-box {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-ground);
+}
+
+.validation-ok {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ok, #4caf50);
+}
+
+.validation-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v-error {
+  color: var(--danger-color, #e53e3e);
+}
+
+.v-warning {
+  color: var(--warn, #ffb300);
+}
+
+.fixes-btn {
+  margin-top: 10px;
+}
+
+.register-warnings {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--warn, #ffb300);
 }
 
 label {

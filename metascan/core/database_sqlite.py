@@ -445,7 +445,9 @@ class DatabaseManager:
                     workflow_json TEXT NOT NULL,
                     bindings      TEXT NOT NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                    video_target  TEXT,
+                    video_mode    TEXT
                 )
                 """
             )
@@ -504,6 +506,18 @@ class DatabaseManager:
                 )
                 conn.commit()
                 conn.execute("PRAGMA foreign_keys = ON")
+            _idempotent_add_column(
+                conn,
+                "workflow_presets",
+                "video_target",
+                "ALTER TABLE workflow_presets ADD COLUMN video_target TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "workflow_presets",
+                "video_mode",
+                "ALTER TABLE workflow_presets ADD COLUMN video_mode TEXT",
+            )
             # NOTE: panel_id deliberately carries no REFERENCES clause. The
             # panels table arrives in Phase B; with PRAGMA foreign_keys = ON
             # an INSERT naming a FK to a missing table fails at runtime, and
@@ -1494,13 +1508,19 @@ class DatabaseManager:
     # self._get_connection() as conn:`. The combined form below is equivalent.
 
     def create_workflow_preset(
-        self, name: str, kind: str, workflow_json: str, bindings: str
+        self,
+        name: str,
+        kind: str,
+        workflow_json: str,
+        bindings: str,
+        video_target: Optional[str] = None,
+        video_mode: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO workflow_presets (name, kind, workflow_json, "
-                "bindings) VALUES (?, ?, ?, ?)",
-                (name, kind, workflow_json, bindings),
+                "bindings, video_target, video_mode) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, kind, workflow_json, bindings, video_target, video_mode),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -1517,8 +1537,8 @@ class DatabaseManager:
         list view needs them."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT id, name, kind, bindings, created_at, updated_at "
-                "FROM workflow_presets ORDER BY id"
+                "SELECT id, name, kind, bindings, video_target, video_mode, "
+                "created_at, updated_at FROM workflow_presets ORDER BY id"
             ).fetchall()
             return [dict(r) for r in rows]
 

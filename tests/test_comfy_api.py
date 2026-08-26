@@ -68,7 +68,9 @@ class StubComfy:
     def snapshot(self):
         return {"base_url": self.base_url, "client_id": "stub", "in_flight": 2}
 
-    async def register_preset(self, name, kind, workflow):
+    async def register_preset(
+        self, name, kind, workflow, video_target=None, video_mode=None
+    ):
         if self.raise_on_register:
             raise self.raise_on_register
         from metascan.core.comfy_bindings import resolve_bindings
@@ -76,7 +78,12 @@ class StubComfy:
 
         bindings = resolve_bindings(workflow, kind)
         return self.db.create_workflow_preset(
-            name, kind, _json.dumps(workflow), bindings.to_json()
+            name,
+            kind,
+            _json.dumps(workflow),
+            bindings.to_json(),
+            video_target,
+            video_mode,
         )
 
     async def submit(self, preset_id, params, panel_id=None, priority=False):
@@ -171,15 +178,88 @@ def test_register_a_preset(client):
 
 
 def test_registering_an_unbindable_workflow_returns_400_with_the_missing_titles(client):
-    client.stub.raise_on_register = BindingError(
-        "Workflow is missing required node title(s) for kind 't2i': MS_SAVE"
-    )
+    # Route-level validation now catches this before register_preset: the
+    # detail is a structured report rather than a bare BindingError string.
     r = client.post(
         "/api/comfy/presets",
         json={"name": "broken", "kind": "t2i", "workflow": {}},
     )
     assert r.status_code == 400
-    assert "MS_SAVE" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert detail["code"] == "validation_failed"
+    assert "MS_SAVE" in str(detail["findings"])
+
+
+def _ref2v_wf(**extra):
+    wf = {
+        "1": {"_meta": {"title": "MS_POSITIVE"}, "inputs": {"text": ""}},
+        "2": {"_meta": {"title": "MS_SEED"}, "inputs": {"seed": 0}},
+        "3": {"_meta": {"title": "MS_SAVE"}, "inputs": {}},
+    }
+    wf.update(extra)
+    return wf
+
+
+def test_validate_preset_endpoint_reports_findings_and_fixes(client):
+    wf = _ref2v_wf(ref={"_meta": {"title": "MS_REF_IMGE"}, "inputs": {"image": ""}})
+    r = client.post(
+        "/api/comfy/presets/validate",
+        json={
+            "kind": "ref2v",
+            "workflow": wf,
+            "video_target": "minimax",
+            "video_mode": "ref2va",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    codes = [f["code"] for f in body["findings"]]
+    assert "unknown_title" in codes and "no_audio_slot" in codes
+    assert body["fixes"][0]["title"] == "MS_REF_IMAGE"
+    assert body["fixed_workflow"]["ref"]["_meta"]["title"] == "MS_REF_IMAGE"
+
+
+def test_register_preset_stores_target_mode_and_returns_warnings(client):
+    r = client.post(
+        "/api/comfy/presets",
+        json={
+            "name": "h3",
+            "kind": "ref2v",
+            "workflow": _ref2v_wf(),
+            "video_target": "minimax",
+            "video_mode": "ref2va",
+        },
+    )
+    assert r.status_code == 200
+    assert any("MS_REF_IMAGE" in w for w in r.json()["warnings"])
+    row = next(x for x in client.get("/api/comfy/presets").json() if x["name"] == "h3")
+    assert row["video_target"] == "minimax" and row["video_mode"] == "ref2va"
+
+
+def test_register_preset_rejects_unknown_target_and_validation_errors(client):
+    r = client.post(
+        "/api/comfy/presets",
+        json={
+            "name": "x",
+            "kind": "ref2v",
+            "workflow": _ref2v_wf(),
+            "video_target": "wan",
+        },
+    )
+    assert r.status_code == 400
+    assert "video_target" in r.json()["detail"]
+
+    wf = _ref2v_wf()
+    del wf["2"]
+    r = client.post(
+        "/api/comfy/presets",
+        json={"name": "broken2", "kind": "ref2v", "workflow": wf},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "validation_failed"
+    assert any(f["code"] == "missing_required" for f in detail["findings"])
 
 
 def test_list_presets_omits_the_workflow_blob(client):

@@ -14,6 +14,7 @@ import {
   PACINGS,
   STORY_SCALES,
   STORY_SCALE_LABELS,
+  presetTag,
 } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 
@@ -411,7 +412,7 @@ function close(): void {
           <select id="ss-video-preset" v-model="videoPresetId" :disabled="presetsLoading">
             <option :value="null">None</option>
             <option v-for="p in ref2vPresets" :key="p.id" :value="p.id">
-              {{ p.name }}
+              {{ p.name }}{{ presetTag(p) }}
             </option>
           </select>
         </div>

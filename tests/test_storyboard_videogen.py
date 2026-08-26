@@ -267,6 +267,50 @@ async def test_validation_lists_all_failures(db, comfy, events, tmp_path):
     assert comfy.submitted == []
 
 
+async def test_validation_groups_identical_reasons_across_panels(
+    db, comfy, events, tmp_path
+):
+    """A board-wide problem (every panel missing a compiled prompt) reads
+    as one grouped line, not one line per panel."""
+    preset_id = _preset(db)
+    sb_id = _storyboard(db, preset_id)
+    _, panel_a = _bare_panel(db, sb_id, panel_sort_order=0, video_prompt="")
+    _, panel_b = _bare_panel(db, sb_id, panel_sort_order=1, video_prompt="")
+    runner = make_runner(db, comfy, events, tmp_path)
+
+    with pytest.raises(StoryboardError) as exc_info:
+        await runner.generate_video(sb_id)
+
+    message = str(exc_info.value)
+    assert message.count("no compiled video_prompt") == 1
+    assert f"2 panels ({panel_a}, {panel_b})" in message
+    assert comfy.submitted == []
+
+
+async def test_generate_video_rejects_target_mode_mismatch(db, comfy, events, tmp_path):
+    """A preset explicitly tagged for a dialect/mode must match the
+    storyboard's; untagged presets keep passing (covered by every other
+    test in this file, whose _preset helper leaves the tags NULL)."""
+    workflow = _ref2v_workflow()
+    bindings = resolve_bindings(workflow, "ref2v")
+    preset_id = db.create_workflow_preset(
+        "tagged",
+        "ref2v",
+        json.dumps(workflow),
+        bindings.to_json(),
+        "minimax",
+        "i2va",
+    )
+    sb_id = _storyboard(db, preset_id, video_mode="ref2va")
+    runner = make_runner(db, comfy, events, tmp_path)
+
+    with pytest.raises(StoryboardError) as exc_info:
+        await runner.generate_video(sb_id)
+    message = str(exc_info.value)
+    assert "video_mode" in message and "'i2va'" in message
+    assert comfy.submitted == []
+
+
 async def test_keeper_anchor_fails_when_first_beat_has_no_keeper(
     db, comfy, events, tmp_path
 ):
