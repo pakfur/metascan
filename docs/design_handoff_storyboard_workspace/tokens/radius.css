@@ -1,0 +1,10 @@
+:root{
+  --radius-xs:4px;   /* thumbnails, job overlays, script beats */
+  --radius-sm:5px;   /* 22-24px square icon buttons */
+  --radius-md:6px;   /* buttons, inputs, selects, textareas, chips-as-buttons */
+  --radius-lg:8px;   /* cards, tiles, board rows */
+  --radius-xl:10px;  /* dashed empty state */
+  --radius-2xl:12px; /* dialog cards */
+  --radius-pill:999px;
+  --radius-circle:50%;
+}

@@ -1,0 +1,76 @@
+<!-- @dsCard group="Components" viewport="700x400" name="Storyboard pieces" subtitle="Scene cards, panel tiles, beat pills, candidates, takes" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{background:var(--surface-ground);padding:12px 16px}.cap{font-size:10px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--text-color-secondary);margin:0 0 6px}.row{display:flex;gap:10px;align-items:flex-start;margin-bottom:12px}.tiles{display:grid;grid-template-columns:repeat(4,132px);gap:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const NS = window.MetascanDesignSystem_f2fbbd;
+const { SceneCard, PanelTile, AddTile, BeatPill, CandidateTile, VideoTakeTile, SubjectChip, JobBadge, IconButton } = NS;
+const F = (n) => '../../assets/placeholders/frame-' + String(n).padStart(2,'0') + '.png';
+function Card(){return (<div>
+  <div className="row">
+    <div>
+      <p className="cap">Scene cards</p>
+      <div style={{display:'flex',gap:10}}>
+        <SceneCard name="Kitchen, dawn" subtitle="interior · dawn" setting="Cold light through slatted blinds, unwashed cups on the counter." thumbs={[F(7),F(2),F(3),null,null,null]} active />
+        <SceneCard name="Courtyard" subtitle="exterior · midday" thumbs={[F(4),F(5),null,null,null,null]} actions={<><IconButton variant="corner" glyph="✎" style={{fontSize:10}} /><IconButton variant="corner" glyph="×" destructive /></>} />
+        <AddTile kind="scene" label="Scene" />
+      </div>
+    </div>
+  </div>
+  <div className="row">
+    <div>
+      <p className="cap">Panel tiles</p>
+      <div className="tiles">
+        <PanelTile src={F(7)} caption="MCU · Mara" active locked />
+        <PanelTile src={F(8)} caption="WS · Mara, Ines" videoCount={3} />
+        <PanelTile src={F(9)} dimmed caption="CU · Ines" job={<JobBadge state="running" value={14} max={20} />} />
+        <PanelTile caption="— " job={<JobBadge state="failed" error="preset 3: node 12 missing input" />} />
+      </div>
+    </div>
+    <div>
+      <p className="cap">Beat pills</p>
+      <div style={{display:'flex',flexDirection:'column',gap:8,width:300}}>
+        <BeatPill index={1} thumb={F(10)} duration={2.5} motion="push_in" action="She sets the cup down." imageCount={4} selected actions={<><IconButton glyph="↑" disabled /><IconButton glyph="✕" destructive /></>} />
+        <BeatPill index={2} thumb={F(11)} duration={3} motion="pan_right" isCut action="The bell does not ring." dialogCount={2} actions={<><IconButton glyph="↑" /><IconButton glyph="✕" destructive /></>} />
+        <BeatPill index={3} duration={1.5} action="Cut to the empty doorway." job={<JobBadge state="queued" layout="fill" />} actions={<><IconButton glyph="↓" disabled /><IconButton glyph="✕" destructive /></>} />
+      </div>
+    </div>
+  </div>
+  <div className="row">
+    <div>
+      <p className="cap">Candidates — keeper picker</p>
+      <div className="ms-candidates-row">
+        <CandidateTile src={F(1)} selected title="seed 481314106 · variant 0" onExpand={()=>{}} />
+        <CandidateTile src={F(2)} title="seed 481314107 · variant 1" onExpand={()=>{}} />
+        <CandidateTile src={F(3)} title="seed 481314108 · variant 2" onExpand={()=>{}} />
+      </div>
+    </div>
+    <div>
+      <p className="cap">Video takes</p>
+      <div className="ms-candidates-row">
+        <VideoTakeTile src={F(12)} title="seed 9931 · take 1" onDelete={()=>{}} />
+        <VideoTakeTile src={F(13)} title="seed 9932 · take 2" onDelete={()=>{}} />
+      </div>
+    </div>
+    <div>
+      <p className="cap">Subjects</p>
+      <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+        <SubjectChip name="Mara" primary /><SubjectChip name="Ines" /><SubjectChip name="The clerk" />
+      </div>
+    </div>
+  </div>
+</div>);}
+ReactDOM.createRoot(document.getElementById('root')).render(<Card/>);
+</script>
+</body>
+</html>

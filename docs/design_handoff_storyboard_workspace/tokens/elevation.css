@@ -1,0 +1,12 @@
+/* Metascan is a flat, border-first UI: 1px borders do the separating and
+   shadow appears ONLY on floating layers. There is no card shadow. */
+:root{
+  --border-hairline:1px solid var(--surface-border); /* @kind other */
+  --border-dashed:1px dashed var(--surface-border); /* @kind other */
+  --shadow-none:none;
+  --shadow-toast:0 8px 24px rgba(0,0,0,0.15);
+  --shadow-dialog:0 20px 60px rgba(0,0,0,0.3);
+  /* selection is a 1px ring on top of a recoloured border, not a shadow */
+  --ring-selected:0 0 0 1px var(--primary-color);
+  --glyph-shadow:drop-shadow(0 1px 1px rgba(0,0,0,0.6)); /* @kind other */
+}

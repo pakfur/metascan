@@ -1,0 +1,7 @@
+:root{
+  --z-divider:5; /* @kind other */
+  --z-loading:800; /* @kind other */
+  --z-dialog:900; /* @kind other */
+  --z-dialog-nested:950; /* @kind other */ /* confirms + pickers that sit over a dialog */
+  --z-toast:1800; /* @kind other */
+}

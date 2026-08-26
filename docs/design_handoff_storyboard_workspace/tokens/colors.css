@@ -1,0 +1,95 @@
+/* Metascan colour system.
+   Base scale = the literal hex values used in frontend/src/style.css and the
+   component <style scoped> blocks. Semantic aliases keep the ORIGINAL
+   variable names from the product (--primary-color, --surface-*, --text-*)
+   because every component in the codebase consumes those names directly. */
+:root{
+  /* base — slate neutrals */
+  --slate-50:#f8fafc;--slate-100:#f1f5f9;--slate-200:#e2e8f0;--slate-300:#cbd5e1;
+  --slate-400:#94a3b8;--slate-500:#64748b;--slate-700:#334155;--slate-800:#1e293b;--slate-900:#0f172a;
+  /* base — accents */
+  --blue-400:#60a5fa;--blue-500:#3b82f6;
+  --red-400:#f87171;--red-500:#ef4444;--red-600:#e53e3e;
+  --amber-500:#eab308;--amber-600:#e0a030;
+  --green-500:#22c55e;--emerald-500:#10b981;
+  --white:#ffffff;--black:#000000;
+
+  /* semantic — light (default; the app is light unless the OS asks for dark) */
+  --primary-color:var(--blue-500);
+  --surface-ground:var(--slate-50);
+  --surface-section:var(--white);
+  --surface-card:var(--white);
+  --surface-border:var(--slate-200);
+  --surface-hover:var(--slate-100);
+  --text-color:var(--slate-800);
+  --text-color-secondary:var(--slate-500);
+  --danger-color:var(--red-500);
+
+  /* semantic — declared here, referenced with fallbacks in product code */
+  --warn:var(--amber-600);
+  --success:var(--green-500);
+  --info:var(--blue-400);
+  /* PrimeVue Aura's own primary. Owns PrimeVue-rendered chrome only
+     (InputGroup search button, focus rings) — never app surfaces. */
+  --prime-primary:var(--emerald-500);
+
+  /* semantic — tints, derived the way the product derives them */
+  --primary-tint-10:color-mix(in srgb, var(--primary-color) 10%, transparent);
+  --primary-tint-12:color-mix(in srgb, var(--primary-color) 12%, transparent);
+  --primary-tint-18:color-mix(in srgb, var(--primary-color) 18%, transparent);
+  --danger-tint-12:color-mix(in srgb, var(--danger-color) 12%, transparent);
+  --danger-tint-18:color-mix(in srgb, var(--danger-color) 18%, transparent);
+  --danger-tint-40:color-mix(in srgb, var(--danger-color) 40%, transparent);
+  --danger-solid-70:color-mix(in srgb, var(--danger-color) 70%, black);
+  --warn-tint-14:color-mix(in srgb, var(--warn) 14%, transparent);
+
+  /* semantic — media scrims (fixed black alphas; NOT theme-aware) */
+  --scrim-dialog:rgba(0,0,0,0.5);
+  --scrim-thumb-hover:rgba(0,0,0,0.25);
+  --scrim-badge:rgba(0,0,0,0.55);
+  --scrim-control:rgba(0,0,0,0.6);
+  --scrim-overlay:rgba(0,0,0,0.65);
+  --on-media:#ffffff;
+  /* the one gradient in the product: filename protection under a thumbnail */
+  --scrim-filename:linear-gradient(transparent, rgba(0,0,0,0.7)); /* @kind other */
+  --badge-favorite:#fbbf24;   /* filled star */
+  --badge-similarity:#4ade80; /* % match */
+  --badge-hidden:#f87171;     /* eye-slash on hidden media */
+  --smart-folder:#a855f7;     /* smart folders, everywhere they appear */
+  /* tag provenance stripes on metadata tag chips */
+  --tag-source-prompt:#4f8bff;
+  --tag-source-clip:#5cd0ff;
+  --tag-source-vlm:#ffd24a;
+
+  color-scheme:light;
+}
+
+@media (prefers-color-scheme:dark){
+  :root{
+    --primary-color:var(--blue-400);
+    --surface-ground:var(--slate-900);
+    --surface-section:var(--slate-800);
+    --surface-card:var(--slate-800);
+    --surface-border:var(--slate-700);
+    --surface-hover:var(--slate-700);
+    --text-color:var(--slate-100);
+    --text-color-secondary:var(--slate-400);
+    --danger-color:var(--red-400);
+    color-scheme:dark;
+  }
+}
+
+/* Explicit theme scopes for specimens and mockups that must show one mode
+   regardless of the OS setting. */
+:root[data-theme='light'],.theme-light{
+  --primary-color:#3b82f6;--surface-ground:#f8fafc;--surface-section:#ffffff;
+  --surface-card:#ffffff;--surface-border:#e2e8f0;--surface-hover:#f1f5f9;
+  --text-color:#1e293b;--text-color-secondary:#64748b;--danger-color:#ef4444;
+  color-scheme:light;
+}
+:root[data-theme='dark'],.theme-dark{
+  --primary-color:#60a5fa;--surface-ground:#0f172a;--surface-section:#1e293b;
+  --surface-card:#1e293b;--surface-border:#334155;--surface-hover:#334155;
+  --text-color:#f1f5f9;--text-color-secondary:#94a3b8;--danger-color:#f87171;
+  color-scheme:dark;
+}
