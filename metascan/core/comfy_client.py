@@ -226,12 +226,20 @@ class ComfyClient:
     # ---- presets -----------------------------------------------------
 
     async def register_preset(
-        self, name: str, kind: str, workflow: Dict[str, Any]
+        self,
+        name: str,
+        kind: str,
+        workflow: Dict[str, Any],
+        video_target: Optional[str] = None,
+        video_mode: Optional[str] = None,
     ) -> int:
         """Resolve MS_* bindings and persist the preset.
 
         Raises BindingError (from comfy_bindings) before anything is
         written, so an unusable workflow never reaches the database.
+        ``video_target``/``video_mode`` record which dialect the workflow
+        was built for (see metascan.core.workflow_validation) -- stored
+        verbatim; value validation is the route's job.
         """
         bindings = resolve_bindings(workflow, kind)
         preset_id = await asyncio.to_thread(
@@ -240,6 +248,8 @@ class ComfyClient:
             kind,
             json.dumps(workflow),
             bindings.to_json(),
+            video_target,
+            video_mode,
         )
         return int(preset_id)
 

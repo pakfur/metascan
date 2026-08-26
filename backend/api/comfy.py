@@ -18,6 +18,12 @@ from backend.dependencies import get_db
 from backend.services.comfy_service import ComfyService, PresetInUseError
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
+from metascan.core.workflow_validation import (
+    VIDEO_MODES,
+    VIDEO_TARGETS,
+    apply_fixes,
+    validate_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,31 @@ class PresetRequest(BaseModel):
     name: str
     kind: str = "t2i"
     workflow: Dict[str, Any]
+    # Optional association with a video dialect + generation mode (see
+    # metascan.core.workflow_validation). Drives target-specific validation
+    # here and the mismatch guard in StoryboardRunner.generate_video.
+    video_target: Optional[str] = None
+    video_mode: Optional[str] = None
+
+
+class PresetValidateRequest(BaseModel):
+    kind: str = "ref2v"
+    workflow: Dict[str, Any]
+    video_target: Optional[str] = None
+    video_mode: Optional[str] = None
+
+
+def _check_target_mode(video_target: Optional[str], video_mode: Optional[str]) -> None:
+    if video_target is not None and video_target not in VIDEO_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"video_target must be one of: {', '.join(VIDEO_TARGETS)}",
+        )
+    if video_mode is not None and video_mode not in VIDEO_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"video_mode must be one of: {', '.join(VIDEO_MODES)}",
+        )
 
 
 class SubmitRequest(BaseModel):
@@ -94,16 +125,52 @@ async def list_presets() -> List[Dict[str, Any]]:
     return await _service().list_presets()
 
 
+@router.post("/presets/validate")
+async def validate_preset(body: PresetValidateRequest) -> Dict[str, Any]:
+    """Dry-run validation of a workflow (pure -- no ComfyUI connection
+    needed). Returns the full findings/fixes report plus, when fixes
+    exist, the workflow with them applied so the dialog can offer a
+    one-click repair."""
+    _check_target_mode(body.video_target, body.video_mode)
+    report = validate_workflow(
+        body.workflow, body.kind, body.video_target, body.video_mode
+    )
+    out = report.to_dict()
+    if report.fixes:
+        out["fixed_workflow"] = apply_fixes(body.workflow, report.fixes)
+    return out
+
+
 @router.post("/presets")
-async def create_preset(body: PresetRequest) -> Dict[str, int]:
+async def create_preset(body: PresetRequest) -> Dict[str, Any]:
     client = _require_client()
+    _check_target_mode(body.video_target, body.video_mode)
+    report = validate_workflow(
+        body.workflow, body.kind, body.video_target, body.video_mode
+    )
+    if not report.ok:
+        # Structured 400 so the dialog can render per-finding rows and
+        # offer the computed fixes instead of one opaque message.
+        detail: Dict[str, Any] = {"code": "validation_failed", **report.to_dict()}
+        if report.fixes:
+            detail["fixed_workflow"] = apply_fixes(body.workflow, report.fixes)
+        raise HTTPException(status_code=400, detail=detail)
     try:
-        preset_id = await client.register_preset(body.name, body.kind, body.workflow)
+        preset_id = await client.register_preset(
+            body.name,
+            body.kind,
+            body.workflow,
+            body.video_target,
+            body.video_mode,
+        )
     except BindingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"id": int(preset_id)}
+    return {
+        "id": int(preset_id),
+        "warnings": [f["message"] for f in report.to_dict()["findings"]],
+    }
 
 
 @router.delete("/presets/{preset_id}")

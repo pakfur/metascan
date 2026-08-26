@@ -9,8 +9,33 @@ export function createPreset(body: {
   name: string
   kind: 't2i' | 'ref' | 'ref2v'
   workflow: Record<string, unknown>
-}): Promise<{ id: number }> {
-  return post<{ id: number }>('/comfy/presets', body)
+  video_target?: string | null
+  video_mode?: string | null
+}): Promise<{ id: number; warnings: string[] }> {
+  return post<{ id: number; warnings: string[] }>('/comfy/presets', body)
+}
+
+export interface ValidationFinding {
+  level: 'error' | 'warning'
+  code: string
+  message: string
+  node_id: string | null
+}
+
+export interface ValidationResult {
+  ok: boolean
+  findings: ValidationFinding[]
+  fixes: { node_id: string; old_title: string | null; title: string; reason: string }[]
+  fixed_workflow?: Record<string, unknown>
+}
+
+export function validatePreset(body: {
+  kind: 't2i' | 'ref' | 'ref2v'
+  workflow: Record<string, unknown>
+  video_target?: string | null
+  video_mode?: string | null
+}): Promise<ValidationResult> {
+  return post<ValidationResult>('/comfy/presets/validate', body)
 }
 
 export function deletePreset(id: number): Promise<{ status: string }> {

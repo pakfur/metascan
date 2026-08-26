@@ -10,6 +10,7 @@ import {
   VIDEO_MODES,
   STORY_SCALES,
   STORY_SCALE_LABELS,
+  presetTag,
 } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
@@ -158,7 +159,7 @@ async function submit() {
           <select id="sb-video-preset" v-model="videoPresetId" :disabled="presetsLoading">
             <option :value="null">None</option>
             <option v-for="p in videoPresets" :key="p.id" :value="p.id">
-              {{ p.name }}
+              {{ p.name }}{{ presetTag(p) }}
             </option>
           </select>
           <p v-if="!presetsLoading && videoPresets.length === 0" class="hint">
