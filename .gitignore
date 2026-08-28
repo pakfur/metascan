@@ -12,6 +12,7 @@ data/*
 !data/meta_prompt.yml
 !data/prompt_guides/
 !data/workflows/
+!data/templates/
 
 .claude/
 

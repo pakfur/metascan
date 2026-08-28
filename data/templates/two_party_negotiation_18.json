@@ -1,0 +1,96 @@
+{
+  "id": "two_party_negotiation_18",
+  "function": "negotiation",
+  "description": "Two-party negotiation: A makes the ask, B holds a condition, A concedes. 18 slots, 5 clip-sized sections, 63.5s, ASL 3.5s. Dialogue on 11 of 18 slots with alternating speakers, five reaction slots, no close-up before slot 8, section seams on dramatic boundaries.",
+  "source": "refactor-spec-visual-story-quality.md §Phase E (structurally derived from shotlist_dialogue_confession.md; the release beat moves from B to A because the party who concedes is the one who made the ask).",
+  "roles": [
+    {"id": "A", "screen_side": "LEFT", "note": "initiator; makes the ask and, in the end, concedes"},
+    {"id": "B", "screen_side": "RIGHT", "note": "responder; holds the condition and never gives it up"}
+  ],
+  "sections": [
+    {
+      "panel_index": 0, "duration_s": 13.0, "label": "The pitch",
+      "note": "A makes the ask; B deflects without refusing, all held inside one setup",
+      "slots": [
+        {"beat_index": 0, "duration_s": 5.0, "kind": "establishing", "cast": ["A", "B"], "dialog_slot": null, "is_cut": false,
+         "note": "master: geography, distance between the two, who approaches whom",
+         "camera": {"shot_size": "WS", "angle": "eye", "lens": "wide", "composition": "deep_staging", "camera_motion": "static"}},
+        {"beat_index": 1, "duration_s": 3.0, "kind": "action", "cast": ["A"], "dialog_slot": "A", "is_cut": true,
+         "note": "the ask, plainly stated",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 2, "duration_s": 5.0, "kind": "action", "cast": ["B"], "dialog_slot": "B", "is_cut": true,
+         "note": "the deflection: B answers a different question, or asks one back",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}}
+      ]
+    },
+    {
+      "panel_index": 1, "duration_s": 12.5, "label": "The complication",
+      "note": "pressure; A pushes, B lets the silence do the work; slots 2 and 3 are reactions carrying no new information",
+      "slots": [
+        {"beat_index": 3, "duration_s": 4.0, "kind": "action", "cast": ["A"], "dialog_slot": "A", "is_cut": false,
+         "note": "A presses: restates the ask with a reason attached",
+         "camera": {"shot_size": "MCU", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 4, "duration_s": 3.0, "kind": "reaction", "cast": ["B"], "dialog_slot": null, "is_cut": true,
+         "note": "B hears it; the change happens in the face, not the mouth",
+         "camera": {"shot_size": "MCU", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}},
+        {"beat_index": 5, "duration_s": 2.5, "kind": "reaction", "cast": ["A"], "dialog_slot": null, "is_cut": true,
+         "note": "A reads the silence and realises the ask is not landing",
+         "camera": {"shot_size": "MCU", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 6, "duration_s": 3.0, "kind": "action", "cast": ["A", "B"], "dialog_slot": "B", "is_cut": true,
+         "note": "over A's shoulder onto B: B names what it would take",
+         "camera": {"shot_size": "MCU", "angle": "ots", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}}
+      ]
+    },
+    {
+      "panel_index": 2, "duration_s": 12.0, "label": "The condition",
+      "note": "THE TURN. B states the condition in full; first close-up of the scene",
+      "slots": [
+        {"beat_index": 7, "duration_s": 6.0, "kind": "action", "cast": ["B"], "dialog_slot": "B", "is_cut": false,
+         "note": "B lays out the condition; this is the longest line in the scene",
+         "camera": {"shot_size": "CU", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "push_in", "camera_amplitude": "small", "camera_speed": "slow"}},
+        {"beat_index": 8, "duration_s": 3.0, "kind": "reaction", "cast": ["A"], "dialog_slot": null, "is_cut": true,
+         "note": "A takes it in; the cost registers",
+         "camera": {"shot_size": "CU", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 9, "duration_s": 3.0, "kind": "action", "cast": ["B"], "dialog_slot": "B", "is_cut": true,
+         "note": "B closes the condition: short, final, not unkind",
+         "camera": {"shot_size": "CU", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}}
+      ]
+    },
+    {
+      "panel_index": 3, "duration_s": 14.5, "label": "The concession",
+      "note": "A resists, then concedes; the two share a frame for the first time since the master",
+      "slots": [
+        {"beat_index": 10, "duration_s": 4.0, "kind": "action", "cast": ["A"], "dialog_slot": "A", "is_cut": false,
+         "note": "A pushes back one last time",
+         "camera": {"shot_size": "MCU", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 11, "duration_s": 2.5, "kind": "reaction", "cast": ["B"], "dialog_slot": null, "is_cut": true,
+         "note": "B does not move; the condition stands",
+         "camera": {"shot_size": "CU", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}},
+        {"beat_index": 12, "duration_s": 5.0, "kind": "action", "cast": ["A", "B"], "dialog_slot": "A", "is_cut": true,
+         "note": "two-shot: A concedes, out loud, in a way B can hold them to",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "symmetrical", "camera_motion": "static"}},
+        {"beat_index": 13, "duration_s": 3.0, "kind": "action", "cast": ["B"], "dialog_slot": "B", "is_cut": true,
+         "note": "B accepts the concession with a line that fixes the terms",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}}
+      ]
+    },
+    {
+      "panel_index": 4, "duration_s": 11.5, "label": "The button",
+      "note": "pattern break, dramatic irony, and a held reaction to end on",
+      "slots": [
+        {"beat_index": 14, "duration_s": 4.0, "kind": "action", "cast": ["A"], "dialog_slot": "A", "is_cut": false,
+         "note": "A, relieved, says something that shows they have misread the deal",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "thirds_left", "camera_motion": "static"}},
+        {"beat_index": 15, "duration_s": 1.5, "kind": "insert", "cast": ["A"], "dialog_slot": null, "is_cut": true,
+         "note": "detail insert on A's hands or an object A is holding; the pattern break",
+         "camera": {"shot_size": "CU", "angle": "high", "lens": "macro", "composition": "centered", "camera_motion": "static"}},
+        {"beat_index": 16, "duration_s": 2.0, "kind": "action", "cast": ["B"], "dialog_slot": "B", "is_cut": true,
+         "note": "B's short reply carries the irony the audience gets and A does not",
+         "camera": {"shot_size": "MS", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}},
+        {"beat_index": 17, "duration_s": 4.0, "kind": "reaction", "cast": ["B"], "dialog_slot": null, "is_cut": true,
+         "note": "hold on B after A looks away; the face says what the line did not",
+         "camera": {"shot_size": "CU", "angle": "eye", "lens": "normal", "composition": "thirds_right", "camera_motion": "static"}}
+      ]
+    }
+  ]
+}
