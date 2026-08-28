@@ -1,0 +1,616 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "purpose": "Composable coverage cells. Each cell is a beat-sequence pattern for ONE shot (one H3 clip). Two jobs: (1) supply camera/duration deterministically so the LLM never chooses them, (2) carry prose exemplars that set the register for action / performance / reveals text.",
+    "how_to_use": [
+      "Selection key is shot.function, emitted by the shots stage. One cell per shot.",
+      "Camera fields are AUTHORITATIVE — copy them into the beat row, do not ask the model for them.",
+      "duration_s values are the base rhythm. Scale the whole cell by a single factor to fit the shot's budget; NEVER rescale beats independently — the contrast between a 1.2s and a 4.0s beat is the pacing.",
+      "*_exemplar fields are few-shot material. Inject them into the beats prompt as a worked example, then ask the model to fill the same slots for THIS shot's content. Do not ship exemplar text to the video compiler.",
+      "{A}, {B}, {OBJ} are role placeholders bound to roster names at injection time.",
+      "screen_side is per-role and fixed for the duration of the cell. gaze values follow from it. If a cell is used twice in one scene, keep the same role→side binding both times."
+    ],
+    "enum_caveat": "Values below use the vocabulary from scene-to-storyboard-prompt-chain.md. Map them to the actual constants in storyboard_story.py before loading — a mismatch will be silently coerced to null by the beats validator.",
+    "new_fields_assumed": {
+      "kind": "action | reaction | establishing | insert — beat classification. reaction beats are EXEMPT from the non-empty reveals lint.",
+      "subjects[].performance": "per-subject description of a CHANGE in the body. Not a state.",
+      "subjects[].gaze": "LOOK_L | LOOK_R | TO_CAMERA | DOWN | UP | OFF_L | OFF_R | CLOSED"
+    },
+    "register_rule": "Every action and performance string names a body part and a change to it. 'She looks upset' is a state and renders as a still frame. 'The smile goes out of her face' is a change and renders as motion. This is the single property that separates the exemplars below from the output you are currently getting."
+  },
+
+  "cells": [
+    {
+      "id": "dialogue_exchange_4",
+      "function": "dialogue_exchange",
+      "notes": "Neutral back-and-forth, no power shift. The load-bearing move is beat 3: cut to the LISTENER before the line finishes landing, so the audience watches the reaction rather than the delivery. Most amateur dialogue coverage cuts on the line boundary instead, and that is the single most common reason a talking scene feels flat.",
+      "applies_when": "2 subjects, verbal exchange, charge delta < 2",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "initiator"},
+        {"id": "B", "screen_side": "RIGHT", "note": "responder"}
+      ],
+      "total_duration_s": 11.5,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "establishing",
+          "duration_s": 3.0,
+          "camera": {
+            "shot_size": "TWO_SHOT", "angle": "EYE", "lens_mm": 35,
+            "composition": "DEEP_STAGING", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "sets both hands flat on the table; the chin drops a fraction before the words come"},
+            {"role": "B", "gaze": "LOOK_L", "performance_exemplar": "weight settled on one hip, thumb working the seam of a sleeve"}
+          ],
+          "action_exemplar": "{A} puts both hands on the table and says the first thing.",
+          "reveals_exemplar": "the distance between them, and who is standing closer to the door",
+          "emotional_intent_exemplar": "one of them has rehearsed this and the other has not",
+          "sound_exemplar": "a refrigerator cycling on somewhere behind them",
+          "dialog_slot": "A"
+        },
+        {
+          "index": 2,
+          "kind": "action",
+          "duration_s": 3.5,
+          "camera": {
+            "shot_size": "OTS", "angle": "EYE", "lens_mm": 50,
+            "composition": "THIRDS_R", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "B", "gaze": "LOOK_L", "performance_exemplar": "lets the sentence sit; one slow blink; the jaw unclenches only in order to speak"},
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "shoulder and ear only, held still in the near foreground"}
+          ],
+          "action_exemplar": "{B} lets it sit, then answers without moving.",
+          "reveals_exemplar": "that {B} was expecting this",
+          "emotional_intent_exemplar": "the pause costs {B} nothing, and both of them know it",
+          "sound_exemplar": null,
+          "dialog_slot": "B"
+        },
+        {
+          "index": 3,
+          "kind": "reaction",
+          "duration_s": 2.0,
+          "camera": {
+            "shot_size": "OTS", "angle": "EYE", "lens_mm": 50,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "the readiness goes out of the face before any reply forms; the hands come off the table"},
+            {"role": "B", "gaze": "LOOK_L", "performance_exemplar": "shoulder only, unmoving, in the near foreground"}
+          ],
+          "action_exemplar": "{A}'s face changes before {A} speaks.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the answer landed somewhere {A} had not defended",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 4,
+          "kind": "action",
+          "duration_s": 3.0,
+          "camera": {
+            "shot_size": "MCU", "angle": "EYE", "lens_mm": 85,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "DOWN", "performance_exemplar": "eyes drop to the tabletop and stay there; a breath goes out through the nose"}
+          ],
+          "action_exemplar": "{A} looks away first, and says the smaller version of it.",
+          "reveals_exemplar": "which of them is going to concede",
+          "emotional_intent_exemplar": "the retreat is decided before it is spoken",
+          "sound_exemplar": null,
+          "dialog_slot": "A"
+        }
+      ]
+    },
+
+    {
+      "id": "confrontation_escalating_5",
+      "function": "confrontation",
+      "notes": "Escalation with a power shift. Two mechanisms do the work: shot size tightens monotonically, and camera height inverts between the two singles (LOW on the one gaining power, HIGH on the one losing it). Beat 5 is the tightest frame in the cell — if this shot carries is_turn, the turn lands here and nowhere else.",
+      "applies_when": "2 subjects, adversarial, charge delta >= 3",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "aggressor / gains power"},
+        {"id": "B", "screen_side": "RIGHT", "note": "receives / loses power"}
+      ],
+      "total_duration_s": 14.3,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "establishing",
+          "duration_s": 4.0,
+          "camera": {
+            "shot_size": "WS", "angle": "EYE", "lens_mm": 24,
+            "composition": "DEEP_STAGING", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "crosses half the distance in flat deliberate steps and stops; hands open at the sides"},
+            {"role": "B", "gaze": "LOOK_L", "performance_exemplar": "does not move; weight settles back onto the heels"}
+          ],
+          "action_exemplar": "{A} crosses half the distance and stops.",
+          "reveals_exemplar": "how much room there is, and how little of it {B} is using",
+          "emotional_intent_exemplar": "the geometry of the room is already the argument",
+          "sound_exemplar": "footfall on bare boards, then nothing",
+          "dialog_slot": null
+        },
+        {
+          "index": 2,
+          "kind": "action",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "MS", "angle": "LOW", "lens_mm": 35,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "the throat works once before the words; the eyes do not leave {B}"}
+          ],
+          "action_exemplar": "{A} names the thing neither of them has said out loud.",
+          "reveals_exemplar": "what this is actually about",
+          "emotional_intent_exemplar": "{A} has been carrying this sentence for a long time",
+          "sound_exemplar": null,
+          "dialog_slot": "A"
+        },
+        {
+          "index": 3,
+          "kind": "reaction",
+          "duration_s": 1.8,
+          "camera": {
+            "shot_size": "MS", "angle": "HIGH", "lens_mm": 35,
+            "composition": "THIRDS_R", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "B", "gaze": "LOOK_L", "performance_exemplar": "the mouth opens slightly and closes again; a breath goes in and does not come back out"}
+          ],
+          "action_exemplar": "{B} takes it without answering.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the reply {B} had ready is no longer usable",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 4,
+          "kind": "action",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "MCU", "angle": "LOW", "lens_mm": 50,
+            "composition": "THIRDS_L", "camera_motion": "PUSH_IN",
+            "camera_amplitude": "small", "camera_speed": "slow",
+            "movement_motivation": "{A} drops the volume and closes the distance; the camera follows the pressure in rather than the body"
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "the voice drops; the shoulders come forward; the knuckles whiten on the chairback"}
+          ],
+          "action_exemplar": "{A} presses, quieter than before.",
+          "reveals_exemplar": "that {A} intends to finish this",
+          "emotional_intent_exemplar": "the quiet is the threat",
+          "sound_exemplar": null,
+          "dialog_slot": "A"
+        },
+        {
+          "index": 5,
+          "kind": "reaction",
+          "duration_s": 3.5,
+          "camera": {
+            "shot_size": "CU", "angle": "EYE", "lens_mm": 85,
+            "composition": "THIRDS_R", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "B", "gaze": "DOWN", "performance_exemplar": "something goes out of the face; the eyes drop; the jaw loosens; a long exhale through the nose"}
+          ],
+          "action_exemplar": "{B} stops holding it.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the position {B} was defending was never defensible",
+          "sound_exemplar": "the room's own quiet, suddenly audible",
+          "dialog_slot": null
+        }
+      ]
+    },
+
+    {
+      "id": "reveal_kuleshov_4",
+      "function": "reveal",
+      "notes": "Look → object → reaction → new geography. The order is not decorative: the audience must see the character look BEFORE seeing the thing, or the reveal belongs to the camera instead of to the character. Beat 3 is the payload; it is a reaction beat and produces no new information by design.",
+      "applies_when": "1+ subjects discover something present in the space",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "discoverer"},
+        {"id": "OBJ", "screen_side": "RIGHT", "note": "the revealed thing or person"}
+      ],
+      "total_duration_s": 11.5,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "action",
+          "duration_s": 2.0,
+          "camera": {
+            "shot_size": "MCU", "angle": "EYE", "lens_mm": 50,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "MOTIVATED_WINDOW",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "the hand halts halfway to the shelf; the head turns before the body does"}
+          ],
+          "action_exemplar": "{A} stops mid-motion and looks off toward the far side of the room.",
+          "reveals_exemplar": "that there is something to see",
+          "emotional_intent_exemplar": "the body registers it before {A} does",
+          "sound_exemplar": "a small sound, off-screen, not repeated",
+          "dialog_slot": null
+        },
+        {
+          "index": 2,
+          "kind": "insert",
+          "duration_s": 3.0,
+          "camera": {
+            "shot_size": "WS", "angle": "EYE", "lens_mm": 35,
+            "composition": "CENTERED", "camera_motion": "RACK_FOCUS",
+            "camera_amplitude": "small", "camera_speed": "slow",
+            "movement_motivation": "focus travels from the near foreground to {OBJ}, matching where {A}'s attention has already gone"
+          },
+          "light_quality": "MOTIVATED_WINDOW",
+          "is_cut": true,
+          "subjects": [
+            {"role": "OBJ", "gaze": null, "performance_exemplar": "sits exactly where it has been the whole time, unremarkable and impossible to unsee"}
+          ],
+          "action_exemplar": "{OBJ} is there, and has been.",
+          "reveals_exemplar": "the thing itself, and that it was never hidden",
+          "emotional_intent_exemplar": "the room did not change; the seeing did",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 3,
+          "kind": "reaction",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "CU", "angle": "EYE", "lens_mm": 85,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "MOTIVATED_WINDOW",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "the eyes widen fractionally and then narrow; the breath stops; the color goes out of the mouth"}
+          ],
+          "action_exemplar": "{A}'s face reorganizes around it.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "{A} understands something that cannot now be un-understood",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 4,
+          "kind": "establishing",
+          "duration_s": 4.0,
+          "camera": {
+            "shot_size": "WS", "angle": "HIGH", "lens_mm": 24,
+            "composition": "NEGATIVE_SPACE", "camera_motion": "PULL_OUT",
+            "camera_amplitude": "medium", "camera_speed": "slow",
+            "movement_motivation": "the room is bigger than it was a moment ago; the camera gives it back the space {A} has lost"
+          },
+          "light_quality": "MOTIVATED_WINDOW",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "does not move; stands small against the far wall with both arms at the sides"},
+            {"role": "OBJ", "gaze": null, "performance_exemplar": "in frame with {A}, and no longer separable from the room"}
+          ],
+          "action_exemplar": "{A} stays where {A} is standing.",
+          "reveals_exemplar": "the whole space with the new fact in it",
+          "emotional_intent_exemplar": "the scale of what this changes",
+          "sound_exemplar": "room tone, and nothing else",
+          "dialog_slot": null
+        }
+      ]
+    },
+
+    {
+      "id": "arrival_in_motion_4",
+      "function": "arrival",
+      "notes": "Scene opener that does NOT waste time on an empty plate. The establishing shot contains the subject already moving through it — geography and momentum in the same beat. Use this to fix 'takes too long to get to the action': the first frame of a scene should already be mid-event.",
+      "applies_when": "scene-opening shot, 1 subject enters or traverses a new space",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "arriving subject; moves L→R"}
+      ],
+      "total_duration_s": 12.5,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "establishing",
+          "duration_s": 4.0,
+          "camera": {
+            "shot_size": "EWS", "angle": "EYE", "lens_mm": 24,
+            "composition": "LEADING_LINES", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "DAPPLED",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "already at a walk and already halfway across; the stride does not break for the doorway"}
+          ],
+          "action_exemplar": "{A} comes into the space at a walk, well past the entrance.",
+          "reveals_exemplar": "the whole geography, and that {A} has been moving for a while",
+          "emotional_intent_exemplar": "{A} came here on purpose",
+          "sound_exemplar": "footsteps carrying in a room with hard surfaces",
+          "dialog_slot": null
+        },
+        {
+          "index": 2,
+          "kind": "action",
+          "duration_s": 3.5,
+          "camera": {
+            "shot_size": "MLS", "angle": "EYE", "lens_mm": 35,
+            "composition": "THIRDS_L", "camera_motion": "STEADICAM",
+            "camera_amplitude": "medium", "camera_speed": "medium",
+            "movement_motivation": "the camera keeps pace with {A} rather than watching {A} pass"
+          },
+          "light_quality": "DAPPLED",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "the head turns to take in the room without the feet slowing; one hand trails the wall"}
+          ],
+          "action_exemplar": "{A} moves through without stopping.",
+          "reveals_exemplar": "what {A} passes and chooses not to look at",
+          "emotional_intent_exemplar": "{A} knows this place, or is pretending to",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 3,
+          "kind": "action",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "MCU", "angle": "EYE", "lens_mm": 50,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "DAPPLED",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "stops; the head turns first and the shoulders follow late; the trailing hand comes off the wall"}
+          ],
+          "action_exemplar": "{A} stops, and the gaze fixes on something ahead.",
+          "reveals_exemplar": "that the walk had a destination {A} did not expect to find occupied",
+          "emotional_intent_exemplar": "the momentum breaks before the face does",
+          "sound_exemplar": "the footsteps stop and the room keeps ringing for a beat",
+          "dialog_slot": null
+        },
+        {
+          "index": 4,
+          "kind": "insert",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "WS", "angle": "EYE", "lens_mm": 50,
+            "composition": "FRAME_IN_FRAME", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "DAPPLED",
+          "is_cut": true,
+          "subjects": [
+            {"role": "OBJ", "gaze": null, "performance_exemplar": "framed by the doorway {A} is looking through, indifferent to being seen"}
+          ],
+          "action_exemplar": "What {A} is looking at.",
+          "reveals_exemplar": "the reason this scene exists",
+          "emotional_intent_exemplar": "the scene's problem, delivered without a line of dialogue",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        }
+      ]
+    },
+
+    {
+      "id": "reaction_ladder_3",
+      "function": "reaction",
+      "notes": "Deliberately low-information. Nobody acts, nothing is revealed, someone absorbs what just happened. This cell CANNOT pass a non-empty-reveals lint and must be exempted — it is the shape your current rule set is structurally unable to produce, and its absence is why scenes read as event-event-event with no weight. Place it immediately after the turn, or after any beat carrying subtext. Note the duration contrast: 2.5 / 1.2 / 4.0. Do not smooth it.",
+      "applies_when": "immediately follows a high-charge beat; 1 subject",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "the one absorbing"}
+      ],
+      "total_duration_s": 7.7,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "reaction",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "CU", "angle": "EYE", "lens_mm": 85,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "the eyes stay open a beat too long; the breath is shallow and high in the chest; nothing else moves"}
+          ],
+          "action_exemplar": "{A} does not move.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the cost is being paid now, silently",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 2,
+          "kind": "insert",
+          "duration_s": 1.2,
+          "camera": {
+            "shot_size": "INSERT", "angle": "HIGH", "lens_mm": 85,
+            "composition": "CENTERED", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": null, "performance_exemplar": "the hand finds the edge of the table and stays there; the tendons stand up across the back of it"}
+          ],
+          "action_exemplar": "The hand finds the table edge and holds it.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the feeling goes into the object because it cannot go into the face",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 3,
+          "kind": "reaction",
+          "duration_s": 4.0,
+          "camera": {
+            "shot_size": "MS", "angle": "EYE", "lens_mm": 35,
+            "composition": "NEGATIVE_SPACE", "camera_motion": "PULL_OUT",
+            "camera_amplitude": "small", "camera_speed": "slow",
+            "movement_motivation": "the camera retreats as the tension leaves {A}; the room comes back into the frame"
+          },
+          "light_quality": "SOFT",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "DOWN", "performance_exemplar": "sits down where {A} was standing; the shoulders come down and stay down"}
+          ],
+          "action_exemplar": "{A} sits down where {A} is standing.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the body gives up before the person decides to",
+          "sound_exemplar": "fabric, and a chair taking weight",
+          "dialog_slot": null
+        }
+      ]
+    },
+
+    {
+      "id": "physical_action_5",
+      "function": "physical_action",
+      "notes": "Fast, short beats. Intent → mechanism → act → consequence → aftermath. The inserts at beats 2 and 4 are what make the action legible; without them a video model renders one continuous mushy movement. The aftermath beat is the longest in the cell and is where the scene's meaning actually sits — cutting away before it is the most common way an action moment lands as nothing.",
+      "applies_when": "1 subject performs a decisive physical act",
+      "roles": [
+        {"id": "A", "screen_side": "LEFT", "note": "actor"},
+        {"id": "OBJ", "screen_side": "RIGHT", "note": "the thing acted upon"}
+      ],
+      "total_duration_s": 7.6,
+      "beats": [
+        {
+          "index": 1,
+          "kind": "action",
+          "duration_s": 1.5,
+          "camera": {
+            "shot_size": "MS", "angle": "LOW", "lens_mm": 35,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": false,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "the weight shifts onto the front foot; the shoulders load; the breath goes in and stops"}
+          ],
+          "action_exemplar": "{A}'s weight comes forward.",
+          "reveals_exemplar": "that {A} has decided",
+          "emotional_intent_exemplar": "the decision is made in the body first",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 2,
+          "kind": "insert",
+          "duration_s": 0.8,
+          "camera": {
+            "shot_size": "ECU", "angle": "EYE", "lens_mm": 85,
+            "composition": "CENTERED", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": null, "performance_exemplar": "fingers close around the handle one at a time and then all at once"}
+          ],
+          "action_exemplar": "The hand closes on {OBJ}.",
+          "reveals_exemplar": "the mechanism of what is about to happen",
+          "emotional_intent_exemplar": "commitment, at the smallest possible scale",
+          "sound_exemplar": "a single sharp contact",
+          "dialog_slot": null
+        },
+        {
+          "index": 3,
+          "kind": "action",
+          "duration_s": 2.0,
+          "camera": {
+            "shot_size": "WS", "angle": "EYE", "lens_mm": 24,
+            "composition": "DEEP_STAGING", "camera_motion": "HANDHELD",
+            "camera_amplitude": "large", "camera_speed": "fast",
+            "movement_motivation": "the camera is destabilized by the same force {A} is applying"
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "LOOK_R", "performance_exemplar": "drives through in one motion; the whole body commits and the follow-through carries past the point of contact"}
+          ],
+          "action_exemplar": "{A} drives it through in one motion.",
+          "reveals_exemplar": "the full extent of the act, in the room it happens in",
+          "emotional_intent_exemplar": "there is no version of this that can be taken back",
+          "sound_exemplar": "impact, and something giving",
+          "dialog_slot": null
+        },
+        {
+          "index": 4,
+          "kind": "insert",
+          "duration_s": 0.8,
+          "camera": {
+            "shot_size": "INSERT", "angle": "HIGH", "lens_mm": 85,
+            "composition": "CENTERED", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "OBJ", "gaze": null, "performance_exemplar": "gives, and keeps giving for a fraction longer than expected"}
+          ],
+          "action_exemplar": "{OBJ} gives.",
+          "reveals_exemplar": "the result, before anyone has reacted to it",
+          "emotional_intent_exemplar": "the world answering the act",
+          "sound_exemplar": null,
+          "dialog_slot": null
+        },
+        {
+          "index": 5,
+          "kind": "reaction",
+          "duration_s": 2.5,
+          "camera": {
+            "shot_size": "MCU", "angle": "EYE", "lens_mm": 50,
+            "composition": "THIRDS_L", "camera_motion": "STATIC",
+            "camera_amplitude": null, "camera_speed": null, "movement_motivation": null
+          },
+          "light_quality": "HARD",
+          "is_cut": true,
+          "subjects": [
+            {"role": "A", "gaze": "OFF_R", "performance_exemplar": "breathing hard through an open mouth; the eyes go anywhere except to {OBJ}; one hand opens and does not close again"}
+          ],
+          "action_exemplar": "{A} is breathing hard and not looking at it.",
+          "reveals_exemplar": null,
+          "emotional_intent_exemplar": "the act is over and {A} is still inside it",
+          "sound_exemplar": "breath, close and uneven",
+          "dialog_slot": null
+        }
+      ]
+    }
+  ]
+}

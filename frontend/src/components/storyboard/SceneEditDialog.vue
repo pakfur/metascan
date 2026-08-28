@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { describeScene } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import TextEditPopup from './TextEditPopup.vue'
-import type { Scene } from '../../types/storyboard'
+import { SCENE_FUNCTIONS, type Scene, type ShotTemplateSummary } from '../../types/storyboard'
 
 // `scene` null means create mode: Save POSTs a new scene. Otherwise Save
 // PATCHes only the changed fields of the given scene.
@@ -19,6 +19,7 @@ const subtitle = ref(props.scene?.subtitle ?? '')
 const setting = ref(props.scene?.setting ?? '')
 const lighting = ref(props.scene?.lighting ?? '')
 const mood = ref(props.scene?.mood ?? '')
+const sceneFunction = ref(props.scene?.function ?? '')
 const referencePath = ref(props.scene?.reference_path ?? '')
 // Last value successfully persisted to the DB via a pick/clear (below) --
 // distinct from `referencePath`, which updates optimistically the instant
@@ -132,6 +133,66 @@ async function onDescribeScene(): Promise<void> {
   }
 }
 
+// ---- shot template -----------------------------------------------------
+
+const templateId = ref('')
+const templateBusy = ref(false)
+const templateError = ref<string | null>(null)
+
+onMounted(() => {
+  void store.loadTemplates()
+})
+
+function templateLabel(t: ShotTemplateSummary): string {
+  return `${t.id} · ${t.function} · ${t.slot_count} slots / ${t.duration_s}s`
+}
+
+// Auto-select the template whose function matches the scene's function once
+// the (lazily-loaded, cached) template list is available, and again on any
+// scene-function change -- but only when the current selection isn't (or is
+// no longer) one of the available options, so a deliberate user pick isn't
+// clobbered by an unrelated re-render.
+watch(
+  () => [store.templates.length, sceneFunction.value] as const,
+  () => {
+    if (store.templates.length === 0) return
+    if (store.templates.some((t) => t.id === templateId.value)) return
+    const match = store.templates.find((t) => t.function === sceneFunction.value)
+    templateId.value = (match ?? store.templates[0]).id
+  },
+  { immediate: true },
+)
+
+async function onApplyTemplate(): Promise<void> {
+  if (!props.scene || !templateId.value) return
+  templateBusy.value = true
+  templateError.value = null
+  try {
+    await store.applyTemplate(props.scene.id, templateId.value, false)
+  } catch (e: unknown) {
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail as { code?: string } | undefined)?.code === 'confirm_required'
+    ) {
+      const message =
+        (e.detail as { message?: string } | undefined)?.message ??
+        'This replaces this scene’s existing shots and beats — continue?'
+      if (window.confirm(message)) {
+        try {
+          await store.applyTemplate(props.scene.id, templateId.value, true)
+        } catch (e2: unknown) {
+          templateError.value = errMsg(e2)
+        }
+      }
+    } else {
+      templateError.value = errMsg(e)
+    }
+  } finally {
+    templateBusy.value = false
+  }
+}
+
 // ---- save -------------------------------------------------------------
 
 async function save(): Promise<void> {
@@ -149,6 +210,7 @@ async function save(): Promise<void> {
         lighting: lighting.value.trim() || null,
         mood: mood.value.trim() || null,
         reference_path: referencePath.value.trim() || null,
+        function: sceneFunction.value || null,
       })
     } else {
       // Changed fields only; empty text clears the nullable columns via an
@@ -163,6 +225,8 @@ async function save(): Promise<void> {
       if (newLighting !== (props.scene.lighting ?? null)) body.lighting = newLighting
       const newMood = mood.value.trim() || null
       if (newMood !== (props.scene.mood ?? null)) body.mood = newMood
+      const newFunction = sceneFunction.value || null
+      if (newFunction !== (props.scene.function ?? null)) body.function = newFunction
       const newRef = referencePath.value.trim() || null
       if (newRef !== (props.scene.reference_path ?? null)) body.reference_path = newRef
       if (Object.keys(body).length > 0) {
@@ -235,6 +299,35 @@ async function save(): Promise<void> {
             <input id="se-mood" v-model="mood" type="text" placeholder="e.g. tense, melancholic" />
           </TextEditPopup>
         </div>
+      </div>
+
+      <div class="field">
+        <label for="se-function">Function</label>
+        <select id="se-function" v-model="sceneFunction">
+          <option value="">—</option>
+          <option v-for="fn in SCENE_FUNCTIONS" :key="fn" :value="fn">{{ fn }}</option>
+        </select>
+      </div>
+
+      <div v-if="!isCreate" class="field template-section">
+        <label for="se-template">Shot template</label>
+        <div class="template-row">
+          <select id="se-template" v-model="templateId" :disabled="store.templates.length === 0">
+            <option v-if="store.templates.length === 0" value="">No templates available</option>
+            <option v-for="t in store.templates" :key="t.id" :value="t.id">
+              {{ templateLabel(t) }}
+            </option>
+          </select>
+          <button
+            type="button"
+            class="browse-btn"
+            :disabled="!templateId || templateBusy || store.story.running"
+            @click="onApplyTemplate"
+          >
+            {{ templateBusy ? 'Applying…' : 'Apply template' }}
+          </button>
+        </div>
+        <p v-if="templateError" class="error inline">{{ templateError }}</p>
       </div>
 
       <div class="field">
@@ -358,7 +451,8 @@ label {
 }
 
 input[type='text'],
-textarea {
+textarea,
+select {
   padding: 6px 10px;
   border: 1px solid var(--surface-border);
   border-radius: 6px;
@@ -371,9 +465,21 @@ textarea {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   outline: none;
   border-color: var(--primary-color);
+}
+
+.template-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-row select {
+  flex: 1;
+  min-width: 0;
 }
 
 textarea {

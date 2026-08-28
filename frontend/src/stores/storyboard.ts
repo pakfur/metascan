@@ -6,6 +6,7 @@ import type {
   ComposeStage,
   Panel,
   Scene,
+  ShotTemplateSummary,
   StoryboardSummary,
   StoryboardTree,
   Subject,
@@ -58,11 +59,18 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   })
   const story = ref<{
     running: boolean
-    stage: ComposeStage | null
+    // 'template' is a synthetic stage emitted by apply-template (see
+    // applyTemplate below) -- not part of ComposeStage/COMPOSE_STAGES,
+    // which enumerates only the compose() stages.
+    stage: ComposeStage | 'template' | null
     done: number
     total: number
     error: string | null
   }>({ running: false, stage: null, done: 0, total: 0, error: null })
+  // Lazily-loaded, session-cached list of shot templates (GET
+  // /storyboard/templates) -- see loadTemplates().
+  const templates = ref<ShotTemplateSummary[]>([])
+  let templatesLoaded = false
 
   // ---- getters ----------------------------------------------------------
   const selectedScene = computed<Scene | null>(() => {
@@ -513,6 +521,39 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  // Lazy + cached: templates rarely change within a session, and the
+  // picker in SceneEditDialog can open/close many times.
+  async function loadTemplates(): Promise<void> {
+    if (templatesLoaded) return
+    try {
+      templates.value = await api.listTemplates()
+      templatesLoaded = true
+    } catch (e) {
+      error.value = errMessage(e)
+    }
+  }
+
+  // Runner-backed, same confirm_required 409 shape / WS event contract as
+  // composeStory (the backend emits story_progress/story_stage_complete/
+  // story_complete/story_error with stage: "template"). Rethrows ApiError
+  // so callers (SceneEditDialog) can catch the 409 confirm_required detail
+  // and re-call with confirm=true.
+  async function applyTemplate(
+    sceneId: number,
+    templateId: string,
+    confirm: boolean,
+  ): Promise<void> {
+    if (!tree.value) return
+    // Optimistic before await -- same race as composeStory/synthesize.
+    story.value = { running: true, stage: 'template', done: 0, total: 0, error: null }
+    try {
+      await api.applyTemplate(tree.value.id, sceneId, { template_id: templateId, confirm })
+    } catch (e) {
+      story.value.running = false
+      throw e
+    }
+  }
+
   async function generate(beatIds?: number[], onlyFailed?: boolean): Promise<void> {
     if (!tree.value) return
     const body: { beat_ids?: number[]; only_failed?: boolean } = {}
@@ -727,7 +768,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       } else if (event === 'story_progress') {
         story.value = {
           running: true,
-          stage: (d.stage as ComposeStage) ?? null,
+          stage: (d.stage as ComposeStage | 'template') ?? null,
           done: Number(d.done ?? 0),
           total: Number(d.total ?? 0),
           error: null,
@@ -833,6 +874,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     synthesis,
     compile,
     story,
+    templates,
     // getters
     selectedScene,
     selectedPanel,
@@ -869,6 +911,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     patchSubjectFields,
     removeSubject,
     composeStory,
+    loadTemplates,
+    applyTemplate,
     addBeat,
     patchBeatFields,
     removeBeat,

@@ -14,13 +14,14 @@ import logging
 import re
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core import h3_compiler as h3
+from metascan.core import shot_templates as templates
 from metascan.core import storyboard_story as story
 from metascan.core.storyboard_brief import (
     beat_seed,
@@ -68,6 +69,13 @@ def expand_name_template(template: Optional[str]) -> Optional[str]:
         return None
     expanded = datetime.now().strftime(template.strip())
     return _PREFIX_ILLEGAL.sub("-", expanded)
+
+
+def _utc_now_sql() -> str:
+    """UTC timestamp in SQLite's ``datetime('now')`` shape, so
+    ``panels.video_compiled_at`` compares lexically against the
+    ``beats.updated_at`` defaults the frontend's stale-compile chip reads."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _format_panel_issues(issues: List[Tuple[int, str]]) -> str:
@@ -419,7 +427,11 @@ class StoryboardRunner:
         # calls purge nothing anyway.
         tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
         assert tree is not None
-        roster = {s["name"].strip().lower(): int(s["id"]) for s in tree["subjects"]}
+        # Spec Phase C1: only character subjects are castable into a
+        # beat's subject_ids; a location/prop name the model emits is
+        # dropped by validate_beats_response with the usual warning.
+        castable = story.castable_subjects(tree["subjects"])
+        roster = {s["name"].strip().lower(): int(s["id"]) for s in castable}
         # storyboards.story_scale widens/narrows the outline/scenes/shots
         # stages together: grammar caps, the explicit shot-count prompt
         # numbers, and max_tokens. "standard" reproduces the pre-scale
@@ -650,10 +662,15 @@ class StoryboardRunner:
             prev_action: Optional[str] = None
             prev_summary: Optional[str] = None
             prev_sizes: List[Optional[str]] = []
+            # Spec Phase B2: the scene-scoped dialogue lint sees every
+            # panel's beats -- freshly composed for targets, existing for
+            # skipped panels.
+            scene_beats: List[Dict[str, Any]] = []
             for idx, panel in enumerate(scene["panels"]):
                 if panel["id"] not in target_ids:
                     # Skipped panel: its existing beats still feed continuity.
                     existing = panel.get("beats") or []
+                    scene_beats.append({"beats": existing})
                     prev_action = panel.get("action")
                     if existing:
                         prev_summary = story.describe_beat_framing(existing[-1])
@@ -676,7 +693,7 @@ class StoryboardRunner:
                             outline_data,
                             scene,
                             panel,
-                            tree["subjects"],
+                            castable,
                             guidance,
                             prev_action,
                             prev_summary,
@@ -697,6 +714,7 @@ class StoryboardRunner:
                 if purged_files:
                     await asyncio.to_thread(remove_files_to_trash, purged_files)
                 prev_action = panel.get("action")
+                scene_beats.append({"beats": beats})
                 if beats:
                     prev_summary = story.describe_beat_framing(beats[-1])
                     prev_sizes = [b.get("shot_size") for b in beats[-2:]]
@@ -707,12 +725,236 @@ class StoryboardRunner:
                     beats_warnings.extend(
                         f"panel {panel['id']}: {w}" for w in lint_warns
                     )
+            dialogue_warns = story.lint_scene_dialogue(
+                scene_beats, tree["subjects"], scene.get("function")
+            )
+            if dialogue_warns:
+                async with lock:
+                    beats_warnings.extend(
+                        f"scene {scene['id']}: {w}" for w in dialogue_warns
+                    )
             return made
 
         results = await asyncio.gather(
             *(_beats_for_scene(s, ids) for s, ids in scene_work)
         )
         return sum(results), beats_warnings
+
+    # ---- shot-list templates (spec Phase E) --------------------------------
+
+    async def check_template_gates(
+        self,
+        storyboard_id: int,
+        scene_id: int,
+        template_id: str,
+        confirm: bool,
+    ) -> Dict[str, Any]:
+        """Synchronous-shaped gate for the apply-template route: 404-ish
+        StoryboardError on an unknown storyboard/scene/template, a
+        StoryboardError when the scene has fewer castable characters than
+        the template has roles, and the usual ConfirmRequiredError when
+        the scene already has shots (a template replaces the scene's
+        whole shots+beats tree). Returns the loaded tree for reuse."""
+        try:
+            template = templates.get_template(template_id)
+        except templates.TemplateError as exc:
+            raise StoryboardError(str(exc)) from exc
+        tree: Optional[Dict[str, Any]] = await asyncio.to_thread(
+            self.db.get_storyboard_tree, storyboard_id
+        )
+        if tree is None:
+            raise StoryboardError(f"no storyboard with id {storyboard_id}")
+        scene = next((s for s in tree["scenes"] if s["id"] == scene_id), None)
+        if scene is None:
+            raise StoryboardError(f"no scene {scene_id} in storyboard {storyboard_id}")
+        characters = story.castable_subjects(tree["subjects"])
+        if len(characters) < len(template.roles):
+            raise StoryboardError(
+                f"template {template.id!r} has {len(template.roles)} roles but "
+                f"the storyboard has only {len(characters)} character "
+                "subject(s) -- mark more roster entries as characters"
+            )
+        panel_ids = [p["id"] for p in scene["panels"]]
+        await self.check_compose_gates(
+            storyboard_id, ("shots", "beats"), [scene_id], panel_ids, confirm
+        )
+        return tree
+
+    async def apply_template(
+        self,
+        storyboard_id: int,
+        scene_id: int,
+        template_id: str,
+        *,
+        confirm: bool = False,
+    ) -> Dict[str, int]:
+        """Replace one scene's shots + beats with a shot-list template:
+        bind roles (one grammar-constrained VLM call), instantiate,
+        fill prose per section (one VLM call each, sequential so later
+        sections see the earlier exchange), conform (hard-fails), write.
+        Emits the compose WS contract with ``stage = "template"``."""
+        try:
+            counts = await self._apply_template_locked(
+                storyboard_id, scene_id, template_id, confirm
+            )
+        except Exception as exc:
+            self._emit(
+                "storyboard",
+                "story_error",
+                {
+                    "storyboard_id": storyboard_id,
+                    "stage": "template",
+                    "error": str(exc),
+                },
+            )
+            raise
+        self._emit(
+            "storyboard",
+            "story_complete",
+            {"storyboard_id": storyboard_id, "counts": counts},
+        )
+        return counts
+
+    async def _apply_template_locked(
+        self,
+        storyboard_id: int,
+        scene_id: int,
+        template_id: str,
+        confirm: bool,
+    ) -> Dict[str, int]:
+        vlm = self.get_vlm()
+        if vlm is None:
+            raise StoryboardError("no VLM client — applying a template requires a VLM")
+        tree = await self.check_template_gates(
+            storyboard_id, scene_id, template_id, confirm
+        )
+        template = templates.get_template(template_id)
+        scene = next(s for s in tree["scenes"] if s["id"] == scene_id)
+        characters = story.castable_subjects(tree["subjects"])
+        roster = {s["name"].strip().lower(): int(s["id"]) for s in characters}
+        outline: Dict[str, Any] = {}
+        try:
+            outline = json.loads(tree.get("outline") or "{}") or {}
+        except (TypeError, ValueError):
+            pass
+        total = len(template.sections) + 1
+
+        def progress(done: int) -> None:
+            self._emit(
+                "storyboard",
+                "story_progress",
+                {
+                    "storyboard_id": storyboard_id,
+                    "stage": "template",
+                    "done": done,
+                    "total": total,
+                },
+            )
+
+        async with self._synth_lock:
+            model_id = self._pick_vlm_model(vlm)
+            await vlm.ensure_started(model_id)
+
+            # 1. Bind roles.
+            progress(0)
+            bind_kwargs: Dict[str, Any] = dict(
+                system_prompt=templates.TEMPLATE_BIND_SYSTEM,
+                user_prompt=templates.build_role_bind_user_prompt(
+                    template, scene, characters, outline
+                ),
+                grammar=templates.role_bind_grammar(
+                    template, [s["name"] for s in characters]
+                ),
+                temperature=0.2,
+                max_tokens=200,
+                timeout=120.0,
+            )
+            try:
+                role_map = templates.validate_role_bind_response(
+                    await vlm.generate_text(**bind_kwargs), template, roster
+                )
+            except templates.TemplateError as exc:
+                logger.warning("apply_template: bad role binding (%s); retrying", exc)
+                role_map = templates.validate_role_bind_response(
+                    await vlm.generate_text(**bind_kwargs), template, roster
+                )
+            name_by_id = {int(s["id"]): str(s["name"]) for s in characters}
+            role_names = {rid: name_by_id[sid] for rid, sid in role_map.items()}
+            voices = {int(s["id"]): s.get("voice") for s in characters}
+            progress(1)
+
+            # 2. Instantiate; 3. fill section by section.
+            panels = templates.instantiate(template, role_map)
+            previous: List[Tuple[templates.Section, List[Dict[str, Any]]]] = []
+            for i, section in enumerate(template.sections):
+                fill_kwargs: Dict[str, Any] = dict(
+                    system_prompt=templates.TEMPLATE_FILL_SYSTEM,
+                    user_prompt=templates.build_fill_user_prompt(
+                        template,
+                        section,
+                        role_names,
+                        scene,
+                        characters,
+                        outline,
+                        previous,
+                    ),
+                    grammar=templates.fill_grammar(section),
+                    temperature=0.6,
+                    max_tokens=1600,
+                    timeout=300.0,
+                )
+                try:
+                    fill = templates.validate_fill_response(
+                        await vlm.generate_text(**fill_kwargs), section
+                    )
+                except templates.TemplateError as exc:
+                    logger.warning(
+                        "apply_template: section %r invalid (%s); retrying once",
+                        section.label,
+                        exc,
+                    )
+                    fill = templates.validate_fill_response(
+                        await vlm.generate_text(**fill_kwargs), section
+                    )
+                templates.apply_fill(panels[i], section, fill, role_map, voices)
+                previous.append((section, fill))
+                progress(i + 2)
+
+            # 4. Conform -- hard-fails by design.
+            templates.conform(template, panels, role_map)
+
+            # 5. Write (the confirmed destructive path purges like a
+            # confirmed shots recompose).
+            panel_ids, purged_files = await asyncio.to_thread(
+                self.db.replace_scene_panels, scene_id, panels, confirm
+            )
+            if purged_files:
+                await asyncio.to_thread(remove_files_to_trash, purged_files)
+            n_beats = 0
+            for pid, panel in zip(panel_ids, panels):
+                await asyncio.to_thread(
+                    self.db.replace_panel_beats, pid, panel["beats"], False
+                )
+                n_beats += len(panel["beats"])
+            if not scene.get("function"):
+                await asyncio.to_thread(
+                    self.db.update_scene, scene_id, function=template.function
+                )
+
+        counts = {"template": len(panel_ids), "beats": n_beats}
+        self._emit(
+            "storyboard",
+            "story_stage_complete",
+            {
+                "storyboard_id": storyboard_id,
+                "stage": "template",
+                "warnings": [],
+                "template_id": template.id,
+                "scene_id": scene_id,
+                "roles": role_names,
+            },
+        )
+        return counts
 
     # ---- shared panel helpers --------------------------------------------
 
@@ -909,6 +1151,7 @@ class StoryboardRunner:
                     video_prompt_locked=0,
                     video_prompt_warnings=json.dumps([i.message for i in issues]),
                     video_compiled_anchor=panel.get("video_anchor"),
+                    video_compiled_at=_utc_now_sql(),
                 )
                 async with progress_lock:
                     done += 1
@@ -984,7 +1227,7 @@ class StoryboardRunner:
         subject_definitions = h3.render_subject_definitions(refplan, subjects, scene)
         summary = h3.render_summary(refplan, panel, subjects, mode, scene)
         retention_analysis = h3.render_retention_analysis(
-            refplan, subjects, scene, timeline
+            refplan, subjects, scene, timeline, beats=beats
         )
 
         audio_definition_lines = h3.render_audio_definition_lines(

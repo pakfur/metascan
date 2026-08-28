@@ -669,6 +669,39 @@ metascan/
   but nothing in the runner ever sets `GenerationParams.last_frame`, so an
   `fl2va` workflow needing its second anchor must supply it by hand in
   ComfyUI.
+- **Shot-list templates replace the shots+beats stages per scene (spec
+  `docs/plans/refactor-spec-visual-story-quality.md`, Phase E).**
+  `metascan/core/shot_templates.py` is pure: it loads `data/templates/*.json`
+  (lazily, cached; `reload_templates()` drops the cache) and validates every
+  camera field against the REAL code vocabulary (`SHOT_SIZE_VALUES`,
+  `ANGLE_VALUES`, `COMPOSITION_VALUES`, `CAMERA_MOTION_VALUES`, …) at load
+  time — a template written in another vocabulary (`"EYE"`, `"THIRDS_L"`,
+  `"STATIC"`) raises `TemplateError` naming the path instead of silently
+  nulling through the beats validator. The template owns every structural
+  field (`duration_s`, `kind`, `is_cut`, `cast` roles → `subject_ids`,
+  `dialog_slot`, camera); the VLM fills only prose. `StoryboardRunner.
+  apply_template` runs bind roles (grammar alts = the scene's castable
+  character names) → `instantiate` → per-section fill (`fill_grammar`
+  bakes the slot count in and makes a `dialog_slot`'s dialog `string`, not
+  `nullable`, so an unfilled line is structurally impossible) →
+  `conform` (**hard-fails** with `TemplateConformanceError`, the one
+  exception to lint-never-hard-fails) → `replace_scene_panels` +
+  `replace_panel_beats`. It gates through `check_compose_gates(("shots",
+  "beats"), [scene_id], <scene's panel ids>)` and emits the compose WS
+  contract with `stage: "template"`. Routes: `GET /api/storyboard/templates`
+  (registered BEFORE `/{storyboard_id}`) and `POST /api/storyboard/{id}/
+  scenes/{scene_id}/apply-template` (202 / 409 `confirm_required` / 400).
+  Supporting schema: `storyboard_subjects.subject_type`
+  (`character|location|prop`, `user_version = 4` backfills via
+  `infer_subject_type`; only characters are castable — `story.
+  castable_subjects` is the roster the beats stage and templates use),
+  `scenes.function` (`SCENE_FUNCTION_VALUES`, emitted by the scenes stage,
+  the template selection key), `beats.kind`, and `panels.video_compiled_at`
+  (the frontend's "beats changed since compile" chip). `render_retention_
+  analysis(..., beats=)` is per-beat: a subject's `(appears in …)` list
+  follows the beats that cast it (Phase A1). `story.lint_scene_dialogue`
+  runs once per scene after its beats stage for verbal functions
+  (`VERBAL_FUNCTIONS`), warnings only.
 - **Stored paths vs. API paths in the storyboard tree.** `beat_images.file_path`
   is stored POSIX (same convention as `media.file_path` and `folder_items.file_path`).
   `get_storyboard_tree` and `list_beat_images` convert it through

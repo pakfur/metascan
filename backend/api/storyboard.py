@@ -36,7 +36,12 @@ from metascan.core.comfy_client import ComfyError
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
-from metascan.core.storyboard_story import PACING_VALUES, STORY_SCALES
+from metascan.core.storyboard_story import (
+    PACING_VALUES,
+    SCENE_FUNCTION_VALUES,
+    STORY_SCALES,
+    SUBJECT_TYPE_VALUES,
+)
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path
@@ -96,6 +101,14 @@ _BEAT_NOT_NULLABLE = frozenset(
 _VIDEO_TARGETS = frozenset({"minimax"})
 _VIDEO_MODES = frozenset({"t2va", "i2va", "fl2va", "ref2va"})
 _VIDEO_ANCHORS = frozenset({"keeper", "prev_last"})
+
+
+def _validate_scene_function(value: Optional[str]) -> None:
+    if value is not None and value not in SCENE_FUNCTION_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"function must be one of: {', '.join(SCENE_FUNCTION_VALUES)}",
+        )
 
 
 def _reject_null_for_required(
@@ -186,6 +199,7 @@ class SubjectCreate(BaseModel):
     sort_order: int = 0
     voice: Optional[str] = None
     voice_ref_path: Optional[str] = None
+    subject_type: str = "character"
 
 
 class SubjectPatch(BaseModel):
@@ -200,6 +214,7 @@ class SubjectPatch(BaseModel):
     voice_ref_path: Optional[str] = None
     sheet_ref: Optional[int] = None
     pov_ref: Optional[int] = None
+    subject_type: Optional[str] = None
 
 
 class SceneCreate(BaseModel):
@@ -213,6 +228,7 @@ class SceneCreate(BaseModel):
     lighting: Optional[str] = None
     notes: Optional[str] = None
     reference_path: Optional[str] = None
+    function: Optional[str] = None
 
 
 class ScenePatch(BaseModel):
@@ -229,6 +245,7 @@ class ScenePatch(BaseModel):
     arc_beats: Optional[List[str]] = None
     charge_in: Optional[int] = None
     charge_out: Optional[int] = None
+    function: Optional[str] = None
 
 
 class PanelCreate(BaseModel):
@@ -278,6 +295,11 @@ class GenerateRequest(BaseModel):
 class GenerateVideoRequest(BaseModel):
     panel_ids: Optional[List[int]] = None
     only_failed: bool = False
+
+
+class ApplyTemplateRequest(BaseModel):
+    template_id: str
+    confirm: bool = False
 
 
 class ComposeRequest(BaseModel):
@@ -375,6 +397,50 @@ async def create_storyboard(body: StoryboardCreate) -> Dict[str, int]:
         notes=body.notes,
     )
     return {"id": storyboard_id}
+
+
+@router.get("/templates")
+async def list_shot_templates() -> List[Dict[str, Any]]:
+    """Shot-list templates on disk (data/templates/*.json). Registered
+    before ``/{storyboard_id}`` so the literal path wins the match."""
+    from metascan.core import shot_templates
+
+    try:
+        return await asyncio.to_thread(shot_templates.list_templates)
+    except shot_templates.TemplateError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/{storyboard_id}/scenes/{scene_id}/apply-template", status_code=202)
+async def apply_shot_template(
+    storyboard_id: int, scene_id: int, body: ApplyTemplateRequest
+) -> Dict[str, str]:
+    """Replace one scene's shots + beats with a shot-list template.
+    Mirrors /compose: gates are checked synchronously (409
+    confirm_required when the scene already has shots), then the
+    VLM-driven bind/fill/conform/write runs as a 202 fire-and-forget
+    task reporting on the storyboard WS channel with stage "template"."""
+    runner = _require_runner()
+    try:
+        await runner.check_template_gates(
+            storyboard_id, scene_id, body.template_id, body.confirm
+        )
+    except ConfirmRequiredError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "confirm_required", "message": str(exc)},
+        ) from exc
+    except StoryboardError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    task = asyncio.create_task(
+        runner.apply_template(
+            storyboard_id, scene_id, body.template_id, confirm=body.confirm
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"status": "started"}
 
 
 @router.get("/{storyboard_id}")
@@ -661,6 +727,11 @@ async def cancel_storyboard(storyboard_id: int) -> Dict[str, int]:
 
 @router.post("/{storyboard_id}/subjects")
 async def create_subject(storyboard_id: int, body: SubjectCreate) -> Dict[str, int]:
+    if body.subject_type not in SUBJECT_TYPE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"subject_type must be one of: {', '.join(SUBJECT_TYPE_VALUES)}",
+        )
     try:
         subject_id = await _service().create_subject(
             storyboard_id,
@@ -672,6 +743,7 @@ async def create_subject(storyboard_id: int, body: SubjectCreate) -> Dict[str, i
             reference_path_2=body.reference_path_2,
             sort_order=body.sort_order,
             voice_ref_path=body.voice_ref_path,
+            subject_type=body.subject_type,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -691,6 +763,11 @@ async def patch_subject(subject_id: int, body: SubjectPatch) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="sheet_ref must be 0 or 1")
     if "pov_ref" in fields and fields["pov_ref"] not in (0, 1):
         raise HTTPException(status_code=400, detail="pov_ref must be 0 or 1")
+    if "subject_type" in fields and fields["subject_type"] not in SUBJECT_TYPE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"subject_type must be one of: {', '.join(SUBJECT_TYPE_VALUES)}",
+        )
     if fields:
         try:
             await svc.update_subject(subject_id, **fields)
@@ -755,6 +832,7 @@ async def describe_subject(subject_id: int) -> Dict[str, Any]:
 
 @router.post("/{storyboard_id}/scenes")
 async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
+    _validate_scene_function(body.function)
     try:
         scene_id = await _service().create_scene(
             storyboard_id,
@@ -768,6 +846,7 @@ async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
             lighting=body.lighting,
             notes=body.notes,
             reference_path=body.reference_path,
+            function=body.function,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -783,6 +862,8 @@ async def patch_scene(scene_id: int, body: ScenePatch) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail=f"No scene {scene_id}")
     fields = body.model_dump(exclude_unset=True)
     _reject_null_for_required(fields, _SCENE_NOT_NULLABLE)
+    if "function" in fields:
+        _validate_scene_function(fields["function"])
     if fields:
         try:
             await svc.update_scene(scene_id, **fields)

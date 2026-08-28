@@ -341,6 +341,7 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   <article class="bc" :class="{ selected }" @click="emit('select')">
     <div class="bc-head">
       <span class="bc-label" :class="{ selected }">BEAT {{ index + 1 }}</span>
+      <span v-if="beat.kind" class="bc-kind-tag">{{ beat.kind }}</span>
       <span v-if="beat.is_cut === 1" class="bc-cut-flag">hard cut</span>
       <span class="bc-duration">{{ beat.duration_s.toFixed(1) }}s</span>
       <div class="bc-head-actions">
@@ -674,6 +675,18 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
   font-size: 11px;
   font-weight: 600;
   color: var(--warn);
+}
+
+.bc-kind-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--text-color-secondary);
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 
 .bc-duration {
