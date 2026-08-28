@@ -1,0 +1,756 @@
+[
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 222,
+            "sort_order": 0,
+            "action": "Party Girl stands in the center of the lawn, arms spread wide to indicate the distance to the cabin, while Friend and Younger Sister stand behind her in a loose line.",
+            "duration_s": 10.0,
+            "subtext": "The invitation is a trap disguised as an escape, and the distance is a promise of isolation.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 713,
+            "sort_order": 0,
+            "duration_s": 2.0,
+            "action": "A wide establishing frame captures the sun-drenched college lawn, showing the two woman standing on the green lawn of a College quad. In the background, a diverse mix of students can be seen in small groups, walking, sitting, sitting alone. ",
+            "reveals": "The full spatial relationship between the three women and the distant Cabin, establishing the physical distance of the trip.",
+            "emotional_intent": "The women are physically separated by several feet, their body language rigid; the bright, harsh sunlight flattens their features, creating a sense of exposed vulnerability against the vast, empty lawn.",
+            "shot_size": "WS",
+            "angle": "eye",
+            "lens": "wide",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                30,
+                31,
+                34
+            ],
+            "subject_names": [
+                "Party Girl",
+                "Friend",
+                "College"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 0,
+            "sound": "Wind rustling through dry grass, distant birdsong",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 222,
+            "sort_order": 0,
+            "action": "Party Girl stands in the center of the lawn, arms spread wide to indicate the distance to the cabin, while Friend and Younger Sister stand behind her in a loose line.",
+            "duration_s": 10.0,
+            "subtext": "The invitation is a trap disguised as an escape, and the distance is a promise of isolation.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 714,
+            "sort_order": 1,
+            "duration_s": 4.0,
+            "action": "A close up shot of the Party Girl",
+            "reveals": "The expansive, open gesture of the invitation, emphasizing the scale of the space between them and the destination.",
+            "emotional_intent": "Party Girl\u2019s shoulders are lifted high and her chest is puffed out, her expression open and unguarded, contrasting with the tight, contained posture of the others behind her.",
+            "shot_size": "MS",
+            "angle": "low",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                30,
+                31,
+                34
+            ],
+            "subject_names": [
+                "Party Girl",
+                "Friend",
+                "College"
+            ],
+            "camera_motion": "push_in",
+            "camera_amplitude": "small",
+            "camera_speed": "slow",
+            "movement_motivation": "To draw the viewer\u2019s focus from the empty landscape to the active gesture of the invitation, narrowing the world down to the promise being made.",
+            "is_cut": 1,
+            "sound": "Fabric rustling as arms spread, a sharp intake of breath",
+            "dialog": [
+                {
+                    "subject_id": 30,
+                    "voice": "bright, breathless female voice",
+                    "delivery": "animated and expansive",
+                    "language": "English",
+                    "text": "It\u2019s only a few miles, but it\u2019s a whole different world out there."
+                }
+            ],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 222,
+            "sort_order": 0,
+            "action": "Party Girl stands in the center of the lawn, arms spread wide to indicate the distance to the cabin, while Friend and Younger Sister stand behind her in a loose line.",
+            "duration_s": 10.0,
+            "subtext": "The invitation is a trap disguised as an escape, and the distance is a promise of isolation.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 715,
+            "sort_order": 2,
+            "duration_s": 4.0,
+            "action": "Younger Sister stands rigidly with her hands clasped tightly in front of her, her gaze fixed on the ground as she bites her lower lip, while Friend remains still behind her holding the canvas tote bag.",
+            "reveals": "The specific physical manifestation of Younger Sister\u2019s anxiety and the static, waiting posture of Friend.",
+            "emotional_intent": "Younger Sister\u2019s jaw is tight and her fingers are knotted together, her eyes darting slightly before dropping to the dry grass; Friend\u2019s shoulders are slumped slightly, her weight shifting to one foot.",
+            "shot_size": "CU",
+            "angle": "eye",
+            "lens": "tele",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                31,
+                34,
+                30
+            ],
+            "subject_names": [
+                "Friend",
+                "College",
+                "Party Girl"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Silence, the faint creak of the canvas tote bag shifting weight",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 223,
+            "sort_order": 1,
+            "action": "Party Girl leans forward, her voice dropping as she mimes holding a drink, while Friend shifts her weight and glances toward Younger Sister, who remains rigid with hands clasped.",
+            "duration_s": 10.0,
+            "subtext": "The specific nature of the party is being carefully obscured to ensure it is accepted.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 734,
+            "sort_order": 0,
+            "duration_s": 3.5,
+            "action": "Party Girl leans her torso forward, narrowing her eyes slightly, and mimes holding a glass with her right hand, bringing it to her lips.",
+            "reveals": "The specific, physical gesture of the drink and the forward lean of Party Girl's posture.",
+            "emotional_intent": "Party Girl leans in with a conspiratorial tilt, her eyes fixed on the others, while her hand performs a precise, practiced motion of lifting a glass.",
+            "shot_size": "MCU",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                30
+            ],
+            "subject_names": [
+                "Party Girl"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Wind rustling dry grass",
+            "dialog": [
+                {
+                    "subject_id": 30,
+                    "voice": null,
+                    "delivery": "whispered, conspiratorial",
+                    "language": "English",
+                    "text": "We just have a little... refreshment."
+                }
+            ],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 223,
+            "sort_order": 1,
+            "action": "Party Girl leans forward, her voice dropping as she mimes holding a drink, while Friend shifts her weight and glances toward Younger Sister, who remains rigid with hands clasped.",
+            "duration_s": 10.0,
+            "subtext": "The specific nature of the party is being carefully obscured to ensure it is accepted.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 735,
+            "sort_order": 1,
+            "duration_s": 3.5,
+            "action": "Friend shifts her weight from her left foot to her right, her denim jacket creaking, and her gaze darts quickly away from Party Girl toward the right side of the frame.",
+            "reveals": "Friend's physical restlessness and the direction of her shifting attention.",
+            "emotional_intent": "Friend's shoulder drops slightly as she shifts weight, her eyes darting with a quick, searching movement that breaks her previous stillness.",
+            "shot_size": "MCU",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                31
+            ],
+            "subject_names": [
+                "Friend"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Fabric creaking, distant birds",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 223,
+            "sort_order": 1,
+            "action": "Party Girl leans forward, her voice dropping as she mimes holding a drink, while Friend shifts her weight and glances toward Younger Sister, who remains rigid with hands clasped.",
+            "duration_s": 10.0,
+            "subtext": "The specific nature of the party is being carefully obscured to ensure it is accepted.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 736,
+            "sort_order": 2,
+            "duration_s": 3.0,
+            "action": "Younger Sister remains completely motionless, her hands clasped so tightly in front of her chest that her knuckles turn white, while she stares at the ground.",
+            "reveals": "The physical tension in Younger Sister's hands and her downward gaze.",
+            "emotional_intent": "Younger Sister's hands are locked in a rigid clasp, knuckles pale, and her head is bowed, eyes fixed on the dry grass at her feet.",
+            "shot_size": "CU",
+            "angle": "high",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                32
+            ],
+            "subject_names": [
+                "Younger Sister"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Silence",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 224,
+            "sort_order": 2,
+            "action": "Friend steps slightly closer to Party Girl, placing a hand on her arm to assert a boundary, while Younger Sister takes a small step back, her sneakers scuffing the dry grass.",
+            "duration_s": 9.0,
+            "subtext": "Friend is negotiating the terms of inclusion, realizing the cost of the invitation is her sister's comfort.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 752,
+            "sort_order": 0,
+            "duration_s": 3.5,
+            "action": "Friend's hand reaches out and closes firmly around Party Girl's upper arm, applying a subtle but firm pressure to halt her forward momentum.",
+            "reveals": "The physical contact between the two women, establishing a boundary.",
+            "emotional_intent": "Friend's shoulder drops slightly as she anchors herself, jaw set; Party Girl's eyes widen slightly in surprise at the interruption.",
+            "shot_size": "MCU",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                31,
+                30
+            ],
+            "subject_names": [
+                "Friend",
+                "Party Girl"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Soft rustle of denim fabric; distant birdsong.",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 224,
+            "sort_order": 2,
+            "action": "Friend steps slightly closer to Party Girl, placing a hand on her arm to assert a boundary, while Younger Sister takes a small step back, her sneakers scuffing the dry grass.",
+            "duration_s": 9.0,
+            "subtext": "Friend is negotiating the terms of inclusion, realizing the cost of the invitation is her sister's comfort.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 753,
+            "sort_order": 1,
+            "duration_s": 3.0,
+            "action": "Younger Sister's white sneaker scrapes backward against the dry, patchy grass, leaving a faint mark as she creates distance.",
+            "reveals": "The physical reaction of the Younger Sister to the previous interaction, emphasizing her retreat.",
+            "emotional_intent": "Younger Sister's shoulders hunch inward, knuckles white where she grips her own hoodie sleeves.",
+            "shot_size": "CU",
+            "angle": "low",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                32
+            ],
+            "subject_names": [
+                "Younger Sister"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Scuff of rubber on dry grass; a sharp intake of breath.",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 224,
+            "sort_order": 2,
+            "action": "Friend steps slightly closer to Party Girl, placing a hand on her arm to assert a boundary, while Younger Sister takes a small step back, her sneakers scuffing the dry grass.",
+            "duration_s": 9.0,
+            "subtext": "Friend is negotiating the terms of inclusion, realizing the cost of the invitation is her sister's comfort.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 754,
+            "sort_order": 2,
+            "duration_s": 2.5,
+            "action": "Friend turns her head slowly toward Younger Sister, her gaze shifting from Party Girl to her sister, while her hand remains fixed on Party Girl's arm.",
+            "reveals": "The triangulation of the group dynamics, showing Friend's divided attention and negotiation of roles.",
+            "emotional_intent": "Friend's eyes are focused and steady; Party Girl's posture relaxes slightly but she watches Friend with a questioning look.",
+            "shot_size": "MS",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                31,
+                30,
+                32
+            ],
+            "subject_names": [
+                "Friend",
+                "Party Girl",
+                "Younger Sister"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Wind rustling through nearby trees; ambient lawn hum.",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 225,
+            "sort_order": 3,
+            "action": "Party Girl rolls her eyes exaggeratedly before nodding sharply, her flannel sleeves sliding down her wrists, while Younger Sister bites her lip and looks down at her clasped hands.",
+            "duration_s": 8.0,
+            "subtext": "The reluctant agreement is a concession made to avoid conflict, not a genuine welcome.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 767,
+            "sort_order": 0,
+            "duration_s": 3.2,
+            "action": "Party Girl rolls her eyes upward and to the side with exaggerated theatricality, her head tilting back slightly.",
+            "reveals": "Party Girl's face in close proximity, showing the smudged makeup and the specific motion of her eye-roll.",
+            "emotional_intent": "Brows furrowed, eyelids rolling up to the forehead, a slight puff of air from the mouth.",
+            "shot_size": "CU",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                30
+            ],
+            "subject_names": [
+                "Party Girl"
+            ],
+            "camera_motion": "push_in",
+            "camera_amplitude": "small",
+            "camera_speed": "slow",
+            "movement_motivation": "Isolating the expression of reluctant concession to emphasize the lack of genuine enthusiasm.",
+            "is_cut": 1,
+            "sound": "Soft fabric rustle as her head tilts",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 225,
+            "sort_order": 3,
+            "action": "Party Girl rolls her eyes exaggeratedly before nodding sharply, her flannel sleeves sliding down her wrists, while Younger Sister bites her lip and looks down at her clasped hands.",
+            "duration_s": 8.0,
+            "subtext": "The reluctant agreement is a concession made to avoid conflict, not a genuine welcome.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 768,
+            "sort_order": 1,
+            "duration_s": 2.8,
+            "action": "Party Girl drops her head and gives a sharp, single nod, her flannel sleeves sliding down to cover her wrists.",
+            "reveals": "The physical weight of the flannel shirt and the sudden stillness of the gesture.",
+            "emotional_intent": "Jaw set tight, chin tucked slightly, the nod is abrupt rather than gentle.",
+            "shot_size": "MS",
+            "angle": "high",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                30
+            ],
+            "subject_names": [
+                "Party Girl"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 0,
+            "sound": "Fabric sliding down sleeves",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    },
+    {
+        "scene": {
+            "id": 92,
+            "name": "Lawn Pitch",
+            "subtitle": "The Weekend Pitch",
+            "setting": "A sun-drenched college lawn with scattered patches of dry grass. Three young women stand in a loose triangle. Party Girl gestures expansively, her flannel shirt catching the light. Friend stands slightly behind, holding a canvas tote bag. Younger Sister stands apart, hands clasped tightly, wearing a grey hoodie.",
+            "location": "College Lawn",
+            "time_of_day": "Day",
+            "mood": "Casual, slightly tense",
+            "lighting": "Bright, direct sunlight creating sharp shadows",
+            "notes": null,
+            "arc_beats": [
+                "setup",
+                "rising"
+            ],
+            "charge_in": 2,
+            "charge_out": 1
+        },
+        "panel": {
+            "id": 225,
+            "sort_order": 3,
+            "action": "Party Girl rolls her eyes exaggeratedly before nodding sharply, her flannel sleeves sliding down her wrists, while Younger Sister bites her lip and looks down at her clasped hands.",
+            "duration_s": 8.0,
+            "subtext": "The reluctant agreement is a concession made to avoid conflict, not a genuine welcome.",
+            "is_turn": 0,
+            "video_anchor": null,
+            "video_prompt_source": "compiled"
+        },
+        "beat": {
+            "id": 769,
+            "sort_order": 2,
+            "duration_s": 2.0,
+            "action": "Younger Sister bites her lower lip firmly, her gaze dropping to her tightly clasped hands.",
+            "reveals": "The tension in Younger Sister's jaw and the specific action of lip-biting.",
+            "emotional_intent": "Lips pressed together then bitten, eyes fixed downward, shoulders hunched slightly inward.",
+            "shot_size": "CU",
+            "angle": "eye",
+            "lens": "normal",
+            "composition": "centered",
+            "light_quality": "hard",
+            "subject_ids": [
+                32
+            ],
+            "subject_names": [
+                "Younger Sister"
+            ],
+            "camera_motion": "static",
+            "camera_amplitude": null,
+            "camera_speed": null,
+            "movement_motivation": null,
+            "is_cut": 1,
+            "sound": "Subtle intake of breath",
+            "dialog": [],
+            "brief": null,
+            "prompt": null,
+            "prompt_locked": 0,
+            "prompt_source": null,
+            "selected_image_id": null
+        }
+    }
+]

@@ -618,14 +618,55 @@ def render_retention_analysis(
     subjects: Sequence[Mapping[str, Any]],
     scene: Mapping[str, Any],
     timeline: Timeline,
+    beats: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> str:
+    """Section 3 retention lines.
+
+    With ``beats`` (index-aligned with ``timeline``), each subject's
+    ``(appears in ...)`` list is computed per beat from
+    ``beat["subject_ids"]`` -- a subject cast in beats 0 and 2 of a
+    three-beat panel is told to appear in ``[Shot 1], [Shot 3]`` only.
+    Telling H3 every panel subject is present in every shot (the old
+    panel-scoped behavior, kept when ``beats`` is None) staged absent
+    characters into shots and drifted identity across in-clip cuts. A
+    dialog-only speaker falls back to the beats whose dialog names them;
+    a subject cast in no beat at all keeps the whole-timeline list so the
+    line never goes empty. POV mode is a single merged shot, so the list
+    is the whole timeline either way. The environment and keyframe lines
+    are unaffected.
+    """
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     shot_list = ", ".join(f"[Shot {shot.number}]" for shot in timeline.shots)
     pov = pov_subject(subjects, refplan)
     lines: List[str] = []
 
+    def _shots_for(subject_id: int) -> str:
+        if beats is None or pov is not None:
+            return shot_list
+        cast: List[int] = []
+        spoken: List[int] = []
+        for shot in timeline.shots:
+            for i in shot.beat_indices:
+                if i >= len(beats):
+                    continue
+                beat = beats[i]
+                if subject_id in (beat.get("subject_ids") or []):
+                    cast.append(shot.number)
+                    break
+                if any(
+                    d.get("subject_id") == subject_id
+                    for d in (beat.get("dialog") or [])
+                ):
+                    spoken.append(shot.number)
+                    break
+        numbers = cast or spoken
+        if not numbers:
+            return shot_list
+        return ", ".join(f"[Shot {n}]" for n in numbers)
+
     for subject in ordered:
         label = refplan.subject_labels[subject["id"]]
+        subject_shots = _shots_for(subject["id"])
         if pov is not None and subject["id"] == pov[0]["id"]:
             # Frame-anchor assertion (ref-guide retention phrasing): the
             # POV picture is both the first frame and the fixed vantage.
@@ -637,7 +678,8 @@ def render_retention_analysis(
             continue
         descriptor = _first_words(subject.get("description", ""))
         lines.append(
-            f"<{label}> (appears in {shot_list}): fully_preserved - {descriptor}."
+            f"<{label}> (appears in {subject_shots}): fully_preserved - "
+            f"{descriptor}."
         )
 
     if refplan.environment_label is not None:

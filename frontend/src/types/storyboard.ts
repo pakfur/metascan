@@ -48,6 +48,7 @@ export interface Beat {
   is_cut: 0 | 1
   dialog: DialogLine[]
   sound: string | null
+  kind: string | null
   brief: string | null
   prompt: string | null
   prompt_locked: number // 0 | 1 from SQLite
@@ -104,6 +105,7 @@ export interface Panel {
   video_prompt_warnings: string[]
   video_anchor: string | null
   video_compiled_anchor: string | null
+  video_compiled_at: string | null
   created_at: string
   updated_at: string
   beats: Beat[]
@@ -144,8 +146,16 @@ export interface Scene {
   arc_beats: string[]
   charge_in: number | null
   charge_out: number | null
+  function: string | null
   panels: Panel[]
 }
+
+// scenes.function — mirrors SCENE_FUNCTION_VALUES in
+// metascan/core/storyboard_story.py.
+export const SCENE_FUNCTIONS = [
+  'negotiation', 'confession', 'confrontation', 'reveal', 'arrival',
+  'physical_action', 'transit', 'contemplation',
+] as const
 
 export interface Subject {
   id: number
@@ -168,7 +178,10 @@ export interface Subject {
   // beats into a single [Shot 1] with in-shot timestamps and locks the
   // camera to that vantage (POV, static, eye height) for the whole clip.
   pov_ref: 0 | 1
+  subject_type: 'character' | 'location' | 'prop'
 }
+
+export const SUBJECT_TYPES = ['character', 'location', 'prop'] as const
 
 export interface StoryboardSummary {
   id: number
@@ -220,6 +233,16 @@ export const STORY_SCALE_LABELS: Record<string, string> = {
 }
 
 // ---- H3 video prompt compiler ----
+
+// GET /storyboard/templates — summary shape for the shot-template picker.
+export interface ShotTemplateSummary {
+  id: string
+  function: string
+  roles: { id: string; screen_side: string; note: string }[]
+  sections: { panel_index: number; duration_s: number; label: string; slot_count: number }[]
+  slot_count: number
+  duration_s: number
+}
 
 export const VIDEO_TARGETS = ['minimax'] as const
 export const VIDEO_MODES = ['t2va', 'i2va', 'fl2va', 'ref2va'] as const

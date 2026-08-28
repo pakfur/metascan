@@ -165,6 +165,17 @@ const anchorRelevant = computed(
 const recompileSuggested = computed(
   () => anchorRelevant.value && props.panel.video_anchor !== props.panel.video_compiled_anchor,
 )
+// SQLite's datetime('now') writes 'YYYY-MM-DD HH:MM:SS'; normalize any 'T'
+// separator before the plain string compare (both timestamps are UTC).
+function normTs(s: string): string {
+  return s.replace('T', ' ')
+}
+const beatsChangedSinceCompile = computed(() => {
+  const compiledAt = props.panel.video_compiled_at
+  if (!compiledAt) return false
+  const compiledNorm = normTs(compiledAt)
+  return props.panel.beats.some((b) => normTs(b.updated_at) > compiledNorm)
+})
 const videoReady = computed(() => !!store.tree?.video_target && !!store.tree?.video_preset_id)
 
 function compile(): void {
@@ -268,6 +279,13 @@ async function renderVideo(): Promise<void> {
             title="Anchor changed since the last compile"
           >
             recompile suggested
+          </span>
+          <span
+            v-if="beatsChangedSinceCompile"
+            class="sh-chip sh-chip--warn"
+            title="Beats changed since the last compile"
+          >
+            beats changed
           </span>
           <button type="button" class="sh-btn" :disabled="store.compile.running" @click="compile">
             Compile

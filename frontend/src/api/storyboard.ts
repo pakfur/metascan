@@ -4,6 +4,7 @@ import type {
   BeatWithoutImages,
   ComposeStage,
   PanelWithoutBeats,
+  ShotTemplateSummary,
   StoryboardSummary,
   StoryboardTree,
 } from '../types/storyboard'
@@ -96,6 +97,25 @@ export function composeStoryboard(
   return post<{ status: string }>(`/storyboard/${id}/compose`, body)
 }
 
+// Registered before the /storyboard/{id} route on the backend so this
+// literal path never collides with the numeric-id route.
+export function listTemplates(): Promise<ShotTemplateSummary[]> {
+  return get<ShotTemplateSummary[]>('/storyboard/templates')
+}
+
+// Runner-backed, same confirm_required 409 shape as composeStoryboard --
+// callers should catch ApiError and re-call with confirm=true.
+export function applyTemplate(
+  storyboardId: number,
+  sceneId: number,
+  body: { template_id: string; confirm: boolean },
+): Promise<{ status: string }> {
+  return post<{ status: string }>(
+    `/storyboard/${storyboardId}/scenes/${sceneId}/apply-template`,
+    body,
+  )
+}
+
 export function synthesizeStoryboard(
   id: number,
   body: { beat_ids?: number[]; force?: boolean } = {},
@@ -184,6 +204,7 @@ export function createScene(
     lighting?: string | null
     notes?: string | null
     reference_path?: string | null
+    function?: string | null
   },
 ): Promise<{ id: number }> {
   return post<{ id: number }>(`/storyboard/${storyboardId}/scenes`, body)

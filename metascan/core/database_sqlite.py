@@ -15,6 +15,189 @@ from metascan.core.prompt_tokenizer import PromptTokenizer
 logger = logging.getLogger(__name__)
 
 
+SUBJECT_TYPE_VALUES = ("character", "location", "prop")
+
+_LOCATION_WORDS = (
+    "cabin",
+    "house",
+    "home",
+    "room",
+    "kitchen",
+    "bedroom",
+    "bathroom",
+    "hall",
+    "hallway",
+    "corridor",
+    "office",
+    "college",
+    "school",
+    "campus",
+    "lawn",
+    "garden",
+    "yard",
+    "street",
+    "road",
+    "alley",
+    "city",
+    "town",
+    "village",
+    "forest",
+    "woods",
+    "beach",
+    "shore",
+    "lake",
+    "river",
+    "mountain",
+    "field",
+    "farm",
+    "barn",
+    "church",
+    "bar",
+    "cafe",
+    "diner",
+    "restaurant",
+    "hotel",
+    "motel",
+    "station",
+    "airport",
+    "harbor",
+    "dock",
+    "warehouse",
+    "factory",
+    "lab",
+    "laboratory",
+    "hospital",
+    "clinic",
+    "apartment",
+    "flat",
+    "loft",
+    "attic",
+    "basement",
+    "cellar",
+    "garage",
+    "rooftop",
+    "bridge",
+    "tunnel",
+    "park",
+    "plaza",
+    "square",
+    "market",
+    "shop",
+    "store",
+    "interior",
+    "exterior",
+    "landscape",
+    "setting",
+    "location",
+    "building",
+    "castle",
+    "temple",
+    "ruins",
+    "cave",
+    "desert",
+    "island",
+    "ship",
+    "spaceship",
+    "corridor",
+    "deck",
+)
+_PROP_WORDS = (
+    "knife",
+    "gun",
+    "pistol",
+    "rifle",
+    "sword",
+    "letter",
+    "note",
+    "phone",
+    "key",
+    "keys",
+    "ring",
+    "necklace",
+    "watch",
+    "bag",
+    "suitcase",
+    "book",
+    "map",
+    "photo",
+    "photograph",
+    "bottle",
+    "glass",
+    "cup",
+    "mug",
+    "box",
+    "package",
+    "envelope",
+    "coin",
+    "coins",
+    "lamp",
+    "candle",
+    "mirror",
+    "painting",
+    "device",
+    "gadget",
+    "artifact",
+    "relic",
+    "object",
+    "item",
+    "tool",
+    "weapon",
+    "prop",
+)
+
+
+def infer_subject_type(name: str, description: str = "") -> str:
+    """Spec Phase C1 backfill heuristic: classify a roster entry from its
+    name (weighted) and description as ``location`` / ``prop`` when the
+    text makes it obvious, else ``character``. Deliberately conservative
+    -- a wrong ``location`` guess un-casts a real performer, whereas a
+    wrong ``character`` guess just keeps the old behavior."""
+    n = re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower()).split()
+    d = re.sub(r"[^a-z0-9 ]+", " ", (description or "").lower()).split()
+    if not n:
+        return "character"
+    if n[-1] in _LOCATION_WORDS or all(w in _LOCATION_WORDS for w in n):
+        return "location"
+    if n[-1] in _PROP_WORDS or all(w in _PROP_WORDS for w in n):
+        return "prop"
+    head = d[:12]
+    person_words = {
+        "woman",
+        "man",
+        "girl",
+        "boy",
+        "female",
+        "male",
+        "person",
+        "child",
+        "teen",
+        "teenager",
+        "lady",
+        "gentleman",
+        "dog",
+        "cat",
+        "creature",
+        "he",
+        "she",
+        "her",
+        "his",
+        "they",
+        "years",
+        "old",
+        "aged",
+    }
+    if any(w in person_words for w in head):
+        return "character"
+    if head and head[0] in ("a", "an", "the") and len(head) > 1:
+        # "a sun-drenched college lawn ..." / "a rusted iron key"
+        for w in head[1:6]:
+            if w in _LOCATION_WORDS:
+                return "location"
+            if w in _PROP_WORDS:
+                return "prop"
+    return "character"
+
+
 def _idempotent_add_column(
     conn: sqlite3.Connection, table: str, column: str, ddl: str
 ) -> None:
@@ -965,6 +1148,33 @@ class DatabaseManager:
                 "ALTER TABLE storyboard_subjects ADD COLUMN pov_ref "
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            # Spec Phase C1: only 'character' subjects are castable into a
+            # beat's subject_ids (locations/props are roster entries for
+            # the compiler's <Subject N> definitions, never performers).
+            _idempotent_add_column(
+                conn,
+                "storyboard_subjects",
+                "subject_type",
+                "ALTER TABLE storyboard_subjects ADD COLUMN subject_type "
+                "TEXT NOT NULL DEFAULT 'character'",
+            )
+            # Spec Phase D: the dramatic function of a scene -- the shot
+            # template selection key. Nullable; existing rows stay NULL.
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "function",
+                "ALTER TABLE scenes ADD COLUMN function TEXT",
+            )
+            # Spec Phase E: template slot kind
+            # (establishing/action/reaction/insert). NULL for beats the
+            # beats stage composed.
+            _idempotent_add_column(
+                conn,
+                "beats",
+                "kind",
+                "ALTER TABLE beats ADD COLUMN kind TEXT",
+            )
             _idempotent_add_column(
                 conn,
                 "scenes",
@@ -1027,6 +1237,15 @@ class DatabaseManager:
                 "panels",
                 "video_compiled_anchor",
                 "ALTER TABLE panels ADD COLUMN video_compiled_anchor TEXT",
+            )
+            # When the panel's video_prompt was last compiled (UTC, SQLite
+            # datetime('now') shape). The frontend flags "beats changed
+            # since compile" when any beat's updated_at is newer.
+            _idempotent_add_column(
+                conn,
+                "panels",
+                "video_compiled_at",
+                "ALTER TABLE panels ADD COLUMN video_compiled_at TEXT",
             )
             _idempotent_add_column(
                 conn,
@@ -1197,6 +1416,24 @@ class DatabaseManager:
                 # whose drop-and-recreate ran up front, in the Phase B
                 # storyboard-tables section above.
                 conn.execute("PRAGMA user_version = 3")
+
+            if user_version < 4:
+                # Spec Phase C1: pre-existing roster rows were all written
+                # before subject_type existed. Infer location/prop from
+                # the name + description where obvious; everything else
+                # stays 'character' and the user corrects it in the UI.
+                rows = conn.execute(
+                    "SELECT id, name, description FROM storyboard_subjects"
+                ).fetchall()
+                for r in rows:
+                    inferred = infer_subject_type(r["name"], r["description"])
+                    if inferred != "character":
+                        conn.execute(
+                            "UPDATE storyboard_subjects SET subject_type = ? "
+                            "WHERE id = ?",
+                            (inferred, r["id"]),
+                        )
+                conn.execute("PRAGMA user_version = 4")
 
             conn.commit()
 
@@ -1690,10 +1927,12 @@ class DatabaseManager:
             "voice_ref_path",
             "sheet_ref",
             "pov_ref",
+            "subject_type",
         }
     )
     _SCENE_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
+            "function",
             "name",
             "sort_order",
             "subtitle",
@@ -1722,6 +1961,7 @@ class DatabaseManager:
             "video_prompt_warnings",
             "video_anchor",
             "video_compiled_anchor",
+            "video_compiled_at",
             "is_turn",
             "subtext",
         }
@@ -1730,6 +1970,7 @@ class DatabaseManager:
     # through ``select_beat_image``, mirroring the old panel rule.
     _BEAT_UPDATABLE: ClassVar[frozenset] = frozenset(
         {
+            "kind",
             "sort_order",
             "duration_s",
             "action",
@@ -1872,6 +2113,7 @@ class DatabaseManager:
         sort_order: int = 0,
         voice: Optional[str] = None,
         voice_ref_path: Optional[str] = None,
+        subject_type: str = "character",
     ) -> int:
         # storyboard_subjects.reference_path(/_2) FKs media(file_path),
         # which is always stored POSIX -- a native-style path (Windows/WSL)
@@ -1889,8 +2131,9 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO storyboard_subjects (storyboard_id, name, "
                 "description, lora_name, lora_strength, reference_path, "
-                "reference_path_2, sort_order, voice, voice_ref_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reference_path_2, sort_order, voice, voice_ref_path, "
+                "subject_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     name,
@@ -1902,6 +2145,7 @@ class DatabaseManager:
                     sort_order,
                     voice,
                     voice_ref_path,
+                    subject_type,
                 ),
             )
             conn.commit()
@@ -1960,6 +2204,7 @@ class DatabaseManager:
         lighting: Optional[str] = None,
         notes: Optional[str] = None,
         reference_path: Optional[str] = None,
+        function: Optional[str] = None,
     ) -> int:
         # scenes.reference_path FKs media(file_path), which is always
         # stored POSIX -- see create_subject's identical rationale.
@@ -1970,8 +2215,8 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO scenes (storyboard_id, sort_order, name, "
                 "subtitle, setting, location, time_of_day, mood, lighting, "
-                "notes, reference_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "notes, reference_path, function) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     sort_order,
@@ -1984,6 +2229,7 @@ class DatabaseManager:
                     lighting,
                     notes,
                     posix_reference_path,
+                    function,
                 ),
             )
             conn.commit()
@@ -2510,9 +2756,9 @@ class DatabaseManager:
                     "action, shot_size, angle, lens, subject_ids, "
                     "camera_motion, camera_amplitude, camera_speed, "
                     "is_cut, dialog, sound, composition, light_quality, "
-                    "emotional_intent, reveals, movement_motivation) "
+                    "emotional_intent, reveals, movement_motivation, kind) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, ?, ?)",
+                    "?, ?, ?, ?)",
                     (
                         panel_id,
                         b.get("sort_order", i),
@@ -2533,6 +2779,7 @@ class DatabaseManager:
                         b.get("emotional_intent"),
                         b.get("reveals"),
                         b.get("movement_motivation"),
+                        b.get("kind"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
@@ -2639,8 +2886,9 @@ class DatabaseManager:
                 cur = conn.execute(
                     "INSERT INTO scenes (storyboard_id, sort_order, name, "
                     "subtitle, setting, location, time_of_day, mood, "
-                    "lighting, notes, arc_beats, charge_in, charge_out) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "lighting, notes, arc_beats, charge_in, charge_out, "
+                    "function) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         storyboard_id,
                         i,
@@ -2655,6 +2903,7 @@ class DatabaseManager:
                         _json.dumps(list(sc.get("arc_beats") or [])),
                         sc.get("charge_in"),
                         sc.get("charge_out"),
+                        sc.get("function"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))

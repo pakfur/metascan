@@ -14,6 +14,7 @@ import {
   PACINGS,
   STORY_SCALES,
   STORY_SCALE_LABELS,
+  SUBJECT_TYPES,
   presetTag,
 } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
@@ -271,6 +272,12 @@ function onSheetRefChange(id: number, e: Event): void {
 function onPovRefChange(id: number, e: Event): void {
   const checked = (e.target as HTMLInputElement).checked
   void commitSubjectField(id, { pov_ref: checked ? 1 : 0 })
+}
+
+// storyboard_subjects.subject_type: character | location | prop. Drives the
+// beats-stage roster (characters only) and the shot-template role binder.
+function onSubjectTypeChange(id: number, e: Event): void {
+  void commitSubjectField(id, { subject_type: (e.target as HTMLSelectElement).value })
 }
 
 const describing = ref<Record<number, boolean>>({})
@@ -615,6 +622,17 @@ function close(): void {
             <span class="hint">First call may take up to a minute while the model loads.</span>
           </div>
           <div class="describe-row">
+            <label :for="`s-type-${s.id}`" class="hint">Type</label>
+            <select
+              :id="`s-type-${s.id}`"
+              class="subject-type-select"
+              :value="s.subject_type"
+              @change="onSubjectTypeChange(s.id, $event)"
+            >
+              <option v-for="t in SUBJECT_TYPES" :key="t" :value="t">{{ t }}</option>
+            </select>
+          </div>
+          <div class="describe-row">
             <label class="sheet-check">
               <input
                 type="checkbox"
@@ -847,6 +865,16 @@ textarea {
   align-items: center;
   gap: 10px;
   margin-top: 8px;
+}
+
+.subject-type-select {
+  padding: 4px 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 13px;
+  font-family: inherit;
 }
 
 .sheet-check {

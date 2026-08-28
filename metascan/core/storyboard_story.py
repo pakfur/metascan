@@ -128,6 +128,21 @@ LIGHT_QUALITY_VALUES = (
     "firelight",
     "ambient",
 )
+# Spec Phase D: the dramatic work a scene does. Nullable on scenes; the
+# shot-template selection key and the dialogue lint's "verbal" test.
+SCENE_FUNCTION_VALUES = (
+    "negotiation",
+    "confession",
+    "confrontation",
+    "reveal",
+    "arrival",
+    "physical_action",
+    "transit",
+    "contemplation",
+)
+VERBAL_FUNCTIONS = frozenset({"negotiation", "confession", "confrontation"})
+# Spec Phase C1: only characters are castable into beats' subject_ids.
+SUBJECT_TYPE_VALUES = ("character", "location", "prop")
 
 _PROMPT_KEYS = frozenset(
     {
@@ -236,9 +251,10 @@ pacingv ::= {pacing_alts}
 
 _SCENES_TEMPLATE = (
     r"""root ::= "[" ws scene (ws "," ws scene){{{scene_lo},{scene_hi}}} ws "]"
-scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "}}"
+scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "," ws "\"function\"" ws ":" ws scenefn ws "}}"
 arcbeats ::= "[" ws (arcbeat (ws "," ws arcbeat){{0,4}})? ws "]"
 arcbeat ::= {arcbeat_alts}
+scenefn ::= {scenefn_alts}
 charge ::= "-"? [0-5]
 """
     + _COMMON_RULES
@@ -262,6 +278,7 @@ def _build_scale_grammars(scale: str) -> Dict[str, str]:
         ),
         "scenes": _SCENES_TEMPLATE.format(
             arcbeat_alts=_alts(ARC_BEAT_VALUES, with_null=False),
+            scenefn_alts=_alts(SCENE_FUNCTION_VALUES),
             scene_lo=spec["scene_lo"],
             scene_hi=spec["scene_hi"],
         ),
@@ -329,6 +346,17 @@ def _roster_lines(subjects: Sequence[Mapping[str, Any]]) -> str:
         "\n".join(f"- {s['name']}: {s['description']}" for s in subjects)
         or "(none yet)"
     )
+
+
+def castable_subjects(
+    subjects: Sequence[Mapping[str, Any]],
+) -> List[Mapping[str, Any]]:
+    """Spec Phase C1: the roster entries a beat may cast -- characters
+    only. Rows without the column (older dicts, tests) count as
+    characters, matching the schema default."""
+    return [
+        s for s in subjects if (s.get("subject_type") or "character") == "character"
+    ]
 
 
 def build_outline_user_prompt(
@@ -574,6 +602,11 @@ def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
                 ],
                 "charge_in": _charge(sc.get("charge_in")),
                 "charge_out": _charge(sc.get("charge_out")),
+                "function": (
+                    sc.get("function")
+                    if sc.get("function") in SCENE_FUNCTION_VALUES
+                    else None
+                ),
             }
         )
     if not scenes:
@@ -740,6 +773,69 @@ def describe_beat_framing(beat: Mapping[str, Any]) -> str:
     ]
     present = [str(b) for b in bits if b]
     return ", ".join(present) or "unspecified framing"
+
+
+def lint_scene_dialogue(
+    panels: Sequence[Mapping[str, Any]],
+    subjects: Sequence[Mapping[str, Any]],
+    scene_function: Optional[str],
+    *,
+    min_dialog_ratio: float = 0.4,
+    presence_floor: int = 3,
+    max_speaker_share: float = 0.7,
+) -> List[str]:
+    """Spec Phase B2: scene-scoped dialogue-density lint, run after a
+    scene's beats stage. Only fires for a verbal ``scene_function``
+    (negotiation/confession/confrontation) with >= 2 character subjects.
+    Each ``panels[i]["beats"]`` is a composed beat list. Returns
+    warnings (never hard-fails); thresholds are starting points."""
+    if scene_function not in VERBAL_FUNCTIONS:
+        return []
+    characters = castable_subjects(subjects)
+    if len(characters) < 2:
+        return []
+    beats = [b for p in panels for b in (p.get("beats") or [])]
+    if not beats:
+        return []
+    out: List[str] = []
+    with_dialog = sum(1 for b in beats if b.get("dialog"))
+    ratio = with_dialog / len(beats)
+    if ratio < min_dialog_ratio:
+        out.append(
+            f"a {scene_function} scene must carry dialogue on at least "
+            f"{int(min_dialog_ratio * 100)}% of its beats; only "
+            f"{with_dialog} of {len(beats)} beats have a spoken line"
+        )
+    name_by_id = {int(s["id"]): str(s["name"]) for s in characters}
+    presence: Dict[int, int] = {}
+    lines: Dict[int, int] = {}
+    total_lines = 0
+    for b in beats:
+        for sid in b.get("subject_ids") or []:
+            if sid in name_by_id:
+                presence[sid] = presence.get(sid, 0) + 1
+        for d in b.get("dialog") or []:
+            total_lines += 1
+            sid = d.get("subject_id")
+            if sid in name_by_id:
+                lines[sid] = lines.get(sid, 0) + 1
+    for sid, n in presence.items():
+        if n >= presence_floor and lines.get(sid, 0) == 0:
+            out.append(
+                f"{name_by_id[sid]} is present in {n} beats of this "
+                f"{scene_function} scene but never speaks — give them at "
+                "least one line"
+            )
+    if total_lines >= 2:
+        for sid, n in lines.items():
+            if n / total_lines > max_speaker_share:
+                out.append(
+                    f"{name_by_id[sid]} holds {n} of {total_lines} lines — "
+                    f"no speaker may carry more than "
+                    f"{int(max_speaker_share * 100)}% of a scene's dialogue; "
+                    "alternate the exchange"
+                )
+    return out
 
 
 def lint_scene_charges(
