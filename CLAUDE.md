@@ -669,7 +669,7 @@ metascan/
   but nothing in the runner ever sets `GenerationParams.last_frame`, so an
   `fl2va` workflow needing its second anchor must supply it by hand in
   ComfyUI.
-- **Shot-list templates replace the shots+beats stages per scene (spec
+- **Shot-list templates are a per-scene branch of the shots stage (spec
   `docs/plans/refactor-spec-visual-story-quality.md`, Phase E).**
   `metascan/core/shot_templates.py` is pure: it loads `data/templates/*.json`
   (lazily, cached; `reload_templates()` drops the cache) and validates every
@@ -679,22 +679,42 @@ metascan/
   `"STATIC"`) raises `TemplateError` naming the path instead of silently
   nulling through the beats validator. The template owns every structural
   field (`duration_s`, `kind`, `is_cut`, `cast` roles → `subject_ids`,
-  `dialog_slot`, camera); the VLM fills only prose. `StoryboardRunner.
-  apply_template` runs bind roles (grammar alts = the scene's castable
-  character names) → `instantiate` → per-section fill (`fill_grammar`
-  bakes the slot count in and makes a `dialog_slot`'s dialog `string`, not
-  `nullable`, so an unfilled line is structurally impossible) →
-  `conform` (**hard-fails** with `TemplateConformanceError`, the one
-  exception to lint-never-hard-fails) → `replace_scene_panels` +
-  `replace_panel_beats`. It gates through `check_compose_gates(("shots",
-  "beats"), [scene_id], <scene's panel ids>)` and emits the compose WS
-  contract with `stage: "template"`. Routes: `GET /api/storyboard/templates`
-  (registered BEFORE `/{storyboard_id}`) and `POST /api/storyboard/{id}/
-  scenes/{scene_id}/apply-template` (202 / 409 `confirm_required` / 400).
+  `dialog_slot`, camera); the VLM fills only prose. **The user picks the
+  template per scene** (`scenes.template_id`, set through `PATCH
+  /api/storyboard/scenes/{id}`, 400 on an unknown id) — there is no
+  standalone apply-template route any more, and no `apply_template` /
+  `check_template_gates` on the runner. The **shots stage is the single
+  path**: per target scene, a set `template_id` runs
+  `StoryboardRunner._template_scene` (bind roles — grammar alts = the
+  scene's castable character names → `instantiate` → per-section fill
+  (`fill_grammar` bakes the slot count in and makes a `dialog_slot`'s
+  dialog `string`, not `nullable`, so an unfilled line is structurally
+  impossible) → `conform` (**hard-fails** with
+  `TemplateConformanceError`, the one exception to
+  lint-never-hard-fails) → `replace_scene_panels` + `replace_panel_beats`),
+  a NULL one runs the free-form VLM shots call. Either way the scene gets a
+  `composed_from = {"stage": "shots", "template_id": …, "outline_hash": …,
+  "at": …}` provenance stamp (same dict shape the scenes stage writes), and
+  `story_stage_complete` for `shots` carries `template_scenes: [scene_id,
+  …]` — `_run_stage` returns `(count, warnings, extra)` and `_compose_locked`
+  spreads `extra` into the event. The **beats stage skips template-built
+  scenes** (a `template_id` plus beats on every panel) unless the caller
+  passes an explicit `panel_ids` — the "Re-beat shot" button always wins.
+  `check_compose_gates` with `"shots"` runs `templates.validate_assignment`
+  over every target scene **before** the confirm short-circuit and raises a
+  `StoryboardError` (400) listing every problem, so `confirm=true` cannot
+  push a bad selection through; a duration mismatch between the template
+  and the scene's share of the outline is a *warning* by decision (the user
+  chose the template knowing its length). `GET /api/storyboard/{id}` runs
+  `templates.annotate_tree`, attaching `template_problems` /
+  `template_warnings` / `outline_stale` per scene plus a board-level
+  `outline_hash`. Routes: `GET /api/storyboard/templates` (registered
+  BEFORE `/{storyboard_id}` so the literal path wins the match).
   Supporting schema: `storyboard_subjects.subject_type`
   (`character|location|prop`, `user_version = 4` backfills via
   `infer_subject_type`; only characters are castable — `story.
   castable_subjects` is the roster the beats stage and templates use),
+  `scenes.template_id` / `scenes.brief` / `scenes.composed_from`,
   `scenes.function` (`SCENE_FUNCTION_VALUES`, emitted by the scenes stage,
   the template selection key), `beats.kind`, and `panels.video_compiled_at`
   (the frontend's "beats changed since compile" chip). `render_retention_

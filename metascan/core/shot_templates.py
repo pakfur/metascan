@@ -11,7 +11,8 @@ nullability are baked in.
 
 Pure module: no I/O beyond reading the template JSON files under
 ``data/templates/`` and the prompt store. The VLM calls live in
-``StoryboardRunner.apply_template``. Grammars are built here from the
+``StoryboardRunner._template_scene`` (the shots stage). Grammars are built
+here from the
 same enum constants the beats validator uses, so a template whose camera
 vocabulary drifts from the code fails LOUDLY at load time instead of
 silently nulling out through ``x if x in VALUES else None``.

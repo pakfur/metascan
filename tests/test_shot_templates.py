@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import re
-import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,11 +12,7 @@ from backend.api import storyboard as storyboard_api
 from backend.main import create_app
 from metascan.core import shot_templates as t
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.storyboard_runner import (
-    ConfirmRequiredError,
-    StoryboardError,
-    StoryboardRunner,
-)
+from metascan.core.storyboard_runner import StoryboardError, StoryboardRunner
 
 PILOT = "two_party_negotiation_18"
 
@@ -354,97 +349,107 @@ def _board(db):
     return sb, scene
 
 
-def test_apply_template_writes_scene_and_emits_events(db, tmp_path):
+def _shots_vlm():
+    """Template FakeVlm that also answers the free-form shots/beats grammars."""
+    from metascan.core import storyboard_story as story
+
+    class Both(FakeVlm):
+        async def generate_text(
+            self, *, system_prompt, user_prompt, grammar=None, **kw
+        ):
+            if grammar == story.SHOTS_GRAMMAR:
+                self.calls.append((system_prompt, user_prompt, grammar))
+                return json.dumps(
+                    [
+                        {
+                            "action": "free",
+                            "duration_s": 8,
+                            "subtext": "s",
+                            "is_turn": False,
+                        }
+                    ]
+                )
+            if grammar == story.BEATS_GRAMMAR:
+                self.calls.append((system_prompt, user_prompt, grammar))
+                return json.dumps(
+                    [
+                        {
+                            "duration_s": 8,
+                            "action": "b",
+                            "reveals": None,
+                            "emotional_intent": None,
+                            "shot_size": "WS",
+                            "angle": None,
+                            "lens": None,
+                            "composition": None,
+                            "light_quality": None,
+                            "subjects": [],
+                            "camera_motion": None,
+                            "camera_amplitude": None,
+                            "camera_speed": None,
+                            "movement_motivation": None,
+                            "is_cut": False,
+                            "sound": None,
+                            "dialog": [],
+                        }
+                    ]
+                )
+            return await super().generate_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                grammar=grammar,
+                **kw,
+            )
+
+    return Both()
+
+
+def test_shots_stage_uses_scene_template_and_records_provenance(db, tmp_path):
     sb, scene = _board(db)
-    vlm = FakeVlm()
+    free = db.create_scene(sb, name="Free scene", sort_order=1)
+    db.update_scene(scene, template_id=PILOT)
+    vlm = _shots_vlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
     events = []
-    runner.on_event(lambda ch, ev, data: events.append((ch, ev, data)))
-
-    counts = asyncio.run(runner.apply_template(sb, scene, PILOT))
-    assert counts == {"template": 5, "beats": 18}
-    # 1 bind + 5 fills, sequential.
-    assert len(vlm.calls) == 6
-    assert "Party Girl" in vlm.calls[0][2]  # roster names baked into grammar
-    assert "College" not in vlm.calls[0][2]  # location is not castable
-
+    runner.on_event(lambda ch, ev, d: events.append((ch, ev, d)))
+    asyncio.run(runner.compose_story(sb, stages=("shots", "beats")))
     tree = db.get_storyboard_tree(sb)
-    sc = tree["scenes"][0]
-    assert sc["function"] == "negotiation"
-    assert [p["duration_s"] for p in sc["panels"]] == [13.0, 12.5, 12.0, 14.5, 11.5]
-    beats = [b for p in sc["panels"] for b in p["beats"]]
-    assert len(beats) == 18
-    assert [b["kind"] for b in beats[:4]] == [
-        "establishing",
-        "action",
-        "action",
-        "action",
+    templated, freeform = tree["scenes"]
+    assert freeform["id"] == free
+    assert len(templated["panels"]) == 5
+    assert sum(len(p["beats"]) for p in templated["panels"]) == 18
+    assert templated["composed_from"]["stage"] == "shots"
+    assert templated["composed_from"]["template_id"] == PILOT
+    assert len(freeform["panels"]) == 1 and len(freeform["panels"][0]["beats"]) == 1
+    assert freeform["composed_from"]["template_id"] is None
+    done = [
+        d
+        for ch, ev, d in events
+        if ev == "story_stage_complete" and d["stage"] == "shots"
     ]
-    assert beats[0]["subject_ids"] == [
-        tree["subjects"][0]["id"],
-        tree["subjects"][1]["id"],
-    ]
-    assert beats[1]["dialog"][0]["subject_id"] == tree["subjects"][0]["id"]
-    assert beats[1]["dialog"][0]["voice"] == "bright"
-    assert beats[4]["dialog"] == [] and beats[4]["kind"] == "reaction"
-    assert beats[7]["shot_size"] == "CU" and beats[7]["camera_motion"] == "push_in"
-    assert sum(1 for b in beats if b["dialog"]) == 11
-    # The retention analysis / refplan roster is per beat.
-    assert beats[1]["subject_ids"] == [tree["subjects"][0]["id"]]
-
-    names = [e[1] for e in events]
-    assert names[0] == "story_progress" and names[-1] == "story_complete"
-    assert "story_stage_complete" in names
-    prog = [e[2] for e in events if e[1] == "story_progress"]
-    assert prog[0]["stage"] == "template" and prog[-1] == {
-        "storyboard_id": sb,
-        "stage": "template",
-        "done": 6,
-        "total": 6,
-    }
-    stage = next(e[2] for e in events if e[1] == "story_stage_complete")
-    assert stage["roles"] == {"A": "Party Girl", "B": "Friend"}
-
-    # Re-applying without confirm is gated (scene already has shots).
-    with pytest.raises(ConfirmRequiredError):
-        asyncio.run(runner.apply_template(sb, scene, PILOT))
-    assert events[-1][1] == "story_error" and events[-1][2]["stage"] == "template"
-    # ... and with confirm it replaces the tree with fresh panel ids.
-    old_ids = [p["id"] for p in sc["panels"]]
-    asyncio.run(runner.apply_template(sb, scene, PILOT, confirm=True))
-    new_ids = [p["id"] for p in db.get_storyboard_tree(sb)["scenes"][0]["panels"]]
-    assert not set(old_ids) & set(new_ids) and len(new_ids) == 5
+    assert done[0]["template_scenes"] == [scene]
+    # Beats stage must not have re-run over the template-built scene.
+    assert templated["panels"][0]["beats"][0]["action"].startswith("slot 0")
 
 
-def test_apply_template_gates(db, tmp_path):
+def test_shots_gate_lists_every_selection_problem(db, tmp_path):
     sb, scene = _board(db)
+    other = db.create_scene(sb, name="Other", sort_order=1)
+    db.update_scene(scene, template_id="nope")
+    db.update_scene(other, template_id=PILOT)
+    friend = db.get_storyboard_tree(sb)["subjects"][1]["id"]
+    db.update_subject(friend, subject_type="prop")
     vlm = FakeVlm()
     runner = StoryboardRunner(
         db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
     )
-    with pytest.raises(StoryboardError, match="unknown template"):
-        asyncio.run(runner.apply_template(sb, scene, "nope"))
-    with pytest.raises(StoryboardError, match="no scene"):
-        asyncio.run(runner.apply_template(sb, 9999, PILOT))
-    # Too few characters: demote Friend to a prop.
-    friend = db.get_storyboard_tree(sb)["subjects"][1]["id"]
-    db.update_subject(friend, subject_type="prop")
-    with pytest.raises(StoryboardError, match="only 1 character"):
-        asyncio.run(runner.apply_template(sb, scene, PILOT))
+    with pytest.raises(StoryboardError) as exc:
+        asyncio.run(runner.check_compose_gates(sb, ("shots",), None, None, False))
+    msg = str(exc.value)
+    assert "unknown template 'nope'" in msg and "needs 2 characters" in msg
     assert vlm.calls == []
-    # A bad binding is retried once, then the conformance/validation error surfaces.
-    db.update_subject(friend, subject_type="character")
-    bad = FakeVlm(bind={"A": "Party Girl", "B": "Party Girl"})
-    runner2 = StoryboardRunner(
-        db=db, comfy=None, get_vlm=lambda: bad, output_root=tmp_path
-    )
-    with pytest.raises(t.TemplateError, match="more than one role"):
-        asyncio.run(runner2.apply_template(sb, scene, PILOT))
-    assert len(bad.calls) == 2
-    # Nothing was written.
-    assert db.get_storyboard_tree(sb)["scenes"][0]["panels"] == []
 
 
 # ---- API ----------------------------------------------------------------------
@@ -472,35 +477,28 @@ def client(db, tmp_path, monkeypatch):
     storyboard_api.set_storyboard_runner(None)
 
 
-def test_templates_endpoint_and_apply_route(client):
+def test_templates_endpoint_lists_pilot(client):
     c, db = client
     r = c.get("/api/storyboard/templates")
     assert r.status_code == 200
     assert [x["id"] for x in r.json()] == [PILOT]
     assert r.json()[0]["slot_count"] == 18
-
     sb, scene = _board(db)
-    r = c.post(
-        f"/api/storyboard/{sb}/scenes/{scene}/apply-template",
-        json={"template_id": "nope"},
-    )
-    assert r.status_code == 400 and "unknown template" in r.json()["detail"]
-    r = c.post(
+    # The standalone apply-template route is gone (the shots stage is the
+    # single path); the path no longer resolves.
+    assert c.post(
         f"/api/storyboard/{sb}/scenes/{scene}/apply-template",
         json={"template_id": PILOT},
-    )
-    assert r.status_code == 202 and r.json() == {"status": "started"}
-    # Wait for the background task to land.
-    for _ in range(200):
-        if db.get_storyboard_tree(sb)["scenes"][0]["panels"]:
-            break
-        time.sleep(0.02)
-    assert len(db.get_storyboard_tree(sb)["scenes"][0]["panels"]) == 5
-    r = c.post(
-        f"/api/storyboard/{sb}/scenes/{scene}/apply-template",
-        json={"template_id": PILOT},
-    )
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "confirm_required"
+    ).status_code in (404, 405)
+
+
+def test_compose_shots_400_on_template_problem(client):
+    c, db = client
+    sb = db.create_storyboard(name="B", target_model="sd", architecture="t2i")
+    db.update_storyboard(sb, source_text="p", outline="{}")
+    db.create_scene(sb, name="S", template_id=PILOT)
+    r = c.post(f"/api/storyboard/{sb}/compose", json={"stages": ["shots"]})
+    assert r.status_code == 400 and "needs 2 characters" in r.json()["detail"]
 
 
 # ---- Selection validation (user-selected templates) ----------------------------

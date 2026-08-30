@@ -280,6 +280,27 @@ class StoryboardRunner:
             )
             exc._compose_stage = "outline"  # type: ignore[attr-defined]
             raise exc
+        if "shots" in stages:
+            # A bad template selection is a hard error, not a confirmable
+            # one -- checked before the confirm short-circuit so
+            # confirm=true can't bypass it.
+            castable = story.castable_subjects(tree["subjects"])
+            share = templates.scene_share_s(tree)
+            problems: List[str] = []
+            for s in tree["scenes"]:
+                if scene_ids is not None and s["id"] not in scene_ids:
+                    continue
+                errs, _ = templates.validate_assignment(
+                    s.get("template_id"), s, castable, share
+                )
+                problems.extend(errs)
+            if problems:
+                exc = StoryboardError(
+                    "fix these template selections before building shots: "
+                    + "; ".join(problems)
+                )
+                exc._compose_stage = "shots"  # type: ignore[attr-defined]
+                raise exc
         if confirm:
             return
         if "outline" in stages and tree.get("outline"):
@@ -393,7 +414,7 @@ class StoryboardRunner:
                 sem = asyncio.Semaphore(slots)
 
                 for current in run_stages:
-                    n, stage_warnings = await self._run_stage(
+                    n, stage_warnings, extra = await self._run_stage(
                         current, vlm, sem, storyboard_id, scene_ids, panel_ids, confirm
                     )
                     counts[current] = n
@@ -404,6 +425,7 @@ class StoryboardRunner:
                             "storyboard_id": storyboard_id,
                             "stage": current,
                             "warnings": stage_warnings,
+                            **extra,
                         },
                     )
         except Exception as exc:
@@ -420,7 +442,7 @@ class StoryboardRunner:
         scene_ids: Optional[List[int]],
         panel_ids: Optional[List[int]],
         purge: bool,
-    ) -> Tuple[int, List[str]]:
+    ) -> Tuple[int, List[str], Dict[str, Any]]:
         # `purge` mirrors the compose call's `confirm`: a user-confirmed
         # destructive recompose purges the destroyed tree's generated
         # media (files to the OS trash) instead of releasing it into the
@@ -540,7 +562,7 @@ class StoryboardRunner:
                 )
                 created += 1
             progress(1, 1)
-            return 1, []
+            return 1, [], {}
 
         outline_json = tree.get("outline") or ""
         if not outline_json:
@@ -580,7 +602,7 @@ class StoryboardRunner:
             for sid in new_ids:
                 await asyncio.to_thread(self.db.update_scene, sid, composed_from=stamp)
             progress(1, 1)
-            return len(scenes), stage_warnings
+            return len(scenes), stage_warnings, {}
 
         if stage == "shots":
             # spec §10.3: the shots stage's per-shot duration guidance is
@@ -601,9 +623,39 @@ class StoryboardRunner:
             lock = asyncio.Lock()
             made = 0
             shots_warnings: List[str] = []
+            template_scenes: List[int] = []
+            stamp_hash = templates.outline_hash(outline_json)
+
+            def _stamp(template_id: Optional[str]) -> Dict[str, Any]:
+                return {
+                    "stage": "shots",
+                    "template_id": template_id,
+                    "outline_hash": stamp_hash,
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
 
             async def _shots_for(idx: int, scene: Dict[str, Any]) -> int:
                 nonlocal done
+                tid = scene.get("template_id")
+                if tid:
+                    # A user-selected shot-list template owns this scene's
+                    # whole shots+beats tree; the free-form VLM path below
+                    # never runs for it (and the beats stage skips it).
+                    template = templates.get_template(str(tid))
+                    async with sem:
+                        n_panels, _ = await self._template_scene(
+                            tree, scene, template, vlm, purge
+                        )
+                    await asyncio.to_thread(
+                        self.db.update_scene,
+                        scene["id"],
+                        composed_from=_stamp(str(tid)),
+                    )
+                    async with lock:
+                        template_scenes.append(scene["id"])
+                        done += 1
+                        progress(done, total)
+                    return n_panels
                 prev_name = tree["scenes"][idx - 1]["name"] if idx > 0 else None
                 next_name = (
                     tree["scenes"][idx + 1]["name"]
@@ -639,6 +691,9 @@ class StoryboardRunner:
                 )
                 if purged_files:
                     await asyncio.to_thread(remove_files_to_trash, purged_files)
+                await asyncio.to_thread(
+                    self.db.update_scene, scene["id"], composed_from=_stamp(None)
+                )
                 async with lock:
                     done += 1
                     progress(done, total)
@@ -647,7 +702,7 @@ class StoryboardRunner:
 
             results = await asyncio.gather(*(_shots_for(i, s) for i, s in targets))
             made = sum(results)
-            return made, shots_warnings
+            return made, shots_warnings, {"template_scenes": template_scenes}
 
         # stage == "beats" -- sequential within a scene (each beats call
         # sees the previous shot's action + closing framing for continuity),
@@ -670,7 +725,20 @@ class StoryboardRunner:
             )
             for scene in tree["scenes"]
         ]
-        scene_work = [(s, ids) for s, ids in scene_work if ids]
+
+        def _template_done(scene: Dict[str, Any]) -> bool:
+            """A template-built scene already has its beats -- the shots
+            stage wrote them. An explicit panel_ids (the "Re-beat shot"
+            button) always overrides."""
+            return bool(scene.get("template_id")) and all(
+                p.get("beats") for p in scene["panels"]
+            )
+
+        scene_work = [
+            (s, ids)
+            for s, ids in scene_work
+            if ids and not (panel_ids is None and _template_done(s))
+        ]
         total = sum(len(ids) for _, ids in scene_work)
         done = 0
         lock = asyncio.Lock()
@@ -758,98 +826,24 @@ class StoryboardRunner:
         results = await asyncio.gather(
             *(_beats_for_scene(s, ids) for s, ids in scene_work)
         )
-        return sum(results), beats_warnings
+        return sum(results), beats_warnings, {}
 
     # ---- shot-list templates (spec Phase E) --------------------------------
 
-    async def check_template_gates(
+    async def _template_scene(
         self,
-        storyboard_id: int,
-        scene_id: int,
-        template_id: str,
-        confirm: bool,
-    ) -> Dict[str, Any]:
-        """Synchronous-shaped gate for the apply-template route: 404-ish
-        StoryboardError on an unknown storyboard/scene/template, a
-        StoryboardError when the scene has fewer castable characters than
-        the template has roles, and the usual ConfirmRequiredError when
-        the scene already has shots (a template replaces the scene's
-        whole shots+beats tree). Returns the loaded tree for reuse."""
-        try:
-            template = templates.get_template(template_id)
-        except templates.TemplateError as exc:
-            raise StoryboardError(str(exc)) from exc
-        tree: Optional[Dict[str, Any]] = await asyncio.to_thread(
-            self.db.get_storyboard_tree, storyboard_id
-        )
-        if tree is None:
-            raise StoryboardError(f"no storyboard with id {storyboard_id}")
-        scene = next((s for s in tree["scenes"] if s["id"] == scene_id), None)
-        if scene is None:
-            raise StoryboardError(f"no scene {scene_id} in storyboard {storyboard_id}")
-        characters = story.castable_subjects(tree["subjects"])
-        if len(characters) < len(template.roles):
-            raise StoryboardError(
-                f"template {template.id!r} has {len(template.roles)} roles but "
-                f"the storyboard has only {len(characters)} character "
-                "subject(s) -- mark more roster entries as characters"
-            )
-        panel_ids = [p["id"] for p in scene["panels"]]
-        await self.check_compose_gates(
-            storyboard_id, ("shots", "beats"), [scene_id], panel_ids, confirm
-        )
-        return tree
-
-    async def apply_template(
-        self,
-        storyboard_id: int,
-        scene_id: int,
-        template_id: str,
-        *,
-        confirm: bool = False,
-    ) -> Dict[str, int]:
-        """Replace one scene's shots + beats with a shot-list template:
-        bind roles (one grammar-constrained VLM call), instantiate,
-        fill prose per section (one VLM call each, sequential so later
-        sections see the earlier exchange), conform (hard-fails), write.
-        Emits the compose WS contract with ``stage = "template"``."""
-        try:
-            counts = await self._apply_template_locked(
-                storyboard_id, scene_id, template_id, confirm
-            )
-        except Exception as exc:
-            self._emit(
-                "storyboard",
-                "story_error",
-                {
-                    "storyboard_id": storyboard_id,
-                    "stage": "template",
-                    "error": str(exc),
-                },
-            )
-            raise
-        self._emit(
-            "storyboard",
-            "story_complete",
-            {"storyboard_id": storyboard_id, "counts": counts},
-        )
-        return counts
-
-    async def _apply_template_locked(
-        self,
-        storyboard_id: int,
-        scene_id: int,
-        template_id: str,
-        confirm: bool,
-    ) -> Dict[str, int]:
-        vlm = self.get_vlm()
-        if vlm is None:
-            raise StoryboardError("no VLM client — applying a template requires a VLM")
-        tree = await self.check_template_gates(
-            storyboard_id, scene_id, template_id, confirm
-        )
-        template = templates.get_template(template_id)
-        scene = next(s for s in tree["scenes"] if s["id"] == scene_id)
+        tree: Dict[str, Any],
+        scene: Dict[str, Any],
+        template: templates.ShotTemplate,
+        vlm: Any,
+        purge: bool,
+    ) -> Tuple[int, int]:
+        """Build one scene's shots + beats from its selected template:
+        bind roles (one grammar-constrained VLM call), instantiate, fill
+        prose per section (sequential so later sections see the earlier
+        exchange), conform (hard-fails), write. Called from the shots
+        stage under _synth_lock; returns (panels, beats)."""
+        scene_id = int(scene["id"])
         characters = story.castable_subjects(tree["subjects"])
         roster = {s["name"].strip().lower(): int(s["id"]) for s in characters}
         outline: Dict[str, Any] = {}
@@ -857,124 +851,90 @@ class StoryboardRunner:
             outline = json.loads(tree.get("outline") or "{}") or {}
         except (TypeError, ValueError):
             pass
-        total = len(template.sections) + 1
 
-        def progress(done: int) -> None:
-            self._emit(
-                "storyboard",
-                "story_progress",
-                {
-                    "storyboard_id": storyboard_id,
-                    "stage": "template",
-                    "done": done,
-                    "total": total,
-                },
+        # 1. Bind roles.
+        bind_kwargs: Dict[str, Any] = dict(
+            system_prompt=templates.TEMPLATE_BIND_SYSTEM,
+            user_prompt=templates.build_role_bind_user_prompt(
+                template, scene, characters, outline
+            ),
+            grammar=templates.role_bind_grammar(
+                template, [s["name"] for s in characters]
+            ),
+            temperature=0.2,
+            max_tokens=200,
+            timeout=120.0,
+        )
+        try:
+            role_map = templates.validate_role_bind_response(
+                await vlm.generate_text(**bind_kwargs), template, roster
             )
+        except templates.TemplateError as exc:
+            logger.warning("template scene: bad role binding (%s); retrying", exc)
+            role_map = templates.validate_role_bind_response(
+                await vlm.generate_text(**bind_kwargs), template, roster
+            )
+        name_by_id = {int(s["id"]): str(s["name"]) for s in characters}
+        role_names = {rid: name_by_id[sid] for rid, sid in role_map.items()}
+        voices = {int(s["id"]): s.get("voice") for s in characters}
 
-        async with self._synth_lock:
-            model_id = self._pick_vlm_model(vlm)
-            await vlm.ensure_started(model_id)
-
-            # 1. Bind roles.
-            progress(0)
-            bind_kwargs: Dict[str, Any] = dict(
-                system_prompt=templates.TEMPLATE_BIND_SYSTEM,
-                user_prompt=templates.build_role_bind_user_prompt(
-                    template, scene, characters, outline
+        # 2. Instantiate; 3. fill section by section.
+        panels = templates.instantiate(template, role_map)
+        previous: List[Tuple[templates.Section, List[Dict[str, Any]]]] = []
+        for i, section in enumerate(template.sections):
+            fill_kwargs: Dict[str, Any] = dict(
+                system_prompt=templates.TEMPLATE_FILL_SYSTEM,
+                user_prompt=templates.build_fill_user_prompt(
+                    template,
+                    section,
+                    role_names,
+                    scene,
+                    characters,
+                    outline,
+                    previous,
                 ),
-                grammar=templates.role_bind_grammar(
-                    template, [s["name"] for s in characters]
-                ),
-                temperature=0.2,
-                max_tokens=200,
-                timeout=120.0,
+                grammar=templates.fill_grammar(section),
+                temperature=0.6,
+                max_tokens=1600,
+                timeout=300.0,
             )
             try:
-                role_map = templates.validate_role_bind_response(
-                    await vlm.generate_text(**bind_kwargs), template, roster
+                fill = templates.validate_fill_response(
+                    await vlm.generate_text(**fill_kwargs), section
                 )
             except templates.TemplateError as exc:
-                logger.warning("apply_template: bad role binding (%s); retrying", exc)
-                role_map = templates.validate_role_bind_response(
-                    await vlm.generate_text(**bind_kwargs), template, roster
+                logger.warning(
+                    "template scene: section %r invalid (%s); retrying once",
+                    section.label,
+                    exc,
                 )
-            name_by_id = {int(s["id"]): str(s["name"]) for s in characters}
-            role_names = {rid: name_by_id[sid] for rid, sid in role_map.items()}
-            voices = {int(s["id"]): s.get("voice") for s in characters}
-            progress(1)
-
-            # 2. Instantiate; 3. fill section by section.
-            panels = templates.instantiate(template, role_map)
-            previous: List[Tuple[templates.Section, List[Dict[str, Any]]]] = []
-            for i, section in enumerate(template.sections):
-                fill_kwargs: Dict[str, Any] = dict(
-                    system_prompt=templates.TEMPLATE_FILL_SYSTEM,
-                    user_prompt=templates.build_fill_user_prompt(
-                        template,
-                        section,
-                        role_names,
-                        scene,
-                        characters,
-                        outline,
-                        previous,
-                    ),
-                    grammar=templates.fill_grammar(section),
-                    temperature=0.6,
-                    max_tokens=1600,
-                    timeout=300.0,
+                fill = templates.validate_fill_response(
+                    await vlm.generate_text(**fill_kwargs), section
                 )
-                try:
-                    fill = templates.validate_fill_response(
-                        await vlm.generate_text(**fill_kwargs), section
-                    )
-                except templates.TemplateError as exc:
-                    logger.warning(
-                        "apply_template: section %r invalid (%s); retrying once",
-                        section.label,
-                        exc,
-                    )
-                    fill = templates.validate_fill_response(
-                        await vlm.generate_text(**fill_kwargs), section
-                    )
-                templates.apply_fill(panels[i], section, fill, role_map, voices)
-                previous.append((section, fill))
-                progress(i + 2)
+            templates.apply_fill(panels[i], section, fill, role_map, voices)
+            previous.append((section, fill))
 
-            # 4. Conform -- hard-fails by design.
-            templates.conform(template, panels, role_map)
+        # 4. Conform -- hard-fails by design.
+        templates.conform(template, panels, role_map)
 
-            # 5. Write (the confirmed destructive path purges like a
-            # confirmed shots recompose).
-            panel_ids, purged_files = await asyncio.to_thread(
-                self.db.replace_scene_panels, scene_id, panels, confirm
-            )
-            if purged_files:
-                await asyncio.to_thread(remove_files_to_trash, purged_files)
-            n_beats = 0
-            for pid, panel in zip(panel_ids, panels):
-                await asyncio.to_thread(
-                    self.db.replace_panel_beats, pid, panel["beats"], False
-                )
-                n_beats += len(panel["beats"])
-            if not scene.get("function"):
-                await asyncio.to_thread(
-                    self.db.update_scene, scene_id, function=template.function
-                )
-
-        counts = {"template": len(panel_ids), "beats": n_beats}
-        self._emit(
-            "storyboard",
-            "story_stage_complete",
-            {
-                "storyboard_id": storyboard_id,
-                "stage": "template",
-                "warnings": [],
-                "template_id": template.id,
-                "scene_id": scene_id,
-                "roles": role_names,
-            },
+        # 5. Write (the confirmed destructive path purges like a
+        # confirmed shots recompose).
+        panel_ids, purged_files = await asyncio.to_thread(
+            self.db.replace_scene_panels, scene_id, panels, purge
         )
-        return counts
+        if purged_files:
+            await asyncio.to_thread(remove_files_to_trash, purged_files)
+        n_beats = 0
+        for pid, panel in zip(panel_ids, panels):
+            await asyncio.to_thread(
+                self.db.replace_panel_beats, pid, panel["beats"], False
+            )
+            n_beats += len(panel["beats"])
+        if not scene.get("function"):
+            await asyncio.to_thread(
+                self.db.update_scene, scene_id, function=template.function
+            )
+        return len(panel_ids), n_beats
 
     # ---- shared panel helpers --------------------------------------------
 
