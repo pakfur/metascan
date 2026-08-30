@@ -152,6 +152,14 @@ const menuItems = computed<MenuItem[]>(() => {
     })
   }
   items.push({ label: 'Edit scene', icon: 'pi pi-pencil', command: () => openEditor(scene) })
+  const scenes = store.tree?.scenes ?? []
+  const next = scenes[scenes.findIndex((s) => s.id === scene.id) + 1]
+  items.push({
+    label: 'Merge with next scene',
+    icon: 'pi pi-arrow-down',
+    disabled: !next || store.story.running,
+    command: () => void (next && store.mergeScenes([scene.id, next.id])),
+  })
   items.push({
     label: 'Delete scene',
     icon: 'pi pi-trash',

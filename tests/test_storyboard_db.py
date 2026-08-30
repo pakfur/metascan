@@ -1016,3 +1016,68 @@ def test_replace_storyboard_scenes_writes_brief(db):
         sb, [{"name": "S", "brief": "what must happen", "arc_beats": ["setup"]}]
     )
     assert db.get_scene(ids[0])["brief"] == "what must happen"
+
+
+def test_merge_scenes_folds_adjacent_scenes(db):
+    sb = db.create_storyboard(name="M", target_model="sd", architecture="t2i")
+    db.update_storyboard(sb, outline='{"logline": "L"}')
+    a = db.create_scene(
+        sb,
+        name="A",
+        sort_order=0,
+        setting="yard",
+        brief="A asks.",
+        notes="n1",
+        function="negotiation",
+        template_id="two_party_negotiation_18",
+    )
+    b = db.create_scene(sb, name="B", sort_order=1, brief="", notes="n2")
+    c = db.create_scene(sb, name="C", sort_order=2, brief="B refuses.")
+    d = db.create_scene(sb, name="D", sort_order=3)
+    db.update_scene(a, arc_beats=["setup"], charge_in=0, charge_out=-1)
+    db.update_scene(b, arc_beats=["rising"], charge_in=-1, charge_out=-2)
+    db.update_scene(c, arc_beats=["rising", "turn"], charge_in=-2, charge_out=3)
+    pa = db.create_panel(a, action="a1", sort_order=0)
+    pb = db.create_panel(b, action="b1", sort_order=0)
+    pc0 = db.create_panel(c, action="c1", sort_order=0)
+    pc1 = db.create_panel(c, action="c2", sort_order=1)
+
+    merged = db.merge_scenes([a, b, c])
+    assert merged == a
+
+    tree = db.get_storyboard_tree(sb)
+    assert [s["name"] for s in tree["scenes"]] == ["A", "D"]
+    assert [s["sort_order"] for s in tree["scenes"]] == [0, 1]
+    s = tree["scenes"][0]
+    assert s["setting"] == "yard" and s["function"] == "negotiation"
+    assert s["brief"] == "A asks.\n\nB refuses."
+    assert s["notes"] == "n1\n\nn2"
+    assert s["arc_beats"] == ["setup", "rising", "turn"]
+    assert s["charge_in"] == 0 and s["charge_out"] == 3
+    assert s["template_id"] is None
+    assert s["composed_from"]["stage"] == "merge"
+    assert [(p["id"], p["sort_order"]) for p in s["panels"]] == [
+        (pa, 0),
+        (pb, 1),
+        (pc0, 2),
+        (pc1, 3),
+    ]
+    assert db.get_scene(b) is None and db.get_scene(c) is None
+    assert db.get_scene(d)["sort_order"] == 1
+
+
+def test_merge_scenes_rejects_bad_input(db):
+    sb = db.create_storyboard(name="M", target_model="sd", architecture="t2i")
+    a = db.create_scene(sb, name="A", sort_order=0)
+    db.create_scene(sb, name="B", sort_order=1)
+    c = db.create_scene(sb, name="C", sort_order=2)
+    other = db.create_storyboard(name="O", target_model="sd", architecture="t2i")
+    o = db.create_scene(other, name="O1", sort_order=0)
+    with pytest.raises(ValueError, match="at least two"):
+        db.merge_scenes([a])
+    with pytest.raises(ValueError, match="adjacent"):
+        db.merge_scenes([a, c])
+    with pytest.raises(ValueError, match="same storyboard"):
+        db.merge_scenes([a, o])
+    with pytest.raises(ValueError, match="unknown scene"):
+        db.merge_scenes([a, 99999])

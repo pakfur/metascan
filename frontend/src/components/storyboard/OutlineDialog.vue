@@ -159,6 +159,35 @@ const hasTemplateProblems = computed(() =>
 // validated are about to be discarded. Blocking `shots` regardless would
 // silently drop it from the default scenes+shots+beats run and leave the
 // rebuilt board with no shots at all.
+// Merge selection: adjacent scenes only (sort order is contiguous in
+// store.tree.scenes, so "adjacent" == consecutive indexes).
+const mergeChecked = ref(new Set<number>())
+const mergeBusy = ref(false)
+function toggleMerge(id: number): void {
+  const next = new Set(mergeChecked.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  mergeChecked.value = next
+}
+const mergeIds = computed<number[]>(() =>
+  (store.tree?.scenes ?? []).filter((s) => mergeChecked.value.has(s.id)).map((s) => s.id),
+)
+const mergeContiguous = computed(() => {
+  const scenes = store.tree?.scenes ?? []
+  const idx = scenes.map((s, i) => (mergeChecked.value.has(s.id) ? i : -1)).filter((i) => i >= 0)
+  return idx.length >= 2 && idx[idx.length - 1] - idx[0] === idx.length - 1
+})
+async function mergeSelected(): Promise<void> {
+  if (!mergeContiguous.value) return
+  mergeBusy.value = true
+  try {
+    await store.mergeScenes(mergeIds.value)
+    mergeChecked.value = new Set()
+  } finally {
+    mergeBusy.value = false
+  }
+}
+
 const shotsBlocked = computed(() => hasTemplateProblems.value && !stageChecks.scenes)
 
 const checkedStages = computed<ComposeStage[]>(() =>
@@ -297,6 +326,15 @@ function close(): void {
           <label class="field-label">Scenes</label>
           <table class="scene-table">
             <tr v-for="s in store.tree.scenes" :key="s.id">
+              <td class="pick">
+                <input
+                  type="checkbox"
+                  :checked="mergeChecked.has(s.id)"
+                  :disabled="store.story.running || mergeBusy"
+                  title="Select for merge"
+                  @change="toggleMerge(s.id)"
+                />
+              </td>
               <td class="name">{{ s.name }}<div class="brief">{{ s.brief }}</div></td>
               <td><span v-for="b in s.arc_beats" :key="b" class="arc-chip">{{ b }}</span></td>
               <td class="charge" v-if="s.charge_in !== null">{{ s.charge_in }} → {{ s.charge_out }}</td>
@@ -320,6 +358,20 @@ function close(): void {
               </td>
             </tr>
           </table>
+          <div class="merge-row">
+            <button
+              type="button"
+              class="btn-secondary"
+              :disabled="!mergeContiguous || mergeBusy || store.story.running"
+              title="Fold the checked adjacent scenes into one (their shots are kept, in order)"
+              @click="mergeSelected"
+            >
+              {{ mergeBusy ? 'Merging…' : `Merge selected (${mergeIds.length})` }}
+            </button>
+            <span v-if="mergeIds.length >= 2 && !mergeContiguous" class="warn inline">
+              Only adjacent scenes can be merged.
+            </span>
+          </div>
         </template>
 
         <label class="field-label">Stages to build</label>
@@ -529,6 +581,17 @@ h3 {
   padding: 6px 4px;
   vertical-align: top;
   border-top: 1px solid var(--surface-border);
+}
+
+.scene-table .pick {
+  width: 24px;
+}
+
+.merge-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
 }
 
 .scene-table .brief {

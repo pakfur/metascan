@@ -446,6 +446,14 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
   compose stage (or hand-edited) and fed into the shots/beats prompts;
   both fields are nullable and PATCH follows the usual
   `exclude_unset`/explicit-`null`-clears rule.
+- `POST /api/storyboard/{id}/scenes/merge` — body `{scene_ids: [...]}`,
+  two or more **adjacent** scenes; returns `{id}` of the surviving (first)
+  scene. Deterministic, no VLM: descriptors come from the first scene,
+  `charge_out` from the last, `brief`/`notes` are joined, `arc_beats` is
+  the ordered union, `template_id` is cleared, `composed_from.stage` is
+  `"merge"`, and the absorbed scenes' shots are re-parented in order (no
+  beats/images/jobs touched). 400 on fewer than two ids, non-adjacent
+  scenes, or ids outside the storyboard; 404 for an unknown storyboard.
 - `POST /api/storyboard/scenes/{id}/panels` · `PATCH
   /api/storyboard/panels/{id}` · `DELETE /api/storyboard/panels/{id}` —
   panel (shot) CRUD: `action`, `duration_s`, `sort_order`, `image_loras`

@@ -234,6 +234,18 @@ export function describeScene(
   return post(`/storyboard/scenes/${sceneId}/describe`, {})
 }
 
+// Fold two or more ADJACENT scenes into the first (no VLM). The merged
+// scene keeps the first scene's descriptors, unions arc_beats, joins
+// brief/notes, clears template_id, and inherits the others' shots in order.
+export function mergeScenes(
+  storyboardId: number,
+  sceneIds: number[],
+): Promise<{ id: number }> {
+  return post<{ id: number }>(`/storyboard/${storyboardId}/scenes/merge`, {
+    scene_ids: sceneIds,
+  })
+}
+
 export function deleteScene(
   sceneId: number,
   purgeImages = false,

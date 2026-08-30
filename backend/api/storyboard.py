@@ -264,6 +264,10 @@ class ScenePatch(BaseModel):
     brief: Optional[str] = None
 
 
+class MergeScenesRequest(BaseModel):
+    scene_ids: List[int]
+
+
 class PanelCreate(BaseModel):
     action: str
     sort_order: int = 0
@@ -865,6 +869,22 @@ async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
     except InvalidReferenceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": scene_id}
+
+
+@router.post("/{storyboard_id}/scenes/merge")
+async def merge_scenes(storyboard_id: int, body: MergeScenesRequest) -> Dict[str, int]:
+    """Fold two or more adjacent scenes into the first (deterministic, no
+    VLM): descriptors from the first, charge_out from the last, brief/notes
+    joined, arc_beats unioned, template_id cleared, panels re-parented in
+    order. 400 on fewer than two ids, non-adjacent scenes, or ids outside
+    the storyboard."""
+    try:
+        merged = await _service().merge_scenes(storyboard_id, body.scene_ids)
+    except ParentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": merged}
 
 
 @router.patch("/scenes/{scene_id}")

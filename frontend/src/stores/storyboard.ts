@@ -468,6 +468,21 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     }
   }
 
+  async function mergeScenes(sceneIds: number[]): Promise<number | null> {
+    if (!tree.value) return null
+    try {
+      const { id } = await api.mergeScenes(tree.value.id, sceneIds)
+      await refresh()
+      // The merged scene's inherited shots were built for the old scene
+      // boundaries -- offer the usual rebuild via the store-driven prompt.
+      noteDownstream('scene', ['brief', 'arc_beats'], { panelId: null, sceneId: id })
+      return id
+    } catch (e) {
+      error.value = errMessage(e)
+      return null
+    }
+  }
+
   async function removeScene(id: number, purgeImages = false): Promise<void> {
     try {
       await api.deleteScene(id, purgeImages)
@@ -945,6 +960,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     addScene,
     addPanel,
     removeScene,
+    mergeScenes,
     removePanel,
     removePanelVideo,
     importText,

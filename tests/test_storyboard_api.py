@@ -1089,3 +1089,31 @@ def test_patch_scene_template_id_and_brief(client):
     r = client.patch(f"/api/storyboard/scenes/{scene_id}", json={"template_id": None})
     assert r.status_code == 200
     assert client.db.get_scene(scene_id)["template_id"] is None
+
+
+def test_merge_scenes_route(client):
+    sid = _create_storyboard(client)
+    ids = [
+        client.post(
+            f"/api/storyboard/{sid}/scenes", json={"name": n, "sort_order": i}
+        ).json()["id"]
+        for i, n in enumerate(["A", "B", "C"])
+    ]
+    client.patch(f"/api/storyboard/scenes/{ids[0]}", json={"brief": "one"})
+    client.patch(f"/api/storyboard/scenes/{ids[1]}", json={"brief": "two"})
+
+    r = client.post(f"/api/storyboard/{sid}/scenes/merge", json={"scene_ids": [ids[0]]})
+    assert r.status_code == 400 and "at least two" in r.json()["detail"]
+    r = client.post(
+        f"/api/storyboard/{sid}/scenes/merge", json={"scene_ids": [ids[0], ids[2]]}
+    )
+    assert r.status_code == 400 and "adjacent" in r.json()["detail"]
+    r = client.post("/api/storyboard/999999/scenes/merge", json={"scene_ids": ids[:2]})
+    assert r.status_code == 404
+
+    r = client.post(f"/api/storyboard/{sid}/scenes/merge", json={"scene_ids": ids[:2]})
+    assert r.status_code == 200 and r.json() == {"id": ids[0]}
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert [s["name"] for s in tree["scenes"]] == ["A", "C"]
+    assert tree["scenes"][0]["brief"] == "one\n\ntwo"
+    assert tree["scenes"][0]["composed_from"]["stage"] == "merge"
