@@ -284,6 +284,15 @@ async function rebuildShots(confirm = false): Promise<void> {
       </div>
 
       <div class="field">
+        <label for="se-brief">Brief <span class="hint-inline">what this scene must accomplish</span></label>
+        <textarea id="se-brief" v-model="brief" rows="3" placeholder="Derived from the arc entries this scene covers" />
+        <p v-if="props.scene?.arc_beats?.length" class="arc-line">
+          Covers: <span v-for="b in props.scene.arc_beats" :key="b" class="arc-chip">{{ b }}</span>
+          <template v-if="props.scene.charge_in !== null"> · charge {{ props.scene.charge_in }} → {{ props.scene.charge_out }}</template>
+        </p>
+      </div>
+
+      <div class="field">
         <label for="se-setting">Setting</label>
         <textarea
           id="se-setting"
@@ -319,15 +328,6 @@ async function rebuildShots(confirm = false): Promise<void> {
           <option value="">—</option>
           <option v-for="fn in SCENE_FUNCTIONS" :key="fn" :value="fn">{{ fn }}</option>
         </select>
-      </div>
-
-      <div class="field">
-        <label for="se-brief">Brief <span class="hint-inline">what this scene must accomplish</span></label>
-        <textarea id="se-brief" v-model="brief" rows="3" placeholder="Derived from the arc entries this scene covers" />
-        <p v-if="props.scene?.arc_beats?.length" class="arc-line">
-          Covers: <span v-for="b in props.scene.arc_beats" :key="b" class="arc-chip">{{ b }}</span>
-          <template v-if="props.scene.charge_in !== null"> · charge {{ props.scene.charge_in }} → {{ props.scene.charge_out }}</template>
-        </p>
       </div>
 
       <div class="field template-section">

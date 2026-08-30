@@ -132,9 +132,17 @@ function onSceneTemplate(sceneId: number, e: Event): void {
   void store.patchSceneFields(sceneId, { template_id: val })
 }
 
-const shotsBlocked = computed(() =>
-  (store.tree?.scenes ?? []).some((s) => s.template_problems.length > 0),
+const hasTemplateProblems = computed(() =>
+  (store.tree?.scenes ?? []).some((s) => (s.template_problems ?? []).length > 0),
 )
+
+// Mirrors the backend gate (`check_compose_gates`): the template selection
+// check is skipped when the scenes stage runs too, because that stage
+// recreates every scene row with template_id NULL and the selections being
+// validated are about to be discarded. Blocking `shots` regardless would
+// silently drop it from the default scenes+shots+beats run and leave the
+// rebuilt board with no shots at all.
+const shotsBlocked = computed(() => hasTemplateProblems.value && !stageChecks.scenes)
 
 const checkedStages = computed<ComposeStage[]>(() =>
   COMPOSE_STAGES.filter((s) => stageChecks[s] && !(s === 'shots' && shotsBlocked.value)),
@@ -277,8 +285,11 @@ function close(): void {
                     {{ t.function === s.function ? '✓ ' : '' }}{{ t.id }}
                   </option>
                 </select>
-                <p v-for="m in s.template_problems" :key="m" class="error inline">{{ m }}</p>
-                <p v-for="m in s.template_warnings" :key="m" class="warn inline">{{ m }}</p>
+                <p v-for="m in s.template_problems ?? []" :key="m" class="error inline">{{ m }}</p>
+                <p v-for="m in s.template_warnings ?? []" :key="m" class="warn inline">{{ m }}</p>
+                <p v-if="s.outline_stale" class="warn inline" title="Outline changed since this scene was built">
+                  ↻ Outline changed since this scene was built
+                </p>
               </td>
             </tr>
           </table>

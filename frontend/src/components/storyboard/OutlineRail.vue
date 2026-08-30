@@ -14,7 +14,7 @@
             :title="`Emotional charge ${scene.charge_in} → ${scene.charge_out}`"
           >{{ scene.charge_in }} → {{ scene.charge_out }}</span>
           <span v-if="scene.template_id" class="or-template" :title="`Shots from template ${scene.template_id}`">⧉</span>
-          <span v-if="scene.template_problems.length" class="or-problem" :title="scene.template_problems.join('\n')">!</span>
+          <span v-if="(scene.template_problems ?? []).length" class="or-problem" :title="(scene.template_problems ?? []).join('\n')">!</span>
           <span v-else-if="scene.outline_stale" class="or-stale" title="Outline changed since this scene was built">↻</span>
           <span class="or-scene-count">{{ scene.panels.length }}</span>
           <button
