@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { ApiError } from '../../api/client'
+import TextEditPopup from './TextEditPopup.vue'
 import {
   COMPOSE_STAGES,
   STORY_SCALES,
@@ -112,15 +113,31 @@ const parsedOutline = computed(() => {
 })
 const showRaw = ref(false)
 
-function editArcSummary(i: number, text: string): void {
+// Structured edits patch the parsed outline and write it back to
+// outlineText -- the same local ref the raw textarea binds to and that
+// run() PATCHes before any non-outline stage.
+function patchOutline(mutate: (o: Record<string, unknown>) => void): void {
   try {
     const o = JSON.parse(outlineText.value)
-    o.arc[i].summary = text
+    mutate(o)
     outlineText.value = JSON.stringify(o, null, 2)
   } catch {
     // outlineText isn't valid JSON right now (mid hand-edit in raw mode) --
     // nothing sane to patch, leave it alone.
   }
+}
+
+function editLogline(text: string): void {
+  patchOutline((o) => {
+    o.logline = text
+  })
+}
+
+function editArcSummary(i: number, text: string): void {
+  patchOutline((o) => {
+    const arc = o.arc as { summary: string }[]
+    if (arc[i]) arc[i].summary = text
+  })
 }
 
 onMounted(() => {
@@ -252,16 +269,26 @@ function close(): void {
           :disabled="store.story.running"
         />
         <div v-else class="outline-view">
-          <p class="logline">{{ parsedOutline.logline }}</p>
+          <TextEditPopup title="Logline" :value="parsedOutline.logline" @save="editLogline($event)">
+            <input
+              class="logline"
+              :value="parsedOutline.logline"
+              :disabled="store.story.running"
+              placeholder="Logline"
+              @change="editLogline(($event.target as HTMLInputElement).value)"
+            />
+          </TextEditPopup>
           <p class="meta">{{ parsedOutline.tone }} · {{ parsedOutline.pacing }} · {{ parsedOutline.duration }}s</p>
           <ol class="arc">
             <li v-for="(e, i) in parsedOutline.arc" :key="i">
               <span class="arc-chip">{{ e.beat }}</span>
-              <input
-                :value="e.summary"
-                :disabled="store.story.running"
-                @change="editArcSummary(i, ($event.target as HTMLInputElement).value)"
-              />
+              <TextEditPopup :title="`Arc: ${e.beat}`" :value="e.summary" @save="editArcSummary(i, $event)">
+                <input
+                  :value="e.summary"
+                  :disabled="store.story.running"
+                  @change="editArcSummary(i, ($event.target as HTMLInputElement).value)"
+                />
+              </TextEditPopup>
             </li>
           </ol>
         </div>
@@ -446,8 +473,15 @@ h3 {
 }
 
 .logline {
+  width: 100%;
+  box-sizing: border-box;
   margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
   font-size: 13px;
+  font-family: inherit;
   color: var(--text-color);
 }
 
@@ -466,6 +500,11 @@ h3 {
   gap: 8px;
   align-items: center;
   margin: 4px 0;
+}
+
+.arc li > :deep(.tep) {
+  flex: 1;
+  min-width: 0;
 }
 
 .arc input {
