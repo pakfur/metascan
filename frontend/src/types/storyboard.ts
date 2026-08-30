@@ -147,6 +147,17 @@ export interface Scene {
   charge_in: number | null
   charge_out: number | null
   function: string | null
+  brief: string | null
+  template_id: string | null
+  composed_from: {
+    stage: string
+    template_id?: string | null
+    outline_hash: string
+    at: string
+  } | null
+  template_problems: string[]
+  template_warnings: string[]
+  outline_stale: boolean
   panels: Panel[]
 }
 

@@ -1166,6 +1166,25 @@ class DatabaseManager:
                 "function",
                 "ALTER TABLE scenes ADD COLUMN function TEXT",
             )
+            # User-selected scene templates: the chosen shot-list template,
+            # the compose-time brief driving it, and provenance of the last
+            # compose that touched the scene. All nullable; existing rows
+            # stay NULL.
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "template_id",
+                "ALTER TABLE scenes ADD COLUMN template_id TEXT",
+            )
+            _idempotent_add_column(
+                conn, "scenes", "brief", "ALTER TABLE scenes ADD COLUMN brief TEXT"
+            )
+            _idempotent_add_column(
+                conn,
+                "scenes",
+                "composed_from",
+                "ALTER TABLE scenes ADD COLUMN composed_from TEXT",
+            )
             # Spec Phase E: template slot kind
             # (establishing/action/reaction/insert). NULL for beats the
             # beats stage composed.
@@ -1946,6 +1965,9 @@ class DatabaseManager:
             "arc_beats",
             "charge_in",
             "charge_out",
+            "template_id",
+            "brief",
+            "composed_from",
         }
     )
     _PANEL_UPDATABLE: ClassVar[frozenset] = frozenset(
@@ -2354,6 +2376,8 @@ class DatabaseManager:
         notes: Optional[str] = None,
         reference_path: Optional[str] = None,
         function: Optional[str] = None,
+        brief: Optional[str] = None,
+        template_id: Optional[str] = None,
     ) -> int:
         # scenes.reference_path FKs media(file_path), which is always
         # stored POSIX -- see create_subject's identical rationale.
@@ -2364,8 +2388,8 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO scenes (storyboard_id, sort_order, name, "
                 "subtitle, setting, location, time_of_day, mood, lighting, "
-                "notes, reference_path, function) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "notes, reference_path, function, brief, template_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     storyboard_id,
                     sort_order,
@@ -2379,6 +2403,8 @@ class DatabaseManager:
                     notes,
                     posix_reference_path,
                     function,
+                    brief,
+                    template_id,
                 ),
             )
             conn.commit()
@@ -2396,6 +2422,11 @@ class DatabaseManager:
             import json as _json
 
             fields["arc_beats"] = _json.dumps(list(fields["arc_beats"] or []))
+        if "composed_from" in fields:
+            import json as _json
+
+            cf = fields["composed_from"]
+            fields["composed_from"] = _json.dumps(cf) if cf is not None else None
         assignments = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [scene_id]
         with self.lock, self._get_connection() as conn:
@@ -2500,6 +2531,12 @@ class DatabaseManager:
         except (ValueError, TypeError):
             decoded = []
         d["arc_beats"] = decoded if isinstance(decoded, list) else []
+        cf_raw = d.get("composed_from")
+        try:
+            cf = _json.loads(cf_raw) if cf_raw else None
+        except (ValueError, TypeError):
+            cf = None
+        d["composed_from"] = cf if isinstance(cf, dict) else None
         return d
 
     def get_panel(self, panel_id: int) -> Optional[Dict[str, Any]]:
@@ -3036,8 +3073,8 @@ class DatabaseManager:
                     "INSERT INTO scenes (storyboard_id, sort_order, name, "
                     "subtitle, setting, location, time_of_day, mood, "
                     "lighting, notes, arc_beats, charge_in, charge_out, "
-                    "function) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "function, brief) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         storyboard_id,
                         i,
@@ -3053,6 +3090,7 @@ class DatabaseManager:
                         sc.get("charge_in"),
                         sc.get("charge_out"),
                         sc.get("function"),
+                        sc.get("brief"),
                     ),
                 )
                 new_ids.append(int(cur.lastrowid))
