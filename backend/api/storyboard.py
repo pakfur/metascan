@@ -112,6 +112,17 @@ def _validate_scene_function(value: Optional[str]) -> None:
         )
 
 
+def _validate_template_id(value: Optional[str]) -> None:
+    if value is None:
+        return
+    from metascan.core import shot_templates
+
+    try:
+        shot_templates.get_template(value)
+    except shot_templates.TemplateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _reject_null_for_required(
     fields: Dict[str, Any], not_nullable: "frozenset[str]"
 ) -> None:
@@ -230,6 +241,8 @@ class SceneCreate(BaseModel):
     notes: Optional[str] = None
     reference_path: Optional[str] = None
     function: Optional[str] = None
+    template_id: Optional[str] = None
+    brief: Optional[str] = None
 
 
 class ScenePatch(BaseModel):
@@ -247,6 +260,8 @@ class ScenePatch(BaseModel):
     charge_in: Optional[int] = None
     charge_out: Optional[int] = None
     function: Optional[str] = None
+    template_id: Optional[str] = None
+    brief: Optional[str] = None
 
 
 class PanelCreate(BaseModel):
@@ -852,6 +867,7 @@ async def describe_subject(subject_id: int) -> Dict[str, Any]:
 @router.post("/{storyboard_id}/scenes")
 async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
     _validate_scene_function(body.function)
+    _validate_template_id(body.template_id)
     try:
         scene_id = await _service().create_scene(
             storyboard_id,
@@ -866,6 +882,8 @@ async def create_scene(storyboard_id: int, body: SceneCreate) -> Dict[str, int]:
             notes=body.notes,
             reference_path=body.reference_path,
             function=body.function,
+            template_id=body.template_id,
+            brief=body.brief,
         )
     except ParentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -883,6 +901,8 @@ async def patch_scene(scene_id: int, body: ScenePatch) -> Dict[str, str]:
     _reject_null_for_required(fields, _SCENE_NOT_NULLABLE)
     if "function" in fields:
         _validate_scene_function(fields["function"])
+    if "template_id" in fields:
+        _validate_template_id(fields["template_id"])
     if fields:
         try:
             await svc.update_scene(scene_id, **fields)

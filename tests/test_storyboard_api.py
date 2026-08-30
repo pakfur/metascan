@@ -1037,3 +1037,25 @@ def test_patch_cinematic_fields(client):
     # explicit null clears a nullable field
     r = client.patch(f"/api/storyboard/beats/{beat}", json={"reveals": None})
     assert r.status_code == 200 and r.json()["reveals"] is None
+
+
+def test_patch_scene_template_id_and_brief(client):
+    sid = _create_storyboard(client)
+    scene_id = client.post(
+        f"/api/storyboard/{sid}/scenes", json={"name": "Scene 1"}
+    ).json()["id"]
+
+    r = client.patch(f"/api/storyboard/scenes/{scene_id}", json={"template_id": "nope"})
+    assert r.status_code == 400 and "unknown template" in r.json()["detail"]
+
+    r = client.patch(
+        f"/api/storyboard/scenes/{scene_id}",
+        json={"template_id": "two_party_negotiation_18", "brief": "b"},
+    )
+    assert r.status_code == 200
+    scene = client.db.get_scene(scene_id)
+    assert scene["template_id"] == "two_party_negotiation_18" and scene["brief"] == "b"
+
+    r = client.patch(f"/api/storyboard/scenes/{scene_id}", json={"template_id": None})
+    assert r.status_code == 200
+    assert client.db.get_scene(scene_id)["template_id"] is None

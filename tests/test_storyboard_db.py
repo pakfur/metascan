@@ -987,3 +987,32 @@ def test_delete_subject_bad_mode_raises(db):
     sb, maya, *_ = _subject_tree(db)
     with pytest.raises(ValueError):
         db.delete_subject(maya, mode="nope")
+
+
+def test_scene_template_brief_composed_from_round_trip(db):
+    sb, su, sc, pa = _build_tree(db)
+    db.update_scene(
+        sc,
+        template_id="two_party_negotiation_18",
+        brief="A asks; B refuses.",
+        composed_from={"stage": "scenes", "outline_hash": "abc", "at": "2026-08-29"},
+    )
+    scene = db.get_storyboard_tree(sb)["scenes"][0]
+    assert scene["template_id"] == "two_party_negotiation_18"
+    assert scene["brief"] == "A asks; B refuses."
+    assert scene["composed_from"] == {
+        "stage": "scenes",
+        "outline_hash": "abc",
+        "at": "2026-08-29",
+    }
+    db.update_scene(sc, template_id=None, composed_from=None)
+    scene = db.get_storyboard_tree(sb)["scenes"][0]
+    assert scene["template_id"] is None and scene["composed_from"] is None
+
+
+def test_replace_storyboard_scenes_writes_brief(db):
+    sb = db.create_storyboard(name="B", target_model="sd", architecture="t2i")
+    ids, _ = db.replace_storyboard_scenes(
+        sb, [{"name": "S", "brief": "what must happen", "arc_beats": ["setup"]}]
+    )
+    assert db.get_scene(ids[0])["brief"] == "what must happen"
