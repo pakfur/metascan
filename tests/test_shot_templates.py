@@ -272,6 +272,28 @@ def test_prompts_carry_slot_specs_and_previous_sections():
     assert "- A (left of frame): initiator" in bind and "- Friend: d2" in bind
 
 
+def test_template_prompts_carry_brief_and_arc():
+    tp = t.get_template(PILOT)
+    outline = {"logline": "L", "arc": [{"beat": "turn", "summary": "T"}]}
+    scene = {
+        "name": "S",
+        "arc_beats": ["turn"],
+        "brief": "B must break.",
+        "setting": "x",
+    }
+    subjects = [
+        {"id": 1, "name": "A", "description": "d"},
+        {"id": 2, "name": "B", "description": "d"},
+    ]
+    bind = t.build_role_bind_user_prompt(tp, scene, subjects, outline)
+    fill = t.build_fill_user_prompt(
+        tp, tp.sections[0], {"A": "A", "B": "B"}, scene, subjects, outline
+    )
+    for p in (bind, fill):
+        assert "Scene brief: B must break." in p
+        assert "Arc covered by this scene:\n- turn: T" in p
+
+
 # ---- runner ------------------------------------------------------------------
 
 

@@ -420,6 +420,27 @@ def build_shots_user_prompt(
     )
 
 
+def arc_summary_lines(outline: Mapping[str, Any], scene: Mapping[str, Any]) -> str:
+    covered = set(scene.get("arc_beats") or [])
+    return "\n".join(
+        f"- {e.get('beat')}: {e.get('summary')}"
+        for e in (outline.get("arc") or [])
+        if isinstance(e, dict) and e.get("beat") in covered
+    )
+
+
+def scene_context_block(outline: Mapping[str, Any], scene: Mapping[str, Any]) -> str:
+    """Brief + arc summaries, formatted for a user prompt; empty when the
+    scene carries neither."""
+    parts = []
+    if scene.get("brief"):
+        parts.append(f"Scene brief: {scene['brief']}\n")
+    arc = arc_summary_lines(outline, scene)
+    if arc:
+        parts.append(f"Arc covered by this scene:\n{arc}\n")
+    return "".join(parts)
+
+
 def build_beats_user_prompt(
     outline: Mapping[str, Any],
     scene: Mapping[str, Any],
@@ -455,6 +476,7 @@ def build_beats_user_prompt(
         f"Time: {scene.get('time_of_day') or 'unspecified'}; "
         f"lighting: {scene.get('lighting') or 'unspecified'}; "
         f"mood: {scene.get('mood') or 'unspecified'}\n"
+        f"{scene_context_block(outline, scene)}"
         f"Shot: {panel['action']}\n"
         f"Shot subtext: {panel.get('subtext') or 'unspecified'}\n"
         f"{turn_line}"

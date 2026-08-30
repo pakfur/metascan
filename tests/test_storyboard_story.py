@@ -294,6 +294,25 @@ def test_build_beats_user_prompt_reinjects_bible_and_context():
     assert "opening shot" in p2 and "WS or EWS" in p2
 
 
+def test_arc_summary_lines_filters_to_scene():
+    outline = {
+        "arc": [{"beat": "setup", "summary": "S"}, {"beat": "turn", "summary": "T"}]
+    }
+    assert story.arc_summary_lines(outline, {"arc_beats": ["turn"]}) == "- turn: T"
+    assert story.arc_summary_lines(outline, {"arc_beats": []}) == ""
+
+
+def test_beats_prompt_carries_brief_and_arc():
+    outline = {"logline": "L", "arc": [{"beat": "turn", "summary": "T"}]}
+    scene = {"name": "S", "arc_beats": ["turn"], "brief": "B must break."}
+    panel = {"action": "act", "duration_s": 10}
+    p = story.build_beats_user_prompt(
+        outline, scene, panel, [], story.pacing_guidance("standard", 15.0), None, None
+    )
+    assert "Scene brief: B must break." in p
+    assert "Arc covered by this scene:\n- turn: T" in p
+
+
 def test_camera_vocabulary_matches_spec():
     for v in ("push_in", "static", "roll_ccw", "tracking", "pov"):
         assert v in CAMERA_MOTION_VALUES
