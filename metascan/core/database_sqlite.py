@@ -2180,13 +2180,162 @@ class DatabaseManager:
             ).fetchone()
             return dict(row) if row else None
 
-    def delete_subject(self, subject_id: int) -> bool:
+    def _subject_referencing_beats(
+        self, conn: sqlite3.Connection, subject_id: int
+    ) -> List[sqlite3.Row]:
+        """Every beat of the subject's storyboard whose ``subject_ids``
+        casts it or whose ``dialog`` has a line spoken by it. Returns the
+        raw rows (id, panel_id, subject_ids, dialog) so callers can rewrite
+        them in the same transaction. Text mentions are never references."""
+        import json as _json
+
+        sub = conn.execute(
+            "SELECT storyboard_id FROM storyboard_subjects WHERE id = ?",
+            (subject_id,),
+        ).fetchone()
+        if sub is None:
+            return []
+        rows = conn.execute(
+            "SELECT b.id, b.panel_id, b.subject_ids, b.dialog FROM beats b "
+            "JOIN panels p ON p.id = b.panel_id "
+            "JOIN scenes s ON s.id = p.scene_id "
+            "WHERE s.storyboard_id = ? ORDER BY b.id",
+            (int(sub["storyboard_id"]),),
+        ).fetchall()
+        out: List[sqlite3.Row] = []
+        for r in rows:
+            try:
+                ids = _json.loads(r["subject_ids"] or "[]")
+            except (TypeError, ValueError):
+                ids = []
+            try:
+                dialog = _json.loads(r["dialog"] or "[]")
+            except (TypeError, ValueError):
+                dialog = []
+            if subject_id in ids or any(
+                isinstance(d, dict) and d.get("subject_id") == subject_id
+                for d in dialog
+            ):
+                out.append(r)
+        return out
+
+    def subject_references(self, subject_id: int) -> Dict[str, Any]:
+        """``{beat_ids, image_count}`` for the beats that cast or voice the
+        subject -- what a delete would touch. Read-only; the frontend uses
+        it to decide whether to prompt for a deletion mode."""
         with self.lock, self._get_connection() as conn:
+            rows = self._subject_referencing_beats(conn, subject_id)
+            beat_ids = [int(r["id"]) for r in rows]
+            image_count = 0
+            if beat_ids:
+                placeholders = ",".join("?" * len(beat_ids))
+                image_count = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) AS n FROM beat_images "
+                        f"WHERE beat_id IN ({placeholders})",
+                        beat_ids,
+                    ).fetchone()["n"]
+                )
+            return {"beat_ids": beat_ids, "image_count": image_count}
+
+    SUBJECT_DELETE_MODES = ("unlink", "content", "purge")
+
+    def delete_subject(
+        self, subject_id: int, mode: str = "unlink"
+    ) -> Tuple[bool, List[str]]:
+        """Delete a subject and every non-text reference to it.
+
+        ``mode`` decides what happens to the beats that cast or voice it:
+
+        * ``unlink`` -- the beats survive; the id is stripped from their
+          ``subject_ids`` and dialog lines spoken by the subject keep their
+          text with ``subject_id`` set to NULL. Scene/shot/beat prose is
+          never touched (a name mention in text is not a reference).
+        * ``content`` -- those beats are deleted (images released into the
+          library, jobs purged -- see _release_beats), then any shot left
+          without beats and any scene left without shots is deleted too.
+        * ``purge`` -- ``content``, but the beats' generated media rows are
+          deleted and their native paths returned for the caller to trash.
+
+        Returns ``(deleted, purged_file_paths)`` -- same contract as
+        delete_beat/delete_panel. Raises ValueError on an unknown mode.
+        """
+        if mode not in self.SUBJECT_DELETE_MODES:
+            raise ValueError(
+                f"unknown subject delete mode {mode!r}; "
+                f"expected one of {self.SUBJECT_DELETE_MODES}"
+            )
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            rows = self._subject_referencing_beats(conn, subject_id)
+            deleted_files: List[str] = []
+            if mode == "unlink":
+                for r in rows:
+                    ids = [
+                        i
+                        for i in _json.loads(r["subject_ids"] or "[]")
+                        if i != subject_id
+                    ]
+                    dialog = []
+                    for d in _json.loads(r["dialog"] or "[]"):
+                        if isinstance(d, dict) and d.get("subject_id") == subject_id:
+                            d = {**d, "subject_id": None}
+                        dialog.append(d)
+                    conn.execute(
+                        "UPDATE beats SET subject_ids = ?, dialog = ?, "
+                        "updated_at = datetime('now') WHERE id = ?",
+                        (_json.dumps(ids), _json.dumps(dialog), int(r["id"])),
+                    )
+            else:
+                purge = mode == "purge"
+                beat_ids = [int(r["id"]) for r in rows]
+                panel_ids = sorted({int(r["panel_id"]) for r in rows})
+                purge_paths = self._release_beats(conn, beat_ids, purge)
+                if beat_ids:
+                    placeholders = ",".join("?" * len(beat_ids))
+                    conn.execute(
+                        f"DELETE FROM beats WHERE id IN ({placeholders})", beat_ids
+                    )
+                empty_panels = [
+                    pid
+                    for pid in panel_ids
+                    if conn.execute(
+                        "SELECT 1 FROM beats WHERE panel_id = ? LIMIT 1", (pid,)
+                    ).fetchone()
+                    is None
+                ]
+                for pid in panel_ids:
+                    if pid not in empty_panels:
+                        self._sync_panel_duration(conn, pid)
+                if empty_panels:
+                    ph = ",".join("?" * len(empty_panels))
+                    scene_ids = sorted(
+                        {
+                            int(r["scene_id"])
+                            for r in conn.execute(
+                                f"SELECT scene_id FROM panels WHERE id IN ({ph})",
+                                empty_panels,
+                            ).fetchall()
+                        }
+                    )
+                    purge_paths += self._release_panels(conn, empty_panels, purge)
+                    conn.execute(f"DELETE FROM panels WHERE id IN ({ph})", empty_panels)
+                    for scid in scene_ids:
+                        if (
+                            conn.execute(
+                                "SELECT 1 FROM panels WHERE scene_id = ? LIMIT 1",
+                                (scid,),
+                            ).fetchone()
+                            is None
+                        ):
+                            conn.execute("DELETE FROM scenes WHERE id = ?", (scid,))
+                deleted_files = self._purge_media_rows(conn, purge_paths)
             cur = conn.execute(
                 "DELETE FROM storyboard_subjects WHERE id = ?", (subject_id,)
             )
             conn.commit()
-            return int(cur.rowcount) > 0
+            return int(cur.rowcount) > 0, deleted_files
 
     # ---- Scenes -------------------------------------------------------------
 

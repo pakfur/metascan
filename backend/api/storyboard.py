@@ -33,6 +33,7 @@ from backend.services.storyboard_service import (
 )
 from metascan.core import ref_describe as rd
 from metascan.core.comfy_client import ComfyError
+from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
@@ -776,9 +777,27 @@ async def patch_subject(subject_id: int, body: SubjectPatch) -> Dict[str, str]:
     return {"status": "updated"}
 
 
+@router.get("/subjects/{subject_id}/references")
+async def subject_references(subject_id: int) -> Dict[str, Any]:
+    """Beats (cast or dialog) and generated images a delete would touch."""
+    svc = _service()
+    if not await svc.subject_exists(subject_id):
+        raise HTTPException(status_code=404, detail=f"No subject {subject_id}")
+    return await svc.subject_references(subject_id)
+
+
 @router.delete("/subjects/{subject_id}")
-async def delete_subject(subject_id: int) -> Dict[str, str]:
-    ok = await _service().delete_subject(subject_id)
+async def delete_subject(subject_id: int, mode: str = "unlink") -> Dict[str, str]:
+    """``mode``: ``unlink`` strips the subject from every beat's cast and
+    dialog (text untouched); ``content`` also deletes the beats that cast
+    or voice it (plus emptied shots/scenes), releasing images to the
+    library; ``purge`` does the same and trashes the generated media."""
+    if mode not in DatabaseManager.SUBJECT_DELETE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be one of {list(DatabaseManager.SUBJECT_DELETE_MODES)}",
+        )
+    ok = await _service().delete_subject(subject_id, mode)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No subject {subject_id}")
     return {"status": "deleted"}

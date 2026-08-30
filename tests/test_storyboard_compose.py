@@ -480,3 +480,40 @@ def test_beats_sequential_with_prev_context(db, storyboard_id):
     assert "Previous shot in this scene: Maya crosses" in vlm.prompts[1]
     # last BEATS beat is MCU — its framing summary reaches the second call
     assert "MCU" in vlm.prompts[1]
+
+
+def test_outline_does_not_recreate_existing_non_character_subject(db, tmp_path):
+    """The outline VLM echoes every 'Existing subjects' name back
+    (including locations/props). Dedupe must run against the whole
+    roster, not just castable characters -- otherwise a location named
+    in the outline is re-created as a duplicate character on every
+    outline rebuild."""
+    vlm = FakeVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    sb = _board(db)
+    existing = db.create_subject(
+        sb, name="maya", description="x", subject_type="location"
+    )
+    asyncio.run(runner.compose_story(sb, stages=("outline",)))
+    subjects = db.get_storyboard_tree(sb)["subjects"]
+    assert [s["id"] for s in subjects] == [existing]
+    assert subjects[0]["subject_type"] == "location"
+    # and a rebuild still adds nothing
+    asyncio.run(runner.compose_story(sb, stages=("outline",), confirm=True))
+    assert len(db.get_storyboard_tree(sb)["subjects"]) == 1
+
+
+def test_outline_new_subject_gets_inferred_type(db, tmp_path):
+    vlm = FakeVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    sb = _board(db)
+    db.create_subject(sb, name="Rio", description="y", subject_type="location")
+    asyncio.run(runner.compose_story(sb, stages=("outline",)))
+    subjects = db.get_storyboard_tree(sb)["subjects"]
+    assert [s["name"] for s in subjects] == ["Rio", "Maya"]
+    assert subjects[1]["subject_type"] == "character"
+    assert subjects[1]["sort_order"] == 1

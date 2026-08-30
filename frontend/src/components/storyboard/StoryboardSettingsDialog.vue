@@ -3,10 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { listPresets } from '../../api/comfy'
 import { fetchConfig } from '../../api/config'
-import { describeSubject } from '../../api/storyboard'
+import { describeSubject, subjectReferences } from '../../api/storyboard'
+import type { SubjectDeleteMode, SubjectReferences } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
 import ReferenceImagePicker from './ReferenceImagePicker.vue'
 import TextEditPopup from './TextEditPopup.vue'
+import DeleteSubjectDialog from './DeleteSubjectDialog.vue'
 import {
   ASPECT_RATIOS,
   VIDEO_TARGETS,
@@ -312,10 +314,31 @@ function onDismissDescribe(id: number): void {
   delete describeResult.value[id]
 }
 
+// A subject referenced by any beat (cast or dialog line) gets the
+// three-way prompt (DeleteSubjectDialog); an unreferenced one just
+// confirms. Either way the server strips every non-text reference.
+const deleteSubjectPending = ref<{ id: number; refs: SubjectReferences } | null>(null)
+
 async function onDeleteSubject(id: number): Promise<void> {
-  if (!confirm('Delete this subject?')) return
+  let refs: SubjectReferences
   try {
-    await store.removeSubject(id)
+    refs = await subjectReferences(id)
+  } catch (e) {
+    subjectErrors.value[id] = describeError(e)
+    return
+  }
+  if (refs.beat_ids.length === 0) {
+    if (!confirm('Delete this subject?')) return
+    await runDeleteSubject(id, 'unlink')
+    return
+  }
+  deleteSubjectPending.value = { id, refs }
+}
+
+async function runDeleteSubject(id: number, mode: SubjectDeleteMode): Promise<void> {
+  deleteSubjectPending.value = null
+  try {
+    await store.removeSubject(id, mode)
     delete subjectErrors.value[id]
   } catch (e) {
     subjectErrors.value[id] = describeError(e)
@@ -724,6 +747,14 @@ function close(): void {
       v-if="picker !== null"
       @select="onPickReference"
       @close="picker = null"
+    />
+    <DeleteSubjectDialog
+      v-if="deleteSubjectPending"
+      :subject-name="store.tree?.subjects.find((s) => s.id === deleteSubjectPending!.id)?.name ?? ''"
+      :beat-count="deleteSubjectPending.refs.beat_ids.length"
+      :image-count="deleteSubjectPending.refs.image_count"
+      @choose="runDeleteSubject(deleteSubjectPending!.id, $event)"
+      @cancel="deleteSubjectPending = null"
     />
   </div>
 </template>

@@ -412,9 +412,44 @@ def test_subject_crud(client):
     tree2 = client.get(f"/api/storyboard/{sid}").json()
     assert tree2["subjects"][0]["name"] == "Bob"
 
+    r = client.get(f"/api/storyboard/subjects/{subj_id}/references")
+    assert r.status_code == 200
+    assert r.json() == {"beat_ids": [], "image_count": 0}
+
+    r = client.delete(f"/api/storyboard/subjects/{subj_id}", params={"mode": "bogus"})
+    assert r.status_code == 400
+
     r = client.delete(f"/api/storyboard/subjects/{subj_id}")
     assert r.status_code == 200
     assert r.json() == {"status": "deleted"}
+    assert (
+        client.get(f"/api/storyboard/subjects/{subj_id}/references").status_code == 404
+    )
+
+
+def test_delete_subject_modes_via_api(client, panel_id):
+    tree_id = client.get("/api/storyboard").json()[0]["id"]
+    subj = client.post(
+        f"/api/storyboard/{tree_id}/subjects",
+        json={"name": "Alice", "description": "x"},
+    ).json()["id"]
+    r = client.post(
+        f"/api/storyboard/panels/{panel_id}/beats",
+        json={"action": "waves", "sort_order": 5, "subject_ids": [subj]},
+    )
+    assert r.status_code == 200, r.text
+    bid = r.json()["id"]
+    refs = client.get(f"/api/storyboard/subjects/{subj}/references").json()
+    assert refs["beat_ids"] == [bid]
+
+    r = client.delete(f"/api/storyboard/subjects/{subj}", params={"mode": "content"})
+    assert r.status_code == 200
+    tree = client.get(f"/api/storyboard/{tree_id}").json()
+    assert tree["subjects"] == []
+    beat_ids = [
+        b["id"] for s in tree["scenes"] for p in s["panels"] for b in p["beats"]
+    ]
+    assert bid not in beat_ids
 
 
 def test_create_subject_unknown_reference_path_is_400(client):

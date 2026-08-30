@@ -240,9 +240,61 @@ async function save(): Promise<void> {
       store.error = null
       return
     }
+    // A saved change to a field the shots stage reads (utils/storyboardDeps)
+    // leaves a pending prompt in the store; keep the dialog open to ask.
+    if (props.scene && store.downstreamPromptsFor('shots', props.scene.id).length > 0) {
+      return
+    }
     emit('close')
   } finally {
     saving.value = false
+  }
+}
+
+// ---- downstream prompt: rebuild shots after a scene edit ----------------
+
+const shotsPrompt = computed(() =>
+  props.scene ? (store.downstreamPromptsFor('shots', props.scene.id)[0] ?? null) : null,
+)
+const rebuildBusy = ref(false)
+const rebuildError = ref<string | null>(null)
+
+function dismissShotsPrompt(): void {
+  if (shotsPrompt.value) store.dismissDownstream(shotsPrompt.value.key)
+  emit('close')
+}
+
+// Same 409 confirm_required shape as onApplyTemplate: rebuilding shots
+// destroys the scene's existing shots/beats, so the backend gates it.
+async function rebuildShots(confirm = false): Promise<void> {
+  if (!props.scene) return
+  rebuildBusy.value = true
+  rebuildError.value = null
+  try {
+    await store.composeStory({
+      stages: ['shots', 'beats'],
+      scene_ids: [props.scene.id],
+      confirm,
+    })
+    emit('close')
+  } catch (e: unknown) {
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail as { code?: string } | undefined)?.code === 'confirm_required'
+    ) {
+      const message =
+        (e.detail as { message?: string } | undefined)?.message ??
+        'This replaces this scene’s existing shots and beats — continue?'
+      if (window.confirm(message)) {
+        await rebuildShots(true)
+        return
+      }
+    } else {
+      rebuildError.value = errMsg(e)
+    }
+  } finally {
+    rebuildBusy.value = false
   }
 }
 </script>
@@ -384,7 +436,23 @@ async function save(): Promise<void> {
 
       <p v-if="saveError" class="error">{{ saveError }}</p>
 
-      <div class="dialog-actions">
+      <div v-if="shotsPrompt" class="downstream">
+        <p>
+          Scene {{ shotsPrompt.fields.map((f) => f.replace(/_/g, ' ')).join(', ') }} changed —
+          rebuild the shots and beats for this scene? Existing shots are replaced.
+        </p>
+        <p v-if="rebuildError" class="error inline">{{ rebuildError }}</p>
+        <div class="dialog-actions">
+          <button class="btn-primary" :disabled="rebuildBusy || store.story.running" @click="rebuildShots()">
+            {{ rebuildBusy ? 'Rebuilding…' : 'Rebuild shots' }}
+          </button>
+          <button class="btn-secondary" :disabled="rebuildBusy" @click="dismissShotsPrompt">
+            Not now
+          </button>
+        </div>
+      </div>
+
+      <div v-else class="dialog-actions">
         <button class="btn-primary" :disabled="!canSave" @click="save">
           {{ saving ? 'Saving…' : 'Save' }}
         </button>
@@ -604,6 +672,19 @@ textarea {
 
 .error.inline {
   margin-top: 6px;
+}
+
+.downstream {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 40%, transparent);
+}
+.downstream p {
+  margin: 0 0 4px;
 }
 
 .dialog-actions {
