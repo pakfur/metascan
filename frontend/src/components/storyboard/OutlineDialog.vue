@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch, type Ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { ApiError } from '../../api/client'
 import {
@@ -88,8 +88,56 @@ watch(
 
 const hasOutline = computed(() => !!store.tree?.outline)
 
+// Structured view of the outline, parsed from the local editable copy
+// (outlineText) rather than store.tree.outline directly -- keeps the raw
+// textarea and the structured arc list as one source of truth so an edit
+// in either view is reflected in the other without an extra round trip.
+interface ArcEntry {
+  beat: string
+  summary: string
+}
+const parsedOutline = computed(() => {
+  try {
+    const o = JSON.parse(outlineText.value || '{}')
+    return {
+      logline: String(o.logline ?? ''),
+      tone: String(o.tone ?? ''),
+      pacing: String(o.pacing ?? ''),
+      duration: Number(o.duration_target_s ?? 0),
+      arc: (Array.isArray(o.arc) ? o.arc : []) as ArcEntry[],
+    }
+  } catch {
+    return null
+  }
+})
+const showRaw = ref(false)
+
+function editArcSummary(i: number, text: string): void {
+  try {
+    const o = JSON.parse(outlineText.value)
+    o.arc[i].summary = text
+    outlineText.value = JSON.stringify(o, null, 2)
+  } catch {
+    // outlineText isn't valid JSON right now (mid hand-edit in raw mode) --
+    // nothing sane to patch, leave it alone.
+  }
+}
+
+onMounted(() => {
+  void store.loadTemplates()
+})
+
+function onSceneTemplate(sceneId: number, e: Event): void {
+  const val = (e.target as HTMLSelectElement).value || null
+  void store.patchSceneFields(sceneId, { template_id: val })
+}
+
+const shotsBlocked = computed(() =>
+  (store.tree?.scenes ?? []).some((s) => s.template_problems.length > 0),
+)
+
 const checkedStages = computed<ComposeStage[]>(() =>
-  COMPOSE_STAGES.filter((s) => stageChecks[s]),
+  COMPOSE_STAGES.filter((s) => stageChecks[s] && !(s === 'shots' && shotsBlocked.value)),
 )
 
 async function run(stages: ComposeStage[], confirm = false): Promise<void> {
@@ -182,13 +230,59 @@ function close(): void {
       </div>
 
       <template v-if="hasOutline">
-        <label class="field-label">Outline</label>
+        <label class="field-label"
+          >Outline
+          <button type="button" class="link" @click="showRaw = !showRaw">
+            {{ showRaw ? 'structured' : 'raw JSON' }}
+          </button>
+        </label>
         <textarea
+          v-if="showRaw || !parsedOutline"
           v-model="outlineText"
           rows="10"
           class="import-textarea outline-textarea"
           :disabled="store.story.running"
         />
+        <div v-else class="outline-view">
+          <p class="logline">{{ parsedOutline.logline }}</p>
+          <p class="meta">{{ parsedOutline.tone }} · {{ parsedOutline.pacing }} · {{ parsedOutline.duration }}s</p>
+          <ol class="arc">
+            <li v-for="(e, i) in parsedOutline.arc" :key="i">
+              <span class="arc-chip">{{ e.beat }}</span>
+              <input
+                :value="e.summary"
+                :disabled="store.story.running"
+                @change="editArcSummary(i, ($event.target as HTMLInputElement).value)"
+              />
+            </li>
+          </ol>
+        </div>
+
+        <template v-if="store.tree?.scenes.length">
+          <label class="field-label">Scenes</label>
+          <table class="scene-table">
+            <tr v-for="s in store.tree.scenes" :key="s.id">
+              <td class="name">{{ s.name }}<div class="brief">{{ s.brief }}</div></td>
+              <td><span v-for="b in s.arc_beats" :key="b" class="arc-chip">{{ b }}</span></td>
+              <td class="charge" v-if="s.charge_in !== null">{{ s.charge_in }} → {{ s.charge_out }}</td>
+              <td v-else />
+              <td>
+                <select
+                  :value="s.template_id ?? ''"
+                  :disabled="store.story.running"
+                  @change="onSceneTemplate(s.id, $event)"
+                >
+                  <option value="">Free-form</option>
+                  <option v-for="t in store.templates" :key="t.id" :value="t.id">
+                    {{ t.function === s.function ? '✓ ' : '' }}{{ t.id }}
+                  </option>
+                </select>
+                <p v-for="m in s.template_problems" :key="m" class="error inline">{{ m }}</p>
+                <p v-for="m in s.template_warnings" :key="m" class="warn inline">{{ m }}</p>
+              </td>
+            </tr>
+          </table>
+        </template>
 
         <label class="field-label">Stages to build</label>
         <div class="stage-picker">
@@ -196,11 +290,12 @@ function close(): void {
             <input
               type="checkbox"
               v-model="stageChecks[stage]"
-              :disabled="store.story.running"
+              :disabled="store.story.running || (stage === 'shots' && shotsBlocked)"
             />
             {{ STAGE_LABEL[stage] }}
           </label>
         </div>
+        <p v-if="shotsBlocked" class="error">Fix the template problems above before building shots.</p>
 
         <div class="dialog-actions">
           <button
@@ -321,6 +416,84 @@ h3 {
   font-size: 12px;
 }
 
+.link {
+  float: right;
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.outline-view {
+  padding: 8px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+
+.logline {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-color);
+}
+
+.meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.arc {
+  padding-left: 18px;
+}
+
+.arc li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 4px 0;
+}
+
+.arc input {
+  flex: 1;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  background: var(--surface-card);
+  color: var(--text-color);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.scene-table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.scene-table td {
+  padding: 6px 4px;
+  vertical-align: top;
+  border-top: 1px solid var(--surface-border);
+}
+
+.scene-table .brief {
+  color: var(--text-color-secondary);
+}
+
+.arc-chip {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 4px;
+  border-radius: 8px;
+  background: var(--surface-border);
+  font-size: 11px;
+}
+
 .import-textarea:focus {
   outline: none;
   border-color: var(--primary-color);
@@ -356,6 +529,15 @@ h3 {
   border: 1px solid color-mix(in srgb, var(--danger-color, #e53e3e) 40%, transparent);
 }
 
+.warn.inline {
+  color: var(--yellow-500, #d4a017);
+  font-size: 12px;
+  margin: 4px 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
 .confirm-actions {
   display: inline-flex;
   gap: 8px;
@@ -366,6 +548,11 @@ h3 {
   color: var(--danger-color, #e53e3e);
   font-size: 13px;
   margin: 10px 0 0;
+}
+
+.error.inline {
+  font-size: 12px;
+  margin: 4px 0 0;
 }
 
 .busy-line {
