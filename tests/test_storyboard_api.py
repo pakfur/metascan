@@ -320,14 +320,29 @@ def test_parse_no_vlm_is_503(client):
     assert r.status_code == 503
 
 
-def test_parse_success_returns_tree_and_records_call(client):
+def test_parse_success_returns_annotated_tree_and_records_call(client):
+    """The parse response is assigned straight to the frontend store's
+    `tree`, so it must carry the same template annotation GET
+    /{id} does -- outline_hash plus per-scene template_problems /
+    template_warnings / outline_stale."""
     sid = _create_storyboard(client)
-    client.stub.parse_result = {"id": sid, "scenes": [], "subjects": []}
+    client.stub.parse_result = {
+        "id": sid,
+        "outline": "",
+        "subjects": [],
+        "scenes": [{"id": 7, "name": "S1", "template_id": None, "panels": []}],
+    }
     r = client.post(
         f"/api/storyboard/{sid}/parse", json={"text": "a story", "confirm": True}
     )
     assert r.status_code == 200
-    assert r.json() == {"id": sid, "scenes": [], "subjects": []}
+    body = r.json()
+    assert body["id"] == sid
+    assert body["outline_hash"] == ""
+    scene = body["scenes"][0]
+    assert scene["template_problems"] == []
+    assert scene["template_warnings"] == []
+    assert scene["outline_stale"] is False
     assert client.stub.calls == [("parse", sid, "a story", True)]
 
 

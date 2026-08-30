@@ -4,6 +4,8 @@ import asyncio
 import copy
 import json
 import re
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +14,7 @@ from backend.api import storyboard as storyboard_api
 from backend.main import create_app
 from metascan.core import shot_templates as t
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media import Media
 from metascan.core.storyboard_runner import (
     ConfirmRequiredError,
     StoryboardError,
@@ -444,6 +447,74 @@ def test_shots_stage_uses_scene_template_and_records_provenance(db, tmp_path):
     rebeat = db.get_storyboard_tree(sb)["scenes"][0]["panels"]
     assert [b["action"] for b in rebeat[0]["beats"]] == ["b"]
     assert all(p["beats"][0]["action"].startswith("slot") for p in rebeat[1:])
+
+
+def test_template_bind_retries_once_then_propagates(db, tmp_path):
+    """A role binding that fails validation is retried exactly once; the
+    second failure is a hard error that leaves the scene untouched (no
+    half-built shots)."""
+    sb, scene = _board(db)
+    db.update_scene(scene, template_id=PILOT)
+    # Both roles bound to the same character -- validate_role_bind_response
+    # rejects it every time, so the retry fails too.
+    vlm = FakeVlm(bind={"A": "Party Girl", "B": "Party Girl"})
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    with pytest.raises(t.TemplateError, match="more than one role"):
+        asyncio.run(runner.compose_story(sb, stages=("shots",)))
+    # One bind call plus one retry -- and no fill calls, since the bind
+    # never produced a role map.
+    assert len(vlm.calls) == 2
+    assert all(g.startswith('root ::= "{"') for _, _, g in vlm.calls)
+    assert db.get_storyboard_tree(sb)["scenes"][0]["panels"] == []
+
+
+def test_confirmed_template_recompose_purges_generated_images(
+    db, tmp_path, monkeypatch
+):
+    """A confirmed re-run of the templated shots stage is destructive the
+    same way a confirmed free-form recompose is: the replaced panels' beat
+    images are purged and their files go to the OS trash."""
+    sb, scene = _board(db)
+    db.update_scene(scene, template_id=PILOT)
+    vlm = _shots_vlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    asyncio.run(runner.compose_story(sb, stages=("shots", "beats")))
+    built = db.get_storyboard_tree(sb)["scenes"][0]["panels"]
+    old_panel_ids = {p["id"] for p in built}
+    assert len(old_panel_ids) == 5
+
+    img = tmp_path / "keeper.png"
+    img.write_bytes(b"x")
+    db.save_media(
+        Media(
+            file_path=Path(img),
+            file_size=1,
+            width=8,
+            height=8,
+            format="png",
+            created_at=datetime.now(),
+            modified_at=datetime.now(),
+        )
+    )
+    db.set_media_hidden(str(img), True)
+    db.create_beat_image(built[0]["beats"][0]["id"], file_path=str(img))
+
+    trashed = []
+    monkeypatch.setattr("metascan.utils.trash.send2trash", lambda p: trashed.append(p))
+    asyncio.run(runner.compose_story(sb, stages=("shots", "beats"), confirm=True))
+
+    rebuilt = db.get_storyboard_tree(sb)["scenes"][0]["panels"]
+    new_panel_ids = {p["id"] for p in rebuilt}
+    assert len(new_panel_ids) == 5
+    assert new_panel_ids.isdisjoint(old_panel_ids)
+    assert trashed == [str(img)]
+    assert str(img) not in {
+        r["file_path"] for r in db.get_all_media_summaries(include_hidden=True)
+    }
 
 
 def test_shots_gate_lists_every_selection_problem(db, tmp_path):
