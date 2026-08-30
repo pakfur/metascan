@@ -51,12 +51,14 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/comfy/jobs` | List generation jobs |
 | GET | `/api/comfy/jobs/{id}` | Get one generation job |
 | POST | `/api/comfy/jobs/{id}/cancel` | Cancel a queued or running job |
+| GET | `/api/storyboard/templates` | List shot-list templates (`data/templates/*.json`) |
 | GET | `/api/storyboard` | List storyboards |
 | POST | `/api/storyboard` | Create a storyboard |
 | GET | `/api/storyboard/{id}` | Full storyboard tree (subjects, scenes, panels, beats, beat images) |
 | PATCH | `/api/storyboard/{id}` | Update storyboard fields |
 | DELETE | `/api/storyboard/{id}` | Delete a storyboard (its folder survives) |
 | POST | `/api/storyboard/{id}/parse` | VLM-parse source text into subjects/scenes/panels |
+| POST | `/api/storyboard/{id}/compose` | Staged VLM compose: outline → scenes → shots → beats (background, progress via WS) |
 | POST | `/api/storyboard/{id}/synthesize` | Compose per-beat prompts (background, progress via WS) |
 | POST | `/api/storyboard/{id}/generate` | Submit beats (still keyframes) to ComfyUI |
 | POST | `/api/storyboard/{id}/cancel` | Cancel queued/running jobs for a storyboard |
@@ -278,14 +280,42 @@ Returns
   `2.39:1`, `9:16`) — validated at save time, not at generate time.
 - `notes` is free-form and UI-only — no pipeline stage reads it.
 
+### `GET /api/storyboard/templates`
+Lists shot-list templates loaded from `data/templates/*.json`
+(`shot_templates.list_templates`), each summarized as `{id, function,
+description, roles: [{id, screen_side, note}], sections: [{panel_index,
+duration_s, label, slot_count}], slot_count, duration_s}`. Registered
+before `/{storyboard_id}` so the literal path wins the route match.
+**500** if a template file on disk fails validation.
+
 ### `GET /api/storyboard/{id}`
-Returns the full nested tree: `{...storyboard fields, subjects: [...],
-scenes: [{...scene fields, panels: [{...panel fields, beats: [{...beat
-fields, images: [...]}]}]}]}`. Panel fields are just `id`, `scene_id`,
-`sort_order`, `action`, `duration_s`, the `video_*` fields, and
-timestamps — the framing/prompt/subject/keeper fields live on each beat
-in its `beats` array instead, along with `images` (the beat's
-`beat_images` rows, paths via `to_native_path`). 404 if unknown.
+Returns the full nested tree: `{...storyboard fields, outline_hash,
+subjects: [...], scenes: [{...scene fields, template_problems: [...],
+template_warnings: [...], outline_stale: bool, panels: [{...panel
+fields, beats: [{...beat fields, images: [...]}]}]}]}`. Panel fields are
+just `id`, `scene_id`, `sort_order`, `action`, `duration_s`, the
+`video_*` fields, and timestamps — the framing/prompt/subject/keeper
+fields live on each beat in its `beats` array instead, along with
+`images` (the beat's `beat_images` rows, paths via `to_native_path`).
+404 if unknown.
+
+`outline_hash` and the per-scene `template_problems`/`template_warnings`/
+`outline_stale` fields are computed live on every read by
+`shot_templates.annotate_tree` — they are never stored:
+- `template_problems` — errors from `validate_assignment` for the
+  scene's `template_id` (e.g. the template needs more castable
+  characters than the storyboard has, or `template_id` no longer names a
+  template on disk). A scene with problems can't be built by the shots
+  compose stage until the selection is fixed (see `POST
+  .../compose` below).
+- `template_warnings` — advisory-only mismatches (the template's
+  `function` differs from the scene's `function`; the template's
+  duration differs from the scene's rough share of the story's runtime).
+  These never block anything.
+- `outline_stale` — `true` when the scene has been composed
+  (`composed_from` is set) but its `composed_from.outline_hash` no
+  longer matches the storyboard's current `outline_hash` — i.e. the
+  outline changed since this scene's shots were last built from it.
 
 ### `PATCH /api/storyboard/{id}`
 Partial update of any storyboard column. Returns `{status: "updated"}`.
@@ -329,6 +359,33 @@ existing structure. Returns the fresh tree (same shape as `GET
   `panel_id`/`beat_id`).
 - **422** if the VLM's output doesn't validate against the parse schema.
 - **503** if no VLM client is available to parse with.
+
+### `POST /api/storyboard/{id}/compose` (status: 202)
+Body: `{stages?: string[], scene_ids?: int[], panel_ids?: int[], confirm:
+boolean = false}`. Runs the staged VLM story engine
+(`outline` → `scenes` → `shots` → `beats`, default all four) in the
+background. Returns immediately: `{status: "started"}`; progress and
+completion stream on the `storyboard` WS channel (below) — there is no
+other signal that a 202'd run has finished.
+- **400** if `stages` names an unknown stage, if `outline` is requested
+  with no premise (`source_text`) set, or — when `shots` is requested
+  without `scenes` in the same call — if any target scene's selected
+  `template_id` fails `validate_assignment` (e.g. a template that needs
+  more castable characters than the storyboard has, or a `template_id`
+  that no longer names a template on disk). This check runs before the
+  confirm gate and **regardless of `confirm`** — a bad template
+  selection can't be forced through. Duration and scene-function
+  mismatches between a template and its scene are warnings only and
+  never block the call (see `template_warnings` on the tree above).
+  When `scenes` is also in `stages`, this check is skipped entirely: the
+  scenes stage recreates every scene row with `template_id` reset to
+  `NULL`, so whatever was selected is about to be discarded anyway.
+- **409** `{code: "confirm_required"}` if the target already has content
+  a stage would destroy (an existing outline, existing scenes, or shots
+  for a target scene that already has panels) and `confirm` wasn't set.
+  Beats-only recompose asks for `confirm` when any target beat already
+  has `beat_images` or a locked prompt.
+- 404 if the storyboard doesn't exist.
 
 ### `POST /api/storyboard/{id}/synthesize` (status: 202)
 Body: `{beat_ids?: int[], force: boolean = false}`. Composes (or
@@ -376,7 +433,16 @@ Returns `{cancelled: n}`. 404 if the storyboard doesn't exist.
 - `POST /api/storyboard/{id}/scenes` · `PATCH
   /api/storyboard/scenes/{id}` · `DELETE /api/storyboard/scenes/{id}` —
   scene CRUD (name, subtitle, setting, location, time_of_day, mood,
-  lighting, notes, sort_order, reference_path).
+  lighting, notes, sort_order, reference_path, `template_id`, `brief`).
+  `template_id` is the user's shot-list template selection (an id from
+  `GET /api/storyboard/templates`, or `null` for free-form shots — the
+  create default) that the shots compose stage builds the scene from;
+  sending an id that doesn't name a template on disk is rejected with
+  **400** `unknown template '<id>'` on both create and PATCH, before any
+  write. `brief` is a free-form scene summary emitted by the scenes
+  compose stage (or hand-edited) and fed into the shots/beats prompts;
+  both fields are nullable and PATCH follows the usual
+  `exclude_unset`/explicit-`null`-clears rule.
 - `POST /api/storyboard/scenes/{id}/panels` · `PATCH
   /api/storyboard/panels/{id}` · `DELETE /api/storyboard/panels/{id}` —
   panel (shot) CRUD: `action`, `duration_s`, `sort_order`, `image_loras`
@@ -429,6 +495,22 @@ Bridged from `StoryboardRunner.on_event`. The runner also emits
 `folder_created` / `folder_items_changed` through the same callback, but
 those go out on the **`folders`** channel, not `storyboard`:
 
+- **`story_progress`** — `{storyboard_id, stage, done, total}`, emitted
+  repeatedly within a stage as `POST .../compose` works through its
+  scope.
+- **`story_stage_complete`** — `{storyboard_id, stage, warnings, ...}`,
+  sent once per finished stage. For `stage: "shots"` it also carries
+  `template_scenes: [scene_id, ...]` — the ids of scenes that were built
+  from a selected `template_id` rather than free-form.
+- **`story_complete`** — `{storyboard_id, counts}`, sent once when a
+  `POST .../compose` background run finishes every requested stage;
+  `counts` maps stage name to the number of scenes/panels/beats it
+  produced. Since `compose` returns 202 immediately, this (or
+  `story_error`) is the only signal a client gets that the run is
+  actually done.
+- **`story_error`** — `{storyboard_id, stage, error}`, sent instead of
+  `story_complete` if the background run raises, naming the stage it
+  failed in.
 - **`synthesis_progress`** — `{storyboard_id, panel_id, beat_id, done,
   total, prompt_source}`, one per beat as `POST .../synthesize` works
   through
