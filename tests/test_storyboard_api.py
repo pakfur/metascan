@@ -178,6 +178,7 @@ def test_create_get_patch_delete_round_trip(client):
     assert body["scenes"] == []
     assert body["subjects"] == []
     assert isinstance(body["base_seed"], int)
+    assert "outline_hash" in body
 
     r = client.patch(f"/api/storyboard/{sid}", json={"name": "Renamed"})
     assert r.status_code == 200
@@ -195,6 +196,20 @@ def test_create_get_patch_delete_round_trip(client):
 
 def test_get_unknown_storyboard_is_404(client):
     assert client.get("/api/storyboard/9999").status_code == 404
+
+
+def test_get_storyboard_annotates_scenes_with_template_check(client):
+    sid = _create_storyboard(client)
+    scene_id = client.post(
+        f"/api/storyboard/{sid}/scenes", json={"name": "Scene 1"}
+    ).json()["id"]
+
+    tree = client.get(f"/api/storyboard/{sid}").json()
+    assert "outline_hash" in tree
+    scene = next(s for s in tree["scenes"] if s["id"] == scene_id)
+    assert scene["template_problems"] == []
+    assert scene["template_warnings"] == []
+    assert scene["outline_stale"] is False
 
 
 def test_patch_unknown_storyboard_is_404(client):
