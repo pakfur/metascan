@@ -115,8 +115,14 @@ class StoryboardService:
                 "reference image is not in the media library"
             ) from exc
 
-    async def delete_subject(self, subject_id: int) -> bool:
-        return await asyncio.to_thread(self.db.delete_subject, subject_id)
+    async def subject_references(self, subject_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.db.subject_references, subject_id)
+
+    async def delete_subject(self, subject_id: int, mode: str = "unlink") -> bool:
+        ok, purged = await asyncio.to_thread(self.db.delete_subject, subject_id, mode)
+        if purged:
+            await asyncio.to_thread(_remove_files_sync, purged)
+        return ok
 
     # ---- scenes -------------------------------------------------------------
 

@@ -142,7 +142,7 @@ def test_update_subject_and_delete(db):
     db.update_subject(su, description="updated desc")
     tree = db.get_storyboard_tree(sb)
     assert tree["subjects"][0]["description"] == "updated desc"
-    assert db.delete_subject(su) is True
+    assert db.delete_subject(su) == (True, [])
     assert db.get_storyboard_tree(sb)["subjects"] == []
 
 
@@ -867,3 +867,123 @@ def test_cinematic_columns_roundtrip(db):
     assert beat["movement_motivation"] is None
     db.update_beat(bids[0], movement_motivation="she pulls away")
     assert db.get_beat(bids[0])["movement_motivation"] == "she pulls away"
+
+
+# ---- subject deletion modes -------------------------------------------------
+
+
+def _subject_tree(db):
+    """Two subjects; beat A casts both + dialog by MAYA, beat B casts only
+    RIO, beat C (own shot, own scene) casts nobody but MAYA speaks in it."""
+    sb, maya, sc, pa = _build_tree(db)
+    rio = db.create_subject(sb, name="RIO", description="tall")
+    a = db.create_beat(
+        pa,
+        action="A",
+        subject_ids=[maya, rio],
+        dialog=[
+            {
+                "subject_id": maya,
+                "voice": None,
+                "delivery": None,
+                "language": "en",
+                "text": "hi",
+            },
+            {
+                "subject_id": rio,
+                "voice": None,
+                "delivery": None,
+                "language": "en",
+                "text": "hey",
+            },
+        ],
+    )
+    b = db.create_beat(pa, action="B", sort_order=1, subject_ids=[rio])
+    sc2 = db.create_scene(sb, name="Later", sort_order=1)
+    pa2 = db.create_panel(sc2, action="talk", sort_order=0)
+    c = db.create_beat(
+        pa2,
+        action="C",
+        subject_ids=[],
+        dialog=[
+            {
+                "subject_id": maya,
+                "voice": None,
+                "delivery": None,
+                "language": "en",
+                "text": "bye",
+            },
+        ],
+    )
+    return sb, maya, rio, sc, pa, sc2, pa2, a, b, c
+
+
+def test_subject_references_counts_cast_and_dialog(db):
+    sb, maya, rio, sc, pa, sc2, pa2, a, b, c = _subject_tree(db)
+    refs = db.subject_references(maya)
+    assert sorted(refs["beat_ids"]) == sorted([a, c])
+    assert refs["image_count"] == 0
+    assert db.subject_references(rio)["beat_ids"] == sorted([a, b])
+    assert db.subject_references(999999) == {"beat_ids": [], "image_count": 0}
+
+
+def test_delete_subject_unlink_strips_ids_but_keeps_text(db):
+    sb, maya, rio, sc, pa, sc2, pa2, a, b, c = _subject_tree(db)
+    assert db.delete_subject(maya) == (True, [])
+    tree = db.get_storyboard_tree(sb)
+    assert [s["id"] for s in tree["subjects"]] == [rio]
+    beats = {
+        bt["id"]: bt for s in tree["scenes"] for p in s["panels"] for bt in p["beats"]
+    }
+    assert set(beats) == {a, b, c}
+    assert beats[a]["subject_ids"] == [rio]
+    assert beats[a]["action"] == "A"
+    assert [d["subject_id"] for d in beats[a]["dialog"]] == [None, rio]
+    assert [d["text"] for d in beats[a]["dialog"]] == ["hi", "hey"]
+    assert beats[c]["dialog"][0]["subject_id"] is None
+    assert beats[c]["dialog"][0]["text"] == "bye"
+    assert db.subject_references(maya) == {"beat_ids": [], "image_count": 0}
+
+
+def test_delete_subject_content_removes_beats_and_empty_shots_scenes(db):
+    sb, maya, rio, sc, pa, sc2, pa2, a, b, c = _subject_tree(db)
+    assert db.delete_subject(maya, mode="content") == (True, [])
+    tree = db.get_storyboard_tree(sb)
+    assert [s["id"] for s in tree["subjects"]] == [rio]
+    # scene 2's only shot's only beat referenced MAYA -> shot + scene gone
+    assert [s["id"] for s in tree["scenes"]] == [sc]
+    beats = tree["scenes"][0]["panels"][0]["beats"]
+    assert [bt["id"] for bt in beats] == [b]
+
+
+def test_delete_subject_content_releases_images_purge_trashes(db, tmp_path):
+    sb, maya, rio, sc, pa, sc2, pa2, a, b, c = _subject_tree(db)
+    img = tmp_path / "a.png"
+    img.write_bytes(b"x")
+    db.save_media(_media(str(img)))
+    db.set_media_hidden(str(img), True)
+    db.create_beat_image(a, file_path=str(img), seed=1)
+    assert db.subject_references(maya)["image_count"] == 1
+    assert db.delete_subject(maya, mode="content") == (True, [])
+    hidden = {
+        r["file_path"]: r["hidden"]
+        for r in db.get_all_media_summaries(include_hidden=True)
+    }
+    assert hidden[str(img)] == 0
+
+    # purge on the other subject: beat b's image is trashed
+    img2 = tmp_path / "b.png"
+    img2.write_bytes(b"x")
+    db.save_media(_media(str(img2)))
+    db.set_media_hidden(str(img2), True)
+    db.create_beat_image(b, file_path=str(img2), seed=1)
+    ok, purged = db.delete_subject(rio, mode="purge")
+    assert ok is True
+    assert purged == [str(img2)]
+    assert db.get_media(Path(str(img2))) is None
+
+
+def test_delete_subject_bad_mode_raises(db):
+    sb, maya, *_ = _subject_tree(db)
+    with pytest.raises(ValueError):
+        db.delete_subject(maya, mode="nope")

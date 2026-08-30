@@ -181,6 +181,31 @@ const videoReady = computed(() => !!store.tree?.video_target && !!store.tree?.vi
 function compile(): void {
   void store.compileVideo([props.panel.id])
 }
+
+// -- downstream-dependency prompts (utils/storyboardDeps.ts) -----------
+//
+// The store records a prompt after any successful PATCH of a field the
+// beats stage (shot action/subtext) or the H3 compiler (beat fields) reads.
+// Offer the recompute inline; "Re-beat" reuses rebeat() so its destructive
+// 409 confirm still applies.
+const beatsPrompt = computed(() => store.downstreamPromptsFor('beats', props.panel.id)[0] ?? null)
+const compilePrompt = computed(
+  () => store.downstreamPromptsFor('compile', props.panel.id)[0] ?? null,
+)
+const FIELD_LABEL: Record<string, string> = {
+  action: 'Action',
+  subtext: 'Subtext',
+  is_turn: 'Turn',
+}
+function fieldsLabel(fields: string[]): string {
+  return fields.map((f) => FIELD_LABEL[f] ?? f.replace(/_/g, ' ')).join(', ')
+}
+function acceptBeatsPrompt(): void {
+  void rebeat()
+}
+function acceptCompilePrompt(): void {
+  compile()
+}
 async function renderVideo(): Promise<void> {
   const res = await store.generateVideo([props.panel.id])
   if (res && res.skipped.length > 0) {
@@ -225,6 +250,39 @@ async function renderVideo(): Promise<void> {
       </span>
     </p>
     <p v-else-if="rebeatError" class="sh-error">{{ rebeatError }}</p>
+
+    <p v-if="beatsPrompt && !confirmPending" class="sh-downstream">
+      {{ fieldsLabel(beatsPrompt.fields) }} changed — recalculate the beats for this shot?
+      <span class="sh-confirm-actions">
+        <button
+          type="button"
+          class="sh-btn sh-btn--primary"
+          :disabled="store.story.running"
+          @click="acceptBeatsPrompt"
+        >
+          Re-beat shot
+        </button>
+        <button type="button" class="sh-btn" @click="store.dismissDownstream(beatsPrompt.key)">
+          Not now
+        </button>
+      </span>
+    </p>
+    <p v-if="compilePrompt" class="sh-downstream">
+      Beat {{ fieldsLabel(compilePrompt.fields) }} changed — recompile the video prompt?
+      <span class="sh-confirm-actions">
+        <button
+          type="button"
+          class="sh-btn sh-btn--primary"
+          :disabled="store.compile.running"
+          @click="acceptCompilePrompt"
+        >
+          Compile
+        </button>
+        <button type="button" class="sh-btn" @click="store.dismissDownstream(compilePrompt.key)">
+          Not now
+        </button>
+      </span>
+    </p>
 
     <PacingStrip :panel="panel" @select-beat="emit('select-beat', $event)" />
 
@@ -464,6 +522,18 @@ async function renderVideo(): Promise<void> {
   margin: 0;
   font-size: 12px;
   color: var(--danger-color, #e53e3e);
+}
+
+/* Downstream-dependency prompt: same shape as the confirm banner, but
+   informational (primary tint) rather than destructive. */
+.sh-downstream {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 40%, transparent);
 }
 
 /* Row 3 */

@@ -715,6 +715,32 @@ metascan/
   run it through `to_posix_path` before the INSERT/UPDATE, and an unknown
   path (raw `sqlite3.IntegrityError` from SQLite) is translated to
   `InvalidReferenceError` → HTTP 400 in `StoryboardService`, not a 500.
+- **Deleting a subject strips every non-text reference; the caller picks
+  what happens to the beats.** `DatabaseManager.delete_subject(subject_id,
+  mode)` (`SUBJECT_DELETE_MODES = unlink|content|purge`, returns
+  `(deleted, purged_paths)` like `delete_beat`) first collects every beat
+  of the storyboard that casts the subject (`beats.subject_ids`) or has a
+  dialog line with its `subject_id` (`_subject_referencing_beats`; name
+  mentions in prose never count). `unlink` (default) rewrites those beats
+  in place — id stripped from `subject_ids`, dialog lines keep their text
+  with `subject_id: null`, `updated_at` bumped so open editors resync;
+  `content` deletes them through `_release_beats`, then deletes any shot
+  left beat-less (`_release_panels`) and any scene left shot-less;
+  `purge` is `content` with the media trashed. Never restore the old
+  bare `DELETE FROM storyboard_subjects` — dangling ids survived in beat
+  JSON, and `BeatCard`'s cast toggles re-PATCHed them. `GET
+  /api/storyboard/subjects/{id}/references` (`{beat_ids, image_count}`)
+  is what `StoryboardSettingsDialog` consults to decide between a plain
+  confirm and `DeleteSubjectDialog.vue`'s three-way choice; `DELETE
+  /subjects/{id}?mode=` 400s on an unknown mode. **The outline compose
+  stage dedupes VLM-emitted subjects against the WHOLE roster, not the
+  castable (character-only) one** — the outline prompt lists every
+  existing subject and the model echoes them back, so checking only
+  characters re-created each location/prop as a duplicate character on
+  every outline rebuild. New outline subjects get `infer_subject_type`.
+  A subject the user deleted whose name the premise still carries does
+  legitimately come back on an outline rebuild (the stage builds the
+  roster from `source_text`).
 - **`beats.prompt_locked` / `prompt_source` gate re-synthesis.** Moved down
   from panels in the shot/beat reorg — keyframes are a per-beat concern now.
   `prompt_source` is one of `'brief'` (deterministic template, no VLM),
@@ -868,6 +894,29 @@ metascan/
   sends a default `target_model` because the column is NOT NULL, and the
   `DeleteImagesDialog.vue` purge/keep flows are kept because legacy
   boards still hold generated images the delete cascades must handle.
+- **Downstream-dependency prompts are store-driven, not editor-driven.**
+  `frontend/src/utils/storyboardDeps.ts` is the single table of which
+  editable fields feed which recompute stage — shot `action`/`subtext`/
+  `is_turn` → beats compose; scene descriptors (name, subtitle, setting,
+  location, mood, lighting, time_of_day, function) → shots(+beats)
+  compose; every beat field the H3 compiler renders → video-prompt
+  compile — with `downstreamFor(entity, changedFields)` as the pure
+  query. `stores/storyboard.ts::noteDownstream` runs after every
+  *successful* `patchPanelFields`/`patchSceneFields`/`patchBeatFields`
+  (so every commit-on-change handler is covered without touching it),
+  skips when nothing downstream exists yet (shot has no beats, scene has
+  no shots, shot has no compiled `video_prompt`), and merges repeated
+  edits into one prompt per `(kind, target)` key. `ShotHeader.vue`
+  renders the beats/compile prompts inline (accept → the existing
+  `rebeat()`/`compile()` paths, so the 409 `confirm_required` flow still
+  gates destructive re-beats); `SceneEditDialog.vue` stays open after Save
+  to offer "Rebuild shots" (`composeStory({stages:['shots','beats'],
+  scene_ids})`). `composeStory`/`compileVideo` clear the matching prompts
+  on success and `load()` clears them all on a board switch. Premise /
+  story-scale edits deliberately do NOT prompt — outline rebuild is
+  whole-board destructive and lives in the Compose dialog. When a stage
+  starts reading a new field, add it to the table; never re-add per-editor
+  ad-hoc prompts.
 - **Detail editors with local commit-on-change copies must resync on id +
   updated_at, not id alone.** `ShotHeader.vue` (the shot header — action,
   subtext) and `BeatCard.vue` (framing, subject picker, camera/dialog/

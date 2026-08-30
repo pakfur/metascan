@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
+from metascan.core.database_sqlite import infer_subject_type
 from metascan.core import h3_compiler as h3
 from metascan.core import shot_templates as templates
 from metascan.core import storyboard_story as story
@@ -516,17 +517,26 @@ class StoryboardRunner:
                 outline=json.dumps(outline),
                 pacing=outline["pacing"],
             )
+            # Dedupe against the WHOLE roster, not the castable one: the
+            # outline prompt lists every existing subject (locations and
+            # props included) and the model echoes them back verbatim.
+            # Checking only characters re-created a location as a
+            # duplicate character on every outline rebuild.
+            existing_names = {s["name"].strip().lower() for s in tree["subjects"]}
             created = 0
             for i, subj in enumerate(outline["subjects"]):
-                if subj["name"].strip().lower() in roster:
+                key = subj["name"].strip().lower()
+                if key in existing_names:
                     continue  # user's existing description wins
+                existing_names.add(key)
                 await asyncio.to_thread(
                     self.db.create_subject,
                     storyboard_id,
                     name=subj["name"],
                     description=subj["description"],
                     voice=subj.get("voice"),
-                    sort_order=len(roster) + created,
+                    sort_order=len(tree["subjects"]) + created,
+                    subject_type=infer_subject_type(subj["name"], subj["description"]),
                 )
                 created += 1
             progress(1, 1)

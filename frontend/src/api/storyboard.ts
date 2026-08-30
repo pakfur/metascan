@@ -179,8 +179,27 @@ export function patchSubject(
   return patch<{ status: string }>(`/storyboard/subjects/${subjectId}`, body)
 }
 
-export function deleteSubject(subjectId: number): Promise<{ status: string }> {
-  return del<{ status: string }>(`/storyboard/subjects/${subjectId}`)
+export type SubjectDeleteMode = 'unlink' | 'content' | 'purge'
+
+export interface SubjectReferences {
+  beat_ids: number[]
+  image_count: number
+}
+
+// Beats that cast or voice the subject (and their generated images) --
+// what deleteSubject would touch. Text mentions never count.
+export function subjectReferences(subjectId: number): Promise<SubjectReferences> {
+  return get<SubjectReferences>(`/storyboard/subjects/${subjectId}/references`)
+}
+
+// 'unlink' strips the subject from every beat's cast/dialog (text kept);
+// 'content' also deletes the referencing beats (+ emptied shots/scenes),
+// releasing images to the library; 'purge' trashes the media as well.
+export function deleteSubject(
+  subjectId: number,
+  mode: SubjectDeleteMode = 'unlink',
+): Promise<{ status: string }> {
+  return del<{ status: string }>(`/storyboard/subjects/${subjectId}?mode=${mode}`)
 }
 
 // Runner-backed VLM call: reads the subject's persisted reference(s) from

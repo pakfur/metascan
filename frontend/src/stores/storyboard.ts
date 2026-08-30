@@ -13,6 +13,7 @@ import type {
   JobState,
 } from '../types/storyboard'
 import * as api from '../api/storyboard'
+import { downstreamFor, type DownstreamKind } from '../utils/storyboardDeps'
 import * as comfyApi from '../api/comfy'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useToast } from '../composables/useToast'
@@ -27,6 +28,52 @@ export const useStoryboardStore = defineStore('storyboard', () => {
   const tree = ref<StoryboardTree | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
+
+  // ---- downstream-dependency prompts ------------------------------------
+  //
+  // After a successful PATCH of a field some compose/compile stage reads
+  // (utils/storyboardDeps.ts), the store records a pending prompt so the
+  // owning editor can offer to recompute. One entry per (kind, target);
+  // repeated edits merge their field names. Cleared by the user (dismiss)
+  // or by running the recompute.
+  interface DownstreamPrompt {
+    key: string
+    kind: DownstreamKind
+    panelId: number | null
+    sceneId: number
+    fields: string[]
+  }
+  const downstream = ref<DownstreamPrompt[]>([])
+
+  function noteDownstream(
+    entity: 'panel' | 'scene' | 'beat',
+    changedFields: string[],
+    target: { panelId: number | null; sceneId: number },
+  ): void {
+    for (const kind of downstreamFor(entity, changedFields)) {
+      // Nothing downstream exists yet -> nothing is stale.
+      const scene = tree.value?.scenes.find((sc) => sc.id === target.sceneId)
+      const panel = target.panelId !== null ? panelById(target.panelId) : null
+      if (kind === 'beats' && !(panel && panel.beats.length > 0)) continue
+      if (kind === 'shots' && !(scene && scene.panels.length > 0)) continue
+      if (kind === 'compile' && !(panel && panel.video_prompt)) continue
+      const key = `${kind}:${kind === 'shots' ? target.sceneId : target.panelId}`
+      const existing = downstream.value.find((d) => d.key === key)
+      if (existing) {
+        for (const f of changedFields) if (!existing.fields.includes(f)) existing.fields.push(f)
+      } else {
+        downstream.value.push({ key, kind, ...target, fields: [...changedFields] })
+      }
+    }
+  }
+
+  function dismissDownstream(key: string): void {
+    downstream.value = downstream.value.filter((d) => d.key !== key)
+  }
+
+  function downstreamPromptsFor(kind: DownstreamKind, id: number): DownstreamPrompt[] {
+    return downstream.value.filter((d) => d.key === `${kind}:${id}`)
+  }
   const selectedSceneId = ref<number | null>(null)
   const selectedPanelId = ref<number | null>(null)
   const selectedBeatId = ref<number | null>(null)
@@ -240,6 +287,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       jobToBeat.value = new Map()
       panelJobState.value = new Map()
       beatJobState.value = new Map()
+      downstream.value = []
     }
     try {
       const t = await api.fetchStoryboard(id)
@@ -372,6 +420,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
       const res = await api.patchPanel(panelId, body)
       const current = panelById(panelId)
       if (current) Object.assign(current, res)
+      noteDownstream('panel', Object.keys(body), { panelId, sceneId: panel.scene_id })
     } catch (e) {
       const current = panelById(panelId)
       if (current) Object.assign(current, snapshot)
@@ -389,6 +438,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     Object.assign(scene, body)
     try {
       await api.patchScene(sceneId, body)
+      noteDownstream('scene', Object.keys(body), { panelId: null, sceneId })
     } catch (e) {
       const current = tree.value?.scenes.find((s) => s.id === sceneId)
       if (current) Object.assign(current, snapshot)
@@ -492,6 +542,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     // synthesize() (compile_progress/compile_complete can beat the HTTP 202
     // response back over the WS channel).
     compile.value = { running: true, done: 0, total: 0, error: null }
+    for (const pid of panelIds ?? []) dismissDownstream(`compile:${pid}`)
+    if (panelIds === undefined) downstream.value = downstream.value.filter((d) => d.kind !== 'compile')
     try {
       const res = await api.compileStoryboard(tree.value.id, body)
       // Only fill in the real total if nothing has already reported
@@ -515,6 +567,16 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     try {
       if (!tree.value) throw new Error('no board loaded')
       await api.composeStoryboard(tree.value.id, body)
+      // A run that got past the confirm gate makes these prompts moot.
+      const stages = body.stages ?? []
+      if (stages.includes('beats')) {
+        for (const pid of body.panel_ids ?? []) dismissDownstream(`beats:${pid}`)
+        if (!body.panel_ids) downstream.value = downstream.value.filter((d) => d.kind !== 'beats')
+      }
+      if (stages.includes('shots')) {
+        for (const sid of body.scene_ids ?? []) dismissDownstream(`shots:${sid}`)
+        if (!body.scene_ids) downstream.value = downstream.value.filter((d) => d.kind !== 'shots')
+      }
     } catch (e) {
       story.value.running = false
       throw e
@@ -678,8 +740,8 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     await refresh()
   }
 
-  async function removeSubject(id: number): Promise<void> {
-    await api.deleteSubject(id)
+  async function removeSubject(id: number, mode: api.SubjectDeleteMode = 'unlink'): Promise<void> {
+    await api.deleteSubject(id, mode)
     await refresh()
   }
 
@@ -706,6 +768,7 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     // beats-less response above.
     if (idx >= 0) Object.assign(panel.beats[idx], updated)
     panel.beats.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
+    noteDownstream('beat', Object.keys(body), { panelId: panel.id, sceneId: panel.scene_id })
   }
 
   async function removeBeat(beatId: number, purgeImages = false): Promise<void> {
@@ -864,6 +927,9 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     tree,
     loading,
     error,
+    downstream,
+    dismissDownstream,
+    downstreamPromptsFor,
     selectedSceneId,
     selectedPanelId,
     selectedBeatId,
