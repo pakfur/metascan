@@ -436,6 +436,12 @@ export const useStoryboardStore = defineStore('storyboard', () => {
     try {
       await api.patchScene(sceneId, body)
       noteDownstream('scene', Object.keys(body), { panelId: null, sceneId })
+      // template_problems / template_warnings are server-computed
+      // (shot_templates.annotate_tree) from the scene's template_id and
+      // function, so the optimistic Object.assign above leaves them stale
+      // after either changes -- the picker would keep showing the old
+      // scene's problems. refresh() preserves the current selection.
+      if ('template_id' in body || 'function' in body) await refresh()
     } catch (e) {
       const current = tree.value?.scenes.find((s) => s.id === sceneId)
       if (current) Object.assign(current, snapshot)
