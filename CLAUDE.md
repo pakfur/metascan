@@ -700,7 +700,9 @@ metascan/
   spreads `extra` into the event. The **beats stage skips template-built
   scenes** (a `template_id` plus beats on every panel) unless the caller
   passes an explicit `panel_ids` — the "Re-beat shot" button always wins.
-  `check_compose_gates` with `"shots"` runs `templates.validate_assignment`
+  `check_compose_gates` with `"shots"` (and **not** `"scenes"` — a full
+  "Compose all" recreates every scene row with `template_id` NULL, so the
+  selections would be discarded anyway) runs `templates.validate_assignment`
   over every target scene **before** the confirm short-circuit and raises a
   `StoryboardError` (400) listing every problem, so `confirm=true` cannot
   push a bad selection through; a duration mismatch between the template
