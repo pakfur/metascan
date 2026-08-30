@@ -479,3 +479,40 @@ def test_templates_endpoint_and_apply_route(client):
         json={"template_id": PILOT},
     )
     assert r.status_code == 409 and r.json()["detail"]["code"] == "confirm_required"
+
+
+# ---- Selection validation (user-selected templates) ----------------------------
+
+
+def _chars(n):
+    return [{"id": i, "name": f"C{i}", "subject_type": "character"} for i in range(n)]
+
+
+def test_validate_assignment_free_form_is_clean():
+    assert t.validate_assignment(None, {"name": "S"}, [], 10.0) == ([], [])
+
+
+def test_validate_assignment_errors():
+    errs, _ = t.validate_assignment("nope", {"name": "S"}, _chars(2), None)
+    assert errs == ["Scene 'S': unknown template 'nope'"]
+    errs, _ = t.validate_assignment(PILOT, {"name": "S"}, _chars(1), None)
+    assert errs == [
+        "Scene 'S': template 'two_party_negotiation_18' needs 2 characters, "
+        "the storyboard has 1"
+    ]
+
+
+def test_validate_assignment_warnings():
+    scene = {"name": "S", "function": "confrontation"}
+    errs, warns = t.validate_assignment(PILOT, scene, _chars(2), 18.0)
+    assert errs == []
+    assert warns == [
+        "Scene 'S': template function 'negotiation' differs from the scene's "
+        "'confrontation'",
+        "Scene 'S': template runs 63.5s but this scene's share of the story "
+        "is about 18s",
+    ]
+    _, warns = t.validate_assignment(
+        PILOT, {"name": "S", "function": "negotiation"}, _chars(2), 60.0
+    )
+    assert warns == []
