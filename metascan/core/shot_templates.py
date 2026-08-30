@@ -40,6 +40,7 @@ from metascan.core.storyboard_story import (
     _loads_array,
     _clean,
     castable_subjects,
+    scene_context_block,
 )
 
 SLOT_KIND_VALUES = ("establishing", "action", "reaction", "insert")
@@ -453,6 +454,7 @@ def build_role_bind_user_prompt(
         f"Story logline: {outline.get('logline') or ''}\n"
         f"Scene: {scene['name']} — {scene.get('setting') or scene.get('location') or ''}\n"
         f"Scene notes: {scene.get('notes') or 'none'}\n"
+        f"{scene_context_block(outline, scene)}"
         f"Scene function: {template.function}\n\n"
         f"Template roles:\n{roles}\n\n"
         f"Characters in this story (use these exact names):\n"
@@ -636,6 +638,7 @@ def build_fill_user_prompt(
         f"lighting: {scene.get('lighting') or 'unspecified'}; "
         f"mood: {scene.get('mood') or 'unspecified'}\n"
         f"Scene notes: {scene.get('notes') or 'none'}\n"
+        f"{scene_context_block(outline, scene)}"
         f"Scene function: {template.function}\n\n"
         f"Cast:\n{roles}\n"
         f"Character descriptions:\n{_roster_lines(subjects)}\n\n"
