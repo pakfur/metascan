@@ -364,6 +364,51 @@ def summarize(t: ShotTemplate) -> Dict[str, Any]:
     }
 
 
+# ---- Selection validation (user-selected templates) -------------------------
+
+_DURATION_TOLERANCE = 0.35
+
+
+def validate_assignment(
+    template_id: Optional[str],
+    scene: Mapping[str, Any],
+    castable: Sequence[Mapping[str, Any]],
+    share_s: Optional[float],
+    directory: Optional[Path] = None,
+) -> Tuple[List[str], List[str]]:
+    """Check a user's template choice for one scene. Returns
+    ``(errors, warnings)``; errors block the shots stage, warnings are
+    advisory (duration mismatch is a warning by decision -- the user
+    chose the template knowing its length). ``template_id`` None is
+    free-form and always clean."""
+    if not template_id:
+        return [], []
+    who = f"Scene {scene.get('name')!r}: "
+    try:
+        template = get_template(template_id, directory)
+    except TemplateError:
+        return [f"{who}unknown template {template_id!r}"], []
+    errors: List[str] = []
+    warnings: List[str] = []
+    if len(castable) < len(template.roles):
+        errors.append(
+            f"{who}template {template.id!r} needs {len(template.roles)} "
+            f"characters, the storyboard has {len(castable)}"
+        )
+    fn = scene.get("function")
+    if fn and fn != template.function:
+        warnings.append(
+            f"{who}template function {template.function!r} differs from the "
+            f"scene's {fn!r}"
+        )
+    if share_s and abs(template.duration_s - share_s) > _DURATION_TOLERANCE * share_s:
+        warnings.append(
+            f"{who}template runs {template.duration_s:g}s but this scene's "
+            f"share of the story is about {share_s:.0f}s"
+        )
+    return errors, warnings
+
+
 # ---- Step 1: role binding ----------------------------------------------------
 
 
