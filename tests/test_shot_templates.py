@@ -12,7 +12,11 @@ from backend.api import storyboard as storyboard_api
 from backend.main import create_app
 from metascan.core import shot_templates as t
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.storyboard_runner import StoryboardError, StoryboardRunner
+from metascan.core.storyboard_runner import (
+    ConfirmRequiredError,
+    StoryboardError,
+    StoryboardRunner,
+)
 
 PILOT = "two_party_negotiation_18"
 
@@ -433,6 +437,14 @@ def test_shots_stage_uses_scene_template_and_records_provenance(db, tmp_path):
     # Beats stage must not have re-run over the template-built scene.
     assert templated["panels"][0]["beats"][0]["action"].startswith("slot 0")
 
+    # ... but an explicit panel_ids (the "Re-beat shot" button) always
+    # overrides the skip, for a template-built shot too.
+    target = templated["panels"][0]["id"]
+    asyncio.run(runner.compose_story(sb, stages=("beats",), panel_ids=[target]))
+    rebeat = db.get_storyboard_tree(sb)["scenes"][0]["panels"]
+    assert [b["action"] for b in rebeat[0]["beats"]] == ["b"]
+    assert all(p["beats"][0]["action"].startswith("slot") for p in rebeat[1:])
+
 
 def test_shots_gate_lists_every_selection_problem(db, tmp_path):
     sb, scene = _board(db)
@@ -450,6 +462,27 @@ def test_shots_gate_lists_every_selection_problem(db, tmp_path):
     msg = str(exc.value)
     assert "unknown template 'nope'" in msg and "needs 2 characters" in msg
     assert vlm.calls == []
+
+
+def test_shots_gate_skipped_when_the_scenes_stage_rebuilds_them(db, tmp_path):
+    """ "Compose all" recreates every scene row with template_id NULL, so a
+    stale selection must not 400 over choices it is about to discard."""
+    sb, scene = _board(db)
+    db.update_scene(scene, template_id="nope")
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: FakeVlm(), output_root=tmp_path
+    )
+    full = ("scenes", "shots", "beats")
+    # Confirmed full cascade: the template check never fires at all.
+    asyncio.run(runner.check_compose_gates(sb, full, None, None, True))
+    # Unconfirmed, it's the ordinary scenes confirm gate that stops it --
+    # not the template error.
+    with pytest.raises(ConfirmRequiredError) as exc:
+        asyncio.run(runner.check_compose_gates(sb, full, None, None, False))
+    assert "unknown template" not in str(exc.value)
+    # Shots alone still reports the bad selection.
+    with pytest.raises(StoryboardError, match="unknown template"):
+        asyncio.run(runner.check_compose_gates(sb, ("shots",), None, None, False))
 
 
 # ---- API ----------------------------------------------------------------------

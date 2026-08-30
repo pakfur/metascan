@@ -280,10 +280,13 @@ class StoryboardRunner:
             )
             exc._compose_stage = "outline"  # type: ignore[attr-defined]
             raise exc
-        if "shots" in stages:
+        if "shots" in stages and "scenes" not in stages:
             # A bad template selection is a hard error, not a confirmable
             # one -- checked before the confirm short-circuit so
-            # confirm=true can't bypass it.
+            # confirm=true can't bypass it. Skipped when the scenes stage
+            # runs too ("Compose all"): it recreates every scene row with
+            # template_id NULL, so the selections being validated here are
+            # about to be discarded anyway.
             castable = story.castable_subjects(tree["subjects"])
             share = templates.scene_share_s(tree)
             problems: List[str] = []
