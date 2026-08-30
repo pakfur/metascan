@@ -313,11 +313,6 @@ class GenerateVideoRequest(BaseModel):
     only_failed: bool = False
 
 
-class ApplyTemplateRequest(BaseModel):
-    template_id: str
-    confirm: bool = False
-
-
 class ComposeRequest(BaseModel):
     stages: Optional[List[str]] = None
     scene_ids: Optional[List[int]] = None
@@ -425,38 +420,6 @@ async def list_shot_templates() -> List[Dict[str, Any]]:
         return await asyncio.to_thread(shot_templates.list_templates)
     except shot_templates.TemplateError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.post("/{storyboard_id}/scenes/{scene_id}/apply-template", status_code=202)
-async def apply_shot_template(
-    storyboard_id: int, scene_id: int, body: ApplyTemplateRequest
-) -> Dict[str, str]:
-    """Replace one scene's shots + beats with a shot-list template.
-    Mirrors /compose: gates are checked synchronously (409
-    confirm_required when the scene already has shots), then the
-    VLM-driven bind/fill/conform/write runs as a 202 fire-and-forget
-    task reporting on the storyboard WS channel with stage "template"."""
-    runner = _require_runner()
-    try:
-        await runner.check_template_gates(
-            storyboard_id, scene_id, body.template_id, body.confirm
-        )
-    except ConfirmRequiredError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "confirm_required", "message": str(exc)},
-        ) from exc
-    except StoryboardError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    task = asyncio.create_task(
-        runner.apply_template(
-            storyboard_id, scene_id, body.template_id, confirm=body.confirm
-        )
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    return {"status": "started"}
 
 
 @router.get("/{storyboard_id}")
