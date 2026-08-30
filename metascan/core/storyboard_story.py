@@ -251,7 +251,7 @@ pacingv ::= {pacing_alts}
 
 _SCENES_TEMPLATE = (
     r"""root ::= "[" ws scene (ws "," ws scene){{{scene_lo},{scene_hi}}} ws "]"
-scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "," ws "\"function\"" ws ":" ws scenefn ws "}}"
+scene ::= "{{" ws "\"name\"" ws ":" ws string ws "," ws "\"subtitle\"" ws ":" ws nullable ws "," ws "\"setting\"" ws ":" ws nullable ws "," ws "\"location\"" ws ":" ws nullable ws "," ws "\"time_of_day\"" ws ":" ws nullable ws "," ws "\"mood\"" ws ":" ws nullable ws "," ws "\"lighting\"" ws ":" ws nullable ws "," ws "\"notes\"" ws ":" ws nullable ws "," ws "\"arc_beats\"" ws ":" ws arcbeats ws "," ws "\"charge_in\"" ws ":" ws charge ws "," ws "\"charge_out\"" ws ":" ws charge ws "," ws "\"function\"" ws ":" ws scenefn ws "," ws "\"brief\"" ws ":" ws string ws "}}"
 arcbeats ::= "[" ws (arcbeat (ws "," ws arcbeat){{0,4}})? ws "]"
 arcbeat ::= {arcbeat_alts}
 scenefn ::= {scenefn_alts}
@@ -372,8 +372,12 @@ def build_outline_user_prompt(
     )
 
 
-def build_scenes_user_prompt(outline_json: str) -> str:
-    return f"Story outline:\n{outline_json}\n\nWrite the scene list JSON."
+def build_scenes_user_prompt(outline_json: str, premise: str = "") -> str:
+    premise_block = f"Premise:\n{premise.strip()}\n\n" if premise.strip() else ""
+    return (
+        f"{premise_block}Story outline:\n{outline_json}\n\n"
+        "Write the scene list JSON."
+    )
 
 
 def build_shots_user_prompt(
@@ -607,6 +611,7 @@ def validate_scenes_response(raw: str) -> List[Dict[str, Any]]:
                     if sc.get("function") in SCENE_FUNCTION_VALUES
                     else None
                 ),
+                "brief": _clean(sc.get("brief")),
             }
         )
     if not scenes:
