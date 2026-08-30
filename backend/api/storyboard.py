@@ -464,7 +464,10 @@ async def get_storyboard(storyboard_id: int) -> Dict[str, Any]:
     tree = await _service().get_storyboard_tree(storyboard_id)
     if tree is None:
         raise HTTPException(status_code=404, detail=f"No storyboard {storyboard_id}")
-    return tree
+
+    from metascan.core import shot_templates
+
+    return shot_templates.annotate_tree(tree)
 
 
 @router.patch("/{storyboard_id}")

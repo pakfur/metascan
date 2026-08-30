@@ -516,3 +516,42 @@ def test_validate_assignment_warnings():
         PILOT, {"name": "S", "function": "negotiation"}, _chars(2), 60.0
     )
     assert warns == []
+
+
+def test_annotate_tree_marks_problems_and_staleness():
+    outline = json.dumps({"duration_target_s": 36, "arc": []})
+    h = t.outline_hash(outline)
+    tree = {
+        "outline": outline,
+        "subjects": [{"id": 1, "name": "A", "subject_type": "character"}],
+        "scenes": [
+            {
+                "id": 1,
+                "name": "S1",
+                "function": "negotiation",
+                "template_id": PILOT,
+                "composed_from": {"stage": "scenes", "outline_hash": h, "at": "x"},
+            },
+            {
+                "id": 2,
+                "name": "S2",
+                "function": None,
+                "template_id": None,
+                "composed_from": {"stage": "scenes", "outline_hash": "old", "at": "x"},
+            },
+        ],
+    }
+    t.annotate_tree(tree)
+    assert tree["outline_hash"] == h
+    s1, s2 = tree["scenes"]
+    assert s1["template_problems"] == [
+        "Scene 'S1': template 'two_party_negotiation_18' needs 2 characters, "
+        "the storyboard has 1"
+    ]
+    assert s1["template_warnings"] == [
+        "Scene 'S1': template runs 63.5s but this scene's share of the story "
+        "is about 18s"
+    ]
+    assert s1["outline_stale"] is False
+    assert s2["template_problems"] == [] and s2["template_warnings"] == []
+    assert s2["outline_stale"] is True

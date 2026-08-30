@@ -19,6 +19,7 @@ silently nulling out through ``x if x in VALUES else None``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ from metascan.core.storyboard_story import (
     _COMMON_RULES,
     _loads_array,
     _clean,
+    castable_subjects,
 )
 
 SLOT_KIND_VALUES = ("establishing", "action", "reaction", "insert")
@@ -789,3 +791,43 @@ def conform(
         raise TemplateConformanceError(
             f"template {template.id!r} conformance failed: " + "; ".join(misses)
         )
+
+
+# ---- Tree annotation ---------------------------------------------------------
+
+
+def outline_hash(outline_json: Optional[str]) -> str:
+    text = (outline_json or "").strip()
+    return hashlib.sha1(text.encode("utf-8")).hexdigest() if text else ""
+
+
+def scene_share_s(tree: Mapping[str, Any]) -> Optional[float]:
+    """Each scene's even share of the outline's duration target, or None
+    when there's no target / no scenes."""
+    try:
+        outline = json.loads(tree.get("outline") or "{}") or {}
+    except (TypeError, ValueError):
+        return None
+    target = outline.get("duration_target_s")
+    n = len(tree.get("scenes") or [])
+    if not target or n == 0:
+        return None
+    return float(target) / n
+
+
+def annotate_tree(tree: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach the live template-selection check and outline staleness to
+    every scene of a storyboard tree (GET /api/storyboard/{id})."""
+    castable = castable_subjects(tree.get("subjects") or [])
+    share = scene_share_s(tree)
+    current = outline_hash(tree.get("outline"))
+    tree["outline_hash"] = current
+    for scene in tree.get("scenes") or []:
+        errors, warnings = validate_assignment(
+            scene.get("template_id"), scene, castable, share
+        )
+        scene["template_problems"] = errors
+        scene["template_warnings"] = warnings
+        cf = scene.get("composed_from") or {}
+        scene["outline_stale"] = bool(cf) and cf.get("outline_hash") != current
+    return tree
