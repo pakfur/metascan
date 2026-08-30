@@ -36,6 +36,7 @@ SCENES = [
         "arc_beats": ["setup"],
         "charge_in": 0,
         "charge_out": -2,
+        "brief": "Maya arrives.",
     }
 ]
 SHOTS = [
@@ -199,6 +200,23 @@ def test_full_cascade_builds_tree_and_emits(db, tmp_path):
     names = [e[1] for e in events if e[0] == "storyboard"]
     assert "story_complete" in names
     assert names.count("story_stage_complete") == 4
+
+
+def test_scenes_stage_writes_brief_and_composed_from(db, tmp_path):
+    vlm = FakeVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path
+    )
+    sb = _board(db)
+    asyncio.run(runner.compose_story(sb, stages=("outline", "scenes")))
+    scene = db.get_storyboard_tree(sb)["scenes"][0]
+    assert scene["brief"] == "Maya arrives."
+    cf = scene["composed_from"]
+    assert cf["stage"] == "scenes" and cf["template_id"] is None
+    from metascan.core.shot_templates import outline_hash
+
+    assert cf["outline_hash"] == outline_hash(db.get_storyboard_tree(sb)["outline"])
+    assert "Premise:" in vlm.prompts[1]
 
 
 def test_outline_confirm_gate(db, tmp_path):

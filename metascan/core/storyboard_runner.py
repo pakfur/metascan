@@ -558,17 +558,27 @@ class StoryboardRunner:
                 story.validate_scenes_response,
                 lint=lambda sc: story.lint_scene_charges(sc, arc),
                 system_prompt=story.STORY_SCENES_SYSTEM,
-                user_prompt=story.build_scenes_user_prompt(outline_json),
+                user_prompt=story.build_scenes_user_prompt(
+                    outline_json, tree.get("source_text") or ""
+                ),
                 grammar=story.scenes_grammar(scale),
                 temperature=0.7,
                 max_tokens=story.stage_max_tokens("scenes", scale),
                 timeout=300.0,
             )
-            _, purged_files = await asyncio.to_thread(
+            new_ids, purged_files = await asyncio.to_thread(
                 self.db.replace_storyboard_scenes, storyboard_id, scenes, purge
             )
             if purged_files:
                 await asyncio.to_thread(remove_files_to_trash, purged_files)
+            stamp = {
+                "stage": "scenes",
+                "template_id": None,
+                "outline_hash": templates.outline_hash(outline_json),
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            for sid in new_ids:
+                await asyncio.to_thread(self.db.update_scene, sid, composed_from=stamp)
             progress(1, 1)
             return len(scenes), stage_warnings
 

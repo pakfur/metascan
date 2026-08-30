@@ -99,6 +99,28 @@ def test_validate_scenes_happy_and_empty():
         validate_scenes_response("[]")
 
 
+def test_scenes_grammar_and_validator_carry_brief():
+    assert '"\\"brief\\""' in story.SCENES_GRAMMAR
+    raw = json.dumps(
+        [
+            {
+                "name": "S",
+                "arc_beats": [],
+                "charge_in": 0,
+                "charge_out": 1,
+                "function": "negotiation",
+                "brief": "A asks B.",
+            }
+        ]
+    )
+    assert story.validate_scenes_response(raw)[0]["brief"] == "A asks B."
+
+
+def test_scenes_prompt_includes_premise():
+    p = story.build_scenes_user_prompt('{"logline": "L"}', "Two rivals meet.")
+    assert "Premise:\nTwo rivals meet." in p and "Story outline:" in p
+
+
 def test_shots_validator_slim_shape():
     raw = '[{"action": "The chase begins", "duration_s": 10}]'
     panels = story.validate_shots_response(raw)
