@@ -533,8 +533,17 @@ async def delete_storyboard(
 @router.post("/{storyboard_id}/parse")
 async def parse_storyboard(storyboard_id: int, body: ParseRequest) -> Dict[str, Any]:
     runner = _require_runner()
+    from metascan.core import shot_templates
+
     try:
-        return await runner.parse(storyboard_id, body.text, confirm=body.confirm)
+        # Annotated on the way out, exactly like GET /{storyboard_id}: the
+        # frontend assigns this response straight to `store.tree`, so a
+        # raw (un-annotated) tree would leave every scene missing
+        # `template_problems`/`template_warnings`/`outline_stale` and the
+        # outline rail / compose dialog dereferencing undefined.
+        # annotate_tree is the single exit for a full tree.
+        result = await runner.parse(storyboard_id, body.text, confirm=body.confirm)
+        return shot_templates.annotate_tree(result)
     except ConfirmRequiredError as exc:
         # Must be caught before StoryboardError -- it's a subclass.
         raise HTTPException(

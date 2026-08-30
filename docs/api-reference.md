@@ -352,7 +352,8 @@ rather than deleted.
 Body: `{text: string, confirm: boolean = false}`. VLM-parses free text
 into subjects/scenes/panels and destructively replaces the storyboard's
 existing structure. Returns the fresh tree (same shape as `GET
-/api/storyboard/{id}`).
+/api/storyboard/{id}`, including the `outline_hash` and per-scene
+`template_problems`/`template_warnings`/`outline_stale` annotation).
 - **409** `{code: "confirm_required"}` if the storyboard already has
   scenes and `confirm` wasn't set — re-parsing destroys panel/beat
   identity (locked prompts, beat images, job history keyed by
@@ -385,7 +386,9 @@ other signal that a 202'd run has finished.
   for a target scene that already has panels) and `confirm` wasn't set.
   Beats-only recompose asks for `confirm` when any target beat already
   has `beat_images` or a locked prompt.
-- 404 if the storyboard doesn't exist.
+- **400** if the storyboard doesn't exist — `check_compose_gates` raises a
+  plain `StoryboardError` for an unknown id and the route maps every
+  non-confirm `StoryboardError` to 400 (not 404).
 
 ### `POST /api/storyboard/{id}/synthesize` (status: 202)
 Body: `{beat_ids?: int[], force: boolean = false}`. Composes (or
