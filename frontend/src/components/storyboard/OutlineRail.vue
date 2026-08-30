@@ -13,6 +13,9 @@
             :class="chargeClass(scene)"
             :title="`Emotional charge ${scene.charge_in} → ${scene.charge_out}`"
           >{{ scene.charge_in }} → {{ scene.charge_out }}</span>
+          <span v-if="scene.template_id" class="or-template" :title="`Shots from template ${scene.template_id}`">⧉</span>
+          <span v-if="scene.template_problems.length" class="or-problem" :title="scene.template_problems.join('\n')">!</span>
+          <span v-else-if="scene.outline_stale" class="or-stale" title="Outline changed since this scene was built">↻</span>
           <span class="or-scene-count">{{ scene.panels.length }}</span>
           <button
             type="button"
@@ -264,6 +267,20 @@ async function confirmDelete(purgeImages: boolean): Promise<void> {
 .or-charge.flat {
   color: var(--text-color-secondary);
   opacity: 0.5;
+}
+
+.or-template {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.or-problem {
+  color: var(--red-500);
+  font-weight: 700;
+}
+
+.or-stale {
+  color: var(--yellow-500, #d4a017);
 }
 
 .or-kebab {

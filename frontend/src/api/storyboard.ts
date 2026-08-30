@@ -103,19 +103,6 @@ export function listTemplates(): Promise<ShotTemplateSummary[]> {
   return get<ShotTemplateSummary[]>('/storyboard/templates')
 }
 
-// Runner-backed, same confirm_required 409 shape as composeStoryboard --
-// callers should catch ApiError and re-call with confirm=true.
-export function applyTemplate(
-  storyboardId: number,
-  sceneId: number,
-  body: { template_id: string; confirm: boolean },
-): Promise<{ status: string }> {
-  return post<{ status: string }>(
-    `/storyboard/${storyboardId}/scenes/${sceneId}/apply-template`,
-    body,
-  )
-}
-
 export function synthesizeStoryboard(
   id: number,
   body: { beat_ids?: number[]; force?: boolean } = {},
@@ -224,6 +211,8 @@ export function createScene(
     notes?: string | null
     reference_path?: string | null
     function?: string | null
+    template_id?: string | null
+    brief?: string | null
   },
 ): Promise<{ id: number }> {
   return post<{ id: number }>(`/storyboard/${storyboardId}/scenes`, body)

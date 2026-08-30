@@ -22,7 +22,18 @@ const RULES: readonly DepRule[] = [
   // rebuilding shots re-runs beats for the scene as well.
   {
     entity: 'scene',
-    fields: ['name', 'subtitle', 'setting', 'location', 'mood', 'lighting', 'time_of_day', 'function'],
+    fields: [
+      'name',
+      'subtitle',
+      'setting',
+      'location',
+      'mood',
+      'lighting',
+      'time_of_day',
+      'function',
+      'template_id',
+      'brief',
+    ],
     downstream: 'shots',
   },
   // Every beat field the H3 compiler renders into the shot's video prompt.

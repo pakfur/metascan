@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useStoryboardStore } from '../../stores/storyboard'
 import { describeScene } from '../../api/storyboard'
 import { ApiError, thumbnailUrl } from '../../api/client'
@@ -133,65 +133,19 @@ async function onDescribeScene(): Promise<void> {
   }
 }
 
-// ---- shot template -----------------------------------------------------
-
-const templateId = ref('')
-const templateBusy = ref(false)
-const templateError = ref<string | null>(null)
-
-onMounted(() => {
-  void store.loadTemplates()
-})
+// ---- shot template (user-selected; the shots stage honours it) --------
+const templateId = ref(props.scene?.template_id ?? '')
+const brief = ref(props.scene?.brief ?? '')
+onMounted(() => { void store.loadTemplates() })
 
 function templateLabel(t: ShotTemplateSummary): string {
-  return `${t.id} · ${t.function} · ${t.slot_count} slots / ${t.duration_s}s`
+  const match = t.function === sceneFunction.value ? '✓ ' : ''
+  return `${match}${t.id} · ${t.function} · ${t.slot_count} slots / ${t.duration_s}s`
 }
-
-// Auto-select the template whose function matches the scene's function once
-// the (lazily-loaded, cached) template list is available, and again on any
-// scene-function change -- but only when the current selection isn't (or is
-// no longer) one of the available options, so a deliberate user pick isn't
-// clobbered by an unrelated re-render.
-watch(
-  () => [store.templates.length, sceneFunction.value] as const,
-  () => {
-    if (store.templates.length === 0) return
-    if (store.templates.some((t) => t.id === templateId.value)) return
-    const match = store.templates.find((t) => t.function === sceneFunction.value)
-    templateId.value = (match ?? store.templates[0]).id
-  },
-  { immediate: true },
+const sortedTemplates = computed(() =>
+  [...store.templates].sort((a, b) =>
+    Number(b.function === sceneFunction.value) - Number(a.function === sceneFunction.value)),
 )
-
-async function onApplyTemplate(): Promise<void> {
-  if (!props.scene || !templateId.value) return
-  templateBusy.value = true
-  templateError.value = null
-  try {
-    await store.applyTemplate(props.scene.id, templateId.value, false)
-  } catch (e: unknown) {
-    if (
-      e instanceof ApiError &&
-      e.status === 409 &&
-      (e.detail as { code?: string } | undefined)?.code === 'confirm_required'
-    ) {
-      const message =
-        (e.detail as { message?: string } | undefined)?.message ??
-        'This replaces this scene’s existing shots and beats — continue?'
-      if (window.confirm(message)) {
-        try {
-          await store.applyTemplate(props.scene.id, templateId.value, true)
-        } catch (e2: unknown) {
-          templateError.value = errMsg(e2)
-        }
-      }
-    } else {
-      templateError.value = errMsg(e)
-    }
-  } finally {
-    templateBusy.value = false
-  }
-}
 
 // ---- save -------------------------------------------------------------
 
@@ -211,6 +165,8 @@ async function save(): Promise<void> {
         mood: mood.value.trim() || null,
         reference_path: referencePath.value.trim() || null,
         function: sceneFunction.value || null,
+        template_id: templateId.value || null,
+        brief: brief.value.trim() || null,
       })
     } else {
       // Changed fields only; empty text clears the nullable columns via an
@@ -229,6 +185,10 @@ async function save(): Promise<void> {
       if (newFunction !== (props.scene.function ?? null)) body.function = newFunction
       const newRef = referencePath.value.trim() || null
       if (newRef !== (props.scene.reference_path ?? null)) body.reference_path = newRef
+      const newTemplate = templateId.value || null
+      if (newTemplate !== (props.scene.template_id ?? null)) body.template_id = newTemplate
+      const newBrief = brief.value.trim() || null
+      if (newBrief !== (props.scene.brief ?? null)) body.brief = newBrief
       if (Object.keys(body).length > 0) {
         await store.patchSceneFields(props.scene.id, body)
       }
@@ -264,8 +224,8 @@ function dismissShotsPrompt(): void {
   emit('close')
 }
 
-// Same 409 confirm_required shape as onApplyTemplate: rebuilding shots
-// destroys the scene's existing shots/beats, so the backend gates it.
+// Same 409 confirm_required shape composeStory uses elsewhere: rebuilding
+// shots destroys the scene's existing shots/beats, so the backend gates it.
 async function rebuildShots(confirm = false): Promise<void> {
   if (!props.scene) return
   rebuildBusy.value = true
@@ -361,25 +321,23 @@ async function rebuildShots(confirm = false): Promise<void> {
         </select>
       </div>
 
-      <div v-if="!isCreate" class="field template-section">
+      <div class="field">
+        <label for="se-brief">Brief <span class="hint-inline">what this scene must accomplish</span></label>
+        <textarea id="se-brief" v-model="brief" rows="3" placeholder="Derived from the arc entries this scene covers" />
+        <p v-if="props.scene?.arc_beats?.length" class="arc-line">
+          Covers: <span v-for="b in props.scene.arc_beats" :key="b" class="arc-chip">{{ b }}</span>
+          <template v-if="props.scene.charge_in !== null"> · charge {{ props.scene.charge_in }} → {{ props.scene.charge_out }}</template>
+        </p>
+      </div>
+
+      <div class="field template-section">
         <label for="se-template">Shot template</label>
-        <div class="template-row">
-          <select id="se-template" v-model="templateId" :disabled="store.templates.length === 0">
-            <option v-if="store.templates.length === 0" value="">No templates available</option>
-            <option v-for="t in store.templates" :key="t.id" :value="t.id">
-              {{ templateLabel(t) }}
-            </option>
-          </select>
-          <button
-            type="button"
-            class="browse-btn"
-            :disabled="!templateId || templateBusy || store.story.running"
-            @click="onApplyTemplate"
-          >
-            {{ templateBusy ? 'Applying…' : 'Apply template' }}
-          </button>
-        </div>
-        <p v-if="templateError" class="error inline">{{ templateError }}</p>
+        <select id="se-template" v-model="templateId">
+          <option value="">Free-form (VLM decides the shots)</option>
+          <option v-for="t in sortedTemplates" :key="t.id" :value="t.id">{{ templateLabel(t) }}</option>
+        </select>
+        <p v-for="m in props.scene?.template_problems ?? []" :key="m" class="error inline">{{ m }}</p>
+        <p v-for="m in props.scene?.template_warnings ?? []" :key="m" class="warn inline">{{ m }}</p>
       </div>
 
       <div class="field">
@@ -539,15 +497,30 @@ select:focus {
   border-color: var(--primary-color);
 }
 
-.template-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.hint-inline {
+  font-weight: 400;
+  color: var(--text-color-secondary);
 }
 
-.template-row select {
-  flex: 1;
-  min-width: 0;
+.warn.inline {
+  color: var(--yellow-500, #d4a017);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.arc-chip {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 4px;
+  border-radius: 8px;
+  background: var(--surface-border);
+  font-size: 11px;
+}
+
+.arc-line {
+  font-size: 12px;
+  color: var(--text-color-secondary);
+  margin: 6px 0 0;
 }
 
 textarea {
