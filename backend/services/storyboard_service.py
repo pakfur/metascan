@@ -152,6 +152,13 @@ class StoryboardService:
                 "reference image is not in the media library"
             ) from exc
 
+    async def merge_scenes(self, storyboard_id: int, scene_ids: List[int]) -> int:
+        """Fold adjacent scenes into the first; ValueError on bad input
+        (translated to 400 by the route)."""
+        if await self.get_storyboard(storyboard_id) is None:
+            raise ParentNotFoundError(f"no storyboard with id {storyboard_id}")
+        return await asyncio.to_thread(self.db.merge_scenes, scene_ids)
+
     async def delete_scene(self, scene_id: int, purge_images: bool = False) -> bool:
         ok, purged_files = await asyncio.to_thread(
             self.db.delete_scene, scene_id, purge_images

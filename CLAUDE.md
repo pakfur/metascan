@@ -669,6 +669,22 @@ metascan/
   but nothing in the runner ever sets `GenerationParams.last_frame`, so an
   `fl2va` workflow needing its second anchor must supply it by hand in
   ComfyUI.
+- **Scene merge is deterministic and non-destructive.**
+  `DatabaseManager.merge_scenes(scene_ids)` (`POST
+  /api/storyboard/{id}/scenes/merge`, spec
+  `docs/superpowers/specs/2026-08-29-merge-scenes-design.md`) folds
+  ADJACENT scenes into the first: descriptors from the first, `charge_out`
+  from the last, `brief`/`notes` joined with a blank line, `arc_beats` the
+  union in `ARC_BEAT_VALUES` order, `template_id` cleared, `composed_from
+  = {stage: "merge", …}`. Panels are re-parented after the survivor's own
+  (sort order continues; beats/images/jobs untouched) BEFORE the absorbed
+  scene rows are deleted, so the scenes→panels cascade never fires;
+  remaining scenes are resequenced 0..n-1. Non-adjacent or cross-storyboard
+  ids raise `ValueError` → 400. The UI (Compose dialog checkboxes + "Merge
+  selected", rail ⋯ → "Merge with next scene") calls `store.mergeScenes`,
+  which refreshes and raises the normal "Rebuild shots?" downstream prompt
+  for the merged scene. It exists because the scenes stage emits
+  location/time units while a shot-list template is a dramatic unit.
 - **Shot-list templates are a per-scene branch of the shots stage (spec
   `docs/plans/refactor-spec-visual-story-quality.md`, Phase E).**
   `metascan/core/shot_templates.py` is pure: it loads `data/templates/*.json`

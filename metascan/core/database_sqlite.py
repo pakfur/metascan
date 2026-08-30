@@ -2440,6 +2440,129 @@ class DatabaseManager:
             ).fetchone()
             return self._decode_scene_row(row) if row else None
 
+    def merge_scenes(self, scene_ids: List[int]) -> int:
+        """Fold two or more ADJACENT scenes into the first (by sort_order)
+        and return its id. Deterministic, no VLM: descriptors come from the
+        first scene, ``charge_out`` from the last, ``brief``/``notes`` are
+        joined, ``arc_beats`` is the ordered union, ``template_id`` is
+        cleared (the user picks again for the merged unit). The absorbed
+        scenes' panels are re-parented after the survivor's own panels --
+        beats, images and jobs are untouched -- then the absorbed rows are
+        deleted and the storyboard's scenes resequenced 0..n-1.
+
+        Raises ``ValueError`` on fewer than two ids, ids outside one
+        storyboard, unknown ids, or non-contiguous scenes.
+        """
+        import json as _json
+        from datetime import datetime, timezone
+
+        from metascan.core.shot_templates import outline_hash
+        from metascan.core.storyboard_story import ARC_BEAT_VALUES
+
+        ids = [int(i) for i in scene_ids]
+        if len(set(ids)) < 2:
+            raise ValueError("merge needs at least two distinct scenes")
+        with self.lock, self._get_connection() as conn:
+            rows = [
+                self._decode_scene_row(r)
+                for r in conn.execute(
+                    "SELECT * FROM scenes WHERE id IN (%s)" % ",".join("?" * len(ids)),
+                    ids,
+                ).fetchall()
+            ]
+            found = {r["id"] for r in rows}
+            missing = [i for i in ids if i not in found]
+            if missing:
+                raise ValueError(f"unknown scene id(s): {missing}")
+            storyboard_ids = {r["storyboard_id"] for r in rows}
+            if len(storyboard_ids) != 1:
+                raise ValueError("scenes to merge must belong to the same storyboard")
+            storyboard_id = storyboard_ids.pop()
+            ordered = sorted(rows, key=lambda r: (r["sort_order"], r["id"]))
+            all_scenes = conn.execute(
+                "SELECT id FROM scenes WHERE storyboard_id = ? "
+                "ORDER BY sort_order, id",
+                (storyboard_id,),
+            ).fetchall()
+            positions = [i for i, r in enumerate(all_scenes) if r["id"] in found]
+            if positions[-1] - positions[0] != len(positions) - 1:
+                raise ValueError("scenes to merge must be adjacent")
+
+            first, last = ordered[0], ordered[-1]
+            survivor = int(first["id"])
+
+            def _join(key: str) -> Optional[str]:
+                parts = [
+                    str(r.get(key)).strip()
+                    for r in ordered
+                    if r.get(key) and str(r.get(key)).strip()
+                ]
+                return "\n\n".join(parts) if parts else None
+
+            present = {b for r in ordered for b in (r.get("arc_beats") or [])}
+            arc = [b for b in ARC_BEAT_VALUES if b in present]
+            outline_row = conn.execute(
+                "SELECT outline FROM storyboards WHERE id = ?", (storyboard_id,)
+            ).fetchone()
+            stamp = {
+                "stage": "merge",
+                "template_id": None,
+                "outline_hash": outline_hash(
+                    outline_row["outline"] if outline_row else None
+                ),
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            conn.execute(
+                "UPDATE scenes SET brief = ?, notes = ?, arc_beats = ?, "
+                "charge_out = ?, template_id = NULL, composed_from = ? "
+                "WHERE id = ?",
+                (
+                    _join("brief"),
+                    _join("notes"),
+                    _json.dumps(arc),
+                    last.get("charge_out"),
+                    _json.dumps(stamp),
+                    survivor,
+                ),
+            )
+
+            # Re-parent panels in scene order, continuing the survivor's
+            # own numbering.
+            next_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM panels "
+                "WHERE scene_id = ?",
+                (survivor,),
+            ).fetchone()["n"]
+            for r in ordered[1:]:
+                panel_rows = conn.execute(
+                    "SELECT id FROM panels WHERE scene_id = ? "
+                    "ORDER BY sort_order, id",
+                    (r["id"],),
+                ).fetchall()
+                for pr in panel_rows:
+                    conn.execute(
+                        "UPDATE panels SET scene_id = ?, sort_order = ? WHERE id = ?",
+                        (survivor, next_order, pr["id"]),
+                    )
+                    next_order += 1
+                conn.execute("DELETE FROM scenes WHERE id = ?", (r["id"],))
+
+            remaining = conn.execute(
+                "SELECT id FROM scenes WHERE storyboard_id = ? "
+                "ORDER BY sort_order, id",
+                (storyboard_id,),
+            ).fetchall()
+            for i, r in enumerate(remaining):
+                conn.execute(
+                    "UPDATE scenes SET sort_order = ? WHERE id = ?", (i, r["id"])
+                )
+            conn.execute(
+                "UPDATE storyboards SET updated_at = datetime('now') WHERE id = ?",
+                (storyboard_id,),
+            )
+            conn.commit()
+            return survivor
+
     def delete_scene(
         self, scene_id: int, purge_images: bool = False
     ) -> Tuple[bool, List[str]]:
