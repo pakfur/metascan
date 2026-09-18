@@ -34,6 +34,7 @@ from backend.api import (
     vlm,
     comfy as comfy_api,
     storyboard as storyboard_api,
+    i2v,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
@@ -46,6 +47,7 @@ from backend.api.comfy import set_comfy_client
 from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
 from metascan.core.storyboard_runner import StoryboardRunner
+from metascan.core.i2v_runner import I2vRunner
 from metascan.core.scanner import Scanner
 
 logging.basicConfig(
@@ -210,6 +212,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     comfy_client.on_job_event(storyboard_runner.handle_job_event)
     set_storyboard_runner(storyboard_runner)
 
+    i2v_runner = I2vRunner(
+        db=get_db(),
+        comfy=comfy_client,
+        get_vlm=get_vlm_client,
+        output_root=Path(comfy_cfg["output_root"]),
+    )
+    i2v_runner.on_event(
+        lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
+    )
+    comfy_client.on_job_event(i2v_runner.handle_job_event)
+    i2v.set_i2v_runner(i2v_runner)
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -302,6 +316,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await storyboard_runner.aclose()
         except Exception:
             logger.exception("Storyboard runner shutdown raised")
+        try:
+            await i2v_runner.aclose()
+        except Exception:
+            logger.exception("i2v runner close failed")
         if prompt_store is not None:
             try:
                 prompt_store.stop_watching()
@@ -376,6 +394,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(prompt_api.router)
     app.include_router(comfy_api.router)
     app.include_router(storyboard_api.router)
+    app.include_router(i2v.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
