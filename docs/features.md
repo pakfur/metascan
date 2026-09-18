@@ -104,10 +104,19 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 - **Compile** — compile shots into MiniMax H3 video prompts (six-section format), rendering each beat as its own `[Shot n]` section with its framing and cast, with lint warnings, editable in the side panel
 - **Generate video** — render shots to video via a local ComfyUI H3 workflow; clips land as hidden panel candidates for review/keeper selection/reroll
 
+## Image to Video
+Right-click any image → "Image to Video…" opens a dialog to turn it into a short MiniMax H3 clip via a driven ComfyUI backend.
+- Type an idea and expand it into a full I2VA video prompt (VLM-composed, editable before generating)
+- Pick a clip duration and a fast/quality generation preset
+- Optional LoRAs applied to the generation
+- Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions
+- Live generation progress over WebSocket
+
 ## Context Menu
 - Open (full-screen viewer)
 - Find Similar (image-to-image search, applied as a filter with a "Similar to …" chip)
 - Upscale (open upscale dialog)
+- Image to Video (images only — opens the Image to Video dialog)
 - Delete (move to trash with confirmation)
 
 ## Keyboard Shortcuts
