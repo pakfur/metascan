@@ -1,7 +1,9 @@
 """workflow_validation: per-(target, mode) validators + title fixes."""
 
-from typing import Any, Dict, Optional
+import unittest
+from typing import Any, Dict, List, Optional
 
+from metascan.core.comfy_bindings import _REQUIRED_WIDGETS
 from metascan.core.workflow_validation import (
     apply_fixes,
     validate_workflow,
@@ -30,6 +32,75 @@ def _codes(report, level=None):
     return [f.code for f in report.findings if level is None or f.level == level]
 
 
+_WIDGET_DEFAULTS: Dict[str, Any] = {
+    "text": "",
+    "seed": 0,
+    "noise_seed": 0,
+    "image": "",
+    "audio": "",
+    "value": 6.0,
+}
+
+
+def _widgets_for(title: str) -> Dict[str, Any]:
+    if title == "MS_SEED":
+        return {"noise_seed": 0}
+    widgets = _REQUIRED_WIDGETS.get(title, ())
+    return {w: _WIDGET_DEFAULTS.get(w, "") for w in widgets}
+
+
+class TestMinimaxI2vaValidator(unittest.TestCase):
+    """("minimax","i2va") -- the i2v flow's dialect."""
+
+    def _wf(self, titles: List[str]) -> Dict[str, Any]:
+        return {str(i): _node(t, _widgets_for(t)) for i, t in enumerate(titles)}
+
+    def test_missing_first_frame_is_error(self):
+        wf = self._wf(["MS_POSITIVE", "MS_SEED", "MS_SAVE"])
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        codes = [f.code for f in report.findings if f.level == "error"]
+        self.assertIn("no_first_frame", codes)
+        self.assertFalse(report.ok)
+
+    def test_complete_workflow_is_ok(self):
+        wf = self._wf(
+            [
+                "MS_POSITIVE",
+                "MS_SEED",
+                "MS_SAVE",
+                "MS_FIRST_FRAME",
+                "MS_DURATION",
+                "MS_LORA_STACK",
+            ]
+        )
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        self.assertEqual([f for f in report.findings if f.code == "no_validator"], [])
+
+    def test_missing_duration_and_lora_stack_warn(self):
+        wf = self._wf(["MS_POSITIVE", "MS_SEED", "MS_SAVE", "MS_FIRST_FRAME"])
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        codes = [f.code for f in report.findings]
+        self.assertIn("no_duration", codes)
+        self.assertIn("no_lora_stack", codes)
+
+    def test_unused_slots_warn(self):
+        wf = self._wf(
+            [
+                "MS_POSITIVE",
+                "MS_SEED",
+                "MS_SAVE",
+                "MS_FIRST_FRAME",
+                "MS_LAST_FRAME",
+                "MS_AUDIO",
+            ]
+        )
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        unused = [f for f in report.findings if f.code == "slot_unused"]
+        self.assertEqual(len(unused), 2)
+
+
 def test_minimax_ref2va_happy_path_is_clean():
     wf = _ref2v_workflow(
         ref=_node("MS_REF_IMAGE", {"image": ""}),
@@ -56,7 +127,7 @@ def test_minimax_ref2va_capability_warnings():
 
 
 def test_unregistered_target_mode_pair_warns_not_errors():
-    report = validate_workflow(_ref2v_workflow(), "ref2v", "minimax", "i2va")
+    report = validate_workflow(_ref2v_workflow(), "ref2v", "minimax", "fl2va")
     assert report.ok
     assert _codes(report) == ["no_validator"]
     # No target/mode at all -> generic checks only, no no_validator noise.

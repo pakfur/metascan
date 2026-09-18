@@ -11,10 +11,11 @@ closest known one).
 
 The target/mode axis is the extension point: validators are registered
 per ``(video_target, video_mode)`` pair in ``_VALIDATORS``. Only
-``("minimax", "ref2va")`` ships today; a pair without a validator gets a
-single "no target-specific validation" warning on top of the generic
-contract checks, so registering a preset for a future target/mode never
-hard-fails just because its validator hasn't been written yet.
+``("minimax", "ref2va")`` and ``("minimax", "i2va")`` ship today; a pair
+without a validator gets a single "no target-specific validation"
+warning on top of the generic contract checks, so registering a preset
+for a future target/mode never hard-fails just because its validator
+hasn't been written yet.
 """
 
 from __future__ import annotations
@@ -262,8 +263,63 @@ def _validate_minimax_ref2va(
     return findings
 
 
+def _validate_minimax_i2va(
+    workflow: Dict[str, Any], found: Dict[str, str]
+) -> List[Finding]:
+    """MiniMax H3 i2va (the image-to-video flow): the selected library
+    image is driven into MS_FIRST_FRAME, so its absence is fatal;
+    duration and the lora stack are optional capabilities."""
+    findings: List[Finding] = []
+    if "MS_FIRST_FRAME" not in found:
+        findings.append(
+            Finding(
+                "error",
+                "no_first_frame",
+                "No MS_FIRST_FRAME node: i2va drives the selected image "
+                "in as the first frame; without it the flow cannot run.",
+            )
+        )
+    if "MS_DURATION" not in found:
+        findings.append(
+            Finding(
+                "warning",
+                "no_duration",
+                "No MS_DURATION node: clip length will not follow the "
+                "dialog's duration setting.",
+            )
+        )
+    if "MS_LORA_STACK" not in found:
+        findings.append(
+            Finding(
+                "warning",
+                "no_lora_stack",
+                "No MS_LORA_STACK node: the dialog's lora list cannot " "be applied.",
+            )
+        )
+    for title in (
+        "MS_LAST_FRAME",
+        "MS_REF_IMAGE",
+        "MS_REF_IMAGE_2",
+        "MS_REF_IMAGE_3",
+        "MS_AUDIO",
+        "MS_AUDIO_2",
+    ):
+        if title in found:
+            findings.append(
+                Finding(
+                    "warning",
+                    "slot_unused",
+                    f"{title} is bound but the i2v flow never writes it; "
+                    "the baked-in value will be used verbatim.",
+                    node_id=found[title],
+                )
+            )
+    return findings
+
+
 _VALIDATORS: Dict[Tuple[str, str], Validator] = {
     ("minimax", "ref2va"): _validate_minimax_ref2va,
+    ("minimax", "i2va"): _validate_minimax_i2va,
 }
 
 
