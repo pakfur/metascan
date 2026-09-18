@@ -67,7 +67,12 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST/PATCH/DELETE | `/api/storyboard/scenes/{id}/panels`, `/api/storyboard/panels/{id}` | Panel (shot) CRUD |
 | POST/PATCH/DELETE | `/api/storyboard/panels/{id}/beats`, `/api/storyboard/beats/{id}` | Beat CRUD |
 | POST | `/api/storyboard/beats/{id}/select` | Choose (or clear) a beat's keeper image |
-| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard` |
+| POST | `/api/i2v/prompt` | VLM-expand an idea into an I2VA video prompt (review-only, writes nothing) |
+| POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
+| GET | `/api/i2v/videos` | List generated clips for a source image |
+| DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
+| GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations) |
+| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
 
 ## Similarity Search Endpoints
 
@@ -539,3 +544,73 @@ those go out on the **`folders`** channel, not `storyboard`:
   sent
   once a ComfyUI job's outputs have been ingested as `beat_images` rows.
   Replaces the pre-reorg `panel_images_changed`.
+
+## Image-to-video (`/api/i2v/*`)
+
+The `I2vRunner` singleton is constructed in the FastAPI lifespan alongside
+`ComfyClient`/`StoryboardRunner` and installed via `set_i2v_runner`. It
+turns a single library image into a MiniMax H3 I2VA video clip: an idea
+expands into a compiled prompt (review-only — nothing is written until the
+user generates), then a `ref2v` ComfyUI preset drives the image in as the
+first frame. Unlike storyboard clips, generated videos are never hidden —
+they're ordinary visible library media, favorited via `media.is_favorite`.
+
+### `POST /api/i2v/prompt`
+Body: `{source_path: string, idea: string = "", duration_s: float}`.
+VLM-expands the idea into an I2VA prompt scaled to the requested duration's
+beat count; writes nothing. Returns `{prompt: string, warnings: string[]}`
+(advisory lint warnings from `lint_i2v_prompt`).
+- **400** if `duration_s <= 0`, or on `I2vRequestError` (e.g. the source
+  path isn't a recognized image).
+- **502** if the VLM call itself fails (`I2vError` / `VlmError` /
+  timeout / runtime error).
+- **503** if the i2v runner isn't installed, or no VLM model is available
+  to expand with (`I2vUnavailableError` / `VlmSelectError`).
+
+### `POST /api/i2v/generate`
+Body: `{source_path: string, prompt: string, duration_s: float, quality:
+"fast" | "quality", seed: int, width: int = 0, height: int = 0, loras:
+[{name, strength}, ...] = [], idea?: string}`. Re-lints `prompt` (the
+lint is advisory and never blocks) and submits a job to ComfyUI using the
+config's `fast_preset_id` or `quality_preset_id` for the requested
+`quality`. Returns `{job_id: int, warnings: string[]}`.
+- **400** if `duration_s <= 0`, `quality` isn't `"fast"`/`"quality"`, no
+  preset is configured for the requested quality slot (set one in
+  Configuration → Image to Video), or on `I2vRequestError` /
+  `BindingError` / `PresetNotFoundError`.
+- **502** if ComfyUI rejects the submission (`ComfyError`).
+- **503** if the i2v runner isn't installed.
+
+### `GET /api/i2v/videos?source_path=`
+Returns every clip generated from that source image, newest first:
+`[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
+quality, preset_id, comfy_prompt_id, created_at, is_favorite}, ...]`,
+`is_favorite` joined live from `media.is_favorite`. Rows whose backing
+media has been deleted from the library are pruned lazily on read —
+deleting the *source* image, by contrast, leaves its generated videos in
+place (`i2v_videos` has no foreign key to media).
+
+### `DELETE /api/i2v/videos/{video_id}`
+Deletes one generated clip: its `i2v_videos` row plus its media row (moved
+to the OS trash, subject to the usual "still referenced elsewhere" survival
+checks). Returns `{status: "deleted"}`. **404** if the video id doesn't
+exist.
+
+### `GET /api/i2v/config`
+Returns the `i2v` config section with defaults filled in:
+```json
+{
+  "fast_preset_id": null,
+  "quality_preset_id": null,
+  "durations": [6.0, 10.0, 15.0, 20.0],
+  "default_duration": 6.0,
+  "default_quality": "fast"
+}
+```
+`fast_preset_id`/`quality_preset_id` name a `workflow_presets.id` or
+`null` if unset — the frontend's Configuration → Image to Video tab is
+where they're picked.
+
+### `i2v` WebSocket channel
+- **`i2v_videos_changed`** — `{source_path, files}`, sent once a ComfyUI
+  job's outputs have been downloaded and ingested as `i2v_videos` rows.

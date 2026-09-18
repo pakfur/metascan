@@ -106,7 +106,7 @@ metascan/
 - **Dim-mismatch guard.** Before FAISS search, `_assert_dim_matches` returns HTTP 409 `{code:"dim_mismatch", index_dim, model_dim, ...}` when the current CLIP model's embedding dim differs from the on-disk index. The frontend's `ApiError` in `client.ts` preserves `detail` so the UI can render an actionable "Rebuild index" banner.
 - **HuggingFace HEAD probe suppression.** `embedding_manager._check_model_needs_download` is authoritative; when weights are cached, the loader sets `HF_HUB_OFFLINE=1` around `open_clip.create_model_and_transforms` to skip the etag revalidation.
 - **Core modules use callbacks** for event dispatch: `on_progress`, `on_complete`, `on_error`, `on_status`, `on_task_added`, etc.
-- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, beat_id, done, total, prompt_source}`), `synthesis_complete` (`{storyboard_id, synthesized, fallback, skipped_locked}`), `synthesis_error` (`{storyboard_id, error}`), and `beat_images_changed` (`{storyboard_id, panel_id, beat_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`. `POST /api/storyboard/{id}/synthesize` is 202 fire-and-forget (`asyncio.create_task`); `synthesis_complete`/`synthesis_error` are the only signal a client gets that the background run actually finished or died — `StoryboardRunner.synthesize` wraps the real work and always emits exactly one of the two, re-raising after `synthesis_error` so a direct (non-route) caller still sees the exception.
+- **WebSocket is multiplexed** — a single `/ws` connection carries all channels (`scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`, `i2v`) with JSON envelope `{channel, event, data}`. The `models` channel broadcasts `inference_status`, `inference_progress`, `download_progress`, `download_complete`, `download_error`. The `folders` channel broadcasts `folder_created` / `folder_updated` / `folder_deleted` / `folder_items_changed` for cross-tab sync. The `storyboard` channel broadcasts `synthesis_progress` (`{storyboard_id, panel_id, beat_id, done, total, prompt_source}`), `synthesis_complete` (`{storyboard_id, synthesized, fallback, skipped_locked}`), `synthesis_error` (`{storyboard_id, error}`), and `beat_images_changed` (`{storyboard_id, panel_id, beat_id, files}`) from `StoryboardRunner`'s own `on_event` callback — the `folder_created` / `folder_items_changed` events it also emits go out on the `folders` channel, not `storyboard`. `POST /api/storyboard/{id}/synthesize` is 202 fire-and-forget (`asyncio.create_task`); `synthesis_complete`/`synthesis_error` are the only signal a client gets that the background run actually finished or died — `StoryboardRunner.synthesize` wraps the real work and always emits exactly one of the two, re-raising after `synthesis_error` so a direct (non-route) caller still sees the exception.
 - **Tag inverted index tracks source.** `indices.source` is one of `'prompt'` / `'clip'` / `'both'` for tag rows, NULL for other index types. `_generate_indices` emits `(type, key, source)` triples; `_update_indices` preserves CLIP-sourced tags across rescans by downgrading `'both'` → `'clip'` before rewriting prompt rows. Use `db.add_tag_indices(path, tags, source='clip')` from the embedding worker — it upserts with conflict-merge.
 - **Folders persist via `/api/folders`.** Two tables: `folders(id, kind ∈ {manual,smart}, name, icon, rules JSON, sort_order, created_at, updated_at)` and `folder_items(folder_id, file_path, added_at)` with `ON DELETE CASCADE` on both sides. The frontend Pinia store (`stores/folders.ts`) does optimistic local updates with API-backed persistence and rolls back on failure. The `folders` WS channel broadcasts every mutation so other tabs stay in sync. A one-shot localStorage → API import runs on first load when the server returns empty; guarded by a localStorage flag.
 - **Smart-folder evaluator is synchronous and client-side.** Rules are a JSON blob evaluated per Media in `stores/folders.ts::evaluateCondition`. Tag conditions can't rely on `m.tags` because the summary endpoint omits it — the store fetches only the tag keys referenced by saved smart folders via `POST /api/filters/tag_paths` with `{keys: […]}` and evaluates against those path sets. A previous bulk-GET version fetched the entire inverted index and blocked the media list endpoint for 20+ s; never restore that shape.
@@ -997,6 +997,26 @@ metascan/
   that want to send an explicit clear (e.g. `StoryboardSettingsDialog`'s
   preset picker sending `preset_id: null` for "None") must diff against
   `null` as a real change, not skip it as falsy.
+- **i2v flow (image→video, MiniMax H3 I2VA).** Right-click an image →
+  I2VDialog. `metascan/core/i2v_compiler.py` is pure: duration→beat-count
+  table, GBNF grammar with the beat count baked into the root rule and
+  camera constrained to `I2V_CAMERA_VALUES` (no `pov`), deterministic
+  `assemble_i2v_prompt` (the base guide's I2VA structure — exact §2.1
+  alignment line, `[Shot 1]` opener, three core fields), and advisory
+  `lint_i2v_prompt` that runs on generated AND hand-edited prompts
+  (`POST /api/i2v/generate` re-lints the submitted text). `I2vRunner`
+  mirrors StoryboardRunner's layering: correlation via
+  `generation_jobs.i2v_source_path` (nullable TEXT, no REFERENCES — the
+  panel_id precedent), ingest keyed on that column (storyboard ingest
+  keys on beat_id/panel_id; the two never collide), `i2v_videos_changed`
+  on the `i2v` WS channel. Generated clips are VISIBLE library media
+  (never hidden — unlike storyboard clips); star = `media.is_favorite`.
+  `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily
+  prunes rows whose media is gone; deleting the source image keeps the
+  videos. Presets are kind `ref2v` tagged `minimax`/`i2va`
+  (`_validate_minimax_i2va`: MS_FIRST_FRAME required, MS_DURATION /
+  MS_LORA_STACK warn-if-missing); the fast/quality slots live in
+  `config.json`'s `i2v` section (`get_i2v_config`).
 
 ## Development Rules
 
