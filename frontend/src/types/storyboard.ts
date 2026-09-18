@@ -302,4 +302,5 @@ export interface GenerationJob {
   started_at: string | null
   finished_at: string | null
   output_dir: string | null
+  i2v_source_path: string | null
 }
