@@ -1101,6 +1101,31 @@ class DatabaseManager:
                 )
                 """
             )
+            # Image-to-video flow: which library image produced which clip.
+            # No REFERENCES media(file_path) on either column by design:
+            # list_i2v_videos JOINs media and lazily prunes rows whose media
+            # is gone, and deleting the source image keeps the videos.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS i2v_videos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL,
+                    file_path TEXT NOT NULL UNIQUE,
+                    prompt_used TEXT,
+                    idea TEXT,
+                    seed INTEGER,
+                    duration_s REAL,
+                    quality TEXT,
+                    preset_id INTEGER,
+                    comfy_prompt_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_i2v_videos_source "
+                "ON i2v_videos(source_path)"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -1318,6 +1343,15 @@ class DatabaseManager:
                 # runner at submit time; collect_outputs prepends it to
                 # ComfyUI's filename when writing the local copy.
                 "ALTER TABLE generation_jobs ADD COLUMN output_prefix TEXT",
+            )
+            # i2v flow correlation. Like panel_id/beat_id: no REFERENCES
+            # clause (SQLite cannot add an FK to an existing table without a
+            # rebuild); cleanup is explicit in the i2v delete paths.
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "i2v_source_path",
+                "ALTER TABLE generation_jobs ADD COLUMN i2v_source_path TEXT",
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
@@ -1834,12 +1868,22 @@ class DatabaseManager:
         output_dir: Optional[str] = None,
         beat_id: Optional[int] = None,
         output_prefix: Optional[str] = None,
+        i2v_source_path: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs (preset_id, params, panel_id, "
-                "output_dir, beat_id, output_prefix) VALUES (?, ?, ?, ?, ?, ?)",
-                (preset_id, params, panel_id, output_dir, beat_id, output_prefix),
+                "output_dir, beat_id, output_prefix, i2v_source_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    preset_id,
+                    params,
+                    panel_id,
+                    output_dir,
+                    beat_id,
+                    output_prefix,
+                    i2v_source_path,
+                ),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -3454,6 +3498,91 @@ class DatabaseManager:
             if row is None:
                 return False, []
             conn.execute("DELETE FROM panel_videos WHERE id = ?", (video_id,))
+            deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.commit()
+            return True, deleted_files
+
+    # ---- i2v videos ------------------------------------------------------
+
+    def create_i2v_video(
+        self,
+        *,
+        source_path: str,
+        file_path: str,
+        prompt_used: Optional[str] = None,
+        idea: Optional[str] = None,
+        seed: Optional[int] = None,
+        duration_s: Optional[float] = None,
+        quality: Optional[str] = None,
+        preset_id: Optional[int] = None,
+        comfy_prompt_id: Optional[str] = None,
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
+                "idea, seed, duration_s, quality, preset_id, comfy_prompt_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    to_posix_path(source_path),
+                    to_posix_path(file_path),
+                    prompt_used,
+                    idea,
+                    seed,
+                    duration_s,
+                    quality,
+                    preset_id,
+                    comfy_prompt_id,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def list_i2v_videos(self, source_path: str) -> List[Dict[str, Any]]:
+        """Videos generated from one source image, newest first, with
+        media.is_favorite merged in. Rows whose media row no longer
+        exists (deleted from the library) are pruned in the same call --
+        the JOIN is the referential integrity here, by design."""
+        posix = to_posix_path(source_path)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT v.*, m.file_path AS media_path, m.is_favorite "
+                "FROM i2v_videos v "
+                "LEFT JOIN media m ON m.file_path = v.file_path "
+                "WHERE v.source_path = ? ORDER BY v.id DESC",
+                (posix,),
+            ).fetchall()
+            out: List[Dict[str, Any]] = []
+            stale: List[int] = []
+            for r in rows:
+                d = dict(r)
+                if d.pop("media_path") is None:
+                    stale.append(int(d["id"]))
+                    continue
+                d["is_favorite"] = bool(d.get("is_favorite"))
+                d["file_path"] = to_native_path(d["file_path"])
+                d["source_path"] = to_native_path(d["source_path"])
+                out.append(d)
+            if stale:
+                conn.execute(
+                    "DELETE FROM i2v_videos WHERE id IN ("
+                    + ",".join("?" * len(stale))
+                    + ")",
+                    stale,
+                )
+                conn.commit()
+            return out
+
+    def delete_i2v_video(self, video_id: int) -> Tuple[bool, List[str]]:
+        """Delete one generated clip completely: its i2v_videos row, then
+        its media row via _purge_media_rows' survival rules. Returns
+        (deleted, purged_native_paths) for the caller to trash."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM i2v_videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            if row is None:
+                return False, []
+            conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
             conn.commit()
             return True, deleted_files

@@ -478,6 +478,7 @@ class ComfyClient:
         output_dir: Optional[Path] = None,
         beat_id: Optional[int] = None,
         output_prefix: Optional[str] = None,
+        i2v_source_path: Optional[str] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -509,6 +510,7 @@ class ComfyClient:
                 str(output_dir) if output_dir else None,
                 beat_id,
                 output_prefix,
+                i2v_source_path,
             )
         )
         if priority:
