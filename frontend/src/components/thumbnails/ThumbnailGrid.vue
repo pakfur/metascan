@@ -16,6 +16,7 @@ const emit = defineEmits<{
   open: [media: Media]
   upscale: [items: Media[]]
   playground: [media: Media]
+  imageToVideo: [media: Media]
 }>()
 
 const props = withDefaults(
@@ -287,6 +288,13 @@ function ctxPlayground() {
   emit('playground', target)
 }
 
+function ctxImageToVideo() {
+  if (!contextMenu.value) return
+  const target = contextMenu.value.media
+  closeContextMenu()
+  emit('imageToVideo', target)
+}
+
 function ctxDelete() {
   if (contextMenu.value) {
     const media = contextMenu.value.media
@@ -462,6 +470,9 @@ function onThumbDragEnd() {
           @click="ctxPlayground"
         >
           Prompt Playground…
+        </button>
+        <button v-if="!contextMenu.media.is_video" @click="ctxImageToVideo">
+          Image to Video…
         </button>
         <hr />
         <div class="context-sub-host">
