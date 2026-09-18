@@ -90,3 +90,4 @@ ehthumbs.db
 *.temp
 *.log
 temp/
+.worktrees/
