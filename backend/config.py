@@ -115,3 +115,44 @@ def get_comfy_config(config: dict) -> dict:
         "output_root": str(raw.get("output_root") or "data/storyboards"),
         "request_timeout_s": float(raw.get("request_timeout_s") or 30.0),
     }
+
+
+def get_i2v_config(config: dict) -> dict:
+    """Return the ``i2v`` section with defaults filled in.
+
+    Shape:
+        {
+            "fast_preset_id": None,      # workflow_presets.id or None
+            "quality_preset_id": None,
+            "durations": [6.0, 10.0, 15.0, 20.0],
+            "default_duration": 6.0,
+            "default_quality": "fast",   # "fast" | "quality"
+        }
+    """
+    raw = config.get("i2v", {}) or {}
+
+    def _preset_id(v: object) -> Optional[int]:
+        try:
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    fallback = [6.0, 10.0, 15.0, 20.0]
+    try:
+        durations = [float(d) for d in (raw.get("durations") or [])]
+    except (TypeError, ValueError):
+        durations = []
+    if not durations:
+        durations = fallback
+    try:
+        default_duration = float(raw.get("default_duration") or durations[0])
+    except (TypeError, ValueError):
+        default_duration = durations[0]
+    quality = str(raw.get("default_quality") or "fast")
+    return {
+        "fast_preset_id": _preset_id(raw.get("fast_preset_id")),
+        "quality_preset_id": _preset_id(raw.get("quality_preset_id")),
+        "durations": durations,
+        "default_duration": default_duration,
+        "default_quality": quality if quality in ("fast", "quality") else "fast",
+    }
