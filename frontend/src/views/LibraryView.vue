@@ -22,6 +22,7 @@ import SimilaritySettings from '../components/dialogs/SimilaritySettings.vue'
 import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
+import I2VDialog from '../components/dialogs/I2VDialog.vue'
 import UpscaleQueue from '../components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from '../components/dialogs/ConfigDialog.vue'
 import ScopeBreadcrumb from '../components/layout/ScopeBreadcrumb.vue'
@@ -58,6 +59,7 @@ const upscaleDialogOpen = ref(false)
 const upscaleQueueOpen = ref(false)
 const upscaleTargets = ref<Media[]>([])
 const playgroundMedia = ref<Media | null>(null)
+const i2vMedia = ref<Media | null>(null)
 const configOpen = ref(false)
 
 onMounted(async () => {
@@ -137,6 +139,10 @@ function closePlayground() {
   playgroundMedia.value = null
 }
 
+function openImageToVideo(m: Media) {
+  i2vMedia.value = m
+}
+
 function handleUpscaleFromSelected() {
   if (isMobile.value) return
   if (mediaStore.selectedMedia) {
@@ -196,6 +202,7 @@ watch(isMobile, () => {
               @open="openViewer"
               @upscale="openUpscale"
               @playground="openPlayground"
+              @image-to-video="openImageToVideo"
             />
           </div>
         </div>
@@ -280,6 +287,9 @@ watch(isMobile, () => {
       :media="playgroundMedia"
       @close="closePlayground"
     />
+
+    <!-- Image to Video dialog -->
+    <I2VDialog v-if="i2vMedia" :media="i2vMedia" @close="i2vMedia = null" />
 
     <!-- Config dialog -->
     <ConfigDialog
