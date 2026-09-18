@@ -12,6 +12,10 @@ import { VIDEO_MODES, presetTag } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
 
+const props = withDefaults(defineProps<{ initialMode?: string }>(), {
+  initialMode: 'ref2va',
+})
+
 const emit = defineEmits<{
   close: []
   registered: []
@@ -23,7 +27,7 @@ const workflowText = ref('')
 // target-specific validation and the generate_video mismatch guard.
 // "" = untagged (legacy behavior, generic validation only).
 const videoTarget = ref('minimax')
-const videoMode = ref('ref2va')
+const videoMode = ref(props.initialMode)
 
 const jsonError = ref<string | null>(null)
 const submitError = ref<string | null>(null)
