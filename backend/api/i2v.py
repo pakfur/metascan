@@ -63,8 +63,10 @@ class GenerateRequest(BaseModel):
     duration_s: float
     quality: str
     seed: int
-    width: int = 0
-    height: int = 0
+    # Pixel budget; output dimensions are derived from it and the source
+    # image's aspect ratio server-side. Explicit checks rather than
+    # Field(gt=0) so a bad value is a 400, not a 422.
+    megapixels: float = 0.75
     loras: List[Dict[str, Any]] = Field(default_factory=list)
     # Dialog metadata persisted onto the i2v_videos row at ingest.
     idea: Optional[str] = None
@@ -99,6 +101,8 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="quality must be 'fast' or 'quality'"
         )
+    if body.megapixels <= 0:
+        raise HTTPException(status_code=400, detail="megapixels must be positive")
     cfg = get_i2v_config(load_app_config())
     preset_id = (
         cfg["fast_preset_id"] if body.quality == "fast" else cfg["quality_preset_id"]
@@ -116,8 +120,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             duration_s=body.duration_s,
             quality=body.quality,
             seed=body.seed,
-            width=body.width,
-            height=body.height,
+            megapixels=body.megapixels,
             loras=body.loras,
             preset_id=preset_id,
             idea=body.idea,

@@ -53,6 +53,23 @@ class TestI2vVideosDb(unittest.TestCase):
         # POSIX in, native out
         self.assertIn("out1.mp4", rows[0]["file_path"])
 
+    def test_stores_and_returns_dimensions(self):
+        self.db.create_i2v_video(
+            source_path="/lib/src.png",
+            file_path="/lib/out1.mp4",
+            width=1328,
+            height=752,
+        )
+        rows = self.db.list_i2v_videos("/lib/src.png")
+        self.assertEqual(rows[0]["width"], 1328)
+        self.assertEqual(rows[0]["height"], 752)
+
+    def test_dimensions_default_to_null(self):
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out1.mp4")
+        rows = self.db.list_i2v_videos("/lib/src.png")
+        self.assertIsNone(rows[0]["width"])
+        self.assertIsNone(rows[0]["height"])
+
     def test_list_newest_first(self):
         self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out1.mp4")
         self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out2.mp4")

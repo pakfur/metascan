@@ -21,6 +21,7 @@ from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core.i2v_compiler import (
     assemble_i2v_prompt,
     build_i2v_user_prompt,
+    i2v_dims,
     i2v_grammar,
     i2v_max_tokens,
     lint_i2v_prompt,
@@ -100,6 +101,27 @@ class I2vRunner:
         text = assemble_i2v_prompt(result)
         return text, lint_i2v_prompt(text, duration_s)
 
+    async def _source_dims(self, src: Path) -> Tuple[int, int]:
+        """Source pixel dimensions: the media row first (already scanned,
+        and what the dialog shows), falling back to reading the file's
+        header for an image that has not been ingested yet."""
+        media = await asyncio.to_thread(self.db.get_media, src)
+        if media is not None and media.width and media.height:
+            return int(media.width), int(media.height)
+        try:
+            from PIL import Image
+
+            def _probe() -> Tuple[int, int]:
+                with Image.open(src) as im:
+                    return (int(im.width), int(im.height))
+
+            return await asyncio.to_thread(_probe)
+        except Exception as exc:
+            raise I2vRequestError(
+                f"Cannot determine the dimensions of {src.name}; "
+                "rescan the library so its size is known."
+            ) from exc
+
     # ---- generation ------------------------------------------------------
 
     async def generate(
@@ -110,8 +132,7 @@ class I2vRunner:
         duration_s: float,
         quality: str,
         seed: int,
-        width: int,
-        height: int,
+        megapixels: float,
         loras: List[Dict[str, Any]],
         preset_id: int,
         idea: Optional[str] = None,
@@ -133,9 +154,18 @@ class I2vRunner:
             )
         if not prompt.strip():
             raise I2vRequestError("Prompt is empty")
+        if megapixels <= 0:
+            raise I2vRequestError(
+                f"Megapixel budget must be positive, got {megapixels}"
+            )
         src = Path(to_native_path(source_path))
         if not src.exists():
             raise I2vRequestError(f"File not found: {source_path}")
+
+        # Output size tracks the source aspect ratio: the image IS the
+        # first frame, so any other ratio letterboxes or crops it.
+        src_w, src_h = await self._source_dims(src)
+        width, height = i2v_dims(src_w, src_h, float(megapixels))
 
         workflow = json.loads(preset["workflow_json"])
         bindings = resolve_bindings(workflow, preset["kind"])
@@ -209,6 +239,8 @@ class I2vRunner:
                     seed=params.get("seed"),
                     duration_s=params.get("duration_s"),
                     quality=meta.get("quality"),
+                    width=params.get("width"),
+                    height=params.get("height"),
                     preset_id=job.get("preset_id"),
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                 )
