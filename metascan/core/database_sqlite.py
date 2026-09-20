@@ -1116,6 +1116,8 @@ class DatabaseManager:
                     seed INTEGER,
                     duration_s REAL,
                     quality TEXT,
+                    width INTEGER,
+                    height INTEGER,
                     preset_id INTEGER,
                     comfy_prompt_id TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1125,6 +1127,19 @@ class DatabaseManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_i2v_videos_source "
                 "ON i2v_videos(source_path)"
+            )
+            # Dev DBs created before the resolution feature lack these.
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "width",
+                "ALTER TABLE i2v_videos ADD COLUMN width INTEGER",
+            )
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "height",
+                "ALTER TABLE i2v_videos ADD COLUMN height INTEGER",
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
@@ -3514,14 +3529,17 @@ class DatabaseManager:
         seed: Optional[int] = None,
         duration_s: Optional[float] = None,
         quality: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
         preset_id: Optional[int] = None,
         comfy_prompt_id: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
-                "idea, seed, duration_s, quality, preset_id, comfy_prompt_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "idea, seed, duration_s, quality, width, height, preset_id, "
+                "comfy_prompt_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -3530,6 +3548,8 @@ class DatabaseManager:
                     seed,
                     duration_s,
                     quality,
+                    width,
+                    height,
                     preset_id,
                     comfy_prompt_id,
                 ),

@@ -179,8 +179,7 @@ class TestI2vApi(unittest.TestCase):
                 "duration_s": 6,
                 "quality": "fast",
                 "seed": 1,
-                "width": 512,
-                "height": 512,
+                "megapixels": 0.75,
                 "loras": [],
             },
         )
@@ -201,13 +200,62 @@ class TestI2vApi(unittest.TestCase):
                 "duration_s": 6,
                 "quality": "quality",
                 "seed": 1,
-                "width": 512,
-                "height": 512,
+                "megapixels": 0.75,
                 "loras": [],
             },
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Configuration", resp.json()["detail"])
+
+    def test_generate_passes_megapixels_to_runner(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json={
+                "source_path": "/lib/a.png",
+                "prompt": "For the target video, the shot begins mid-air.",
+                "duration_s": 6,
+                "quality": "fast",
+                "seed": 1,
+                "megapixels": 0.5,
+                "loras": [],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.runner.calls[0][1]
+        self.assertEqual(kwargs["megapixels"], 0.5)
+        self.assertNotIn("width", kwargs)
+        self.assertNotIn("height", kwargs)
+
+    def test_generate_defaults_megapixels_when_omitted(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json={
+                "source_path": "/lib/a.png",
+                "prompt": "For the target video, the shot begins mid-air.",
+                "duration_s": 6,
+                "quality": "fast",
+                "seed": 1,
+                "loras": [],
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.calls[0][1]["megapixels"], 0.75)
+
+    def test_generate_400_non_positive_megapixels(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json={
+                "source_path": "/lib/a.png",
+                "prompt": "For the target video, the shot begins mid-air.",
+                "duration_s": 6,
+                "quality": "fast",
+                "seed": 1,
+                "megapixels": 0,
+                "loras": [],
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("megapixels", resp.json()["detail"].lower())
 
     def test_generate_400_bad_quality(self):
         resp = self.client.post(
@@ -218,8 +266,7 @@ class TestI2vApi(unittest.TestCase):
                 "duration_s": 6,
                 "quality": "ultra",
                 "seed": 1,
-                "width": 512,
-                "height": 512,
+                "megapixels": 0.75,
                 "loras": [],
             },
         )
@@ -234,8 +281,7 @@ class TestI2vApi(unittest.TestCase):
                 "duration_s": 0,
                 "quality": "fast",
                 "seed": 1,
-                "width": 512,
-                "height": 512,
+                "megapixels": 0.75,
                 "loras": [],
             },
         )
@@ -330,3 +376,28 @@ class TestGetI2vConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestI2vConfigMegapixels(unittest.TestCase):
+    def test_defaults(self):
+        cfg = get_i2v_config({})
+        self.assertEqual(cfg["megapixels"], [0.25, 0.5, 0.75, 1.0])
+        self.assertEqual(cfg["default_megapixels"], 0.75)
+
+    def test_junk_falls_back_to_defaults(self):
+        cfg = get_i2v_config({"i2v": {"megapixels": "x", "default_megapixels": "y"}})
+        self.assertEqual(cfg["megapixels"], [0.25, 0.5, 0.75, 1.0])
+        self.assertEqual(cfg["default_megapixels"], 0.75)
+
+    def test_valid_values_pass_through(self):
+        cfg = get_i2v_config({"i2v": {"megapixels": [0.5, 2], "default_megapixels": 2}})
+        self.assertEqual(cfg["megapixels"], [0.5, 2.0])
+        self.assertEqual(cfg["default_megapixels"], 2.0)
+
+    def test_default_outside_ladder_falls_back_to_first_entry(self):
+        cfg = get_i2v_config({"i2v": {"megapixels": [0.5, 1.0]}})
+        self.assertEqual(cfg["default_megapixels"], 0.5)
+
+    def test_non_positive_entries_are_dropped(self):
+        cfg = get_i2v_config({"i2v": {"megapixels": [0, -1, 0.5]}})
+        self.assertEqual(cfg["megapixels"], [0.5])

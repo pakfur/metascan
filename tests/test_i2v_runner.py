@@ -162,8 +162,7 @@ class TestGenerate(I2vRunnerBase):
             duration_s=6.0,
             quality="fast",
             seed=123,
-            width=832,
-            height=1216,
+            megapixels=0.75,
             loras=[],
             preset_id=self.preset_id,
             idea="a cat",
@@ -181,6 +180,51 @@ class TestGenerate(I2vRunnerBase):
         self.assertEqual(params.duration_s, 6.0)
         self.assertTrue(str(kwargs["i2v_source_path"]).endswith("src.png"))
         self.assertIn("i2v", str(kwargs["output_dir"]))
+
+    def test_dims_derived_from_source_aspect_and_budget(self):
+        """832x1216 source -> portrait output at ~0.75 MP, snapped to 16."""
+        self._generate(megapixels=0.75)
+        _, params, _ = self.comfy.submits[0]
+        self.assertGreater(params.height, params.width)
+        self.assertEqual(params.width % 16, 0)
+        self.assertEqual(params.height % 16, 0)
+        self.assertAlmostEqual(
+            params.width * params.height / 1_000_000, 0.75, delta=0.04
+        )
+        self.assertAlmostEqual(params.width / params.height, 832 / 1216, delta=0.02)
+
+    def test_landscape_source_yields_landscape_output(self):
+        self.db.save_media(
+            Media(
+                file_path=self.src,
+                file_size=1,
+                width=1920,
+                height=1080,
+                format="png",
+                created_at=datetime.now(),
+                modified_at=datetime.now(),
+            )
+        )
+        self._generate()
+        _, params, _ = self.comfy.submits[0]
+        self.assertGreater(params.width, params.height)
+
+    def test_budget_changes_output_size(self):
+        self._generate(megapixels=0.25)
+        small = self.comfy.submits[0][1]
+        self._generate(megapixels=1.0)
+        large = self.comfy.submits[1][1]
+        self.assertLess(small.width * small.height, large.width * large.height)
+
+    def test_non_positive_megapixels_rejected(self):
+        with self.assertRaises(I2vRequestError):
+            self._generate(megapixels=0)
+
+    def test_unknown_source_dimensions_rejected(self):
+        orphan = Path(self.tmp.name) / "orphan.png"
+        orphan.write_bytes(b"\x89PNG fake")
+        with self.assertRaises(I2vRequestError):
+            self._generate(source_path=str(orphan))
 
     def test_missing_preset_rejected(self):
         with self.assertRaises(I2vRequestError):
@@ -268,6 +312,47 @@ class TestIngest(I2vRunnerBase):
         self.assertEqual(
             [(ch, ev) for ch, ev, _ in events], [("i2v", "i2v_videos_changed")]
         )
+
+    def test_ingest_records_generated_dimensions(self):
+        """Dims come from the job's stored params, so they survive a
+        server restart -- unlike the in-memory quality/idea metadata."""
+        out = Path(self.tmp.name) / "clip2.mp4"
+        out.write_bytes(b"fake")
+        self.db.save_media(
+            Media(
+                file_path=out,
+                file_size=4,
+                width=1152,
+                height=656,
+                format="mp4",
+                created_at=datetime.now(),
+                modified_at=datetime.now(),
+            )
+        )
+        job_id = self.db.create_generation_job(
+            self.preset_id,
+            json.dumps(
+                {
+                    "positive": "p",
+                    "seed": 5,
+                    "duration_s": 6.0,
+                    "width": 1152,
+                    "height": 656,
+                }
+            ),
+            i2v_source_path=str(self.src),
+        )
+
+        async def scenario():
+            self.runner.handle_job_event(
+                "job_outputs", {"job_id": job_id, "files": [str(out)]}
+            )
+            await self.runner.aclose()
+
+        self.run_async(scenario())
+        rows = self.db.list_i2v_videos(str(self.src))
+        self.assertEqual(rows[0]["width"], 1152)
+        self.assertEqual(rows[0]["height"], 656)
 
     def test_non_i2v_job_ignored(self):
         job_id = self.db.create_generation_job(self.preset_id, "{}")

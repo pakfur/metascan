@@ -127,7 +127,13 @@ def get_i2v_config(config: dict) -> dict:
             "durations": [6.0, 10.0, 15.0, 20.0],
             "default_duration": 6.0,
             "default_quality": "fast",   # "fast" | "quality"
+            "megapixels": [0.25, 0.5, 0.75, 1.0],
+            "default_megapixels": 0.75,
         }
+
+    Output dimensions are derived from the source image's aspect ratio
+    and the chosen megapixel budget (i2v_compiler.i2v_dims), so there is
+    no orientation setting -- orientation always follows the source.
     """
     raw = config.get("i2v", {}) or {}
 
@@ -149,10 +155,28 @@ def get_i2v_config(config: dict) -> dict:
     except (TypeError, ValueError):
         default_duration = durations[0]
     quality = str(raw.get("default_quality") or "fast")
+
+    mp_fallback = [0.25, 0.5, 0.75, 1.0]
+    try:
+        megapixels = [float(m) for m in (raw.get("megapixels") or [])]
+    except (TypeError, ValueError):
+        megapixels = []
+    megapixels = [m for m in megapixels if m > 0]
+    if not megapixels:
+        megapixels = mp_fallback
+    try:
+        default_mp = float(raw.get("default_megapixels") or 0.75)
+    except (TypeError, ValueError):
+        default_mp = 0.75
+    if default_mp not in megapixels:
+        default_mp = megapixels[0]
+
     return {
         "fast_preset_id": _preset_id(raw.get("fast_preset_id")),
         "quality_preset_id": _preset_id(raw.get("quality_preset_id")),
         "durations": durations,
         "default_duration": default_duration,
         "default_quality": quality if quality in ("fast", "quality") else "fast",
+        "megapixels": megapixels,
+        "default_megapixels": default_mp,
     }
