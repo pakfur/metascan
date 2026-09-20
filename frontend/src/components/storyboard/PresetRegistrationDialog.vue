@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   listPresets,
   createPreset,
+  updatePreset,
+  getPreset,
   deletePreset,
   validatePreset,
   type ValidationResult,
@@ -28,6 +30,21 @@ const workflowText = ref('')
 // "" = untagged (legacy behavior, generic validation only).
 const videoTarget = ref('minimax')
 const videoMode = ref(props.initialMode)
+
+// ---- update mode ----------------------------------------------------------
+// Selecting a preset in the list below loads it into the form for an
+// in-place workflow update; selecting it again returns to registering a
+// new one. Only the workflow is updatable -- name and the dialect tag are
+// shown (so the user can see WHAT they are updating) but locked, and the
+// preset's id is preserved server-side so config slots and job history
+// keep pointing at it.
+const editingId = ref<number | null>(null)
+// Validation must run against the preset's own kind (legacy t2i/ref
+// presets can be updated too), not the 'ref2v' new registrations use.
+const editingKind = ref<WorkflowPreset['kind']>('ref2v')
+const loadingPreset = ref(false)
+const savedNotice = ref<string | null>(null)
+const isUpdating = computed(() => editingId.value !== null)
 
 const jsonError = ref<string | null>(null)
 const submitError = ref<string | null>(null)
@@ -65,7 +82,7 @@ async function onValidate(): Promise<void> {
   validating.value = true
   try {
     validation.value = await validatePreset({
-      kind: 'ref2v',
+      kind: isUpdating.value ? editingKind.value : 'ref2v',
       workflow,
       video_target: videoTarget.value || null,
       video_mode: videoMode.value || null,
@@ -111,9 +128,59 @@ async function onFileChange(e: Event) {
   input.value = ''
 }
 
+// Back to the registration defaults (also leaves update mode).
+function resetForm() {
+  selectSeq++ // orphan any preset load still in flight
+  editingId.value = null
+  editingKind.value = 'ref2v'
+  name.value = ''
+  videoTarget.value = 'minimax'
+  videoMode.value = props.initialMode
+  workflowText.value = ''
+  jsonError.value = null
+  submitError.value = null
+  validation.value = null
+  registerWarnings.value = []
+  savedNotice.value = null
+}
+
+let selectSeq = 0
+async function onSelectPreset(p: WorkflowPreset) {
+  // Re-selecting the highlighted preset toggles update mode off.
+  if (editingId.value === p.id) {
+    resetForm()
+    return
+  }
+  const seq = ++selectSeq
+  loadingPreset.value = true
+  submitError.value = null
+  try {
+    const full = await getPreset(p.id)
+    if (seq !== selectSeq) return // a later click won
+    editingId.value = full.id
+    editingKind.value = full.kind
+    name.value = full.name
+    videoTarget.value = full.video_target ?? ''
+    videoMode.value = full.video_mode ?? ''
+    workflowText.value = JSON.stringify(full.workflow, null, 2)
+    jsonError.value = null
+    validation.value = null
+    registerWarnings.value = []
+    savedNotice.value = null
+  } catch (e) {
+    if (seq === selectSeq) {
+      submitError.value =
+        e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
+    }
+  } finally {
+    if (seq === selectSeq) loadingPreset.value = false
+  }
+}
+
 async function submit() {
   submitError.value = null
   registerWarnings.value = []
+  savedNotice.value = null
   const trimmedName = name.value.trim()
   if (!trimmedName) return
 
@@ -122,6 +189,16 @@ async function submit() {
 
   submitting.value = true
   try {
+    if (editingId.value !== null) {
+      // Update: only the workflow travels. The selection (and the form)
+      // stay as they are so the user can keep iterating on the graph.
+      const res = await updatePreset(editingId.value, workflow)
+      registerWarnings.value = res.warnings ?? []
+      savedNotice.value = `Updated “${trimmedName}”.`
+      emit('registered')
+      await refreshPresets()
+      return
+    }
     // The storyboard UX is video-only, so registration is fixed to the
     // ref2v (video workflow) kind.
     const res = await createPreset({
@@ -132,6 +209,7 @@ async function submit() {
       video_mode: videoMode.value || null,
     })
     registerWarnings.value = res.warnings ?? []
+    savedNotice.value = `Saved “${trimmedName}”.`
     name.value = ''
     workflowText.value = ''
     emit('registered')
@@ -160,6 +238,8 @@ async function onDelete(id: number, presetName: string) {
   try {
     await deletePreset(id)
     presets.value = presets.value.filter((p) => p.id !== id)
+    // The form may still hold the preset that just went away.
+    if (editingId.value === id) resetForm()
   } catch (e) {
     // A 409 from the backend names the jobs still referencing this preset --
     // surfaced verbatim, same treatment as the JSON-validation error above.
@@ -177,10 +257,16 @@ function close() {
     <div class="dialog-card">
       <h3>Workflow presets</h3>
 
-      <h4>Register a new video preset (ref2v)</h4>
+      <h4>Register or update a workflow</h4>
+      <p v-if="isUpdating" class="update-hint">
+        Updating “{{ name }}” — only the workflow can be changed. Select it
+        again in the list below to go back to registering a new workflow.
+      </p>
       <div class="field">
         <label for="preset-name">Name</label>
-        <TextEditPopup title="Name" :value="name" @save="name = $event">
+        <!-- Locked while updating: no edit popup, just the value. -->
+        <InputText v-if="isUpdating" id="preset-name" :model-value="name" disabled />
+        <TextEditPopup v-else title="Name" :value="name" @save="name = $event">
           <InputText id="preset-name" v-model="name" placeholder="e.g. H3 ref2v" />
         </TextEditPopup>
       </div>
@@ -188,14 +274,14 @@ function close() {
       <div class="field-row">
         <div class="field">
           <label for="preset-target">Video model</label>
-          <select id="preset-target" v-model="videoTarget">
+          <select id="preset-target" v-model="videoTarget" :disabled="isUpdating">
             <option value="">Untagged</option>
             <option value="minimax">MiniMax H3</option>
           </select>
         </div>
         <div class="field">
           <label for="preset-mode">Generation mode</label>
-          <select id="preset-mode" v-model="videoMode">
+          <select id="preset-mode" v-model="videoMode" :disabled="isUpdating">
             <option value="">Untagged</option>
             <option v-for="m in VIDEO_MODES" :key="m" :value="m">{{ m }}</option>
           </select>
@@ -240,8 +326,9 @@ function close() {
         </button>
       </div>
 
+      <p v-if="savedNotice" class="saved-notice">✓ {{ savedNotice }}</p>
       <p v-if="registerWarnings.length" class="register-warnings">
-        Registered with {{ registerWarnings.length }} warning{{
+        {{ isUpdating ? 'Updated' : 'Saved' }} with {{ registerWarnings.length }} warning{{
           registerWarnings.length === 1 ? '' : 's'
         }}: {{ registerWarnings.join(' ') }}
       </p>
@@ -252,7 +339,8 @@ function close() {
           :disabled="!name.trim() || !workflowText.trim() || submitting"
           @click="submit"
         >
-          {{ submitting ? 'Registering…' : 'Register' }}
+          <template v-if="isUpdating">{{ submitting ? 'Updating…' : 'Update' }}</template>
+          <template v-else>{{ submitting ? 'Saving…' : 'Save' }}</template>
         </button>
         <button
           class="btn-secondary"
@@ -268,11 +356,28 @@ function close() {
       <div v-if="presetsLoading" class="muted">Loading…</div>
       <div v-else-if="presets.length === 0" class="muted">No presets registered yet.</div>
       <div v-else class="preset-list">
-        <div v-for="p in presets" :key="p.id" class="preset-row">
-          <div class="preset-info">
-            <div class="preset-name">{{ p.name }}</div>
+        <div
+          v-for="p in presets"
+          :key="p.id"
+          class="preset-row"
+          :class="{ selected: editingId === p.id }"
+        >
+          <button
+            type="button"
+            class="preset-info"
+            :aria-pressed="editingId === p.id"
+            :disabled="loadingPreset || submitting"
+            :title="editingId === p.id
+              ? 'Being updated — select again to go back to a new workflow'
+              : 'Select to update this workflow'"
+            @click="onSelectPreset(p)"
+          >
+            <div class="preset-name">
+              {{ p.name }}
+              <span v-if="editingId === p.id" class="updating-chip">updating</span>
+            </div>
             <div class="preset-meta">{{ p.kind }}{{ presetTag(p) }}</div>
-          </div>
+          </button>
           <button class="btn-remove" title="Delete" @click="onDelete(p.id, p.name)">
             &times;
           </button>
@@ -499,6 +604,57 @@ textarea:focus {
 }
 .preset-row:last-child {
   border-bottom: none;
+}
+
+/* The selected (being-updated) row stays highlighted for as long as
+   update mode lasts: tinted background plus a primary-colored left bar. */
+.preset-row.selected {
+  background: color-mix(in srgb, var(--primary-color) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--primary-color);
+}
+
+.preset-info {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.preset-info:disabled { cursor: default; }
+.preset-row:not(.selected):hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.12));
+}
+
+.updating-chip {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--primary-color-text, #fff);
+  background: var(--primary-color);
+}
+
+.update-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.saved-notice {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--green-500, #2e9d5b);
+}
+
+select:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .preset-name {

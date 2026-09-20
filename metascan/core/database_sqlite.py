@@ -1873,6 +1873,27 @@ class DatabaseManager:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def update_workflow_preset_workflow(
+        self, preset_id: int, workflow_json: str, bindings: str
+    ) -> bool:
+        """Replace a preset's graph (and its bindings snapshot) in place.
+
+        The id -- and with it every config slot and generation_jobs row
+        pointing at the preset -- is preserved, which is the point of
+        updating rather than delete + re-register (delete is refused
+        outright once jobs reference the preset). Name, kind and the
+        dialect tag are deliberately not updatable here. Returns False
+        when no such preset exists.
+        """
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE workflow_presets SET workflow_json = ?, bindings = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (workflow_json, bindings, preset_id),
+            )
+            conn.commit()
+            return int(cur.rowcount) > 0
+
     def delete_workflow_preset(self, preset_id: int) -> bool:
         """Delete a preset.
 

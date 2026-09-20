@@ -187,7 +187,20 @@ title is missing, you exported the wrong format.
 4. Click **Validate**. Fix anything reported as an error; warnings are fine
    to accept. If the only problem is a misspelled `MS_*` title, the dialog
    offers **Apply fixes** to rename it for you.
-5. Save.
+5. Click **Save**.
+
+### Updating a registered workflow
+
+Re-exported the graph — added `MS_STEPS`, swapped a model, fixed a node?
+Update the preset rather than registering a second one. In the same dialog,
+click the preset in the **Existing presets** list: it highlights, its name,
+model, generation mode and workflow load into the form, and the button
+becomes **Update**. Paste the new JSON (or load the file), optionally
+**Validate**, then **Update**. Only the workflow changes — the name, model
+and mode are locked — and the preset keeps its id, so the Fast / High
+quality slots that point at it need no re-selection and its past jobs stay
+attached. Click the highlighted preset again to clear the form and go back
+to registering a new workflow.
 
 You can run the same check from the command line before you ever open the
 dialog, which is faster to iterate against:

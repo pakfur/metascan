@@ -8,8 +8,11 @@ is a thin asyncio.to_thread hop, matching backend/services/folders_service.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from typing import Any, Dict, List, Optional
+
+from metascan.core.comfy_bindings import resolve_bindings
 
 
 class PresetInUseError(RuntimeError):
@@ -43,6 +46,19 @@ class ComfyService:
 
     async def get_preset(self, preset_id: int) -> Optional[Dict[str, Any]]:
         return await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
+
+    async def update_preset_workflow(
+        self, preset_id: int, workflow: Dict[str, Any], kind: str
+    ) -> bool:
+        """Re-resolve bindings for ``workflow`` and persist both. Raises
+        BindingError before anything is written, like register_preset."""
+        bindings = resolve_bindings(workflow, kind)
+        return await asyncio.to_thread(
+            self.db.update_workflow_preset_workflow,
+            preset_id,
+            json.dumps(workflow),
+            bindings.to_json(),
+        )
 
     async def count_jobs_for_preset(self, preset_id: int) -> int:
         return await asyncio.to_thread(self.db.count_jobs_for_preset, preset_id)

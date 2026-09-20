@@ -8,6 +8,7 @@ can still show what is configured.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -65,6 +66,13 @@ class PresetRequest(BaseModel):
     # here and the mismatch guard in StoryboardRunner.generate_video.
     video_target: Optional[str] = None
     video_mode: Optional[str] = None
+
+
+class PresetUpdateRequest(BaseModel):
+    # The workflow is the ONLY updatable part of a preset. Name, kind and
+    # the dialect tag are fixed at registration; extra keys in the body
+    # are ignored (pydantic's default), not applied.
+    workflow: Dict[str, Any]
 
 
 class PresetValidateRequest(BaseModel):
@@ -169,6 +177,59 @@ async def create_preset(body: PresetRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "id": int(preset_id),
+        "warnings": [f["message"] for f in report.to_dict()["findings"]],
+    }
+
+
+@router.get("/presets/{preset_id}")
+async def get_preset(preset_id: int) -> Dict[str, Any]:
+    """One preset WITH its graph (the list route omits it) -- what the
+    registration dialog's update flow populates its form from."""
+    row = await _service().get_preset(preset_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No preset {preset_id}")
+    out = {k: v for k, v in row.items() if k != "workflow_json"}
+    try:
+        out["workflow"] = json.loads(row["workflow_json"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Preset {preset_id} holds unreadable JSON"
+        ) from exc
+    return out
+
+
+@router.put("/presets/{preset_id}")
+async def update_preset(preset_id: int, body: PresetUpdateRequest) -> Dict[str, Any]:
+    """Replace a preset's workflow in place, keeping its id (so the i2v
+    config slots, storyboards and job history that reference it survive).
+
+    Validated exactly like registration, but against the preset's STORED
+    kind and dialect tag -- those are not updatable. Needs no ComfyUI
+    connection: it is validation plus a DB write. Jobs already queued
+    against the preset pick up the new graph when they dispatch.
+    """
+    service = _service()
+    row = await service.get_preset(preset_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No preset {preset_id}")
+    report = validate_workflow(
+        body.workflow, row["kind"], row.get("video_target"), row.get("video_mode")
+    )
+    if not report.ok:
+        detail: Dict[str, Any] = {"code": "validation_failed", **report.to_dict()}
+        if report.fixes:
+            detail["fixed_workflow"] = apply_fixes(body.workflow, report.fixes)
+        raise HTTPException(status_code=400, detail=detail)
+    try:
+        updated = await service.update_preset_workflow(
+            preset_id, body.workflow, row["kind"]
+        )
+    except BindingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:  # deleted between the read and the write
+        raise HTTPException(status_code=404, detail=f"No preset {preset_id}")
+    return {
+        "id": preset_id,
         "warnings": [f["message"] for f in report.to_dict()["findings"]],
     }
 

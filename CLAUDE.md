@@ -595,6 +595,26 @@ metascan/
   which is what makes the association binding. `VIDEO_TARGETS`/
   `VIDEO_MODES` in `workflow_validation.py` are the canonical axes to
   extend when a new dialect (ltx, wan, …) lands.
+- **Presets are updated in place, workflow only.** `PUT
+  /api/comfy/presets/{id}` (`{workflow}`) replaces `workflow_json` and the
+  bindings snapshot via `DatabaseManager.update_workflow_preset_workflow`
+  and bumps `updated_at`; name, kind and the dialect tag are NOT
+  updatable (extra body keys are ignored), and validation runs against
+  the preset's STORED kind/target/mode. The id is preserved on purpose —
+  `i2v.fast_preset_id`/`quality_preset_id`, storyboards and
+  `generation_jobs.preset_id` all reference it, and `DELETE` 409s once
+  jobs exist, so delete + re-register is not an option for a used preset.
+  It goes through `ComfyService`, not `ComfyClient` (no ComfyUI
+  connection needed). `GET /api/comfy/presets/{id}` returns the parsed
+  `workflow` (the list route still omits the graph). In
+  `PresetRegistrationDialog.vue`, clicking a row in "Existing presets"
+  enters update mode (`editingId`): the row stays highlighted, the form
+  is populated, name/model/mode are locked, Validate uses the preset's
+  own `editingKind` (legacy `t2i`/`ref` presets are updatable too), and
+  the button reads **Update** instead of **Save**; clicking the selected
+  row again calls `resetForm()`. After a successful update the selection
+  and form are kept so the user can keep iterating. `selectSeq` drops
+  out-of-order preset loads.
 - **Video generation drives ComfyUI with a third preset kind, `ref2v`.**
   `workflow_presets.kind`'s CHECK gained `'ref2v'` alongside `t2i`/`ref`; a
   dev DB with the old two-value CHECK baked into its DDL is detected via
