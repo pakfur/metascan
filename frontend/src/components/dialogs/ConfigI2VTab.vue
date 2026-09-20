@@ -14,6 +14,8 @@ const qualityPresetId = ref<number | null>(null)
 const durationsText = ref('6, 10, 15, 20')
 const defaultDuration = ref(6)
 const defaultQuality = ref<'fast' | 'quality'>('fast')
+const megapixelsText = ref('0.25, 0.5, 0.75, 1')
+const defaultMegapixels = ref(0.75)
 const presets = ref<WorkflowPreset[]>([])
 const showRegister = ref(false)
 const saved = ref(false)
@@ -34,6 +36,13 @@ const parsedDurations = computed(() =>
     .filter((n) => Number.isFinite(n) && n > 0),
 )
 
+const parsedMegapixels = computed(() =>
+  megapixelsText.value
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0),
+)
+
 onMounted(load)
 
 async function load() {
@@ -49,6 +58,10 @@ async function load() {
     defaultDuration.value = (i2vRaw.value.default_duration as number) ?? durations[0]
     defaultQuality.value =
       (i2vRaw.value.default_quality as 'fast' | 'quality') ?? 'fast'
+    const mps = (i2vRaw.value.megapixels as number[]) || [0.25, 0.5, 0.75, 1]
+    megapixelsText.value = mps.join(', ')
+    defaultMegapixels.value =
+      (i2vRaw.value.default_megapixels as number) ?? 0.75
   } finally {
     loading.value = false
   }
@@ -58,6 +71,9 @@ async function save() {
   const durations = parsedDurations.value.length
     ? parsedDurations.value
     : [6, 10, 15, 20]
+  const megapixels = parsedMegapixels.value.length
+    ? parsedMegapixels.value
+    : [0.25, 0.5, 0.75, 1]
   const i2v = {
     ...i2vRaw.value,
     fast_preset_id: fastPresetId.value,
@@ -67,6 +83,10 @@ async function save() {
       ? defaultDuration.value
       : durations[0],
     default_quality: defaultQuality.value,
+    megapixels,
+    default_megapixels: megapixels.includes(defaultMegapixels.value)
+      ? defaultMegapixels.value
+      : megapixels[0],
   }
   await updateConfig({ i2v })
   i2vRaw.value = i2v
@@ -120,6 +140,22 @@ async function onRegistered() {
           <option v-for="d in parsedDurations" :key="d" :value="d">{{ d }}s</option>
         </select>
       </label>
+      <h4>Output size</h4>
+      <p class="muted">
+        Orientation always follows the source image; only the pixel budget is
+        chosen. Needs an MS_RESOLUTION node in the workflow.
+      </p>
+      <label class="row">
+        <span>Choices (megapixels, comma-separated)</span>
+        <input v-model="megapixelsText" />
+      </label>
+      <label class="row">
+        <span>Default size</span>
+        <select v-model.number="defaultMegapixels">
+          <option v-for="m in parsedMegapixels" :key="m" :value="m">{{ m }} MP</option>
+        </select>
+      </label>
+
       <label class="row">
         <span>Default quality</span>
         <select v-model="defaultQuality">
