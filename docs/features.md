@@ -108,6 +108,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 Right-click any image → "Image to Video…" opens a dialog to turn it into a short MiniMax H3 clip via a driven ComfyUI backend.
 - Type an idea and expand it into a full I2VA video prompt (VLM-composed, editable before generating)
 - Pick a clip duration and a fast/quality generation preset
+- Pick an output size as a megapixel budget; the clip's orientation and aspect ratio always follow the source image, since that image is the first frame
 - Optional LoRAs applied to the generation
 - Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions
 - Live generation progress over WebSocket

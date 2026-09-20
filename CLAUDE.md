@@ -263,7 +263,7 @@ metascan/
   separate concern). A workflow is registered as an API-format graph whose
   nodes are titled with the `MS_*` convention (`MS_POSITIVE`, `MS_NEGATIVE`,
   `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_LORA_STACK` /
-  `MS_REF_IMAGE`);
+  `MS_REF_IMAGE` / `MS_RESOLUTION`);
   `comfy_bindings.resolve_bindings` maps titles to node ids at registration
   time and **fails loudly** on a missing required title. Titles are used
   rather than node ids because ComfyUI renumbers nodes on re-save.
@@ -1015,8 +1015,30 @@ metascan/
   prunes rows whose media is gone; deleting the source image keeps the
   videos. Presets are kind `ref2v` tagged `minimax`/`i2va`
   (`_validate_minimax_i2va`: MS_FIRST_FRAME required, MS_DURATION /
-  MS_LORA_STACK warn-if-missing); the fast/quality slots live in
-  `config.json`'s `i2v` section (`get_i2v_config`).
+  MS_LORA_STACK / MS_RESOLUTION warn-if-missing); the fast/quality slots
+  live in `config.json`'s `i2v` section (`get_i2v_config`).
+  **Output resolution follows the source image's aspect ratio, always.**
+  The selected image IS the first frame, so any other ratio letterboxes
+  or crops it — there is deliberately no orientation control, and the
+  user picks only a megapixel budget (`i2v.megapixels` /
+  `default_megapixels`). `i2v_compiler.i2v_dims(src_w, src_h,
+  megapixels)` preserves the source aspect, snaps each edge to a
+  multiple of 16 and floors at one multiple so an extreme panorama still
+  yields a usable short edge; `I2vRunner.generate` takes `megapixels`
+  (never client-supplied dimensions) and resolves the source's real size
+  from the media row, falling back to the file header for an image that
+  has not been scanned yet. The computed dims ride
+  `GenerationParams.width`/`height` into **`MS_RESOLUTION`** (widgets
+  `width`/`height`, optional for every kind — do NOT reuse `MS_LATENT`,
+  whose contract requires `batch_size` that a resize node has no widget
+  for). A preset with no `MS_RESOLUTION` keeps its baked-in resolution
+  rather than raising, the `MS_DURATION` precedent, so presets
+  registered before this feature need no retrofit. Ingest reads the dims
+  back out of the job's stored `params` (not the in-memory `_job_meta`
+  that carries quality/idea) and writes them to `i2v_videos.width` /
+  `.height`, so they survive a server restart. `types/i2v.ts::i2vDims`
+  is a display-only mirror for the dialog's live size hint — the backend
+  recomputes and stays authoritative; keep the two in step.
 
 ## Development Rules
 
