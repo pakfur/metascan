@@ -182,11 +182,14 @@ class TestI2vDims(unittest.TestCase):
         w, h = c.i2v_dims(2048, 2048, 1.0)
         self.assertEqual(w, h)
 
-    def test_edges_snap_to_multiple_of_16(self):
+    def test_edges_snap_to_multiple_of_32(self):
+        """MiniMax H3's width/height widgets declare step=32, and the
+        ResolutionSelector / ImageScaleToTotalPixels nodes in the reference
+        graphs both use 32. An off-grid edge is not a valid size."""
         for src in ((1920, 1080), (1080, 1920), (1000, 667), (3000, 2000)):
             w, h = c.i2v_dims(*src, 0.75)
-            self.assertEqual(w % 16, 0, f"{src} -> {w}x{h}")
-            self.assertEqual(h % 16, 0, f"{src} -> {w}x{h}")
+            self.assertEqual(w % 32, 0, f"{src} -> {w}x{h}")
+            self.assertEqual(h % 32, 0, f"{src} -> {w}x{h}")
 
     def test_hits_megapixel_budget_within_five_percent(self):
         for mp in (0.25, 0.5, 0.75, 1.0):
@@ -204,12 +207,15 @@ class TestI2vDims(unittest.TestCase):
 
     def test_extreme_aspect_ratio_keeps_a_usable_short_edge(self):
         w, h = c.i2v_dims(5000, 500, 0.25)
-        self.assertGreaterEqual(h, 16)
-        self.assertEqual(h % 16, 0)
+        self.assertGreaterEqual(h, 32)
+        self.assertEqual(h % 32, 0)
 
     def test_tiny_source_is_upscaled_to_budget(self):
         w, h = c.i2v_dims(64, 64, 1.0)
         self.assertAlmostEqual(w * h / 1_000_000, 1.0, delta=0.05)
+
+    def test_default_multiple_is_32(self):
+        self.assertEqual(c.I2V_DIM_MULTIPLE, 32)
 
     def test_rejects_non_positive_source_dimensions(self):
         for bad in ((0, 100), (100, 0), (-1, 100)):
