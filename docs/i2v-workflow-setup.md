@@ -180,6 +180,16 @@ title is missing, you exported the wrong format.
    offers **Apply fixes** to rename it for you.
 5. Save.
 
+You can run the same check from the command line before you ever open the
+dialog, which is faster to iterate against:
+
+```bash
+python scripts/validate_i2v_workflow.py path/to/exported_api.json
+```
+
+It exits non-zero on anything that would block registration, prints warnings
+without failing, and lists which node each `MS_*` title resolved to.
+
 Then, still in Configuration → Video, set the **Fast (turbo)** and **High
 quality** dropdowns to the two presets, and hit **Save**. Until both slots
 point at something, the dialog's Generate button returns an error naming the
@@ -197,8 +207,9 @@ Get one graph validating, then make the second from it.
 **High quality:** base `minimax_h3_fl2va_pruned_bf16` model, `BasicScheduler`
 steps at **20**, no turbo LoRA in the Power Lora Loader.
 
-**Fast (turbo):** same graph, `BasicScheduler` steps at **4**, and the turbo
-LoRA loaded. Two ways to load it, and the difference matters:
+**Fast (turbo):** same graph, `BasicScheduler` steps at **4**, and
+`minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors` loaded at
+strength 1.0. Two ways to load it, and the difference matters:
 
 - **Bake it into the graph** — add a separate `LoraLoaderModelOnly` in front
   of the Power Lora Loader. Metascan never touches it, so it is always on.
@@ -225,6 +236,12 @@ portrait clip automatically.
 
 Both edges land on a multiple of 32, which is what H3's `width` / `height`
 widgets require. A 1920×1080 source at 0.75 MP becomes 1152×640.
+
+If you use the 768p-tuned turbo LoRA, note that **1.0 MP** is the budget
+closest to its training resolution (16:9 at 1.0 MP is 1312×736; 768p 16:9 is
+1366×768). The shipped default is 0.75 MP, which is slightly under — consider
+raising `default_megapixels` in Configuration → Video if turbo output looks
+soft.
 
 If a preset has no `MS_RESOLUTION` node, nothing breaks — the graph keeps
 whatever resolution is baked into it, and the dialog's size selector simply
