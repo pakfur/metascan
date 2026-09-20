@@ -71,7 +71,9 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
 | DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
+| GET | `/api/i2v/output-preview` | Resolve where a clip would be saved for a root + prefix (config tab live preview) |
 | GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations, megapixel ladder) |
+| GET | `/api/config/browse` | List one level of the server's directories (directory picker; directories only) |
 | WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
 
 ## Similarity Search Endpoints
@@ -570,7 +572,7 @@ beat count; writes nothing. Returns `{prompt: string, warnings: string[]}`
 ### `POST /api/i2v/generate`
 Body: `{source_path: string, prompt: string, duration_s: float, quality:
 "fast" | "quality", seed: int, megapixels: float = 0.75, loras:
-[{name, strength}, ...] = [], idea?: string}`. Re-lints `prompt` (the
+[{name, strength}, ...] = [], idea?: string, steps?: int}`. Re-lints `prompt` (the
 lint is advisory and never blocks) and submits a job to ComfyUI using the
 config's `fast_preset_id` or `quality_preset_id` for the requested
 `quality`. Returns `{job_id: int, warnings: string[]}`.
@@ -579,7 +581,16 @@ ratio and `megapixels` (`i2v_compiler.i2v_dims`) and written to the
 preset's `MS_RESOLUTION` node; a workflow without one keeps its baked-in
 resolution. There is no orientation parameter — the source image is the
 first frame, so the output ratio always follows it.
-- **400** if `duration_s <= 0`, `megapixels <= 0`, `quality` isn't
+`steps` is written to the preset's `MS_STEPS` node **only when `quality`
+is `"quality"`** and the workflow binds that title; it is ignored for
+`"fast"` (a step-distilled build) and for a quality preset with no
+`MS_STEPS`, which keeps its baked-in count.
+To stop a job, use the generic `POST /api/comfy/jobs/{job_id}/cancel` with
+the returned `job_id` — a queued job is dropped, a running one is
+interrupted inside ComfyUI by prompt id; `job_update` → `cancelled` follows
+on the `comfy` WS channel.
+- **400** if `duration_s <= 0`, `megapixels <= 0`, `steps` is outside
+  1–200, `quality` isn't
   `"fast"`/`"quality"`, no preset is configured for the requested quality slot (set one in
   Configuration → Image to Video), or on `I2vRequestError` /
   `BindingError` / `PresetNotFoundError`.
@@ -589,8 +600,11 @@ first frame, so the output ratio always follows it.
 ### `GET /api/i2v/videos?source_path=`
 Returns every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
-quality, width, height, preset_id, comfy_prompt_id, created_at,
-is_favorite}, ...]`,
+quality, width, height, steps, render_s, preset_id, comfy_prompt_id,
+created_at, is_favorite}, ...]`. `steps` is the step count actually
+applied (`null` for Fast renders and presets without `MS_STEPS`);
+`render_s` is wall-clock render seconds from the job row (`null` for clips
+ingested before it was recorded); `created_at` is UTC with no zone marker.
 `is_favorite` joined live from `media.is_favorite`. Rows whose backing
 media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
@@ -602,6 +616,14 @@ to the OS trash, subject to the usual "still referenced elsewhere" survival
 checks). Returns `{status: "deleted"}`. **404** if the video id doesn't
 exist.
 
+### `GET /api/i2v/output-preview?root=&prefix=`
+Where a clip generated right now would land for the given (possibly
+unsaved) `i2v.output_root` / `output_prefix` values:
+`{path: string | null, error: string | null, warnings: string[]}`. Always
+**200** — a bad value is form feedback, not a failed request. `path` is
+`null` on error and for a blank `root` (the default layout depends on the
+source image). `warnings` is the advisory prefix lint (`%M` without `%H`).
+
 ### `GET /api/i2v/config`
 Returns the `i2v` config section with defaults filled in:
 ```json
@@ -612,9 +634,17 @@ Returns the `i2v` config section with defaults filled in:
   "default_duration": 6.0,
   "default_quality": "fast",
   "megapixels": [0.25, 0.5, 0.75, 1.0],
-  "default_megapixels": 0.75
+  "default_megapixels": 0.75,
+  "steps": [20, 25, 30, 35, 40],
+  "default_steps": 25,
+  "output_root": "",
+  "output_prefix": "/%Y-%m-%d/i2v_",
+  "quality_steps_supported": false
 }
 ```
+`quality_steps_supported` is computed per request, not stored: `true` when
+the configured quality preset's workflow binds `MS_STEPS`. The dialog
+disables its Steps selector when it is `false`.
 `fast_preset_id`/`quality_preset_id` name a `workflow_presets.id` or
 `null` if unset — the frontend's Configuration → Image to Video tab is
 where they're picked.

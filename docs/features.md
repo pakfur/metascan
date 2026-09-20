@@ -107,11 +107,15 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 ## Image to Video
 Right-click any image → "Image to Video…" opens a dialog to turn it into a short MiniMax H3 clip via a driven ComfyUI backend.
 - Type an idea and expand it into a full I2VA video prompt (VLM-composed, editable before generating)
-- Pick a clip duration and a fast/quality generation preset
+- Pick a clip duration and a fast/quality generation preset; High quality also offers a sampler Steps choice (20–40, default 25)
 - Pick an output size as a megapixel budget; the clip's orientation and aspect ratio always follow the source image, since that image is the first frame
 - Optional LoRAs applied to the generation
 - Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions
-- Live generation progress over WebSocket
+- Clips are saved under a configurable root directory with a date-expanding file prefix (Configuration → Video), e.g. `<root>/2026-09-20/minimax_<number>.mp4`
+- Re-submitting with nothing changed (same seed, quality, steps, prompt…) asks for confirmation first, since it would render an identical clip
+- The dialog closes only through its ✕ — clicking the backdrop does nothing, so a written prompt or a running job is never lost to a stray click
+- Each clip is labelled with the quality (and steps) used, clip length and render time, and when it was generated
+- Live generation progress over WebSocket, with Cancel for the running workflow (or ✕ on a single queued/running job)
 
 Requires two registered ComfyUI workflows (turbo and high quality) — see [Image-to-Video Workflow Setup](i2v-workflow-setup.md).
 

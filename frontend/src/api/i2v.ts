@@ -18,6 +18,8 @@ export function generateVideo(body: {
   megapixels: number
   loras: { name: string; strength: number }[]
   idea?: string
+  // High quality only; the server ignores it for Fast.
+  steps?: number
 }): Promise<{ job_id: number; warnings: string[] }> {
   return post('/i2v/generate', body)
 }
@@ -32,4 +34,14 @@ export function deleteI2vVideo(id: number): Promise<{ status: string }> {
 
 export function fetchI2vConfig(): Promise<I2vConfig> {
   return get('/i2v/config')
+}
+
+// Where a clip generated right now would land for these (possibly
+// unsaved) settings. Always resolves: problems come back as `error`.
+export function previewI2vOutput(
+  root: string,
+  prefix: string,
+): Promise<{ path: string | null; error: string | null; warnings: string[] }> {
+  const q = `root=${encodeURIComponent(root)}&prefix=${encodeURIComponent(prefix)}`
+  return get(`/i2v/output-preview?${q}`)
 }

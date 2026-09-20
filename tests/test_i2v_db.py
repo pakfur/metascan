@@ -64,6 +64,23 @@ class TestI2vVideosDb(unittest.TestCase):
         self.assertEqual(rows[0]["width"], 1328)
         self.assertEqual(rows[0]["height"], 752)
 
+    def test_stores_and_returns_steps_and_render_time(self):
+        self.db.create_i2v_video(
+            source_path="/lib/src.png",
+            file_path="/lib/out1.mp4",
+            steps=30,
+            render_s=247.5,
+        )
+        rows = self.db.list_i2v_videos("/lib/src.png")
+        self.assertEqual(rows[0]["steps"], 30)
+        self.assertEqual(rows[0]["render_s"], 247.5)
+
+    def test_steps_and_render_time_default_to_null(self):
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out1.mp4")
+        rows = self.db.list_i2v_videos("/lib/src.png")
+        self.assertIsNone(rows[0]["steps"])
+        self.assertIsNone(rows[0]["render_s"])
+
     def test_dimensions_default_to_null(self):
         self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out1.mp4")
         rows = self.db.list_i2v_videos("/lib/src.png")

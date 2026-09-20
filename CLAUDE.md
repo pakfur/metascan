@@ -1039,6 +1039,67 @@ metascan/
   `.height`, so they survive a server restart. `types/i2v.ts::i2vDims`
   is a display-only mirror for the dialog's live size hint — the backend
   recomputes and stays authoritative; keep the two in step.
+  **`MS_STEPS` is a High-quality-only binding** (widget `steps`, put on
+  the graph's `BasicScheduler`). `I2vRunner.generate(steps=…)` writes it
+  only when `quality == "quality"` AND the preset binds the title — the
+  Fast slot is a step-distilled turbo build, and 20–40 steps through a
+  4-step distillation renders garbage, so never send steps for `fast`. A
+  quality preset with no `MS_STEPS` keeps its baked-in count (the
+  `MS_DURATION` precedent); `GET /api/i2v/config` reports that as
+  `quality_steps_supported: false` (computed per request from
+  `workflow_json`, never stored) and the dialog disables the selector
+  with a hint instead of offering a no-op control. The validator is never
+  told which slot a preset is headed for, so `_validate_minimax_i2va`
+  reads the graph: `sampler_step_node` finds the baked-in step count and
+  `STEP_DISTILLED_MAX = 8` splits the two builds — `no_steps` warns on a
+  full-step graph without the title, `steps_on_distilled` warns on a
+  turbo graph that carries it. `scripts/validate_i2v_workflow.py` prints
+  `ok` / `n/a` for `MS_STEPS` on the same boundary. The steps ladder
+  (`i2v.steps`, `default_steps`, default 20–40 / 25) lives in
+  `get_i2v_config` like durations and megapixels. `i2v_videos.steps` and
+  `.render_s` (idempotent column adds) feed the per-clip details label:
+  both are read from the durable job row at ingest (`params.steps`;
+  `render_seconds(started_at, finished_at)` — `job_outputs` fires BEFORE
+  `_finish_job`, so a missing `finished_at` means "now"), unlike
+  `quality`/`idea`, which are still in-memory `_job_meta`. `created_at`
+  is SQLite `datetime('now')` — UTC with no zone marker — so
+  `types/i2v.ts::formatI2vTimestamp` appends `Z` before formatting;
+  parsing it bare reads it as local time. **Cancel is the generic
+  `POST /api/comfy/jobs/{id}/cancel`** (`api/comfy.ts::cancelJob`), not an
+  i2v route: the dialog's footer Cancel runs `store.cancelAllJobs()` over
+  every queued/running job for the open source image, and each job tile
+  has its own ✕. Tiles leave via the `comfy` channel's `job_update` →
+  `cancelled`, and are also dropped on the POST succeeding so a missed WS
+  frame cannot strand one.
+  **Clip placement is `i2v.output_root` + `i2v.output_prefix`**, resolved
+  by the pure `metascan/core/i2v_output.py::resolve_output_target`. The
+  prefix is a path RELATIVE to the root (a leading slash is cosmetic)
+  whose last component is the filename prefix; it is split on `/` FIRST
+  and each component strftime-expanded and sanitized AFTER, so a slash
+  born from a token (`%D`) can't create directories, and `..` raises.
+  The runner appends `_next_output_number()` (epoch seconds, strictly
+  increasing per process) and submits with **`output_name`** — a
+  `generation_jobs` column that, unlike `output_prefix`, REPLACES
+  ComfyUI's filename (only its suffix survives): ComfyUI's counter
+  restarts whenever its output dir is cleared, so it can't be trusted in
+  a long-lived library folder. `collect_outputs` routes named files
+  through `_unclobbered`, which never overwrites — extra outputs and
+  existing names get `_2`, `_3`…. An empty root keeps the original
+  `<comfy.output_root>/i2v/<stem>/i2v_<stem><comfy name>` layout; a
+  configured root that doesn't exist is a 400 BEFORE the first-frame
+  upload, never auto-created. `%M` is minutes — `output_prefix_warnings`
+  flags it when `%H` is absent, and `GET /api/i2v/output-preview` (always
+  200; `error` is form data) feeds the config tab's live preview so date
+  expansion has one implementation. The root is chosen with
+  `DirectoryPicker.vue` over `GET /api/config/browse` — a browser file
+  input cannot yield a server path, so the picker walks the SERVER's tree
+  (directories only, dot-dirs hidden). Both routes are deliberately sync
+  `def` (threadpool): they stat possibly slow `/mnt/<drive>` mounts.
+  **`I2VDialog` closes only via its ✕** — no `@click.self` on the overlay;
+  don't re-add one. A Generate whose `requestSignature()` (prompt, seed,
+  quality, effective steps, duration, size, loras) equals the last
+  successful submit's asks `confirm()` first; the snapshot is
+  component-local by decision, so earlier sessions never count.
 
 ## Development Rules
 

@@ -97,7 +97,11 @@ Read by `backend.config.get_i2v_config` and served to the frontend by `GET /api/
     "default_duration": 6.0,
     "default_quality": "fast",
     "megapixels": [0.25, 0.5, 0.75, 1.0],
-    "default_megapixels": 0.75
+    "default_megapixels": 0.75,
+    "steps": [20, 25, 30, 35, 40],
+    "default_steps": 25,
+    "output_root": "",
+    "output_prefix": "/%Y-%m-%d/i2v_"
   }
 }
 ```
@@ -108,3 +112,7 @@ Read by `backend.config.get_i2v_config` and served to the frontend by `GET /api/
 - **`default_quality`** — `"fast"` or `"quality"`; anything else falls back to `"fast"`.
 - **`megapixels`** — output size choices, as a pixel budget. Non-positive entries are dropped; an empty result falls back to the default ladder. There is deliberately no orientation or aspect-ratio setting — the source image is the first frame, so the output ratio always follows it. Dimensions are derived per generation by `i2v_compiler.i2v_dims` and land on a multiple of 32.
 - **`default_megapixels`** — which budget the dialog opens with. Falls back to the first entry if it isn't in `megapixels`.
+- **`steps`** — sampler step counts offered in the dialog's Steps selector. Non-positive entries are dropped; junk or empty falls back to the default ladder. The selector is enabled only for **High quality**, and only reaches a preset whose workflow has an `MS_STEPS` node; Fast (turbo) presets always keep their baked-in count.
+- **`default_steps`** — which entry the selector opens with. Falls back to the first entry if it isn't in `steps`.
+- **`output_root`** — absolute directory generated clips are saved under, chosen with the **Browse…** directory picker (it walks the *server's* filesystem). Empty keeps the default layout, `<comfy.output_root>/i2v/<image name>/`. The directory must already exist — a generate against a missing one returns 400 rather than creating it.
+- **`output_prefix`** — a path *relative to `output_root`* whose last component is the file name prefix; a unique number (epoch seconds) and the extension are appended. `strftime` date tokens expand at generate time: `%Y` year, `%m` month, `%d` day, `%H` hour, `%M` **minute**, `%S` second. With root `/mnt/d/Media/images` and prefix `/%Y-%m-%d/minimax_`, a clip lands at `/mnt/d/Media/images/2026-09-20/minimax_1789930000.mp4`. A leading slash is cosmetic (never the filesystem root), missing subdirectories are created, `..` is rejected, and characters illegal in file names become `-`. An existing file is never overwritten — a `_2`, `_3`… tail is added instead. Ignored while `output_root` is empty. The config tab shows a live preview of the resolved path and warns about `%M` used without `%H` (almost always a typo for `%m`).

@@ -235,3 +235,45 @@ async def test_collect_outputs_applies_output_prefix(
     assert job["state"] == "done"
     files = list(started_client.output_dir_for(evil_job_id).glob("*.mp4"))
     assert [f.name for f in files] == ["escape_clip_00001.mp4"]
+
+
+async def test_collect_outputs_output_name_replaces_comfy_filename(
+    started_client, fake_comfy  # noqa: F811
+):
+    """output_name is the local file's whole stem -- ComfyUI's own name
+    (whose counter resets whenever its output dir is cleared) is dropped,
+    only its suffix survives. A path-shaped name keeps its last component."""
+    fake_comfy.output_override = {
+        "gifs": [{"filename": "clip_00001.mp4", "subfolder": "", "type": "output"}]
+    }
+    pid = await started_client.register_preset("wan", "t2i", t2i_workflow())
+    job_id = await started_client.submit(
+        pid, params(), output_name="../minimax_1789930000"
+    )
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "done"
+    files = list(started_client.output_dir_for(job_id).glob("*.mp4"))
+    assert [f.name for f in files] == ["minimax_1789930000.mp4"]
+
+
+async def test_collect_outputs_output_name_numbers_extra_files_and_never_clobbers(
+    started_client, fake_comfy, workspace  # noqa: F811
+):
+    fake_comfy.output_override = {
+        "gifs": [
+            {"filename": "a_00001.mp4", "subfolder": "", "type": "output"},
+            {"filename": "b_00001.mp4", "subfolder": "", "type": "output"},
+        ]
+    }
+    out_dir = workspace / "named"
+    out_dir.mkdir()
+    (out_dir / "take_5.mp4").write_bytes(b"already here")
+    pid = await started_client.register_preset("wan", "t2i", t2i_workflow())
+    job_id = await started_client.submit(
+        pid, params(), output_dir=out_dir, output_name="take_5"
+    )
+    job = await started_client.wait_for_job(job_id, timeout=10.0)
+    assert job["state"] == "done"
+    names = sorted(f.name for f in out_dir.glob("*.mp4"))
+    assert (out_dir / "take_5.mp4").read_bytes() == b"already here"
+    assert names == ["take_5.mp4", "take_5_2.mp4", "take_5_3.mp4"]

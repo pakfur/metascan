@@ -115,6 +115,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _unclobbered(directory: Path, stem: str, suffix: str, index: int) -> Path:
+    """First free ``<stem>[_n]<suffix>`` in ``directory``, where the
+    job's ``index``-th named file (1-based) starts at no tail for 1 and
+    ``_<index>`` after, then counts up past anything already on disk."""
+    n = index
+    while True:
+        candidate = directory / (f"{stem}{suffix}" if n == 1 else f"{stem}_{n}{suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
 def _next_backoff(attempt: int, got_frame: bool, survived: bool) -> Tuple[int, float]:
     """Decide the next reconnect attempt counter and delay after a drop.
 
@@ -479,6 +491,7 @@ class ComfyClient:
         beat_id: Optional[int] = None,
         output_prefix: Optional[str] = None,
         i2v_source_path: Optional[str] = None,
+        output_name: Optional[str] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -486,6 +499,12 @@ class ComfyClient:
         ``output_prefix`` is an already-expanded filename fragment the
         collector prepends to ComfyUI's own filename when writing the
         local copy -- callers own any template expansion/sanitizing.
+
+        ``output_name`` is the alternative: the local file's WHOLE stem.
+        ComfyUI's filename is dropped (its counter restarts whenever its
+        output directory is cleared, so it cannot be trusted for
+        uniqueness in a long-lived library folder) and only its suffix is
+        kept; ``output_prefix`` is ignored when it is set.
 
         The preset is validated up front -- both that it exists
         (PresetNotFoundError) and that `params` binds cleanly against it
@@ -511,6 +530,7 @@ class ComfyClient:
                 beat_id,
                 output_prefix,
                 i2v_source_path,
+                output_name,
             )
         )
         if priority:
@@ -1168,6 +1188,7 @@ class ComfyClient:
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
 
         written: List[Path] = []
+        named_index = 0
         for entry_item in entries:
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):
@@ -1186,6 +1207,15 @@ class ComfyClient:
             # component of it too.
             prefix = Path(str(job.get("output_prefix") or "")).name
             target = target_dir / f"{prefix}{name}"
+            # output_name (same traversal guard) replaces ComfyUI's stem
+            # outright. Extra files of the same job, and any name already
+            # on disk, get a numeric tail -- a caller-chosen name must
+            # never overwrite a library file.
+            stem = Path(str(job.get("output_name") or "")).name
+            if stem and stem not in (".", ".."):
+                suffix = Path(name).suffix
+                named_index += 1
+                target = _unclobbered(target_dir, stem, suffix, named_index)
             await self._download_image(entry_item, target)
             current = await asyncio.to_thread(self.db.get_generation_job, job_id)
             if current is None or current["state"] not in ("queued", "running"):

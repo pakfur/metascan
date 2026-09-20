@@ -9,6 +9,9 @@ lints the submitted prompt text (advisory -- warnings never block).
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -20,7 +23,13 @@ from backend.services.i2v_service import I2vService
 from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt
+from metascan.core.i2v_output import (
+    I2vOutputError,
+    output_prefix_warnings,
+    resolve_output_target,
+)
 from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.utils.path_utils import to_native_path
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
 
@@ -29,6 +38,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/i2v", tags=["i2v"])
 
 _runner: Optional[Any] = None
+
+# Sanity ceiling for a client-supplied step count; the dialog offers 20-40.
+_MAX_STEPS = 200
 
 
 def set_i2v_runner(runner: Any) -> None:
@@ -70,6 +82,9 @@ class GenerateRequest(BaseModel):
     loras: List[Dict[str, Any]] = Field(default_factory=list)
     # Dialog metadata persisted onto the i2v_videos row at ingest.
     idea: Optional[str] = None
+    # Sampler steps. Only the High quality preset is ever driven, and only
+    # when its workflow binds MS_STEPS; ignored otherwise.
+    steps: Optional[int] = None
 
 
 @router.post("/prompt")
@@ -103,6 +118,10 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         )
     if body.megapixels <= 0:
         raise HTTPException(status_code=400, detail="megapixels must be positive")
+    if body.steps is not None and not 1 <= body.steps <= _MAX_STEPS:
+        raise HTTPException(
+            status_code=400, detail=f"steps must be between 1 and {_MAX_STEPS}"
+        )
     cfg = get_i2v_config(load_app_config())
     preset_id = (
         cfg["fast_preset_id"] if body.quality == "fast" else cfg["quality_preset_id"]
@@ -124,6 +143,9 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             loras=body.loras,
             preset_id=preset_id,
             idea=body.idea,
+            steps=body.steps,
+            output_root=cfg["output_root"] or None,
+            output_prefix=cfg["output_prefix"],
         )
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -150,6 +172,43 @@ async def delete_video(video_id: int) -> Dict[str, str]:
     return {"status": "deleted"}
 
 
+@router.get("/output-preview")
+def output_preview(root: str = "", prefix: str = "") -> Dict[str, Any]:
+    """Where a clip generated right now would land, for the Video config
+    tab's live preview. Always 200: a problem with the (unsaved, mid-edit)
+    values is data for the form -- ``error`` -- not a failed request.
+    ``path`` is null both on error and for a blank root (the default
+    layout under comfy.output_root, which depends on the source image).
+    Sync on purpose (threadpool): it stats a possibly slow mount."""
+    warnings = output_prefix_warnings(prefix)
+    if not root.strip():
+        return {"path": None, "error": None, "warnings": warnings}
+    native = Path(to_native_path(root.strip()))
+    try:
+        target = resolve_output_target(
+            str(native), prefix, datetime.now(), int(time.time())
+        )
+    except I2vOutputError as exc:
+        return {"path": None, "error": str(exc), "warnings": warnings}
+    if not native.is_dir():
+        return {
+            "path": None,
+            "error": f"Directory does not exist: {native}",
+            "warnings": warnings,
+        }
+    return {
+        "path": str(target.directory / f"{target.stem}.mp4"),
+        "error": None,
+        "warnings": warnings,
+    }
+
+
 @router.get("/config")
 async def i2v_config() -> Dict[str, Any]:
-    return get_i2v_config(load_app_config())
+    cfg = get_i2v_config(load_app_config())
+    # Whether the Steps selector can actually drive the configured High
+    # quality preset -- the dialog disables it (with a hint) when not.
+    cfg["quality_steps_supported"] = await _service().preset_supports_steps(
+        cfg["quality_preset_id"]
+    )
+    return cfg

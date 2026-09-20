@@ -12,6 +12,7 @@ from metascan.core.i2v_runner import (
     I2vRequestError,
     I2vRunner,
     I2vUnavailableError,
+    render_seconds,
 )
 from metascan.core.media import Media
 
@@ -275,6 +276,121 @@ class TestGenerate(I2vRunnerBase):
         _, params, _ = self.comfy.submits[-1]
         self.assertIsNone(params.duration_s)
 
+    # ---- steps (High quality only, MS_STEPS-bound presets only) ----------
+
+    def _steps_preset(self):
+        wf = dict(_WF)
+        wf["6"] = {
+            "class_type": "BasicScheduler",
+            "inputs": {"scheduler": "simple", "steps": 20, "denoise": 1},
+            "_meta": {"title": "MS_STEPS"},
+        }
+        return self.db.create_workflow_preset(
+            "i2v-quality",
+            "ref2v",
+            json.dumps(wf),
+            "{}",
+            video_target="minimax",
+            video_mode="i2va",
+        )
+
+    def test_quality_steps_reach_params(self):
+        self._generate(preset_id=self._steps_preset(), quality="quality", steps=30)
+        _, params, _ = self.comfy.submits[-1]
+        self.assertEqual(params.steps, 30)
+
+    def test_fast_quality_never_sends_steps(self):
+        """Even against a preset that binds MS_STEPS: the Fast slot is a
+        step-distilled build and must keep its baked-in count."""
+        self._generate(preset_id=self._steps_preset(), quality="fast", steps=30)
+        _, params, _ = self.comfy.submits[-1]
+        self.assertIsNone(params.steps)
+
+    def test_steps_omitted_when_not_bound(self):
+        """The MS_DURATION precedent: a preset registered before MS_STEPS
+        existed keeps its baked-in count rather than failing the submit."""
+        self._generate(quality="quality", steps=30)
+        _, params, _ = self.comfy.submits[-1]
+        self.assertIsNone(params.steps)
+
+    def test_steps_default_to_none(self):
+        self._generate(preset_id=self._steps_preset(), quality="quality")
+        _, params, _ = self.comfy.submits[-1]
+        self.assertIsNone(params.steps)
+
+    def test_non_positive_steps_rejected(self):
+        with self.assertRaises(I2vRequestError):
+            self._generate(preset_id=self._steps_preset(), quality="quality", steps=0)
+
+    # ---- output placement (config: i2v.output_root / output_prefix) -------
+
+    def test_legacy_layout_when_no_output_root(self):
+        self._generate()
+        _, _, kwargs = self.comfy.submits[-1]
+        self.assertEqual(
+            Path(kwargs["output_dir"]), Path(self.tmp.name) / "out" / "i2v" / "src"
+        )
+        self.assertEqual(kwargs["output_prefix"], "i2v_src")
+        self.assertIsNone(kwargs.get("output_name"))
+
+    def test_output_root_and_prefix_place_the_file(self):
+        root = Path(self.tmp.name) / "library"
+        root.mkdir()
+        self._generate(output_root=str(root), output_prefix="/%Y-%m-%d/minimax_")
+        _, _, kwargs = self.comfy.submits[-1]
+        day = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(Path(kwargs["output_dir"]), root / day)
+        self.assertRegex(kwargs["output_name"], r"^minimax_\d{10}$")
+        self.assertIsNone(kwargs.get("output_prefix"))
+
+    def test_output_numbers_are_unique_within_a_second(self):
+        root = Path(self.tmp.name) / "library"
+        root.mkdir()
+        for _ in range(3):
+            self._generate(output_root=str(root), output_prefix="x_")
+        names = [kw["output_name"] for _, _, kw in self.comfy.submits]
+        self.assertEqual(len(set(names)), 3)
+
+    def test_missing_output_root_rejected_before_upload(self):
+        with self.assertRaises(I2vRequestError) as ctx:
+            self._generate(output_root=str(Path(self.tmp.name) / "nope"))
+        self.assertIn("nope", str(ctx.exception))
+        self.assertEqual(self.comfy.uploads, [])
+        self.assertEqual(self.comfy.submits, [])
+
+    def test_traversing_prefix_rejected(self):
+        root = Path(self.tmp.name) / "library"
+        root.mkdir()
+        with self.assertRaises(I2vRequestError):
+            self._generate(output_root=str(root), output_prefix="../x_")
+
+
+class TestRenderSeconds(unittest.TestCase):
+    def test_difference_between_iso_stamps(self):
+        self.assertEqual(
+            render_seconds(
+                "2026-09-20T18:00:00+00:00", "2026-09-20T18:04:07.500000+00:00"
+            ),
+            247.5,
+        )
+
+    def test_missing_end_uses_now(self):
+        from datetime import timedelta, timezone
+
+        start = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
+        got = render_seconds(start, None)
+        assert got is not None
+        self.assertTrue(89.0 <= got <= 120.0, got)
+
+    def test_missing_or_junk_start_is_none(self):
+        self.assertIsNone(render_seconds(None, None))
+        self.assertIsNone(render_seconds("not a date", None))
+
+    def test_negative_span_is_none(self):
+        self.assertIsNone(
+            render_seconds("2026-09-20T18:05:00+00:00", "2026-09-20T18:00:00+00:00")
+        )
+
 
 class TestIngest(I2vRunnerBase):
     def test_job_outputs_creates_rows_and_emits(self):
@@ -353,6 +469,45 @@ class TestIngest(I2vRunnerBase):
         rows = self.db.list_i2v_videos(str(self.src))
         self.assertEqual(rows[0]["width"], 1152)
         self.assertEqual(rows[0]["height"], 656)
+
+    def test_ingest_records_steps_and_render_time(self):
+        """Both come from the durable job row (params JSON + started_at),
+        so they survive a server restart."""
+        out = Path(self.tmp.name) / "clip3.mp4"
+        out.write_bytes(b"fake")
+        self.db.save_media(
+            Media(
+                file_path=out,
+                file_size=4,
+                width=672,
+                height=1184,
+                format="mp4",
+                created_at=datetime.now(),
+                modified_at=datetime.now(),
+            )
+        )
+        job_id = self.db.create_generation_job(
+            self.preset_id,
+            json.dumps({"positive": "p", "seed": 5, "duration_s": 6.0, "steps": 30}),
+            i2v_source_path=str(self.src),
+        )
+        self.db.update_generation_job(
+            job_id,
+            state="running",
+            started_at="2026-09-20T18:00:00+00:00",
+            finished_at="2026-09-20T18:04:07.500000+00:00",
+        )
+
+        async def scenario():
+            self.runner.handle_job_event(
+                "job_outputs", {"job_id": job_id, "files": [str(out)]}
+            )
+            await self.runner.aclose()
+
+        self.run_async(scenario())
+        rows = self.db.list_i2v_videos(str(self.src))
+        self.assertEqual(rows[0]["steps"], 30)
+        self.assertEqual(rows[0]["render_s"], 247.5)
 
     def test_non_i2v_job_ignored(self):
         job_id = self.db.create_generation_job(self.preset_id, "{}")
