@@ -16,6 +16,7 @@ generated and hand-edited prompts.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import List, Tuple
@@ -260,15 +261,48 @@ def lint_i2v_prompt(text: str, duration_s: float) -> List[str]:
     return issues
 
 
+# ---- output resolution ------------------------------------------------
+#
+# The source image IS the first frame, so the output aspect ratio must
+# track the source: any other AR letterboxes or crops that frame.
+# Orientation therefore needs no control of its own -- it falls out of
+# preserving the ratio. The user picks only a pixel budget.
+
+I2V_DIM_MULTIPLE: int = 16
+
+
+def i2v_dims(
+    src_w: int, src_h: int, megapixels: float, multiple: int = I2V_DIM_MULTIPLE
+) -> Tuple[int, int]:
+    """Output dimensions at a megapixel budget, preserving source aspect.
+
+    Each edge snaps to a multiple of ``multiple`` (video samplers reject
+    odd sizes) with a floor of one multiple, so an extreme panorama still
+    yields a usable short edge rather than zero.
+    """
+    if src_w <= 0 or src_h <= 0:
+        raise I2vError(f"Source dimensions must be positive, got {src_w}x{src_h}")
+    if megapixels <= 0:
+        raise I2vError(f"Megapixel budget must be positive, got {megapixels}")
+
+    aspect = src_w / src_h
+    budget = megapixels * 1_000_000
+    width = max(multiple, round(math.sqrt(budget * aspect) / multiple) * multiple)
+    height = max(multiple, round(math.sqrt(budget / aspect) / multiple) * multiple)
+    return (int(width), int(height))
+
+
 __all__ = [
     "ALIGNMENT_LINE",
     "I2V_CAMERA_VALUES",
+    "I2V_DIM_MULTIPLE",
     "I2vBeat",
     "I2vError",
     "I2vResult",
     "assemble_i2v_prompt",
     "beat_count",
     "build_i2v_user_prompt",
+    "i2v_dims",
     "i2v_grammar",
     "i2v_max_tokens",
     "lint_i2v_prompt",

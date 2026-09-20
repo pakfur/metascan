@@ -288,6 +288,16 @@ def _validate_minimax_i2va(
                 "dialog's duration setting.",
             )
         )
+    if "MS_RESOLUTION" not in found:
+        findings.append(
+            Finding(
+                "warning",
+                "no_resolution",
+                "No MS_RESOLUTION node: output size will not follow the "
+                "dialog's quality setting, and the clip may not match the "
+                "source image's aspect ratio.",
+            )
+        )
     if "MS_LORA_STACK" not in found:
         findings.append(
             Finding(

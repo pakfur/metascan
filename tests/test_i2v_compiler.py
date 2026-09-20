@@ -167,3 +167,55 @@ class TestLint(unittest.TestCase):
             "The camera does a barrel roll.",
         )
         self.assertTrue(any("camera" in i for i in c.lint_i2v_prompt(text, 10)))
+
+
+class TestI2vDims(unittest.TestCase):
+    def test_preserves_landscape_orientation(self):
+        w, h = c.i2v_dims(1920, 1080, 1.0)
+        self.assertGreater(w, h)
+
+    def test_preserves_portrait_orientation(self):
+        w, h = c.i2v_dims(1080, 1920, 1.0)
+        self.assertGreater(h, w)
+
+    def test_square_source_stays_square(self):
+        w, h = c.i2v_dims(2048, 2048, 1.0)
+        self.assertEqual(w, h)
+
+    def test_edges_snap_to_multiple_of_16(self):
+        for src in ((1920, 1080), (1080, 1920), (1000, 667), (3000, 2000)):
+            w, h = c.i2v_dims(*src, 0.75)
+            self.assertEqual(w % 16, 0, f"{src} -> {w}x{h}")
+            self.assertEqual(h % 16, 0, f"{src} -> {w}x{h}")
+
+    def test_hits_megapixel_budget_within_five_percent(self):
+        for mp in (0.25, 0.5, 0.75, 1.0):
+            w, h = c.i2v_dims(1920, 1080, mp)
+            self.assertAlmostEqual(w * h / 1_000_000, mp, delta=mp * 0.05)
+
+    def test_preserves_aspect_ratio_within_two_percent(self):
+        w, h = c.i2v_dims(1920, 1080, 0.5)
+        self.assertAlmostEqual(w / h, 1920 / 1080, delta=0.02)
+
+    def test_larger_budget_yields_more_pixels(self):
+        small = c.i2v_dims(1920, 1080, 0.25)
+        large = c.i2v_dims(1920, 1080, 1.0)
+        self.assertLess(small[0] * small[1], large[0] * large[1])
+
+    def test_extreme_aspect_ratio_keeps_a_usable_short_edge(self):
+        w, h = c.i2v_dims(5000, 500, 0.25)
+        self.assertGreaterEqual(h, 16)
+        self.assertEqual(h % 16, 0)
+
+    def test_tiny_source_is_upscaled_to_budget(self):
+        w, h = c.i2v_dims(64, 64, 1.0)
+        self.assertAlmostEqual(w * h / 1_000_000, 1.0, delta=0.05)
+
+    def test_rejects_non_positive_source_dimensions(self):
+        for bad in ((0, 100), (100, 0), (-1, 100)):
+            with self.assertRaises(c.I2vError):
+                c.i2v_dims(*bad, 1.0)
+
+    def test_rejects_non_positive_megapixels(self):
+        with self.assertRaises(c.I2vError):
+            c.i2v_dims(1920, 1080, 0.0)
