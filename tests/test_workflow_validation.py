@@ -39,6 +39,7 @@ _WIDGET_DEFAULTS: Dict[str, Any] = {
     "image": "",
     "audio": "",
     "value": 6.0,
+    "steps": 20,
 }
 
 
@@ -128,6 +129,94 @@ class TestMinimaxI2vaValidator(unittest.TestCase):
         report = validate_workflow(wf, "ref2v", "minimax", "i2va")
         unused = [f for f in report.findings if f.code == "slot_unused"]
         self.assertEqual(len(unused), 2)
+
+    # ---- MS_STEPS (High quality presets only) -----------------------------
+
+    _I2VA_FULL = [
+        "MS_POSITIVE",
+        "MS_SEED",
+        "MS_SAVE",
+        "MS_FIRST_FRAME",
+        "MS_DURATION",
+        "MS_RESOLUTION",
+        "MS_LORA_STACK",
+    ]
+
+    def _scheduler(self, steps, title=None):
+        return {
+            "class_type": "BasicScheduler",
+            "inputs": {"scheduler": "simple", "steps": steps, "denoise": 1},
+            "_meta": {"title": title or "BasicScheduler"},
+        }
+
+    def test_steps_is_a_known_title(self):
+        wf = self._wf(self._I2VA_FULL + ["MS_STEPS"])
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertNotIn("unknown_title", [f.code for f in report.findings])
+
+    def test_steps_node_without_steps_widget_is_error(self):
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = _node("MS_STEPS", {"scheduler": "simple"})
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertFalse(report.ok)
+
+    def test_full_step_workflow_without_ms_steps_warns(self):
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = self._scheduler(20)
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        warn = [f for f in report.findings if f.code == "no_steps"]
+        self.assertEqual(len(warn), 1)
+        self.assertEqual(warn[0].level, "warning")
+        self.assertEqual(warn[0].node_id, "s")
+
+    def test_full_step_workflow_with_ms_steps_is_clean(self):
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = self._scheduler(20, "MS_STEPS")
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertEqual(report.findings, [])
+
+    def test_distilled_workflow_without_ms_steps_is_clean(self):
+        """A turbo (step-distilled) graph is the Fast slot's preset; the
+        dialog's Steps selector never applies to it, so no warning."""
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = self._scheduler(4)
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertEqual(report.findings, [])
+
+    def test_ms_steps_on_distilled_workflow_warns(self):
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = self._scheduler(4, "MS_STEPS")
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        self.assertIn("steps_on_distilled", [f.code for f in report.findings])
+
+    def test_linked_steps_input_is_not_a_step_count(self):
+        """A `steps` input wired from another node is a link, not a
+        literal -- it says nothing about distillation, so stay quiet."""
+        wf = self._wf(self._I2VA_FULL)
+        wf["s"] = self._scheduler(["99", 0])
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertEqual(report.findings, [])
+
+    def test_ms_steps_does_not_warn_for_other_dialects(self):
+        """MS_STEPS is an i2v concern; the ref2va validator ignores it."""
+        wf = _ref2v_workflow(
+            ref=_node("MS_REF_IMAGE", {"image": ""}),
+            sched=self._scheduler(20),
+        )
+        report = validate_workflow(wf, "ref2v", "minimax", "ref2va")
+        self.assertNotIn("no_steps", [f.code for f in report.findings])
+
+    def test_shipped_workflows_validate_clean(self):
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "data" / "workflows"
+        for name in ("minimax_i2va_quality_api.json", "minimax_i2va_turbo_api.json"):
+            wf = json.loads((root / name).read_text())
+            report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+            self.assertEqual(report.findings, [], name)
 
 
 def test_minimax_ref2va_happy_path_is_clean():

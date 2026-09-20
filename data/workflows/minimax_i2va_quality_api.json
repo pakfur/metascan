@@ -162,11 +162,11 @@
         0
       ],
       "scheduler": "simple",
-      "steps": 20,
+      "steps": 25,
       "denoise": 1
     },
     "_meta": {
-      "title": "BasicScheduler"
+      "title": "MS_STEPS"
     }
   },
   "15": {

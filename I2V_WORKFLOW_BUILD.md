@@ -81,6 +81,7 @@ Set `_meta.title` on exactly these nodes:
 | `MS_RESOLUTION` | `MiniMaxH3ImageToVideo` | receives computed width/height |
 | `MS_DURATION` | `PrimitiveFloat` | receives duration in seconds |
 | `MS_LORA_STACK` | `Power Lora Loader (rgthree)` | receives the user's LoRA list |
+| `MS_STEPS` | `BasicScheduler` — **quality build only** | receives the dialog's Steps choice (20–40) |
 
 Leave every other node untitled or with its default title. Do **not** add
 `MS_LAST_FRAME`, `MS_REF_IMAGE*` or `MS_AUDIO*` — this flow never fills them
@@ -153,7 +154,8 @@ Build one, validate it, then copy and change only these:
 
 | | `minimax_i2va_quality_api.json` | `minimax_i2va_turbo_api.json` |
 |---|---|---|
-| `BasicScheduler.steps` | `20` | `4` |
+| `BasicScheduler.steps` | `25` | `4` |
+| `BasicScheduler` title | `MS_STEPS` | untitled — never `MS_STEPS` |
 | Turbo LoRA | none | `LoraLoaderModelOnly` at `strength_model` 1.0, between `UNETLoader` and `MS_LORA_STACK` |
 
 **The turbo LoRA must be its own `LoraLoaderModelOnly` node — never an entry
@@ -176,7 +178,9 @@ python scripts/validate_i2v_workflow.py data/workflows/minimax_i2va_turbo_api.js
 python scripts/validate_i2v_workflow.py data/workflows/minimax_i2va_quality_api.json
 ```
 
-Both must exit 0 and print `ok` against all seven `MS_*` titles. "Optional
+Both must exit 0 and print `ok` against all seven shared `MS_*` titles. The
+quality file must also print `ok` for `MS_STEPS`; the turbo file must print
+`n/a` for it (a 4-step distillation has no business receiving 20–40 steps). "Optional
 slots unbound" in the output means you missed a title — fix it, don't accept
 it.
 
