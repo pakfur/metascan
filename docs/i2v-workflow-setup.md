@@ -66,8 +66,17 @@ For an image-to-video preset (kind `ref2v`, tagged `minimax` / `i2va`):
 | `MS_RESOLUTION` | warns if absent | `MiniMaxH3ImageToVideo` | `width` / `height` ← computed dimensions |
 | `MS_DURATION` | warns if absent | `PrimitiveFloat` | `value` ← the dialog's duration in seconds |
 | `MS_LORA_STACK` | warns if absent | `Power Lora Loader (rgthree)` | the dialog's LoRA list |
+| `MS_STEPS` | **High quality only** — warns if absent there, warns if *present* on a turbo build | `BasicScheduler` | `steps` ← the dialog's Steps choice (20–40) |
 
-Missing one of the three "warns if absent" titles is not fatal — registration
+`MS_STEPS` is the one title the two builds differ on. The dialog's Steps
+selector is enabled only for **High quality**, and the Fast slot never
+writes it — a turbo LoRA is a 4-step distillation, and 25 steps through it
+renders garbage. So: title the High quality graph's `BasicScheduler`
+`MS_STEPS`, and leave the turbo graph's scheduler untitled. The validator
+tells the builds apart by the baked-in step count (8 or fewer reads as
+step-distilled).
+
+Missing one of the "warns if absent" titles is not fatal — registration
 succeeds with a warning and the graph runs with whatever is baked into it.
 You just lose that control from the dialog.
 
@@ -205,7 +214,8 @@ defaults the dialog opens with.
 Get one graph validating, then make the second from it.
 
 **High quality:** base `minimax_h3_fl2va_pruned_bf16` model, `BasicScheduler`
-steps at **20**, no turbo LoRA in the Power Lora Loader.
+titled **`MS_STEPS`** with steps at **25** (the dialog overwrites it per
+generation), no turbo LoRA in the Power Lora Loader.
 
 **Fast (turbo):** same graph, `BasicScheduler` steps at **4**, and
 `minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors` loaded at
@@ -257,6 +267,8 @@ has no effect on that preset.
 | `no_resolution` | warning | No `MS_RESOLUTION`. Output size won't follow the dialog, and the clip may not match the source's aspect ratio. |
 | `no_duration` | warning | No `MS_DURATION`. Clip length won't follow the dialog. |
 | `no_lora_stack` | warning | No `MS_LORA_STACK`. The dialog's LoRA list can't be applied. |
+| `no_steps` | warning | A full-step graph (more than 8 baked-in steps) with no `MS_STEPS`. The dialog's Steps choice can't be applied; the Steps selector shows "preset has no MS_STEPS node". |
+| `steps_on_distilled` | warning | `MS_STEPS` on a graph that samples at 8 steps or fewer — a turbo build. Remove the title; Steps applies to High quality presets only. |
 | `slot_unused` | warning | A title this flow never fills (`MS_LAST_FRAME`, `MS_REF_IMAGE*`, `MS_AUDIO*`). Harmless. |
 | `unknown_title` | warning | A node titled `MS_something` that isn't in the contract — usually a typo. |
 

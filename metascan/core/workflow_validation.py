@@ -263,6 +263,42 @@ def _validate_minimax_ref2va(
     return findings
 
 
+# A workflow whose sampler runs this many steps or fewer is treated as
+# step-distilled (a turbo LoRA build: 4 steps, 8 at the outside). The i2v
+# dialog's Steps selector (20-40) only ever drives the High quality preset,
+# so the MS_STEPS expectation flips on this boundary.
+STEP_DISTILLED_MAX: int = 8
+
+
+def _literal_steps(node: Any) -> Optional[int]:
+    """A node's literal integer ``steps`` input, or None when it has no
+    such input or the input is a link (``[node_id, slot]``)."""
+    if not isinstance(node, dict):
+        return None
+    inputs = node.get("inputs")
+    value = inputs.get("steps") if isinstance(inputs, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def sampler_step_node(
+    workflow: Dict[str, Any], found: Dict[str, str]
+) -> Tuple[Optional[str], Optional[int]]:
+    """(node id, baked-in step count) of the node that sets the sampler's
+    step count: the MS_STEPS node when titled, else the node with the
+    highest literal ``steps`` input. (None, None) when nothing qualifies."""
+    if "MS_STEPS" in found:
+        node_id = found["MS_STEPS"]
+        return node_id, _literal_steps(workflow.get(node_id))
+    best: Tuple[Optional[str], Optional[int]] = (None, None)
+    for node_id, node in workflow.items():
+        steps = _literal_steps(node)
+        if steps is not None and (best[1] is None or steps > best[1]):
+            best = (str(node_id), steps)
+    return best
+
+
 def _validate_minimax_i2va(
     workflow: Dict[str, Any], found: Dict[str, str]
 ) -> List[Finding]:
@@ -306,6 +342,37 @@ def _validate_minimax_i2va(
                 "No MS_LORA_STACK node: the dialog's lora list cannot " "be applied.",
             )
         )
+    # MS_STEPS applies to High quality presets only. The validator is not
+    # told which slot a preset is headed for, so it reads the graph: a
+    # full-step sampler should expose MS_STEPS, a step-distilled one must
+    # not (the Fast slot never writes it, and 20-40 steps through a 4-step
+    # distillation renders garbage if the preset lands in the quality slot).
+    step_node, baked_steps = sampler_step_node(workflow, found)
+    if baked_steps is not None:
+        distilled = baked_steps <= STEP_DISTILLED_MAX
+        if "MS_STEPS" not in found and not distilled:
+            findings.append(
+                Finding(
+                    "warning",
+                    "no_steps",
+                    f"No MS_STEPS node: this workflow samples at {baked_steps} "
+                    "steps and looks like a High quality preset, but the "
+                    "dialog's Steps setting cannot be applied. Title the node "
+                    "that carries the `steps` widget MS_STEPS.",
+                    node_id=step_node,
+                )
+            )
+        elif "MS_STEPS" in found and distilled:
+            findings.append(
+                Finding(
+                    "warning",
+                    "steps_on_distilled",
+                    f"MS_STEPS is bound on a {baked_steps}-step workflow, which "
+                    "looks step-distilled (turbo). Steps only applies to High "
+                    "quality presets; remove the title from a Fast preset.",
+                    node_id=step_node,
+                )
+            )
     for title in (
         "MS_LAST_FRAME",
         "MS_REF_IMAGE",
@@ -375,10 +442,12 @@ def apply_fixes(workflow: Dict[str, Any], fixes: List[TitleFix]) -> Dict[str, An
 
 __all__ = [
     "Finding",
+    "STEP_DISTILLED_MAX",
     "TitleFix",
     "ValidationReport",
     "VIDEO_MODES",
     "VIDEO_TARGETS",
     "apply_fixes",
+    "sampler_step_node",
     "validate_workflow",
 ]

@@ -35,6 +35,9 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_AUDIO_2": ("audio",),
     "MS_DURATION": ("value",),
     "MS_RESOLUTION": ("width", "height"),
+    # Sampler step count. Only the i2v flow's High quality preset is ever
+    # written; a step-distilled (turbo) workflow must NOT carry this title.
+    "MS_STEPS": ("steps",),
     # MS_SEED is special-cased: either "seed" or "noise_seed".
     # MS_SAVE is an output node; metascan only needs its id.
 }
@@ -77,6 +80,7 @@ class Bindings:
     audio_2: Optional[str] = None
     duration: Optional[str] = None
     resolution: Optional[str] = None
+    steps: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -182,6 +186,7 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
         audio_2=found.get("MS_AUDIO_2"),
         duration=found.get("MS_DURATION"),
         resolution=found.get("MS_RESOLUTION"),
+        steps=found.get("MS_STEPS"),
     )
 
 
@@ -208,6 +213,7 @@ class GenerationParams:
     last_frame: Optional[str] = None
     audio_refs: List[str] = field(default_factory=list)
     duration_s: Optional[float] = None
+    steps: Optional[int] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -358,6 +364,13 @@ def apply_overrides(
                 "A duration was supplied but this workflow has no " "MS_DURATION node."
             )
         write(bindings.duration, "value", params.duration_s)
+
+    if params.steps is not None:
+        if bindings.steps is None:
+            raise BindingError(
+                "A step count was supplied but this workflow has no MS_STEPS node."
+            )
+        write(bindings.steps, "steps", int(params.steps))
 
     return graph
 

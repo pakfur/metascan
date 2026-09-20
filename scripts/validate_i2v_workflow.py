@@ -5,6 +5,11 @@ Usage:  python scripts/validate_i2v_workflow.py <workflow.json>
 
 Exits 0 if the graph would register as a (minimax, i2va) ref2v preset,
 1 otherwise. Warnings are printed but do not fail the check.
+
+MS_STEPS applies to High quality presets only. The script reads the
+sampler's baked-in step count to tell the two builds apart: a full-step
+graph is expected to bind MS_STEPS, a step-distilled (turbo) one is
+expected not to.
 """
 
 from __future__ import annotations
@@ -16,7 +21,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from metascan.core.comfy_bindings import resolve_bindings  # noqa: E402
-from metascan.core.workflow_validation import validate_workflow  # noqa: E402
+from metascan.core.workflow_validation import (  # noqa: E402
+    STEP_DISTILLED_MAX,
+    sampler_step_node,
+    validate_workflow,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -64,7 +73,24 @@ def main(argv: list[str]) -> int:
         mark = "ok " if node_id else "   "
         print(f"  {mark} MS_{name.upper():<13} -> {str(node_id):<8} {cls}")
 
+    # MS_STEPS: expected on a full-step (High quality) build only.
+    titles = {"MS_STEPS": b.steps} if b.steps else {}
+    _, baked = sampler_step_node(workflow, titles)
+    distilled = baked is not None and baked <= STEP_DISTILLED_MAX
+    if b.steps:
+        cls = workflow.get(b.steps, {}).get("class_type", "-")
+        print(f"  ok  {'MS_STEPS':<16} -> {b.steps:<8} {cls} ({baked} steps)")
+    elif distilled:
+        print(
+            f"  n/a {'MS_STEPS':<16} -> step-distilled build ({baked} steps); "
+            "Steps applies to High quality presets only"
+        )
+    else:
+        print(f"      {'MS_STEPS':<16} -> None     -")
+
     missing = [n for n in ("resolution", "duration", "lora_stack") if not getattr(b, n)]
+    if not b.steps and not distilled:
+        missing.append("steps")
     print(f"\nPASS  registers as (minimax, i2va).", end="")
     print(f"  Optional slots unbound: {', '.join(missing)}" if missing else "")
     return 0
