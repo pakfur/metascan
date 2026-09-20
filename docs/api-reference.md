@@ -46,6 +46,8 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/comfy/loras` | Lora filenames installed on the ComfyUI server |
 | GET | `/api/comfy/presets` | List registered workflow presets |
 | POST | `/api/comfy/presets` | Register a workflow preset |
+| GET | `/api/comfy/presets/{id}` | Get one workflow preset including its workflow graph |
+| PUT | `/api/comfy/presets/{id}` | Replace a preset's workflow in place (id preserved) |
 | DELETE | `/api/comfy/presets/{id}` | Delete a workflow preset |
 | POST | `/api/comfy/submit` | Submit a generation job |
 | GET | `/api/comfy/jobs` | List generation jobs |
@@ -176,6 +178,28 @@ Body: `{name: string, kind: "t2i" | "ref", workflow: object}`, where
 `workflow` is a ComfyUI API-format export with `MS_*` node titles. Returns
 `{id: int}`. 400 with the missing/invalid title list if the workflow
 doesn't satisfy the `MS_*` binding contract (`BindingError`).
+
+### `GET /api/comfy/presets/{id}`
+One preset with its graph: the list shape plus `video_target`,
+`video_mode` and `workflow` (the parsed API-format object — never the raw
+`workflow_json` string). The registration dialog's update flow populates
+its form from this. **404** if the preset doesn't exist.
+
+### `PUT /api/comfy/presets/{id}`
+Body: `{workflow: object}`. Replaces the preset's workflow **in place** and
+re-resolves its bindings snapshot; `updated_at` is bumped. The workflow is
+the only updatable part — `name`, `kind`, `video_target` and `video_mode`
+are fixed at registration, and any such keys in the body are ignored. The
+id is preserved, so the `i2v` config slots, storyboards and
+`generation_jobs` rows that reference the preset keep working; this is the
+way to change a preset that has job history, since `DELETE` answers 409
+for one. Validated exactly like `POST`, against the preset's *stored* kind
+and dialect tag. Needs no ComfyUI connection. Jobs already queued against
+the preset pick up the new graph when they dispatch. Returns
+`{id: int, warnings: string[]}`.
+- **400** `{code: "validation_failed", findings, fixes, fixed_workflow?}`
+  on validation errors (nothing is written), or a `BindingError` message.
+- **404** if the preset doesn't exist.
 
 ### `DELETE /api/comfy/presets/{id}`
 Returns `{status: "deleted"}`.

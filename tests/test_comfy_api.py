@@ -262,6 +262,132 @@ def test_register_preset_rejects_unknown_target_and_validation_errors(client):
     assert any(f["code"] == "missing_required" for f in detail["findings"])
 
 
+def _register(client, name="h3", **over):
+    body = {
+        "name": name,
+        "kind": "ref2v",
+        "workflow": _ref2v_wf(),
+        "video_target": "minimax",
+        "video_mode": "ref2va",
+    }
+    body.update(over)
+    r = client.post("/api/comfy/presets", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_get_preset_returns_the_workflow(client):
+    """The update flow populates the dialog from this -- unlike the list
+    route it must carry the graph, parsed."""
+    pid = _register(client)
+    r = client.get(f"/api/comfy/presets/{pid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == pid and body["name"] == "h3"
+    assert body["kind"] == "ref2v"
+    assert body["video_target"] == "minimax" and body["video_mode"] == "ref2va"
+    assert body["workflow"] == _ref2v_wf()
+    assert "workflow_json" not in body
+
+
+def test_get_a_missing_preset_is_404(client):
+    assert client.get("/api/comfy/presets/9999").status_code == 404
+
+
+def test_update_preset_replaces_only_the_workflow(client):
+    pid = _register(client)
+    before = client.db.get_workflow_preset(pid)
+    new_wf = _ref2v_wf(
+        ref={"_meta": {"title": "MS_REF_IMAGE"}, "inputs": {"image": ""}},
+        steps={"_meta": {"title": "MS_STEPS"}, "inputs": {"steps": 20}},
+    )
+    r = client.put(f"/api/comfy/presets/{pid}", json={"workflow": new_wf})
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == pid
+    assert isinstance(r.json()["warnings"], list)
+
+    import json as _json
+
+    after = client.db.get_workflow_preset(pid)
+    assert _json.loads(after["workflow_json"]) == new_wf
+    # The bindings snapshot is re-resolved alongside the graph.
+    assert _json.loads(after["bindings"])["steps"] == "steps"
+    assert _json.loads(after["bindings"])["ref_image"] == "ref"
+    # Identity and association are untouched: same id (config slots and
+    # job history keep pointing at it), same name / kind / dialect tag.
+    for key in ("id", "name", "kind", "video_target", "video_mode", "created_at"):
+        assert after[key] == before[key], key
+    assert [p["id"] for p in client.get("/api/comfy/presets").json()] == [pid]
+
+
+def test_update_preset_ignores_attempts_to_change_other_fields(client):
+    pid = _register(client)
+    r = client.put(
+        f"/api/comfy/presets/{pid}",
+        json={"workflow": _ref2v_wf(), "name": "renamed", "video_mode": "i2va"},
+    )
+    assert r.status_code == 200
+    row = client.db.get_workflow_preset(pid)
+    assert row["name"] == "h3" and row["video_mode"] == "ref2va"
+
+
+def test_update_preset_validates_against_the_stored_kind_and_dialect(client):
+    """An i2va preset needs MS_FIRST_FRAME; an update that drops it is the
+    same structured 400 registration gives, and nothing is written."""
+    wf = _ref2v_wf(ff={"_meta": {"title": "MS_FIRST_FRAME"}, "inputs": {"image": ""}})
+    pid = _register(client, name="i2v", workflow=wf, video_mode="i2va")
+    r = client.put(f"/api/comfy/presets/{pid}", json={"workflow": _ref2v_wf()})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "validation_failed"
+    assert "no_first_frame" in [f["code"] for f in detail["findings"]]
+
+    import json as _json
+
+    assert _json.loads(client.db.get_workflow_preset(pid)["workflow_json"]) == wf
+
+
+def test_update_preset_offers_title_fixes_like_registration(client):
+    pid = _register(client)
+    broken = {
+        "1": {"_meta": {"title": "MS_POSITIV"}, "inputs": {"text": ""}},
+        "2": {"_meta": {"title": "MS_SEED"}, "inputs": {"seed": 0}},
+        "3": {"_meta": {"title": "MS_SAVE"}, "inputs": {}},
+    }
+    r = client.put(f"/api/comfy/presets/{pid}", json={"workflow": broken})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["fixed_workflow"]["1"]["_meta"]["title"] == "MS_POSITIVE"
+
+
+def test_update_a_missing_preset_is_404(client):
+    r = client.put("/api/comfy/presets/9999", json={"workflow": _ref2v_wf()})
+    assert r.status_code == 404
+
+
+def test_update_preset_works_without_a_comfy_connection(client):
+    """Pure DB + validation -- a ComfyUI outage must not block fixing a
+    workflow (registration needs the client only for historical reasons)."""
+    pid = _register(client)
+    comfy_api.set_comfy_client(None)
+    r = client.put(f"/api/comfy/presets/{pid}", json={"workflow": _ref2v_wf()})
+    assert r.status_code == 200
+
+
+def test_update_preset_bumps_updated_at(client):
+    pid = _register(client)
+    client.db.update_workflow_preset_workflow  # exists
+    with client.db.lock, client.db._get_connection() as conn:
+        conn.execute(
+            "UPDATE workflow_presets SET updated_at = '2000-01-01 00:00:00' "
+            "WHERE id = ?",
+            (pid,),
+        )
+        conn.commit()
+    client.put(f"/api/comfy/presets/{pid}", json={"workflow": _ref2v_wf()})
+    assert client.db.get_workflow_preset(pid)["updated_at"] > "2000-01-01 00:00:00"
+
+
 def test_list_presets_omits_the_workflow_blob(client):
     client.post(
         "/api/comfy/presets",
