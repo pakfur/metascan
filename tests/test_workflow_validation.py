@@ -85,6 +85,35 @@ class TestMinimaxI2vaValidator(unittest.TestCase):
         self.assertIn("no_duration", codes)
         self.assertIn("no_lora_stack", codes)
 
+    def test_missing_resolution_warns(self):
+        wf = self._wf(["MS_POSITIVE", "MS_SEED", "MS_SAVE", "MS_FIRST_FRAME"])
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        warnings = [f for f in report.findings if f.code == "no_resolution"]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].level, "warning")
+
+    def test_present_resolution_does_not_warn(self):
+        wf = self._wf(
+            [
+                "MS_POSITIVE",
+                "MS_SEED",
+                "MS_SAVE",
+                "MS_FIRST_FRAME",
+                "MS_RESOLUTION",
+            ]
+        )
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertTrue(report.ok)
+        self.assertNotIn("no_resolution", [f.code for f in report.findings])
+
+    def test_resolution_is_a_known_title(self):
+        wf = self._wf(
+            ["MS_POSITIVE", "MS_SEED", "MS_SAVE", "MS_FIRST_FRAME", "MS_RESOLUTION"]
+        )
+        report = validate_workflow(wf, "ref2v", "minimax", "i2va")
+        self.assertNotIn("unknown_title", [f.code for f in report.findings])
+
     def test_unused_slots_warn(self):
         wf = self._wf(
             [

@@ -211,3 +211,68 @@ def test_apply_overrides_too_many_audio_refs_raises():
         apply_overrides(wf, b, base_ref2v_params(audio_refs=["a1_ov.mp3", "a2_ov.mp3"]))
     assert "2 " in str(exc.value)
     assert "1 MS_AUDIO slot" in str(exc.value)
+
+
+# ---- MS_RESOLUTION ----------------------------------------------------
+
+
+def _resolution_node() -> dict:
+    return _node("ImageScale", "MS_RESOLUTION", {"width": 512, "height": 512})
+
+
+def test_resolution_is_optional_and_resolves_none_when_absent():
+    b = resolve_bindings(minimal_ref2v(), "ref2v")
+    assert b.resolution is None
+
+
+def test_resolution_resolves_when_present():
+    wf = minimal_ref2v()
+    wf["20"] = _resolution_node()
+    b = resolve_bindings(wf, "ref2v")
+    assert b.resolution == "20"
+
+
+def test_resolution_requires_width_and_height_widgets():
+    wf = minimal_ref2v()
+    wf["20"] = _node("ImageScale", "MS_RESOLUTION", {"width": 512})
+    with pytest.raises(BindingError, match="height"):
+        resolve_bindings(wf, "ref2v")
+
+
+def test_apply_overrides_writes_dims_to_resolution_node():
+    wf = minimal_ref2v()
+    wf["20"] = _resolution_node()
+    b = resolve_bindings(wf, "ref2v")
+    graph = apply_overrides(wf, b, base_ref2v_params(width=1328, height=752))
+    assert graph["20"]["inputs"]["width"] == 1328
+    assert graph["20"]["inputs"]["height"] == 752
+
+
+def test_apply_overrides_leaves_source_workflow_unmutated():
+    wf = minimal_ref2v()
+    wf["20"] = _resolution_node()
+    b = resolve_bindings(wf, "ref2v")
+    apply_overrides(wf, b, base_ref2v_params(width=1328, height=752))
+    assert wf["20"]["inputs"]["width"] == 512
+
+
+def test_resolution_and_latent_both_written_when_both_present():
+    wf = minimal_ref2v()
+    wf["19"] = _node(
+        "EmptyLatentImage", "MS_LATENT", {"width": 8, "height": 8, "batch_size": 1}
+    )
+    wf["20"] = _resolution_node()
+    b = resolve_bindings(wf, "ref2v")
+    graph = apply_overrides(wf, b, base_ref2v_params(width=1328, height=752))
+    assert graph["19"]["inputs"]["width"] == 1328
+    assert graph["20"]["inputs"]["width"] == 1328
+
+
+def test_dims_are_silently_skipped_when_no_resolution_node():
+    """A workflow with neither MS_RESOLUTION nor MS_LATENT keeps its baked-in
+    resolution rather than raising -- the MS_DURATION precedent."""
+    wf = minimal_ref2v()
+    b = resolve_bindings(wf, "ref2v")
+    graph = apply_overrides(wf, b, base_ref2v_params(width=1328, height=752))
+    assert set(graph) == set(wf)
+    assert "1328" not in json.dumps(graph)

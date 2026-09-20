@@ -34,6 +34,7 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_AUDIO": ("audio",),
     "MS_AUDIO_2": ("audio",),
     "MS_DURATION": ("value",),
+    "MS_RESOLUTION": ("width", "height"),
     # MS_SEED is special-cased: either "seed" or "noise_seed".
     # MS_SAVE is an output node; metascan only needs its id.
 }
@@ -75,6 +76,7 @@ class Bindings:
     audio: Optional[str] = None
     audio_2: Optional[str] = None
     duration: Optional[str] = None
+    resolution: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -179,6 +181,7 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
         audio=found.get("MS_AUDIO"),
         audio_2=found.get("MS_AUDIO_2"),
         duration=found.get("MS_DURATION"),
+        resolution=found.get("MS_RESOLUTION"),
     )
 
 
@@ -251,6 +254,13 @@ def apply_overrides(
         write(bindings.latent, "width", params.width)
         write(bindings.latent, "height", params.height)
         write(bindings.latent, "batch_size", params.batch_size)
+    # ref2v graphs usually have no MS_LATENT; MS_RESOLUTION is the
+    # video-side dimension carrier. A workflow with neither keeps its
+    # baked-in resolution rather than raising -- the MS_DURATION
+    # precedent, so existing presets need no retrofit.
+    if bindings.resolution is not None:
+        write(bindings.resolution, "width", params.width)
+        write(bindings.resolution, "height", params.height)
 
     if params.negative is not None:
         if bindings.negative is None:
