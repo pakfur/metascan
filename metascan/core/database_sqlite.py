@@ -1118,6 +1118,8 @@ class DatabaseManager:
                     quality TEXT,
                     width INTEGER,
                     height INTEGER,
+                    steps INTEGER,
+                    render_s REAL,
                     preset_id INTEGER,
                     comfy_prompt_id TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1140,6 +1142,21 @@ class DatabaseManager:
                 "i2v_videos",
                 "height",
                 "ALTER TABLE i2v_videos ADD COLUMN height INTEGER",
+            )
+            # ...and these predate the Steps selector / per-clip details
+            # label. steps is NULL for Fast renders and for presets with no
+            # MS_STEPS node; render_s is NULL for rows ingested before it.
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "steps",
+                "ALTER TABLE i2v_videos ADD COLUMN steps INTEGER",
+            )
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "render_s",
+                "ALTER TABLE i2v_videos ADD COLUMN render_s REAL",
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
@@ -1358,6 +1375,15 @@ class DatabaseManager:
                 # runner at submit time; collect_outputs prepends it to
                 # ComfyUI's filename when writing the local copy.
                 "ALTER TABLE generation_jobs ADD COLUMN output_prefix TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "output_name",
+                # Whole local filename stem (i2v: "<prefix><epoch>").
+                # When set, collect_outputs drops ComfyUI's own filename
+                # and keeps only its suffix; output_prefix is ignored.
+                "ALTER TABLE generation_jobs ADD COLUMN output_name TEXT",
             )
             # i2v flow correlation. Like panel_id/beat_id: no REFERENCES
             # clause (SQLite cannot add an FK to an existing table without a
@@ -1884,12 +1910,14 @@ class DatabaseManager:
         beat_id: Optional[int] = None,
         output_prefix: Optional[str] = None,
         i2v_source_path: Optional[str] = None,
+        output_name: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs (preset_id, params, panel_id, "
-                "output_dir, beat_id, output_prefix, i2v_source_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "output_dir, beat_id, output_prefix, i2v_source_path, "
+                "output_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset_id,
                     params,
@@ -1898,6 +1926,7 @@ class DatabaseManager:
                     beat_id,
                     output_prefix,
                     i2v_source_path,
+                    output_name,
                 ),
             )
             conn.commit()
@@ -3531,15 +3560,17 @@ class DatabaseManager:
         quality: Optional[str] = None,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        steps: Optional[int] = None,
+        render_s: Optional[float] = None,
         preset_id: Optional[int] = None,
         comfy_prompt_id: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
-                "idea, seed, duration_s, quality, width, height, preset_id, "
-                "comfy_prompt_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "idea, seed, duration_s, quality, width, height, steps, "
+                "render_s, preset_id, comfy_prompt_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -3550,6 +3581,8 @@ class DatabaseManager:
                     quality,
                     width,
                     height,
+                    steps,
+                    render_s,
                     preset_id,
                     comfy_prompt_id,
                 ),

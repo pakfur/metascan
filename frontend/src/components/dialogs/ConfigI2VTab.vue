@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fetchConfig, updateConfig } from '../../api/config'
 import { listPresets } from '../../api/comfy'
+import { previewI2vOutput } from '../../api/i2v'
+import DirectoryPicker from './DirectoryPicker.vue'
 import type { WorkflowPreset } from '../../types/storyboard'
 import PresetRegistrationDialog from '../storyboard/PresetRegistrationDialog.vue'
 
@@ -16,6 +18,16 @@ const defaultDuration = ref(6)
 const defaultQuality = ref<'fast' | 'quality'>('fast')
 const megapixelsText = ref('0.25, 0.5, 0.75, 1')
 const defaultMegapixels = ref(0.75)
+// Must match backend/config.py::I2V_DEFAULT_OUTPUT_PREFIX.
+const DEFAULT_OUTPUT_PREFIX = '/%Y-%m-%d/i2v_'
+const outputRoot = ref('')
+const outputPrefix = ref(DEFAULT_OUTPUT_PREFIX)
+const showPicker = ref(false)
+const preview = ref<{ path: string | null; error: string | null; warnings: string[] }>({
+  path: null,
+  error: null,
+  warnings: [],
+})
 const presets = ref<WorkflowPreset[]>([])
 const showRegister = ref(false)
 const saved = ref(false)
@@ -45,6 +57,39 @@ const parsedMegapixels = computed(() =>
 
 onMounted(load)
 
+// Live "would be saved as" preview, resolved by the server so the date
+// expansion and path rules have exactly one implementation. Debounced:
+// it fires on every keystroke in the prefix box.
+let previewTimer: ReturnType<typeof setTimeout> | null = null
+let previewSeq = 0
+async function refreshPreview() {
+  const seq = ++previewSeq
+  try {
+    const res = await previewI2vOutput(outputRoot.value, outputPrefix.value)
+    if (seq === previewSeq) preview.value = res // drop out-of-order replies
+  } catch (e) {
+    if (seq === previewSeq) {
+      preview.value = {
+        path: null,
+        error: e instanceof Error ? e.message : String(e),
+        warnings: [],
+      }
+    }
+  }
+}
+watch([outputRoot, outputPrefix], () => {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(refreshPreview, 250)
+})
+onBeforeUnmount(() => {
+  if (previewTimer) clearTimeout(previewTimer)
+})
+
+function onPickRoot(path: string) {
+  outputRoot.value = path
+  showPicker.value = false
+}
+
 async function load() {
   loading.value = true
   try {
@@ -62,6 +107,14 @@ async function load() {
     megapixelsText.value = mps.join(', ')
     defaultMegapixels.value =
       (i2vRaw.value.default_megapixels as number) ?? 0.75
+    outputRoot.value =
+      typeof i2vRaw.value.output_root === 'string' ? i2vRaw.value.output_root : ''
+    // An explicit '' is a saved choice; only an absent key gets the default.
+    outputPrefix.value =
+      typeof i2vRaw.value.output_prefix === 'string'
+        ? i2vRaw.value.output_prefix
+        : DEFAULT_OUTPUT_PREFIX
+    void refreshPreview()
   } finally {
     loading.value = false
   }
@@ -87,6 +140,8 @@ async function save() {
     default_megapixels: megapixels.includes(defaultMegapixels.value)
       ? defaultMegapixels.value
       : megapixels[0],
+    output_root: outputRoot.value.trim(),
+    output_prefix: outputPrefix.value.trim(),
   }
   await updateConfig({ i2v })
   i2vRaw.value = i2v
@@ -164,11 +219,63 @@ async function onRegistered() {
         </select>
       </label>
 
+      <h4>Output files</h4>
+      <p class="muted">
+        Where generated clips are saved. Leave the directory empty to keep the
+        default location under the ComfyUI output root.
+      </p>
+      <label class="row">
+        <span>Root directory</span>
+        <span class="root-row">
+          <input
+            v-model="outputRoot"
+            spellcheck="false"
+            placeholder="(default — ComfyUI output root)"
+          />
+          <button type="button" class="btn" @click="showPicker = true">Browse…</button>
+          <button
+            type="button"
+            class="btn"
+            title="Back to the default location"
+            :disabled="!outputRoot"
+            @click="outputRoot = ''"
+          >Clear</button>
+        </span>
+      </label>
+      <label class="row">
+        <span>File prefix</span>
+        <input
+          v-model="outputPrefix"
+          spellcheck="false"
+          :disabled="!outputRoot.trim()"
+          :placeholder="DEFAULT_OUTPUT_PREFIX"
+        />
+      </label>
+      <p class="muted hint">
+        A path under the root; the last part is the file name prefix and a
+        unique number is appended. Date tokens: <code>%Y</code> year,
+        <code>%m</code> month, <code>%d</code> day, <code>%H</code> hour,
+        <code>%M</code> minute, <code>%S</code> second.
+      </p>
+      <p v-for="(w, i) in preview.warnings" :key="i" class="warn">⚠ {{ w }}</p>
+      <p v-if="preview.error" class="warn">⚠ {{ preview.error }}</p>
+      <p v-else-if="preview.path" class="muted hint">
+        Next clip: <code class="preview-path">{{ preview.path }}</code>
+      </p>
+
       <div class="actions">
         <button class="btn primary" @click="save">Save</button>
         <span v-if="saved" class="muted">Saved.</span>
       </div>
     </template>
+
+    <DirectoryPicker
+      v-if="showPicker"
+      title="Root directory for generated videos"
+      :initial-path="outputRoot"
+      @select="onPickRoot"
+      @close="showPicker = false"
+    />
 
     <PresetRegistrationDialog
       v-if="showRegister"
@@ -197,6 +304,13 @@ async function onRegistered() {
   padding: 6px 8px;
   box-sizing: border-box;
 }
+.root-row { flex: 1; display: flex; gap: 6px; min-width: 0; }
+.root-row input { min-width: 0; font-family: monospace; font-size: 12px; }
+.row input:disabled { opacity: 0.55; }
+.hint { margin: 0; font-size: 12px; }
+.hint code, .preview-path { font-family: monospace; font-size: 12px; color: var(--text-color); }
+.preview-path { word-break: break-all; }
+.warn { margin: 0; font-size: 12px; color: var(--warn, #c90); }
 .actions { margin-top: 8px; display: flex; gap: 10px; align-items: center; }
 .muted { color: var(--text-color-secondary, #888); font-size: 13px; }
 

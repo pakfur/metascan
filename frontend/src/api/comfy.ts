@@ -57,3 +57,10 @@ export function listJobs(state?: JobState, limit = 100): Promise<GenerationJob[]
 export function getJob(id: number): Promise<GenerationJob> {
   return get<GenerationJob>(`/comfy/jobs/${id}`)
 }
+
+// Cancels a queued or running job. A running job is interrupted inside
+// ComfyUI (by prompt id, so bystander prompts survive); the terminal
+// state arrives on the `comfy` WS channel as job_update → cancelled.
+export function cancelJob(id: number): Promise<{ status: string }> {
+  return post<{ status: string }>(`/comfy/jobs/${id}/cancel`)
+}

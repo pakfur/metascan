@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { Media } from '../types/media'
 import type { I2vConfig, I2vJobChip, I2vVideo } from '../types/i2v'
 import { fetchI2vConfig, listI2vVideos } from '../api/i2v'
-import { listJobs } from '../api/comfy'
+import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { updateMedia } from '../api/media'
 
 // POSIX/native tolerance: job rows store POSIX, Media paths are native.
@@ -60,6 +60,44 @@ export const useI2vStore = defineStore('i2v', () => {
     jobs.value = next
   }
 
+  // Jobs that can still be cancelled (a failed tile is only dismissable).
+  const activeJobIds = computed<number[]>(() =>
+    [...jobs.value].filter(([, c]) => c.state !== 'failed').map(([id]) => id),
+  )
+
+  function patchChip(jobId: number, fields: Partial<I2vJobChip>): void {
+    const chip = jobs.value.get(jobId)
+    if (!chip) return
+    const next = new Map(jobs.value)
+    next.set(jobId, { ...chip, ...fields })
+    jobs.value = next
+  }
+
+  // Cancel one queued/running job. The tile normally leaves via the comfy
+  // channel's job_update → cancelled; it is also dropped here on success
+  // so a missed WS frame cannot strand it. On failure the tile stays, with
+  // its button re-armed, and the error propagates to the caller's toast.
+  async function cancelJob(jobId: number): Promise<void> {
+    const chip = jobs.value.get(jobId)
+    if (!chip || chip.state === 'failed' || chip.cancelling) return
+    patchChip(jobId, { cancelling: true })
+    try {
+      await apiCancelJob(jobId)
+      dismissJob(jobId)
+    } catch (e) {
+      patchChip(jobId, { cancelling: false })
+      throw e
+    }
+  }
+
+  // Cancel every in-flight job for this source image. Every job is
+  // attempted; the first failure is rethrown after the rest have settled.
+  async function cancelAllJobs(): Promise<void> {
+    const results = await Promise.allSettled(activeJobIds.value.map((id) => cancelJob(id)))
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    if (failed) throw failed.reason
+  }
+
   function dismissJob(jobId: number): void {
     const next = new Map(jobs.value)
     next.delete(jobId)
@@ -78,13 +116,17 @@ export const useI2vStore = defineStore('i2v', () => {
       } else if (state === 'done' || state === 'cancelled') {
         next.delete(jobId)
       } else {
-        next.set(jobId, { state: state === 'running' ? 'running' : 'queued' })
+        next.set(jobId, {
+          state: state === 'running' ? 'running' : 'queued',
+          cancelling: next.get(jobId)?.cancelling,
+        })
       }
     } else if (event === 'job_progress') {
       next.set(jobId, {
         state: 'running',
         value: Number(data.value),
         max: Number(data.max),
+        cancelling: next.get(jobId)?.cancelling,
       })
     }
     jobs.value = next
@@ -119,6 +161,9 @@ export const useI2vStore = defineStore('i2v', () => {
     refreshActiveJobs,
     trackJob,
     dismissJob,
+    activeJobIds,
+    cancelJob,
+    cancelAllJobs,
     handleComfyEvent,
     handleI2vEvent,
     toggleFavorite,

@@ -117,6 +117,9 @@ def get_comfy_config(config: dict) -> dict:
     }
 
 
+I2V_DEFAULT_OUTPUT_PREFIX = "/%Y-%m-%d/i2v_"
+
+
 def get_i2v_config(config: dict) -> dict:
     """Return the ``i2v`` section with defaults filled in.
 
@@ -129,7 +132,15 @@ def get_i2v_config(config: dict) -> dict:
             "default_quality": "fast",   # "fast" | "quality"
             "megapixels": [0.25, 0.5, 0.75, 1.0],
             "default_megapixels": 0.75,
+            "steps": [20, 25, 30, 35, 40],   # High quality only
+            "default_steps": 25,
+            "output_root": "",           # "" = <comfy.output_root>/i2v/<image>/
+            "output_prefix": "/%Y-%m-%d/i2v_",
         }
+
+    ``output_root`` + ``output_prefix`` place generated clips (see
+    metascan/core/i2v_output.py): the prefix is a strftime-expanded path
+    relative to the root whose last component is the filename prefix.
 
     Output dimensions are derived from the source image's aspect ratio
     and the chosen megapixel budget (i2v_compiler.i2v_dims), so there is
@@ -171,6 +182,29 @@ def get_i2v_config(config: dict) -> dict:
     if default_mp not in megapixels:
         default_mp = megapixels[0]
 
+    steps_fallback = [20, 25, 30, 35, 40]
+    try:
+        steps = [int(s) for s in (raw.get("steps") or [])]
+    except (TypeError, ValueError):
+        steps = []
+    steps = [s for s in steps if s > 0]
+    if not steps:
+        steps = steps_fallback
+    try:
+        default_steps = int(raw.get("default_steps") or 25)
+    except (TypeError, ValueError):
+        default_steps = 25
+    if default_steps not in steps:
+        default_steps = steps[0]
+
+    output_root = raw.get("output_root")
+    output_root = output_root.strip() if isinstance(output_root, str) else ""
+    # An explicit "" is a real choice (files straight into the root, bare
+    # number as the name); only an absent/junk value gets the default.
+    output_prefix = raw.get("output_prefix")
+    if not isinstance(output_prefix, str):
+        output_prefix = I2V_DEFAULT_OUTPUT_PREFIX
+
     return {
         "fast_preset_id": _preset_id(raw.get("fast_preset_id")),
         "quality_preset_id": _preset_id(raw.get("quality_preset_id")),
@@ -179,4 +213,8 @@ def get_i2v_config(config: dict) -> dict:
         "default_quality": quality if quality in ("fast", "quality") else "fast",
         "megapixels": megapixels,
         "default_megapixels": default_mp,
+        "steps": steps,
+        "default_steps": default_steps,
+        "output_root": output_root,
+        "output_prefix": output_prefix.strip(),
     }

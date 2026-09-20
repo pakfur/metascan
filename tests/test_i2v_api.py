@@ -226,6 +226,93 @@ class TestI2vApi(unittest.TestCase):
         self.assertNotIn("width", kwargs)
         self.assertNotIn("height", kwargs)
 
+    def _generate_body(self, **over):
+        body = {
+            "source_path": "/lib/a.png",
+            "prompt": "For the target video, the shot begins mid-air.",
+            "duration_s": 6,
+            "quality": "fast",
+            "seed": 1,
+            "loras": [],
+        }
+        body.update(over)
+        return body
+
+    def test_generate_passes_configured_output_placement(self):
+        with patch(
+            "backend.api.i2v.load_app_config",
+            return_value={
+                "i2v": {
+                    "fast_preset_id": 5,
+                    "output_root": "/mnt/d/Media/images",
+                    "output_prefix": "/%Y-%m-%d/minimax_",
+                }
+            },
+        ):
+            resp = self.client.post("/api/i2v/generate", json=self._generate_body())
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.runner.calls[0][1]
+        self.assertEqual(kwargs["output_root"], "/mnt/d/Media/images")
+        self.assertEqual(kwargs["output_prefix"], "/%Y-%m-%d/minimax_")
+
+    def test_generate_output_root_defaults_to_none(self):
+        resp = self.client.post("/api/i2v/generate", json=self._generate_body())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(self.runner.calls[0][1]["output_root"])
+
+    def test_output_preview(self):
+        resp = self.client.get(
+            "/api/i2v/output-preview",
+            params={"root": str(self.data_dir), "prefix": "/%Y-%M-%d/minimax_"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["path"].startswith(str(self.data_dir)))
+        self.assertTrue(body["path"].endswith(".mp4"))
+        self.assertIn("minimax_", body["path"])
+        self.assertEqual(len(body["warnings"]), 1)  # %M is minutes
+        self.assertIsNone(body["error"])
+
+    def test_output_preview_reports_problems_without_failing(self):
+        resp = self.client.get(
+            "/api/i2v/output-preview",
+            params={"root": str(self.data_dir), "prefix": "../x_"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["path"])
+        self.assertTrue(resp.json()["error"])
+
+        resp = self.client.get(
+            "/api/i2v/output-preview",
+            params={"root": str(self.data_dir / "missing"), "prefix": "x_"},
+        )
+        self.assertIn("does not exist", resp.json()["error"])
+
+    def test_output_preview_blank_root_describes_the_default(self):
+        resp = self.client.get("/api/i2v/output-preview", params={"root": ""})
+        body = resp.json()
+        self.assertIsNone(body["path"])
+        self.assertIsNone(body["error"])
+
+    def test_generate_passes_steps_to_runner(self):
+        resp = self.client.post("/api/i2v/generate", json=self._generate_body(steps=35))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.calls[0][1]["steps"], 35)
+
+    def test_generate_steps_default_to_none(self):
+        resp = self.client.post("/api/i2v/generate", json=self._generate_body())
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(self.runner.calls[0][1]["steps"])
+
+    def test_generate_400_out_of_range_steps(self):
+        for bad in (0, -5, 201):
+            resp = self.client.post(
+                "/api/i2v/generate", json=self._generate_body(steps=bad)
+            )
+            self.assertEqual(resp.status_code, 400, bad)
+            self.assertIn("steps", resp.json()["detail"])
+        self.assertEqual(self.runner.calls, [])
+
     def test_generate_defaults_megapixels_when_omitted(self):
         resp = self.client.post(
             "/api/i2v/generate",
@@ -327,6 +414,46 @@ class TestI2vApi(unittest.TestCase):
         self.assertIsNone(body["fast_preset_id"])
         self.assertIsNone(body["quality_preset_id"])
 
+    def test_config_endpoint_reports_steps(self):
+        with patch("backend.api.i2v.load_app_config", return_value={}):
+            body = self.client.get("/api/i2v/config").json()
+        self.assertEqual(body["steps"], [20, 25, 30, 35, 40])
+        self.assertEqual(body["default_steps"], 25)
+        # No quality preset configured -> nothing to drive.
+        self.assertFalse(body["quality_steps_supported"])
+
+    def _preset(self, with_steps: bool) -> int:
+        import json
+
+        wf = {
+            "1": {"inputs": {"text": ""}, "_meta": {"title": "MS_POSITIVE"}},
+            "2": {"inputs": {"noise_seed": 0}, "_meta": {"title": "MS_SEED"}},
+            "3": {"inputs": {}, "_meta": {"title": "MS_SAVE"}},
+        }
+        if with_steps:
+            wf["4"] = {"inputs": {"steps": 20}, "_meta": {"title": "MS_STEPS"}}
+        return self.db.create_workflow_preset(
+            f"q-{with_steps}", "ref2v", json.dumps(wf), "{}"
+        )
+
+    def test_config_quality_steps_supported_follows_the_preset(self):
+        for with_steps in (True, False):
+            pid = self._preset(with_steps)
+            with patch(
+                "backend.api.i2v.load_app_config",
+                return_value={"i2v": {"quality_preset_id": pid}},
+            ):
+                body = self.client.get("/api/i2v/config").json()
+            self.assertEqual(body["quality_steps_supported"], with_steps)
+
+    def test_config_quality_steps_supported_false_for_missing_preset(self):
+        with patch(
+            "backend.api.i2v.load_app_config",
+            return_value={"i2v": {"quality_preset_id": 9999}},
+        ):
+            body = self.client.get("/api/i2v/config").json()
+        self.assertFalse(body["quality_steps_supported"])
+
 
 class TestGetI2vConfig(unittest.TestCase):
     def test_empty_dict_defaults(self):
@@ -401,3 +528,52 @@ class TestI2vConfigMegapixels(unittest.TestCase):
     def test_non_positive_entries_are_dropped(self):
         cfg = get_i2v_config({"i2v": {"megapixels": [0, -1, 0.5]}})
         self.assertEqual(cfg["megapixels"], [0.5])
+
+
+class TestI2vConfigSteps(unittest.TestCase):
+    def test_defaults(self):
+        cfg = get_i2v_config({})
+        self.assertEqual(cfg["steps"], [20, 25, 30, 35, 40])
+        self.assertEqual(cfg["default_steps"], 25)
+
+    def test_junk_falls_back_to_defaults(self):
+        cfg = get_i2v_config({"i2v": {"steps": "x", "default_steps": "y"}})
+        self.assertEqual(cfg["steps"], [20, 25, 30, 35, 40])
+        self.assertEqual(cfg["default_steps"], 25)
+
+    def test_valid_values_pass_through(self):
+        cfg = get_i2v_config({"i2v": {"steps": [30, 50], "default_steps": 50}})
+        self.assertEqual(cfg["steps"], [30, 50])
+        self.assertEqual(cfg["default_steps"], 50)
+
+    def test_default_outside_ladder_falls_back_to_first_entry(self):
+        cfg = get_i2v_config({"i2v": {"steps": [30, 50]}})
+        self.assertEqual(cfg["default_steps"], 30)
+
+    def test_non_positive_entries_are_dropped(self):
+        cfg = get_i2v_config({"i2v": {"steps": [0, -4, 30]}})
+        self.assertEqual(cfg["steps"], [30])
+
+
+class TestI2vConfigOutput(unittest.TestCase):
+    def test_defaults(self):
+        cfg = get_i2v_config({})
+        self.assertEqual(cfg["output_root"], "")
+        self.assertEqual(cfg["output_prefix"], "/%Y-%m-%d/i2v_")
+
+    def test_values_pass_through_trimmed(self):
+        cfg = get_i2v_config(
+            {"i2v": {"output_root": "  /mnt/d/Media  ", "output_prefix": "/a/b_"}}
+        )
+        self.assertEqual(cfg["output_root"], "/mnt/d/Media")
+        self.assertEqual(cfg["output_prefix"], "/a/b_")
+
+    def test_explicit_empty_prefix_is_kept(self):
+        self.assertEqual(
+            get_i2v_config({"i2v": {"output_prefix": ""}})["output_prefix"], ""
+        )
+
+    def test_junk_types_fall_back(self):
+        cfg = get_i2v_config({"i2v": {"output_root": 5, "output_prefix": ["x"]}})
+        self.assertEqual(cfg["output_root"], "")
+        self.assertEqual(cfg["output_prefix"], "/%Y-%m-%d/i2v_")
