@@ -190,32 +190,44 @@ def assign_reference_labels(
     roster subject already covered the room. Pictures are numbered in
     upload order:
     each subject's ``reference_path`` then ``reference_path_2`` (subject
-    order), then the scene's ``reference_path``. ``<Audio N>`` labels
+    order), then the scene's ``reference_path`` — but a path that already
+    has a label REUSES it rather than getting a new number. Labels map to
+    uploaded pictures and a repeated file is uploaded once, so a shared
+    reference (e.g. a POV vantage image that also serves as an
+    environment subject's picture) must be one ``<Picture N>``; a fresh
+    number per occurrence made ``dict(picture_labels)`` lookups resolve
+    the path to the LAST label, mislabeling every earlier user of the
+    picture. ``<Audio N>`` labels
     (ref-guide §2.4) are numbered separately, in subject ``sort_order``,
     for every subject with a truthy ``voice_ref_path``.
     """
     ordered = sorted(subjects, key=lambda s: s.get("sort_order", 0))
     subject_labels: Dict[int, str] = {}
     picture_labels: List[Tuple[str, str]] = []
+    label_by_path: Dict[str, str] = {}
     audio_labels: List[Tuple[int, str]] = []
-    next_picture = 1
     next_audio = 1
+
+    def _label_picture(path: str) -> None:
+        if path not in label_by_path:
+            label = f"Picture {len(label_by_path) + 1}"
+            label_by_path[path] = label
+            picture_labels.append((path, label))
 
     for subject in ordered:
         subject_labels[subject["id"]] = f"Subject {len(subject_labels) + 1}"
         for key in ("reference_path", "reference_path_2"):
             path = subject.get(key)
             if path:
-                picture_labels.append((path, f"Picture {next_picture}"))
-                next_picture += 1
+                _label_picture(path)
         if subject.get("voice_ref_path"):
             audio_labels.append((subject["id"], f"Audio {next_audio}"))
             next_audio += 1
 
     scene_ref = scene.get("reference_path")
     if scene_ref:
-        picture_labels.append((scene_ref, f"Picture {next_picture}"))
-        next_picture += 1
+        _label_picture(scene_ref)
+    next_picture = len(label_by_path) + 1
 
     environment_label = f"Subject {len(subject_labels) + 1}" if scene_ref else None
     keyframe_picture_label = f"Picture {next_picture}"
