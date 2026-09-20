@@ -71,7 +71,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
 | DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
-| GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations) |
+| GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations, megapixel ladder) |
 | WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
 
 ## Similarity Search Endpoints
@@ -569,13 +569,18 @@ beat count; writes nothing. Returns `{prompt: string, warnings: string[]}`
 
 ### `POST /api/i2v/generate`
 Body: `{source_path: string, prompt: string, duration_s: float, quality:
-"fast" | "quality", seed: int, width: int = 0, height: int = 0, loras:
+"fast" | "quality", seed: int, megapixels: float = 0.75, loras:
 [{name, strength}, ...] = [], idea?: string}`. Re-lints `prompt` (the
 lint is advisory and never blocks) and submits a job to ComfyUI using the
 config's `fast_preset_id` or `quality_preset_id` for the requested
 `quality`. Returns `{job_id: int, warnings: string[]}`.
-- **400** if `duration_s <= 0`, `quality` isn't `"fast"`/`"quality"`, no
-  preset is configured for the requested quality slot (set one in
+Output dimensions are derived server-side from the source image's aspect
+ratio and `megapixels` (`i2v_compiler.i2v_dims`) and written to the
+preset's `MS_RESOLUTION` node; a workflow without one keeps its baked-in
+resolution. There is no orientation parameter — the source image is the
+first frame, so the output ratio always follows it.
+- **400** if `duration_s <= 0`, `megapixels <= 0`, `quality` isn't
+  `"fast"`/`"quality"`, no preset is configured for the requested quality slot (set one in
   Configuration → Image to Video), or on `I2vRequestError` /
   `BindingError` / `PresetNotFoundError`.
 - **502** if ComfyUI rejects the submission (`ComfyError`).
@@ -584,7 +589,8 @@ config's `fast_preset_id` or `quality_preset_id` for the requested
 ### `GET /api/i2v/videos?source_path=`
 Returns every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
-quality, preset_id, comfy_prompt_id, created_at, is_favorite}, ...]`,
+quality, width, height, preset_id, comfy_prompt_id, created_at,
+is_favorite}, ...]`,
 `is_favorite` joined live from `media.is_favorite`. Rows whose backing
 media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
@@ -604,7 +610,9 @@ Returns the `i2v` config section with defaults filled in:
   "quality_preset_id": null,
   "durations": [6.0, 10.0, 15.0, 20.0],
   "default_duration": 6.0,
-  "default_quality": "fast"
+  "default_quality": "fast",
+  "megapixels": [0.25, 0.5, 0.75, 1.0],
+  "default_megapixels": 0.75
 }
 ```
 `fast_preset_id`/`quality_preset_id` name a `workflow_presets.id` or
