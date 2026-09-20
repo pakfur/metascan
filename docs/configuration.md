@@ -83,3 +83,28 @@ Read by `backend.config.get_comfy_config` and consumed by the FastAPI lifespan t
 - **`unload_vlm_during_generation`** — reserved for the storyboard feature (Phase B/C), which will pause VLM tagging while ComfyUI is busy to free VRAM. Default `true`.
 - **`output_root`** — directory generated images are written to, relative to the repo root. Default `"data/storyboards"`.
 - **`request_timeout_s`** — HTTP timeout (seconds) for calls to ComfyUI (`/prompt`, `/upload/image`, `/history`, `/view`). Default `30.0`.
+
+## `i2v`
+
+Read by `backend.config.get_i2v_config` and served to the frontend by `GET /api/i2v/config`. Everything here is editable from **Configuration → Video** in the UI; you rarely need to hand-edit it. Setting up the two workflows this section points at is covered in [Image-to-Video Workflow Setup](i2v-workflow-setup.md).
+
+```jsonc
+{
+  "i2v": {
+    "fast_preset_id": null,
+    "quality_preset_id": null,
+    "durations": [6.0, 10.0, 15.0, 20.0],
+    "default_duration": 6.0,
+    "default_quality": "fast",
+    "megapixels": [0.25, 0.5, 0.75, 1.0],
+    "default_megapixels": 0.75
+  }
+}
+```
+
+- **`fast_preset_id`** / **`quality_preset_id`** — a `workflow_presets.id`, or `null` if unset. These are the two quality slots the Image to Video dialog offers; a generation against an unset slot returns 400 naming it. Both must be `ref2v` presets tagged `minimax` / `i2va`.
+- **`durations`** — clip lengths (seconds) offered in the dialog. Duration also drives the beat count of the generated I2VA prompt (6→3 beats, 10→4, 15→5, 20→6). Junk or empty falls back to the default list.
+- **`default_duration`** — which entry the dialog opens with. Falls back to the first entry if it isn't in `durations`.
+- **`default_quality`** — `"fast"` or `"quality"`; anything else falls back to `"fast"`.
+- **`megapixels`** — output size choices, as a pixel budget. Non-positive entries are dropped; an empty result falls back to the default ladder. There is deliberately no orientation or aspect-ratio setting — the source image is the first frame, so the output ratio always follows it. Dimensions are derived per generation by `i2v_compiler.i2v_dims` and land on a multiple of 32.
+- **`default_megapixels`** — which budget the dialog opens with. Falls back to the first entry if it isn't in `megapixels`.

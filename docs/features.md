@@ -113,6 +113,8 @@ Right-click any image → "Image to Video…" opens a dialog to turn it into a s
 - Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions
 - Live generation progress over WebSocket
 
+Requires two registered ComfyUI workflows (turbo and high quality) — see [Image-to-Video Workflow Setup](i2v-workflow-setup.md).
+
 ## Context Menu
 - Open (full-screen viewer)
 - Find Similar (image-to-image search, applied as a filter with a "Similar to …" chip)
