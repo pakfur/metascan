@@ -1360,7 +1360,81 @@ def test_pov_timeline_merges_all_beats_into_shot_1() -> None:
     assert normal.beat_starts == (0.0, 4.0, 8.0)
 
 
-def test_pov_subject_picks_first_flagged_with_picture() -> None:
+def test_refplan_reuses_label_for_duplicate_reference_path() -> None:
+    """The same file used as a reference by two subjects (or a subject and
+    the scene) gets ONE picture label — labels map to uploaded pictures,
+    and a repeated path is uploaded once. Assigning a fresh number per
+    occurrence made dict(picture_labels) lookups resolve the path to the
+    LAST label, so e.g. a POV subject's vantage rendered as <Picture 3>
+    while <Picture 1> went unreferenced (real bug, storyboard 8)."""
+    subjects = _subjects()
+    subjects[1]["reference_path"] = "/refs/grandma1.png"  # shared with subj 0
+    scene = _scene()
+    refplan = assign_reference_labels(subjects, scene)
+    assert refplan.picture_labels == [
+        ("/refs/grandma1.png", "Picture 1"),
+        ("/refs/grandma2.png", "Picture 2"),
+        ("/refs/kitchen.png", "Picture 3"),
+    ]
+    assert refplan.keyframe_picture_label == "Picture 4"
+
+    # Scene sharing a subject's picture: no new entry either, and the
+    # scene still earns its environment Subject slot.
+    scene["reference_path"] = "/refs/grandma1.png"
+    refplan = assign_reference_labels(_subjects(), scene)
+    assert refplan.picture_labels == [
+        ("/refs/grandma1.png", "Picture 1"),
+        ("/refs/grandma2.png", "Picture 2"),
+    ]
+    assert refplan.environment_label == "Subject 3"
+    assert refplan.keyframe_picture_label == "Picture 3"
+
+
+def test_pov_vantage_label_with_shared_reference_picture() -> None:
+    """Storyboard-8 regression: a POV subject and an environment-modeled
+    subject sharing the same reference file must both render the SAME
+    (first) picture label — the compiled doc previously called the
+    vantage <Picture 3> and never referenced <Picture 1>."""
+    subjects = [
+        {
+            "id": 27,
+            "name": "Man",
+            "description": "male lower torso on a white bedsheet",
+            "reference_path": "/refs/pov.png",
+            "reference_path_2": None,
+            "sort_order": 0,
+            "pov_ref": 1,
+        },
+        {
+            "id": 28,
+            "name": "Girl",
+            "description": "wearing a light silk robe",
+            "reference_path": "/refs/girl_sheet.png",
+            "reference_path_2": None,
+            "sort_order": 1,
+            "sheet_ref": 1,
+        },
+        {
+            "id": 29,
+            "name": "Bedroom",
+            "description": "dimly lit interior, warm lamp glow",
+            "reference_path": "/refs/pov.png",  # same file as Man's
+            "reference_path_2": None,
+            "sort_order": 2,
+        },
+    ]
+    scene = {"id": 89, "name": "The Entry", "setting": "a dim bedroom"}
+    refplan = assign_reference_labels(subjects, scene)
+
+    picked = pov_subject(subjects, refplan)
+    assert picked is not None and picked[1] == "Picture 1"
+
+    text = render_subject_definitions(refplan, subjects, scene)
+    assert "<Picture 3>" not in text
+    lines = text.split("\n")
+    assert "<Picture 1> shows this viewer's own body" in lines[0]
+    assert "<Picture 2>" in lines[1]  # Girl's sheet
+    assert "<Picture 1>" in lines[2]  # Bedroom shares Man's picture
     subjects = _subjects()
     scene = _scene()
     refplan = assign_reference_labels(subjects, scene)
