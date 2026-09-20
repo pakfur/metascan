@@ -268,7 +268,7 @@ def lint_i2v_prompt(text: str, duration_s: float) -> List[str]:
 # Orientation therefore needs no control of its own -- it falls out of
 # preserving the ratio. The user picks only a pixel budget.
 
-I2V_DIM_MULTIPLE: int = 16
+I2V_DIM_MULTIPLE: int = 32
 
 
 def i2v_dims(
@@ -276,9 +276,13 @@ def i2v_dims(
 ) -> Tuple[int, int]:
     """Output dimensions at a megapixel budget, preserving source aspect.
 
-    Each edge snaps to a multiple of ``multiple`` (video samplers reject
-    odd sizes) with a floor of one multiple, so an extreme panorama still
-    yields a usable short edge rather than zero.
+    Both edges land on the ``multiple`` grid -- MiniMax H3's width/height
+    widgets declare step=32, so an off-grid edge is not a valid size.
+    Rounding each edge independently compounds the aspect error at that
+    coarseness (a 16:9 source at 0.5 MP drifts ~4%), so candidate widths
+    around the ideal are scored on aspect fidelity first, pixel budget
+    second, and the best pair wins. The floor of one multiple keeps an
+    extreme panorama's short edge usable rather than zero.
     """
     if src_w <= 0 or src_h <= 0:
         raise I2vError(f"Source dimensions must be positive, got {src_w}x{src_h}")
@@ -287,9 +291,25 @@ def i2v_dims(
 
     aspect = src_w / src_h
     budget = megapixels * 1_000_000
-    width = max(multiple, round(math.sqrt(budget * aspect) / multiple) * multiple)
-    height = max(multiple, round(math.sqrt(budget / aspect) / multiple) * multiple)
-    return (int(width), int(height))
+    ideal_w = math.sqrt(budget * aspect)
+
+    def _snap(value: float) -> int:
+        return max(multiple, round(value / multiple) * multiple)
+
+    best: Tuple[float, int, int] = (float("inf"), 0, 0)
+    centre = round(ideal_w / multiple)
+    for step in range(-2, 3):
+        width = max(1, centre + step) * multiple
+        height = _snap(width / aspect)
+        # Aspect fidelity dominates: the source image is the first frame,
+        # so drift there is visible as crop or stretch. Budget is a
+        # preference, weighted an order of magnitude lower.
+        score = 10.0 * abs(math.log((width / height) / aspect)) + abs(
+            math.log((width * height) / budget)
+        )
+        if score < best[0]:
+            best = (score, width, height)
+    return (int(best[1]), int(best[2]))
 
 
 __all__ = [

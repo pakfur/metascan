@@ -39,7 +39,7 @@ export interface I2vJobChip {
  * the VIDEO_TARGET_CAPS precedent in types/storyboard.ts; keep the two in
  * step if the Python changes.
  */
-export const I2V_DIM_MULTIPLE = 16
+export const I2V_DIM_MULTIPLE = 32
 
 export function i2vDims(
   srcW: number,
@@ -50,8 +50,16 @@ export function i2vDims(
   if (srcW <= 0 || srcH <= 0 || megapixels <= 0) return null
   const aspect = srcW / srcH
   const budget = megapixels * 1_000_000
-  return {
-    width: Math.max(multiple, Math.round(Math.sqrt(budget * aspect) / multiple) * multiple),
-    height: Math.max(multiple, Math.round(Math.sqrt(budget / aspect) / multiple) * multiple),
+  const snap = (v: number) => Math.max(multiple, Math.round(v / multiple) * multiple)
+  const centre = Math.round(Math.sqrt(budget * aspect) / multiple)
+  let best: { score: number; width: number; height: number } | null = null
+  for (let step = -2; step <= 2; step++) {
+    const width = Math.max(1, centre + step) * multiple
+    const height = snap(width / aspect)
+    const score =
+      10 * Math.abs(Math.log(width / height / aspect)) +
+      Math.abs(Math.log((width * height) / budget))
+    if (!best || score < best.score) best = { score, width, height }
   }
+  return best ? { width: best.width, height: best.height } : null
 }
