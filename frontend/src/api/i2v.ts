@@ -15,8 +15,7 @@ export function generateVideo(body: {
   duration_s: number
   quality: 'fast' | 'quality'
   seed: number
-  width: number
-  height: number
+  megapixels: number
   loras: { name: string; strength: number }[]
   idea?: string
 }): Promise<{ job_id: number; warnings: string[] }> {

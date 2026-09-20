@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import type { Media } from '../../types/media'
-import type { I2vVideo } from '../../types/i2v'
+import { i2vDims, type I2vVideo } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
 import { generatePrompt, generateVideo, deleteI2vVideo } from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
@@ -24,6 +24,7 @@ const prompt = ref('')
 const warnings = ref<string[]>([])
 const durationS = ref(6)
 const quality = ref<'fast' | 'quality'>('fast')
+const megapixels = ref(0.75)
 const seed = ref(randomSeed())
 const loras = ref<LoraEntry[]>([])
 const expanding = ref(false)
@@ -40,6 +41,7 @@ onMounted(async () => {
   if (cfg) {
     durationS.value = cfg.default_duration
     quality.value = cfg.default_quality
+    megapixels.value = cfg.default_megapixels
   }
 })
 
@@ -59,6 +61,11 @@ useWebSocket('comfy', (event, data) => {
 })
 
 const durations = computed(() => store.config?.durations ?? [6, 10, 15, 20])
+const megapixelOptions = computed(() => store.config?.megapixels ?? [0.25, 0.5, 0.75, 1.0])
+// Preview only; the server recomputes from the source's real dimensions.
+const outputDims = computed(() =>
+  i2vDims(props.media.width ?? 0, props.media.height ?? 0, megapixels.value),
+)
 
 async function onExpandPrompt() {
   expanding.value = true
@@ -90,8 +97,7 @@ async function onGenerate() {
       duration_s: durationS.value,
       quality: quality.value,
       seed: seed.value,
-      width: props.media.width ?? 0,
-      height: props.media.height ?? 0,
+      megapixels: megapixels.value,
       loras: loras.value,
       idea: idea.value,
     })
@@ -180,6 +186,17 @@ function jobLabel(chip: { state: string; value?: number; max?: number }): string
               </select>
             </label>
             <label class="fld">
+              <span>Size</span>
+              <select v-model.number="megapixels">
+                <option v-for="m in megapixelOptions" :key="m" :value="m">
+                  {{ m }} MP
+                </option>
+              </select>
+              <small class="dims-hint">
+                {{ outputDims ? `${outputDims.width}×${outputDims.height}` : 'unknown source size' }}
+              </small>
+            </label>
+            <label class="fld">
               <span>Seed</span>
               <span class="seed-row">
                 <input v-model.number="seed" type="number" />
@@ -232,7 +249,8 @@ function jobLabel(chip: { state: string; value?: number; max?: number }): string
           v-for="(v, idx) in store.videos"
           :key="v.id"
           class="tile"
-          :title="`seed ${v.seed ?? '—'} · ${v.duration_s ?? '—'}s · ${v.quality ?? ''}`"
+          :title="`seed ${v.seed ?? '—'} · ${v.duration_s ?? '—'}s · ${v.quality ?? ''}`
+            + `${v.width && v.height ? ` · ${v.width}×${v.height}` : ''}`"
           @dblclick="viewerIndex = idx"
         >
           <img :src="thumbnailUrl(v.file_path)" alt="" />
@@ -359,6 +377,7 @@ function jobLabel(chip: { state: string; value?: number; max?: number }): string
 .params { display: flex; gap: 12px; flex-wrap: wrap; }
 .seed-row { display: inline-flex; gap: 4px; }
 .i2v-prompt { margin-top: 14px; }
+.dims-hint { color: var(--text-muted, #888); font-size: 11px; margin-top: 2px; }
 .i2v-prompt textarea { width: 100%; font-family: monospace; font-size: 12px; }
 .lint { color: var(--warn, #c90); font-size: 12px; margin: 4px 0; }
 .i2v-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
