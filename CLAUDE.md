@@ -267,6 +267,27 @@ metascan/
   `comfy_bindings.resolve_bindings` maps titles to node ids at registration
   time and **fails loudly** on a missing required title. Titles are used
   rather than node ids because ComfyUI renumbers nodes on re-save.
+- **Video metadata is read from the API-format `prompt` container tag, and
+  the graph shape varies by model.** `ComfyUIVideoExtractor`
+  (`metascan/extractors/comfyui_video.py`) dispatches handlers on
+  `class_type`, so a new topology silently yields nothing. MiniMax H3 uses
+  the split-sampler layout — seed on `RandomNoise.noise_seed`,
+  scheduler/steps on `BasicScheduler`, sampler name on `KSamplerSelect`,
+  fps on `CreateVideo` — and feeds its prompt from a plain string node into
+  `MiniMaxH3*.prompt` (no `CLIPTextEncode`). Three graph-aware passes run
+  after the handlers: `_apply_ms_titles` reads back `MS_POSITIVE` /
+  `MS_NEGATIVE` / `MS_SEED` / `MS_STEPS` and is authoritative for
+  metascan-generated clips; `_resolve_linked_prompt` follows a video node's
+  `prompt` link for hand-run graphs; `_fill_from_container` ffprobes frame
+  rate / frame count / duration only when the graph left one unset (H3's
+  `length` is a link into a math node, and no node carries duration). A
+  list-valued input is a link, never a number — guard with `isinstance`
+  before `int()`. The `"RES4LYF"` sampler relabel excludes ComfyUI's core
+  `res_multistep*` family. The extractor→scanner key for frame count is
+  **`video_length`** (`base.py`'s documented contract); the scanner once
+  read `"length"`, which left `media.video_length` NULL for every video.
+  The SaveVideo tag carries only `prompt` (no `workflow`) for API-submitted
+  jobs. Rows scanned before a fix keep their old values until rescanned.
 - **Metascan owns the ComfyUI job queue.** `ComfyClient` holds at most
   `comfy.in_flight` jobs inside ComfyUI at a time so a user-requested reroll
   can jump the queue and cancellation stays responsive. One persistent
