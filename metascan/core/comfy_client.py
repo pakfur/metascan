@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 
 _RECONNECT_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
 
+# How often running jobs are checked against ComfyUI's /history, and how
+# long a finished-but-unreported prompt is given for its websocket frame
+# to turn up before the poll acts on it. See _reconcile_loop.
+_RECONCILE_INTERVAL_SECONDS = 10.0
+_RECONCILE_GRACE_SECONDS = 2.0
+
 # A connection that stayed open at least this long is trusted as "healthy"
 # even if it never delivered a frame (e.g. we connected but no job was
 # submitted during that window) -- see _next_backoff.
@@ -127,6 +133,30 @@ def _unclobbered(directory: Path, stem: str, suffix: str, index: int) -> Path:
         n += 1
 
 
+def _history_outcome(entry: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Terminal state (and error text) a /history entry stands for.
+
+    ComfyUI records the prompt's websocket messages in
+    ``status.messages``; an interrupt and a node failure both end with
+    ``status_str == "error"`` and are told apart only there.
+    """
+    status = entry.get("status") or {}
+    for message in status.get("messages") or []:
+        if not isinstance(message, (list, tuple)) or len(message) < 2:
+            continue
+        kind, data = message[0], message[1] if isinstance(message[1], dict) else {}
+        if kind == "execution_interrupted":
+            return "cancelled", None
+        if kind == "execution_error":
+            return "failed", "{}: {}".format(
+                data.get("node_type") or "unknown node",
+                data.get("exception_message") or "execution failed",
+            )
+    if status.get("status_str") == "error":
+        return "failed", "ComfyUI reported an execution error"
+    return "done", None
+
+
 def _next_backoff(attempt: int, got_frame: bool, survived: bool) -> Tuple[int, float]:
     """Decide the next reconnect attempt counter and delay after a drop.
 
@@ -161,6 +191,10 @@ class ComfyClient:
         self.db = db
         self.scanner = scanner
         self.in_flight = max(1, int(in_flight))
+        # The clientId the NEXT websocket connection presents, and that
+        # every POST /prompt carries. Replaced on every drop -- see
+        # _fresh_client_id for why it must never be reused.
+        self._client_id_base = client_id
         self.client_id = client_id or str(uuid4())
         self._http = httpx.AsyncClient(timeout=request_timeout_s)
         # ComfyUI's prompt_id -> our generation_jobs.id. Populated at
@@ -170,6 +204,10 @@ class ComfyClient:
         self._prompt_to_job: Dict[str, int] = {}
         self.connected: bool = False
         self._ws_task: Optional[asyncio.Task] = None
+        self._reconcile_task: Optional[asyncio.Task] = None
+        # Set on every (re)connect so jobs whose frames were lost while
+        # the socket was down are checked at once, not a full interval later.
+        self._reconcile_wake = asyncio.Event()
         self._listeners: List[JobEventCb] = []
         self._job_done: Dict[int, asyncio.Event] = {}
         self._stopping = False
@@ -233,6 +271,7 @@ class ComfyClient:
             "base_url": self.base_url,
             "client_id": self.client_id,
             "in_flight": self.in_flight,
+            "connected": self.connected,
         }
 
     # ---- presets -----------------------------------------------------
@@ -759,6 +798,8 @@ class ComfyClient:
         self._ws_task = asyncio.create_task(self._reader_loop(ready))
         if self._pump_task is None:
             self._pump_task = asyncio.create_task(self._pump_loop())
+        if self._reconcile_task is None:
+            self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(ready.wait(), timeout=5.0)
 
@@ -779,6 +820,11 @@ class ComfyClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._pump_task
             self._pump_task = None
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reconcile_task
+            self._reconcile_task = None
         if self._ws_task is not None:
             self._ws_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -807,7 +853,9 @@ class ComfyClient:
                 async with websockets.connect(self._ws_url()) as ws:
                     self.connected = True
                     connected_at = asyncio.get_running_loop().time()
+                    logger.info("ComfyUI event socket connected (%s)", self.base_url)
                     await self._rehydrate_prompt_map()
+                    self._reconcile_wake.set()
                     ready.set()
                     async for raw in ws:
                         got_frame = True
@@ -820,7 +868,18 @@ class ComfyClient:
             except Exception as exc:
                 logger.debug("comfy websocket dropped: %s", exc)
             finally:
+                if connected_at is not None and not self._stopping:
+                    # Was DEBUG, which made a dead event stream invisible:
+                    # jobs sat in "running" for hours with nothing logged.
+                    logger.warning(
+                        "ComfyUI event socket dropped; reconnecting. Jobs "
+                        "running now lose live progress and are completed "
+                        "from /history instead."
+                    )
                 self.connected = False
+                # Before the backoff sleep, so a submit made while we are
+                # down already carries the id the next connection registers.
+                self.client_id = self._fresh_client_id()
                 ready.set()  # never block start() on an unreachable server
 
             if self._stopping:
@@ -832,6 +891,90 @@ class ComfyClient:
             )
             attempt, delay = _next_backoff(attempt, got_frame, survived)
             await asyncio.sleep(delay)
+
+    def _fresh_client_id(self) -> str:
+        """A clientId no earlier connection of ours has used.
+
+        ComfyUI keeps ONE socket per clientId and its /ws teardown does
+        ``self.sockets.pop(sid, None)`` unconditionally -- it never checks
+        the registered socket is still its own. Reconnecting under the
+        same id therefore races the old connection's teardown: if ComfyUI
+        gets to it after the new socket registered (its event loop was
+        busy loading a model, or the FIN arrived late through the WSL
+        localhost relay), the pop deletes the LIVE registration. The
+        socket stays open and answers pings, but no frame is ever routed
+        to it again -- no progress, no end-of-prompt, so nothing is
+        collected. A fresh id per connection makes the stale teardown pop
+        only its own, dead, id.
+
+        The cost is that a prompt submitted under the previous id keeps
+        sending its frames there; _reconcile_loop is what finishes it.
+        """
+        suffix = uuid4().hex
+        if self._client_id_base:
+            return f"{self._client_id_base}-{suffix[:8]}"
+        return str(uuid4())
+
+    async def _reconcile_loop(self) -> None:
+        """Finish jobs ComfyUI completed without us hearing about it.
+
+        The websocket is the fast path, not a reliable one: a frame sent
+        while we were reconnecting is gone, one addressed to a previous
+        clientId never arrives, and ComfyUI does not replay either. Without
+        this a single lost ``execution_success`` leaves the row "running"
+        forever, holding an ``in_flight`` slot and never collecting the
+        output. /history is the durable record, so poll it for every job
+        we still believe is running -- at most ``in_flight`` GETs a tick.
+        """
+        while not self._stopping:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._reconcile_wake.wait(), timeout=_RECONCILE_INTERVAL_SECONDS
+                )
+            self._reconcile_wake.clear()
+            try:
+                await self._reconcile_running_jobs()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("ComfyUI history reconcile failed", exc_info=True)
+
+    def _awaiting_end_of_prompt(self, prompt_id: str, job_id: int) -> bool:
+        return (
+            self._prompt_to_job.get(prompt_id) == job_id
+            and job_id not in self._collecting
+            and job_id not in self._cancelled
+        )
+
+    async def _reconcile_running_jobs(self) -> None:
+        for prompt_id, job_id in list(self._prompt_to_job.items()):
+            if not self._awaiting_end_of_prompt(prompt_id, job_id):
+                continue
+            try:
+                entry = await self.fetch_history(prompt_id)
+            except ComfyError:
+                return  # ComfyUI unreachable; try again next tick
+            if not entry:
+                continue  # still queued or executing
+            # History is written a hair before the trailing
+            # `executing {node: null}` frame. Give the websocket its
+            # chance so a healthy connection is never second-guessed.
+            await asyncio.sleep(_RECONCILE_GRACE_SECONDS)
+            if not self._awaiting_end_of_prompt(prompt_id, job_id):
+                continue
+
+            state, error = _history_outcome(entry)
+            logger.warning(
+                "ComfyUI finished prompt %s (job %s, %s) but no end-of-prompt "
+                "event reached metascan; completing it from /history",
+                prompt_id,
+                job_id,
+                state,
+            )
+            if state == "done":
+                await self._on_prompt_end(job_id, {"prompt_id": prompt_id})
+            else:
+                await self._finish_job(job_id, state, error=error)
 
     async def _rehydrate_jobs(self) -> None:
         """Reconcile the generation_jobs table with a fresh process.

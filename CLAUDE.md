@@ -314,8 +314,8 @@ metascan/
   `Scanner.ingest_file`, wrapped in `asyncio.to_thread` — it does SQLite
   writes and Pillow work, and running it on the event loop stalls the
   WebSocket reader.
-- **ComfyUI's protocol has four sharp edges; `tests/_fake_comfy_server.py`
-  models all four and must keep doing so.** Verified against ComfyUI's
+- **ComfyUI's protocol has five sharp edges; `tests/_fake_comfy_server.py`
+  models all five and must keep doing so.** Verified against ComfyUI's
   `server.py` / `execution.py` / `main.py`.
   1. **`/interrupt` must carry `{"prompt_id": ...}`.** A bodyless POST is
      an explicit *global* interrupt that kills whatever prompt is
@@ -338,6 +338,36 @@ metascan/
      lost every image whenever `MS_SAVE` wasn't the last node to run.
   4. **`executing` is overloaded**: `{node: <id>}` is a per-node ping,
      `{node: null}` is end-of-prompt. Only the latter is actionable.
+  5. **A `clientId` must never be reused across websocket connections.**
+     ComfyUI keeps ONE socket per `clientId`, routes a prompt's frames
+     only to the socket registered under the id that submitted it, and
+     its `/ws` teardown does `self.sockets.pop(sid, None)`
+     *unconditionally* — it never checks the registered socket is still
+     its own. Reconnecting under the same id races the old connection's
+     teardown; when ComfyUI gets to it late (event loop busy loading a
+     model, FIN delayed by the WSL localhost relay) the pop deletes the
+     LIVE registration. The socket stays open and answers every ping but
+     is deaf: no progress, no `execution_success`, nothing collected, the
+     row sits in `running` forever. Observed for real — four hours of
+     pongs and zero events while two jobs finished. `_reader_loop`
+     therefore replaces `client_id` via `_fresh_client_id()` on every
+     drop (before the backoff sleep, so submits made while down carry
+     the next connection's id).
+- **The ComfyUI websocket is the fast path, not a reliable one —
+  `/history` is the record.** A frame sent during a reconnect gap, or
+  addressed to a previous `clientId`, is gone; ComfyUI never replays.
+  `ComfyClient._reconcile_loop` polls `/history/{prompt_id}` for every
+  entry in `_prompt_to_job` (≤ `in_flight` GETs per
+  `_RECONCILE_INTERVAL_SECONDS`, plus one pass on every (re)connect),
+  waits `_RECONCILE_GRACE_SECONDS` so a healthy socket's trailing frame
+  wins, then completes the job through the normal `_on_prompt_end` /
+  `_finish_job` paths — `_collecting` and the terminal-state guard make
+  a race with the websocket a no-op. `_history_outcome` tells an
+  interrupt from a node failure by `status.messages`; both have
+  `status_str == "error"`. A reconcile that fires logs a WARNING: it
+  means the event stream lost something. The socket drop itself is also
+  a WARNING now (it was DEBUG, which is why a dead stream went unnoticed
+  for hours), and `GET /api/comfy/status` reports `connected`.
 - **ComfyUI job rows are reconciled at startup, not just at reconnect.**
   `ComfyClient.start()` calls `_rehydrate_jobs` once: `queued` rows are
   re-enqueued into `_queue` (that's what makes "state survives a restart"
