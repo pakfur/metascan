@@ -257,8 +257,14 @@ metascan/
   build a `FileHandler` elsewhere; `tests/test_log_files.py` greps
   `metascan/` and `backend/` and fails on one. `logs/
   metadata_extraction_report.txt` was a bare append and reached **4.25 GB
-  in one full import** — every successful extraction dumps its whole
-  metadata dict, embedded workflow graph included. `rotating_file_handler`
+  in one full import** — every successful extraction dumped its whole
+  metadata dict, embedded workflow graph included (~170 KB per image
+  pretty-printed). Rotation bounds the size, not the write volume, so
+  success entries now summarise it: `MetadataParsingLogger._without_graph`
+  replaces `raw_metadata` with `<omitted: prompt, workflow>` on a shallow
+  copy (the caller's dict is what the scanner stores as
+  `generation_data` — never mutate it). Failure entries still carry their
+  truncated `raw_data` excerpt. `rotating_file_handler`
   is for ordinary log streams (`server.log`, `embedding_worker.log`,
   `~/.metascan/logs/upscaler.log`); `get_file_logger` is for report files
   written verbatim (the extraction report and its error CSV) and shares

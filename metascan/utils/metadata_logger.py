@@ -73,6 +73,27 @@ class MetadataParsingLogger:
         )
 
     @staticmethod
+    def _without_graph(metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """``metadata`` with the embedded graph summarised, not dumped.
+
+        ``raw_metadata`` is the file's whole ComfyUI prompt + workflow
+        graph (~85 KB for a real image). Writing it for every successful
+        extraction is what pushed a full import's report into gigabytes,
+        and it says nothing the parsed fields above it don't: the graph is
+        still in the file itself and in ``media.generation_data``. Failure
+        entries are unaffected -- they log a truncated ``raw_data`` excerpt,
+        which is the part worth having when a parse goes wrong.
+
+        Returns a shallow copy; the caller's dict is what the scanner goes
+        on to store and must not be mutated.
+        """
+        raw = metadata.get("raw_metadata")
+        if not raw:
+            return metadata
+        parts = sorted(raw) if isinstance(raw, dict) else [type(raw).__name__]
+        return {**metadata, "raw_metadata": f"<omitted: {', '.join(parts)}>"}
+
+    @staticmethod
     def _csv_line(row: List[Any]) -> str:
         buffer = io.StringIO()
         csv.writer(buffer, lineterminator="").writerow(row)
@@ -147,7 +168,9 @@ class MetadataParsingLogger:
 
             if success and metadata:
                 f.write("\nExtracted Metadata:\n")
-                f.write(json.dumps(metadata, indent=2, default=str))
+                f.write(
+                    json.dumps(self._without_graph(metadata), indent=2, default=str)
+                )
                 f.write("\n")
 
             if error:
