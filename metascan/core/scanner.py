@@ -273,7 +273,7 @@ class Scanner:
 
                 media.frame_rate = metadata.get("frame_rate")
                 media.duration = metadata.get("duration")
-                media.video_length = metadata.get("length")
+                media.video_length = metadata.get("video_length")
 
                 media.generation_data = metadata.get("raw_metadata", {})
 

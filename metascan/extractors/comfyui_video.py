@@ -240,10 +240,21 @@ class UNETLoaderHandler(NodeHandler):
 
 
 class SamplerHandler(NodeHandler):
-    """Handler for sampler nodes (KSampler and variants)"""
+    """Handler for sampler nodes (KSampler and variants).
+
+    Also covers the split-sampler topology (SamplerCustomAdvanced), where
+    the same widgets live on separate nodes: ``RandomNoise`` carries the
+    seed, ``BasicScheduler`` the scheduler/steps/denoise and
+    ``KSamplerSelect`` the sampler name.
+    """
 
     def can_handle(self, class_type: str) -> bool:
-        return "sampler" in class_type.lower()
+        lowered = class_type.lower()
+        return (
+            "sampler" in lowered
+            or "scheduler" in lowered
+            or class_type == "RandomNoise"
+        )
 
     def extract(
         self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
@@ -252,17 +263,19 @@ class SamplerHandler(NodeHandler):
 
         # Extract sampler name (handle various formats)
         sampler_name = inputs.get("sampler_name", "")
-        if sampler_name:
-            # Simplify sampler names like "multistep/res_2m" to "RES4LYF" if needed
-            # This is a custom mapping based on the specific workflow
-            if "res" in sampler_name.lower():
+        if isinstance(sampler_name, str) and sampler_name:
+            # Simplify RES4LYF sampler names like "multistep/res_2m" to
+            # "RES4LYF". ComfyUI's own res_multistep family is a core
+            # sampler, not a RES4LYF one, so it keeps its real name.
+            lowered = sampler_name.lower()
+            if "res" in lowered and not lowered.startswith("res_multistep"):
                 result["sampler"] = "RES4LYF"
             else:
                 result["sampler"] = sampler_name
 
         # Extract scheduler
         scheduler = inputs.get("scheduler")
-        if scheduler and "scheduler" not in result:
+        if isinstance(scheduler, str) and scheduler and "scheduler" not in result:
             result["scheduler"] = scheduler
 
         # Extract steps
@@ -281,9 +294,12 @@ class SamplerHandler(NodeHandler):
             # Round to avoid floating point precision issues
             result["cfg_scale"] = round(float(cfg), 2)
 
-        # Extract seed
+        # Extract seed (KSamplerAdvanced / RandomNoise spell it noise_seed).
+        # A list here is a link to another node, not a value.
         seed = inputs.get("seed")
-        if seed is not None and "seed" not in result:
+        if seed is None:
+            seed = inputs.get("noise_seed")
+        if isinstance(seed, (int, float)) and "seed" not in result:
             result["seed"] = int(seed)
 
         # Extract denoise strength
@@ -296,35 +312,45 @@ class VideoGeneratorHandler(NodeHandler):
     """Handler for video generation nodes"""
 
     def can_handle(self, class_type: str) -> bool:
-        return class_type in ["WanImageToVideo", "VHS_VideoCombine", "AnimateDiff"]
+        return class_type in [
+            "WanImageToVideo",
+            "VHS_VideoCombine",
+            "AnimateDiff",
+            "CreateVideo",
+        ] or class_type.startswith("MiniMaxH3")
 
     def extract(
         self, node_id: str, node_data: Dict[str, Any], result: Dict[str, Any]
     ) -> None:
         inputs = node_data.get("inputs", {})
 
-        # Extract dimensions
-        if "width" not in result:
-            width = inputs.get("width")
-            if width is not None:
-                result["width"] = int(width)
+        # A list value is a link to another node (e.g. H3's ``length`` comes
+        # from a seconds-to-frames math node), not a number to read.
+        def number(*keys: str) -> Optional[float]:
+            for key in keys:
+                value = inputs.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return float(value)
+            return None
 
-        if "height" not in result:
-            height = inputs.get("height")
-            if height is not None:
-                result["height"] = int(height)
+        # Extract dimensions
+        width = number("width")
+        if "width" not in result and width is not None:
+            result["width"] = int(width)
+
+        height = number("height")
+        if "height" not in result and height is not None:
+            result["height"] = int(height)
 
         # Extract frame rate
-        if "frame_rate" not in result:
-            frame_rate = inputs.get("frame_rate") or inputs.get("fps")
-            if frame_rate is not None:
-                result["frame_rate"] = float(frame_rate)
+        frame_rate = number("frame_rate", "fps")
+        if "frame_rate" not in result and frame_rate:
+            result["frame_rate"] = frame_rate
 
         # Extract video length
-        if "video_length" not in result:
-            length = inputs.get("length") or inputs.get("num_frames")
-            if length is not None:
-                result["video_length"] = int(length)
+        length = number("length", "num_frames")
+        if "video_length" not in result and length:
+            result["video_length"] = int(length)
 
 
 class ComfyUIVideoExtractor(MetadataExtractor):
@@ -368,6 +394,8 @@ class ComfyUIVideoExtractor(MetadataExtractor):
 
                     # Process each node with appropriate handler
                     self._process_nodes(prompt_data, result)
+                    self._apply_ms_titles(prompt_data, result)
+                    self._resolve_linked_prompt(prompt_data, result)
 
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.warning(
@@ -385,6 +413,9 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                     logger.warning(
                         f"Failed to parse ComfyUI workflow data from {media_path}: {e}"
                     )
+
+            if result["raw_metadata"]:
+                self._fill_from_container(media_path, result)
 
             # Post-process results
             self._post_process_results(result)
@@ -414,6 +445,167 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                         logger.debug(
                             f"Handler {handler.__class__.__name__} failed for node {node_id}: {e}"
                         )
+
+    def _apply_ms_titles(
+        self, prompt_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """Read back the values metascan itself wrote into MS_* titled nodes.
+
+        These are authoritative for clips metascan generated (see
+        ``metascan/core/comfy_bindings.py`` for the title contract), so they
+        override whatever the class-name heuristics guessed.
+        """
+        for node_data in prompt_data.values():
+            if not isinstance(node_data, dict):
+                continue
+            title = (node_data.get("_meta") or {}).get("title")
+            inputs = node_data.get("inputs") or {}
+
+            if title in ("MS_POSITIVE", "MS_NEGATIVE"):
+                text = inputs.get("text")
+                if isinstance(text, str) and text.strip():
+                    key = "prompt" if title == "MS_POSITIVE" else "negative_prompt"
+                    result[key] = text.strip()
+            elif title == "MS_SEED":
+                seed = inputs.get("seed")
+                if seed is None:
+                    seed = inputs.get("noise_seed")
+                if isinstance(seed, (int, float)):
+                    result["seed"] = int(seed)
+            elif title == "MS_STEPS":
+                steps = inputs.get("steps")
+                if isinstance(steps, (int, float)):
+                    result["steps"] = int(steps)
+
+    def _resolve_linked_prompt(
+        self, prompt_data: Dict[str, Any], result: Dict[str, Any]
+    ) -> None:
+        """Find the prompt on video nodes that take it as a plain string.
+
+        Nodes like MiniMaxH3ImageToVideo have no CLIPTextEncode upstream:
+        their ``prompt`` input is the text itself or a link to a string node.
+        """
+        if "prompt" in result:
+            return
+
+        generator = VideoGeneratorHandler()
+        for node_data in prompt_data.values():
+            if not isinstance(node_data, dict):
+                continue
+            if not generator.can_handle(node_data.get("class_type", "")):
+                continue
+
+            value = (node_data.get("inputs") or {}).get("prompt")
+            if isinstance(value, list) and value:
+                source = prompt_data.get(str(value[0]))
+                source_inputs = (
+                    source.get("inputs") or {} if isinstance(source, dict) else {}
+                )
+                value = next(
+                    (
+                        source_inputs[key]
+                        for key in ("text", "string", "value")
+                        if isinstance(source_inputs.get(key), str)
+                    ),
+                    None,
+                )
+            if isinstance(value, str) and value.strip():
+                result["prompt"] = value.strip()
+                return
+
+    def _fill_from_container(self, media_path: Path, result: Dict[str, Any]) -> None:
+        """Fill frame rate / frame count / duration the graph didn't state.
+
+        The graph can only state these when they are literal widget values;
+        a linked ``length`` or a missing fps is unreadable, and no node
+        carries the duration. The container knows all three.
+        """
+        self._derive_duration(result)
+        if all(result.get(k) for k in ("frame_rate", "video_length", "duration")):
+            return
+
+        for key, value in self._probe_container(media_path).items():
+            if not result.get(key):
+                result[key] = value
+        self._derive_duration(result)
+
+    @staticmethod
+    def _derive_duration(result: Dict[str, Any]) -> None:
+        if result.get("duration"):
+            return
+        frame_rate = result.get("frame_rate")
+        length = result.get("video_length")
+        if frame_rate and length:
+            result["duration"] = round(length / frame_rate, 3)
+
+    def _probe_container(self, media_path: Path) -> Dict[str, Any]:
+        """Read frame_rate / video_length / duration from the video stream."""
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=avg_frame_rate,r_frame_rate,nb_frames,duration"
+                    ":format=duration",
+                    str(media_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if proc.returncode != 0:
+                return {}
+
+            data = json.loads(proc.stdout)
+            streams = data.get("streams") or [{}]
+            stream = streams[0]
+            out: Dict[str, Any] = {}
+
+            for rate_key in ("avg_frame_rate", "r_frame_rate"):
+                rate = self._parse_rate(stream.get(rate_key))
+                if rate:
+                    out["frame_rate"] = rate
+                    break
+
+            try:
+                frames = int(stream.get("nb_frames") or 0)
+            except (TypeError, ValueError):
+                frames = 0
+            if frames > 0:
+                out["video_length"] = frames
+
+            for raw in (stream.get("duration"), data.get("format", {}).get("duration")):
+                try:
+                    duration = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if duration > 0:
+                    out["duration"] = duration
+                    break
+
+            return out
+
+        except Exception as e:
+            logger.debug(f"Container probe failed for {media_path}: {e}")
+            return {}
+
+    @staticmethod
+    def _parse_rate(raw: Any) -> Optional[float]:
+        """Parse an ffprobe rational like ``"24/1"``."""
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            num, _, den = raw.partition("/")
+            rate = float(num) / (float(den) if den else 1.0)
+        except (ValueError, ZeroDivisionError):
+            return None
+        return round(rate, 3) if rate > 0 else None
 
     def _post_process_results(self, result: Dict[str, Any]) -> None:
         """Clean up and finalize extracted metadata"""
