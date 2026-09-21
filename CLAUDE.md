@@ -250,6 +250,26 @@ metascan/
   and httpx's default INFO-per-request logging dumped hundreds of
   `503 Service Unavailable` lines per spawn. Don't relax this without
   also rate-limiting or quieting the probe.
+- **Every log file goes through `metascan/utils/log_files.py`: 10 MB live
+  file, the 3 most recent rollovers kept** (`LOG_MAX_BYTES` /
+  `LOG_BACKUP_COUNT`, stdlib `RotatingFileHandler` underneath — 40 MB
+  worst case per log). Never open a log with a bare `open(path, "a")` or
+  build a `FileHandler` elsewhere; `tests/test_log_files.py` greps
+  `metascan/` and `backend/` and fails on one. `logs/
+  metadata_extraction_report.txt` was a bare append and reached **4.25 GB
+  in one full import** — every successful extraction dumps its whole
+  metadata dict, embedded workflow graph included. `rotating_file_handler`
+  is for ordinary log streams (`server.log`, `embedding_worker.log`,
+  `~/.metascan/logs/upscaler.log`); `get_file_logger` is for report files
+  written verbatim (the extraction report and its error CSV) and shares
+  ONE handler per path — two handlers on one file rotate it out from under
+  each other. `BoundedFileHandler` re-stamps a `header` after every
+  rollover (the CSV must stay `DictReader`-parseable on its own) and
+  reopens a file deleted underneath it, since logs get cleared by hand
+  while the server runs. `RotatingFileHandler` is thread-safe but NOT
+  process-safe: one file per process. The server's own `logs/server.log`
+  is installed from the `lifespan`, not at import, so importing
+  `backend.main` in a test creates nothing.
 - **`VlmClient` stderr drainer logs at DEBUG, errors at WARNING.**
   llama-server stderr includes the entire chat-template dump on each
   load (~150 lines) plus per-request slot chatter. Routine lines go to
@@ -1282,6 +1302,7 @@ Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr
 | `METASCAN_PORT` | `8700` | Backend port |
 | `METASCAN_API_KEY` | (none) | Bearer token for API auth |
 | `METASCAN_CORS_ORIGINS` | `*` | Comma-separated CORS origins |
+| `METASCAN_LOG_FILE` | `1` | `0`/`false`/`off` keeps server logging console-only (no `logs/server.log`); `tests/conftest.py` sets it |
 
 ## Documentation Layout
 

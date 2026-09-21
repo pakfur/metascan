@@ -3,6 +3,7 @@ Metadata parsing logger and error tracking system.
 """
 
 import csv
+import io
 import json
 import logging
 import traceback
@@ -10,6 +11,12 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import hashlib
+
+from metascan.utils.log_files import (
+    close_file_loggers,
+    get_file_logger,
+    rollover_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,28 +42,41 @@ class MetadataParsingLogger:
         self.text_log_path = self.log_dir / "metadata_extraction_report.txt"
         self.csv_log_path = self.log_dir / "metadata_extraction_errors.csv"
 
-        # Initialize CSV file with headers if it doesn't exist
-        if not self.csv_log_path.exists():
-            self._init_csv_file()
+    _CSV_COLUMNS = [
+        "timestamp",
+        "file_id",
+        "file_path",
+        "file_name",
+        "extractor",
+        "success",
+        "error_type",
+        "error_message",
+        "raw_metadata",
+        "stack_trace",
+    ]
 
-    def _init_csv_file(self):
-        """Initialize CSV file with headers."""
-        with open(self.csv_log_path, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(
-                [
-                    "timestamp",
-                    "file_id",
-                    "file_path",
-                    "file_name",
-                    "extractor",
-                    "success",
-                    "error_type",
-                    "error_message",
-                    "raw_metadata",
-                    "stack_trace",
-                ]
-            )
+    # Both files go through log_files' size-capped handlers (10 MB live,
+    # three rollovers). This report used to be a bare open(path, "a") and
+    # reached 4.25 GB in one full import: every successful extraction
+    # dumps its whole metadata dict, embedded workflow graph included.
+    # Resolved per write rather than cached, so clear_logs() and a second
+    # MetadataParsingLogger on the same directory share one handler.
+
+    def _text_logger(self) -> logging.Logger:
+        return get_file_logger(self.text_log_path)
+
+    def _csv_logger(self) -> logging.Logger:
+        # The header is re-stamped after every rollover so each file, and
+        # above all the live one the analyzer reads, parses on its own.
+        return get_file_logger(
+            self.csv_log_path, header=self._csv_line(self._CSV_COLUMNS)
+        )
+
+    @staticmethod
+    def _csv_line(row: List[Any]) -> str:
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="").writerow(row)
+        return buffer.getvalue()
 
     def _generate_file_id(self, file_path: Path) -> str:
         """Generate a unique ID for a file based on its path."""
@@ -117,7 +137,7 @@ class MetadataParsingLogger:
         raw_data: Optional[Any],
     ):
         """Write detailed log entry to text file."""
-        with open(self.text_log_path, "a", encoding="utf-8") as f:
+        with io.StringIO() as f:
             f.write(f"\n{'='*80}\n")
             f.write(f"Timestamp: {timestamp}\n")
             f.write(f"File ID: {file_id}\n")
@@ -144,6 +164,9 @@ class MetadataParsingLogger:
                     f.write("\n... (truncated)")
                 f.write("\n")
 
+            # One record per entry, so a rollover never splits one in two.
+            self._text_logger().info(f.getvalue().rstrip("\n"))
+
     def _log_to_csv(
         self,
         timestamp: str,
@@ -154,24 +177,22 @@ class MetadataParsingLogger:
         raw_data: Optional[Any],
     ):
         """Write error entry to CSV file."""
-        with open(self.csv_log_path, "a", newline="", encoding="utf-8") as csvfile:
-            writer = csv.writer(csvfile)
+        # Prepare raw metadata string (truncated for CSV)
+        raw_metadata_str = ""
+        if raw_data:
+            try:
+                if isinstance(raw_data, dict):
+                    raw_metadata_str = json.dumps(raw_data, default=str)[:500]
+                else:
+                    raw_metadata_str = str(raw_data)[:500]
+            except Exception:
+                raw_metadata_str = "Error serializing raw data"
 
-            # Prepare raw metadata string (truncated for CSV)
-            raw_metadata_str = ""
-            if raw_data:
-                try:
-                    if isinstance(raw_data, dict):
-                        raw_metadata_str = json.dumps(raw_data, default=str)[:500]
-                    else:
-                        raw_metadata_str = str(raw_data)[:500]
-                except Exception:
-                    raw_metadata_str = "Error serializing raw data"
+        # Get concise stack trace
+        stack_trace = traceback.format_exc().replace("\n", " | ")[:1000]
 
-            # Get concise stack trace
-            stack_trace = traceback.format_exc().replace("\n", " | ")[:1000]
-
-            writer.writerow(
+        self._csv_logger().info(
+            self._csv_line(
                 [
                     timestamp,
                     file_id,
@@ -185,6 +206,7 @@ class MetadataParsingLogger:
                     stack_trace,
                 ]
             )
+        )
 
     def get_errors_for_file(self, file_path: Path) -> List[Dict[str, Any]]:
         """Get all logged errors for a specific file."""
@@ -216,12 +238,11 @@ class MetadataParsingLogger:
         return errors
 
     def clear_logs(self):
-        """Clear all log files."""
-        if self.text_log_path.exists():
-            self.text_log_path.unlink()
-        if self.csv_log_path.exists():
-            self.csv_log_path.unlink()
-            self._init_csv_file()
+        """Clear all log files, rollovers included."""
+        for log_path in (self.text_log_path, self.csv_log_path):
+            close_file_loggers(log_path)
+            for stale in rollover_files(log_path):
+                stale.unlink()
 
 
 class MetadataLogAnalyzer:
