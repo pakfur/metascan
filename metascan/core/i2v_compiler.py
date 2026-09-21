@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from metascan.core.h3_compiler import _CAMERA_PHRASES
+from metascan.core.i2v_fixes import camera_findings, speech_findings
 
 
 class I2vError(RuntimeError):
@@ -205,7 +206,6 @@ _REF_GUIDE_MARKERS = (
     "retention_analysis:",
     "summary:",
 )
-_CAMERA_SENTENCE_RE = re.compile(r"\bThe camera ([a-z][^.]*)\.")
 _DESCRIPTION_RE = re.compile(
     r"integrated_multimodal_description:(.*?)(?:\n\n|\Z)", re.S
 )
@@ -251,13 +251,10 @@ def lint_i2v_prompt(text: str, duration_s: float) -> List[str]:
                 f"description is short for {duration_s:.0f}s "
                 f"({words} words < {floor}); consider more beat detail"
             )
-    known = tuple(_CAMERA_PHRASES.values())
-    for cm in _CAMERA_SENTENCE_RE.finditer(text):
-        frag = cm.group(1)
-        if not frag.startswith(known) and not frag.startswith("cuts to"):
-            issues.append(
-                f"camera sentence uses non-guide phrasing: " f"'The camera {frag}.'"
-            )
+    # Camera phrasing and unwrapped speech live in i2v_fixes, which also
+    # knows how to rewrite most of them (the dialog's "Apply fixes").
+    issues.extend(f.message for f in camera_findings(text))
+    issues.extend(f.message for f in speech_findings(text))
     return issues
 
 

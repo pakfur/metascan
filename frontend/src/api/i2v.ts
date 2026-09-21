@@ -1,5 +1,5 @@
 import { get, post, del } from './client'
-import type { I2vConfig, I2vVideo } from '../types/i2v'
+import type { I2vConfig, I2vLintReport, I2vVideo } from '../types/i2v'
 
 export function generatePrompt(body: {
   source_path: string
@@ -7,6 +7,15 @@ export function generatePrompt(body: {
   duration_s: number
 }): Promise<{ prompt: string; warnings: string[] }> {
   return post('/i2v/prompt', body)
+}
+
+// Advisory lint of the prompt text plus the no-model rewrites it could
+// apply (camera phrasing, speech form). Never changes anything itself.
+export function lintI2vPrompt(body: {
+  prompt: string
+  duration_s: number
+}): Promise<I2vLintReport> {
+  return post('/i2v/lint', body)
 }
 
 export function generateVideo(body: {

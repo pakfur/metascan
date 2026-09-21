@@ -238,6 +238,49 @@ class TestI2vApi(unittest.TestCase):
         body.update(over)
         return body
 
+    # ---- /lint -------------------------------------------------------
+
+    def test_lint_reports_warnings_fixes_and_the_fixed_prompt(self):
+        resp = self.client.post(
+            "/api/i2v/lint",
+            json={
+                "prompt": 'The camera slowly dollies in. She says, "Hello."',
+                "duration_s": 6,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(
+            [f["code"] for f in body["fixes"]], ["camera_phrase", "speech_format"]
+        )
+        self.assertEqual(body["fixes"][0]["original"], "The camera slowly dollies in.")
+        self.assertEqual(
+            body["fixed_prompt"],
+            "The camera pushes in at slow speed. "
+            "She (S1) says: <d>[English] Hello.</d>",
+        )
+        self.assertTrue(any("non-guide phrasing" in w for w in body["warnings"]))
+
+    def test_lint_nothing_to_fix(self):
+        resp = self.client.post(
+            "/api/i2v/lint",
+            json={"prompt": "The camera does a barrel roll.", "duration_s": 6},
+        )
+        body = resp.json()
+        self.assertEqual(body["fixes"], [])
+        self.assertIsNone(body["fixed_prompt"])
+        self.assertTrue(body["warnings"])
+
+    def test_lint_needs_no_runner(self):
+        """Pure text analysis -- must work while the i2v runner is down."""
+        set_i2v_runner(None)
+        resp = self.client.post("/api/i2v/lint", json={"prompt": "x", "duration_s": 6})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_lint_400_nonpositive_duration(self):
+        resp = self.client.post("/api/i2v/lint", json={"prompt": "x", "duration_s": 0})
+        self.assertEqual(resp.status_code, 400)
+
     def test_generate_passes_configured_output_placement(self):
         with patch(
             "backend.api.i2v.load_app_config",

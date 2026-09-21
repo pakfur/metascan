@@ -23,6 +23,7 @@ from backend.services.i2v_service import I2vService
 from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt
+from metascan.core.i2v_fixes import lint_i2v_report
 from metascan.core.i2v_output import (
     I2vOutputError,
     output_prefix_warnings,
@@ -69,6 +70,11 @@ class PromptRequest(BaseModel):
     duration_s: float
 
 
+class LintRequest(BaseModel):
+    prompt: str
+    duration_s: float
+
+
 class GenerateRequest(BaseModel):
     source_path: str
     prompt: str
@@ -105,6 +111,22 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"prompt": prompt, "warnings": warnings}
+
+
+@router.post("/lint")
+async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
+    """Advisory lint of the prompt box's current text, plus the rewrites
+    that need no model call (natural camera phrasing -> the guide's motion
+    vocabulary; quoted speech -> ``(S1) says: <d>[Language] ...</d>``).
+
+    ``fixes`` is the fixable subset with before/after text; ``fixed_prompt``
+    is the prompt with all of them applied, or null when there is nothing
+    to fix. Never rewrites on its own -- the dialog's "Apply fixes" button
+    opts in. Pure text analysis: needs neither the runner nor the VLM.
+    """
+    if body.duration_s <= 0:
+        raise HTTPException(status_code=400, detail="duration_s must be positive")
+    return lint_i2v_report(body.prompt, body.duration_s)
 
 
 @router.post("/generate")

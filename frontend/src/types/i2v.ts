@@ -37,6 +37,21 @@ export interface I2vConfig {
   quality_steps_supported: boolean
 }
 
+// One lint finding the server can rewrite without a model call.
+export interface I2vFix {
+  code: 'camera_phrase' | 'speech_format'
+  message: string
+  original: string
+  replacement: string
+}
+
+export interface I2vLintReport {
+  warnings: string[]
+  fixes: I2vFix[]
+  // The prompt with every fix applied; null when there is nothing to fix.
+  fixed_prompt: string | null
+}
+
 export interface I2vJobChip {
   state: 'queued' | 'running' | 'failed'
   // A cancel request is in flight; the tile's button is disabled until

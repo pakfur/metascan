@@ -1154,6 +1154,35 @@ metascan/
   quality, effective steps, duration, size, loras) equals the last
   successful submit's asks `confirm()` first; the snapshot is
   component-local by decision, so earlier sessions never count.
+  **Prompt rewrites are offered, never applied.**
+  `metascan/core/i2v_fixes.py` (pure, no model call) owns the two lint
+  findings that can be fixed mechanically, as `I2vFinding(code, message,
+  start, end, replacement)` — `replacement is None` means "warn only".
+  `camera_findings` maps natural wording onto `_CAMERA_PHRASES` (leading
+  adverbs become `with small/large amplitude` / `at slow/fast speed`
+  AFTER the verb, the guide's order; arc/tracking drop their object
+  because the guide phrase already says "the subject"; static and shake
+  take no modifiers) and **returns None rather than guess** — "moves
+  left" could be a pan or a truck. Every rewrite must itself pass
+  `_accepted()`, the same prefix test the lint uses, or it is discarded.
+  The lint is a PREFIX check, so "zooms into" / "tilts upward" already
+  pass and are never findings — don't add synonyms for them.
+  `speech_findings` wraps quoted speech as `<speaker> (S1) <verb>:
+  <d>[Language] words</d>` per base-guide §4.4: words verbatim (only an
+  attribution comma in `"Hi," she says.` becomes a period), id after a
+  leading pronoun else before the (adverb+)verb, one id per
+  `_speaker_key` (she/the woman share one), numbering continuing past
+  ids already in the text, language from the script (Latin stays
+  English). Quotes led by sign/label/screen/reads… are visible text and
+  skipped silently; a quote with no speech verb is warn-only.
+  `i2v_compiler.lint_i2v_prompt` gets its camera + speech messages from
+  this module (it imports i2v_fixes; `lint_i2v_report` imports
+  `lint_i2v_prompt` at function level to avoid the cycle). `POST
+  /api/i2v/lint` returns `{warnings, fixes, fixed_prompt}`; `I2VDialog`
+  lints 400 ms after the prompt or duration changes and enables **Apply
+  fixes** only when `fixes.length > 0` AND `lintedFor === prompt` (a
+  stale rewrite must never clobber newer typing). Never auto-apply on
+  Generate: the box is "Generate uses this text".
 
 ## Development Rules
 

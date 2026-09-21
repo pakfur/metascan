@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Media } from '../../types/media'
-import { i2vDims, i2vVideoDetails, type I2vVideo } from '../../types/i2v'
+import { i2vDims, i2vVideoDetails, type I2vFix, type I2vVideo } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
-import { generatePrompt, generateVideo, deleteI2vVideo } from '../../api/i2v'
+import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useToast } from '../../composables/useToast'
@@ -79,6 +79,74 @@ const stepsHint = computed(() => {
 const outputDims = computed(() =>
   i2vDims(props.media.width ?? 0, props.media.height ?? 0, megapixels.value),
 )
+
+// ---- live lint + "Apply fixes" ---------------------------------------------
+// The prompt box is linted as it changes (generated text and hand edits
+// alike). Some findings come with a rewrite the server can do without a
+// model call -- natural camera phrasing, quoted speech. They are only
+// OFFERED: Generate sends exactly what is in the box, so nothing is ever
+// rewritten until the user presses Apply fixes.
+const fixes = ref<I2vFix[]>([])
+const fixedPrompt = ref<string | null>(null)
+// The exact text the current fixes were computed for. Apply is disabled
+// the moment the box diverges from it, so a stale rewrite can never
+// clobber newer typing.
+const lintedFor = ref<string | null>(null)
+let lintTimer: ReturnType<typeof setTimeout> | null = null
+let lintSeq = 0
+
+async function runLint() {
+  const text = prompt.value
+  const seq = ++lintSeq
+  if (!text.trim()) {
+    warnings.value = []
+    fixes.value = []
+    fixedPrompt.value = null
+    lintedFor.value = null
+    return
+  }
+  try {
+    const res = await lintI2vPrompt({ prompt: text, duration_s: durationS.value })
+    if (seq !== lintSeq) return // a newer lint is in flight
+    warnings.value = res.warnings
+    fixes.value = res.fixes
+    fixedPrompt.value = res.fixed_prompt
+    lintedFor.value = text
+  } catch {
+    // Advisory only: a failed lint must never get in the way of editing.
+    if (seq === lintSeq) {
+      fixes.value = []
+      fixedPrompt.value = null
+      lintedFor.value = null
+    }
+  }
+}
+
+watch([prompt, durationS], () => {
+  if (lintTimer) clearTimeout(lintTimer)
+  lintTimer = setTimeout(runLint, 400)
+})
+onBeforeUnmount(() => {
+  if (lintTimer) clearTimeout(lintTimer)
+})
+
+const canApplyFixes = computed(
+  () => fixes.value.length > 0 && fixedPrompt.value !== null && lintedFor.value === prompt.value,
+)
+
+// Warnings that have a fix are shown with their before/after below, so
+// they are left out of the plain list rather than appearing twice.
+const plainWarnings = computed(() => {
+  const fixable = new Set(fixes.value.map((f) => f.message))
+  return warnings.value.filter((w) => !fixable.has(w))
+})
+
+function onApplyFixes() {
+  if (!canApplyFixes.value || fixedPrompt.value === null) return
+  const count = fixes.value.length
+  prompt.value = fixedPrompt.value // the watcher re-lints the result
+  toast.show(`Applied ${count} fix${count === 1 ? '' : 'es'}`, 'success')
+}
 
 async function onExpandPrompt() {
   expanding.value = true
@@ -307,8 +375,30 @@ function jobLabel(chip: {
         <span>MiniMax I2VA prompt (editable — Generate uses this text)</span>
         <textarea v-model="prompt" rows="10" spellcheck="false" />
       </label>
-      <ul v-if="warnings.length" class="lint">
-        <li v-for="(w, i) in warnings" :key="i">⚠ {{ w }}</li>
+      <div class="lint-bar">
+        <button
+          class="btn"
+          :disabled="!canApplyFixes"
+          :title="fixes.length
+            ? 'Rewrite the fixable findings below into MiniMax guide phrasing'
+            : 'Nothing the linter can fix automatically'"
+          @click="onApplyFixes"
+        >
+          Apply fixes{{ fixes.length ? ` (${fixes.length})` : '' }}
+        </button>
+        <span v-if="fixes.length" class="lint-bar-hint">
+          The prompt is only changed when you press this.
+        </span>
+      </div>
+      <ul v-if="fixes.length" class="lint lint-fixable">
+        <li v-for="(f, i) in fixes" :key="'fix-' + i">
+          <span>⚠ {{ f.message }}</span>
+          <span class="fix-row"><b>now</b> <code>{{ f.original }}</code></span>
+          <span class="fix-row"><b>fix</b> <code>{{ f.replacement }}</code></span>
+        </li>
+      </ul>
+      <ul v-if="plainWarnings.length" class="lint">
+        <li v-for="(w, i) in plainWarnings" :key="i">⚠ {{ w }}</li>
       </ul>
 
       <footer class="i2v-footer">
@@ -506,6 +596,19 @@ function jobLabel(chip: {
 .dims-hint { color: var(--text-muted, #888); font-size: 11px; margin-top: 2px; }
 .i2v-prompt textarea { width: 100%; font-family: monospace; font-size: 12px; }
 .lint { color: var(--warn, #c90); font-size: 12px; margin: 4px 0; }
+.lint-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.lint-bar-hint { font-size: 11px; color: var(--text-color-secondary); }
+.lint-fixable { list-style: none; padding-left: 0; }
+.lint-fixable li { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.fix-row { display: flex; gap: 6px; align-items: baseline; color: var(--text-color-secondary); }
+.fix-row b { flex: 0 0 26px; font-weight: 600; font-size: 10px; text-transform: uppercase; }
+.fix-row code {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .i2v-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .fld-off { opacity: 0.55; }
 .i2v-strip { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; min-height: 110px; align-items: flex-start; }
