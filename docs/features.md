@@ -107,6 +107,7 @@ Desktop-only authoring canvas at `/storyboard/:id?` (nav button in the header ac
 ## Image to Video
 Right-click any image → "Image to Video…" opens a dialog to turn it into a short MiniMax H3 clip via a driven ComfyUI backend.
 - Type an idea and expand it into a full I2VA video prompt (VLM-composed, editable before generating)
+- The prompt is linted as you type; **Apply fixes** rewrites natural camera wording ("slowly dollies in") into MiniMax's motion vocabulary ("pushes in at slow speed") and quoted speech into its `(S1) says: <d>[English] …</d>` dialogue form, showing each before/after first — the prompt is never changed without pressing it
 - Pick a clip duration and a fast/quality generation preset; High quality also offers a sampler Steps choice (20–40, default 25)
 - Pick an output size as a megapixel budget; the clip's orientation and aspect ratio always follow the source image, since that image is the first frame
 - Optional LoRAs applied to the generation

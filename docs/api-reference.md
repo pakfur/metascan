@@ -70,6 +70,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST/PATCH/DELETE | `/api/storyboard/panels/{id}/beats`, `/api/storyboard/beats/{id}` | Beat CRUD |
 | POST | `/api/storyboard/beats/{id}/select` | Choose (or clear) a beat's keeper image |
 | POST | `/api/i2v/prompt` | VLM-expand an idea into an I2VA video prompt (review-only, writes nothing) |
+| POST | `/api/i2v/lint` | Lint a prompt and return the no-model rewrites it could apply (Apply fixes) |
 | POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
 | DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
@@ -592,6 +593,21 @@ beat count; writes nothing. Returns `{prompt: string, warnings: string[]}`
   timeout / runtime error).
 - **503** if the i2v runner isn't installed, or no VLM model is available
   to expand with (`I2vUnavailableError` / `VlmSelectError`).
+
+### `POST /api/i2v/lint`
+Body: `{prompt: string, duration_s: float}`. Advisory lint of the prompt
+text plus the rewrites that need no model call. Returns
+`{warnings: string[], fixes: [{code, message, original, replacement}, ...],
+fixed_prompt: string | null}`. `fixes` is the fixable subset of the
+warnings — `code` is `camera_phrase` (natural camera wording → the MiniMax
+guide's motion vocabulary, e.g. "slowly dollies in" → "pushes in at slow
+speed") or `speech_format` (quoted speech → `<speaker> (S1) says:
+<d>[English] …</d>`, words verbatim). `fixed_prompt` is the prompt with
+every fix applied, `null` when there is nothing to fix. The route never
+rewrites on its own; the dialog's **Apply fixes** button opts in. Ambiguous
+wording ("moves left": a pan or a truck?) and quotes with no identifiable
+speaker stay warnings with no fix. Pure text analysis — needs neither the
+i2v runner nor the VLM. **400** if `duration_s <= 0`.
 
 ### `POST /api/i2v/generate`
 Body: `{source_path: string, prompt: string, duration_s: float, quality:
