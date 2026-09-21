@@ -153,3 +153,211 @@ def test_untitled_literal_prompts_keep_the_content_heuristic(monkeypatch):
     result = _extract(graph, monkeypatch)
     assert result["prompt"] == "a red fox"
     assert result["negative_prompt"] == "ugly, worst quality"
+
+
+# ---- models and loras: trace the sampler's model wire ------------------
+#
+# Reduced from the same real graph. Two UNETLoaders sit behind a mode
+# switch, so listing every loader would report a model that never ran; the
+# one that did is whichever the KSampler's `model` input actually reaches.
+
+
+def _model_graph() -> Dict[str, Any]:
+    return {
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {"sampler_name": "euler", "scheduler": "beta", "model": ["6", 0]},
+            "_meta": {"title": "Main KSampler"},
+        },
+        "6": {
+            "class_type": "Power Lora Loader (rgthree)",
+            "inputs": {
+                "PowerLoraLoaderHeaderWidget": {"type": "PowerLoraLoaderHeaderWidget"},
+                "lora_1": {
+                    "on": True,
+                    "lora": "qwen\\first.safetensors",
+                    "strength": 0.8,
+                },
+                "lora_2": {
+                    "on": False,
+                    "lora": "qwen\\off.safetensors",
+                    "strength": 1.0,
+                },
+                "lora_3": {
+                    "on": True,
+                    "lora": "qwen\\second.safetensors",
+                    "strength": 0.55,
+                },
+                "➕ Add Lora": "",
+                "model": ["236", 0],
+                "clip": ["13", 0],
+            },
+        },
+        "236": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {"shift": 13.0, "model": ["233", 0]},
+        },
+        "233": {
+            "class_type": "ImpactSwitch",
+            "inputs": {
+                "select": ["138", 0],
+                "sel_mode": False,
+                "input1": ["12", 0],
+                "input2": ["12", 0],
+                "input3": ["174", 0],
+            },
+        },
+        "138": {"class_type": "ImpactInt", "inputs": {"value": 1}},
+        "12": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": "qwen\\qwen_image.safetensors",
+                "weight_dtype": "default",
+            },
+        },
+        "174": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": "qwen\\qwen_image_edit.safetensors",
+                "weight_dtype": "default",
+            },
+        },
+    }
+
+
+def test_unet_loader_model_is_read(monkeypatch):
+    result = _extract(_model_graph(), monkeypatch)
+    assert result["models"] == ["qwen\\qwen_image.safetensors"]
+
+
+def test_only_the_switch_branch_that_is_selected_counts(monkeypatch):
+    graph = _model_graph()
+    graph["138"]["inputs"]["value"] = 3
+    result = _extract(graph, monkeypatch)
+    assert result["models"] == ["qwen\\qwen_image_edit.safetensors"]
+
+
+def test_underscore_style_switch_inputs_are_understood(monkeypatch):
+    graph = _model_graph()
+    graph["233"] = {
+        "class_type": "Big Model Switch [Dream]",
+        "inputs": {"select": 2, "input_1": ["12", 0], "input_2": ["174", 0]},
+    }
+    result = _extract(graph, monkeypatch)
+    assert result["models"] == ["qwen\\qwen_image_edit.safetensors"]
+
+
+def test_an_unresolvable_switch_reports_every_branch(monkeypatch):
+    graph = _model_graph()
+    graph["233"]["inputs"]["select"] = ["999", 0]  # dangling
+    result = _extract(graph, monkeypatch)
+    assert result["models"] == [
+        "qwen\\qwen_image.safetensors",
+        "qwen\\qwen_image_edit.safetensors",
+    ]
+
+
+def test_power_lora_loader_reports_enabled_loras_in_order(monkeypatch):
+    result = _extract(_model_graph(), monkeypatch)
+    assert result["loras"] == [
+        {"lora_name": "qwen\\first", "lora_weight": 0.8},
+        {"lora_name": "qwen\\second", "lora_weight": 0.55},
+    ]
+
+
+def test_loras_come_out_in_application_order_across_nodes(monkeypatch):
+    graph = _model_graph()
+    # checkpoint -> LoraLoader(base) -> Power Lora Loader -> KSampler
+    graph["236"] = {
+        "class_type": "LoraLoader",
+        "inputs": {
+            "lora_name": "base.safetensors",
+            "strength_model": 1.0,
+            "strength_clip": 1.0,
+            "model": ["233", 0],
+        },
+    }
+    result = _extract(graph, monkeypatch)
+    assert [entry["lora_name"] for entry in result["loras"]] == [
+        "base",
+        "qwen\\first",
+        "qwen\\second",
+    ]
+
+
+def test_a_lora_on_an_unselected_branch_is_not_reported(monkeypatch):
+    graph = _model_graph()
+    graph["174"] = {
+        "class_type": "LoraLoader",
+        "inputs": {"lora_name": "edit_only.safetensors", "strength_model": 1.0},
+    }
+    result = _extract(graph, monkeypatch)
+    assert "edit_only" not in [entry["lora_name"] for entry in result["loras"]]
+
+
+def test_several_samplers_sharing_a_model_report_it_once(monkeypatch):
+    graph = _model_graph()
+    graph["29"] = copy.deepcopy(graph["2"])
+    graph["41"] = copy.deepcopy(graph["2"])
+    result = _extract(graph, monkeypatch)
+    assert result["models"] == ["qwen\\qwen_image.safetensors"]
+    assert len(result["loras"]) == 2
+
+
+def test_a_model_loop_terminates(monkeypatch):
+    graph = _model_graph()
+    graph["233"]["inputs"] = {"select": 1, "input1": ["236", 0]}
+    # The wire never reaches a loader, so this lands in the list-everything
+    # fallback; the point is that the walk ends.
+    result = _extract(graph, monkeypatch)
+    assert result is not None
+    assert len(result["models"]) == 2
+
+
+def test_classic_checkpoint_graph_is_unchanged(monkeypatch):
+    graph = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"sampler_name": "euler", "seed": 7, "model": ["10", 0]},
+        },
+        "10": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": "detail.safetensors",
+                "strength_model": 0.6,
+                "model": ["4", 0],
+            },
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sdxl_base.safetensors"},
+        },
+    }
+    result = _extract(graph, monkeypatch)
+    assert result["models"] == ["sdxl_base.safetensors"]
+    assert result["loras"] == [{"lora_name": "detail", "lora_weight": 0.6}]
+
+
+def test_loaders_are_still_found_when_no_sampler_wires_to_them(monkeypatch):
+    # No traceable KSampler.model (e.g. a custom sampler this extractor
+    # does not know): fall back to listing what the graph contains.
+    graph = {
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sdxl_base.safetensors"},
+        },
+        "12": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux.safetensors"}},
+        "10": {
+            "class_type": "LoraLoader",
+            "inputs": {"lora_name": "detail.safetensors", "strength_model": 0.6},
+        },
+        "6": {
+            "class_type": "Power Lora Loader (rgthree)",
+            "inputs": {
+                "lora_1": {"on": True, "lora": "p.safetensors", "strength": 0.5}
+            },
+        },
+    }
+    result = _extract(graph, monkeypatch)
+    assert sorted(result["models"]) == ["flux.safetensors", "sdxl_base.safetensors"]
+    assert sorted(entry["lora_name"] for entry in result["loras"]) == ["detail", "p"]
