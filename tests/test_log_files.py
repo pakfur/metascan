@@ -206,3 +206,34 @@ def test_server_log_can_be_disabled(tmp_path, monkeypatch, clean_root):
     assert log_files.install_server_log(tmp_path) is None
     assert len(clean_root.handlers) == before
     assert not (tmp_path / "server.log").exists()
+
+
+def test_success_entries_leave_the_embedded_graph_out(tmp_path):
+    # raw_metadata is the whole embedded prompt + workflow graph (~85 KB for
+    # a real Qwen image). Dumping it per file is what made a full import
+    # write gigabytes; the parsed fields are what the report is for.
+    parsing_logger = MetadataParsingLogger(tmp_path)
+    metadata = {
+        "source": "ComfyUI",
+        "sampler": "euler",
+        "steps": 50,
+        "raw_metadata": {
+            "prompt": {"2": {"class_type": "KSampler", "inputs": {"GRAPH": 1}}},
+            "workflow": {"nodes": ["GRAPH"]},
+        },
+    }
+    parsing_logger.log_extraction_attempt(
+        Path("/media/a.png"), "ComfyUIExtractor", True, metadata=metadata
+    )
+    close_file_loggers()
+
+    report = (tmp_path / "metadata_extraction_report.txt").read_text()
+    assert '"sampler": "euler"' in report
+    assert '"steps": 50' in report
+    assert "GRAPH" not in report
+    assert "KSampler" not in report
+    # ...but the entry still says the graph existed, and which parts.
+    assert "raw_metadata" in report
+    assert "prompt" in report and "workflow" in report
+    # The caller's dict is what the scanner goes on to store; never mutate it.
+    assert "GRAPH" in str(metadata["raw_metadata"])
