@@ -288,6 +288,19 @@ metascan/
   read `"length"`, which left `media.video_length` NULL for every video.
   The SaveVideo tag carries only `prompt` (no `workflow`) for API-submitted
   jobs. Rows scanned before a fix keep their old values until rescanned.
+- **In an API-format graph any widget can be a `[node_id, output_index]`
+  link instead of a literal — never call a str/number method on an input
+  without resolving it first.** `ComfyUIExtractor._resolve_input`
+  (`metascan/extractors/comfyui.py`, still images) follows a link back to
+  its literal; a wired `CLIPTextEncode.text` once raised `'list' object has
+  no attribute 'lower'`, and because `extract()`'s blanket `except` returns
+  `None`, the file lost ALL its metadata, not just the prompt. A literal on
+  the immediate source wins over walking upstream: `ShowText|pysssss`'s
+  `text_0` is the expanded prompt, while the `DPRandomGenerator` feeding it
+  still holds the unexpanded wildcard template. Positive/negative polarity
+  comes from the node title when it says so; the keyword heuristic is only
+  the untitled fallback — a bare type guard that merely skipped the linked
+  positive would store a keyword-free negative as the prompt.
 - **Metascan owns the ComfyUI job queue.** `ComfyClient` holds at most
   `comfy.in_flight` jobs inside ComfyUI at a time so a user-requested reroll
   can jump the queue and cancellation stays responsive. One persistent
