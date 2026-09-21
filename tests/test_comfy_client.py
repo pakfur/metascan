@@ -17,6 +17,7 @@ from metascan.core.comfy_bindings import (
     GenerationParams,
     resolve_bindings,
 )
+from metascan.core import comfy_client as comfy_client_module
 from metascan.core.comfy_client import (
     ComfyClient,
     ComfyError,
@@ -1498,3 +1499,93 @@ async def test_list_loras_unreachable_server_returns_empty(workspace):
         assert await c.list_loras() == []
     finally:
         await c.aclose()
+
+
+# ---- lost events: deaf sockets and reconnect gaps --------------------
+#
+# ComfyUI routes a prompt's frames to the ONE socket registered under the
+# client_id that submitted it, and its /ws teardown pops that client_id
+# unconditionally. Both halves were observed against a real server: a
+# socket that stayed open for four hours, answered every ping, and
+# received nothing but pongs while two jobs ran to completion.
+
+
+async def _drop_sockets_and_wait_for_reconnect(client, fake) -> None:
+    for ws in list(fake._sockets):
+        await ws.close()
+    assert await _until(lambda: not client.connected, timeout=5.0)
+    assert await _until(lambda: client.connected and bool(fake._sockets))
+
+
+async def test_each_connection_presents_a_fresh_client_id(
+    started_client, fake_comfy
+):  # noqa: F811
+    await _drop_sockets_and_wait_for_reconnect(started_client, fake_comfy)
+
+    assert len(fake_comfy.client_ids_seen) == 2
+    assert len(set(fake_comfy.client_ids_seen)) == 2
+    assert started_client.client_id == fake_comfy.client_ids_seen[-1]
+
+
+async def test_a_stale_connections_late_cleanup_does_not_deafen_the_reconnect(
+    started_client, fake_comfy
+):  # noqa: F811
+    gate = asyncio.Event()
+    fake_comfy.stale_cleanup_gate = gate
+
+    await _drop_sockets_and_wait_for_reconnect(started_client, fake_comfy)
+    # Only now does the server get round to tearing down the OLD socket.
+    gate.set()
+    await asyncio.sleep(0.05)
+    fake_comfy.stale_cleanup_gate = None
+
+    fake_comfy.execution_delay = 0.2
+    pid = await started_client.register_preset("sdxl3", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+    # 5s is well inside _RECONCILE_INTERVAL_SECONDS, and the reconnect's
+    # own reconcile pass ran before this job existed -- so finishing in
+    # time means the frames reached us over the socket, not that the
+    # history poll rescued the job.
+    assert comfy_client_module._RECONCILE_INTERVAL_SECONDS > 5.0
+    assert (await started_client.wait_for_job(job_id, timeout=5.0))["state"] == "done"
+
+
+async def test_a_job_that_finishes_while_disconnected_is_reconciled_from_history(
+    started_client, fake_comfy, workspace
+):  # noqa: F811
+    release = asyncio.Event()
+    fake_comfy.hold = release
+    pid = await started_client.register_preset("sdxl4", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+    assert await _until(lambda: fake_comfy.running_prompt is not None)
+
+    for ws in list(fake_comfy._sockets):
+        await ws.close()
+    assert await _until(lambda: not started_client.connected, timeout=5.0)
+    release.set()  # every end-of-prompt frame is sent into the void
+    assert await _until(lambda: bool(fake_comfy._history), timeout=5.0)
+
+    row = await started_client.wait_for_job(job_id, timeout=15.0)
+    assert row["state"] == "done"
+    assert list((workspace / "out").rglob("*.png"))
+
+
+async def test_reconcile_reports_a_failure_it_never_heard_about(
+    started_client, fake_comfy
+):  # noqa: F811
+    release = asyncio.Event()
+    fake_comfy.hold = release
+    fake_comfy.fail_with = "CUDA out of memory"
+    pid = await started_client.register_preset("sdxl5", "t2i", t2i_workflow())
+    job_id = await started_client.submit_now(pid, params())
+    assert await _until(lambda: fake_comfy.running_prompt is not None)
+
+    for ws in list(fake_comfy._sockets):
+        await ws.close()
+    assert await _until(lambda: not started_client.connected, timeout=5.0)
+    release.set()
+    assert await _until(lambda: bool(fake_comfy._history), timeout=5.0)
+
+    row = await started_client.wait_for_job(job_id, timeout=15.0)
+    assert row["state"] == "failed"
+    assert "CUDA out of memory" in row["error"]

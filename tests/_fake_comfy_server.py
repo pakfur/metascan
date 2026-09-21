@@ -128,8 +128,21 @@ class FakeComfy:
         self.interrupted_prompts: List[str] = []
         self.deleted: List[str] = []
 
+        # When set, a /ws handler that is exiting waits for this event
+        # before running its cleanup -- a stale connection whose teardown
+        # ComfyUI only gets to AFTER the client has already reconnected
+        # (its event loop was busy, or the FIN arrived late).
+        self.stale_cleanup_gate: Optional[asyncio.Event] = None
+        # Every clientId a /ws connection has presented, in order.
+        self.client_ids_seen: List[str] = []
+
         self._history: Dict[str, Dict[str, Any]] = {}
         self._sockets: List[web.WebSocketResponse] = []
+        # ComfyUI's `self.sockets`: clientId -> the ONE socket frames for
+        # that client are routed to. See `_ws` for the cleanup hazard.
+        self._registry: Dict[str, web.WebSocketResponse] = {}
+        # prompt_id -> the client_id its POST /prompt carried.
+        self._prompt_client: Dict[str, str] = {}
         self._runner: Optional[web.AppRunner] = None
         self._port: int = 0
 
@@ -184,7 +197,24 @@ class FakeComfy:
             await self._runner.cleanup()
 
     async def broadcast(self, message: Dict[str, Any]) -> None:
-        for ws in list(self._sockets):
+        """Route a frame the way ComfyUI's `send` does.
+
+        A frame about a prompt this server accepted goes ONLY to the
+        socket registered under that prompt's client_id -- and nowhere at
+        all if that registration is gone, which is exactly how a client
+        ends up alive, answering pings, and deaf. Anything else (`status`,
+        a test-injected frame for an unknown prompt) goes to every
+        registered socket.
+        """
+        data = message.get("data")
+        prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
+        client_id = self._prompt_client.get(str(prompt_id)) if prompt_id else None
+        if client_id is not None:
+            target = self._registry.get(client_id)
+            targets = [target] if target is not None else []
+        else:
+            targets = list(self._registry.values())
+        for ws in targets:
             try:
                 await ws.send_str(json.dumps(message))
             except Exception:
@@ -196,6 +226,8 @@ class FakeComfy:
         body = await request.json()
         prompt_id = str(uuid.uuid4())
         self.submitted.append({"prompt_id": prompt_id, "body": body})
+        if body.get("client_id"):
+            self._prompt_client[prompt_id] = str(body["client_id"])
         if self.omit_prompt_id:
             return web.json_response({"number": 1})
         self._pending.append((prompt_id, body))
@@ -285,6 +317,16 @@ class FakeComfy:
         if self.close_after_connect:
             await ws.close()
             return ws
+        # Verbatim ComfyUI semantics (server.py::websocket_handler): a
+        # reconnect under an existing clientId replaces the registration,
+        # and teardown pops the clientId UNCONDITIONALLY -- it never
+        # checks the registered socket is still its own. So a stale
+        # handler exiting after a same-id reconnect deletes the live
+        # socket's registration.
+        sid = request.rel_url.query.get("clientId", "") or uuid.uuid4().hex
+        self.client_ids_seen.append(sid)
+        self._registry.pop(sid, None)
+        self._registry[sid] = ws
         self._sockets.append(ws)
         try:
             async for _ in ws:
@@ -292,6 +334,9 @@ class FakeComfy:
         finally:
             if ws in self._sockets:
                 self._sockets.remove(ws)
+            if self.stale_cleanup_gate is not None:
+                await self.stale_cleanup_gate.wait()
+            self._registry.pop(sid, None)
         return ws
 
     # ---- simulated execution ----------------------------------------
@@ -397,7 +442,24 @@ class FakeComfy:
                 }
             )
             await self._end_of_prompt(
-                prompt_id, {"status": {"completed": False}, "outputs": {}}
+                prompt_id,
+                {
+                    "status": {
+                        "status_str": "error",
+                        "completed": False,
+                        "messages": [
+                            [
+                                "execution_error",
+                                {
+                                    "prompt_id": prompt_id,
+                                    "node_type": "CheckpointLoaderSimple",
+                                    "exception_message": self.fail_with,
+                                },
+                            ]
+                        ],
+                    },
+                    "outputs": {},
+                },
             )
             return
 
@@ -453,7 +515,11 @@ class FakeComfy:
         await self._end_of_prompt(
             prompt_id,
             {
-                "status": {"completed": True},
+                "status": {
+                    "status_str": "success",
+                    "completed": True,
+                    "messages": [["execution_success", {"prompt_id": prompt_id}]],
+                },
                 "outputs": {save_node: output},
             },
         )
@@ -471,7 +537,15 @@ class FakeComfy:
             }
         )
         await self._end_of_prompt(
-            prompt_id, {"status": {"completed": False}, "outputs": {}}
+            prompt_id,
+            {
+                "status": {
+                    "status_str": "error",
+                    "completed": False,
+                    "messages": [["execution_interrupted", {"prompt_id": prompt_id}]],
+                },
+                "outputs": {},
+            },
         )
 
 
