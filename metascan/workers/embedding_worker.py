@@ -11,7 +11,6 @@ Usage:
 
 import json
 import logging
-import logging.handlers
 import os
 import platform
 import signal
@@ -55,6 +54,7 @@ from metascan.core.vocabulary import (  # noqa: E402
     select_tags,
 )
 from metascan.utils.app_paths import get_base_path, get_data_dir  # noqa: E402
+from metascan.utils.log_files import rotating_file_handler  # noqa: E402
 
 
 # Maximum time to spend on a single file (seconds).
@@ -632,13 +632,8 @@ def setup_logging(queue_dir: Path) -> None:
 
     log_file = log_dir / "embedding_worker.log"
 
-    handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=3,
-    )
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler = rotating_file_handler(
+        log_file, fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
     root_logger = logging.getLogger()

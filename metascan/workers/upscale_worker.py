@@ -14,7 +14,6 @@ import json
 import time
 import signal
 import logging
-import logging.handlers
 import traceback
 from pathlib import Path
 from typing import Optional, IO, Any
@@ -45,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from metascan.core.media_upscaler import MediaUpscaler  # noqa: E402
 from metascan.core.upscale_queue_process import UpscaleStatus  # noqa: E402
 from metascan.utils.app_paths import get_data_dir  # noqa: E402
+from metascan.utils.log_files import rotating_file_handler  # noqa: E402
 import portalocker  # noqa: E402
 
 
@@ -677,10 +677,8 @@ def main():
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
-    # Rotating file handler (10 MB max, keep 5 backup files)
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"  # 10 MB
-    )
+    # Shared policy: 10 MB live file, three rollovers (see log_files.py)
+    file_handler = rotating_file_handler(log_file, fmt=None)
     file_handler.setLevel(log_level)
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)

@@ -49,6 +49,8 @@ from metascan.core.comfy_client import ComfyClient
 from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.i2v_runner import I2vRunner
 from metascan.core.scanner import Scanner
+from metascan.utils.app_paths import get_data_dir
+from metascan.utils.log_files import install_server_log
 
 logging.basicConfig(
     level=logging.INFO,
@@ -132,6 +134,13 @@ async def _event_loop_heartbeat() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Until now the server logged to the console only, so anything that
+    # scrolled away (a dropped ComfyUI socket, a stalled event loop) was
+    # unrecoverable. Size-capped: see metascan/utils/log_files.py.
+    server_log = install_server_log(get_data_dir().parent / "logs")
+    if server_log is not None:
+        logger.info("Logging to %s", server_log)
+
     ws_manager.attach_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
 

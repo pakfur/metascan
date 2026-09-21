@@ -96,3 +96,4 @@ For local development with all dev tools:
 | `METASCAN_PORT` | `8700` | Backend server port |
 | `METASCAN_API_KEY` | (none) | API key for authenticated access (optional) |
 | `METASCAN_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins |
+| `METASCAN_LOG_FILE` | `1` | Set to `0` to disable `logs/server.log` and log to the console only |
