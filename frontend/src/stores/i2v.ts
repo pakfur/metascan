@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Media } from '../types/media'
-import type { I2vConfig, I2vJobChip, I2vVideo } from '../types/i2v'
-import { fetchI2vConfig, listI2vVideos } from '../api/i2v'
+import type { I2vConfig, I2vFormState, I2vJobChip, I2vVideo } from '../types/i2v'
+import { fetchI2vConfig, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { updateMedia } from '../api/media'
 
@@ -150,6 +150,15 @@ export const useI2vStore = defineStore('i2v', () => {
     }
   }
 
+  // Autosave target for the dialog. Writes the clip's EDITABLE form state
+  // only, then mirrors the server's merged result onto the local row so a
+  // later click on that clip loads what was just saved.
+  async function saveFormState(id: number, fields: Partial<I2vFormState>): Promise<void> {
+    const res = await updateI2vFormState(id, fields)
+    const row = videos.value.find((v) => v.id === id)
+    if (row) row.form_state = res.form_state
+  }
+
   return {
     source,
     videos,
@@ -167,5 +176,6 @@ export const useI2vStore = defineStore('i2v', () => {
     handleComfyEvent,
     handleI2vEvent,
     toggleFavorite,
+    saveFormState,
   }
 })

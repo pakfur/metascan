@@ -524,3 +524,129 @@ class TestIngest(I2vRunnerBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _JobCreatingComfy(FakeComfy):
+    """FakeComfy whose submit writes a real generation_jobs row, so a
+    generate() can be followed through to its ingest."""
+
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+
+    async def submit(self, preset_id, params, **kwargs):
+        self.submits.append((preset_id, params, kwargs))
+        return self.db.create_generation_job(
+            preset_id,
+            json.dumps(
+                {
+                    "positive": params.positive,
+                    "seed": params.seed,
+                    "duration_s": params.duration_s,
+                    "width": params.width,
+                    "height": params.height,
+                    "steps": params.steps,
+                }
+            ),
+            i2v_source_path=kwargs["i2v_source_path"],
+        )
+
+
+class TestFormStateAtIngest(I2vRunnerBase):
+    """The dialog's form is persisted at ingest, and only at ingest."""
+
+    def setUp(self):
+        super().setUp()
+        self.comfy = _JobCreatingComfy(self.db)
+        self.runner.comfy = self.comfy
+        self.out = Path(self.tmp.name) / "clip.mp4"
+        self.out.write_bytes(b"fake")
+        self.db.save_media(
+            Media(
+                file_path=self.out,
+                file_size=4,
+                width=640,
+                height=944,
+                format="mp4",
+                created_at=datetime.now(),
+                modified_at=datetime.now(),
+            )
+        )
+
+    def _generate(self, **over):
+        kwargs = dict(
+            source_path=str(self.src),
+            prompt="[Shot 1] the cat stretches",
+            duration_s=10.0,
+            quality="fast",
+            seed=123,
+            megapixels=0.5,
+            loras=[],
+            preset_id=self.preset_id,
+            idea="a cat stretches",
+            steps=30,
+        )
+        kwargs.update(over)
+        return self.run_async(self.runner.generate(**kwargs))
+
+    def _ingest(self, job_id):
+        async def scenario():
+            self.runner.handle_job_event(
+                "job_outputs", {"job_id": job_id, "files": [str(self.out)]}
+            )
+            await self.runner.aclose()
+
+        self.run_async(scenario())
+
+    def test_the_form_as_submitted_becomes_the_clips_form_state(self):
+        job_id = self._generate()
+        self._ingest(job_id)
+
+        row = self.db.list_i2v_videos(str(self.src))[0]
+        self.assertEqual(
+            row["form_state"],
+            {
+                "idea": "a cat stretches",
+                "prompt": "[Shot 1] the cat stretches",
+                "duration_s": 10.0,
+                "quality": "fast",
+                "megapixels": 0.5,
+                # The form's step selection, kept even though a Fast render
+                # never applies it -- it is what the user had chosen.
+                "steps": 30,
+                "seed": 123,
+                "loras": [],
+            },
+        )
+
+    def test_rendered_facts_are_recorded_alongside_and_stay_honest(self):
+        job_id = self._generate()
+        self._ingest(job_id)
+
+        row = self.db.list_i2v_videos(str(self.src))[0]
+        self.assertEqual(row["megapixels"], 0.5)
+        self.assertEqual(row["loras"], [])
+        self.assertEqual(row["quality"], "fast")
+        # steps is the APPLIED count: none for a Fast render.
+        self.assertIsNone(row["steps"])
+
+    def test_nothing_is_persisted_for_a_render_that_never_ingests(self):
+        self._generate()  # submitted, never finishes
+
+        self.assertEqual(self.db.list_i2v_videos(str(self.src)), [])
+        with self.db.lock, self.db._get_connection() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM i2v_videos").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_a_restart_between_submit_and_ingest_leaves_form_state_empty(self):
+        """The form snapshot is in-memory by decision (nothing is written
+        before ingest), so a fresh process has none to store. The row must
+        still ingest; the API then builds a form from the rendered facts."""
+        job_id = self._generate()
+        self.runner._job_meta.clear()  # what a restart does
+
+        self._ingest(job_id)
+
+        row = self.db.list_i2v_videos(str(self.src))[0]
+        self.assertIsNone(row["form_state"])
+        self.assertEqual(row["seed"], 123)  # facts still come from the job row

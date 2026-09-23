@@ -1,5 +1,5 @@
-import { get, post, del } from './client'
-import type { I2vConfig, I2vLintReport, I2vVideo } from '../types/i2v'
+import { get, post, del, patch } from './client'
+import type { I2vConfig, I2vFormState, I2vLintReport, I2vVideo } from '../types/i2v'
 
 export function generatePrompt(body: {
   source_path: string
@@ -35,6 +35,15 @@ export function generateVideo(body: {
 
 export function listI2vVideos(sourcePath: string): Promise<I2vVideo[]> {
   return get(`/i2v/videos?source_path=${encodeURIComponent(sourcePath)}`)
+}
+
+// Autosave into one clip's editable form state. Partial; the clip's
+// as-rendered fields are not reachable through this.
+export function updateI2vFormState(
+  id: number,
+  fields: Partial<I2vFormState>,
+): Promise<{ form_state: I2vFormState }> {
+  return patch(`/i2v/videos/${id}`, fields)
 }
 
 export function deleteI2vVideo(id: number): Promise<{ status: string }> {

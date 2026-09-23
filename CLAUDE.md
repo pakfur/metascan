@@ -1231,6 +1231,38 @@ metascan/
   quality, effective steps, duration, size, loras) equals the last
   successful submit's asks `confirm()` first; the snapshot is
   component-local by decision, so earlier sessions never count.
+  **Each clip carries two sets of values, and only one is editable.**
+  The as-rendered columns (`prompt_used`, `seed`, `duration_s`, `quality`,
+  `steps`, `width`/`height`, plus `megapixels`/`loras`) are facts: written
+  once at ingest, they feed the tile's details label and must keep
+  agreeing with the metadata embedded in the file. `form_state` (JSON) is
+  the editable copy — seeded at ingest from the dialog exactly as
+  submitted (`i2v_form.build_form_state`, including a step selection a
+  Fast render never applies), loaded when a clip is single-clicked, and
+  autosaved into via `PATCH /api/i2v/videos/{id}`.
+  `DatabaseManager.set_i2v_video_form_state` is deliberately the ONLY
+  `i2v_videos` update there is; never add a route that writes the fact
+  columns. **Nothing is persisted before ingest, by decision** — the form
+  snapshot rides the in-memory `_job_meta` (so a cancelled/failed render
+  leaves nothing, and a restart between submit and ingest leaves
+  `form_state` NULL); do not move it onto `generation_jobs` or add a draft
+  table. `i2v_form.form_state_for_row` makes the API shape complete either
+  way — stored values win field-by-field, gaps (a legacy clip, or a field
+  added to the form later) fill from the facts, megapixels snapped from
+  `width × height` to the nearest configured option — and it runs in
+  `I2vService`, not the DB layer, because it needs config. In
+  `I2VDialog.vue`: with no clip selected the form is an unsaved scratch
+  area; `savedSnapshot` stops a load echoing straight back as a save;
+  saves are chained so an early slow request can't overwrite a later one,
+  and capture the clip id at flush time (the user may have clicked
+  another clip since); `flushFormState` runs before a clip switch, on
+  **Stop editing**, on close and on unmount. Deselect is an explicit
+  button, not a second click on the tile — a double-click (play) fires
+  two single-clicks first, so `onSelectClip` also ignores
+  `event.detail > 1`. `loadClip` arms `lastSubmitted`: the one deliberate
+  exception to that snapshot being session-local, because the clip's exact
+  seed is now in the form. `withCurrentOption` keeps a loaded value that
+  has since left the config lists visible in its select.
   **Prompt rewrites are offered, never applied.**
   `metascan/core/i2v_fixes.py` (pure, no model call) owns the two lint
   findings that can be fixed mechanically, as `I2vFinding(code, message,

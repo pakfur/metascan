@@ -1,3 +1,35 @@
+/**
+ * The EDITABLE copy of the dialog's form kept on each clip. Seeded from the
+ * request at ingest, loaded when the clip is clicked, autosaved into as the
+ * user edits. Deliberately separate from I2vVideo's as-rendered fields
+ * (prompt_used, seed, quality, steps, …), which describe what actually
+ * produced the video and never change. The server always sends a complete
+ * one: for a clip that predates the column it builds it from those facts,
+ * which is the only time a value here can be null.
+ */
+export interface I2vFormState {
+  idea: string
+  prompt: string
+  duration_s: number | null
+  quality: 'fast' | 'quality' | null
+  megapixels: number | null
+  // The form's step selection. Null when the clip was a Fast render, which
+  // sends no step count.
+  steps: number | null
+  seed: number | null
+  loras: { name: string; strength: number }[]
+}
+
+/**
+ * Select options plus a value that is no longer among them — a clip made
+ * with a duration since removed from config must still show what it used,
+ * not a blank select that silently saves the first option.
+ */
+export function withCurrentOption(options: number[], current: number): number[] {
+  if (!Number.isFinite(current) || options.includes(current)) return options
+  return [...options, current].sort((a, b) => a - b)
+}
+
 export interface I2vVideo {
   id: number
   source_path: string
@@ -18,6 +50,10 @@ export interface I2vVideo {
   comfy_prompt_id: string | null
   created_at: string
   is_favorite: boolean
+  // As-rendered facts, null for clips ingested before they were recorded.
+  megapixels: number | null
+  loras: { name: string; strength: number }[] | null
+  form_state: I2vFormState
 }
 
 export interface I2vConfig {

@@ -54,7 +54,10 @@ class FakeRunner:
         return self.generate_result
 
 
-class TestI2vApi(unittest.TestCase):
+class _I2vApiBase(unittest.TestCase):
+    """App + temp DB + fake runner. Holds no tests, so subclasses don't
+    re-run one another's."""
+
     tmp: Optional[tempfile.TemporaryDirectory] = None
 
     @classmethod
@@ -108,6 +111,8 @@ class TestI2vApi(unittest.TestCase):
         assert self.tmp is not None
         self.tmp.cleanup()
 
+
+class TestI2vApi(_I2vApiBase):
     # ---- /prompt ----------------------------------------------------
 
     def test_prompt_happy_path(self):
@@ -496,6 +501,111 @@ class TestI2vApi(unittest.TestCase):
         ):
             body = self.client.get("/api/i2v/config").json()
         self.assertFalse(body["quality_steps_supported"])
+
+
+class TestI2vFormStateApi(_I2vApiBase):
+    """GET /videos hands the dialog a complete form_state per clip, and
+    PATCH /videos/{id} autosaves into it without touching the rendered
+    facts."""
+
+    FORM = {
+        "idea": "a cat",
+        "prompt": "[Shot 1] as submitted",
+        "duration_s": 10.0,
+        "quality": "quality",
+        "megapixels": 0.5,
+        "steps": 30,
+        "seed": 42,
+        "loras": [{"name": "a.safetensors", "strength": 0.8}],
+    }
+
+    def _clip(self, path="/lib/out.mp4", **kw):
+        _seed_media(self.db, [path])
+        return self.db.create_i2v_video(
+            source_path="/lib/a.png",
+            file_path=path,
+            prompt_used="[Shot 1] as submitted",
+            seed=42,
+            duration_s=10.0,
+            quality="quality",
+            steps=30,
+            width=640,
+            height=1184,
+            **kw,
+        )
+
+    def _videos(self):
+        resp = self.client.get("/api/i2v/videos", params={"source_path": "/lib/a.png"})
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()
+
+    def test_list_returns_the_stored_form_state(self):
+        self._clip(form_state=self.FORM, megapixels=0.5, loras=self.FORM["loras"])
+        self.assertEqual(self._videos()[0]["form_state"], self.FORM)
+
+    def test_list_builds_a_form_state_for_a_clip_that_predates_the_column(self):
+        self._clip()  # no form_state, no megapixels, no loras
+        state = self._videos()[0]["form_state"]
+        self.assertEqual(state["prompt"], "[Shot 1] as submitted")
+        self.assertEqual(state["seed"], 42)
+        self.assertEqual(state["megapixels"], 0.75)  # 640x1184 snapped
+        self.assertEqual(state["loras"], [])
+
+    def test_patch_merges_into_the_form_state(self):
+        vid = self._clip(form_state=self.FORM)
+
+        resp = self.client.patch(
+            f"/api/i2v/videos/{vid}", json={"prompt": "edited", "seed": 7}
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        expected = {**self.FORM, "prompt": "edited", "seed": 7}
+        self.assertEqual(resp.json()["form_state"], expected)
+        self.assertEqual(self._videos()[0]["form_state"], expected)
+
+    def test_patch_never_touches_the_rendered_facts(self):
+        vid = self._clip(form_state=self.FORM)
+
+        self.client.patch(
+            f"/api/i2v/videos/{vid}",
+            json={"prompt": "edited", "seed": 7, "quality": "fast", "steps": None},
+        )
+
+        row = self._videos()[0]
+        self.assertEqual(row["prompt_used"], "[Shot 1] as submitted")
+        self.assertEqual(row["seed"], 42)
+        self.assertEqual(row["quality"], "quality")
+        self.assertEqual(row["steps"], 30)
+
+    def test_patch_on_a_legacy_clip_starts_from_its_built_form_state(self):
+        vid = self._clip()
+
+        resp = self.client.patch(f"/api/i2v/videos/{vid}", json={"idea": "new idea"})
+
+        state = resp.json()["form_state"]
+        self.assertEqual(state["idea"], "new idea")
+        self.assertEqual(state["prompt"], "[Shot 1] as submitted")  # not lost
+        self.assertEqual(state["seed"], 42)
+
+    def test_patch_unknown_video_is_404(self):
+        resp = self.client.patch("/api/i2v/videos/99999", json={"idea": "x"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_patch_bad_value_is_400_naming_the_field(self):
+        vid = self._clip(form_state=self.FORM)
+        resp = self.client.patch(f"/api/i2v/videos/{vid}", json={"quality": "ultra"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("quality", resp.json()["detail"])
+
+    def test_patch_unknown_field_is_400(self):
+        vid = self._clip(form_state=self.FORM)
+        resp = self.client.patch(f"/api/i2v/videos/{vid}", json={"prompt_used": "x"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_patch_empty_body_is_400(self):
+        vid = self._clip(form_state=self.FORM)
+        resp = self.client.patch(f"/api/i2v/videos/{vid}", json={})
+        self.assertEqual(resp.status_code, 400)
 
 
 class TestGetI2vConfig(unittest.TestCase):
