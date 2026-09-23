@@ -616,6 +616,7 @@ class TestFormStateAtIngest(I2vRunnerBase):
                 "steps": 30,
                 "seed": 123,
                 "loras": [],
+                "template_id": None,
             },
         )
 

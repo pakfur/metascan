@@ -31,6 +31,7 @@ FORM_FIELDS = (
     "steps",
     "seed",
     "loras",
+    "template_id",
 )
 
 QUALITIES = ("fast", "quality")
@@ -101,6 +102,15 @@ def _quality(value: Any) -> str:
     return str(value)
 
 
+def _template_id(value: Any) -> Optional[str]:
+    # The découpage cadence the clip was made with; None = single take.
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise FormStateError("template_id must be a non-empty string or null")
+    return value
+
+
 _VALIDATORS = {
     "idea": lambda v: _text(v, "idea"),
     "prompt": lambda v: _text(v, "prompt"),
@@ -110,6 +120,7 @@ _VALIDATORS = {
     "steps": _steps,
     "seed": lambda v: _whole(v, "seed"),
     "loras": _loras,
+    "template_id": _template_id,
 }
 
 
@@ -138,6 +149,7 @@ def build_form_state(
     steps: Optional[int],
     seed: int,
     loras: Optional[Sequence[Mapping[str, Any]]],
+    template_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The form exactly as it stood when Generate was clicked."""
     return {
@@ -149,6 +161,7 @@ def build_form_state(
         "steps": int(steps) if steps is not None else None,
         "seed": int(seed),
         "loras": [dict(entry) for entry in (loras or [])],
+        "template_id": template_id,
     }
 
 
@@ -196,6 +209,7 @@ def form_state_for_row(
         "steps": row.get("steps"),
         "seed": row.get("seed"),
         "loras": list(rendered_loras) if isinstance(rendered_loras, list) else [],
+        "template_id": row.get("template_id"),
     }
     stored = row.get("form_state")
     if isinstance(stored, Mapping):
