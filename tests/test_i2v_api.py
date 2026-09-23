@@ -517,6 +517,7 @@ class TestI2vFormStateApi(_I2vApiBase):
         "steps": 30,
         "seed": 42,
         "loras": [{"name": "a.safetensors", "strength": 0.8}],
+        "template_id": None,
     }
 
     def _clip(self, path="/lib/out.mp4", **kw):

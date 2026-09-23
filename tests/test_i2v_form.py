@@ -106,6 +106,7 @@ def test_a_legacy_row_gets_a_form_state_built_from_its_rendered_facts():
         "steps": 25,
         "seed": 1411732318,
         "loras": [],
+        "template_id": None,
     }
 
 
@@ -174,3 +175,49 @@ def test_validate_rejects_bad_values_naming_the_field(body, fragment):
 def test_validate_rejects_an_empty_patch():
     with pytest.raises(FormStateError):
         validate_form_patch({})
+
+
+def test_template_id_is_a_form_field_defaulting_to_none():
+    assert "template_id" in FORM_FIELDS
+    state = build_form_state(
+        idea="",
+        prompt="p",
+        duration_s=6,
+        quality="fast",
+        megapixels=0.5,
+        steps=None,
+        seed=1,
+        loras=None,
+    )
+    assert state["template_id"] is None
+    state = build_form_state(
+        idea="",
+        prompt="p",
+        duration_s=15,
+        quality="fast",
+        megapixels=0.5,
+        steps=None,
+        seed=1,
+        loras=None,
+        template_id="dialog_ots_15",
+    )
+    assert state["template_id"] == "dialog_ots_15"
+
+
+def test_legacy_row_form_state_has_no_template():
+    state = form_state_for_row({"form_state": None, "seed": 3}, MEGAPIXEL_OPTIONS)
+    assert state["template_id"] is None
+
+
+def test_validate_accepts_a_template_id_or_null():
+    assert validate_form_patch({"template_id": "melee_12"}) == {
+        "template_id": "melee_12"
+    }
+    assert validate_form_patch({"template_id": None}) == {"template_id": None}
+
+
+@pytest.mark.parametrize("bad", [5, "", "   ", ["x"]])
+def test_validate_rejects_a_non_string_or_blank_template_id(bad):
+    with pytest.raises(FormStateError) as excinfo:
+        validate_form_patch({"template_id": bad})
+    assert "template_id" in str(excinfo.value)
