@@ -51,9 +51,31 @@ const cadence = computed(() => (selectedTemplate.value ? cadenceChips(selectedTe
 // Loading a clip whose template file has since been removed.
 const missingTemplateNote = ref('')
 
+// Re-asserts the template's current duration_s whenever the selected
+// template changes, including on load (loadClip assigns templateId
+// directly rather than going through onCadenceChange below). If a
+// template's duration_s is edited in the library after clips were made
+// with it, reloading one of those clips drifts the form to the template's
+// new duration rather than the one the clip actually rendered at.
 watch(selectedTemplate, (t) => {
   if (t) durationS.value = t.duration_s
 })
+
+// The select's own @change handler (not v-model) so the note is cleared
+// exactly on a genuine user pick and never by loadClip's own assignment.
+// A watch(templateId) alternative was considered, but loadClip sets
+// templateId then the note synchronously, and the watcher fires later
+// (post-flush) -- an unconditional clear there would wipe the note
+// loadClip just set; a suppress-flag guard is also unsound because
+// assigning templateId to its *current* value (e.g. loading a second
+// missing-template clip while already on Single take) doesn't trigger the
+// watcher at all, leaving the flag stuck and swallowing the next real
+// user change. Tying the clear directly to the change event has neither
+// problem.
+function onCadenceChange(id: string) {
+  templateId.value = id
+  missingTemplateNote.value = ''
+}
 
 const expanding = ref(false)
 const submitting = ref(false)
@@ -501,7 +523,10 @@ function jobLabel(chip: {
         <div class="i2v-controls">
           <label class="fld">
             <span>Cadence</span>
-            <select v-model="templateId">
+            <select
+              :value="templateId"
+              @change="onCadenceChange(($event.target as HTMLSelectElement).value)"
+            >
               <option value="">Single take</option>
               <option
                 v-for="t in store.templates"
