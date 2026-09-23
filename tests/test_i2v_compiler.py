@@ -225,3 +225,35 @@ class TestI2vDims(unittest.TestCase):
     def test_rejects_non_positive_megapixels(self):
         with self.assertRaises(c.I2vError):
             c.i2v_dims(1920, 1080, 0.0)
+
+
+def test_single_take_output_is_pinned():
+    """template_id = null must stay byte-for-byte what it was before
+    découpage templates existed (spec §5.1). If this test fails, the
+    single-take path changed -- that is a bug, not a golden to update."""
+    from metascan.core.i2v_compiler import (
+        ALIGNMENT_LINE,
+        I2vBeat,
+        I2vResult,
+        assemble_i2v_prompt,
+    )
+
+    result = I2vResult(
+        beats=[
+            I2vBeat(action="She lifts the cup", camera="static"),
+            I2vBeat(action="She turns to the window", camera="push_in"),
+            I2vBeat(action="She smiles", camera="static"),
+        ],
+        overall_soundscape="quiet room",
+        non_diegetic_music="none",
+    )
+    assert assemble_i2v_prompt(result) == (
+        ALIGNMENT_LINE
+        + "\n\nintegrated_multimodal_description: [Shot 1] The subjects, "
+        "composition, and setting shown in <Picture 1> are established at 0.00 "
+        "seconds and keep their appearance, clothing, colors, and spatial "
+        "relationships. She lifts the cup. She turns to the window. The camera "
+        "pushes in. She smiles."
+        "\n\noverall_soundscape: quiet room."
+        "\n\nnon_diegetic_music: none."
+    )

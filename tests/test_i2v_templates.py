@@ -650,3 +650,82 @@ def test_melee_and_intimate_shapes():
     assert "At 00:05.000, the camera pushes in at slow speed." in text
     assert "At 00:10.000, the camera holds a static shot." in text
     assert "[Shot 2]" not in text
+
+
+# ---- lint --------------------------------------------------------------
+
+from metascan.core.i2v_compiler import lint_i2v_prompt  # noqa: E402
+from metascan.core.i2v_templates import lint_against_template  # noqa: E402
+
+
+def _dialog_text():
+    t = parse_i2v_template(DIALOG)
+    fill = validate_i2v_template_fill(json.dumps(DIALOG_FILL), t)
+    return t, assemble_i2v_template_prompt(t, fill)[0]
+
+
+def test_generated_text_lints_clean_against_its_template():
+    t, text = _dialog_text()
+    assert lint_against_template(text, t) == []
+    # and the full lint (base + template) adds nothing template-related
+    assert [
+        w for w in lint_i2v_prompt(text, 15.0, template=t) if "Shot" in w or "beat" in w
+    ] == []
+
+
+def test_lint_flags_a_missing_shot():
+    t, text = _dialog_text()
+    text = text.replace("[Shot 3] At 00:05.000, ", "")
+    issues = lint_against_template(text, t)
+    assert any("2 shots" in w and "3" in w for w in issues)
+
+
+def test_lint_flags_non_contiguous_numbering():
+    t, text = _dialog_text()
+    text = text.replace("[Shot 3]", "[Shot 4]")
+    assert any("contiguous" in w for w in lint_against_template(text, t))
+
+
+def test_lint_flags_a_timestamp_on_shot_one():
+    t, text = _dialog_text()
+    text = text.replace("[Shot 1] ", "[Shot 1] At 00:00.000, ")
+    assert any(
+        "Shot 1" in w and "timestamp" in w for w in lint_against_template(text, t)
+    )
+
+
+def test_lint_flags_cut_times_out_of_order_or_past_the_end():
+    t, text = _dialog_text()
+    issues = lint_against_template(text.replace("At 00:05.000", "At 00:03.000"), t)
+    assert any("increase" in w for w in issues)
+    issues = lint_against_template(text.replace("At 00:05.000", "At 00:16.000"), t)
+    assert any("15" in w and "duration" in w for w in issues)
+
+
+def test_lint_flags_a_missing_camera_phrase_in_a_shot():
+    t, text = _dialog_text()
+    text = text.replace("The camera pulls out at slow speed. ", "")
+    issues = lint_against_template(text, t)
+    assert any("Shot 3" in w and "pulls out" in w for w in issues)
+
+
+def test_lint_flags_a_missing_line_where_a_speaker_is_set():
+    t, text = _dialog_text()
+    text = text.replace(
+        "The man in the leather jacket (S1) says: <d>[English] I told you, we shouldn't be here.</d>",
+        "",
+    )
+    issues = lint_against_template(text, t)
+    assert any("Shot 1" in w and "B speaks" in w for w in issues)
+
+
+def test_lint_flags_a_cut_time_that_moved_from_the_template():
+    t, text = _dialog_text()
+    text = text.replace("At 00:04.000", "At 00:04.500")
+    issues = lint_against_template(text, t)
+    assert any("Shot 2" in w and "00:04.000" in w for w in issues)
+
+
+def test_base_lint_is_unchanged_when_no_template_is_given():
+    _, text = _dialog_text()
+    assert lint_i2v_prompt(text, 15.0) == lint_i2v_prompt(text, 15.0, template=None)

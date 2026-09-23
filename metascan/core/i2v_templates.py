@@ -774,6 +774,95 @@ def assemble_i2v_template_prompt(
     return text, notes
 
 
+# ---- lint --------------------------------------------------------------
+#
+# Advisory only. Runs on generated AND hand-edited text. Text-only: the
+# fill is not available here, so "every role's tag appears in every beat
+# that casts it" (spec §5.6) is guaranteed by assembly for generated text
+# and NOT checked on hand edits.
+
+# The negative lookahead excludes ALIGNMENT_LINE's own "(from [Shot 1])"
+# citation -- a real marker is never immediately followed by ")".
+_SHOT_MARK = re.compile(r"\[Shot (\d+)\](?!\))(?: At (\d\d):(\d\d\.\d{3}),)?")
+
+
+def _shot_spans(text: str) -> List[Tuple[int, Optional[float], str]]:
+    """[(shot_no, cut_time_s or None, span_text), ...] in document order."""
+    marks = list(_SHOT_MARK.finditer(text))
+    out: List[Tuple[int, Optional[float], str]] = []
+    for k, m in enumerate(marks):
+        end = marks[k + 1].start() if k + 1 < len(marks) else len(text)
+        stamp = None
+        if m.group(2) is not None:
+            stamp = int(m.group(2)) * 60 + float(m.group(3))
+        out.append((int(m.group(1)), stamp, text[m.end() : end]))
+    return out
+
+
+def lint_against_template(text: str, t: I2vTemplate) -> List[str]:
+    issues: List[str] = []
+    spans = _shot_spans(text)
+    expected = shots_of(t)
+
+    if len(spans) != len(expected):
+        issues.append(
+            f"text has {len(spans)} shots; template '{t.id}' has {len(expected)}"
+        )
+    if [s[0] for s in spans] != list(range(1, len(spans) + 1)):
+        issues.append("[Shot n] numbers must be contiguous from 1")
+    if spans and spans[0][1] is not None:
+        issues.append("Shot 1 must not carry a timestamp (base guide 4.2)")
+
+    last = 0.0
+    for shot_no, stamp, _ in spans[1:]:
+        if stamp is None:
+            issues.append(f"Shot {shot_no} has no 'At MM:SS.mmm,' cut time")
+            continue
+        if stamp <= last:
+            issues.append(
+                f"Shot {shot_no} cut time must increase (after {_timestamp(last)})"
+            )
+        if stamp >= t.duration_s:
+            issues.append(
+                f"Shot {shot_no} cut time {_timestamp(stamp)} is past the "
+                f"{t.duration_s:.0f}s duration"
+            )
+        last = stamp
+
+    for (shot_no, stamp, span), beat_ids in zip(spans, expected):
+        first = t.beats[beat_ids[0]]
+        if shot_no != 1 and stamp is not None and abs(stamp - first.start_s) > 1e-6:
+            issues.append(
+                f"Shot {shot_no} cuts at {_timestamp(stamp)}; template has "
+                f"{_timestamp(first.start_s)}"
+            )
+        for bi in beat_ids:
+            b = t.beats[bi]
+            phrase = (
+                "static shot"
+                if b.camera.camera_motion == "static"
+                else _CAMERA_PHRASES[b.camera.camera_motion]
+            )
+            if phrase not in span:
+                issues.append(
+                    f"Shot {shot_no} lacks its camera move '{phrase}' "
+                    f"({describe_beat(t, bi).split(':', 1)[0]})"
+                )
+        need = sum(1 for bi in beat_ids if t.beats[bi].speaker)
+        have = span.count("<d>")
+        if have < need:
+            who = ", ".join(
+                f"{t.beats[bi].speaker} speaks"
+                for bi in beat_ids
+                if t.beats[bi].speaker
+            )
+            issues.append(
+                f"Shot {shot_no} has {have} spoken line(s) but the template has "
+                f"{need} ({who})"
+            )
+    return issues
+
+
 __all__ = [
     "I2V_ANGLE_VALUES",
     "I2V_MOTION_VALUES",
@@ -796,6 +885,7 @@ __all__ = [
     "get_i2v_template",
     "i2v_template_grammar",
     "i2v_template_max_tokens",
+    "lint_against_template",
     "load_i2v_templates",
     "parse_i2v_template",
     "reload_i2v_templates",
