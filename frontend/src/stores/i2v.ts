@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Media } from '../types/media'
-import type { I2vConfig, I2vFormState, I2vJobChip, I2vVideo } from '../types/i2v'
-import { fetchI2vConfig, listI2vVideos, updateI2vFormState } from '../api/i2v'
+import type { I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVideo } from '../types/i2v'
+import { fetchI2vConfig, listI2vTemplates, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { updateMedia } from '../api/media'
 
@@ -16,12 +16,20 @@ export const useI2vStore = defineStore('i2v', () => {
   const videos = ref<I2vVideo[]>([])
   const jobs = ref<Map<number, I2vJobChip>>(new Map())
   const config = ref<I2vConfig | null>(null)
+  // The découpage library. Loaded once per open(); a failure leaves it
+  // empty and the dialog offers only Single take.
+  const templates = ref<I2vTemplate[]>([])
 
   async function open(media: Media): Promise<void> {
     source.value = media
     jobs.value = new Map()
     videos.value = []
     config.value = await fetchI2vConfig()
+    try {
+      templates.value = await listI2vTemplates()
+    } catch {
+      templates.value = []
+    }
     await Promise.all([refreshVideos(), refreshActiveJobs()])
   }
 
@@ -164,6 +172,7 @@ export const useI2vStore = defineStore('i2v', () => {
     videos,
     jobs,
     config,
+    templates,
     open,
     close,
     refreshVideos,
