@@ -303,3 +303,166 @@ def test_the_shipped_library_loads_and_has_the_expected_cadences():
     assert lib["intimate_15"].duration_s == 15.0
     assert [r.id for r in lib["melee_12"].roles] == ["A", "B"]
     assert [r.id for r in lib["intimate_15"].roles] == ["A"]
+
+
+# ---- grammar / prompt / fill ------------------------------------------
+
+from metascan.core.i2v_compiler import I2vError  # noqa: E402
+from metascan.core.i2v_templates import (  # noqa: E402
+    build_i2v_template_user_prompt,
+    describe_beat,
+    i2v_template_grammar,
+    i2v_template_max_tokens,
+    validate_i2v_template_fill,
+)
+
+
+def _fill(t, **over) -> str:
+    """A well-formed VLM response for ``t``."""
+    roles = [
+        {
+            "id": r.id,
+            "bound": True,
+            "description": f"desc of {r.id}",
+            "tag": f"tag {r.id}",
+        }
+        for r in t.roles
+    ]
+    beats = []
+    for b in t.beats:
+        beat = {"action": f"action for {b.start_s}"}
+        if b.speaker:
+            beat["line"] = f"line by {b.speaker}"
+        beats.append(beat)
+    data = {
+        "roles": roles,
+        "beats": beats,
+        "overall_soundscape": "room tone",
+        "non_diegetic_music": "none",
+    }
+    data.update(over)
+    return json.dumps(data)
+
+
+def test_grammar_bakes_in_role_ids_and_beat_count():
+    t = parse_i2v_template(DIALOG)
+    g = i2v_template_grammar(t)
+    assert "role0 ::=" in g and "role1 ::=" in g and "role2 ::=" not in g
+    assert '"\\"A\\""' in g and '"\\"B\\""' in g
+    assert "beat3 ::=" in g and "beat4 ::=" not in g
+    assert 'boolean ::= "true" | "false"' in g
+
+
+def test_grammar_requires_a_line_exactly_where_a_speaker_is_set():
+    t = parse_i2v_template(DIALOG)
+    rules = dict(
+        line.split(" ::= ", 1)
+        for line in i2v_template_grammar(t).splitlines()
+        if " ::= " in line
+    )
+    assert '"\\"line\\""' in rules["beat0"]  # B speaks
+    assert '"\\"line\\""' not in rules["beat1"]
+    assert '"\\"line\\""' in rules["beat2"]  # A speaks
+    assert '"\\"line\\""' not in rules["beat3"]
+
+
+def test_grammar_with_no_roles_is_still_valid():
+    d = _with(roles=[])
+    for b in d["beats"]:
+        b["cast"], b["speaker"] = [], None
+    g = i2v_template_grammar(parse_i2v_template(d))
+    assert '"\\"roles\\"" ws ":" ws "[" ws  ws "]"' in g
+
+
+def test_max_tokens_scales_with_beats_and_roles():
+    t = parse_i2v_template(DIALOG)
+    assert i2v_template_max_tokens(t) > 260 + 90 * 4
+
+
+def test_describe_beat_reads_like_a_brief():
+    t = parse_i2v_template(DIALOG)
+    assert describe_beat(t, 0) == (
+        "Beat 1 (0.0-4.0 s, medium shot, over the shoulder, camera trucks "
+        "right at slow speed; on screen: A, B; B speaks): over A's shoulder "
+        "onto B, who is speaking"
+    )
+    assert describe_beat(t, 1) == (
+        "Beat 2 (4.0-5.0 s, CUT to a close-up, eye level, camera holds a static "
+        "shot; on screen: B; no line): B's face; a reaction, not a line"
+    )
+    assert describe_beat(t, 2).startswith("Beat 3 (5.0-10.0 s, J-CUT to a medium shot")
+    assert "camera arcs around the subject with small amplitude" in describe_beat(t, 3)
+
+
+def test_user_prompt_lists_roles_beats_idea_and_soundscape_hint():
+    t = parse_i2v_template(DIALOG)
+    p = build_i2v_template_user_prompt(t, "two old friends argue about money")
+    assert "two old friends argue about money" in p
+    assert "15-second video" in p
+    assert "Role A: the listener first; speaks second" in p
+    assert "Role B: speaks first" in p
+    assert describe_beat(t, 0) in p
+    assert describe_beat(t, 3) in p
+    assert "room ambience appropriate to the setting" in p
+    assert "bound" in p  # explains the bound flag
+    assert "Beat 1" in p and "exactly what the image depicts" in p
+
+
+def test_user_prompt_with_empty_idea_says_so():
+    t = parse_i2v_template(DIALOG)
+    assert "(none -- infer" in build_i2v_template_user_prompt(t, "  ")
+
+
+def test_validate_fill_round_trips_a_good_response():
+    t = parse_i2v_template(DIALOG)
+    f = validate_i2v_template_fill(_fill(t), t)
+    assert f.roles["A"].bound is True
+    assert f.roles["B"].tag == "tag B"
+    assert [b.line for b in f.beats] == ["line by B", None, "line by A", None]
+    assert f.overall_soundscape == "room tone"
+
+
+def test_validate_fill_normalises_whitespace_and_defaults_sound():
+    t = parse_i2v_template(DIALOG)
+    raw = _fill(t, overall_soundscape="  ", non_diegetic_music="")
+    f = validate_i2v_template_fill(raw, t)
+    assert f.overall_soundscape == "Natural ambient sound consistent with the scene."
+    assert f.non_diegetic_music == "No non-diegetic music."
+
+
+@pytest.mark.parametrize(
+    "over, fragment",
+    [
+        ({"beats": [{"action": "x"}]}, "4 beats"),
+        ({"roles": []}, "role"),
+    ],
+)
+def test_validate_fill_rejects_structural_mismatch(over, fragment):
+    t = parse_i2v_template(DIALOG)
+    with pytest.raises(I2vError) as excinfo:
+        validate_i2v_template_fill(_fill(t, **over), t)
+    assert fragment in str(excinfo.value)
+
+
+def test_validate_fill_rejects_a_missing_or_blank_line_where_a_speaker_is_set():
+    t = parse_i2v_template(DIALOG)
+    data = json.loads(_fill(t))
+    data["beats"][0]["line"] = "   "
+    with pytest.raises(I2vError) as excinfo:
+        validate_i2v_template_fill(json.dumps(data), t)
+    assert "beat 1" in str(excinfo.value)
+
+
+def test_validate_fill_rejects_a_blank_tag_or_description():
+    t = parse_i2v_template(DIALOG)
+    data = json.loads(_fill(t))
+    data["roles"][1]["tag"] = ""
+    with pytest.raises(I2vError) as excinfo:
+        validate_i2v_template_fill(json.dumps(data), t)
+    assert "B" in str(excinfo.value)
+
+
+def test_validate_fill_rejects_non_json():
+    t = parse_i2v_template(DIALOG)
+    with pytest.raises(I2vError):
+        validate_i2v_template_fill("{not json", t)
