@@ -31,6 +31,11 @@ from metascan.core.i2v_output import (
     resolve_output_target,
 )
 from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.core.i2v_templates import (
+    I2vTemplateError,
+    get_i2v_template,
+    lint_against_template,
+)
 from metascan.utils.path_utils import to_native_path
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
@@ -69,11 +74,14 @@ class PromptRequest(BaseModel):
     source_path: str
     idea: str = ""
     duration_s: float
+    # Découpage cadence; null = single take (the pre-template behaviour).
+    template_id: Optional[str] = None
 
 
 class LintRequest(BaseModel):
     prompt: str
     duration_s: float
+    template_id: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -92,6 +100,9 @@ class GenerateRequest(BaseModel):
     # Sampler steps. Only the High quality preset is ever driven, and only
     # when its workflow binds MS_STEPS; ignored otherwise.
     steps: Optional[int] = None
+    # Recorded into the clip's form_state only; the prompt text already
+    # embodies the cadence, so the render never needs the template.
+    template_id: Optional[str] = None
 
 
 @router.post("/prompt")
@@ -101,13 +112,15 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
     try:
         prompt, warnings = await runner.generate_prompt(
-            body.source_path, body.idea, body.duration_s
+            body.source_path, body.idea, body.duration_s, template_id=body.template_id
         )
     except I2vUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VlmSelectError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except I2vRequestError as exc:
+        if str(exc).startswith("unknown i2v template"):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -127,7 +140,22 @@ async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
     """
     if body.duration_s <= 0:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
-    return lint_i2v_report(body.prompt, body.duration_s)
+    template = None
+    warnings_extra: List[str] = []
+    if body.template_id:
+        try:
+            template = get_i2v_template(body.template_id)
+        except I2vTemplateError:
+            warnings_extra.append(
+                f"unknown i2v template '{body.template_id}'; linted as a single take"
+            )
+    report = lint_i2v_report(body.prompt, body.duration_s)
+    if template is not None:
+        report["warnings"] = list(report["warnings"]) + lint_against_template(
+            body.prompt, template
+        )
+    report["warnings"] = list(report["warnings"]) + warnings_extra
+    return report
 
 
 @router.post("/generate")
@@ -169,6 +197,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             steps=body.steps,
             output_root=cfg["output_root"] or None,
             output_prefix=cfg["output_prefix"],
+            template_id=body.template_id,
         )
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -180,6 +209,16 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         "job_id": job_id,
         "warnings": lint_i2v_prompt(body.prompt, body.duration_s),
     }
+
+
+@router.get("/templates")
+async def list_templates() -> List[Dict[str, Any]]:
+    cfg = get_i2v_config(load_app_config())
+    try:
+        return await _service().list_templates(cfg["durations"])
+    except I2vTemplateError as exc:
+        # A malformed library file must not load silently.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def _megapixel_options() -> List[float]:
