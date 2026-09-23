@@ -19,10 +19,13 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from metascan.core.h3_compiler import _CAMERA_PHRASES
 from metascan.core.i2v_fixes import camera_findings, speech_findings
+
+if TYPE_CHECKING:  # pragma: no cover -- import cycle at runtime
+    from metascan.core.i2v_templates import I2vTemplate
 
 
 class I2vError(RuntimeError):
@@ -212,9 +215,13 @@ _DESCRIPTION_RE = re.compile(
 _MIN_WORDS_PER_BEAT = 12
 
 
-def lint_i2v_prompt(text: str, duration_s: float) -> List[str]:
+def lint_i2v_prompt(
+    text: str, duration_s: float, template: Optional["I2vTemplate"] = None
+) -> List[str]:
     """Expectation-driven advisory lint over the final document text.
-    Warnings only -- runs on generated AND hand-edited prompts."""
+    Warnings only -- runs on generated AND hand-edited prompts. With a
+    découpage ``template`` the structural checks in
+    ``i2v_templates.lint_against_template`` run as well."""
     issues: List[str] = []
     lines = text.splitlines()
     if not lines or lines[0].strip() != ALIGNMENT_LINE:
@@ -255,6 +262,11 @@ def lint_i2v_prompt(text: str, duration_s: float) -> List[str]:
     # knows how to rewrite most of them (the dialog's "Apply fixes").
     issues.extend(f.message for f in camera_findings(text))
     issues.extend(f.message for f in speech_findings(text))
+    if template is not None:
+        # Function-level: i2v_templates imports this module.
+        from metascan.core.i2v_templates import lint_against_template
+
+        issues.extend(lint_against_template(text, template))
     return issues
 
 
