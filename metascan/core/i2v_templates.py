@@ -23,7 +23,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from metascan.core.h3_compiler import _CAMERA_PHRASES
-from metascan.core.i2v_compiler import _COMMON, I2vError
+from metascan.core.i2v_compiler import (
+    _COMMON,
+    _OPENING,
+    ALIGNMENT_LINE,
+    I2vError,
+    _sentence,
+)
 from metascan.core.storyboard_parse import (
     ANGLE_VALUES,
     LENS_VALUES,
@@ -560,6 +566,214 @@ def validate_i2v_template_fill(raw: str, t: I2vTemplate) -> I2vTemplateFill:
     )
 
 
+# ---- assembly ----------------------------------------------------------
+
+
+def _join_names(names: Sequence[str]) -> str:
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _capital(text: str) -> str:
+    return text[0].upper() + text[1:] if text else text
+
+
+class _Names:
+    """First mention -> description, afterwards -> tag."""
+
+    def __init__(self, fill: I2vTemplateFill) -> None:
+        self._fill = fill
+        self._seen: set[str] = set()
+
+    def __call__(self, role_id: str) -> str:
+        r = self._fill.roles[role_id]
+        if role_id in self._seen:
+            return r.tag
+        self._seen.add(role_id)
+        return r.description
+
+    def seen(self, role_id: str) -> bool:
+        return role_id in self._seen
+
+
+class _Speakers:
+    """(S1), (S2) ... in order of first line."""
+
+    def __init__(self) -> None:
+        self._ids: Dict[str, int] = {}
+
+    def __call__(self, role_id: str) -> str:
+        if role_id not in self._ids:
+            self._ids[role_id] = len(self._ids) + 1
+        return f"(S{self._ids[role_id]})"
+
+
+def _line_sentence(
+    name: str, sid: str, line: str, *, off_screen: bool = False, capital: bool = True
+) -> str:
+    """``The man in the leather jacket (S1) says: <d>[English] ...</d>``.
+    ``capital`` is False when the sentence continues an ``At MM:SS.mmm,``
+    stamp (the j_cut form); the "Off-screen, " prefix takes the capital
+    itself."""
+    prefix = "Off-screen, " if off_screen else ""
+    shown = name if (off_screen or not capital) else _capital(name)
+    return f"{prefix}{shown} {sid} says: <d>[English] {_sentence(line)}</d>"
+
+
+def _framing(cam: I2vCamera, names: Sequence[str], *, opening: bool) -> str:
+    """The sentence that establishes a shot's framing and who is in it."""
+    if cam.angle == "ots" and len(names) >= 2:
+        size = SHOT_SIZE_PHRASES[cam.shot_size].split(" ", 1)[1]  # drop article
+        if opening:
+            return (
+                f"An over-the-shoulder {size} looks past {names[0]} onto "
+                f"{_join_names(names[1:])}."
+            )
+        return (
+            f"the shot cuts to an over-the-shoulder {size} looking past "
+            f"{names[0]} onto {_join_names(names[1:])}."
+        )
+    phrase = framing_phrase(cam)
+    if opening:
+        who = _join_names(names) or "the scene"
+        return f"{_capital(phrase)} frames {who}."
+    return f"the shot cuts to {phrase}" + (
+        f" of {_join_names(names)}." if names else "."
+    )
+
+
+def assemble_i2v_template_prompt(
+    t: I2vTemplate, fill: I2vTemplateFill
+) -> Tuple[str, List[str]]:
+    """Deterministic H3 document from template + fill. Returns the text
+    and advisory notes (the off-screen rule). Code owns 100% of the
+    document structure; the VLM's words appear only as actions, lines,
+    role descriptions/tags and the two sound fields.
+
+    Name lookups are ordered to match the TEXT's reading order, not the
+    beat's data order -- ``_Names`` hands out a role's full description
+    on its first call and a short tag on every call after, so whichever
+    mention actually reads first in the document is the one that gets
+    the description. A j_cut's line reads before its framing clause, so
+    the speaker is resolved before the shot's cast names; every other
+    beat shape reads framing (or "is now in frame") before its line.
+    """
+    names = _Names(fill)
+    speakers = _Speakers()
+    notes: List[str] = []
+    parts: List[str] = []
+    shot_no = 0
+
+    for i, b in enumerate(t.beats):
+        cast = list(b.cast)
+        off_screen_speaker = False
+        if i == 0:
+            for rid in b.cast:
+                if not fill.roles[rid].bound:
+                    cast.remove(rid)
+                    later = next(
+                        (
+                            j + 1
+                            for j in range(1, len(t.beats))
+                            if rid in t.beats[j].cast
+                        ),
+                        None,
+                    )
+                    notes.append(
+                        f"role {rid} is not in the picture; the template casts it "
+                        f"in the first shot, so it enters at beat "
+                        f"{later if later is not None else 'never'} instead"
+                    )
+                    if b.speaker == rid:
+                        off_screen_speaker = True
+
+        opens_shot = i == 0 or b.transition != "continuous"
+        segment: List[str] = []
+
+        if i == 0:
+            shot_no = 1
+            opening_rest = _OPENING.removeprefix("[Shot 1] ")
+            if t.look:
+                head = f"[Shot 1] {_sentence(_capital(t.look))} {opening_rest}"
+            else:
+                head = _OPENING
+            segment.append(head)
+            cast_names = [names(rid) for rid in cast]
+            segment.append(_framing(b.camera, cast_names, opening=True))
+            segment.append(camera_sentence(b.camera))
+            segment.append(_sentence(fill.beats[i].action))
+            if b.speaker:
+                segment.append(
+                    _line_sentence(
+                        names(b.speaker),
+                        speakers(b.speaker),
+                        fill.beats[i].line or "",
+                        off_screen=off_screen_speaker,
+                    )
+                )
+        elif opens_shot:
+            shot_no += 1
+            stamp = f"[Shot {shot_no}] At {_timestamp(b.start_s)},"
+            if b.transition == "j_cut" and b.speaker:
+                # The line reads before the framing clause -- resolve the
+                # speaker's name first so its first mention lands here.
+                line = _line_sentence(
+                    names(b.speaker),
+                    speakers(b.speaker),
+                    fill.beats[i].line or "",
+                    capital=False,
+                )
+                cast_names = [names(rid) for rid in cast]
+                segment.append(
+                    f"{stamp} {line}, the words carrying over from the previous "
+                    f"shot, as {_framing(b.camera, cast_names, opening=False)}"
+                )
+                segment.append(camera_sentence(b.camera))
+                segment.append(_sentence(fill.beats[i].action))
+            else:
+                cast_names = [names(rid) for rid in cast]
+                segment.append(
+                    f"{stamp} {_framing(b.camera, cast_names, opening=False)}"
+                )
+                segment.append(camera_sentence(b.camera))
+                segment.append(_sentence(fill.beats[i].action))
+                if b.speaker:
+                    segment.append(
+                        _line_sentence(
+                            names(b.speaker),
+                            speakers(b.speaker),
+                            fill.beats[i].line or "",
+                        )
+                    )
+        else:
+            newly = [rid for rid in cast if not names.seen(rid)]
+            segment.append(
+                f"At {_timestamp(b.start_s)}, {camera_sentence(b.camera, capital=False)}"
+            )
+            for rid in newly:
+                segment.append(f"{_capital(names(rid))} is now in frame.")
+            segment.append(_sentence(fill.beats[i].action))
+            if b.speaker:
+                segment.append(
+                    _line_sentence(
+                        names(b.speaker), speakers(b.speaker), fill.beats[i].line or ""
+                    )
+                )
+        parts.append(" ".join(segment))
+
+    description = " ".join(parts)
+    text = (
+        f"{ALIGNMENT_LINE}\n\n"
+        f"integrated_multimodal_description: {description}\n\n"
+        f"overall_soundscape: {_sentence(_capital(fill.overall_soundscape))}\n\n"
+        f"non_diegetic_music: {_sentence(_capital(fill.non_diegetic_music))}"
+    )
+    return text, notes
+
+
 __all__ = [
     "I2V_ANGLE_VALUES",
     "I2V_MOTION_VALUES",
@@ -574,6 +788,7 @@ __all__ = [
     "I2vTemplateFill",
     "MIN_BEAT_S",
     "TRANSITION_VALUES",
+    "assemble_i2v_template_prompt",
     "build_i2v_template_user_prompt",
     "camera_sentence",
     "describe_beat",
