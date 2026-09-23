@@ -466,3 +466,187 @@ def test_validate_fill_rejects_non_json():
     t = parse_i2v_template(DIALOG)
     with pytest.raises(I2vError):
         validate_i2v_template_fill("{not json", t)
+
+
+# ---- assembly ---------------------------------------------------------
+
+from metascan.core.i2v_compiler import ALIGNMENT_LINE  # noqa: E402
+from metascan.core.i2v_templates import assemble_i2v_template_prompt  # noqa: E402
+
+DIALOG_FILL = {
+    "roles": [
+        {
+            "id": "A",
+            "bound": True,
+            "description": "a woman in her thirties with dark hair and a red wool coat",
+            "tag": "the woman in the red coat",
+        },
+        {
+            "id": "B",
+            "bound": True,
+            "description": "a man in his forties with grey stubble and a black leather jacket",
+            "tag": "the man in the leather jacket",
+        },
+    ],
+    "beats": [
+        {
+            "action": "He leans across the table and speaks under his breath",
+            "line": "I told you, we shouldn't be here",
+        },
+        {"action": "His jaw tightens and he glances toward the door"},
+        {"action": "She sits back and folds her arms", "line": "It's already too late"},
+        {"action": "He exhales and nods once"},
+    ],
+    "overall_soundscape": "low jazz piano, glasses, muffled chatter",
+    "non_diegetic_music": "none",
+}
+
+EXPECTED_DIALOG = (
+    ALIGNMENT_LINE
+    + "\n\nintegrated_multimodal_description: [Shot 1] Cinematic, photorealistic "
+    "skin textures, fine grain. The subjects, composition, and setting shown in "
+    "<Picture 1> are established at 0.00 seconds and keep their appearance, "
+    "clothing, colors, and spatial relationships. An over-the-shoulder medium "
+    "shot looks past a woman in her thirties with dark hair and a red wool coat "
+    "onto a man in his forties with grey stubble and a black leather jacket. "
+    "The camera trucks right at slow speed. He leans across the table and "
+    "speaks under his breath. The man in the leather jacket (S1) says: "
+    "<d>[English] I told you, we shouldn't be here.</d> "
+    "[Shot 2] At 00:04.000, the shot cuts to a close-up of the man in the "
+    "leather jacket. The camera holds a static shot. His jaw tightens and he "
+    "glances toward the door. "
+    "[Shot 3] At 00:05.000, the woman in the red coat (S2) says: "
+    "<d>[English] It's already too late.</d>, the words carrying over from the "
+    "previous shot, as the shot cuts to a medium shot of the woman in the red "
+    "coat and the man in the leather jacket. The camera pulls out at slow "
+    "speed. She sits back and folds her arms. "
+    "At 00:10.000, the camera arcs around the subject with small amplitude. "
+    "He exhales and nods once."
+    "\n\noverall_soundscape: Low jazz piano, glasses, muffled chatter."
+    "\n\nnon_diegetic_music: None."
+)
+
+
+def test_dialog_golden():
+    t = parse_i2v_template(DIALOG)
+    fill = validate_i2v_template_fill(json.dumps(DIALOG_FILL), t)
+    text, notes = assemble_i2v_template_prompt(t, fill)
+    assert text == EXPECTED_DIALOG
+    assert notes == []
+
+
+def test_speaker_ids_follow_first_line_order():
+    t = parse_i2v_template(DIALOG)
+    fill = validate_i2v_template_fill(json.dumps(DIALOG_FILL), t)
+    text, _ = assemble_i2v_template_prompt(t, fill)
+    assert text.index("(S1)") < text.index("(S2)")
+    # Beat 1's line is sentence-initial (capitalised); beat 3's j_cut line
+    # continues the "At MM:SS.mmm," stamp (not capitalised) -- see EXPECTED_DIALOG.
+    assert "The man in the leather jacket (S1)" in text
+    assert "the woman in the red coat (S2)" in text
+
+
+def test_unbound_role_is_kept_out_of_shot_one_and_enters_later():
+    t = parse_i2v_template(DIALOG)
+    data = copy.deepcopy(DIALOG_FILL)
+    data["roles"][0]["bound"] = False  # A is not in the picture
+    fill = validate_i2v_template_fill(json.dumps(data), t)
+    text, notes = assemble_i2v_template_prompt(t, fill)
+
+    shot1 = text.split("[Shot 2]")[0]
+    assert "red wool coat" not in shot1  # A's description absent from Shot 1
+    assert "looks past" not in shot1  # ots collapses when only one is in frame
+    assert "A medium shot frames a man in his forties" in shot1
+    # A's full description appears at its first rendered mention, in Shot 3.
+    shot3 = text.split("[Shot 3]")[1]
+    assert (
+        "a woman in her thirties with dark hair and a red wool coat (S2) says" in shot3
+    )
+    assert notes == [
+        "role A is not in the picture; the template casts it in the first shot, "
+        "so it enters at beat 3 instead"
+    ]
+
+
+def test_unbound_speaker_in_shot_one_speaks_off_screen():
+    t = parse_i2v_template(DIALOG)
+    data = copy.deepcopy(DIALOG_FILL)
+    data["roles"][1]["bound"] = False  # B, who speaks in beat 1, is invented
+    fill = validate_i2v_template_fill(json.dumps(data), t)
+    text, notes = assemble_i2v_template_prompt(t, fill)
+    shot1 = text.split("[Shot 2]")[0]
+    assert (
+        "Off-screen, a man in his forties with grey stubble and a black leather "
+        "jacket (S1) says: <d>[English] I told you, we shouldn't be here.</d>"
+    ) in shot1
+    assert "A medium shot frames a woman in her thirties" in shot1
+    assert notes and "role B" in notes[0]
+
+
+def test_role_first_seen_in_a_continuous_beat_is_introduced():
+    d = copy.deepcopy(DIALOG)
+    d["beats"][0]["cast"], d["beats"][0]["speaker"] = ["B"], "B"
+    d["beats"][1]["transition"] = "continuous"
+    d["beats"][1]["cast"] = ["A", "B"]
+    d["beats"][2]["transition"] = "continuous"
+    d["beats"][3]["transition"] = "continuous"
+    t = parse_i2v_template(d)
+    fill = validate_i2v_template_fill(json.dumps(DIALOG_FILL), t)
+    text, _ = assemble_i2v_template_prompt(t, fill)
+    assert (
+        "At 00:04.000, the camera holds a static shot. A woman in her thirties with dark hair and a red wool coat is now in frame."
+        in text
+    )
+    assert "[Shot 2]" not in text
+
+
+def test_look_is_optional_and_shot_one_opener_is_the_single_take_one():
+    from metascan.core.i2v_compiler import _OPENING
+
+    d = _with(look="")
+    t = parse_i2v_template(d)
+    fill = validate_i2v_template_fill(json.dumps(DIALOG_FILL), t)
+    text, _ = assemble_i2v_template_prompt(t, fill)
+    assert "integrated_multimodal_description: " + _OPENING in text
+
+
+def test_shipped_templates_assemble_without_error():
+    from metascan.core.i2v_templates import I2V_TEMPLATES_DIR
+
+    for t in load_i2v_templates(I2V_TEMPLATES_DIR).values():
+        fill = validate_i2v_template_fill(_fill(t), t)
+        text, notes = assemble_i2v_template_prompt(t, fill)
+        assert text.startswith(ALIGNMENT_LINE)
+        assert notes == []
+        # ALIGNMENT_LINE itself cites "(from [Shot 1])", so the full text
+        # always has one more "[Shot " match than there are shots.
+        assert text.count("[Shot ") == len(shots_of(t)) + 1
+
+
+def test_melee_and_intimate_shapes():
+    from metascan.core.i2v_templates import I2V_TEMPLATES_DIR
+
+    lib = load_i2v_templates(I2V_TEMPLATES_DIR)
+    melee = lib["melee_12"]
+    text, _ = assemble_i2v_template_prompt(
+        melee, validate_i2v_template_fill(_fill(melee), melee)
+    )
+    assert "[Shot 1] High contrast, sharp reflections, fast kinetic energy. " in text
+    assert "A wide shot from a low angle frames desc of A and desc of B." in text
+    assert "At 00:03.000, the camera tracks the subject at fast speed." in text
+    assert (
+        "[Shot 2] At 00:07.000, the shot cuts to a medium shot of tag A and tag B. The camera shakes slightly."
+        in text
+    )
+
+    intimate = lib["intimate_15"]
+    text, _ = assemble_i2v_template_prompt(
+        intimate, validate_i2v_template_fill(_fill(intimate), intimate)
+    )
+    assert (
+        "An extreme close-up on a macro lens frames desc of A. The camera tilts up at slow speed."
+        in text
+    )
+    assert "At 00:05.000, the camera pushes in at slow speed." in text
+    assert "At 00:10.000, the camera holds a static shot." in text
+    assert "[Shot 2]" not in text
