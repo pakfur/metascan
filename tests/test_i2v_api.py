@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from backend.api.i2v import get_i2v_config, set_i2v_runner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.core.i2v_templates import I2vTemplateError
 from metascan.core.media import Media
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
@@ -643,6 +644,18 @@ class TestI2vTemplatesApi(_I2vApiBase):
         self.assertIn("12", by_id["melee_12"]["unavailable_reason"])
         self.assertEqual(by_id["dialog_ots_15"]["beats"][1]["transition"], "cut")
 
+    def test_templates_route_500s_on_a_malformed_library(self):
+        # A bad file must not load silently -- it must surface, not 200
+        # with a partial/empty list. Patched where the service resolves the
+        # name, never touching the real data/i2v_templates/.
+        with patch(
+            "backend.services.i2v_service.load_i2v_templates",
+            side_effect=I2vTemplateError("broken.json: invalid JSON: ..."),
+        ):
+            resp = self.client.get("/api/i2v/templates")
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("broken.json", resp.json()["detail"])
+
     def test_prompt_passes_template_id_to_the_runner(self):
         resp = self.client.post(
             "/api/i2v/prompt",
@@ -657,6 +670,27 @@ class TestI2vTemplatesApi(_I2vApiBase):
         self.assertEqual(self.runner.prompt_calls[-1]["template_id"], "dialog_ots_15")
 
     def test_prompt_unknown_template_is_404(self):
+        # The route discriminates on the chained cause, not message text --
+        # mirror how the runner actually raises this (I2vRequestError(...)
+        # from an I2vTemplateError).
+        err = I2vRequestError("unknown i2v template 'nope'; available: ...")
+        err.__cause__ = I2vTemplateError("unknown i2v template 'nope'; available: ...")
+        self.runner.prompt_error = err
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 15,
+                "template_id": "nope",
+            },
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_prompt_bare_request_error_with_template_wording_is_still_400(self):
+        # Same message text as the 404 case above, but no I2vTemplateError
+        # cause -- the discriminator must not fall back to sniffing the
+        # message.
         self.runner.prompt_error = I2vRequestError(
             "unknown i2v template 'nope'; available: ..."
         )
@@ -669,7 +703,7 @@ class TestI2vTemplatesApi(_I2vApiBase):
                 "template_id": "nope",
             },
         )
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.status_code, 400)
 
     def test_prompt_duration_mismatch_is_400(self):
         self.runner.prompt_error = I2vRequestError(

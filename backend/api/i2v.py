@@ -119,7 +119,10 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     except VlmSelectError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except I2vRequestError as exc:
-        if str(exc).startswith("unknown i2v template"):
+        # The runner re-raises an unknown template as
+        # `I2vRequestError(str(exc)) from exc`, so the chained cause -- not
+        # the message text -- is what identifies an unknown template.
+        if isinstance(exc.__cause__, I2vTemplateError):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
