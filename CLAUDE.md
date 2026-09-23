@@ -1306,9 +1306,15 @@ metascan/
   `i2v.durations`. No aspect ratio (output follows the source) and no
   constraints/negative section (H3 has none) — by decision.
   `POST /api/i2v/prompt`'s 404 for an unknown `template_id` is keyed on
-  `isinstance(exc.__cause__, I2vTemplateError)` — the runner re-raises the
-  lookup failure as `I2vRequestError(str(exc)) from exc`, and the route
-  checks the chained cause, never the message text. The dialog's Cadence
+  `isinstance(exc.__cause__, I2vTemplateNotFound)` — a subclass of
+  `I2vTemplateError` raised only from `get_i2v_template`'s id miss (a
+  broken template *file* still raises the bare `I2vTemplateError` and is a
+  500, not a 404/400 — a data fault must not be reported as a bad
+  request). The runner re-raises the lookup failure as
+  `I2vRequestError(str(exc)) from exc`, and the route checks the chained
+  cause, never the message text; `/lint` and `/generate` apply the same
+  split when resolving `template_id` (unknown → lint as a single take,
+  broken library → 500). The dialog's Cadence
   `<select>` binds `:value`/`@change` rather than `v-model`, so picking a
   new cadence commits `onCadenceChange` synchronously (clearing the
   missing-template note on a genuine pick) instead of racing the

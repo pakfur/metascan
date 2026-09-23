@@ -33,8 +33,8 @@ from metascan.core.i2v_output import (
 from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
 from metascan.core.i2v_templates import (
     I2vTemplateError,
+    I2vTemplateNotFound,
     get_i2v_template,
-    lint_against_template,
 )
 from metascan.utils.path_utils import to_native_path
 from metascan.core.vlm_client import VlmError
@@ -121,9 +121,13 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     except I2vRequestError as exc:
         # The runner re-raises an unknown template as
         # `I2vRequestError(str(exc)) from exc`, so the chained cause -- not
-        # the message text -- is what identifies an unknown template.
-        if isinstance(exc.__cause__, I2vTemplateError):
+        # the message text -- is what identifies an unknown template. A
+        # bare `I2vTemplateError` cause (the library itself is broken) is a
+        # data fault, not a bad request -- 500, not 404/400.
+        if isinstance(exc.__cause__, I2vTemplateNotFound):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if isinstance(exc.__cause__, I2vTemplateError):
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -148,15 +152,15 @@ async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
     if body.template_id:
         try:
             template = get_i2v_template(body.template_id)
-        except I2vTemplateError:
+        except I2vTemplateNotFound:
             warnings_extra.append(
                 f"unknown i2v template '{body.template_id}'; linted as a single take"
             )
-    report = lint_i2v_report(body.prompt, body.duration_s)
-    if template is not None:
-        report["warnings"] = list(report["warnings"]) + lint_against_template(
-            body.prompt, template
-        )
+        except I2vTemplateError as exc:
+            # The library itself is broken (a data fault), not an unknown
+            # id -- must not be reported as "unknown template".
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    report = lint_i2v_report(body.prompt, body.duration_s, template=template)
     report["warnings"] = list(report["warnings"]) + warnings_extra
     return report
 
@@ -176,6 +180,18 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400, detail=f"steps must be between 1 and {_MAX_STEPS}"
         )
+    # Resolved tolerantly: an unknown id just falls back to single-take
+    # lint (the render itself never needs the template -- the prompt text
+    # already embodies the cadence), but a broken library file is a data
+    # fault, not a bad request.
+    template = None
+    if body.template_id:
+        try:
+            template = get_i2v_template(body.template_id)
+        except I2vTemplateNotFound:
+            template = None
+        except I2vTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     cfg = get_i2v_config(load_app_config())
     preset_id = (
         cfg["fast_preset_id"] if body.quality == "fast" else cfg["quality_preset_id"]
@@ -210,7 +226,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
         "job_id": job_id,
-        "warnings": lint_i2v_prompt(body.prompt, body.duration_s),
+        "warnings": lint_i2v_prompt(body.prompt, body.duration_s, template=template),
     }
 
 

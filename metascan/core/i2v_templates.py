@@ -63,6 +63,13 @@ class I2vTemplateError(ValueError):
     """A template file is unusable. The message names the file and field."""
 
 
+class I2vTemplateNotFound(I2vTemplateError):
+    """The requested template id does not exist. The library itself loaded
+    fine -- this is a lookup miss, not a broken file -- so callers that
+    want to distinguish "pick a different id" from "the library is
+    corrupt" should catch this subclass first."""
+
+
 @dataclass(frozen=True)
 class I2vRole:
     id: str
@@ -302,7 +309,7 @@ def reload_i2v_templates() -> None:
 def get_i2v_template(template_id: str, directory: Optional[Path] = None) -> I2vTemplate:
     templates = load_i2v_templates(directory)
     if template_id not in templates:
-        raise I2vTemplateError(
+        raise I2vTemplateNotFound(
             f"unknown i2v template {template_id!r}; available: "
             f"{', '.join(sorted(templates)) or '(none)'}"
         )
@@ -897,6 +904,7 @@ __all__ = [
     "I2vTemplate",
     "I2vTemplateError",
     "I2vTemplateFill",
+    "I2vTemplateNotFound",
     "MIN_BEAT_S",
     "TRANSITION_VALUES",
     "assemble_i2v_template_prompt",

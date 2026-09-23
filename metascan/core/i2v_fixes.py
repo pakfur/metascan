@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from metascan.core.h3_compiler import _CAMERA_PHRASES
+
+if TYPE_CHECKING:  # pragma: no cover -- import cycle at runtime
+    from metascan.core.i2v_templates import I2vTemplate
 
 
 @dataclass(frozen=True)
@@ -545,9 +548,13 @@ def apply_i2v_fixes(text: str, findings: List[I2vFinding]) -> str:
     return text
 
 
-def lint_i2v_report(text: str, duration_s: float) -> Dict[str, Any]:
+def lint_i2v_report(
+    text: str, duration_s: float, template: Optional["I2vTemplate"] = None
+) -> Dict[str, Any]:
     """The dialog's lint payload: every advisory warning, the subset that
-    can be fixed (with before/after), and the prompt with them applied."""
+    can be fixed (with before/after), and the prompt with them applied.
+    With a découpage ``template`` the structural checks run too (forwarded
+    to ``lint_i2v_prompt``, which owns that call)."""
     # Function-level: i2v_compiler imports this module for its lint.
     from metascan.core.i2v_compiler import lint_i2v_prompt
 
@@ -565,7 +572,7 @@ def lint_i2v_report(text: str, duration_s: float) -> Dict[str, Any]:
         if f.fixable
     ]
     return {
-        "warnings": lint_i2v_prompt(text, duration_s),
+        "warnings": lint_i2v_prompt(text, duration_s, template=template),
         "fixes": fixes,
         "fixed_prompt": apply_i2v_fixes(text, findings) if fixes else None,
     }

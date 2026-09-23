@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from backend.api.i2v import get_i2v_config, set_i2v_runner
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
-from metascan.core.i2v_templates import I2vTemplateError
+from metascan.core.i2v_templates import I2vTemplateError, I2vTemplateNotFound
 from metascan.core.media import Media
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
@@ -672,9 +672,11 @@ class TestI2vTemplatesApi(_I2vApiBase):
     def test_prompt_unknown_template_is_404(self):
         # The route discriminates on the chained cause, not message text --
         # mirror how the runner actually raises this (I2vRequestError(...)
-        # from an I2vTemplateError).
+        # from an I2vTemplateNotFound).
         err = I2vRequestError("unknown i2v template 'nope'; available: ...")
-        err.__cause__ = I2vTemplateError("unknown i2v template 'nope'; available: ...")
+        err.__cause__ = I2vTemplateNotFound(
+            "unknown i2v template 'nope'; available: ..."
+        )
         self.runner.prompt_error = err
         resp = self.client.post(
             "/api/i2v/prompt",
@@ -686,6 +688,24 @@ class TestI2vTemplatesApi(_I2vApiBase):
             },
         )
         self.assertEqual(resp.status_code, 404)
+
+    def test_prompt_500_on_a_broken_template_library(self):
+        # A bare I2vTemplateError cause -- the library file itself is
+        # broken, not merely an unknown id -- must be a 500, not a 404/400.
+        err = I2vRequestError("broken.json: invalid JSON: ...")
+        err.__cause__ = I2vTemplateError("broken.json: invalid JSON: ...")
+        self.runner.prompt_error = err
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 15,
+                "template_id": "dialog_ots_15",
+            },
+        )
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("broken.json", resp.json()["detail"])
 
     def test_prompt_bare_request_error_with_template_wording_is_still_400(self):
         # Same message text as the 404 case above, but no I2vTemplateError
@@ -747,6 +767,24 @@ class TestI2vTemplatesApi(_I2vApiBase):
             any("unknown i2v template 'nope'" in w for w in resp.json()["warnings"])
         )
 
+    def test_lint_500_on_a_broken_template_library(self):
+        # A broken library file is a data fault, not an unknown id -- must
+        # not be reported as "unknown template".
+        with patch(
+            "backend.api.i2v.get_i2v_template",
+            side_effect=I2vTemplateError("broken.json: invalid JSON: ..."),
+        ):
+            resp = self.client.post(
+                "/api/i2v/lint",
+                json={
+                    "prompt": "x",
+                    "duration_s": 15,
+                    "template_id": "dialog_ots_15",
+                },
+            )
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("broken.json", resp.json()["detail"])
+
     def test_generate_forwards_template_id(self):
         resp = self.client.post(
             "/api/i2v/generate",
@@ -762,6 +800,53 @@ class TestI2vTemplatesApi(_I2vApiBase):
         )
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(self.runner.generate_calls[-1]["template_id"], "dialog_ots_15")
+
+    def test_generate_includes_template_lint_warnings(self):
+        # The warnings returned after Generate must match the dialog's live
+        # lint -- both go through lint_i2v_prompt(..., template=...).
+        text = (
+            "For the target video, at 0.00 seconds into the target video, "
+            "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+            "integrated_multimodal_description: [Shot 1] words.\n\n"
+            "overall_soundscape: x.\n\n"
+            "non_diegetic_music: y."
+        )
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json={
+                "source_path": "/lib/a.png",
+                "prompt": text,
+                "duration_s": 15,
+                "quality": "fast",
+                "seed": 1,
+                "megapixels": 0.5,
+                "template_id": "dialog_ots_15",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(
+            any("1 shots" in w and "3" in w for w in resp.json()["warnings"])
+        )
+
+    def test_generate_500_on_a_broken_template_library(self):
+        with patch(
+            "backend.api.i2v.get_i2v_template",
+            side_effect=I2vTemplateError("broken.json: invalid JSON: ..."),
+        ):
+            resp = self.client.post(
+                "/api/i2v/generate",
+                json={
+                    "source_path": "/lib/a.png",
+                    "prompt": "p",
+                    "duration_s": 15,
+                    "quality": "fast",
+                    "seed": 1,
+                    "megapixels": 0.5,
+                    "template_id": "dialog_ots_15",
+                },
+            )
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("broken.json", resp.json()["detail"])
 
 
 class TestGetI2vConfig(unittest.TestCase):
