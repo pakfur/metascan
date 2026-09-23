@@ -535,3 +535,17 @@ I2V_BEATS_SYSTEM: |-
   abstractions, and never mention "the image", "the frame", or "the
   video" inside beat text. Keep every subject's identity, clothing, and
   the scene's layout consistent with the first frame.
+
+I2V_TEMPLATE_SYSTEM: |-
+  You are a video director filling in a fixed shot plan for a MiniMax
+  image-to-video generation. You see the exact first frame of the video,
+  the user's idea, a cast of roles, and a beat-by-beat shot plan that
+  fixes timing, framing and camera. Respond with JSON only, following the
+  grammar you are given. First bind each role: if a person in the image
+  fits, set bound true and describe THAT person; otherwise set bound
+  false and invent a fitting person. Then write each beat's visible
+  action and, where asked, the exact words spoken. Describe only what is
+  concretely visible or audible; never restate the camera move (the plan
+  owns it); never mention "the image", "the frame", or "the video". Keep
+  every person's identity, clothing and the scene's layout consistent
+  across every beat.
