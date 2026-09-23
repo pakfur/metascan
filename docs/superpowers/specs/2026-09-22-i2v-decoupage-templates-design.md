@@ -39,7 +39,7 @@ H3 prompt and lints it against the template.
 |---|---|
 | Template vs. clip duration | **A template fixes the duration.** Choosing one sets the clip length and locks the selector. No proportional rescaling. |
 | How templates name people | **Role slots bound from the image.** A template declares roles; before writing prose the VLM binds each to a person it sees in the source image and describes them once. |
-| Image has fewer people than roles | **The VLM invents the extra**, described like a bound role, and the compiler keeps it out of Shot 1 (anchored to the picture). It may enter from the next shot. |
+| Image has fewer people than roles | **The VLM invents the extra**, described like a bound role, and the compiler keeps it out of beat 1 (anchored to the picture). It may enter from its next beat. |
 | Authoring | **JSON files** under `data/i2v_templates/`, validated at load; the dialog only picks. No in-app editor in this phase. |
 | Edits overwrite? | Not applicable here, but note: `template_id` joins the clip's editable `form_state` (see `i2v_form.py`) so a clip remembers its cadence. |
 
@@ -119,7 +119,7 @@ Per beat:
 | `camera.camera_motion` | `CAMERA_MOTION_VALUES` minus `pov`. Required. |
 | `camera.camera_amplitude` | `small` \| `large`, optional. |
 | `camera.camera_speed` | `slow` \| `fast`, optional. |
-| `camera.lens` | `LENS_VALUES`, optional. Rendered as a phrase ("a macro detail shot") when present. |
+| `camera.lens` | `LENS_VALUES`, optional. Rendered as a phrase ("on a macro lens") when present. |
 | `note` | string, optional. Given to the VLM as the beat's brief. |
 
 Vocabularies are imported from `storyboard_parse.py` /
@@ -226,7 +226,7 @@ code, deterministically:
 ```
 For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
 
-integrated_multimodal_description: [Shot 1] Cinematic, photorealistic skin textures, fine grain. The subjects, composition, and setting shown in <Picture 1> are established at 0.00 seconds and keep their appearance, clothing, colors, and spatial relationships. An over-the-shoulder medium shot looks past a woman in her thirties, dark hair, red wool coat, onto a man in his forties, grey stubble, black leather jacket. The camera trucks right at slow speed. The man in the leather jacket (S1) says: <d>[English] I told you, we shouldn't be here.</d> [Shot 2] At 00:04.000, the shot cuts to a close-up of the man in the leather jacket. The camera holds a static shot. <action>. [Shot 3] At 00:05.000, the shot cuts to a medium shot of the woman in the red coat and the man in the leather jacket as the woman in the red coat (S2) says: <d>[English] It's already too late.</d>, the words carrying over from the previous shot. The camera pulls out at slow speed. <action>. At 00:10.000, the camera arcs around the subject with small amplitude. <action>.
+integrated_multimodal_description: [Shot 1] Cinematic, photorealistic skin textures, fine grain. The subjects, composition, and setting shown in <Picture 1> are established at 0.00 seconds and keep their appearance, clothing, colors, and spatial relationships. An over-the-shoulder medium shot looks past a woman in her thirties, dark hair, red wool coat, onto a man in his forties, grey stubble, black leather jacket. The camera trucks right at slow speed. The man in the leather jacket (S1) says: <d>[English] I told you, we shouldn't be here.</d> [Shot 2] At 00:04.000, the shot cuts to a close-up of the man in the leather jacket. The camera holds a static shot. <action>. [Shot 3] At 00:05.000, the woman in the red coat (S2) says: <d>[English] It's already too late.</d>, the words carrying over from the previous shot, as the shot cuts to a medium shot of the woman in the red coat and the man in the leather jacket. The camera pulls out at slow speed. <action>. At 00:10.000, the camera arcs around the subject with small amplitude. <action>.
 
 overall_soundscape: …
 

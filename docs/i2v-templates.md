@@ -19,7 +19,7 @@ A template lists **beats**. H3 **shots** are derived from them:
 |---|---|
 | `continuous` | Stays in the current shot; rendered as `At MM:SS.mmm, the camera …`. |
 | `cut` | Opens a new `[Shot n] At MM:SS.mmm, the shot cuts to …`. |
-| `j_cut` | Opens a new shot, but the speaker's line is rendered first, "carrying over from the previous shot" (audio leads picture). |
+| `j_cut` | Opens a new shot, but the speaker's line is rendered first, "carrying over from the previous shot" (audio leads picture). Requires a `speaker` — the line is what carries over the cut, so a `j_cut` beat with `speaker: null` fails to load. |
 
 The first beat is always `continuous`: it is anchored to the source image.
 Use a cut when the shot introduces new information (subject, space,
@@ -51,7 +51,7 @@ Per beat:
 | `camera.camera_motion` | `CAMERA_MOTION_VALUES` minus `pov`. Required. |
 | `camera.camera_amplitude` | `small` \| `large`, optional. |
 | `camera.camera_speed` | `slow` \| `fast`, optional. |
-| `camera.lens` | `LENS_VALUES`, optional. Rendered as a phrase ("a macro detail shot") when present. |
+| `camera.lens` | `LENS_VALUES`, optional. Rendered as a phrase ("on a macro lens") when present. |
 | `note` | string, optional. Given to the VLM as the beat's brief. |
 
 Vocabularies are imported from `storyboard_parse.py` /

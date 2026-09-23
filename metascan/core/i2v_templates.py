@@ -172,6 +172,11 @@ def _parse_beat(
             f"{where}.transition: the first beat must be 'continuous' -- "
             "it is anchored to the source picture, there is nothing to cut from"
         )
+    if transition == "j_cut" and data.get("speaker") is None:
+        raise I2vTemplateError(
+            f"{where}.transition: j_cut requires a speaker -- the line is "
+            "what carries over the cut"
+        )
     raw_cast = data.get("cast", [])
     if not isinstance(raw_cast, list) or any(
         not isinstance(r, str) or r not in role_ids for r in raw_cast
@@ -696,11 +701,17 @@ def assemble_i2v_template_prompt(
                         ),
                         None,
                     )
-                    notes.append(
-                        f"role {rid} is not in the picture; the template casts it "
-                        f"in the first shot, so it enters at beat "
-                        f"{later if later is not None else 'never'} instead"
-                    )
+                    if later is None:
+                        notes.append(
+                            f"role {rid} is not in the picture; the template "
+                            "casts it only in the first shot, so it is left out"
+                        )
+                    else:
+                        notes.append(
+                            f"role {rid} is not in the picture; the template "
+                            f"casts it in the first shot, so it enters at beat "
+                            f"{later} instead"
+                        )
                     if b.speaker == rid:
                         off_screen_speaker = True
 

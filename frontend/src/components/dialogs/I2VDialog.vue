@@ -9,6 +9,7 @@ import {
   withCurrentOption,
   type I2vFix,
   type I2vFormState,
+  type I2vTemplate,
   type I2vVideo,
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
@@ -48,6 +49,15 @@ const selectedTemplate = computed(
 )
 const durationLocked = computed(() => selectedTemplate.value !== null)
 const cadence = computed(() => (selectedTemplate.value ? cadenceChips(selectedTemplate.value) : []))
+// Available cadences first (alphabetical), then unavailable ones
+// (alphabetical) -- so a duration-config change that strands a template
+// pushes it to the bottom instead of scattering it mid-list.
+const orderedTemplates = computed(() => {
+  const byName = (a: I2vTemplate, b: I2vTemplate) => a.name.localeCompare(b.name)
+  const available = store.templates.filter((t) => t.available).sort(byName)
+  const unavailable = store.templates.filter((t) => !t.available).sort(byName)
+  return [...available, ...unavailable]
+})
 // Loading a clip whose template file has since been removed.
 const missingTemplateNote = ref('')
 
@@ -529,7 +539,7 @@ function jobLabel(chip: {
             >
               <option value="">Single take</option>
               <option
-                v-for="t in store.templates"
+                v-for="t in orderedTemplates"
                 :key="t.id"
                 :value="t.id"
                 :disabled="!t.available"

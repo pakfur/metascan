@@ -145,6 +145,9 @@ def test_roles_may_be_empty_when_no_beat_casts_anyone():
     for b in d["beats"]:
         b["cast"] = []
         b["speaker"] = None
+        # A speakerless template can't have a j_cut (it requires a speaker).
+        if b["transition"] == "j_cut":
+            b["transition"] = "cut"
     t = parse_i2v_template(d)
     assert t.roles == ()
 
@@ -178,6 +181,10 @@ def test_roles_may_be_empty_when_no_beat_casts_anyone():
         (lambda d: d["beats"][0].update(cast=["A", "Z"]), "cast"),
         (lambda d: d["beats"][1].update(speaker="A"), "speaker"),  # A not in cast
         (lambda d: d["beats"][1].update(speaker="Z"), "speaker"),
+        (
+            lambda d: d["beats"][2].update(speaker=None),  # beat 2 is j_cut
+            "j_cut requires a speaker",
+        ),
         (lambda d: d["beats"][1].update(start_s=4.5), "start_s"),  # gap
         (lambda d: d["beats"][3].update(end_s=14), "end_s"),  # short of duration
         (lambda d: d["beats"][0].update(start_s=1), "start_s"),  # not 0
@@ -370,6 +377,9 @@ def test_grammar_with_no_roles_is_still_valid():
     d = _with(roles=[])
     for b in d["beats"]:
         b["cast"], b["speaker"] = [], None
+        # A speakerless template can't have a j_cut (it requires a speaker).
+        if b["transition"] == "j_cut":
+            b["transition"] = "cut"
     g = i2v_template_grammar(parse_i2v_template(d))
     assert '"\\"roles\\"" ws ":" ws "[" ws  ws "]"' in g
 
@@ -568,6 +578,63 @@ def test_unbound_role_is_kept_out_of_shot_one_and_enters_later():
     ]
 
 
+def test_unbound_role_with_no_later_beat_is_left_out_entirely():
+    """A role cast only in beat 1: if the fill marks it unbound, there is
+    no later beat to introduce it in, so the note must say it is left out
+    rather than claiming it "enters at beat never"."""
+    d = {
+        "id": "solo_beat_2",
+        "name": "Solo",
+        "description": "",
+        "duration_s": 2,
+        "look": "",
+        "soundscape_hint": "",
+        "roles": [{"id": "A", "note": ""}, {"id": "B", "note": ""}],
+        "beats": [
+            {
+                "start_s": 0,
+                "end_s": 1,
+                "transition": "continuous",
+                "cast": ["A", "B"],
+                "speaker": None,
+                "camera": {
+                    "shot_size": "MS",
+                    "angle": "eye",
+                    "camera_motion": "static",
+                },
+            },
+            {
+                "start_s": 1,
+                "end_s": 2,
+                "transition": "cut",
+                "cast": ["B"],
+                "speaker": None,
+                "camera": {
+                    "shot_size": "CU",
+                    "angle": "eye",
+                    "camera_motion": "static",
+                },
+            },
+        ],
+    }
+    t = parse_i2v_template(d)
+    fill_data = {
+        "roles": [
+            {"id": "A", "bound": False, "description": "a woman", "tag": "the woman"},
+            {"id": "B", "bound": True, "description": "a man", "tag": "the man"},
+        ],
+        "beats": [{"action": "They stand together"}, {"action": "He looks away"}],
+        "overall_soundscape": "quiet",
+        "non_diegetic_music": "none",
+    }
+    fill = validate_i2v_template_fill(json.dumps(fill_data), t)
+    _, notes = assemble_i2v_template_prompt(t, fill)
+    assert notes == [
+        "role A is not in the picture; the template casts it only in the "
+        "first shot, so it is left out"
+    ]
+
+
 def test_unbound_speaker_in_shot_one_speaks_off_screen():
     t = parse_i2v_template(DIALOG)
     data = copy.deepcopy(DIALOG_FILL)
@@ -611,7 +678,7 @@ def test_look_is_optional_and_shot_one_opener_is_the_single_take_one():
 
 
 def test_shipped_templates_assemble_without_error():
-    from metascan.core.i2v_templates import I2V_TEMPLATES_DIR
+    from metascan.core.i2v_templates import I2V_TEMPLATES_DIR, lint_against_template
 
     for t in load_i2v_templates(I2V_TEMPLATES_DIR).values():
         fill = validate_i2v_template_fill(_fill(t), t)
@@ -621,6 +688,7 @@ def test_shipped_templates_assemble_without_error():
         # ALIGNMENT_LINE itself cites "(from [Shot 1])", so the full text
         # always has one more "[Shot " match than there are shots.
         assert text.count("[Shot ") == len(shots_of(t)) + 1
+        assert lint_against_template(text, t) == []
 
 
 def test_melee_and_intimate_shapes():
@@ -752,3 +820,39 @@ def test_lint_flags_a_cut_time_that_moved_from_the_template():
 def test_base_lint_is_unchanged_when_no_template_is_given():
     _, text = _dialog_text()
     assert lint_i2v_prompt(text, 15.0) == lint_i2v_prompt(text, 15.0, template=None)
+
+
+# ---- rendering vocabulary pinned to the storyboard's ---------------------
+#
+# These mirror-tables must never drift from the vocabularies they render --
+# a value present in one but not the other is either a dead phrase or a
+# KeyError waiting to happen.
+
+from metascan.core.h3_compiler import _CAMERA_PHRASES  # noqa: E402
+from metascan.core.i2v_templates import (  # noqa: E402
+    ANGLE_PHRASES,
+    I2V_ANGLE_VALUES,
+    I2V_MOTION_VALUES,
+    LENS_PHRASES,
+    SHOT_SIZE_PHRASES,
+)
+from metascan.core.storyboard_parse import (  # noqa: E402
+    LENS_VALUES,
+    SHOT_SIZE_VALUES,
+)
+
+
+def test_shot_size_phrases_cover_exactly_the_storyboard_values():
+    assert set(SHOT_SIZE_PHRASES) == set(SHOT_SIZE_VALUES)
+
+
+def test_angle_phrases_cover_exactly_the_i2v_angle_values():
+    assert set(ANGLE_PHRASES) == set(I2V_ANGLE_VALUES)
+
+
+def test_lens_phrases_cover_exactly_the_storyboard_values():
+    assert set(LENS_PHRASES) == set(LENS_VALUES)
+
+
+def test_every_i2v_motion_value_has_a_camera_phrase():
+    assert set(I2V_MOTION_VALUES) <= set(_CAMERA_PHRASES)
