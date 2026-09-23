@@ -706,7 +706,30 @@ def test_lint_flags_a_missing_camera_phrase_in_a_shot():
     t, text = _dialog_text()
     text = text.replace("The camera pulls out at slow speed. ", "")
     issues = lint_against_template(text, t)
-    assert any("Shot 3" in w and "pulls out" in w for w in issues)
+    msg = next(w for w in issues if "pulls out" in w)
+    assert "Shot 3" in msg
+    # The label is a short, well-formed identifier -- not describe_beat's
+    # prose truncated at its first colon (which falls mid-sentence, at
+    # "; on screen:", leaving an unbalanced paren).
+    assert "(Beat 3, 5.0-10.0 s)" in msg
+    assert "on screen" not in msg
+
+
+def test_parenthetical_shot_citation_inside_the_body_still_counts_as_a_shot():
+    """A hand edit that wraps a marker in a parenthetical aside, e.g.
+    '(as noted, [Shot 2]) At ...', must not be mistaken for
+    ALIGNMENT_LINE's own '(from [Shot 1])' citation and dropped entirely
+    -- that used to cascade into a wrong shot count, a wrong contiguity
+    complaint, a bogus cut-time complaint, and a camera complaint against
+    the wrong beat. Scoping the scan to the
+    integrated_multimodal_description field (rather than guessing from a
+    marker's punctuation) fixes that: the shot is still recognized and
+    correctly numbered; the only issue reported is the genuine one -- this
+    specific edit broke the marker's immediate 'At MM:SS.mmm,' adjacency."""
+    t, text = _dialog_text()
+    text = text.replace("[Shot 2] At", "(as noted, [Shot 2]) At")
+    issues = lint_against_template(text, t)
+    assert issues == ["Shot 2 has no 'At MM:SS.mmm,' cut time"]
 
 
 def test_lint_flags_a_missing_line_where_a_speaker_is_set():

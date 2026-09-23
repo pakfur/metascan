@@ -10,6 +10,12 @@ camera motion when only the distance changes" rule, as data.
 Vocabularies are the storyboard's, imported, never redeclared. ``pov`` is
 excluded: i2v has no POV mode.
 
+``lint_against_template`` is advisory only and runs on generated AND
+hand-edited text. It is text-only -- the fill is not available to it --
+so §5.6's "every role's tag appears in the span of every beat that casts
+it" cannot be checked from text alone: assembly guarantees it for
+generated text, but a hand edit is not checked for it.
+
 Pure module: reads the JSON files and nothing else. See
 docs/superpowers/specs/2026-09-22-i2v-decoupage-templates-design.md.
 """
@@ -25,6 +31,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from metascan.core.h3_compiler import _CAMERA_PHRASES
 from metascan.core.i2v_compiler import (
     _COMMON,
+    _DESCRIPTION_RE,
     _OPENING,
     ALIGNMENT_LINE,
     I2vError,
@@ -776,14 +783,9 @@ def assemble_i2v_template_prompt(
 
 # ---- lint --------------------------------------------------------------
 #
-# Advisory only. Runs on generated AND hand-edited text. Text-only: the
-# fill is not available here, so "every role's tag appears in every beat
-# that casts it" (spec §5.6) is guaranteed by assembly for generated text
-# and NOT checked on hand edits.
+# See the module docstring for the §5.6 text-only limitation.
 
-# The negative lookahead excludes ALIGNMENT_LINE's own "(from [Shot 1])"
-# citation -- a real marker is never immediately followed by ")".
-_SHOT_MARK = re.compile(r"\[Shot (\d+)\](?!\))(?: At (\d\d):(\d\d\.\d{3}),)?")
+_SHOT_MARK = re.compile(r"\[Shot (\d+)\](?: At (\d\d):(\d\d\.\d{3}),)?")
 
 
 def _shot_spans(text: str) -> List[Tuple[int, Optional[float], str]]:
@@ -799,9 +801,26 @@ def _shot_spans(text: str) -> List[Tuple[int, Optional[float], str]]:
     return out
 
 
+def _beat_label(t: I2vTemplate, index: int) -> str:
+    """Short, well-formed identifier for a beat in a lint message --
+    ``describe_beat`` is prose for the VLM prompt, not a label, and
+    truncating it at its first colon (which falls mid-sentence, at
+    "; on screen:") produced unbalanced-parenthesis garbage."""
+    b = t.beats[index]
+    return f"Beat {index + 1}, {b.start_s:.1f}-{b.end_s:.1f} s"
+
+
 def lint_against_template(text: str, t: I2vTemplate) -> List[str]:
     issues: List[str] = []
-    spans = _shot_spans(text)
+    # Scope the scan to the integrated_multimodal_description field so
+    # ALIGNMENT_LINE's own "(from [Shot 1])" citation in the preamble is
+    # excluded structurally, never by guessing at a marker's punctuation
+    # (a heuristic like "not followed by ')'" also drops real markers a
+    # hand edit wraps in a parenthetical aside). Absent the field, the
+    # base lint (_REQUIRED_FIELDS) already reports it -- scan whole text.
+    m = _DESCRIPTION_RE.search(text)
+    body = m.group(1) if m else text
+    spans = _shot_spans(body)
     expected = shots_of(t)
 
     if len(spans) != len(expected):
@@ -829,6 +848,9 @@ def lint_against_template(text: str, t: I2vTemplate) -> List[str]:
             )
         last = stamp
 
+    # zip stops at the shorter sequence, so a shot-count mismatch (already
+    # reported above) simply limits per-shot checks to the overlap rather
+    # than raising -- intentional, not a silent truncation bug.
     for (shot_no, stamp, span), beat_ids in zip(spans, expected):
         first = t.beats[beat_ids[0]]
         if shot_no != 1 and stamp is not None and abs(stamp - first.start_s) > 1e-6:
@@ -846,7 +868,7 @@ def lint_against_template(text: str, t: I2vTemplate) -> List[str]:
             if phrase not in span:
                 issues.append(
                     f"Shot {shot_no} lacks its camera move '{phrase}' "
-                    f"({describe_beat(t, bi).split(':', 1)[0]})"
+                    f"({_beat_label(t, bi)})"
                 )
         need = sum(1 for bi in beat_ids if t.beats[bi].speaker)
         have = span.count("<d>")
