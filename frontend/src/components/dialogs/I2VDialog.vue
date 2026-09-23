@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Media } from '../../types/media'
 import {
+  cadenceChips,
   formatI2vTimestamp,
   i2vDims,
   i2vVideoDetails,
@@ -37,6 +38,23 @@ const steps = ref(25)
 const cancelling = ref(false)
 const seed = ref(randomSeed())
 const loras = ref<LoraEntry[]>([])
+
+// Découpage cadence. '' = Single take (today's single-shot path). A
+// template fixes the clip duration, so selecting one sets durationS and
+// locks the Duration select; Single take unlocks it and keeps the value.
+const templateId = ref<string>('')
+const selectedTemplate = computed(
+  () => store.templates.find((t) => t.id === templateId.value) ?? null,
+)
+const durationLocked = computed(() => selectedTemplate.value !== null)
+const cadence = computed(() => (selectedTemplate.value ? cadenceChips(selectedTemplate.value) : []))
+// Loading a clip whose template file has since been removed.
+const missingTemplateNote = ref('')
+
+watch(selectedTemplate, (t) => {
+  if (t) durationS.value = t.duration_s
+})
+
 const expanding = ref(false)
 const submitting = ref(false)
 const viewerIndex = ref<number | null>(null)
@@ -123,7 +141,11 @@ async function runLint() {
     return
   }
   try {
-    const res = await lintI2vPrompt({ prompt: text, duration_s: durationS.value })
+    const res = await lintI2vPrompt({
+      prompt: text,
+      duration_s: durationS.value,
+      template_id: templateId.value || null,
+    })
     if (seq !== lintSeq) return // a newer lint is in flight
     warnings.value = res.warnings
     fixes.value = res.fixes
@@ -172,6 +194,7 @@ async function onExpandPrompt() {
       source_path: props.media.file_path,
       idea: idea.value,
       duration_s: durationS.value,
+      template_id: templateId.value || null,
     })
     prompt.value = res.prompt
     warnings.value = res.warnings
@@ -196,6 +219,7 @@ function requestSignature(): string {
     duration: durationS.value,
     megapixels: megapixels.value,
     loras: loras.value.map((l) => [l.name, l.strength]),
+    template: templateId.value || null,
   })
 }
 
@@ -235,7 +259,7 @@ function currentForm(): I2vFormState {
     steps: steps.value,
     seed: seed.value,
     loras: loras.value.map((l) => ({ name: l.name, strength: l.strength })),
-    template_id: null, // set by the Cadence picker (next task)
+    template_id: templateId.value || null,
   }
 }
 
@@ -277,7 +301,7 @@ function flushFormState() {
 }
 
 watch(
-  [idea, prompt, durationS, quality, megapixels, steps, seed, loras],
+  [idea, prompt, durationS, quality, megapixels, steps, seed, loras, templateId],
   () => {
     if (selectedId.value == null) return
     if (saveTimer) clearTimeout(saveTimer)
@@ -299,6 +323,14 @@ function loadClip(v: I2vVideo) {
   if (f.steps != null) steps.value = f.steps
   if (f.seed != null) seed.value = f.seed
   loras.value = (f.loras ?? []).map((l) => ({ name: l.name, strength: l.strength }))
+  const tid = f.template_id ?? ''
+  if (tid && !store.templates.some((t) => t.id === tid)) {
+    templateId.value = ''
+    missingTemplateNote.value = `This clip used cadence "${tid}", which is no longer in the library; loaded as Single take.`
+  } else {
+    templateId.value = tid
+    missingTemplateNote.value = ''
+  }
   warnings.value = []
   selectedId.value = v.id
   savedSnapshot = JSON.stringify(currentForm())
@@ -361,6 +393,7 @@ async function onGenerate() {
       megapixels: megapixels.value,
       loras: loras.value,
       idea: idea.value,
+      template_id: templateId.value || null,
       ...(stepsEnabled.value ? { steps: steps.value } : {}),
     })
     warnings.value = res.warnings
@@ -467,6 +500,32 @@ function jobLabel(chip: {
         <img class="i2v-source" :src="thumbnailUrl(media.file_path)" alt="" />
         <div class="i2v-controls">
           <label class="fld">
+            <span>Cadence</span>
+            <select v-model="templateId">
+              <option value="">Single take</option>
+              <option
+                v-for="t in store.templates"
+                :key="t.id"
+                :value="t.id"
+                :disabled="!t.available"
+                :title="t.unavailable_reason ?? t.description"
+              >
+                {{ t.name }} · {{ t.duration_s }}s{{ t.available ? '' : ' (unavailable)' }}
+              </option>
+            </select>
+            <small v-if="selectedTemplate" class="dims-hint">{{ selectedTemplate.description }}</small>
+            <small v-if="missingTemplateNote" class="dims-hint warn">{{ missingTemplateNote }}</small>
+          </label>
+          <div
+            v-if="cadence.length"
+            class="cadence"
+            title="The shot plan this cadence fixes; the prompt is written to it"
+          >
+            <span v-for="(c, i) in cadence" :key="i" class="cadence-chip" :class="c.kind">{{
+              c.label
+            }}</span>
+          </div>
+          <label class="fld">
             <span>Idea</span>
             <textarea
               v-model="idea"
@@ -478,11 +537,16 @@ function jobLabel(chip: {
             {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
           </button>
           <div class="params">
-            <label class="fld">
+            <label
+              class="fld"
+              :class="{ 'fld-off': durationLocked }"
+              :title="durationLocked ? 'Set by the cadence' : ''"
+            >
               <span>Duration</span>
-              <select v-model.number="durationS">
+              <select v-model.number="durationS" :disabled="durationLocked">
                 <option v-for="d in durations" :key="d" :value="d">{{ d }}s</option>
               </select>
+              <small v-if="durationLocked" class="dims-hint">set by the cadence</small>
             </label>
             <label class="fld">
               <span>Quality</span>
@@ -821,4 +885,13 @@ function jobLabel(chip: {
 .tile-job { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #666; }
 .tile-job.failed { border-color: #c33; color: #c33; }
 .strip-empty { color: #888; align-self: center; font-size: 13px; }
+.cadence { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.cadence-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap;
+  color: var(--text-color-secondary); background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+}
+.cadence-chip.cut { border-color: var(--primary-color, #6366f1); color: var(--text-color); }
+.cadence-chip.j_cut { border-style: dashed; border-color: var(--primary-color, #6366f1); color: var(--text-color); }
+.dims-hint.warn { color: #c33; }
 </style>
