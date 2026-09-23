@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from metascan.core.h3_compiler import _CAMERA_PHRASES
+from metascan.core.i2v_compiler import _COMMON, I2vError
 from metascan.core.storyboard_parse import (
     ANGLE_VALUES,
     LENS_VALUES,
@@ -319,21 +321,270 @@ def summarize_i2v_template(t: I2vTemplate) -> Dict[str, Any]:
     return d
 
 
+# ---- rendering vocabulary --------------------------------------------
+
+SHOT_SIZE_PHRASES: Dict[str, str] = {
+    "ECU": "an extreme close-up",
+    "CU": "a close-up",
+    "MCU": "a medium close-up",
+    "MS": "a medium shot",
+    "MLS": "a medium long shot",
+    "WS": "a wide shot",
+    "EWS": "an extreme wide shot",
+}
+ANGLE_PHRASES: Dict[str, str] = {
+    "eye": "",
+    "low": "from a low angle",
+    "high": "from a high angle",
+    "overhead": "from directly overhead",
+    "dutch": "with a dutch tilt",
+    "ots": "over the shoulder",
+}
+LENS_PHRASES: Dict[str, str] = {
+    "wide": "on a wide lens",
+    "normal": "",
+    "tele": "on a telephoto lens",
+    "macro": "on a macro lens",
+}
+
+
+def camera_sentence(cam: I2vCamera, *, capital: bool = True) -> str:
+    """``The camera pushes in with small amplitude at slow speed.`` --
+    the base guide's motion + amplitude + speed order, the same shape
+    ``i2v_fixes`` rewrites toward so Apply fixes never fights it."""
+    phrase = _CAMERA_PHRASES[cam.camera_motion]
+    if cam.camera_motion == "static":
+        text = "the camera holds a static shot"
+    else:
+        text = f"the camera {phrase}"
+        if cam.camera_amplitude:
+            text += f" with {cam.camera_amplitude} amplitude"
+        if cam.camera_speed:
+            text += f" at {cam.camera_speed} speed"
+    return (text[0].upper() + text[1:] if capital else text) + "."
+
+
+def framing_phrase(cam: I2vCamera) -> str:
+    """``a medium shot from a low angle on a macro lens`` (no cast)."""
+    bits = [SHOT_SIZE_PHRASES[cam.shot_size]]
+    if cam.angle != "ots" and ANGLE_PHRASES[cam.angle]:
+        bits.append(ANGLE_PHRASES[cam.angle])
+    if cam.lens and LENS_PHRASES[cam.lens]:
+        bits.append(LENS_PHRASES[cam.lens])
+    return " ".join(bits)
+
+
+def _timestamp(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes:02d}:{seconds - minutes * 60:06.3f}"
+
+
+# ---- VLM fill: grammar, prompt, validation ---------------------------
+
+
+def describe_beat(t: I2vTemplate, index: int) -> str:
+    """One-line brief for beat ``index`` -- the VLM's instructions for
+    it, and the wording lint messages reuse."""
+    b = t.beats[index]
+    cam = b.camera
+    how = {"continuous": "", "cut": "CUT to ", "j_cut": "J-CUT to "}[b.transition]
+    size = SHOT_SIZE_PHRASES[cam.shot_size]
+    # "CUT to a close-up" keeps the article; a continuing beat reads
+    # "medium shot" bare.
+    framing = f"{how}{size}" if how else size.split(" ", 1)[1]
+    angle = (
+        "over the shoulder"
+        if cam.angle == "ots"
+        else (ANGLE_PHRASES[cam.angle] or "eye level")
+    )
+    motion = camera_sentence(cam, capital=False).rstrip(".").removeprefix("the ")
+    cast = ", ".join(b.cast) if b.cast else "nobody (a detail shot)"
+    who = f"{b.speaker} speaks" if b.speaker else "no line"
+    return (
+        f"Beat {index + 1} ({b.start_s:.1f}-{b.end_s:.1f} s, {framing}, {angle}, "
+        f"{motion}; on screen: {cast}; {who}): {b.note or 'no further direction'}"
+    )
+
+
+def i2v_template_grammar(t: I2vTemplate) -> str:
+    """GBNF with the template baked in: one rule per role (id fixed as a
+    literal) and per beat; a beat with a ``speaker`` gets a required
+    ``line`` string, one without has no ``line`` key at all -- so a
+    missing or stray line is structurally impossible."""
+    role_rules = [
+        f'role{i} ::= "{{" ws "\\"id\\"" ws ":" ws "\\"{r.id}\\"" ws "," ws '
+        f'"\\"bound\\"" ws ":" ws boolean ws "," ws '
+        f'"\\"description\\"" ws ":" ws string ws "," ws '
+        f'"\\"tag\\"" ws ":" ws string ws "}}"'
+        for i, r in enumerate(t.roles)
+    ]
+    beat_rules = []
+    for i, b in enumerate(t.beats):
+        line = ' ws "," ws "\\"line\\"" ws ":" ws string' if b.speaker else ""
+        beat_rules.append(
+            f'beat{i} ::= "{{" ws "\\"action\\"" ws ":" ws string{line} ws "}}"'
+        )
+    roles_seq = ' ws "," ws '.join(f"role{i}" for i in range(len(t.roles)))
+    beats_seq = ' ws "," ws '.join(f"beat{i}" for i in range(len(t.beats)))
+    root = (
+        'root ::= "{" ws "\\"roles\\"" ws ":" ws "[" ws '
+        + roles_seq
+        + ' ws "]" ws "," ws '
+        '"\\"beats\\"" ws ":" ws "[" ws ' + beats_seq + ' ws "]" ws "," ws '
+        '"\\"overall_soundscape\\"" ws ":" ws string ws "," ws '
+        '"\\"non_diegetic_music\\"" ws ":" ws string ws "}"\n'
+    )
+    return (
+        root
+        + "\n".join(role_rules + beat_rules)
+        + '\nboolean ::= "true" | "false"\n'
+        + _COMMON
+    )
+
+
+def i2v_template_max_tokens(t: I2vTemplate) -> int:
+    """Roles cost a description each; beats an action (+ a line)."""
+    return 260 + 90 * len(t.beats) + 70 * len(t.roles)
+
+
+def build_i2v_template_user_prompt(t: I2vTemplate, idea: str) -> str:
+    idea_line = idea.strip() or "(none -- infer a natural continuation)"
+    roles = "\n".join(f"Role {r.id}: {r.note or 'no note'}" for r in t.roles) or (
+        "This template casts no one; the beats are detail shots."
+    )
+    beats = "\n".join(describe_beat(t, i) for i in range(len(t.beats)))
+    hint = f"Soundscape guidance: {t.soundscape_hint}\n" if t.soundscape_hint else ""
+    return (
+        f"The attached image is the exact first frame of a "
+        f"{t.duration_s:.0f}-second video with a fixed shot plan.\n"
+        f"User's idea for the video: {idea_line}\n\n"
+        f"Roles:\n{roles}\n\n"
+        "For each role, set 'bound' to true if that person is visible in the "
+        "image and describe THAT person; set it false if nobody in the image "
+        "fits and invent a fitting person. 'description' is one sentence of "
+        "stable identity (age, build, hair, clothing) used on first mention; "
+        "'tag' is a 3-6 word handle used afterwards (\"the woman in the red "
+        'coat").\n\n'
+        f"Shot plan:\n{beats}\n\n"
+        "Write each beat's 'action' as 1-2 present-tense sentences of "
+        "concrete visible action matching its brief and framing; do not "
+        "restate the camera move. Beat 1 must begin from exactly what the "
+        "image depicts. Where a beat lists a speaker, write that person's "
+        "spoken words in 'line' (words only, no quotes, no attribution). "
+        f"{hint}"
+        "Then summarize ambient and action sound in 'overall_soundscape' "
+        "and the score in 'non_diegetic_music'."
+    )
+
+
+@dataclass
+class I2vRoleFill:
+    id: str
+    bound: bool
+    description: str
+    tag: str
+
+
+@dataclass
+class I2vBeatFill:
+    action: str
+    line: Optional[str]
+
+
+@dataclass
+class I2vTemplateFill:
+    roles: Dict[str, I2vRoleFill]
+    beats: List[I2vBeatFill]
+    overall_soundscape: str
+    non_diegetic_music: str
+
+
+_DEFAULT_SOUNDSCAPE = "Natural ambient sound consistent with the scene."
+_DEFAULT_MUSIC = "No non-diegetic music."
+
+
+def _squash(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def validate_i2v_template_fill(raw: str, t: I2vTemplate) -> I2vTemplateFill:
+    """Strict parse of the VLM's fill against ``t``. The grammar is the
+    real enforcement; this catches a model that ignored it."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise I2vError(f"VLM response is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise I2vError("VLM response is not a JSON object")
+
+    roles: Dict[str, I2vRoleFill] = {}
+    raw_roles = data.get("roles")
+    for r in raw_roles if isinstance(raw_roles, list) else []:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "")
+        desc, tag = _squash(r.get("description")), _squash(r.get("tag"))
+        if not desc or not tag:
+            raise I2vError(f"VLM gave role {rid or '?'} no description or tag")
+        roles[rid] = I2vRoleFill(
+            id=rid, bound=bool(r.get("bound")), description=desc, tag=tag
+        )
+    expected_roles = [r.id for r in t.roles]
+    if sorted(roles) != sorted(expected_roles):
+        raise I2vError(
+            f"VLM returned roles {sorted(roles)}; template needs {expected_roles}"
+        )
+
+    raw_beats = data.get("beats")
+    beats_in = raw_beats if isinstance(raw_beats, list) else []
+    if len(beats_in) != len(t.beats):
+        raise I2vError(
+            f"VLM returned {len(beats_in)} beats; template has {len(t.beats)} beats"
+        )
+    beats: List[I2vBeatFill] = []
+    for i, (spec, b) in enumerate(zip(t.beats, beats_in)):
+        action = _squash(b.get("action")) if isinstance(b, dict) else ""
+        if not action:
+            raise I2vError(f"VLM gave beat {i + 1} no action")
+        line = _squash(b.get("line")) if isinstance(b, dict) else ""
+        if spec.speaker and not line:
+            raise I2vError(f"VLM gave beat {i + 1} no line, but {spec.speaker} speaks")
+        beats.append(I2vBeatFill(action=action, line=line if spec.speaker else None))
+
+    return I2vTemplateFill(
+        roles=roles,
+        beats=beats,
+        overall_soundscape=_squash(data.get("overall_soundscape"))
+        or _DEFAULT_SOUNDSCAPE,
+        non_diegetic_music=_squash(data.get("non_diegetic_music")) or _DEFAULT_MUSIC,
+    )
+
+
 __all__ = [
     "I2V_ANGLE_VALUES",
     "I2V_MOTION_VALUES",
     "I2V_TEMPLATES_DIR",
+    "I2vBeatFill",
     "I2vBeatSpec",
     "I2vCamera",
     "I2vRole",
+    "I2vRoleFill",
     "I2vTemplate",
     "I2vTemplateError",
+    "I2vTemplateFill",
     "MIN_BEAT_S",
     "TRANSITION_VALUES",
+    "build_i2v_template_user_prompt",
+    "camera_sentence",
+    "describe_beat",
+    "framing_phrase",
     "get_i2v_template",
+    "i2v_template_grammar",
+    "i2v_template_max_tokens",
     "load_i2v_templates",
     "parse_i2v_template",
     "reload_i2v_templates",
     "shots_of",
     "summarize_i2v_template",
+    "validate_i2v_template_fill",
 ]
