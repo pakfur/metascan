@@ -116,6 +116,7 @@ Right-click any image → "Image to Video…" opens a dialog to turn it into a s
 - Re-submitting with nothing changed (same seed, quality, steps, prompt…) asks for confirmation first, since it would render an identical clip
 - The dialog closes only through its ✕ — clicking the backdrop does nothing, so a written prompt or a running job is never lost to a stray click
 - Each clip is labelled with the quality (and steps) used, clip length and render time, and when it was generated
+- Every finished clip remembers the idea, settings and prompt that made it: click a clip to load them back into the form (double-click still plays it). While a clip is selected, any change you make is saved to that clip automatically — **Stop editing** detaches the form. The clip's label and recorded provenance always describe the actual render; your edits are kept separately. Nothing is saved for a render that is cancelled or fails
 - Live generation progress over WebSocket, with Cancel for the running workflow (or ✕ on a single queued/running job)
 
 Requires two registered ComfyUI workflows (turbo and high quality) — see [Image-to-Video Workflow Setup](i2v-workflow-setup.md).

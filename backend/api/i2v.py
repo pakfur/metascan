@@ -24,6 +24,7 @@ from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt
 from metascan.core.i2v_fixes import lint_i2v_report
+from metascan.core.i2v_form import FormStateError, validate_form_patch
 from metascan.core.i2v_output import (
     I2vOutputError,
     output_prefix_warnings,
@@ -181,9 +182,34 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
     }
 
 
+def _megapixel_options() -> List[float]:
+    return list(get_i2v_config(load_app_config())["megapixels"])
+
+
 @router.get("/videos")
 async def list_videos(source_path: str) -> List[Dict[str, Any]]:
-    return await _service().list_videos(source_path)
+    return await _service().list_videos(source_path, _megapixel_options())
+
+
+@router.patch("/videos/{video_id}")
+async def update_video_form_state(
+    video_id: int, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Autosave the dialog's form into one clip's editable ``form_state``.
+
+    Partial: send only what changed, or the whole form. The clip's
+    as-rendered columns (``prompt_used``, ``seed``, ``quality``, ...) are
+    not reachable from here -- they are facts about the video. Needs
+    neither the runner nor ComfyUI, so it works while either is down.
+    """
+    try:
+        patch = validate_form_patch(body)
+    except FormStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row = await _service().update_form_state(video_id, patch, _megapixel_options())
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No i2v video {video_id}")
+    return row
 
 
 @router.delete("/videos/{video_id}")

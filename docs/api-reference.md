@@ -73,6 +73,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/i2v/lint` | Lint a prompt and return the no-model rewrites it could apply (Apply fixes) |
 | POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
+| PATCH | `/api/i2v/videos/{id}` | Autosave the dialog's form into a clip's editable `form_state` |
 | DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
 | GET | `/api/i2v/output-preview` | Resolve where a clip would be saved for a root + prefix (config tab live preview) |
 | GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations, megapixel ladder) |
@@ -641,7 +642,16 @@ on the `comfy` WS channel.
 Returns every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
 quality, width, height, steps, render_s, preset_id, comfy_prompt_id,
-created_at, is_favorite}, ...]`. `steps` is the step count actually
+created_at, is_favorite, megapixels, loras, form_state}, ...]`. Each row
+carries two sets of values. Everything except `form_state` is an
+**as-rendered fact** about the clip, written once at ingest and never
+changed (`megapixels`/`loras` are `null` for clips ingested before they
+were recorded). `form_state` — `{idea, prompt, duration_s, quality,
+megapixels, steps, seed, loras}` — is the **editable copy** the dialog
+loads when a clip is clicked and autosaves into; it is always complete:
+for a clip that predates the column the server builds it from the facts
+(megapixels snapped from `width × height` to the nearest configured
+option). `steps` is the step count actually
 applied (`null` for Fast renders and presets without `MS_STEPS`);
 `render_s` is wall-clock render seconds from the job row (`null` for clips
 ingested before it was recorded); `created_at` is UTC with no zone marker.
@@ -649,6 +659,18 @@ ingested before it was recorded); `created_at` is UTC with no zone marker.
 media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
 place (`i2v_videos` has no foreign key to media).
+
+### `PATCH /api/i2v/videos/{video_id}`
+Merges a partial `form_state` — any of `idea`, `prompt`, `duration_s`,
+`quality` (`fast`/`quality`), `megapixels`, `steps` (`null` allowed),
+`seed`, `loras` (`[{name, strength}]`) — into the clip's stored one and
+returns the updated row. Only `form_state` is written: the as-rendered
+columns are not reachable through this route, so a clip's tile label and
+provenance can never be edited into describing a render that didn't
+happen. **400** for an empty body, an unknown field, or a bad value (the
+message names the field); **404** for an unknown id. Needs neither the
+i2v runner nor ComfyUI. Nothing is ever persisted for a render that did
+not ingest — there is no draft or pre-ingest record.
 
 ### `DELETE /api/i2v/videos/{video_id}`
 Deletes one generated clip: its `i2v_videos` row plus its media row (moved

@@ -29,6 +29,7 @@ from metascan.core.i2v_compiler import (
     lint_i2v_prompt,
     validate_i2v_beats,
 )
+from metascan.core.i2v_form import build_form_state
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_select import pick_vlm_model
@@ -279,7 +280,27 @@ class I2vRunner:
                 **placement,
             )
         )
-        self._job_meta[job_id] = {"quality": quality, "idea": idea}
+        # Held in memory until ingest, never written before it: a cancelled
+        # or failed render must leave nothing behind (by decision). `form`
+        # is the dialog exactly as submitted -- including a step selection a
+        # Fast render does not apply -- and seeds the clip's editable
+        # form_state; the rest are as-rendered facts.
+        self._job_meta[job_id] = {
+            "quality": quality,
+            "idea": idea,
+            "megapixels": float(megapixels),
+            "loras": [dict(entry) for entry in loras],
+            "form": build_form_state(
+                idea=idea,
+                prompt=prompt,
+                duration_s=duration_s,
+                quality=quality,
+                megapixels=megapixels,
+                steps=steps,
+                seed=seed,
+                loras=loras,
+            ),
+        }
         return job_id
 
     # ---- ingest ------------------------------------------------------------
@@ -330,6 +351,9 @@ class I2vRunner:
                     ),
                     preset_id=job.get("preset_id"),
                     comfy_prompt_id=job.get("comfy_prompt_id"),
+                    megapixels=meta.get("megapixels"),
+                    loras=meta.get("loras"),
+                    form_state=meta.get("form"),
                 )
                 inserted.append(posix)
             except Exception:

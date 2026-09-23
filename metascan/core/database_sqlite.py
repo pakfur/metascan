@@ -1122,7 +1122,10 @@ class DatabaseManager:
                     render_s REAL,
                     preset_id INTEGER,
                     comfy_prompt_id TEXT,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    megapixels REAL,
+                    loras TEXT,
+                    form_state TEXT
                 )
                 """
             )
@@ -1157,6 +1160,29 @@ class DatabaseManager:
                 "i2v_videos",
                 "render_s",
                 "ALTER TABLE i2v_videos ADD COLUMN render_s REAL",
+            )
+            # megapixels / loras complete the as-rendered facts (both JSON-
+            # free facts were previously unrecorded). form_state is the
+            # EDITABLE copy the dialog autosaves into -- see
+            # metascan/core/i2v_form.py for why the two are kept apart.
+            # All three are NULL for clips ingested before they existed.
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "megapixels",
+                "ALTER TABLE i2v_videos ADD COLUMN megapixels REAL",
+            )
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "loras",
+                "ALTER TABLE i2v_videos ADD COLUMN loras TEXT",
+            )
+            _idempotent_add_column(
+                conn,
+                "i2v_videos",
+                "form_state",
+                "ALTER TABLE i2v_videos ADD COLUMN form_state TEXT",
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
@@ -3585,13 +3611,19 @@ class DatabaseManager:
         render_s: Optional[float] = None,
         preset_id: Optional[int] = None,
         comfy_prompt_id: Optional[str] = None,
+        megapixels: Optional[float] = None,
+        loras: Optional[List[Dict[str, Any]]] = None,
+        form_state: Optional[Dict[str, Any]] = None,
     ) -> int:
+        import json as _json
+
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
                 "idea, seed, duration_s, quality, width, height, steps, "
-                "render_s, preset_id, comfy_prompt_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
+                "form_state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -3606,10 +3638,57 @@ class DatabaseManager:
                     render_s,
                     preset_id,
                     comfy_prompt_id,
+                    megapixels,
+                    _json.dumps(loras) if loras is not None else None,
+                    _json.dumps(form_state) if form_state is not None else None,
                 ),
             )
             conn.commit()
             return int(cur.lastrowid)
+
+    @staticmethod
+    def _i2v_video_row(row: Any) -> Dict[str, Any]:
+        """One i2v_videos row as the API shape: native paths, and the two
+        JSON columns parsed. Unparseable JSON reads as None so a single
+        bad row can never break the dialog's clip strip."""
+        import json as _json
+
+        d = dict(row)
+        d["file_path"] = to_native_path(d["file_path"])
+        d["source_path"] = to_native_path(d["source_path"])
+        for column, kind in (("loras", list), ("form_state", dict)):
+            raw = d.get(column)
+            parsed = None
+            if raw:
+                try:
+                    parsed = _json.loads(raw)
+                except (TypeError, ValueError):
+                    parsed = None
+            d[column] = parsed if isinstance(parsed, kind) else None
+        return d
+
+    def get_i2v_video(self, video_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM i2v_videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            return self._i2v_video_row(row) if row is not None else None
+
+    def set_i2v_video_form_state(
+        self, video_id: int, form_state: Dict[str, Any]
+    ) -> bool:
+        """Replace a clip's EDITABLE form state. Deliberately the only
+        i2v_videos update there is: the as-rendered columns (prompt_used,
+        seed, quality, ...) are facts about the clip and never change."""
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE i2v_videos SET form_state = ? WHERE id = ?",
+                (_json.dumps(form_state), video_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount > 0)
 
     def list_i2v_videos(self, source_path: str) -> List[Dict[str, Any]]:
         """Videos generated from one source image, newest first, with
@@ -3628,13 +3707,11 @@ class DatabaseManager:
             out: List[Dict[str, Any]] = []
             stale: List[int] = []
             for r in rows:
-                d = dict(r)
+                d = self._i2v_video_row(r)
                 if d.pop("media_path") is None:
                     stale.append(int(d["id"]))
                     continue
                 d["is_favorite"] = bool(d.get("is_favorite"))
-                d["file_path"] = to_native_path(d["file_path"])
-                d["source_path"] = to_native_path(d["source_path"])
                 out.append(d)
             if stale:
                 conn.execute(

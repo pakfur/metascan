@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Media } from '../../types/media'
-import { i2vDims, i2vVideoDetails, type I2vFix, type I2vVideo } from '../../types/i2v'
+import {
+  formatI2vTimestamp,
+  i2vDims,
+  i2vVideoDetails,
+  withCurrentOption,
+  type I2vFix,
+  type I2vFormState,
+  type I2vVideo,
+} from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
 import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
@@ -49,6 +57,7 @@ onMounted(async () => {
 })
 
 function close() {
+  flushFormState() // before store.close() empties the clip list
   store.close()
   emit('close')
 }
@@ -63,9 +72,17 @@ useWebSocket('comfy', (event, data) => {
   store.handleComfyEvent(event, data)
 })
 
-const durations = computed(() => store.config?.durations ?? [6, 10, 15, 20])
-const megapixelOptions = computed(() => store.config?.megapixels ?? [0.25, 0.5, 0.75, 1.0])
-const stepOptions = computed(() => store.config?.steps ?? [20, 25, 30, 35, 40])
+// withCurrentOption: a loaded clip may carry a value that has since left
+// the config lists; it must still be shown, not blanked.
+const durations = computed(() =>
+  withCurrentOption(store.config?.durations ?? [6, 10, 15, 20], durationS.value),
+)
+const megapixelOptions = computed(() =>
+  withCurrentOption(store.config?.megapixels ?? [0.25, 0.5, 0.75, 1.0], megapixels.value),
+)
+const stepOptions = computed(() =>
+  withCurrentOption(store.config?.steps ?? [20, 25, 30, 35, 40], steps.value),
+)
 // Steps drive the High quality preset only (Fast is a step-distilled
 // build), and only when that preset's workflow binds MS_STEPS.
 const stepsSupported = computed(() => store.config?.quality_steps_supported ?? true)
@@ -183,8 +200,138 @@ function requestSignature(): string {
 }
 
 // Signature of the last SUCCESSFUL submit from this dialog instance.
-// Component-local on purpose: earlier sessions/runs are not considered.
+// Component-local on purpose: earlier sessions/runs are not considered --
+// with one deliberate exception: loading a clip (loadClip) arms it, since
+// that clip's exact seed and settings are now in the form and an untouched
+// Generate would re-render the very same video.
 const lastSubmitted = ref<string | null>(null)
+
+// ---- per-clip form state ----------------------------------------------------
+// Nothing is saved until a clip exists: with no clip selected the form is a
+// scratch area, exactly as before. Clicking a clip loads its form_state and
+// from then on every change autosaves INTO THAT CLIP -- its form_state only.
+// The clip's as-rendered fields (prompt_used, seed, quality, steps, which
+// feed the tile label) are facts about the video and are never written.
+const selectedId = ref<number | null>(null)
+const selectedVideo = computed(
+  () => store.videos.find((v) => v.id === selectedId.value) ?? null,
+)
+const saveFailed = ref(false)
+// JSON of the form as last loaded or saved; an autosave is skipped while
+// the form still equals it (loading a clip must not echo straight back).
+let savedSnapshot = ''
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+// Saves run one at a time, in order, so a slow early request can never
+// land after -- and overwrite -- a later one.
+let saveChain: Promise<void> = Promise.resolve()
+
+function currentForm(): I2vFormState {
+  return {
+    idea: idea.value,
+    prompt: prompt.value,
+    duration_s: durationS.value,
+    quality: quality.value,
+    megapixels: megapixels.value,
+    steps: steps.value,
+    seed: seed.value,
+    loras: loras.value.map((l) => ({ name: l.name, strength: l.strength })),
+  }
+}
+
+// A number input emptied mid-edit yields '' (v-model.number), and the
+// server rejects a non-number. Leave such a field out: its last good value
+// stays saved, and everything else still goes through.
+function savableFields(form: I2vFormState): Partial<I2vFormState> {
+  const out: Partial<I2vFormState> = { ...form }
+  if (!Number.isInteger(form.seed)) delete out.seed
+  if (!(typeof form.steps === 'number' && form.steps > 0)) delete out.steps
+  if (!(typeof form.duration_s === 'number' && form.duration_s > 0)) delete out.duration_s
+  if (!(typeof form.megapixels === 'number' && form.megapixels > 0)) delete out.megapixels
+  return out
+}
+
+function flushFormState() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  const id = selectedId.value
+  if (id == null) return
+  const form = currentForm()
+  const snapshot = JSON.stringify(form)
+  if (snapshot === savedSnapshot) return
+  // Captured now, sent later: by the time the chain reaches this save the
+  // user may have clicked a different clip.
+  const fields = savableFields(form)
+  saveChain = saveChain.then(async () => {
+    try {
+      await store.saveFormState(id, fields)
+      if (selectedId.value === id) savedSnapshot = snapshot
+      saveFailed.value = false
+    } catch {
+      // Snapshot left alone, so the next edit (or close) retries.
+      saveFailed.value = true
+    }
+  })
+}
+
+watch(
+  [idea, prompt, durationS, quality, megapixels, steps, seed, loras],
+  () => {
+    if (selectedId.value == null) return
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(flushFormState, 600)
+  },
+  { deep: true },
+)
+
+function loadClip(v: I2vVideo) {
+  flushFormState() // pending edits belong to the clip being left
+  const f = v.form_state
+  idea.value = f.idea ?? ''
+  prompt.value = f.prompt ?? ''
+  // Nulls only occur on clips that predate form_state (or were ingested
+  // across a server restart); keep the form's current value for those.
+  if (f.duration_s != null) durationS.value = f.duration_s
+  if (f.quality != null) quality.value = f.quality
+  if (f.megapixels != null) megapixels.value = f.megapixels
+  if (f.steps != null) steps.value = f.steps
+  if (f.seed != null) seed.value = f.seed
+  loras.value = (f.loras ?? []).map((l) => ({ name: l.name, strength: l.strength }))
+  warnings.value = []
+  selectedId.value = v.id
+  savedSnapshot = JSON.stringify(currentForm())
+  saveFailed.value = false
+  lastSubmitted.value = requestSignature()
+}
+
+// detail > 1 is the second click of a double-click, which plays the clip;
+// it must not also re-run the load.
+function onSelectClip(v: I2vVideo, event: MouseEvent) {
+  if (event.detail > 1) return
+  loadClip(v)
+}
+
+// The form keeps its values and goes back to being a scratch area.
+function stopEditingClip() {
+  flushFormState()
+  selectedId.value = null
+}
+
+// The selected clip can vanish underneath us: deleted here, or pruned by
+// the server because its media row is gone.
+watch(
+  () => store.videos,
+  (videos) => {
+    if (selectedId.value != null && !videos.some((v) => v.id === selectedId.value)) {
+      if (saveTimer) clearTimeout(saveTimer)
+      saveTimer = null
+      selectedId.value = null
+    }
+  },
+)
+
+onBeforeUnmount(flushFormState)
 
 async function onGenerate() {
   if (!prompt.value.trim()) {
@@ -252,6 +399,12 @@ async function onCancelJob(jobId: number) {
 
 async function onDeleteVideo(v: I2vVideo) {
   if (!confirm('Delete this video? The file goes to the OS trash.')) return
+  if (selectedId.value === v.id) {
+    // Drop any pending save rather than PATCH a row that is about to go.
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    selectedId.value = null
+  }
   try {
     await deleteI2vVideo(v.id)
     await store.refreshVideos()
@@ -371,6 +524,23 @@ function jobLabel(chip: {
         </div>
       </div>
 
+      <!-- Shown only while a clip is selected: says where edits are going.
+           With no clip selected the form is an unsaved scratch area. -->
+      <div v-if="selectedVideo" class="editing-bar" :class="{ failed: saveFailed }">
+        <span v-if="saveFailed">
+          Couldn't save your changes to this clip — they'll be retried on the next edit.
+        </span>
+        <span v-else>
+          Editing the clip from {{ formatI2vTimestamp(selectedVideo.created_at) }} ·
+          changes save automatically
+        </span>
+        <button
+          class="link-btn"
+          title="Keep these values in the form, but stop saving them to this clip"
+          @click="stopEditingClip"
+        >Stop editing</button>
+      </div>
+
       <label class="fld i2v-prompt">
         <span>MiniMax I2VA prompt (editable — Generate uses this text)</span>
         <textarea v-model="prompt" rows="10" spellcheck="false" />
@@ -447,8 +617,11 @@ function jobLabel(chip: {
         <div v-for="(v, idx) in store.videos" :key="v.id" class="tile-wrap">
           <div
             class="tile"
-            :title="`seed ${v.seed ?? '—'} · ${v.duration_s ?? '—'}s · ${v.quality ?? ''}`
+            :class="{ selected: v.id === selectedId }"
+            :title="`Click to load this clip's idea, settings and prompt · double-click to play\n`
+              + `seed ${v.seed ?? '—'} · ${v.duration_s ?? '—'}s · ${v.quality ?? ''}`
               + `${v.width && v.height ? ` · ${v.width}×${v.height}` : ''}`"
+            @click="onSelectClip(v, $event)"
             @dblclick="viewerIndex = idx"
           >
             <img :src="thumbnailUrl(v.file_path)" alt="" />
@@ -621,6 +794,23 @@ function jobLabel(chip: {
 .tile-meta-quality { color: var(--text-color); font-weight: 600; }
 .tile { position: relative; flex: 0 0 176px; height: 99px; border-radius: 6px; overflow: hidden; background: #111; }
 .tile img { width: 100%; height: 100%; object-fit: cover; }
+.tile { cursor: pointer; }
+/* outline, not border: a border would shrink the fixed-size thumbnail. */
+.tile.selected { outline: 2px solid var(--primary-color, #6366f1); outline-offset: 1px; }
+.editing-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 10px; border-radius: 6px; font-size: 12px;
+  color: var(--text-color-secondary);
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-left: 3px solid var(--primary-color, #6366f1);
+}
+.editing-bar.failed { border-left-color: #c33; color: #c33; }
+.link-btn {
+  background: none; border: none; padding: 0; cursor: pointer; font-size: 12px;
+  color: var(--primary-color, #6366f1); white-space: nowrap;
+}
+.link-btn:hover { text-decoration: underline; }
 .tile .overlay { position: absolute; opacity: 0; transition: opacity .15s; }
 .tile:hover .overlay { opacity: 1; }
 .tile .play { inset: 0; margin: auto; width: 36px; height: 36px; }
