@@ -40,15 +40,28 @@ class FakeRunner:
         self.generate_result = 42
         self.generate_error = None
         self.calls = []
+        # Dict-shaped call logs (kwargs only), alongside the tuple-shaped
+        # ``calls`` above which existing tests already assert against.
+        self.prompt_calls = []
+        self.generate_calls = []
 
-    async def generate_prompt(self, source_path, idea, duration_s):
+    async def generate_prompt(self, source_path, idea, duration_s, template_id=None):
         self.calls.append(("prompt", source_path, idea, duration_s))
+        self.prompt_calls.append(
+            {
+                "source_path": source_path,
+                "idea": idea,
+                "duration_s": duration_s,
+                "template_id": template_id,
+            }
+        )
         if self.prompt_error:
             raise self.prompt_error
         return self.prompt_result
 
     async def generate(self, **kwargs):
         self.calls.append(("generate", kwargs))
+        self.generate_calls.append(kwargs)
         if self.generate_error:
             raise self.generate_error
         return self.generate_result
@@ -607,6 +620,114 @@ class TestI2vFormStateApi(_I2vApiBase):
         vid = self._clip(form_state=self.FORM)
         resp = self.client.patch(f"/api/i2v/videos/{vid}", json={})
         self.assertEqual(resp.status_code, 400)
+
+
+class TestI2vTemplatesApi(_I2vApiBase):
+    def setUp(self):
+        super().setUp()
+        self._config_patch.stop()
+        self._config_patch = patch(
+            "backend.api.i2v.load_app_config",
+            return_value={"i2v": {"fast_preset_id": 5, "durations": [6, 10, 15, 20]}},
+        )
+        self._config_patch.start()
+
+    def test_templates_route_lists_the_library_with_availability(self):
+        resp = self.client.get("/api/i2v/templates")
+        self.assertEqual(resp.status_code, 200)
+        by_id = {t["id"]: t for t in resp.json()}
+        self.assertEqual(sorted(by_id), ["dialog_ots_15", "intimate_15", "melee_12"])
+        self.assertTrue(by_id["dialog_ots_15"]["available"])
+        self.assertIsNone(by_id["dialog_ots_15"]["unavailable_reason"])
+        self.assertFalse(by_id["melee_12"]["available"])
+        self.assertIn("12", by_id["melee_12"]["unavailable_reason"])
+        self.assertEqual(by_id["dialog_ots_15"]["beats"][1]["transition"], "cut")
+
+    def test_prompt_passes_template_id_to_the_runner(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 15,
+                "template_id": "dialog_ots_15",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.prompt_calls[-1]["template_id"], "dialog_ots_15")
+
+    def test_prompt_unknown_template_is_404(self):
+        self.runner.prompt_error = I2vRequestError(
+            "unknown i2v template 'nope'; available: ..."
+        )
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 15,
+                "template_id": "nope",
+            },
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_prompt_duration_mismatch_is_400(self):
+        self.runner.prompt_error = I2vRequestError(
+            "Template 'dialog_ots_15' is a 15s cadence; duration_s was 10"
+        )
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 10,
+                "template_id": "dialog_ots_15",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_lint_with_a_template_runs_the_structural_checks(self):
+        text = (
+            "For the target video, at 0.00 seconds into the target video, "
+            "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+            "integrated_multimodal_description: [Shot 1] words.\n\n"
+            "overall_soundscape: x.\n\n"
+            "non_diegetic_music: y."
+        )
+        resp = self.client.post(
+            "/api/i2v/lint",
+            json={"prompt": text, "duration_s": 15, "template_id": "dialog_ots_15"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(
+            any("1 shots" in w and "3" in w for w in resp.json()["warnings"])
+        )
+
+    def test_lint_with_an_unknown_template_warns_and_still_lints(self):
+        resp = self.client.post(
+            "/api/i2v/lint",
+            json={"prompt": "x", "duration_s": 15, "template_id": "nope"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(
+            any("unknown i2v template 'nope'" in w for w in resp.json()["warnings"])
+        )
+
+    def test_generate_forwards_template_id(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json={
+                "source_path": "/lib/a.png",
+                "prompt": "p",
+                "duration_s": 15,
+                "quality": "fast",
+                "seed": 1,
+                "megapixels": 0.5,
+                "template_id": "dialog_ots_15",
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.runner.generate_calls[-1]["template_id"], "dialog_ots_15")
 
 
 class TestGetI2vConfig(unittest.TestCase):

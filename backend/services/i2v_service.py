@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from metascan.core.comfy_bindings import BindingError, resolve_bindings
 from metascan.core.i2v_form import form_state_for_row
+from metascan.core.i2v_templates import load_i2v_templates, summarize_i2v_template
 
 from metascan.utils.trash import remove_files_to_trash
 
@@ -65,6 +66,24 @@ class I2vService:
             return resolve_bindings(workflow, preset["kind"]).steps is not None
         except (BindingError, TypeError, ValueError):
             return False
+
+    async def list_templates(self, durations: Sequence[float]) -> List[Dict[str, Any]]:
+        """The découpage library, each stamped with whether its fixed
+        duration is one the dialog can select."""
+        allowed = {float(d) for d in durations}
+        out: List[Dict[str, Any]] = []
+        for t in (await asyncio.to_thread(load_i2v_templates)).values():
+            summary = summarize_i2v_template(t)
+            ok = t.duration_s in allowed
+            summary["available"] = ok
+            summary["unavailable_reason"] = (
+                None
+                if ok
+                else f"duration {t.duration_s:.0f}s is not one of the configured "
+                f"durations ({', '.join(f'{d:.0f}' for d in sorted(allowed))})"
+            )
+            out.append(summary)
+        return out
 
     async def delete_video(self, video_id: int) -> bool:
         deleted, purged = await asyncio.to_thread(self.db.delete_i2v_video, video_id)
