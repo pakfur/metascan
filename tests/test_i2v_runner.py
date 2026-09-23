@@ -651,3 +651,117 @@ class TestFormStateAtIngest(I2vRunnerBase):
         row = self.db.list_i2v_videos(str(self.src))[0]
         self.assertIsNone(row["form_state"])
         self.assertEqual(row["seed"], 123)  # facts still come from the job row
+
+
+class TestGeneratePromptWithTemplate(I2vRunnerBase):
+    def setUp(self):
+        super().setUp()
+        from metascan.core.i2v_templates import get_i2v_template
+
+        self.template = get_i2v_template("dialog_ots_15")
+        roles = [
+            {
+                "id": "A",
+                "bound": True,
+                "description": "a woman in a red coat",
+                "tag": "the woman",
+            },
+            {
+                "id": "B",
+                "bound": True,
+                "description": "a man in a leather jacket",
+                "tag": "the man",
+            },
+        ]
+        beats = [
+            {"action": "He leans in", "line": "We shouldn't be here"},
+            {"action": "His jaw tightens"},
+            {"action": "She folds her arms", "line": "Too late"},
+            {"action": "He nods"},
+        ]
+        self.vlm = FakeVlm(
+            json.dumps(
+                {
+                    "roles": roles,
+                    "beats": beats,
+                    "overall_soundscape": "jazz",
+                    "non_diegetic_music": "none",
+                }
+            )
+        )
+        self.runner.get_vlm = lambda: self.vlm
+
+    def test_template_drives_grammar_prompt_and_assembly(self):
+        from metascan.core.i2v_templates import (
+            build_i2v_template_user_prompt,
+            i2v_template_grammar,
+        )
+
+        text, warnings = self.run_async(
+            self.runner.generate_prompt(
+                str(self.src), "an argument", 15.0, "dialog_ots_15"
+            )
+        )
+        call = self.vlm.calls[0]
+        self.assertEqual(call["grammar"], i2v_template_grammar(self.template))
+        self.assertEqual(
+            call["user_prompt"],
+            build_i2v_template_user_prompt(self.template, "an argument"),
+        )
+        self.assertIn(
+            "fixed shot plan",
+            call["system_prompt"].lower() + call["user_prompt"].lower(),
+        )
+        self.assertIn(
+            "[Shot 2] At 00:04.000, the shot cuts to a close-up of the man.", text
+        )
+        self.assertIn("[Shot 3] At 00:05.000, the woman (S2) says:", text)
+        self.assertEqual([w for w in warnings if "Shot" in w], [])
+
+    def test_off_screen_note_reaches_the_warnings(self):
+        data = json.loads(self.vlm.response)
+        data["roles"][0]["bound"] = False
+        self.vlm.response = json.dumps(data)
+        _, warnings = self.run_async(
+            self.runner.generate_prompt(str(self.src), "", 15.0, "dialog_ots_15")
+        )
+        self.assertTrue(
+            any(w.startswith("role A is not in the picture") for w in warnings)
+        )
+
+    def test_duration_must_match_the_template(self):
+        with self.assertRaises(I2vRequestError) as ctx:
+            self.run_async(
+                self.runner.generate_prompt(str(self.src), "", 10.0, "dialog_ots_15")
+            )
+        self.assertIn("15", str(ctx.exception))
+        self.assertIn("10", str(ctx.exception))
+
+    def test_unknown_template_is_a_request_error(self):
+        with self.assertRaises(I2vRequestError) as ctx:
+            self.run_async(self.runner.generate_prompt(str(self.src), "", 15.0, "nope"))
+        self.assertIn("unknown i2v template", str(ctx.exception))
+
+    def test_no_template_uses_the_single_take_path_unchanged(self):
+        from metascan.core.i2v_compiler import i2v_grammar
+
+        self.vlm = FakeVlm(_beats_response(3))
+        self.runner.get_vlm = lambda: self.vlm
+        self.run_async(self.runner.generate_prompt(str(self.src), "x", 6.0))
+        self.assertEqual(self.vlm.calls[0]["grammar"], i2v_grammar(6.0))
+
+
+class TestGenerateRecordsTemplateId(TestFormStateAtIngest):
+    def test_template_id_is_in_the_form_snapshot_at_ingest(self):
+        job_id = self._generate(duration_s=15.0, template_id="dialog_ots_15")
+        self._ingest(job_id)
+        row = self.db.list_i2v_videos(str(self.src))[0]
+        self.assertEqual(row["form_state"]["template_id"], "dialog_ots_15")
+
+    def test_generate_does_not_require_the_template_to_exist(self):
+        # The prompt text already embodies the cadence; a renamed template
+        # file must not block a render.
+        job_id = self._generate(template_id="gone_20")
+        self._ingest(job_id)
+        row = self.db.list_i2v_videos(str(self.src))[0]
+        self.assertEqual(row["form_state"]["template_id"], "gone_20")

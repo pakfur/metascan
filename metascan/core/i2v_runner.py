@@ -31,6 +31,15 @@ from metascan.core.i2v_compiler import (
 )
 from metascan.core.i2v_form import build_form_state
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
+from metascan.core.i2v_templates import (
+    I2vTemplateError,
+    assemble_i2v_template_prompt,
+    build_i2v_template_user_prompt,
+    get_i2v_template,
+    i2v_template_grammar,
+    i2v_template_max_tokens,
+    validate_i2v_template_fill,
+)
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_select import pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
@@ -111,8 +120,27 @@ class I2vRunner:
     # ---- prompt expansion (review-only, writes nothing) ----------------
 
     async def generate_prompt(
-        self, source_path: str, idea: str, duration_s: float
+        self,
+        source_path: str,
+        idea: str,
+        duration_s: float,
+        template_id: Optional[str] = None,
     ) -> Tuple[str, List[str]]:
+        """Expand an idea into the H3 prompt. With ``template_id`` the
+        découpage template owns the shot structure and the VLM fills only
+        prose; without it, this is the single-take path, unchanged."""
+        template = None
+        if template_id:
+            try:
+                template = get_i2v_template(template_id)
+            except I2vTemplateError as exc:
+                raise I2vRequestError(str(exc)) from exc
+            if abs(float(duration_s) - template.duration_s) > 1e-6:
+                raise I2vRequestError(
+                    f"Template '{template.id}' is a {template.duration_s:.0f}s "
+                    f"cadence; duration_s was {float(duration_s):.0f}"
+                )
+
         vlm = self.get_vlm()
         if vlm is None:
             raise I2vUnavailableError("VLM subsystem is not running")
@@ -123,18 +151,33 @@ class I2vRunner:
             raise I2vRequestError(f"File not found: {source_path}")
         model_id = pick_vlm_model(vlm)
         await vlm.ensure_started(model_id)
+
+        if template is None:
+            raw = await vlm.generate_text(
+                system_prompt=get_prompt_store().get("I2V_BEATS_SYSTEM"),
+                user_prompt=build_i2v_user_prompt(idea, duration_s),
+                image_path=path,
+                grammar=i2v_grammar(duration_s),
+                temperature=0.6,
+                max_tokens=i2v_max_tokens(duration_s),
+                timeout=240.0,
+            )
+            result = validate_i2v_beats(raw)
+            text = assemble_i2v_prompt(result)
+            return text, lint_i2v_prompt(text, duration_s)
+
         raw = await vlm.generate_text(
-            system_prompt=get_prompt_store().get("I2V_BEATS_SYSTEM"),
-            user_prompt=build_i2v_user_prompt(idea, duration_s),
+            system_prompt=get_prompt_store().get("I2V_TEMPLATE_SYSTEM"),
+            user_prompt=build_i2v_template_user_prompt(template, idea),
             image_path=path,
-            grammar=i2v_grammar(duration_s),
+            grammar=i2v_template_grammar(template),
             temperature=0.6,
-            max_tokens=i2v_max_tokens(duration_s),
+            max_tokens=i2v_template_max_tokens(template),
             timeout=240.0,
         )
-        result = validate_i2v_beats(raw)
-        text = assemble_i2v_prompt(result)
-        return text, lint_i2v_prompt(text, duration_s)
+        fill = validate_i2v_template_fill(raw, template)
+        text, notes = assemble_i2v_template_prompt(template, fill)
+        return text, lint_i2v_prompt(text, duration_s, template=template) + notes
 
     async def _source_dims(self, src: Path) -> Tuple[int, int]:
         """Source pixel dimensions: the media row first (already scanned,
@@ -205,6 +248,7 @@ class I2vRunner:
         preset_id: int,
         idea: Optional[str] = None,
         steps: Optional[int] = None,
+        template_id: Optional[str] = None,
         output_root: Optional[str] = None,
         output_prefix: Optional[str] = None,
     ) -> int:
@@ -299,6 +343,7 @@ class I2vRunner:
                 steps=steps,
                 seed=seed,
                 loras=loras,
+                template_id=template_id,
             ),
         }
         return job_id
