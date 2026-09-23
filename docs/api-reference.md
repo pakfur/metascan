@@ -73,6 +73,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/i2v/lint` | Lint a prompt and return the no-model rewrites it could apply (Apply fixes) |
 | POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
+| GET | `/api/i2v/templates` | List cadence templates (with availability) |
 | PATCH | `/api/i2v/videos/{id}` | Autosave the dialog's form into a clip's editable `form_state` |
 | DELETE | `/api/i2v/videos/{id}` | Delete a generated clip |
 | GET | `/api/i2v/output-preview` | Resolve where a clip would be saved for a root + prefix (config tab live preview) |
@@ -584,20 +585,32 @@ first frame. Unlike storyboard clips, generated videos are never hidden —
 they're ordinary visible library media, favorited via `media.is_favorite`.
 
 ### `POST /api/i2v/prompt`
-Body: `{source_path: string, idea: string = "", duration_s: float}`.
+Body: `{source_path: string, idea: string = "", duration_s: float,
+template_id?: string | null}`.
 VLM-expands the idea into an I2VA prompt scaled to the requested duration's
 beat count; writes nothing. Returns `{prompt: string, warnings: string[]}`
 (advisory lint warnings from `lint_i2v_prompt`).
-- **400** if `duration_s <= 0`, or on `I2vRequestError` (e.g. the source
-  path isn't a recognized image).
+- **400** if `duration_s <= 0`, on `I2vRequestError` (e.g. the source
+  path isn't a recognized image), or when `duration_s` doesn't match a
+  supplied `template_id`'s fixed duration.
+- **404** if `template_id` names a template that doesn't exist. The
+  runner re-raises the lookup failure as `I2vRequestError(...) from exc`;
+  the route distinguishes this case from the plain 400s above by checking
+  `isinstance(exc.__cause__, I2vTemplateError)` on the caught exception,
+  not by matching the error message text.
 - **502** if the VLM call itself fails (`I2vError` / `VlmError` /
   timeout / runtime error).
 - **503** if the i2v runner isn't installed, or no VLM model is available
   to expand with (`I2vUnavailableError` / `VlmSelectError`).
 
 ### `POST /api/i2v/lint`
-Body: `{prompt: string, duration_s: float}`. Advisory lint of the prompt
-text plus the rewrites that need no model call. Returns
+Body: `{prompt: string, duration_s: float, template_id?: string | null}`.
+Advisory lint of the prompt
+text plus the rewrites that need no model call. When `template_id` is
+given, the response's `warnings` also include `lint_against_template`'s
+findings (shot count/numbering, cut timing, camera phrasing, spoken-line
+counts per shot); an unknown `template_id` adds a single warning and the
+text is linted as a single take instead of a 404. Returns
 `{warnings: string[], fixes: [{code, message, original, replacement}, ...],
 fixed_prompt: string | null}`. `fixes` is the fixable subset of the
 warnings — `code` is `camera_phrase` (natural camera wording → the MiniMax
@@ -613,7 +626,10 @@ i2v runner nor the VLM. **400** if `duration_s <= 0`.
 ### `POST /api/i2v/generate`
 Body: `{source_path: string, prompt: string, duration_s: float, quality:
 "fast" | "quality", seed: int, megapixels: float = 0.75, loras:
-[{name, strength}, ...] = [], idea?: string, steps?: int}`. Re-lints `prompt` (the
+[{name, strength}, ...] = [], idea?: string, steps?: int,
+template_id?: string | null}`. `template_id` is recorded into the clip's
+`form_state` only — it is not re-validated against the template library,
+since the prompt text already embodies the cadence. Re-lints `prompt` (the
 lint is advisory and never blocks) and submits a job to ComfyUI using the
 config's `fast_preset_id` or `quality_preset_id` for the requested
 `quality`. Returns `{job_id: int, warnings: string[]}`.
@@ -638,6 +654,19 @@ on the `comfy` WS channel.
 - **502** if ComfyUI rejects the submission (`ComfyError`).
 - **503** if the i2v runner isn't installed.
 
+### `GET /api/i2v/templates`
+Every template under `data/i2v_templates/`, as
+`[{id, name, description, duration_s, look, soundscape_hint, roles,
+beats, available, unavailable_reason}, ...]`. `available` is false when
+the template's fixed `duration_s` is not one of the configured
+`i2v.durations`. A malformed template file is a **500** naming it.
+
+`POST /api/i2v/prompt`, `POST /api/i2v/lint` and `POST /api/i2v/generate`
+accept `template_id` (string or null). On `/prompt` an unknown id is
+**404** and a `duration_s` that differs from the template's is **400**;
+on `/lint` an unknown id adds a warning and lints as a single take; on
+`/generate` it is recorded into the clip's `form_state` only.
+
 ### `GET /api/i2v/videos?source_path=`
 Returns every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
@@ -647,7 +676,7 @@ carries two sets of values. Everything except `form_state` is an
 **as-rendered fact** about the clip, written once at ingest and never
 changed (`megapixels`/`loras` are `null` for clips ingested before they
 were recorded). `form_state` — `{idea, prompt, duration_s, quality,
-megapixels, steps, seed, loras}` — is the **editable copy** the dialog
+megapixels, steps, seed, loras, template_id}` — is the **editable copy** the dialog
 loads when a clip is clicked and autosaves into; it is always complete:
 for a clip that predates the column the server builds it from the facts
 (megapixels snapped from `width × height` to the nearest configured
@@ -663,7 +692,8 @@ place (`i2v_videos` has no foreign key to media).
 ### `PATCH /api/i2v/videos/{video_id}`
 Merges a partial `form_state` — any of `idea`, `prompt`, `duration_s`,
 `quality` (`fast`/`quality`), `megapixels`, `steps` (`null` allowed),
-`seed`, `loras` (`[{name, strength}]`) — into the clip's stored one and
+`seed`, `loras` (`[{name, strength}]`), `template_id` (string or `null`)
+— into the clip's stored one and
 returns the updated row. Only `form_state` is written: the as-rendered
 columns are not reachable through this route, so a clip's tile label and
 provenance can never be edited into describing a render that didn't

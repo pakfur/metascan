@@ -109,6 +109,7 @@ Right-click any image → "Image to Video…" opens a dialog to turn it into a s
 - Type an idea and expand it into a full I2VA video prompt (VLM-composed, editable before generating)
 - The prompt is linted as you type; **Apply fixes** rewrites natural camera wording ("slowly dollies in") into MiniMax's motion vocabulary ("pushes in at slow speed") and quoted speech into its `(S1) says: <d>[English] …</d>` dialogue form, showing each before/after first — the prompt is never changed without pressing it
 - Pick a clip duration and a fast/quality generation preset; High quality also offers a sampler Steps choice (20–40, default 25)
+- Pick a **Cadence**: Single take, or a découpage template that fixes the shot plan — timing, framing, camera and cuts — while the VLM writes only the action and lines. A template sets the clip duration. See [Image-to-Video cadence templates](i2v-templates.md).
 - Pick an output size as a megapixel budget; the clip's orientation and aspect ratio always follow the source image, since that image is the first frame
 - Optional LoRAs applied to the generation
 - Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions

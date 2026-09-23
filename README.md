@@ -145,6 +145,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Installation](docs/installation.md)** — prerequisites, end-user setup, contributor setup, environment variables
 - **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, `models`, `comfy`, and `i2v` sections
 - **[Image-to-Video Workflow Setup](docs/i2v-workflow-setup.md)** — step-by-step ComfyUI build and registration for the MiniMax H3 turbo and high-quality presets
+- **[Image-to-Video cadence templates](docs/i2v-templates.md)** — the JSON découpage-template format that fixes an i2v clip's shot structure
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
 - **[Hardware Detection](docs/hardware-detection.md)** — what gets probed, tier classification, per-model gates, auto-warnings

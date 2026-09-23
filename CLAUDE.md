@@ -1263,6 +1263,56 @@ metascan/
   exception to that snapshot being session-local, because the clip's exact
   seed is now in the form. `withCurrentOption` keeps a loaded value that
   has since left the config lists visible in its select.
+  **Découpage templates own an i2v clip's shot structure; the VLM fills
+  only prose.** `metascan/core/i2v_templates.py` loads
+  `data/i2v_templates/*.json` (id must equal the file stem; cached until
+  `reload_i2v_templates()`), validated at load against the storyboard
+  vocabularies imported from `storyboard_parse.py`/`storyboard_story.py`
+  — never redeclare them; `pov` is excluded from angle and motion. Beats
+  must tile `[0, duration_s]`; **shots are derived**: `cut`/`j_cut` open
+  a `[Shot n] At MM:SS.mmm,`, `continuous` stays in the shot with an
+  intra-shot timestamp (`shots_of`). The first beat is always
+  `continuous`. `i2v_template_grammar` bakes role ids and beat count into
+  the GBNF and makes `line` required exactly where a beat has a
+  `speaker`. `assemble_i2v_template_prompt` renders the H3 document in
+  code: first mention of a role → its `description`, after → its `tag`;
+  `(S1)`/`(S2)` in first-line order; camera through
+  `h3_compiler._CAMERA_PHRASES` with amplitude then speed; a `j_cut`
+  puts the line before the cut with "the words carrying over from the
+  previous shot". **Off-screen rule:** an unbound role (VLM said it is
+  not in the picture) is dropped from Shot 1's framing (the only shot the
+  picture anchors) and enters at its next beat; an unbound Shot-1 speaker
+  speaks "Off-screen,". Assembly returns `(text, notes)` — the runner
+  appends `notes` to the lint warnings. `lint_against_template` is
+  text-only and warnings-only (shot count/numbering, Shot 1 has no
+  timestamp, cut times increasing/inside duration/equal to the template,
+  camera phrase per shot, a `<d>` per speaker beat); it scopes its
+  `[Shot n]` scan to the `integrated_multimodal_description:` body via
+  `i2v_compiler._DESCRIPTION_RE`, because `ALIGNMENT_LINE` itself contains
+  "(from [Shot 1])" and would otherwise be misread as a shot marker; the
+  beat label in its messages is `_beat_label` (e.g. `Beat 3, 5.0-10.0 s`).
+  It cannot check role tags without the fill, so that is guaranteed by
+  assembly for generated text and unchecked on hand edits.
+  `lint_i2v_prompt(..., template=)`
+  imports it at function level (import cycle). **`template_id = null` is
+  the single-take path, byte-for-byte** — `tests/test_i2v_compiler.py::
+  test_single_take_output_is_pinned` guards it; never route Single take
+  through the template code. A template **fixes the duration**: `/prompt`
+  400s on a mismatch, the dialog locks the Duration select. `template_id`
+  is a `FORM_FIELDS` entry (null = single take) and rides `_job_meta["form"]`
+  to ingest; `generate()` does not validate it against the library, since
+  the prompt text already embodies the cadence and a renamed file must not
+  block a render. `GET /api/i2v/templates` stamps `available` against
+  `i2v.durations`. No aspect ratio (output follows the source) and no
+  constraints/negative section (H3 has none) — by decision.
+  `POST /api/i2v/prompt`'s 404 for an unknown `template_id` is keyed on
+  `isinstance(exc.__cause__, I2vTemplateError)` — the runner re-raises the
+  lookup failure as `I2vRequestError(str(exc)) from exc`, and the route
+  checks the chained cause, never the message text. The dialog's Cadence
+  `<select>` binds `:value`/`@change` rather than `v-model`, so picking a
+  new cadence commits `onCadenceChange` synchronously (clearing the
+  missing-template note on a genuine pick) instead of racing the
+  `loadClip` watcher that also assigns `templateId` directly.
   **Prompt rewrites are offered, never applied.**
   `metascan/core/i2v_fixes.py` (pure, no model call) owns the two lint
   findings that can be fixed mechanically, as `I2vFinding(code, message,
