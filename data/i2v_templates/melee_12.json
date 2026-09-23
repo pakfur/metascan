@@ -1,0 +1,32 @@
+{
+  "id": "melee_12",
+  "name": "Melee — clash and counter",
+  "description": "Two fighters: a low wide shot of the initial clash, a fast tracking push along the line of action as one strikes, then a cut to a handheld side medium for the block and counter. Does not return to the opening framing; identity rests on the description.",
+  "duration_s": 12,
+  "look": "high contrast, sharp reflections, fast kinetic energy",
+  "soundscape_hint": "impacts, cloth and footwork; whatever weather or surface the setting implies",
+  "roles": [
+    {"id": "A", "note": "attacks first"},
+    {"id": "B", "note": "blocks, then counters"}
+  ],
+  "beats": [
+    {
+      "start_s": 0, "end_s": 3, "transition": "continuous",
+      "cast": ["A", "B"], "speaker": null,
+      "camera": {"shot_size": "WS", "angle": "low", "camera_motion": "static"},
+      "note": "full-body wide, slightly low, both fighters square up and the first clash lands"
+    },
+    {
+      "start_s": 3, "end_s": 7, "transition": "continuous",
+      "cast": ["A", "B"], "speaker": null,
+      "camera": {"shot_size": "MS", "angle": "eye", "camera_motion": "tracking", "camera_speed": "fast"},
+      "note": "sudden fast push-in tracking parallel to the line of action as A launches a strike"
+    },
+    {
+      "start_s": 7, "end_s": 12, "transition": "cut",
+      "cast": ["A", "B"], "speaker": null,
+      "camera": {"shot_size": "MS", "angle": "eye", "camera_motion": "shake_slight"},
+      "note": "tight side-angle medium: B's block and immediate counter-strike; natural handheld wobble"
+    }
+  ]
+}

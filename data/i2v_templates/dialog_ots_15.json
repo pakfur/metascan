@@ -1,0 +1,38 @@
+{
+  "id": "dialog_ots_15",
+  "name": "Dialog — over-the-shoulder",
+  "description": "Two people talking: over-the-shoulder track onto the speaker, a reaction close-up, a J-cut back to a two-shot, then a slow orbit as they settle. Ends near the opening framing, which keeps identity stable across the cuts.",
+  "duration_s": 15,
+  "look": "cinematic, photorealistic skin textures, fine grain",
+  "soundscape_hint": "room ambience appropriate to the setting",
+  "roles": [
+    {"id": "A", "note": "listens first, speaks second"},
+    {"id": "B", "note": "speaks first"}
+  ],
+  "beats": [
+    {
+      "start_s": 0, "end_s": 4, "transition": "continuous",
+      "cast": ["A", "B"], "speaker": "B",
+      "camera": {"shot_size": "MS", "angle": "ots", "camera_motion": "truck_right", "camera_speed": "slow"},
+      "note": "over A's shoulder onto B, who is speaking clearly"
+    },
+    {
+      "start_s": 4, "end_s": 5, "transition": "cut",
+      "cast": ["B"], "speaker": null,
+      "camera": {"shot_size": "CU", "angle": "eye", "camera_motion": "static"},
+      "note": "B's face; micro-expressions, a reaction, not a line"
+    },
+    {
+      "start_s": 5, "end_s": 10, "transition": "j_cut",
+      "cast": ["A", "B"], "speaker": "A",
+      "camera": {"shot_size": "MS", "angle": "eye", "camera_motion": "pull_out", "camera_speed": "slow"},
+      "note": "A's line starts before we see A; the camera dollies back into a waist-up two-shot"
+    },
+    {
+      "start_s": 10, "end_s": 15, "transition": "continuous",
+      "cast": ["A", "B"], "speaker": null,
+      "camera": {"shot_size": "MS", "angle": "eye", "camera_motion": "arc", "camera_amplitude": "small"},
+      "note": "a gentle orbit with background parallax as B smiles and nods"
+    }
+  ]
+}

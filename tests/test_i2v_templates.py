@@ -285,3 +285,21 @@ def test_summarize_is_json_safe_and_complete():
         "lens": None,
     }
     assert s["beats"][0]["cast"] == ["A", "B"]
+
+
+# ---- shipped library ---------------------------------------------------
+
+
+def test_the_shipped_library_loads_and_has_the_expected_cadences():
+    from metascan.core.i2v_templates import I2V_TEMPLATES_DIR
+
+    lib = load_i2v_templates(I2V_TEMPLATES_DIR)
+    assert sorted(lib) == ["dialog_ots_15", "intimate_15", "melee_12"]
+    assert shots_of(lib["dialog_ots_15"]) == [[0], [1], [2, 3]]
+    assert shots_of(lib["melee_12"]) == [[0, 1], [2]]
+    assert shots_of(lib["intimate_15"]) == [[0, 1, 2]]
+    assert lib["dialog_ots_15"].duration_s == 15.0
+    assert lib["melee_12"].duration_s == 12.0
+    assert lib["intimate_15"].duration_s == 15.0
+    assert [r.id for r in lib["melee_12"].roles] == ["A", "B"]
+    assert [r.id for r in lib["intimate_15"].roles] == ["A"]

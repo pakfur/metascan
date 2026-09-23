@@ -1,0 +1,31 @@
+{
+  "id": "intimate_15",
+  "name": "Intimate — detail to face",
+  "description": "One person, one continuous shot: a macro detail on the hands, a slow tilt and push up to a medium close-up, then settling into a close-up on the eyes. No cuts, so identity is the most stable of the library.",
+  "duration_s": 15,
+  "look": "soft natural light, shallow depth of field with creamy bokeh, volumetric dust",
+  "soundscape_hint": "quiet room tone and small close sounds; distant exterior ambience",
+  "roles": [
+    {"id": "A", "note": "the only person in the shot"}
+  ],
+  "beats": [
+    {
+      "start_s": 0, "end_s": 5, "transition": "continuous",
+      "cast": ["A"], "speaker": null,
+      "camera": {"shot_size": "ECU", "angle": "eye", "camera_motion": "tilt_up", "camera_speed": "slow", "lens": "macro"},
+      "note": "macro detail on A's hands and whatever they hold; a slow mechanical tilt upward begins"
+    },
+    {
+      "start_s": 5, "end_s": 10, "transition": "continuous",
+      "cast": ["A"], "speaker": null,
+      "camera": {"shot_size": "MCU", "angle": "eye", "camera_motion": "push_in", "camera_speed": "slow"},
+      "note": "focus settles on A's face, chest-to-head framing, a micro push-in over the whole beat"
+    },
+    {
+      "start_s": 10, "end_s": 15, "transition": "continuous",
+      "cast": ["A"], "speaker": null,
+      "camera": {"shot_size": "CU", "angle": "eye", "camera_motion": "static"},
+      "note": "a tight close-up isolating the emotion in A's eyes; nothing else moves"
+    }
+  ]
+}
