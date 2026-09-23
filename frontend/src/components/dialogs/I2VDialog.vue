@@ -183,7 +183,7 @@ async function runLint() {
   }
 }
 
-watch([prompt, durationS], () => {
+watch([prompt, durationS, templateId], () => {
   if (lintTimer) clearTimeout(lintTimer)
   lintTimer = setTimeout(runLint, 400)
 })
