@@ -37,6 +37,7 @@ const steps = ref(25)
 const cancelling = ref(false)
 const seed = ref(randomSeed())
 const loras = ref<LoraEntry[]>([])
+const templateId = ref<string | null>(null)
 const expanding = ref(false)
 const submitting = ref(false)
 const viewerIndex = ref<number | null>(null)
@@ -235,6 +236,7 @@ function currentForm(): I2vFormState {
     steps: steps.value,
     seed: seed.value,
     loras: loras.value.map((l) => ({ name: l.name, strength: l.strength })),
+    template_id: templateId.value,
   }
 }
 
@@ -276,7 +278,7 @@ function flushFormState() {
 }
 
 watch(
-  [idea, prompt, durationS, quality, megapixels, steps, seed, loras],
+  [idea, prompt, durationS, quality, megapixels, steps, seed, loras, templateId],
   () => {
     if (selectedId.value == null) return
     if (saveTimer) clearTimeout(saveTimer)
@@ -298,6 +300,7 @@ function loadClip(v: I2vVideo) {
   if (f.steps != null) steps.value = f.steps
   if (f.seed != null) seed.value = f.seed
   loras.value = (f.loras ?? []).map((l) => ({ name: l.name, strength: l.strength }))
+  if (f.template_id != null) templateId.value = f.template_id
   warnings.value = []
   selectedId.value = v.id
   savedSnapshot = JSON.stringify(currentForm())
@@ -361,6 +364,7 @@ async function onGenerate() {
       loras: loras.value,
       idea: idea.value,
       ...(stepsEnabled.value ? { steps: steps.value } : {}),
+      ...(templateId.value ? { template_id: templateId.value } : {}),
     })
     warnings.value = res.warnings
     lastSubmitted.value = signature

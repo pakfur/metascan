@@ -18,6 +18,8 @@ export interface I2vFormState {
   steps: number | null
   seed: number | null
   loras: { name: string; strength: number }[]
+  // Découpage cadence the clip was made with; null = single take.
+  template_id: string | null
 }
 
 /**
@@ -96,6 +98,77 @@ export interface I2vJobChip {
   value?: number
   max?: number
   error?: string | null
+}
+
+export interface I2vTemplateBeat {
+  start_s: number
+  end_s: number
+  transition: 'continuous' | 'cut' | 'j_cut'
+  cast: string[]
+  speaker: string | null
+  camera: {
+    shot_size: string
+    angle: string
+    camera_motion: string
+    camera_amplitude: string | null
+    camera_speed: string | null
+    lens: string | null
+  }
+  note: string
+}
+
+/** One découpage template from data/i2v_templates/, as GET /api/i2v/templates returns it. */
+export interface I2vTemplate {
+  id: string
+  name: string
+  description: string
+  duration_s: number
+  look: string
+  soundscape_hint: string
+  roles: { id: string; note: string }[]
+  beats: I2vTemplateBeat[]
+  available: boolean
+  unavailable_reason: string | null
+}
+
+const MOTION_GLYPH: Record<string, string> = {
+  static: '·',
+  push_in: '⇢',
+  pull_out: '⇠',
+  zoom_in: '+',
+  zoom_out: '−',
+  pan_left: '←',
+  pan_right: '→',
+  truck_left: '⇐',
+  truck_right: '⇒',
+  tilt_up: '↑',
+  tilt_down: '↓',
+  pedestal_up: '⇑',
+  pedestal_down: '⇓',
+  arc: '↻',
+  tracking: '⇶',
+  shake_slight: '≈',
+  shake_strong: '≋',
+  roll_cw: '↷',
+  roll_ccw: '↶',
+}
+
+/**
+ * The read-only cadence strip under the Cadence select: one chip per beat,
+ * e.g. "0–4s · OTS MS · ⇒", "4–5s · CU · CUT", "5–10s · MS · J-CUT ⇠".
+ * Pure, so it is reviewable by reading (there is no frontend test runner).
+ */
+export function cadenceChips(t: I2vTemplate): { label: string; kind: I2vTemplateBeat['transition'] }[] {
+  return t.beats.map((b) => {
+    const size = b.camera.angle === 'ots' ? `OTS ${b.camera.shot_size}` : b.camera.shot_size
+    const how = b.transition === 'cut' ? 'CUT ' : b.transition === 'j_cut' ? 'J-CUT ' : ''
+    const motion = MOTION_GLYPH[b.camera.camera_motion] ?? b.camera.camera_motion
+    const speaker = b.speaker ? ` · ${b.speaker} speaks` : ''
+    return {
+      label: `${b.start_s}–${b.end_s}s · ${size} · ${how}${motion}${speaker}`,
+      kind: b.transition,
+    }
+  })
 }
 
 /**

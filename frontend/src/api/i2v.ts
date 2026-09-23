@@ -1,10 +1,11 @@
 import { get, post, del, patch } from './client'
-import type { I2vConfig, I2vFormState, I2vLintReport, I2vVideo } from '../types/i2v'
+import type { I2vConfig, I2vFormState, I2vLintReport, I2vTemplate, I2vVideo } from '../types/i2v'
 
 export function generatePrompt(body: {
   source_path: string
   idea: string
   duration_s: number
+  template_id?: string | null
 }): Promise<{ prompt: string; warnings: string[] }> {
   return post('/i2v/prompt', body)
 }
@@ -14,6 +15,7 @@ export function generatePrompt(body: {
 export function lintI2vPrompt(body: {
   prompt: string
   duration_s: number
+  template_id?: string | null
 }): Promise<I2vLintReport> {
   return post('/i2v/lint', body)
 }
@@ -29,6 +31,7 @@ export function generateVideo(body: {
   idea?: string
   // High quality only; the server ignores it for Fast.
   steps?: number
+  template_id?: string | null
 }): Promise<{ job_id: number; warnings: string[] }> {
   return post('/i2v/generate', body)
 }
@@ -52,6 +55,10 @@ export function deleteI2vVideo(id: number): Promise<{ status: string }> {
 
 export function fetchI2vConfig(): Promise<I2vConfig> {
   return get('/i2v/config')
+}
+
+export function listI2vTemplates(): Promise<I2vTemplate[]> {
+  return get('/i2v/templates')
 }
 
 // Where a clip generated right now would land for these (possibly
