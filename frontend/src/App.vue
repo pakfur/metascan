@@ -28,6 +28,11 @@ useWebSocket('folders', (event, data) => {
     )
   }
 })
+
+// New i2v clips change the "Has I2V video" smart-folder rule's membership.
+useWebSocket('i2v', (event) => {
+  if (event === 'i2v_videos_changed') void foldersStore.refreshI2vSources()
+})
 </script>
 
 <template>

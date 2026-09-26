@@ -9,6 +9,7 @@ export type RuleField =
   | 'tags'
   | 'modified'
   | 'added'
+  | 'i2v'
 
 export type RuleOp =
   | 'is'

@@ -18,6 +18,7 @@ import { thumbnailUrl } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useToast } from '../../composables/useToast'
 import { useMediaStore } from '../../stores/media'
+import { useFoldersStore } from '../../stores/folders'
 import MediaViewer from '../viewer/MediaViewer.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
 import type { LoraEntry } from '../../types/storyboard'
@@ -27,6 +28,7 @@ const emit = defineEmits<{ close: [] }>()
 
 const store = useI2vStore()
 const mediaStore = useMediaStore()
+const foldersStore = useFoldersStore()
 const toast = useToast()
 
 const idea = ref('')
@@ -475,6 +477,7 @@ async function onDeleteVideo(v: I2vVideo) {
     await deleteI2vVideo(v.id)
     await store.refreshVideos()
     void mediaStore.loadAllMedia()
+    void foldersStore.refreshI2vSources()
   } catch (e) {
     toast.show(e instanceof Error ? e.message : String(e), 'warn')
   }

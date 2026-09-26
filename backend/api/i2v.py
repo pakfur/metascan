@@ -249,6 +249,14 @@ async def list_videos(source_path: str) -> List[Dict[str, Any]]:
     return await _service().list_videos(source_path, _megapixel_options())
 
 
+@router.get("/sources")
+async def list_sources() -> List[str]:
+    """Source images that have one or more i2v clips in the library, for
+    the smart-folder "Has I2V video" rule. One flat list rather than a
+    per-image flag on /api/media, so the grid's covering indexes stay put."""
+    return await _service().list_source_paths()
+
+
 @router.patch("/videos/{video_id}")
 async def update_video_form_state(
     video_id: int, body: Dict[str, Any]

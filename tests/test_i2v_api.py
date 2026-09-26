@@ -464,6 +464,15 @@ class TestI2vApi(_I2vApiBase):
         resp = self.client.delete(f"/api/i2v/videos/{video_id}")
         self.assertEqual(resp.status_code, 404)
 
+    def test_sources_lists_images_with_clips(self):
+        resp = self.client.get("/api/i2v/sources")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+        self.db.create_i2v_video(source_path="/lib/a.png", file_path="/lib/a.png")
+        resp = self.client.get("/api/i2v/sources")
+        self.assertEqual(len(resp.json()), 1)
+        self.assertIn("a.png", resp.json()[0])
+
     # ---- /config ----------------------------------------------------
 
     def test_config_endpoint_defaults(self):

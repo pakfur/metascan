@@ -13,6 +13,7 @@ import type {
 } from '../types/folders'
 import { fileName } from '../utils/path'
 import { fetchTagPaths } from '../api/filters'
+import { listI2vSources } from '../api/i2v'
 import * as foldersApi from '../api/folders'
 import type { FolderRecord } from '../api/folders'
 
@@ -114,6 +115,11 @@ function recordToSmart(r: FolderRecord): SmartFolder {
 // call sites unchanged.
 let tagPathSets: Record<string, Set<string>> = {}
 
+// Source images with one or more i2v clips, for the 'i2v' rule. Same
+// module-scope pattern as tagPathSets; null until first loaded. Fetched only
+// while some smart folder (or the open editor) uses the rule.
+let i2vSourcePaths: Set<string> | null = null
+
 function normalizeModel(m: Media): string {
   if (Array.isArray(m.model) && m.model.length > 0) return m.model[0]
   return ''
@@ -162,6 +168,10 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
       if (op === 'all_of') return vals.every(hasTag)
       if (op === 'any_of') return vals.some(hasTag)
       return false
+    }
+    case 'i2v': {
+      const has = i2vSourcePaths?.has(m.file_path) ?? false
+      return op === 'is' ? has === Boolean(value) : has !== Boolean(value)
     }
     case 'modified':
     case 'added': {
@@ -259,13 +269,56 @@ export const useFoldersStore = defineStore('folders', () => {
       tagPathSets = {}
       tagPathsVersion.value++
     }
-    await ensureTagPathsFor(referencedTagKeys())
+    await Promise.all([
+      ensureTagPathsFor(referencedTagKeys()),
+      options.force ? refreshI2vSources() : ensureI2vSources(),
+    ])
+  }
+
+  // --- i2v source-path cache (the 'i2v' rule) -------------------------
+  // Membership changes rarely (a clip ingested or deleted), so the whole
+  // set is refetched on each change; it bumps tagPathsVersion because that
+  // is the counter every membership computed already watches.
+
+  let i2vFetchSeq = 0
+
+  function referencesI2v(): boolean {
+    return smartFolders.value.some((f) =>
+      f.rules.conditions.some((c) => c.field === 'i2v'),
+    )
+  }
+
+  async function fetchI2vSources(): Promise<void> {
+    const seq = ++i2vFetchSeq
+    try {
+      const paths = await listI2vSources()
+      // A newer refresh started meanwhile; its answer wins.
+      if (seq !== i2vFetchSeq) return
+      i2vSourcePaths = new Set(paths)
+      tagPathsVersion.value++
+    } catch {
+      // Leave cache as-is on failure.
+    }
+  }
+
+  /** Load the set once, if anything uses it (or `always`, for the editor). */
+  async function ensureI2vSources(always = false): Promise<void> {
+    if (i2vSourcePaths !== null) return
+    if (!always && !referencesI2v()) return
+    await fetchI2vSources()
+  }
+
+  /** Refetch after clips change; a no-op while nothing has loaded the set. */
+  async function refreshI2vSources(): Promise<void> {
+    if (i2vSourcePaths === null && !referencesI2v()) return
+    await fetchI2vSources()
   }
 
   watch(
     smartFolders,
     () => {
       void ensureTagPathsFor(referencedTagKeys())
+      void ensureI2vSources()
     },
     { deep: true },
   )
@@ -706,6 +759,8 @@ export const useFoldersStore = defineStore('folders', () => {
     purgePath,
     loadTagPaths,
     ensureTagPathsFor,
+    ensureI2vSources,
+    refreshI2vSources,
     onFolderCreated,
     onFolderUpdated,
     onFolderDeleted,
@@ -781,5 +836,11 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
     ops: ['within_days', 'older_than_days'],
     value: 'days',
     defaultValue: () => 30,
+  },
+  i2v: {
+    label: 'Has I2V video',
+    ops: ['is', 'is_not'],
+    value: 'bool',
+    defaultValue: () => true,
   },
 }

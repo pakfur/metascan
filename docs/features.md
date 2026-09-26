@@ -85,7 +85,7 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 
 ## Folders (Static & Smart)
 - **Static folders** — manually curated collections; right-click items to add/remove
-- **Smart folders** — saved rules over fields like tags, model, source, modified/added date, favorite status. Evaluated client-side and re-resolved as the library changes
+- **Smart folders** — saved rules over fields like tags, model, source, modified/added date, favorite status, and whether an image has one or more I2V (image-to-video) clips. Evaluated client-side and re-resolved as the library changes
 - Cross-tab sync over WebSocket: creating, renaming, or moving items broadcasts to every connected browser
 
 ## Storyboards

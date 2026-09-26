@@ -49,6 +49,12 @@ export function updateI2vFormState(
   return patch(`/i2v/videos/${id}`, fields)
 }
 
+// Source images with one or more i2v clips still in the library — the
+// "Has I2V video" smart-folder rule's membership set.
+export function listI2vSources(): Promise<string[]> {
+  return get('/i2v/sources')
+}
+
 export function deleteI2vVideo(id: number): Promise<{ status: string }> {
   return del(`/i2v/videos/${id}`)
 }
