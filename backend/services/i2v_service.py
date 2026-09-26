@@ -28,6 +28,9 @@ class I2vService:
             row["form_state"] = form_state_for_row(row, megapixel_options)
         return rows
 
+    async def list_source_paths(self) -> List[str]:
+        return list(await asyncio.to_thread(self.db.list_i2v_source_paths))
+
     async def update_form_state(
         self,
         video_id: int,

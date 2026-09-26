@@ -53,6 +53,23 @@ class TestI2vVideosDb(unittest.TestCase):
         # POSIX in, native out
         self.assertIn("out1.mp4", rows[0]["file_path"])
 
+    def test_list_source_paths(self):
+        self.assertEqual(self.db.list_i2v_source_paths(), [])
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out1.mp4")
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/out2.mp4")
+        paths = self.db.list_i2v_source_paths()
+        self.assertEqual(len(paths), 1)
+        self.assertIn("src.png", paths[0])
+
+    def test_list_source_paths_skips_clips_missing_from_library(self):
+        # A clip whose media row is gone doesn't count, and the read
+        # never prunes (list_i2v_videos owns that).
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/gone.mp4")
+        self.assertEqual(self.db.list_i2v_source_paths(), [])
+        with self.db._get_connection() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM i2v_videos").fetchone()[0]
+        self.assertEqual(n, 1)
+
     def test_stores_and_returns_dimensions(self):
         self.db.create_i2v_video(
             source_path="/lib/src.png",

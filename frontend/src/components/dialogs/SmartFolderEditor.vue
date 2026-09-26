@@ -74,6 +74,9 @@ function onFieldChange(idx: number, field: RuleField) {
   c.op = def.ops[0]
   const dv = def.defaultValue()
   c.value = Array.isArray(dv) ? [...dv] : dv
+  // The saved folders may not use the rule yet, so load its set now for
+  // the live match count.
+  if (field === 'i2v') void foldersStore.ensureI2vSources(true)
 }
 
 function onOpChange(idx: number, op: RuleOp) {

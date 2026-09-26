@@ -3723,6 +3723,18 @@ class DatabaseManager:
                 conn.commit()
             return out
 
+    def list_i2v_source_paths(self) -> List[str]:
+        """Native paths of every source image with at least one i2v clip
+        still in the library. Feeds the "Has I2V video" smart-folder rule.
+        Read-only: the media JOIN filters dangling rows rather than pruning
+        them (list_i2v_videos owns the prune)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT v.source_path FROM i2v_videos v "
+                "JOIN media m ON m.file_path = v.file_path"
+            ).fetchall()
+            return [to_native_path(str(r["source_path"])) for r in rows]
+
     def delete_i2v_video(self, video_id: int) -> Tuple[bool, List[str]]:
         """Delete one generated clip completely: its i2v_videos row, then
         its media row via _purge_media_rows' survival rules. Returns
