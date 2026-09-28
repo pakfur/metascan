@@ -86,6 +86,10 @@ _ARC_HINT = (
     "reaction."
 )
 
+_NSFW_HINT = (
+    "Use explicit, anotomically correct depictions of the subjects anatomy when possible. "
+    "Carry over the users explicit use of sexual positions and slang that are present in the users idea for the video"
+)
 
 def build_i2v_user_prompt(idea: str, duration_s: float) -> str:
     n = beat_count(duration_s)
@@ -95,6 +99,7 @@ def build_i2v_user_prompt(idea: str, duration_s: float) -> str:
         f"{duration_s:.0f}-second video.\n"
         f"User's idea for the video: {idea_line}\n\n"
         f"Write exactly {n} beats. {_ARC_HINT}\n"
+        f"{_NSFW_HINT}\n"
         "Each beat's 'action' is 1-2 present-tense sentences of concrete "
         "visible action and sound-producing events; 'camera' is one motion "
         "from the allowed list (use 'static' unless movement adds "

@@ -21,6 +21,12 @@ import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
 import MediaViewer from '../viewer/MediaViewer.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
+import TextEditPopup from '../storyboard/TextEditPopup.vue'
+import {
+  parseI2vPrompt,
+  replaceI2vSection,
+  type I2vSectionKey,
+} from '../../utils/i2vPromptSections'
 import type { LoraEntry } from '../../types/storyboard'
 
 const props = defineProps<{ media: Media }>()
@@ -148,6 +154,67 @@ const stepsHint = computed(() => {
 const outputDims = computed(() =>
   i2vDims(props.media.width ?? 0, props.media.height ?? 0, megapixels.value),
 )
+
+// ---- prompt panels ---------------------------------------------------------
+// The document stays ONE string (`prompt`) everywhere it already was: the
+// clip's form_state, the lint, and what Generate sends. These panels are a
+// view over it -- each editable one is a computed whose setter splices only
+// its own span back in, so editing one region cannot disturb another. A
+// document that does not parse (hand-mangled, or written before the panels
+// existed) falls back to editing the whole thing in one box.
+const sections = computed(() => parseI2vPrompt(prompt.value))
+
+function sectionModel(key: I2vSectionKey) {
+  return computed({
+    get: () => sections.value?.[key] ?? '',
+    set: (value: string) => {
+      prompt.value = replaceI2vSection(prompt.value, key, value)
+    },
+  })
+}
+
+const promptBody = sectionModel('prompt')
+const soundscapeBody = sectionModel('soundscape')
+const musicBody = sectionModel('music')
+
+// ---- seed policy + batch generate -------------------------------------------
+// "Seed after generate" advances the seed once per submitted job, so the
+// field ends up showing the next unused seed. Fixed is the default and is
+// exactly the old behaviour: one job, seed untouched.
+const SEED_POLICIES = ['fixed', 'increment', 'decrement', 'random'] as const
+type SeedPolicy = (typeof SEED_POLICIES)[number]
+const SEED_MAX = 2 ** 31 - 1
+const MAX_GENERATE_COUNT = 20
+
+const seedPolicy = ref<SeedPolicy>('fixed')
+const generateCount = ref(1)
+const batchProgress = ref('')
+
+// A Fixed seed would render the same video N times, so the count is ignored
+// rather than obeyed -- the field keeps whatever was typed for when the
+// policy changes back.
+const countIgnored = computed(() => seedPolicy.value === 'fixed')
+const effectiveCount = computed(() => {
+  if (countIgnored.value) return 1
+  const n = Math.round(Number(generateCount.value))
+  if (!Number.isFinite(n)) return 1
+  return Math.min(MAX_GENERATE_COUNT, Math.max(1, n))
+})
+
+// null = the next seed would leave the 0..2^31-1 range, so the batch stops
+// instead of silently repeating a seed.
+function nextSeed(current: number): number | null {
+  switch (seedPolicy.value) {
+    case 'increment':
+      return current < SEED_MAX ? current + 1 : null
+    case 'decrement':
+      return current > 0 ? current - 1 : null
+    case 'random':
+      return randomSeed()
+    default:
+      return current
+  }
+}
 
 // ---- live lint + "Apply fixes" ---------------------------------------------
 // The prompt box is linted as it changes (generated text and hand edits
@@ -405,6 +472,9 @@ async function onGenerate() {
     toast.show('Write or generate a prompt first', 'warn')
     return
   }
+  const total = effectiveCount.value
+  // Checked once for the whole batch: with any policy but Fixed the seed
+  // moves, so every later submit differs from this one by construction.
   const signature = requestSignature()
   if (
     signature === lastSubmitted.value &&
@@ -417,27 +487,51 @@ async function onGenerate() {
     return
   }
   submitting.value = true
+  let queued = 0
+  let stopped: string | null = null
   try {
-    const res = await generateVideo({
-      source_path: props.media.file_path,
-      prompt: prompt.value,
-      duration_s: durationS.value,
-      quality: quality.value,
-      seed: seed.value,
-      megapixels: megapixels.value,
-      loras: loras.value,
-      idea: idea.value,
-      template_id: templateId.value || null,
-      ...(stepsEnabled.value ? { steps: steps.value } : {}),
-    })
-    warnings.value = res.warnings
-    lastSubmitted.value = signature
-    store.trackJob(res.job_id)
-    toast.show('Video job queued', 'success')
-  } catch (e) {
-    toast.show(e instanceof Error ? e.message : String(e), 'warn')
+    for (let i = 0; i < total; i++) {
+      batchProgress.value = total > 1 ? `${i + 1}/${total}` : ''
+      try {
+        const res = await generateVideo({
+          source_path: props.media.file_path,
+          prompt: prompt.value,
+          duration_s: durationS.value,
+          quality: quality.value,
+          seed: seed.value,
+          megapixels: megapixels.value,
+          loras: loras.value,
+          idea: idea.value,
+          template_id: templateId.value || null,
+          ...(stepsEnabled.value ? { steps: steps.value } : {}),
+        })
+        warnings.value = res.warnings
+        // The signature of what was just submitted: the seed has not
+        // advanced yet at this point.
+        lastSubmitted.value = requestSignature()
+        store.trackJob(res.job_id)
+        queued += 1
+      } catch (e) {
+        stopped = e instanceof Error ? e.message : String(e)
+        break
+      }
+      const advanced = nextSeed(seed.value)
+      if (advanced === null) {
+        // Leave the seed where it is rather than repeat it. Only a batch
+        // with submits still owing has actually been cut short.
+        if (i + 1 < total) stopped = 'the seed reached the end of its range'
+        break
+      }
+      seed.value = advanced
+    }
   } finally {
     submitting.value = false
+    batchProgress.value = ''
+  }
+  if (stopped) {
+    toast.show(total > 1 ? `${stopped} — queued ${queued} of ${total}` : stopped, 'warn')
+  } else {
+    toast.show(total > 1 ? `${total} video jobs queued` : 'Video job queued', 'success')
   }
 }
 
@@ -618,6 +712,33 @@ function jobLabel(chip: {
                 <button class="icon-btn" title="Randomize" @click="seed = randomSeed()">🎲</button>
               </span>
             </label>
+            <label class="fld" title="What happens to the seed after each generated job">
+              <span>Seed after generate</span>
+              <select v-model="seedPolicy">
+                <option value="fixed">Fixed</option>
+                <option value="increment">Increment</option>
+                <option value="decrement">Decrement</option>
+                <option value="random">Random</option>
+              </select>
+            </label>
+            <label
+              class="fld"
+              :class="{ 'fld-off': countIgnored }"
+              title="How many videos one Generate queues"
+            >
+              <span>Generate count</span>
+              <input
+                v-model.number="generateCount"
+                type="number"
+                min="1"
+                :max="MAX_GENERATE_COUNT"
+              />
+              <small class="dims-hint">
+                {{ countIgnored
+                  ? 'ignored while the seed is Fixed'
+                  : `${effectiveCount} video${effectiveCount > 1 ? 's' : ''}` }}
+              </small>
+            </label>
           </div>
           <LoraListEditor
             label="LoRAs"
@@ -644,9 +765,56 @@ function jobLabel(chip: {
         >Stop editing</button>
       </div>
 
-      <label class="fld i2v-prompt">
+      <!-- The prompt document shown as its four regions. A view only:
+           `prompt` is still the single value Generate sends. -->
+      <div v-if="sections" class="i2v-panels">
+        <div class="fld i2v-panel">
+          <span>Header — fixed by the MiniMax format, not editable</span>
+          <textarea :value="sections.header" rows="3" readonly spellcheck="false" />
+        </div>
+        <div class="fld i2v-panel">
+          <span>Prompt (editable — Generate uses this text)</span>
+          <TextEditPopup
+            title="Prompt"
+            width="900px"
+            :rows="22"
+            :value="promptBody"
+            @save="promptBody = $event"
+          >
+            <textarea v-model="promptBody" rows="8" spellcheck="false" />
+          </TextEditPopup>
+        </div>
+        <div class="fld i2v-panel">
+          <span>Soundscape</span>
+          <TextEditPopup
+            title="Soundscape"
+            width="700px"
+            :rows="8"
+            :value="soundscapeBody"
+            @save="soundscapeBody = $event"
+          >
+            <textarea v-model="soundscapeBody" rows="2" spellcheck="false" />
+          </TextEditPopup>
+        </div>
+        <div class="fld i2v-panel">
+          <span>Non diegetic music</span>
+          <TextEditPopup
+            title="Non diegetic music"
+            width="700px"
+            :rows="8"
+            :value="musicBody"
+            @save="musicBody = $event"
+          >
+            <textarea v-model="musicBody" rows="2" spellcheck="false" />
+          </TextEditPopup>
+        </div>
+      </div>
+      <label v-else class="fld i2v-prompt">
         <span>MiniMax I2VA prompt (editable — Generate uses this text)</span>
         <textarea v-model="prompt" rows="10" spellcheck="false" />
+        <small class="dims-hint">
+          This text doesn't match the standard layout, so it is edited as one block.
+        </small>
       </label>
       <div class="lint-bar">
         <button
@@ -690,7 +858,9 @@ function jobLabel(chip: {
           :disabled="submitting || !prompt.trim()"
           @click="onGenerate"
         >
-          {{ submitting ? 'Submitting…' : 'Generate' }}
+          {{ submitting
+            ? (batchProgress ? `Generating ${batchProgress}…` : 'Submitting…')
+            : (effectiveCount > 1 ? `Generate ×${effectiveCount}` : 'Generate') }}
         </button>
       </footer>
 
@@ -869,6 +1039,20 @@ function jobLabel(chip: {
 .params { display: flex; gap: 12px; flex-wrap: wrap; }
 .seed-row { display: inline-flex; gap: 4px; }
 .i2v-prompt { margin-top: 14px; }
+.i2v-panels { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.i2v-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: monospace;
+  font-size: 12px;
+}
+.i2v-panel textarea[readonly] {
+  color: var(--text-color-secondary);
+  background: var(--surface-ground);
+}
+/* TextEditPopup centres its button against a single-line input; a textarea
+   host wants the button at the top and the box filling the row. */
+.i2v-panel :deep(.tep) { align-items: flex-start; width: 100%; }
 .dims-hint { color: var(--text-muted, #888); font-size: 11px; margin-top: 2px; }
 .i2v-prompt textarea { width: 100%; font-family: monospace; font-size: 12px; }
 .lint { color: var(--warn, #c90); font-size: 12px; margin: 4px 0; }

@@ -1319,6 +1319,39 @@ metascan/
   new cadence commits `onCadenceChange` synchronously (clearing the
   missing-template note on a genuine pick) instead of racing the
   `loadClip` watcher that also assigns `templateId` directly.
+  **The dialog's four prompt panels are a view, not a representation.**
+  `frontend/src/utils/i2vPromptSections.ts` locates four spans in the one
+  prompt document — header (the alignment line through the anchored opener
+  sentence), prompt, soundscape, music — and `replaceI2vSection` splices a
+  single span, copying every other byte through, so editing one panel
+  cannot disturb another. `prompt` stays the canonical value everywhere it
+  already was (`form_state`, `i2v_videos.prompt_used`, the lint, what
+  Generate sends): there is no sectioned representation in the API or the
+  DB, and adding one would be a regression. **The header is derived, never
+  assumed constant** — a découpage template's `look` sentence is spliced in
+  *before* the opener, so it belongs to the header region; matching a fixed
+  literal would mis-split every templated prompt. `parseI2vPrompt`
+  validates its own spans (separators must be exactly the document's, spans
+  ordered and covering the text, each label occurring once) and returns
+  `null` otherwise, which drops the dialog back to one textarea — a
+  hand-mangled prompt, a pre-panels clip, or a pasted field label degrades
+  the UI instead of corrupting text. The markers mirror
+  `i2v_compiler.py`'s `_OPENING` and field labels; if those change, the
+  fallback catches it. `TextEditPopup` is shared with the storyboard and
+  collapses newlines on save — correct here, because each H3 field is one
+  logical line; its `width`/`rows` props are optional and default to the
+  size its nine original callers were written against.
+  **Seed policy and generate count are session-local, not `form_state`.**
+  They are actions, not properties of a clip, so clicking a clip never
+  changes how many videos the next Generate makes; the defaults (Fixed, 1)
+  are byte-for-byte the old behaviour. `Fixed` forces the effective count
+  to 1 by decision — the same seed would render the same clip N times — and
+  the count field keeps whatever was typed for when the policy changes
+  back. The batch submits serially, advancing the seed after each job so
+  the field shows the next unused seed, and stops (rather than repeating a
+  seed) when increment/decrement would leave `0..2^31-1`. The
+  "nothing has changed" confirm is checked once for the batch, since any
+  non-Fixed policy makes later submits differ by construction.
   **Prompt rewrites are offered, never applied.**
   `metascan/core/i2v_fixes.py` (pure, no model call) owns the two lint
   findings that can be fixed mechanically, as `I2vFinding(code, message,

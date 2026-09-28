@@ -3,13 +3,27 @@ import { ref } from 'vue'
 import { copyToClipboard } from '../../utils/clipboard'
 import ModalShell from './ModalShell.vue'
 
-// Popup editor for single-line text inputs. The host input rides in the
-// slot untouched (keeping its own commit-on-change wiring); the icon
-// button to its right opens a large editor whose Save emits the new text
-// back through the host's `@save` handler. Newlines collapse to spaces on
-// save -- the target control is single-line. Multi-line textareas don't
-// use this component.
-const props = defineProps<{ value: string | null | undefined; title?: string }>()
+// Popup editor for text that is ONE LOGICAL LINE. The host control rides
+// in the slot untouched (keeping its own commit-on-change wiring); the
+// icon button to its right opens a large editor whose Save emits the new
+// text back through the host's `@save` handler. Newlines collapse to
+// spaces on save.
+//
+// That makes it right for a single-line `<input>`, and also for a long
+// value a host chooses to show in a `<textarea>` for readability while the
+// value itself must stay one line -- the i2v dialog's prompt panels, where
+// each MiniMax H3 document field (description, soundscape, music) is one
+// line by format. It is NOT for free-form multi-line text, which the
+// collapse would flatten.
+//
+// `width`/`rows` size the popup for long values; they default to the
+// compact size every original caller was written against.
+const props = defineProps<{
+  value: string | null | undefined
+  title?: string
+  width?: string
+  rows?: number
+}>()
 const emit = defineEmits<{ (e: 'save', value: string): void }>()
 
 const open = ref(false)
@@ -71,9 +85,9 @@ function save(): void {
       <span class="pi pi-window-maximize" />
     </button>
 
-    <ModalShell v-if="open" width="560px" @close="open = false">
+    <ModalShell v-if="open" :width="width ?? '560px'" @close="open = false">
       <h3 class="tep-title">{{ title ?? 'Edit text' }}</h3>
-      <textarea ref="editor" v-model="draft" rows="8" class="tep-body" />
+      <textarea ref="editor" v-model="draft" :rows="rows ?? 8" class="tep-body" />
       <p v-if="pasteBlocked" class="tep-hint">
         The browser blocked clipboard read — press Ctrl+V in the editor instead.
       </p>
