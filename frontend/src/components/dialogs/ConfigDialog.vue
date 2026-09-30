@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { fetchConfig, updateConfig } from '../../api/config'
 import ConfigModelsTab from './ConfigModelsTab.vue'
 import ConfigI2VTab from './ConfigI2VTab.vue'
+import ConfigT2ITab from './ConfigT2ITab.vue'
 
 const emit = defineEmits<{
   close: []
@@ -13,7 +14,7 @@ interface DirEntry {
   search_subfolders: boolean
 }
 
-type TabKey = 'directories' | 'models' | 'i2v'
+type TabKey = 'directories' | 'models' | 'i2v' | 't2i'
 
 const activeTab = ref<TabKey>('directories')
 
@@ -89,6 +90,13 @@ async function saveDirectories() {
         >
           Video
         </button>
+        <button
+          class="tab"
+          :class="{ active: activeTab === 't2i' }"
+          @click="activeTab = 't2i'"
+        >
+          Text to Image
+        </button>
       </nav>
 
       <div v-if="activeTab === 'directories'" class="tab-panel">
@@ -162,6 +170,13 @@ async function saveDirectories() {
 
       <div v-else-if="activeTab === 'i2v'" class="tab-panel">
         <ConfigI2VTab />
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="emit('close')">Close</button>
+        </div>
+      </div>
+
+      <div v-else-if="activeTab === 't2i'" class="tab-panel">
+        <ConfigT2ITab />
         <div class="dialog-actions">
           <button class="btn-secondary" @click="emit('close')">Close</button>
         </div>
