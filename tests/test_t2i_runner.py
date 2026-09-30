@@ -1466,19 +1466,16 @@ class TestPlanning(ParkedRunCase):
         )
         self.assertEqual(self.runner.active_batches()[0]["next_seed"], 55)
 
-    async def test_the_same_character_seed_draws_the_same_cast(self) -> None:
-        # What "same seed, same cast" means for two different captions.
-        one = await self.runner.resolve(
-            caption="__ALICE__ walks along a beach at dawn.", seed=55, model="krea2"
-        )
-        two = await self.runner.resolve(
+    async def test_a_caption_draws_the_same_cast_whatever_the_seed(self) -> None:
+        # The cast follows the caption text; the seed is free to change.
+        one = await self.runner.resolve(caption=CAPTION, seed=55, model="krea2")
+        other = await self.runner.resolve(caption=CAPTION, seed=56, model="krea2")
+        self.assertEqual(one.characters, other.characters)
+        self.assertEqual(one.text, other.text)
+        elsewhere = await self.runner.resolve(
             caption="__ALICE__ paints a mural on a tall wall.", seed=55, model="krea2"
         )
-        self.assertEqual(one.characters["ALICE"], two.characters["ALICE"])
-        other = await self.runner.resolve(
-            caption="__ALICE__ paints a mural on a tall wall.", seed=56, model="krea2"
-        )
-        self.assertNotEqual(one.characters["ALICE"], other.characters["ALICE"])
+        self.assertNotEqual(one.characters["ALICE"], elsewhere.characters["ALICE"])
 
     # -- what start_batch does and does not touch ---------------------------
 
@@ -2173,59 +2170,28 @@ class TestRandomBatchRun(BatchCase):
         )
         self.assertIn("The woman waves.", text)
 
-    async def test_fixed_gives_every_step_the_same_cast(self) -> None:
-        # Review focus 5: same seed, same characters, whatever the caption.
+    async def test_a_new_seed_changes_the_image_not_the_cast(self) -> None:
+        # Review focus 5, reversed: the cast follows the caption text, so the
+        # same caption is written up with the same characters under every seed.
         assert self.vlm is not None
         self.roomy()
+        caption = "__ALICE__ walks along a beach."
         self._write_csv(
-            [
-                [text, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]
-                for text in (
-                    "__ALICE__ walks along a beach.",
-                    "__ALICE__ paints a mural.",
-                    "__ALICE__ reads in a library.",
-                )
-            ]
+            [[caption, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]] * 3
         )
         await self.run_to_end(
             self.random_mode(
-                seed=55, seed_policy="fixed", batch_size=3, count_per_batch=1
+                seed=55, seed_policy="increment", batch_size=3, count_per_batch=1
             )
         )
         steps = self.frames("batch_step")
-        self.assertEqual([s["seed"] for s in steps], [55, 55, 55])
-        self.assertEqual([p.seed for p in self.params()], [55, 55, 55])
-        library, _ = self.library.get()
-        casts = [
-            resolve_caption(s["caption"], 55, "ref", library).characters["ALICE"]
-            for s in steps
-        ]
-        self.assertEqual(casts[0], casts[1])
-        self.assertEqual(casts[1], casts[2])
+        self.assertEqual([s["seed"] for s in steps], [55, 56, 57])
+        self.assertEqual([p.seed for p in self.params()], [55, 56, 57])
+        self.assertEqual(len(self.vlm.calls), 3)
+        expected = self.expected_text(caption, 55)
         for call in self.vlm.calls:
-            self.assertIn(casts[0]["hair"], call["user_prompt"])
-            self.assertIn(casts[0]["eyes"], call["user_prompt"])
-
-    async def test_an_incrementing_seed_gives_each_step_a_new_cast(self) -> None:
-        self.roomy()
-        self._write_csv(
-            [
-                [text, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]
-                for text in (
-                    "__ALICE__ walks.",
-                    "__ALICE__ paints.",
-                    "__ALICE__ reads.",
-                    "__ALICE__ sings.",
-                )
-            ]
-        )
-        await self.run_to_end(self.random_mode(seed=1, batch_size=4, count_per_batch=1))
-        library, _ = self.library.get()
-        casts = [
-            resolve_caption(s["caption"], s["seed"], "ref", library).characters["ALICE"]
-            for s in self.frames("batch_step")
-        ]
-        self.assertGreater(len({tuple(sorted(c.items())) for c in casts}), 1)
+            self.assertIn(expected, call["user_prompt"])
+        self.assertEqual(len({call["user_prompt"] for call in self.vlm.calls}), 1)
 
     async def test_the_step_frame_carries_prompt_negative_and_warnings(self) -> None:
         self.roomy()
@@ -3228,7 +3194,7 @@ class TestIngest(AccountingCase):
         self.assertEqual(row["loras"], [])
         self.assertEqual(row["render_s"], 41.5)
         self.assertEqual(row["comfy_prompt_id"], "prompt-abc")
-        # The next image has its own seed; the step's character seed is shared.
+        # The next image has its own seed; the step's prompt seed is shared.
         await self.job_done(second)
         again = self.db.get_t2i_image(2)
         assert again is not None

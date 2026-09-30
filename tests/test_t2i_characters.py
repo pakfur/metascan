@@ -2,8 +2,13 @@
 
 Every caption in this file is hand-written with known expected properties.
 The word lists are small stand-ins defined below -- never the shipped
-starter lists and never rows of the real caption CSV. The Appendix B tests
-reproduce the spec's worked examples (seed 101) character for character.
+starter lists and never rows of the real caption CSV.
+
+A caption's characters are drawn from the sha256 of its text, so a different
+caption is a different cast. The tests that pin wording therefore run on
+``FORCED``, whose lists hold one value each: the cast is the same whatever the
+caption says, and the expected text is written out by hand. The tests about
+the draws themselves run on ``LIBRARY``, whose lists have variety.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import time
 import unittest
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from metascan.core.t2i_characters import (
     IDENTITY_STYLES,
@@ -75,6 +80,19 @@ PLACEHOLDER_LISTS: Dict[str, Tuple[str, ...]] = {
     "penis": ("penis-alpha", "penis-beta", "penis-gamma"),
 }
 
+# One value per list, so a lone female character is always this woman. Only her
+# own lists are given: two characters of one gender would share a hair value.
+FORCED_LISTS: Dict[str, Tuple[str, ...]] = {
+    "age": ("31-year-old",),
+    "ethnicity": ("West African",),
+    "skin": ("olive skin",),
+    "eyes": ("brown eyes",),
+    "face": ("a soft round face",),
+    "hair": ("copper red hair",),
+    "body.female": ("an athletic build",),
+    "body.male": ("a lean build",),
+}
+
 CONFIG = CharacterConfig()
 
 
@@ -82,8 +100,9 @@ def make_library(
     extra: Optional[Mapping[str, Tuple[str, ...]]] = None,
     drop: Sequence[str] = (),
     config: Optional[CharacterConfig] = None,
+    base: Optional[Mapping[str, Tuple[str, ...]]] = None,
 ) -> Library:
-    lists = dict(LISTS)
+    lists = dict(LISTS if base is None else base)
     lists.update(extra or {})
     for key in drop:
         lists.pop(key, None)
@@ -91,6 +110,7 @@ def make_library(
 
 
 LIBRARY = make_library()
+FORCED = make_library(base=FORCED_LISTS)
 
 
 def resolve(
@@ -102,17 +122,35 @@ def resolve(
     return resolve_caption(caption, seed, style, library or LIBRARY)
 
 
+def resolve_forced(caption: str, style: str = "ref") -> ResolvedCaption:
+    """``resolve`` with the forced cast: for tests about wording, not draws."""
+    return resolve(caption, style=style, library=FORCED)
+
+
+def takes(caption: str, count: int) -> List[str]:
+    """``count`` captions that differ only in a closing "Take N.": each is its
+    own cast, which is how the tests sample many draws now that the seed does
+    not vary them. No parentheses, so the suffix cannot fake or hide one."""
+    return [f"{caption} Take {n}." for n in range(count)]
+
+
 def cap1(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def draw(seed: int, name: str, slot: str, salt: int, size: int) -> int:
-    """The spec's draw formula, restated independently of the module."""
-    digest = hashlib.sha256(f"{seed}|{name}|{slot}|{salt}".encode("utf-8")).digest()
+def cast_key(caption: str) -> str:
+    """What a caption's character draws are keyed on, restated independently of
+    the module: the sha256 of the text exactly as given."""
+    return hashlib.sha256(caption.encode("utf-8")).hexdigest()
+
+
+def draw(key: object, name: str, slot: str, salt: int, size: int) -> int:
+    """The draw formula, restated independently of the module."""
+    digest = hashlib.sha256(f"{key}|{name}|{slot}|{salt}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") % size
 
 
-# ALICE at seed 101 with the stand-in lists above (spec Appendix B):
+# The forced woman (``FORCED_LISTS``), as the engine words her:
 ALICE_INLINE = (
     "a 31-year-old West African woman with olive skin, brown eyes, "
     "a soft round face, copper red hair and an athletic build"
@@ -161,7 +199,9 @@ class DefaultsTests(unittest.TestCase):
 
 
 class AppendixBGoldenTests(unittest.TestCase):
-    """The spec's worked examples, seed 101, identity style ref."""
+    """The spec's worked examples (Appendix B), identity style ref. The two
+    with one woman run on the forced cast; the compound subject shows the draws
+    its own caption's sha256 gives its two characters."""
 
     def test_male_and_female_compound_subject(self) -> None:
         caption = (
@@ -169,13 +209,13 @@ class AppendixBGoldenTests(unittest.TestCase):
             "and her __HAIR__ is tied back. __ADAM__ carries a surfboard."
         )
         expected = (
-            "A 52-year-old South Asian middle aged man and a 31-year-old Latina "
-            "woman walk along a beach. His short auburn hair is damp and her "
-            "copper red hair "
-            "is tied back. The auburn-haired man carries a surfboard. The "
-            "auburn-haired man has warm tan skin, green eyes, high cheekbones and "
-            "a lean build. The copper-red-haired woman has olive skin, green eyes, "
-            "a soft round face and a curvy build."
+            "A 45-year-old East Asian middle aged man and a 31-year-old East Asian "
+            "woman walk along a beach. His short jet-black hair is damp and her "
+            "auburn hair "
+            "is tied back. The jet-black-haired man carries a surfboard. The "
+            "jet-black-haired man has fair skin, brown eyes, an oval face and "
+            "a lean build. The auburn-haired woman has deep brown skin, green eyes, "
+            "high cheekbones and a curvy build."
         )
         self.assertEqual(resolve(caption).text, expected)
 
@@ -192,7 +232,7 @@ class AppendixBGoldenTests(unittest.TestCase):
             "breeze. She holds a paper cup in both hands while the "
             "copper-red-haired woman smiles at the camera."
         )
-        self.assertEqual(resolve(caption).text, expected)
+        self.assertEqual(resolve_forced(caption).text, expected)
 
     def test_possessive_first_mention_body_hair_and_fused_suffix(self) -> None:
         caption = (
@@ -205,7 +245,7 @@ class AppendixBGoldenTests(unittest.TestCase):
             "hair. The copper-red-haired woman has olive skin, brown eyes, a soft "
             "round face and an athletic build."
         )
-        self.assertEqual(resolve(caption).text, expected)
+        self.assertEqual(resolve_forced(caption).text, expected)
 
 
 class IdentityStyleTests(unittest.TestCase):
@@ -242,39 +282,43 @@ class IdentityStyleTests(unittest.TestCase):
         for style, (opening, handle) in cases.items():
             with self.subTest(style=style):
                 expected = f"{opening}{head_rest}{handle} smiles at the camera."
-                self.assertEqual(resolve(self.SINGLE, style=style).text, expected)
+                self.assertEqual(
+                    resolve_forced(self.SINGLE, style=style).text, expected
+                )
 
     def test_two_females_owner_tracking_all_three_styles(self) -> None:
+        # Two women of one gender cannot be forced (their hair must differ), so
+        # this is the cast their caption's sha256 draws.
         alice = (
-            "A 31-year-old West African woman{named} with olive skin, brown eyes, "
-            "a soft round face, copper red hair and an athletic build"
+            "A 45-year-old Latina middle aged woman{named} with olive skin, green "
+            "eyes, a soft round face, chestnut brown hair and an athletic build"
         )
         bella = (
-            "a 24-year-old South Asian woman{named} with warm tan skin, brown "
-            "eyes, a soft round face and a slim build"
+            "a 38-year-old Mediterranean woman{named} with fair skin, hazel "
+            "eyes, a soft round face and an athletic build"
         )
         expected = {
             "ref": (
                 alice.format(named="")
                 + " stands beside a window while "
                 + bella.format(named="")
-                + " sits at a desk. Long, straight chestnut brown hair falls over "
-                "the chestnut-brown-haired woman's shoulders. The "
-                "copper-red-haired woman turns to look at the "
-                "chestnut-brown-haired woman."
+                + " sits at a desk. Long, straight auburn hair falls over "
+                "the auburn-haired woman's shoulders. The "
+                "chestnut-brown-haired woman turns to look at the "
+                "auburn-haired woman."
             ),
             "noun": (
                 alice.format(named="")
                 + " stands beside a window while "
                 + bella.format(named="")
-                + " sits at a desk. Long, straight chestnut brown hair falls over "
+                + " sits at a desk. Long, straight auburn hair falls over "
                 "the woman's shoulders. The woman turns to look at the woman."
             ),
             "name": (
                 alice.format(named=" named Alice")
                 + " stands beside a window while "
                 + bella.format(named=" named Bella")
-                + " sits at a desk. Long, straight chestnut brown hair falls over "
+                + " sits at a desk. Long, straight auburn hair falls over "
                 "Bella's shoulders. Alice turns to look at Bella."
             ),
         }
@@ -297,7 +341,9 @@ class IdentityStyleTests(unittest.TestCase):
         }
         for style, text in expected.items():
             with self.subTest(style=style):
-                self.assertEqual(resolve(self.POSSESSIVE, style=style).text, text)
+                self.assertEqual(
+                    resolve_forced(self.POSSESSIVE, style=style).text, text
+                )
 
     def test_ref_falls_back_to_noun_when_hair_does_not_end_in_hair(self) -> None:
         library = make_library({"hair": ("long braids",)})
@@ -308,7 +354,7 @@ class IdentityStyleTests(unittest.TestCase):
         self.assertNotIn("-haired", res.text)
 
     def test_noun_style_trailing_sentence_keeps_hair(self) -> None:
-        text = resolve("A close-up of __ALICE__'s hands.", style="noun").text
+        text = resolve_forced("A close-up of __ALICE__'s hands.", style="noun").text
         self.assertEqual(
             text,
             "A close-up of a 31-year-old West African woman's hands. The woman has "
@@ -320,12 +366,12 @@ class IdentityStyleTests(unittest.TestCase):
         self,
     ) -> None:
         caption = "A close-up of __ALICE__'s hands."
-        ref = resolve(caption, style="ref").text
+        ref = resolve_forced(caption, style="ref").text
         self.assertEqual(
             ref,
             "A close-up of a 31-year-old West African woman's hands. " + ALICE_TRAIL,
         )
-        library = make_library({"hair": ("long braids",)})
+        library = make_library({"hair": ("long braids",)}, base=FORCED_LISTS)
         no_handle = resolve(caption, style="ref", library=library).text
         self.assertTrue(no_handle.endswith("long braids and an athletic build."))
         self.assertIn("The woman has", no_handle)
@@ -333,7 +379,7 @@ class IdentityStyleTests(unittest.TestCase):
 
 class FirstMentionTests(unittest.TestCase):
     def test_inline_details_and_hair_omitted_when_spelled_out_by_a_token(self) -> None:
-        text = resolve("__ALICE__ waves. Her __HAIR__ is loose.").text
+        text = resolve_forced("__ALICE__ waves. Her __HAIR__ is loose.").text
         self.assertEqual(
             text,
             "A 31-year-old West African woman with olive skin, brown eyes, a soft "
@@ -341,7 +387,7 @@ class FirstMentionTests(unittest.TestCase):
         )
 
     def test_with_continuation_puts_details_in_a_trailing_sentence(self) -> None:
-        text = resolve("__ALICE__ with a red scarf waves.").text
+        text = resolve_forced("__ALICE__ with a red scarf waves.").text
         self.assertEqual(
             text,
             "A 31-year-old West African woman with a red scarf waves. " + ALICE_TRAIL,
@@ -363,7 +409,7 @@ class FirstMentionTests(unittest.TestCase):
             "as",
         ):
             with self.subTest(word=word):
-                text = resolve(f"__ALICE__ {word} a friend waves.").text
+                text = resolve_forced(f"__ALICE__ {word} a friend waves.").text
                 self.assertEqual(
                     text,
                     f"A 31-year-old West African woman {word} a friend waves. "
@@ -373,7 +419,7 @@ class FirstMentionTests(unittest.TestCase):
     def test_punctuation_after_the_token_forces_a_trailing_sentence(self) -> None:
         for mark in (",", ".", ";", ":", "!", "?", "\u2014"):
             with self.subTest(mark=mark):
-                text = resolve(f"Meet __ALICE__{mark} she waves.").text
+                text = resolve_forced(f"Meet __ALICE__{mark} she waves.").text
                 self.assertEqual(
                     text,
                     f"Meet a 31-year-old West African woman{mark} she waves. "
@@ -381,15 +427,17 @@ class FirstMentionTests(unittest.TestCase):
                 )
 
     def test_a_verb_after_the_token_stays_inline(self) -> None:
-        text = resolve("__ALICE__ waves.").text
+        text = resolve_forced("__ALICE__ waves.").text
         self.assertEqual(text, cap1(ALICE_INLINE) + " waves.")
 
     def test_token_at_the_end_of_the_string_stays_inline(self) -> None:
-        self.assertEqual(resolve("Look at __ALICE__").text, "Look at " + ALICE_INLINE)
+        self.assertEqual(
+            resolve_forced("Look at __ALICE__").text, "Look at " + ALICE_INLINE
+        )
 
     def test_possessive_forces_a_trailing_sentence_straight_or_curly(self) -> None:
-        straight = resolve("A close-up of __ALICE__'s hands.").text
-        curly = resolve("A close-up of __ALICE__\u2019s hands.").text
+        straight = resolve_forced("A close-up of __ALICE__'s hands.").text
+        curly = resolve_forced("A close-up of __ALICE__\u2019s hands.").text
         self.assertEqual(
             straight,
             "A close-up of a 31-year-old West African woman's hands. " + ALICE_TRAIL,
@@ -397,33 +445,33 @@ class FirstMentionTests(unittest.TestCase):
         self.assertEqual(curly, straight.replace("'", "\u2019"))
 
     def test_trailing_sentence_gets_a_full_stop_when_the_caption_has_none(self) -> None:
-        text = resolve("A portrait of __ALICE__'s hands").text
+        text = resolve_forced("A portrait of __ALICE__'s hands").text
         self.assertEqual(
             text,
             "A portrait of a 31-year-old West African woman's hands. " + ALICE_TRAIL,
         )
 
     def test_trailing_sentence_looks_through_closing_quotes_for_the_stop(self) -> None:
-        stopped = resolve('She says "meet __ALICE__, please."').text
+        stopped = resolve_forced('She says "meet __ALICE__, please."').text
         self.assertEqual(
             stopped,
             'She says "meet a 31-year-old West African woman, please." ' + ALICE_TRAIL,
         )
-        unstopped = resolve('He said "hi to __ALICE__"').text
+        unstopped = resolve_forced('He said "hi to __ALICE__"').text
         self.assertEqual(
             unstopped,
             'He said "hi to a 31-year-old West African woman". ' + ALICE_TRAIL,
         )
 
     def test_a_dangling_clause_mark_becomes_the_stop(self) -> None:
-        text = resolve("A portrait of __ALICE__'s friend,").text
+        text = resolve_forced("A portrait of __ALICE__'s friend,").text
         self.assertEqual(
             text,
             "A portrait of a 31-year-old West African woman's friend. " + ALICE_TRAIL,
         )
 
     def test_trailing_whitespace_is_kept_after_the_trailing_sentence(self) -> None:
-        text = resolve("__ALICE__, smiling.\n").text
+        text = resolve_forced("__ALICE__, smiling.\n").text
         self.assertEqual(
             text,
             "A 31-year-old West African woman, smiling. " + ALICE_TRAIL + "\n",
@@ -433,12 +481,13 @@ class FirstMentionTests(unittest.TestCase):
         text = resolve("__ALICE__, __BELLA__ and __CLARA__ wave.").text
         self.assertEqual(
             text,
-            "A 31-year-old West African woman, a 24-year-old South Asian woman "
-            "and a 31-year-old Latina woman wave. The copper-red-haired woman has "
-            "olive skin, brown eyes, a soft round face and an athletic build. The "
-            "chestnut-brown-haired woman has warm tan skin, brown eyes, a soft "
-            "round face and a slim build. The auburn-haired woman has olive skin, "
-            "green eyes, a soft round face and a curvy build.",
+            "A 24-year-old West African woman, a 45-year-old South Asian middle "
+            "aged woman and a 52-year-old West African middle aged woman wave. "
+            "The platinum-blonde-haired woman has warm tan skin, blue eyes, a "
+            "heart-shaped face and an athletic build. The chestnut-brown-haired "
+            "woman has deep brown skin, green eyes, a soft round face and a slim "
+            "build. The auburn-haired woman has olive skin, brown eyes, an oval "
+            "face and an athletic build.",
         )
 
     def test_compound_subject_with_comma_and_oxford_and(self) -> None:
@@ -484,7 +533,8 @@ class FirstMentionTests(unittest.TestCase):
         )
         for extra, expected in cases:
             with self.subTest(age=extra["age"][0]):
-                text = resolve("__ALICE__ waves.", library=make_library(extra)).text
+                library = make_library(extra, base=FORCED_LISTS)
+                text = resolve("__ALICE__ waves.", library=library).text
                 self.assertTrue(text.startswith(expected), text)
 
     def test_an_before_ordinals_spoken_with_a_vowel(self) -> None:
@@ -515,7 +565,7 @@ class FirstMentionTests(unittest.TestCase):
                 self.assertTrue(text.startswith(expected), text)
 
     def test_head_is_just_the_noun_when_age_and_ethnicity_are_missing(self) -> None:
-        library = make_library({"age": (), "ethnicity": ()})
+        library = make_library({"age": (), "ethnicity": ()}, base=FORCED_LISTS)
         text = resolve("__ALICE__ waves.", library=library).text
         self.assertTrue(text.startswith("A woman with olive skin"), text)
 
@@ -705,18 +755,18 @@ class AgedNounTests(unittest.TestCase):
         )
         self.assertTrue(text.endswith("The auburn-haired lady smiles."), text)
 
-    def test_the_rule_follows_whatever_age_the_seed_draws(self) -> None:
+    def test_the_rule_follows_whatever_age_the_caption_draws(self) -> None:
         # The stand-in age list holds 27, 31, 24, 38, 45 and 52: only 45 and 52
         # are middle aged. The expectation is this literal table, not the code.
         middle_aged = {"45-year-old", "52-year-old"}
         seen = set()
-        for seed in range(120):
-            resolved = resolve("__ALICE__ waves.", seed=seed)
+        for caption in takes("__ALICE__ waves.", 120):
+            resolved = resolve(caption)
             drawn = resolved.characters["ALICE"]
             seen.add(drawn["age"])
             noun = "middle aged woman" if drawn["age"] in middle_aged else "woman"
             head = resolved.text.split(" with ")[0]
-            with self.subTest(seed=seed):
+            with self.subTest(caption=caption):
                 self.assertTrue(head.endswith(f"{drawn['ethnicity']} {noun}"), head)
         self.assertEqual(seen, set(LISTS["age"]))  # the loop really met every age
 
@@ -725,7 +775,7 @@ class CharacteristicTokenTests(unittest.TestCase):
     def test_hair_token_before_the_first_mention_binds_to_the_first_female(
         self,
     ) -> None:
-        text = resolve(
+        text = resolve_forced(
             "Her long __HAIR__ falls over her shoulders as __ALICE__ smiles."
         ).text
         self.assertEqual(
@@ -885,7 +935,7 @@ class CharacteristicTokenTests(unittest.TestCase):
             "stomach",
         ):
             with self.subTest(prefix=prefix):
-                res = resolve(f"__ALICE__ shows fine {prefix} __HAIR__.")
+                res = resolve_forced(f"__ALICE__ shows fine {prefix} __HAIR__.")
                 self.assertTrue(
                     res.text.endswith(f"shows fine {prefix} hair."), res.text
                 )
@@ -897,7 +947,7 @@ class CharacteristicTokenTests(unittest.TestCase):
         self.assertTrue(res.text.endswith("shows fine Body hair."), res.text)
 
     def test_fused_suffix_makes_the_token_a_bare_word(self) -> None:
-        res = resolve("__ALICE__ holds a __HAIR__brush.")
+        res = resolve_forced("__ALICE__ holds a __HAIR__brush.")
         self.assertEqual(res.text, cap1(ALICE_INLINE) + " holds a hairbrush.")
 
     def test_fused_vaginal_is_a_bare_word_even_with_a_list(self) -> None:
@@ -908,7 +958,7 @@ class CharacteristicTokenTests(unittest.TestCase):
         self.assertNotIn("vagina", res.characters["ALICE"])
 
     def test_missing_list_makes_the_token_a_bare_word_and_warns(self) -> None:
-        res = resolve("__ALICE__ covers her __BREASTS__ with a scarf.")
+        res = resolve_forced("__ALICE__ covers her __BREASTS__ with a scarf.")
         self.assertEqual(
             res.text,
             cap1(ALICE_INLINE) + " covers her breasts with a scarf.",
@@ -924,12 +974,10 @@ class CharacteristicTokenTests(unittest.TestCase):
 
     def test_a_list_supplies_the_value_and_the_draw_is_per_owner(self) -> None:
         library = make_library(PLACEHOLDER_LISTS)
-        res = resolve(
-            "__ALICE__ and __BELLA__ pose. __BELLA__ covers her __BREASTS__.",
-            library=library,
-        )
+        caption = "__ALICE__ and __BELLA__ pose. __BELLA__ covers her __BREASTS__."
+        res = resolve(caption, library=library)
         options = PLACEHOLDER_LISTS["breasts"]
-        expected = options[draw(101, "BELLA", "breasts", 0, len(options))]
+        expected = options[draw(cast_key(caption), "BELLA", "breasts", 0, len(options))]
         self.assertEqual(res.characters["BELLA"]["breasts"], expected)
         self.assertIn(f"covers her {expected}.", res.text)
         # ALICE's token-only slot was never referenced, so it is not drawn.
@@ -938,12 +986,10 @@ class CharacteristicTokenTests(unittest.TestCase):
 
     def test_male_token_binds_to_the_male_even_when_a_female_is_nearer(self) -> None:
         library = make_library(PLACEHOLDER_LISTS)
-        res = resolve(
-            "__ADAM__ smiles at __ALICE__ and the chart notes the __PENIS__ note.",
-            library=library,
-        )
+        caption = "__ADAM__ smiles at __ALICE__ and the chart notes the __PENIS__ note."
+        res = resolve(caption, library=library)
         options = PLACEHOLDER_LISTS["penis"]
-        expected = options[draw(101, "ADAM", "penis", 0, len(options))]
+        expected = options[draw(cast_key(caption), "ADAM", "penis", 0, len(options))]
         self.assertIn(f"the chart notes the {expected} note.", res.text)
         self.assertIn("penis", res.characters["ADAM"])
         self.assertNotIn("penis", res.characters["ALICE"])
@@ -958,35 +1004,38 @@ class CharacteristicTokenTests(unittest.TestCase):
         self.assertIn("points at the breasts diagram.", res2.text)
 
     def test_typed_caption_with_a_hair_token_gets_a_default_owner(self) -> None:
-        res = resolve("A woman brushes her __HAIR__ by the window.")
+        res = resolve_forced("A woman brushes her __HAIR__ by the window.")
         self.assertEqual(res.text, "A woman brushes her copper red hair by the window.")
         self.assertEqual(list(res.characters), ["ALICE"])
         self.assertEqual(res.characters["ALICE"]["hair"], "copper red hair")
         self.assertEqual(res.warnings, [])
 
     def test_default_owner_for_a_masculine_pronoun_is_the_first_male(self) -> None:
-        res = resolve("A man brushes his __HAIR__.", seed=1)
-        self.assertEqual(res.text, "A man brushes his jet-black hair.")
+        res = resolve_forced("A man brushes his __HAIR__.")
+        self.assertEqual(res.text, "A man brushes his copper red hair.")
         self.assertEqual(list(res.characters), ["ADAM"])
 
     def test_default_owner_for_penis_is_the_first_male(self) -> None:
         library = make_library(PLACEHOLDER_LISTS)
-        res = resolve("A diagram labelled __PENIS__.", library=library)
+        caption = "A diagram labelled __PENIS__."
+        res = resolve(caption, library=library)
         options = PLACEHOLDER_LISTS["penis"]
-        expected = options[draw(101, "ADAM", "penis", 0, len(options))]
+        expected = options[draw(cast_key(caption), "ADAM", "penis", 0, len(options))]
         self.assertEqual(res.text, f"A diagram labelled {expected}.")
         self.assertEqual(list(res.characters), ["ADAM"])
 
     def test_two_default_owners_get_distinct_hair(self) -> None:
-        res = resolve("Her __HAIR__ is long. His __HAIR__ is short.", seed=1)
-        self.assertEqual(
-            res.text, "Her auburn hair is long. His jet-black hair is short."
-        )
+        res = resolve("Her __HAIR__ is long. His __HAIR__ is short.")
         self.assertEqual(list(res.characters), ["ALICE", "ADAM"])
+        alice = res.characters["ALICE"]["hair"]
+        adam = res.characters["ADAM"]["hair"]
+        self.assertNotEqual(alice, adam)
+        self.assertEqual(res.text, f"Her {alice} is long. His {adam} is short.")
 
     def test_repeated_hair_tokens_for_one_owner_repeat_the_value(self) -> None:
         res = resolve("Her __HAIR__ is long. She combs her __HAIR__ daily.")
-        self.assertEqual(res.text.count("copper red hair"), 2)
+        hair = res.characters["ALICE"]["hair"]
+        self.assertEqual(res.text, f"Her {hair} is long. She combs her {hair} daily.")
 
     def test_default_owner_does_not_appear_when_the_only_token_is_fused(self) -> None:
         res = resolve("She holds a __HAIR__brush.")
@@ -1011,17 +1060,6 @@ class CharacteristicTokenTests(unittest.TestCase):
 
 
 class DrawTests(unittest.TestCase):
-    def test_draws_follow_the_documented_sha256_formula(self) -> None:
-        res = resolve("__ALICE__ waves.", seed=101)
-        slots = ("age", "ethnicity", "skin", "eyes", "face", "hair", "body")
-        lists = dict(LISTS)
-        lists["body"] = LISTS["body.female"]
-        for slot in slots:
-            options = lists[slot]
-            expected = options[draw(101, "ALICE", slot, 0, len(options))]
-            self.assertEqual(res.characters["ALICE"][slot], expected, slot)
-        self.assertEqual(list(res.characters["ALICE"]), list(slots))
-
     def test_same_inputs_give_identical_results(self) -> None:
         caption = "__ALICE__ meets __ADAM__. Her __HAIR__ is long. __ADAM__ nods."
         for style in IDENTITY_STYLES:
@@ -1029,36 +1067,16 @@ class DrawTests(unittest.TestCase):
             second = resolve(caption, seed=77, style=style)
             self.assertEqual(first, second)
 
-    def test_different_seeds_change_the_cast(self) -> None:
-        seen = {resolve("__ALICE__ waves.", seed=s).text for s in range(20)}
-        self.assertGreater(len(seen), 10)
-
-    def test_alice_is_unchanged_when_other_characters_join(self) -> None:
-        for seed in range(60):
-            solo = resolve("__ALICE__ waves.", seed=seed).characters["ALICE"]
-            pair = resolve("__ALICE__ waves at __BELLA__.", seed=seed).characters
-            trio = resolve(
-                "__ALICE__ waves at __BELLA__ and __ADAM__.", seed=seed
-            ).characters
-            self.assertEqual(solo, pair["ALICE"], seed)
-            self.assertEqual(solo, trio["ALICE"], seed)
-
-    def test_default_alice_matches_named_alice(self) -> None:
-        typed = resolve("Her __HAIR__ is long.", seed=9).characters["ALICE"]
-        named = resolve("__ALICE__ waves.", seed=9).characters["ALICE"]
-        self.assertEqual(typed, named)
-
-    def test_hair_is_distinct_across_the_cast_over_many_seeds(self) -> None:
-        caption = "__ALICE__, __BELLA__ and __CLARA__ wave."
-        for seed in range(300):
-            chars = resolve(caption, seed=seed).characters
+    def test_hair_is_distinct_across_the_cast_over_many_captions(self) -> None:
+        for caption in takes("__ALICE__, __BELLA__ and __CLARA__ wave.", 300):
+            chars = resolve(caption).characters
             hairs = [chars[n]["hair"] for n in ("ALICE", "BELLA", "CLARA")]
-            self.assertEqual(len(set(hairs)), 3, (seed, hairs))
+            self.assertEqual(len(set(hairs)), 3, (caption, hairs))
 
     def test_hair_is_distinct_across_genders_too(self) -> None:
-        for seed in range(100):
-            chars = resolve("__CLARA__ and __ADAM__ wave.", seed=seed).characters
-            self.assertNotEqual(chars["CLARA"]["hair"], chars["ADAM"]["hair"], seed)
+        for caption in takes("__CLARA__ and __ADAM__ wave.", 100):
+            chars = resolve(caption).characters
+            self.assertNotEqual(chars["CLARA"]["hair"], chars["ADAM"]["hair"], caption)
 
     def test_too_short_a_hair_list_falls_back_to_noun_handles_and_warns(self) -> None:
         library = make_library({"hair": ("auburn hair", "jet-black hair")})
@@ -1066,11 +1084,11 @@ class DrawTests(unittest.TestCase):
             "__ALICE__, __BELLA__ and __CLARA__ stand together. __ALICE__ smiles. "
             "__BELLA__ nods. __CLARA__ waves."
         )
-        for seed in range(25):
-            res = resolve(caption, seed=seed, library=library)
+        for take in takes(caption, 25):
+            res = resolve(take, library=library)
             hair = {n: res.characters[n]["hair"] for n in ("ALICE", "BELLA", "CLARA")}
-            self.assertEqual(len(set(hair.values())), 2, seed)
-            self.assertTrue(any("hair" in w for w in res.warnings), seed)
+            self.assertEqual(len(set(hair.values())), 2, take)
+            self.assertTrue(any("hair" in w for w in res.warnings), take)
             shared = {v for v in hair.values() if list(hair.values()).count(v) > 1}
             for name, verb in (
                 ("ALICE", "smiles"),
@@ -1083,15 +1101,15 @@ class DrawTests(unittest.TestCase):
                     handle = (
                         "The " + hair[name][:-5].replace(" ", "-") + "-haired woman"
                     )
-                self.assertIn(f"{handle} {verb}.", res.text, (seed, name))
+                self.assertIn(f"{handle} {verb}.", res.text, (take, name))
 
     def test_a_seven_person_cast_with_five_hair_values_never_raises(self) -> None:
         caption = (
             "__ALICE__ __BELLA__ __CLARA__ __DIANNA__ __EMMA__ __ADAM__ __BOB__ "
             "stand in a row."
         )
-        for seed in (0, 1, 5, 101, 4242):
-            res = resolve(caption, seed=seed)
+        for take in takes(caption, 25):
+            res = resolve(take)
             self.assertEqual(len(res.characters), 7)
             self.assertTrue(any("hair" in w for w in res.warnings))
 
@@ -1102,16 +1120,16 @@ class DrawTests(unittest.TestCase):
                 "hair.male": ("buzz-cut black hair",),
             }
         )
-        for seed in range(30):
-            chars = resolve("__ALICE__ and __ADAM__ wave.", seed=seed, library=library)
+        for take in takes("__ALICE__ and __ADAM__ wave.", 30):
+            chars = resolve(take, library=library)
             self.assertIn(
                 chars.characters["ALICE"]["hair"], ("plain hair one", "plain hair two")
             )
             self.assertEqual(chars.characters["ADAM"]["hair"], "buzz-cut black hair")
 
     def test_body_lists_are_split_by_gender(self) -> None:
-        for seed in range(30):
-            chars = resolve("__ALICE__ and __ADAM__ wave.", seed=seed).characters
+        for take in takes("__ALICE__ and __ADAM__ wave.", 30):
+            chars = resolve(take).characters
             self.assertIn(chars["ALICE"]["body"], LISTS["body.female"])
             self.assertIn(chars["ADAM"]["body"], LISTS["body.male"])
 
@@ -1129,6 +1147,85 @@ class DrawTests(unittest.TestCase):
         res = resolve("__ALICE__ and __BELLA__ wave.", library=library)
         self.assertNotIn("eyes", res.text)
         self.assertEqual(sum("eyes" in w for w in res.warnings), 1)
+
+
+class CastKeyTests(unittest.TestCase):
+    """A caption's characters are a function of the caption text alone. Every
+    draw is keyed on its sha256, never on the seed, so the seed can change (a
+    new image of the same scene) without changing who is in it."""
+
+    SLOTS = ("age", "ethnicity", "skin", "eyes", "face", "hair", "body")
+
+    def cast(
+        self, caption: str, seed: int = 101, style: str = "ref"
+    ) -> Dict[str, Dict[str, str]]:
+        return resolve(caption, seed=seed, style=style).characters
+
+    def test_the_seed_does_not_change_the_cast(self) -> None:
+        caption = "__ALICE__ meets __ADAM__. Her __HAIR__ is long. __ADAM__ nods."
+        expected = resolve(caption, seed=0)
+        for seed in (1, 2, 101, 4242, 2**31 - 1, -1, 10**40):
+            with self.subTest(seed=seed):
+                self.assertEqual(resolve(caption, seed=seed), expected)
+
+    def test_a_different_caption_changes_the_cast(self) -> None:
+        casts = {
+            tuple(sorted(self.cast(f"__ALICE__ waves {n}.")["ALICE"].items()))
+            for n in range(20)
+        }
+        self.assertGreater(len(casts), 10)
+
+    def test_every_draw_is_keyed_on_the_sha256_of_the_caption(self) -> None:
+        # The second caption is untidy on purpose: the text is hashed exactly as
+        # given, not trimmed or normalised.
+        for caption in (
+            "__ALICE__ waves at __CLARA__.",
+            "  __ALICE__   waves at __CLARA__.  \r\n\t",
+        ):
+            key = cast_key(caption)
+            cast = self.cast(caption)
+            self.assertEqual(list(cast["ALICE"]), list(self.SLOTS))
+            for name in ("ALICE", "CLARA"):
+                for slot in self.SLOTS:
+                    if slot == "hair" and name != "ALICE":
+                        continue  # a later character's hair is re-drawn on a clash
+                    options = LISTS["body.female" if slot == "body" else slot]
+                    expected = options[draw(key, name, slot, 0, len(options))]
+                    with self.subTest(caption=caption, name=name, slot=slot):
+                        self.assertEqual(cast[name][slot], expected)
+
+    def test_a_default_owner_is_drawn_like_a_named_character(self) -> None:
+        caption = "Her __HAIR__ is long."
+        cast = self.cast(caption)
+        self.assertEqual(list(cast), ["ALICE"])
+        for slot in self.SLOTS:
+            options = LISTS["body.female" if slot == "body" else slot]
+            expected = options[draw(cast_key(caption), "ALICE", slot, 0, len(options))]
+            with self.subTest(slot=slot):
+                self.assertEqual(cast["ALICE"][slot], expected)
+
+    def test_the_identity_style_is_not_part_of_the_key(self) -> None:
+        caption = "__ALICE__ waves at __BELLA__. __ALICE__ smiles."
+        casts = [self.cast(caption, style=style) for style in IDENTITY_STYLES]
+        self.assertEqual(casts[0], casts[1])
+        self.assertEqual(casts[0], casts[2])
+
+    def test_the_seed_still_picks_a_plain_wildcard_but_not_the_cast(self) -> None:
+        setting = ("a sunlit garden", "a foggy pier", "a quiet library")
+        library = make_library({"setting": setting})
+        caption = "__ALICE__ waits in __SETTING__."
+        results = [resolve(caption, seed=seed, library=library) for seed in range(20)]
+        self.assertEqual(len({str(r.characters) for r in results}), 1)
+        self.assertGreater(len({r.text for r in results}), 1)
+
+    def test_a_lone_surrogate_in_the_caption_does_not_raise(self) -> None:
+        # Legal in a JSON string, so a request can carry one; the engine never
+        # raises on data problems.
+        caption = "__ALICE__ waves at a \ud800 sign."
+        res = resolve(caption)
+        self.assertIn("ALICE", res.characters)
+        self.assertIn("\ud800 sign", res.text)
+        self.assertEqual(res, resolve(caption))
 
 
 class PlainWildcardTests(unittest.TestCase):
@@ -1183,51 +1280,57 @@ class PlainWildcardTests(unittest.TestCase):
 
 class SentenceStartTests(unittest.TestCase):
     def test_capitalised_at_the_start_of_the_text(self) -> None:
-        self.assertTrue(resolve("__ALICE__ waves.").text.startswith("A 31-year-old"))
+        self.assertTrue(
+            resolve_forced("__ALICE__ waves.").text.startswith("A 31-year-old")
+        )
 
     def test_capitalised_after_sentence_punctuation(self) -> None:
         for lead in ("She waves. ", "Who? ", "Wow! ", "Well\u2026 "):
             with self.subTest(lead=lead):
-                text = resolve(lead + "__ALICE__ smiles.").text
+                text = resolve_forced(lead + "__ALICE__ smiles.").text
                 self.assertEqual(text, lead + cap1(ALICE_INLINE) + " smiles.")
 
     def test_lowercase_mid_sentence(self) -> None:
         for lead in ("Then ", "Scene: ", "Then, ", "Behind "):
             with self.subTest(lead=lead):
-                text = resolve(lead + "__ALICE__ smiles.").text
+                text = resolve_forced(lead + "__ALICE__ smiles.").text
                 self.assertEqual(text, lead + ALICE_INLINE + " smiles.")
 
     def test_capitalised_after_a_line_break(self) -> None:
-        text = resolve("Scene one\n__ALICE__ smiles.").text
+        text = resolve_forced("Scene one\n__ALICE__ smiles.").text
         self.assertEqual(text, "Scene one\n" + cap1(ALICE_INLINE) + " smiles.")
 
     def test_capitalised_after_an_opening_quote(self) -> None:
-        text = resolve('"__ALICE__ smiles," he says.').text
+        text = resolve_forced('"__ALICE__ smiles," he says.').text
         self.assertEqual(text, '"' + cap1(ALICE_INLINE) + ' smiles," he says.')
-        text = resolve('He says: "Look. __ALICE__ smiles."').text
+        text = resolve_forced('He says: "Look. __ALICE__ smiles."').text
         self.assertIn('"Look. A 31-year-old', text)
 
     def test_apostrophes_are_not_sentence_boundaries(self) -> None:
-        text = resolve("The girls' __HAIR__ shines.").text
+        text = resolve_forced("The girls' __HAIR__ shines.").text
         self.assertTrue(text.startswith("The girls' copper red hair shines"), text)
 
     def test_later_mentions_are_capitalised_at_a_sentence_start(self) -> None:
         caption = "__ALICE__ waves. __ALICE__ smiles."
-        ref = resolve(caption, style="ref").text
-        noun = resolve(caption, style="noun").text
+        ref = resolve_forced(caption, style="ref").text
+        noun = resolve_forced(caption, style="noun").text
         self.assertTrue(ref.endswith(" waves. The copper-red-haired woman smiles."))
         self.assertTrue(noun.endswith(" waves. The woman smiles."))
 
     def test_characteristic_and_bare_tokens_are_capitalised_at_a_sentence_start(
         self,
     ) -> None:
-        self.assertEqual(resolve("__HAIR__ falls.").text, "Copper red hair falls.")
-        res = resolve("__BREASTS__ are covered.")
+        self.assertEqual(
+            resolve_forced("__HAIR__ falls.").text, "Copper red hair falls."
+        )
+        res = resolve_forced("__BREASTS__ are covered.")
         self.assertEqual(res.text, "Breasts are covered.")
         self.assertTrue(res.warnings)
 
     def test_mid_sentence_replacements_are_not_capitalised(self) -> None:
-        text = resolve("__ALICE__ waves and __ALICE__ smiles.", style="noun").text
+        text = resolve_forced(
+            "__ALICE__ waves and __ALICE__ smiles.", style="noun"
+        ).text
         self.assertTrue(text.endswith(" waves and the woman smiles."), text)
 
 
@@ -1272,10 +1375,9 @@ class EdgeInputTests(unittest.TestCase):
                         self.assertNotIn("__HAIR__", first.text)
 
     def test_curly_apostrophe_matches_the_straight_one(self) -> None:
-        for seed in self.SEEDS:
-            straight = resolve("__ALICE__'s hat.", seed=seed).text
-            curly = resolve("__ALICE__\u2019s hat.", seed=seed).text
-            self.assertEqual(curly, straight.replace("'", "\u2019"))
+        straight = resolve_forced("__ALICE__'s hat.").text
+        curly = resolve_forced("__ALICE__\u2019s hat.").text
+        self.assertEqual(curly, straight.replace("'", "\u2019"))
 
     def test_empty_and_whitespace_only_captions_are_unchanged(self) -> None:
         for caption in ("", " ", "   ", "\n", "\t \n ", "\u00a0"):
@@ -1297,26 +1399,36 @@ class EdgeInputTests(unittest.TestCase):
                 self.assertEqual(res.characters, {})
                 self.assertEqual(res.warnings, [])
 
-    def test_extreme_seeds_draw_valid_values(self) -> None:
+    def test_extreme_seeds_pick_valid_values_and_leave_the_cast_alone(self) -> None:
+        # A plain wildcard is all the seed still draws.
+        setting = ("a sunlit garden", "a foggy pier", "a quiet library")
+        library = make_library({"setting": setting})
+        caption = "__ALICE__ waves in __SETTING__."
+        casts = set()
         for seed in self.SEEDS:
-            res = resolve("__ALICE__ waves at __ADAM__.", seed=seed)
-            self.assertIn(res.characters["ALICE"]["age"], LISTS["age"])
-            self.assertIn(res.characters["ALICE"]["body"], LISTS["body.female"])
-            self.assertIn(res.characters["ADAM"]["body"], LISTS["body.male"])
-            self.assertEqual(res, resolve("__ALICE__ waves at __ADAM__.", seed=seed))
+            res = resolve(caption, seed=seed, library=library)
+            self.assertTrue(any(f"waves in {v}." in res.text for v in setting), seed)
+            self.assertEqual(res, resolve(caption, seed=seed, library=library))
+            casts.add(str(res.characters))
+        self.assertEqual(len(casts), 1)
 
     def test_negative_and_positive_seeds_are_different_seeds(self) -> None:
-        texts = {resolve("__ALICE__ waves.", seed=s).text for s in (-5, 5, -6, 6)}
-        self.assertGreater(len(texts), 1)
+        # A long list, so two seeds meeting the same value by chance is unlikely.
+        places = tuple(f"place {n}" for n in range(1000))
+        library = make_library({"setting": places})
+        texts = {
+            resolve("__SETTING__", seed=s, library=library).text for s in (-5, 5, -6, 6)
+        }
+        self.assertEqual(len(texts), 4)
 
     def test_malformed_underscores_parse_like_the_well_formed_token(self) -> None:
-        clean = resolve("__ALICE__ waves. Her __HAIR__ is loose.").text
+        clean = resolve_forced("__ALICE__ waves. Her __HAIR__ is loose.").text
         for caption in (
             "____ALICE____ waves. Her __HAIR__ is loose.",
             "___ALICE__ waves. Her ___HAIR____ is loose.",
         ):
             with self.subTest(caption=caption):
-                self.assertEqual(resolve(caption).text, clean)
+                self.assertEqual(resolve_forced(caption).text, clean)
 
     def test_things_that_are_not_tokens_are_left_alone(self) -> None:
         for caption in (
@@ -1382,15 +1494,15 @@ class EdgeInputTests(unittest.TestCase):
         )
         for caption in captions:
             for style in IDENTITY_STYLES:
-                for seed in range(40):
-                    text = resolve(caption, seed=seed, style=style).text
+                for take in takes(caption, 40):
+                    text = resolve(take, style=style).text
                     self.assertNotIn("(", text)
                     self.assertNotIn(")", text)
 
     def test_many_tokens_are_handled_in_linear_time(self) -> None:
         caption = "__ALICE__ waves at the camera. " * 20000
         started = time.perf_counter()
-        res = resolve(caption)
+        res = resolve_forced(caption)
         elapsed = time.perf_counter() - started
         self.assertEqual(res.text.count("waves at the camera."), 20000)
         self.assertEqual(res.text.count("The copper-red-haired woman waves"), 19999)
@@ -1399,7 +1511,7 @@ class EdgeInputTests(unittest.TestCase):
     def test_a_huge_underscore_run_is_not_quadratic(self) -> None:
         caption = "_" * 300000 + " __ALICE__ waves."
         started = time.perf_counter()
-        res = resolve(caption)
+        res = resolve_forced(caption)
         elapsed = time.perf_counter() - started
         self.assertTrue(res.text.endswith(" waves."))
         self.assertLess(elapsed, 5.0)

@@ -343,7 +343,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         "--seed",
         type=int,
         default=DEFAULT_SEED,
-        help="seed for the character draws (default: %(default)s)",
+        help=(
+            "seed sent with each request; the characters follow each caption's "
+            "text, so it does not change them (default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--only",

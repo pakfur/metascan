@@ -764,7 +764,7 @@ Body: `{filter}`. Returns `{count, total}`. A `filter` may carry `nudity` (any-o
 Body: `{filter}`. Returns one caption row `{id, caption, aspect_ratio, nudity, artistic_quality, erotic_score, pornographic_score, males, females, clothing}` with its tokens intact. **400** for a bad filter, **404** if nothing matches, **503** if the caption CSV is unavailable. `captions/count` and `captions/meta` answer `0` / empty for an unavailable CSV rather than an error.
 
 ### `POST /api/t2i/captions/resolve`
-Body: `{caption, seed, model}`. Returns `{resolved_caption, characters: {NAME: {slot: value}}, warnings}`. Pure and deterministic — the same caption and seed always resolve identically.
+Body: `{caption, seed, model}`. Returns `{resolved_caption, characters: {NAME: {slot: value}}, warnings}`. Pure and deterministic — the same caption and seed always resolve identically. The `characters` depend on the caption text alone, so a different `seed` gives the same ones; `seed` only picks the value of a plain `__TOKEN__` wildcard.
 
 ### `POST /api/t2i/prompt`
 Body: `{caption, seed, model}`. Resolves the caption, then has the VLM write the model-styled prompt; writes nothing. Returns `{prompt, negative, resolved_caption, warnings}` (`negative` is `null` for models that write none). With no VLM available it returns **200** with the resolved caption as the prompt and a warning.

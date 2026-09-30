@@ -2,7 +2,7 @@
 
 A caption is a plain string that may contain ``__TOKEN__`` placeholders
 (two or more underscores each side, ``[A-Z][A-Z0-9]*`` between). This module
-turns them into seeded, deterministic character descriptions:
+turns them into deterministic character descriptions:
 
 * **Character names** (``__ALICE__``, ``__ADAM__`` ...) -- the first mention
   becomes a description (``a 31-year-old West African woman with olive skin,
@@ -16,11 +16,15 @@ turns them into seeded, deterministic character descriptions:
 * **Plain wildcards** (any other token with a list) -- one seeded value,
   the same everywhere in the caption.
 
-Every draw is ``sha256(f"{seed}|{name}|{slot}|{salt}")`` reduced modulo the
-list length, so results are stable across processes and Python versions.
-Parentheses are never emitted (ComfyUI would read them as weighting syntax).
-No I/O and no exceptions on data problems: awkward input degrades to the
-bare word or an omitted slot and adds a warning.
+A character's draws are keyed on the caption text alone, never on the seed:
+``sha256(f"{caption_sha}|{name}|{slot}|{salt}")`` where ``caption_sha`` is the
+hex sha256 of the caption. One caption therefore always draws the same cast,
+and the seed is free to change (a new image of the same scene). The seed only
+picks plain wildcards: ``sha256(f"{seed}|{token}|wildcard|0")``. Each draw is
+reduced modulo the list length, so results are stable across processes and
+Python versions. Parentheses are never emitted (ComfyUI would read them as
+weighting syntax). No I/O and no exceptions on data problems: awkward input
+degrades to the bare word or an omitted slot and adds a warning.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from metascan.core.t2i_ages import stated_age
 
@@ -141,8 +145,15 @@ _MAX_HAIR_SALT = 64
 _A_EXCEPTIONS = ("eu", "uk", "uni", "uru", "uga", "use")
 
 
-def _draw(seed: int, name: str, slot: str, salt: int, size: int) -> int:
-    digest = hashlib.sha256(f"{seed}|{name}|{slot}|{salt}".encode("utf-8")).digest()
+def _caption_key(caption: str) -> str:
+    """What every character draw of ``caption`` is keyed on: the sha256 of its
+    text exactly as given. ``surrogatepass`` keeps a lone surrogate, which a
+    JSON string may carry, from raising."""
+    return hashlib.sha256(caption.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _draw(key: Union[int, str], name: str, slot: str, salt: int, size: int) -> int:
+    digest = hashlib.sha256(f"{key}|{name}|{slot}|{salt}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") % size
 
 
@@ -447,7 +458,7 @@ class _Planner:
 
 
 def _draw_distinct(
-    seed: int,
+    key: str,
     name: str,
     slot: str,
     options: Tuple[str, ...],
@@ -461,10 +472,10 @@ def _draw_distinct(
     """
     size = len(options)
     for salt in range(_MAX_HAIR_SALT):
-        value = options[_draw(seed, name, slot, salt, size)]
+        value = options[_draw(key, name, slot, salt, size)]
         if value.casefold() not in taken:
             return value, False
-    start = _draw(seed, name, slot, 0, size)
+    start = _draw(key, name, slot, 0, size)
     for step in range(size):
         value = options[(start + step) % size]
         if value.casefold() not in taken:
@@ -473,7 +484,7 @@ def _draw_distinct(
 
 
 def _draw_cast(
-    seed: int,
+    key: str,
     cast: Sequence[str],
     genders: Dict[str, str],
     library: Library,
@@ -482,9 +493,10 @@ def _draw_cast(
 ) -> Tuple[Dict[str, Dict[str, str]], Set[str]]:
     """Draw every character's slots; returns (characters, ambiguous names).
 
-    ``hair`` is forced distinct across the cast (canonical order, so stable).
-    A name is *ambiguous* when it shares hair with another character, and its
-    ``ref`` handle then falls back to the plain noun.
+    ``key`` is the caption's (see ``_caption_key``). ``hair`` is forced
+    distinct across the cast (canonical order, so stable). A name is
+    *ambiguous* when it shares hair with another character, and its ``ref``
+    handle then falls back to the plain noun.
     """
     cfg = library.config
     characters: Dict[str, Dict[str, str]] = {}
@@ -508,7 +520,7 @@ def _draw_cast(
                     )
                 continue
             if slot == "hair":
-                value, clashed = _draw_distinct(seed, name, slot, options, hair_owners)
+                value, clashed = _draw_distinct(key, name, slot, options, hair_owners)
                 owners = hair_owners.setdefault(value.casefold(), [])
                 owners.append(name)
                 if clashed:
@@ -519,7 +531,7 @@ def _draw_cast(
                         "characters; some share hair and are called by their noun",
                     )
             else:
-                value = options[_draw(seed, name, slot, 0, len(options))]
+                value = options[_draw(key, name, slot, 0, len(options))]
             drawn[slot] = value
         characters[name] = drawn
     return characters, ambiguous
@@ -707,11 +719,13 @@ class _Renderer:
 def resolve_caption(
     caption: str, seed: int, style: str, library: Library
 ) -> ResolvedCaption:
-    """Resolve every token in ``caption`` for ``seed`` and identity ``style``.
+    """Resolve every token in ``caption`` in identity ``style``.
 
-    Pure and deterministic: the same inputs always give the same output. A
-    caption with no tokens is returned unchanged. Never raises on data
-    problems; an unknown ``style`` is treated as ``ref`` with a warning.
+    Pure and deterministic: the same inputs always give the same output. The
+    characters depend on the caption text alone; ``seed`` only picks the value
+    of plain wildcards. A caption with no tokens is returned unchanged. Never
+    raises on data problems; an unknown ``style`` is treated as ``ref`` with a
+    warning.
     """
     warnings: List[str] = []
     if style not in IDENTITY_STYLES:
@@ -728,7 +742,7 @@ def resolve_caption(
     plan = _Planner(caption, matches, library, genders, warnings).run()
     cast = [name for name in genders if name in plan.named or name in plan.defaults]
     characters, ambiguous = _draw_cast(
-        seed, cast, genders, library, plan.referenced, warnings
+        _caption_key(caption), cast, genders, library, plan.referenced, warnings
     )
     renderer = _Renderer(
         caption, seed, style, library, genders, plan, characters, ambiguous
