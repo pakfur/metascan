@@ -17,6 +17,7 @@ from backend.config import (
     get_comfy_config,
     get_models_config,
     get_server_config,
+    get_t2i_config,
     load_app_config,
 )
 from backend.api import (
@@ -35,6 +36,7 @@ from backend.api import (
     comfy as comfy_api,
     storyboard as storyboard_api,
     i2v,
+    t2i,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
@@ -48,6 +50,9 @@ from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
 from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.i2v_runner import I2vRunner
+from metascan.core.t2i_captions import CaptionStore
+from metascan.core.t2i_runner import T2iRunner
+from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.scanner import Scanner
 from metascan.utils.app_paths import get_data_dir
 from metascan.utils.log_files import install_server_log
@@ -233,6 +238,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     comfy_client.on_job_event(i2v_runner.handle_job_event)
     i2v.set_i2v_runner(i2v_runner)
 
+    # The caption CSV and the wildcard lists live side by side. Both are
+    # lazy: nothing is read until the first request, and both reload on
+    # change, so a missing CSV only turns Random mode off.
+    t2i_dir = get_data_dir() / "t2i_captions"
+    t2i_runner = T2iRunner(
+        db=get_db(),
+        comfy=comfy_client,
+        get_vlm=get_vlm_client,
+        captions=CaptionStore(t2i_dir / "t2i_captions.csv"),
+        library=LibraryCache(t2i_dir),
+        output_root=Path(comfy_cfg["output_root"]),
+        get_config=lambda: get_t2i_config(load_app_config()),
+        unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+    )
+    t2i_runner.on_event(
+        lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
+    )
+    comfy_client.on_job_event(t2i_runner.handle_job_event)
+    t2i.set_t2i_runner(t2i_runner)
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -329,6 +354,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await i2v_runner.aclose()
         except Exception:
             logger.exception("i2v runner close failed")
+        try:
+            await t2i_runner.aclose()
+        except Exception:
+            logger.exception("t2i runner close failed")
         if prompt_store is not None:
             try:
                 prompt_store.stop_watching()
@@ -404,6 +433,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(comfy_api.router)
     app.include_router(storyboard_api.router)
     app.include_router(i2v.router)
+    app.include_router(t2i.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)
