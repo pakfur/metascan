@@ -77,7 +77,7 @@ Each characteristic is a text file with one value per line; blank lines and `#` 
 | `<name>.female.txt` / `<name>.male.txt` | Override `<name>.txt` for that gender. The shipped body lists are `body.female.txt` and `body.male.txt`. |
 | `breasts.txt`, `vagina.txt`, `penis.txt` | Body-part tokens. **Not shipped** — supply your own. A missing list makes the token its plain word. |
 
-Write values so they read after `with`: `an oval face`, `green eyes`, `olive skin`, `an athletic build`. Hair values must end in ` hair` (`auburn hair`) — the short handle for a later mention is built from it (`the auburn-haired woman`).
+Write values so they read after `with`: `an oval face`, `green eyes`, `olive skin`, `an athletic build`. Write every `age` value with its number (`45-year-old`): the age wording above reads it. Hair values must end in ` hair` (`auburn hair`) — the short handle for a later mention is built from it (`the auburn-haired woman`).
 
 Lists reload automatically when a file changes. **Editing or reordering a list changes which value a given caption and seed picks.**
 
@@ -93,6 +93,10 @@ Optional; defaults are built in. It sets the names, the noun for each gender, wh
 - If the next word is a possessive, `with`, `and`, punctuation, or the name is part of a compound subject (`X and Y`), only the head noun goes inline and the details move to one trailing sentence. Parentheses are never used — ComfyUI parses them as weighting.
 - A slot the caption already writes out with a token (`__HAIR__`) is left out of the description.
 - The owner of a body-part token is the character a pronoun points at (`his` / `her`), otherwise the character named nearest before it. This is a heuristic: in a caption with several people the worst case swaps who gets which hair colour.
+
+### Age wording
+
+A bare *woman* or *man* makes image models draw the subject younger than the number, so a first mention also names the age bracket in words: from **40** the noun becomes *middle aged woman* / *middle aged man* (*A 52-year-old Nordic middle aged man with …*), and **over 70** it becomes *old woman* / *old man* (a 70-year-old is still middle aged). The age is the first number in the drawn `age` value, in digits or spelled out (`45-year-old`, `forty-five-year-old`, `in her 50s`); a value with no number (`elderly`) is left alone, and so is a character with no `age` list. Later mentions keep the plain noun. The two cut-offs are the constants `MIDDLE_AGED_FROM` and `OLD_FROM` in `metascan/core/t2i_characters.py`.
 
 ### Later mentions
 
