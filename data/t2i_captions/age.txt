@@ -1,0 +1,21 @@
+# One value per line. Adults only: any number under 18 is rejected at load time.
+21-year-old
+23-year-old
+24-year-old
+26-year-old
+27-year-old
+29-year-old
+31-year-old
+33-year-old
+34-year-old
+36-year-old
+38-year-old
+40-year-old
+42-year-old
+44-year-old
+46-year-old
+48-year-old
+50-year-old
+52-year-old
+55-year-old
+58-year-old

@@ -1,0 +1,21 @@
+# Read after the word "with": with <value>, ...
+fair skin
+pale skin
+light skin
+porcelain skin
+rosy skin
+freckled skin
+olive skin
+warm tan skin
+golden skin
+sun-kissed skin
+bronze skin
+light brown skin
+medium brown skin
+warm brown skin
+brown skin
+deep brown skin
+dark brown skin
+smooth skin
+weathered skin
+tanned skin

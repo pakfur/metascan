@@ -1,0 +1,19 @@
+# Read after the word "with": with <value>. body.female.txt is the female list.
+an athletic build
+a lean build
+a wiry build
+a lanky build
+a slim build
+a trim build
+an average build
+a solid build
+a sturdy build
+a stocky build
+a broad-shouldered build
+a muscular build
+a strong build
+a powerful build
+a rugged build
+a tall lean build
+a heavyset build
+a compact build

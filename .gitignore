@@ -14,6 +14,10 @@ data/*
 !data/workflows/
 !data/templates/
 !data/i2v_templates/
+# T2I: the starter lists and characters.yml are tracked; the caption CSV
+# (tens of MB, user-supplied) is not.
+!data/t2i_captions/
+data/t2i_captions/*.csv
 
 .claude/
 

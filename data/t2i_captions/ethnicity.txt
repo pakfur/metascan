@@ -1,0 +1,31 @@
+# Read as: a <age> <ethnicity> woman / man. Keep entries neutral for both genders.
+Nordic
+Latin American
+East Asian
+West African
+South Asian
+Mediterranean
+Southeast Asian
+Middle Eastern
+Central Asian
+Eastern European
+Western European
+Irish
+Scottish
+Italian
+Greek
+Persian
+Korean
+Japanese
+Chinese
+Indian
+Brazilian
+Mexican
+Caribbean
+Ethiopian
+Nigerian
+Moroccan
+Turkish
+Polish
+Vietnamese
+Pacific Islander
