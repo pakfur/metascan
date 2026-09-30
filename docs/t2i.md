@@ -22,8 +22,8 @@ Generated images are ordinary library media. They appear in the strip at the bot
 | Control | What it does |
 |---|---|
 | **Caption** | The description to expand. Plain text; tokens are optional. A collapsible *Resolved caption* shows exactly what the VLM will be given. |
-| **Generate Prompt** | Resolves the caption with the current seed and writes the prompt into **Prompt**. Review-only: nothing is queued. |
-| **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption so you can preview it. |
+| **Generate Prompt** | Resolves the caption with the current seed and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first step (see Batches). |
+| **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption so you can preview it; **Generate** renders that caption only if you have also pressed **Generate Prompt** for it. |
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
 | **Model** | Krea 2, Qwen-Image, SDXL or Z-Image. Chooses the prompt style and the default workflow. |
 | **Workflow** | Every registered `t2i` workflow. |
@@ -32,7 +32,7 @@ Generated images are ordinary library media. They appear in the strip at the bot
 | **Seed** and policy | The seed, plus how it advances: **Fixed**, **Increment**, **Decrement** or **Randomize**. |
 | **LoRAs** | Same editor as Image to Video. Needs an `MS_LORA_STACK` node in the workflow. |
 | **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL) and is sent only if the workflow has an `MS_NEGATIVE` node. |
-| **Batch Size** | How many captions a run uses. Locked at 1 in Manual mode. |
+| **Batch Size** | How many captions a run uses; the first is your prompt when one is ready. Locked at 1 in Manual mode. |
 | **Count per Batch** | How many images each caption renders, one seed apiece. Above 1 needs a non-Fixed policy. |
 
 ## Batches
@@ -40,7 +40,7 @@ Generated images are ordinary library media. They appear in the strip at the bot
 **Generate** starts a batch on the server, so it keeps running if you close the dialog or reload the page; reopening the dialog reattaches to it. **Cancel** stops every running batch and cancels its unfinished jobs.
 
 - **Manual:** one step — your caption and prompt — rendered `Count per Batch` times.
-- **Random Caption:** for each of `Batch Size` steps the server picks an unused caption, takes its aspect ratio, writes a prompt, then renders `Count per Batch` images. While it runs, the Caption, Prompt, Aspect and Seed boxes show the current step and cannot be edited. Only one Random batch runs at a time.
+- **Random Caption:** for each of `Batch Size` steps the server picks an unused caption, takes its aspect ratio, writes a prompt, then renders `Count per Batch` images. The one exception is the **first step when the Prompt box holds a prompt you generated with *Generate Prompt* or wrote yourself, and no batch has rendered it yet**: that prompt, with the Caption, Aspect Ratio and Negative in the boxes, is step 1 — nothing is drawn and no prompt is written for it, so what you reviewed is what renders — and the remaining steps are drawn as above. A prompt a batch has already used, including the last step a finished run hands back in the boxes, is never reused: the next **Generate** draws every caption itself. Closing and reopening the dialog keeps a prompt ready; reloading the page forgets it, so press **Generate Prompt** again first. While it runs, the Caption, Prompt, Aspect and Seed boxes show the current step and cannot be edited. Only one Random batch runs at a time.
 
 Seeds advance across the whole run according to the policy and stop the run early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). Under **Randomize** the first image uses the seed shown in the dialog, so it reproduces that prompt, and the rest are drawn at random. The character description for a step is drawn from that step's **first** image seed, so the same caption and seed always give the same cast. With **Fixed**, every step uses the same seed and therefore the same cast. When a run ends, the seed box shows the next unused seed.
 

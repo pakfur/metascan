@@ -29,7 +29,7 @@ from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyClient, ComfyError
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.scanner import Scanner
-from metascan.core.t2i_captions import CaptionFilterError, CaptionStore
+from metascan.core.t2i_captions import CaptionFilterError, CaptionPicker, CaptionStore
 from metascan.core.t2i_characters import resolve_caption
 from metascan.core.t2i_form import SEED_MAX, T2iFormError, t2i_dims
 from metascan.core.t2i_models import MODEL_PROFILES
@@ -1038,6 +1038,34 @@ class TestValidation(ValidationCase):
         started = await self.runner.start_batch(self.manual(caption=None))
         self.assertEqual(started.total_images, 3)
 
+    async def test_a_random_first_step_needs_one_of_the_eleven_aspect_ratios(
+        self,
+    ) -> None:
+        # A Random request that carries a prompt renders it as step 1 at the
+        # ratio it names: there is no CSV row to take one from.
+        for aspect in (None, "5:7", "banana"):
+            with self.subTest(aspect=aspect):
+                await self.rejects(
+                    T2iRequestError,
+                    "Aspect ratio",
+                    self.random_mode(prompt="A red kite.", aspect_ratio=aspect),
+                )
+
+    async def test_a_random_request_with_a_blank_prompt_supplies_no_first_step(
+        self,
+    ) -> None:
+        # Guard: only a prompt supplies a step. A blank one, with or without a
+        # stray caption, is a plain Random request and needs no ratio.
+        for prompt in (None, "", "  \n"):
+            with self.subTest(prompt=prompt):
+                started = await self.runner.start_batch(
+                    self.random_mode(
+                        prompt=prompt, caption="a red kite", aspect_ratio=None
+                    )
+                )
+                self.assertEqual(started.total_images, 6)
+                await self.runner.cancel_batch(started.batch_id)  # frees the slot
+
     async def test_random_mode_needs_the_caption_csv(self) -> None:
         self.csv_path.unlink()
         with self.assertRaises(T2iRequestError) as ctx:
@@ -1153,6 +1181,49 @@ class TestValidation(ValidationCase):
     async def test_random_krea2_has_no_negative_to_warn_about(self) -> None:
         started = await self.runner.start_batch(self.random_mode(model="krea2"))
         self.assertEqual(started.warnings, [])
+
+    async def test_a_negative_supplied_with_a_random_first_step_is_warned_about(
+        self,
+    ) -> None:
+        # Like a Manual one: the user typed it. krea2 writes none itself, so
+        # the supplied one is the only thing the workflow could drop.
+        started = await self.runner.start_batch(
+            self.random_mode(
+                model="krea2",
+                batch_size=1,
+                prompt="A red kite.",
+                aspect_ratio="3:2",
+                negative="blurry",
+            )
+        )
+        self.assertEqual(
+            started.warnings,
+            ["negative prompt ignored: the workflow has no MS_NEGATIVE node"],
+        )
+
+    async def test_a_run_of_one_supplied_step_writes_no_negative_to_warn_about(
+        self,
+    ) -> None:
+        # SDXL would write a negative, but this run draws no step to write one.
+        started = await self.runner.start_batch(
+            self.random_mode(
+                model="sd", batch_size=1, prompt="A red kite.", aspect_ratio="3:2"
+            )
+        )
+        self.assertEqual(started.warnings, [])
+
+    async def test_a_supplied_step_does_not_hide_the_warning_for_the_drawn_ones(
+        self,
+    ) -> None:
+        started = await self.runner.start_batch(
+            self.random_mode(
+                model="sd", batch_size=2, prompt="A red kite.", aspect_ratio="3:2"
+            )
+        )
+        self.assertEqual(
+            started.warnings,
+            ["negative prompt ignored: the workflow has no MS_NEGATIVE node"],
+        )
 
     async def test_validation_reports_the_first_problem_in_the_documented_order(
         self,
@@ -2286,6 +2357,121 @@ class TestRandomBatchRun(BatchCase):
         )
 
 
+class TestRandomFirstStep(BatchCase):
+    """The dialog's Generate Prompt, then Generate in Random Caption mode: a
+    Random request that carries a prompt renders it as step 1, with no
+    caption drawn and no model call for it. Only the later steps draw a
+    caption and have a prompt written."""
+
+    PROMPT = "A red kite over a gray sea."
+
+    def supplied(self, **over: Any) -> BatchRequest:
+        fields: Dict[str, Any] = dict(
+            caption="a red kite", prompt=self.PROMPT, aspect_ratio="2:3"
+        )
+        fields.update(over)
+        return self.random_mode(**fields)
+
+    async def test_a_supplied_prompt_is_step_one_and_needs_no_model_call(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(self.supplied(seed=42, batch_size=1, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["prompt"], self.PROMPT)
+        self.assertEqual(step["caption"], "a red kite")
+        self.assertEqual(step["aspect_ratio"], "2:3")
+        self.assertEqual(step["seed"], 42)
+        self.assertEqual(self.vlm.calls, [])
+        (params,) = self.params()
+        self.assertEqual(params.positive, self.PROMPT)
+        self.assertEqual((params.width, params.height), (816, 1232))
+
+    async def test_only_step_one_is_supplied_the_rest_are_drawn_and_written(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        await self.run_to_end(self.supplied(seed=10, batch_size=3, count_per_batch=2))
+        steps = self.frames("batch_step")
+        self.assertEqual([s["seed"] for s in steps], [10, 12, 14])
+        self.assertEqual(steps[0]["caption"], "a red kite")
+        drawn = [s["caption"] for s in steps[1:]]
+        self.assertEqual(len(set(drawn)), 2)
+        self.assertLessEqual(set(drawn), {row[0] for row in CSV_ROWS})
+        # The model wrote exactly the two drawn steps and never saw the caption
+        # the request supplied.
+        self.assertEqual(len(self.vlm.calls), 2)
+        for call in self.vlm.calls:
+            self.assertNotIn("red kite", call["user_prompt"])
+        positives = [p.positive for p in self.params()]
+        self.assertEqual(positives[:2], [self.PROMPT] * 2)
+        for positive in positives[2:]:
+            self.assertTrue(positive.startswith("A calm beach scene at dawn."))
+
+    async def test_a_supplied_step_draws_no_caption(self) -> None:
+        # One draw per drawn step and none for the supplied one: a row drawn
+        # and thrown away would be a reroll the user never sees. The real
+        # picker still runs; the spy only counts. (Counting rows instead does
+        # not work: the picker never repeats the last row when it reshuffles,
+        # which hides a wasted draw.)
+        self.roomy()
+        with mock.patch.object(
+            CaptionPicker, "next", autospec=True, side_effect=CaptionPicker.next
+        ) as draw:
+            await self.run_to_end(self.supplied(batch_size=3, count_per_batch=1))
+        self.assertEqual(draw.call_count, 2)
+
+    async def test_a_supplied_negative_reaches_the_workflow(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(
+            self.supplied(
+                model="sd",
+                preset_id=self.with_negative,
+                batch_size=1,
+                count_per_batch=1,
+                negative="blurry, extra fingers",
+            )
+        )
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["negative"], "blurry, extra fingers")
+        (params,) = self.params()
+        self.assertEqual(params.negative, "blurry, extra fingers")
+        self.assertEqual(self.vlm.calls, [])
+
+    async def test_a_supplied_step_without_a_negative_gets_none_written(self) -> None:
+        # The model would have written "blurry, watermark" for a drawn step.
+        await self.run_to_end(
+            self.supplied(
+                model="sd",
+                preset_id=self.with_negative,
+                batch_size=1,
+                count_per_batch=1,
+            )
+        )
+        (step,) = self.frames("batch_step")
+        self.assertIsNone(step["negative"])
+        (params,) = self.params()
+        self.assertIsNone(params.negative)
+
+    async def test_the_supplied_step_is_announced_before_the_model_is_asked(
+        self,
+    ) -> None:
+        # What the dialog shows while step 2's prompt is being written: the
+        # supplied prompt, not empty boxes waiting for a model call.
+        assert self.vlm is not None
+        self.vlm.gates.append(asyncio.Event())
+        started = await self.start(self.supplied(batch_size=2, count_per_batch=1))
+        await self.until(lambda: len(self.vlm.calls) == 1, "step 2's prompt to start")
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["prompt"], self.PROMPT)
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["step"]["prompt"], self.PROMPT)
+        self.assertLess(
+            self.log.index(("event", "batch_step")),
+            self.log.index(("vlm", "generate_text")),
+        )
+        await self.runner.cancel_batch(started.batch_id)
+
+
 class TestPromptRetryAndFallback(BatchCase):
     def one_step(self, **over: Any) -> BatchRequest:
         """One caption, always the first CSV row (the only 3:2 one)."""
@@ -3109,6 +3295,51 @@ class TestIngest(AccountingCase):
         assert all(r is not None for r in rows)
         self.assertEqual([r["seed"] for r in rows if r], [10, 11, 12, 13])
         self.assertEqual([r["prompt_seed"] for r in rows if r], [10, 10, 12, 12])
+
+    async def test_a_supplied_first_step_is_remembered_as_the_dialog_had_it(
+        self,
+    ) -> None:
+        # Step 1 of a Random run, supplied by the request with no caption: the
+        # image remembers a Random dialog with its filter, its own prompt and
+        # negative, and no caption -- the way a Manual one does.
+        self.roomy()
+        flt = {"aspect_ratios": ["3:2"]}
+        await self.run_to_end(
+            self.random_mode(
+                model="sd",
+                preset_id=self.with_negative,
+                seed=10,
+                batch_size=1,
+                count_per_batch=1,
+                filter=flt,
+                prompt="A red kite over a gray sea.",
+                negative="blurry",
+                aspect_ratio="2:3",
+            )
+        )
+        await self.job_done(self.comfy.job_ids[0])
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(
+            row["form_state"],
+            {
+                "mode": "random",
+                "filter": flt,
+                "caption": None,
+                "model": "sd",
+                "preset_id": self.with_negative,
+                "megapixels": 1.0,
+                "aspect_ratio": "2:3",
+                "seed": 10,
+                "prompt": "A red kite over a gray sea.",
+                "negative": "blurry",
+                "loras": [],
+            },
+        )
+        self.assertIsNone(row["caption"])
+        self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
+        self.assertEqual(row["negative_used"], "blurry")
+        self.assertEqual((row["seed"], row["prompt_seed"]), (10, 10))
 
     async def test_random_sdxl_keeps_the_negative_it_rendered_with(self) -> None:
         self.roomy()

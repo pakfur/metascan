@@ -162,14 +162,22 @@ export interface BatchContext {
   hasNegative: boolean
   maxBatchSize: number
   maxCount: number
+  /**
+   * Random only: the Prompt box holds a prompt the user made ready (see
+   * firstStepReady), so it goes out as the run's first step and the server
+   * draws a caption and writes a prompt only for the steps after it.
+   */
+  firstStepFromForm?: boolean
 }
 
 /**
  * The POST /api/t2i/batches body for a Generate: one snapshot of the fields,
  * so nothing the user types afterwards can leak into a batch the server is
  * running. Manual sends its prompt, aspect ratio and (as provenance) its
- * caption; Random sends its filter. The counts are the EFFECTIVE ones: Manual
- * is locked at Batch Size 1, and Fixed forces Count per Batch to 1.
+ * caption; Random sends its filter, and those same fields as its first step
+ * when `firstStepFromForm` says the prompt in the box is one to render. The
+ * counts are the EFFECTIVE ones: Manual is locked at Batch Size 1, and Fixed
+ * forces Count per Batch to 1.
  */
 export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequest {
   if (f.presetId === null) throw new Error('Choose a workflow first')
@@ -184,15 +192,32 @@ export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequ
     count_per_batch: effectiveCount(f.seedPolicy, f.countPerBatch, ctx.maxCount),
     loras: f.loras.map((l) => ({ name: l.name, strength: l.strength })),
   }
-  if (f.mode === 'manual') {
+  const addFormStep = () => {
     req.prompt = f.prompt
     req.aspect_ratio = f.aspect
     if (f.caption.trim()) req.caption = f.caption
     if (ctx.hasNegative && f.negative.trim()) req.negative = f.negative
+  }
+  if (f.mode === 'manual') {
+    addFormStep()
   } else {
     req.filter = cleanFilter(f.filter)
+    if (ctx.firstStepFromForm && f.prompt.trim()) addFormStep()
   }
   return req
+}
+
+/**
+ * Whether a Random Generate renders the Prompt box as its first step instead
+ * of drawing every caption itself: the box holds text, and it is text the user
+ * made ready (Generate Prompt wrote it, or they typed it) that no batch has
+ * taken since. `ready` is that text. It is compared by value, so a prompt that
+ * has replaced it since (a tile loaded, a finished batch handing its last step
+ * back) is never mistaken for it. A caption alone never counts: the dice only
+ * previews one, and nothing was written for it.
+ */
+export function firstStepReady(f: T2iFields, ready: string | null): boolean {
+  return f.mode === 'random' && ready !== null && ready === f.prompt && f.prompt.trim() !== ''
 }
 
 /**

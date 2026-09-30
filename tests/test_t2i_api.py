@@ -696,6 +696,36 @@ class TestBatches(T2iApiCase):
         self.assertIsNone(req.caption)
         self.assertEqual(req.loras, [])
 
+    def test_a_random_request_may_carry_a_first_step(self) -> None:
+        # The dialog's Generate Prompt, then Generate in Random Caption mode:
+        # the runner gets the prompt the user already has, with its caption,
+        # ratio and negative, next to the filter that draws the other steps.
+        body = {
+            "mode": "random",
+            "model": "sd",
+            "preset_id": 2,
+            "megapixels": 1.0,
+            "seed": 7,
+            "seed_policy": "increment",
+            "batch_size": 3,
+            "count_per_batch": 1,
+            "filter": {"nudity": ["none"]},
+            "caption": "a red kite",
+            "prompt": "A red kite over a gray sea.",
+            "negative": "blurry",
+            "aspect_ratio": "2:3",
+        }
+        self.assertEqual(
+            self.client.post("/api/t2i/batches", json=body).status_code, 200
+        )
+        ((_, req),) = self.runner.calls
+        self.assertEqual(req.mode, "random")
+        self.assertEqual(req.filter, {"nudity": ["none"]})
+        self.assertEqual(req.caption, "a red kite")
+        self.assertEqual(req.prompt, "A red kite over a gray sea.")
+        self.assertEqual(req.negative, "blurry")
+        self.assertEqual(req.aspect_ratio, "2:3")
+
     def test_optional_fields_default(self) -> None:
         minimal = {
             "mode": "manual",

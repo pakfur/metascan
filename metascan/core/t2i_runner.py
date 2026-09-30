@@ -116,7 +116,8 @@ class BatchRequest:
     batch_size: int = 1
     count_per_batch: int = 1
     loras: List[Dict[str, Any]] = field(default_factory=list)
-    # Manual fields
+    # Manual fields. A Random request may carry them too: one with a prompt
+    # renders it as its first step (see ``_supplies_first_step``).
     caption: Optional[str] = None
     prompt: Optional[str] = None
     negative: Optional[str] = None
@@ -201,7 +202,9 @@ class _Step:
     """One caption's worth of images: a prompt and the seeds it renders with."""
 
     index: int  # 0-based
-    caption: str  # provenance: Manual = the given caption, Random = the raw row
+    # Provenance: the given caption for a supplied step (Manual, or a Random
+    # batch's first), the raw row for a drawn one.
+    caption: str
     aspect_ratio: str
     seeds: List[int]
     prompt: str
@@ -258,6 +261,26 @@ def _check_count(value: Any, label: str, maximum: int) -> int:
     ):
         raise T2iRequestError(f"{label} must be a whole number from 1 to {maximum}")
     return int(value)
+
+
+def _check_aspect(aspect: Any) -> None:
+    if aspect not in ASPECT_RATIOS:
+        raise T2iRequestError(
+            f"Aspect ratio {aspect!r} is not supported; use one of "
+            f"{', '.join(ASPECT_RATIOS)}"
+        )
+
+
+def _supplies_first_step(req: BatchRequest) -> bool:
+    """A Random request that carries a prompt renders it as its first step
+    (the dialog's Generate Prompt, then Generate): nothing is drawn and no
+    prompt is written for that step, the rest are drawn as usual. A blank
+    prompt supplies nothing, and neither does a caption or ratio without one."""
+    return (
+        req.mode == "random"
+        and isinstance(req.prompt, str)
+        and req.prompt.strip() != ""
+    )
 
 
 def _profile(model: Any) -> T2iModelProfile:
@@ -513,15 +536,14 @@ class T2iRunner:
             )
 
         picker: Optional[CaptionPicker] = None
+        supplied = _supplies_first_step(req)
         if req.mode == "manual":
             if not isinstance(req.prompt, str) or not req.prompt.strip():
                 raise T2iRequestError("Prompt is empty")
-            if req.aspect_ratio not in ASPECT_RATIOS:
-                raise T2iRequestError(
-                    f"Aspect ratio {req.aspect_ratio!r} is not supported; use one "
-                    f"of {', '.join(ASPECT_RATIOS)}"
-                )
+            _check_aspect(req.aspect_ratio)
         else:
+            if supplied:
+                _check_aspect(req.aspect_ratio)  # no CSV row to take one from
             if not await asyncio.to_thread(self.captions.available):
                 reason = await asyncio.to_thread(self.captions.error)
                 raise T2iRequestError(
@@ -549,11 +571,16 @@ class T2iRunner:
         if req.seed_policy != "random":
             following = next_seed(req.seed_policy, seeds[-1], random.Random())
         # A negative the workflow has no node for is dropped, once, loudly:
-        # the user typed one (Manual) or the model writes one (Random).
+        # the user typed one (Manual, or a Random first step) or the model
+        # writes one (each step a Random batch draws).
+        typed_negative = isinstance(req.negative, str) and req.negative.strip() != ""
         if req.mode == "manual":
-            has_negative = isinstance(req.negative, str) and req.negative.strip() != ""
+            has_negative = typed_negative
         else:
-            has_negative = profile.has_negative
+            drawn_steps = batch_size - (1 if supplied else 0)
+            has_negative = (drawn_steps > 0 and profile.has_negative) or (
+                supplied and typed_negative
+            )
         if has_negative and bindings.negative is None:
             warnings.append(WARN_NEGATIVE_IGNORED)
 
@@ -703,7 +730,10 @@ class T2iRunner:
             f"VLM failed ({self._reason(failure)}) - used the resolved caption"
         )
 
-    def _manual_step(self, batch: _Batch) -> _Step:
+    def _supplied_step(self, batch: _Batch) -> _Step:
+        """The step the request itself carries -- a Manual batch's only step,
+        or a Random batch's first: its prompt, ratio, caption and negative
+        exactly as given. Nothing is drawn and the model is not asked."""
         req = batch.req
         aspect = str(req.aspect_ratio)
         width, height = t2i_dims(aspect, req.megapixels, batch.profile.dim_multiple)
@@ -779,11 +809,14 @@ class T2iRunner:
 
     async def _produce(self, batch: _Batch, queue: "asyncio.Queue[_Step]") -> None:
         """Write the prompts, one step at a time, and hand each to the
-        consumer. A Manual batch has one step and never asks the VLM."""
+        consumer. A Manual batch has one step and never asks the VLM; neither
+        does the first step of a Random batch whose request supplies it."""
         try:
             for index in range(batch.total_steps):
-                if batch.mode == "manual":
-                    step = self._manual_step(batch)
+                if batch.mode == "manual" or (
+                    index == 0 and _supplies_first_step(batch.req)
+                ):
+                    step = self._supplied_step(batch)
                 else:
                     step = await self._random_step(batch, index)
                 self._announce_step(batch, step)
@@ -827,7 +860,7 @@ class T2iRunner:
             "mode": batch.mode,
             "filter": None if manual else copy.deepcopy(batch.req.filter),
             "model": batch.req.model,
-            "caption": (batch.req.caption or None) if manual else step.caption,
+            "caption": step.caption or None,
             "prompt_seed": step.prompt_seed,
             "aspect_ratio": step.aspect_ratio,
             "megapixels": batch.req.megapixels,
