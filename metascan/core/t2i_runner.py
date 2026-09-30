@@ -21,12 +21,13 @@ import os
 import random
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from metascan.core.comfy_bindings import Bindings, resolve_bindings
+from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
 from metascan.core.t2i_captions import CaptionPicker, CaptionStore
 from metascan.core.t2i_characters import ResolvedCaption, resolve_caption
@@ -67,6 +68,11 @@ WARN_NEGATIVE_IGNORED = "negative prompt ignored: the workflow has no MS_NEGATIV
 
 _VLM_TEMPERATURE = 0.6
 _VLM_TIMEOUT_S = 240.0
+_TERMINAL_JOB_STATES = ("done", "failed", "cancelled")
+# Finished batches remembered (so a cancel of one is "already over", not
+# "unknown") and per-job snapshots kept before the oldest are evicted.
+_FINISHED_KEEP = 50
+_JOB_META_LIMIT = 2000
 
 
 class T2iRequestError(RuntimeError):
@@ -148,6 +154,13 @@ class _Batch:
     images_done: int = 0
     images_failed: int = 0
     last_error: Optional[str] = None
+    task: Optional["asyncio.Task[None]"] = None
+    # Jobs submitted whose terminal job_update has not arrived. Each holds
+    # one slot of ``window``; membership IS ownership of the slot, so a slot
+    # is released exactly once however many events arrive.
+    pending: Set[int] = field(default_factory=set)
+    # "complete" | "cancelled" | "error" once the terminal frame is decided.
+    finished: Optional[str] = None
 
     @property
     def mode(self) -> str:
@@ -161,6 +174,26 @@ class _Batch:
         """The seeds of step ``index`` (0-based); the first is the step's
         character seed."""
         return self.seeds[index * self.per_step : (index + 1) * self.per_step]
+
+
+@dataclass
+class _Step:
+    """One caption's worth of images: a prompt and the seeds it renders with."""
+
+    index: int  # 0-based
+    caption: str  # provenance: Manual = the given caption, Random = the raw row
+    aspect_ratio: str
+    seeds: List[int]
+    prompt: str
+    negative: Optional[str]
+    warnings: List[str]
+    width: int
+    height: int
+
+    @property
+    def prompt_seed(self) -> int:
+        """The seed the step's characters were drawn with: its first image's."""
+        return self.seeds[0]
 
 
 def default_output_root(comfy_output_root: Any) -> Path:
@@ -240,6 +273,11 @@ class T2iRunner:
         self._get_config = get_config
         self._on_event: List[EventCb] = []
         self._batches: Dict[str, _Batch] = {}
+        self._finished: "OrderedDict[str, _Batch]" = OrderedDict()
+        # job id -> batch id, for every submitted job whose terminal update
+        # has not arrived; and the per-job snapshot the ingest will need.
+        self._job_batch: Dict[int, str] = {}
+        self._job_meta: Dict[int, Dict[str, Any]] = {}
         # Last filename number handed out (epoch seconds). Two images in the
         # same second must not share one -- see _next_output_number.
         self._last_output_number = 0
@@ -529,6 +567,9 @@ class T2iRunner:
             },
         )
         self._emit_progress(batch)
+        batch.task = asyncio.create_task(
+            self._run(batch), name=f"t2i-batch-{batch.id[:8]}"
+        )
         return BatchStarted(
             batch_id=batch.id,
             total_images=batch.total_images,
@@ -538,6 +579,8 @@ class T2iRunner:
     # ---- batch state as data ----------------------------------------------
 
     def _emit_progress(self, batch: _Batch) -> None:
+        if batch.finished is not None:
+            return  # the terminal frame has the final counters
         data: Dict[str, Any] = {
             "batch_id": batch.id,
             "phase": batch.phase,
@@ -567,3 +610,447 @@ class T2iRunner:
             }
             for b in self._batches.values()
         ]
+
+    # ---- the run: prompts, then jobs ------------------------------------------
+
+    @staticmethod
+    def _reason(exc: BaseException) -> str:
+        """One short line about ``exc``, for a warning."""
+        return " ".join(str(exc).split())[:160] or type(exc).__name__
+
+    async def _write_prompt(
+        self, batch: _Batch, resolved_text: str
+    ) -> Tuple[str, Optional[str], List[str]]:
+        """``(prompt, negative, warnings)`` for one step of a running batch.
+
+        An unattended run never dies on one bad VLM call: a call that fails
+        is tried once more (starting the model again first), then the
+        resolved caption is used and a warning says so. Cancellation is
+        never swallowed, and neither is anything that is not a VLM failure.
+        """
+        profile = batch.profile
+
+        def fall_back(warning: str) -> Tuple[str, Optional[str], List[str]]:
+            prompt, negative = fallback_prompt(profile, resolved_text)
+            return prompt, negative, [warning]
+
+        vlm = self.get_vlm()
+        if vlm is None:
+            return fall_back(WARN_VLM_UNAVAILABLE)
+        try:
+            model_id = pick_vlm_model(vlm)
+        except VlmSelectError:
+            return fall_back(WARN_VLM_UNAVAILABLE)
+        system_prompt, user_prompt = compose_t2i_prompts(
+            profile, resolved_text, batch.content_mode
+        )
+        failure: BaseException = VlmError("no attempt was made")
+        for attempt in (1, 2):
+            try:
+                prompt, negative = await self._vlm_prompt(
+                    vlm, model_id, profile, system_prompt, user_prompt
+                )
+                return prompt, negative, []
+            except asyncio.CancelledError:
+                raise
+            except (VlmError, TimeoutError, RuntimeError) as exc:
+                failure = exc
+                logger.warning(
+                    "t2i batch %s: VLM attempt %d failed: %s", batch.id, attempt, exc
+                )
+        return fall_back(
+            f"VLM failed ({self._reason(failure)}) - used the resolved caption"
+        )
+
+    def _manual_step(self, batch: _Batch) -> _Step:
+        req = batch.req
+        aspect = str(req.aspect_ratio)
+        width, height = t2i_dims(aspect, req.megapixels, batch.profile.dim_multiple)
+        blank = not isinstance(req.negative, str) or not req.negative.strip()
+        return _Step(
+            index=0,
+            caption=req.caption or "",
+            aspect_ratio=aspect,
+            seeds=batch.step_seeds(0),
+            prompt=str(req.prompt),
+            negative=None if blank else req.negative,
+            warnings=[],
+            width=width,
+            height=height,
+        )
+
+    async def _random_step(self, batch: _Batch, index: int) -> _Step:
+        if batch.picker is None:
+            raise RuntimeError("a Random batch has no caption picker")
+        row = await asyncio.to_thread(batch.picker.next)
+        seeds = batch.step_seeds(index)
+        warnings: List[str] = []
+        aspect = row.aspect_ratio
+        megapixels = batch.req.megapixels
+        multiple = batch.profile.dim_multiple
+        try:
+            width, height = t2i_dims(aspect, megapixels, multiple)
+        except T2iFormError as exc:
+            # One odd row must not end an unattended run.
+            warnings.append(
+                f"aspect ratio {aspect!r} of this caption is unusable ({exc}); "
+                "used 1:1"
+            )
+            aspect = "1:1"
+            width, height = t2i_dims(aspect, megapixels, multiple)
+        library, _ = await asyncio.to_thread(self.library.get)
+        resolved = resolve_caption(row.caption, seeds[0], batch.identity, library)
+        warnings.extend(resolved.warnings)
+        prompt, negative, notes = await self._write_prompt(batch, resolved.text)
+        warnings.extend(notes)
+        return _Step(
+            index=index,
+            caption=row.caption,
+            aspect_ratio=aspect,
+            seeds=seeds,
+            prompt=prompt,
+            negative=negative,
+            warnings=warnings,
+            width=width,
+            height=height,
+        )
+
+    def _announce_step(self, batch: _Batch, step: _Step) -> None:
+        snapshot: Dict[str, Any] = {
+            "step": step.index + 1,
+            "total_steps": batch.total_steps,
+            "caption": step.caption,
+            "aspect_ratio": step.aspect_ratio,
+            "seed": step.prompt_seed,
+            "prompt": step.prompt,
+            "negative": step.negative,
+            "warnings": list(step.warnings),
+        }
+        batch.step = snapshot
+        self._emit(
+            "t2i", "batch_step", {"batch_id": batch.id, **copy.deepcopy(snapshot)}
+        )
+
+    def _set_phase(self, batch: _Batch, phase: str) -> None:
+        if batch.phase != phase and batch.finished is None:
+            batch.phase = phase
+            self._emit_progress(batch)
+
+    async def _produce(self, batch: _Batch, queue: "asyncio.Queue[_Step]") -> None:
+        """Write the prompts, one step at a time, and hand each to the
+        consumer. A Manual batch has one step and never asks the VLM."""
+        try:
+            for index in range(batch.total_steps):
+                if batch.mode == "manual":
+                    step = self._manual_step(batch)
+                else:
+                    step = await self._random_step(batch, index)
+                self._announce_step(batch, step)
+                await queue.put(step)
+        finally:
+            batch.prompting = False
+
+    async def _unload_vlm(self, batch: _Batch) -> None:
+        """Free the GPU for ComfyUI: shut the VLM down if a model is loaded
+        -- unless another Random batch is still writing prompts with it.
+        Only called when unloading is on. Failing to unload never stops the
+        run."""
+        vlm = self.get_vlm()
+        if vlm is None or not vlm.model_id:
+            return
+        for other in self._batches.values():
+            if other is not batch and other.mode == "random" and other.prompting:
+                return
+        try:
+            await vlm.shutdown()
+        except Exception as exc:
+            logger.warning("could not unload the VLM before rendering: %s", exc)
+
+    def _negative_for(self, batch: _Batch, step: _Step) -> Optional[str]:
+        """The negative to send: only a workflow that binds MS_NEGATIVE can
+        take one (the start warning already said so), and only a real one."""
+        if batch.bindings.negative is None:
+            return None
+        if step.negative is None or not step.negative.strip():
+            return None
+        return step.negative
+
+    def _register_job(self, batch: _Batch, job_id: int, step: _Step, seed: int) -> None:
+        """Remember a submitted job: it owns a window slot until its terminal
+        job_update, and the ingest will need what the dialog showed."""
+        batch.pending.add(job_id)
+        self._job_batch[job_id] = batch.id
+        manual = batch.mode == "manual"
+        self._job_meta[job_id] = {
+            "mode": batch.mode,
+            "filter": None if manual else copy.deepcopy(batch.req.filter),
+            "model": batch.req.model,
+            "caption": (batch.req.caption or None) if manual else step.caption,
+            "prompt_seed": step.prompt_seed,
+            "aspect_ratio": step.aspect_ratio,
+            "megapixels": batch.req.megapixels,
+            "loras": [dict(entry) for entry in batch.loras],
+            "prompt": step.prompt,
+            # The Negative box as the dialog had it: Manual keeps what was
+            # typed even if the workflow could not take it.
+            "negative": batch.req.negative if manual else step.negative,
+        }
+        while len(self._job_meta) > _JOB_META_LIMIT:
+            self._job_meta.pop(next(iter(self._job_meta)))
+
+    def _release_slot(self, batch: _Batch, job_id: int) -> None:
+        if job_id in batch.pending:
+            batch.pending.discard(job_id)
+            batch.window.release()
+
+    @staticmethod
+    async def _landed(submit: "Optional[asyncio.Future[int]]") -> Optional[int]:
+        """The job id of a submit that was in flight, once it has landed;
+        None if it failed (or never started)."""
+        if submit is None:
+            return None
+        try:
+            return await submit
+        except BaseException:
+            return None
+
+    async def _submit_registered(
+        self,
+        batch: _Batch,
+        step: _Step,
+        seed: int,
+        params: GenerationParams,
+        target: Any,
+    ) -> int:
+        """comfy.submit, then remember the job in the same step of the loop:
+        ComfyClient may announce the job's end a loop iteration after submit
+        returns, and by then the runner has to know the job."""
+        job_id = int(
+            await self.comfy.submit(
+                batch.req.preset_id,
+                params,
+                output_dir=target.directory,
+                output_name=target.stem,
+                t2i_batch_id=batch.id,
+            )
+        )
+        self._register_job(batch, job_id, step, seed)
+        return job_id
+
+    async def _submit_one(self, batch: _Batch, step: _Step, seed: int) -> int:
+        """Submit one image. Called holding a window slot: on success the
+        slot belongs to the job (its terminal update frees it), on failure it
+        is released here."""
+        inflight: "Optional[asyncio.Future[int]]" = None
+        try:
+            params = GenerationParams(
+                positive=step.prompt,
+                seed=seed,
+                width=step.width,
+                height=step.height,
+                batch_size=1,
+                negative=self._negative_for(batch, step),
+                loras=[dict(entry) for entry in batch.loras],
+            )
+            target = resolve_output_target(
+                batch.root, batch.prefix, datetime.now(), self._next_output_number()
+            )
+            # Shielded: ComfyClient.submit writes the job row and only then
+            # queues it, so a cancel landing in between must not lose the id
+            # -- the row would sit queued and run after the next restart.
+            submitting = asyncio.ensure_future(
+                self._submit_registered(batch, step, seed, params, target)
+            )
+            inflight = submitting
+            return await asyncio.shield(submitting)
+        except asyncio.CancelledError:
+            # A submit that landed registered its job (the cancel will reach
+            # it, and the job owns the slot); one that failed never did.
+            if await self._landed(inflight) is None:
+                batch.window.release()
+            raise
+        except BaseException:
+            batch.window.release()
+            raise
+
+    async def _consume(self, batch: _Batch, queue: "asyncio.Queue[_Step]") -> None:
+        """Submit every image of every step, keeping at most ``window`` jobs
+        unfinished."""
+        for _ in range(batch.total_steps):
+            step = await queue.get()
+            self._set_phase(batch, "rendering")
+            for seed in step.seeds:
+                await batch.window.acquire()
+                await self._submit_one(batch, step, seed)
+
+    @staticmethod
+    async def _await_all(*tasks: "asyncio.Task[None]") -> None:
+        """Wait for every task. If one fails, or this coroutine is cancelled,
+        the rest are cancelled and awaited before the error is re-raised, so
+        nothing is left running."""
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    async def _run(self, batch: _Batch) -> None:
+        """The batch's background task: write the prompts, then submit the
+        jobs -- in that order when unloading is on, overlapped when it is off
+        (spec 6.3). Anything that goes wrong ends the batch with one
+        ``batch_error``."""
+        tag = batch.id[:8]
+        try:
+            # With unloading on every prompt is written before the first job
+            # goes out, so the queue must hold every step; with it off the
+            # writer may only run a step or two ahead of the renderer.
+            queue: "asyncio.Queue[_Step]" = asyncio.Queue(
+                maxsize=batch.total_steps if self.unload_vlm_during_generation else 1
+            )
+            producer = asyncio.create_task(
+                self._produce(batch, queue), name=f"t2i-produce-{tag}"
+            )
+            if self.unload_vlm_during_generation:
+                await self._await_all(producer)
+                self._set_phase(batch, "rendering")
+                await self._unload_vlm(batch)
+                await self._consume(batch, queue)
+            else:
+                consumer = asyncio.create_task(
+                    self._consume(batch, queue), name=f"t2i-consume-{tag}"
+                )
+                await self._await_all(producer, consumer)
+        except asyncio.CancelledError:
+            raise  # cancel_batch / aclose own what happens next
+        except Exception as exc:
+            logger.warning("t2i batch %s failed: %s", batch.id, exc, exc_info=True)
+            await self._abort_batch(batch, "error", self._reason(exc))
+
+    # ---- ending a batch -----------------------------------------------------------
+
+    def _retire(self, batch: _Batch, kind: str, error: Optional[str] = None) -> None:
+        """Emit the batch's one terminal frame and move it out of the active
+        list (the last few finished batches stay known)."""
+        event = {
+            "complete": "batch_complete",
+            "cancelled": "batch_cancelled",
+            "error": "batch_error",
+        }[kind]
+        data: Dict[str, Any] = {
+            "batch_id": batch.id,
+            "images_done": batch.images_done,
+            "images_failed": batch.images_failed,
+            "images_total": batch.total_images,
+            # Whatever neither rendered nor failed: cancelled, or never submitted.
+            "images_cancelled": max(
+                0, batch.total_images - batch.images_done - batch.images_failed
+            ),
+            "next_seed": batch.next_seed,
+        }
+        if error is not None:
+            data["error"] = error
+        if batch.last_error is not None:
+            data["last_error"] = batch.last_error
+        self._emit("t2i", event, data)
+        self._batches.pop(batch.id, None)
+        self._finished[batch.id] = batch
+        while len(self._finished) > _FINISHED_KEEP:
+            self._finished.popitem(last=False)
+        batch.picker = None  # let the caption index go
+
+    async def _abort_batch(
+        self, batch: _Batch, kind: str, error: Optional[str] = None
+    ) -> bool:
+        """Stop a batch for good: cancel its run, cancel every job still
+        unfinished in ComfyUI, give back the window and emit the terminal
+        frame. False if the batch is already over."""
+        if batch.finished is not None:
+            return False
+        # First, before any await: from here nothing else may emit a
+        # terminal frame for this batch.
+        batch.finished = kind
+        task = batch.task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+        targets = sorted(batch.pending)
+        if targets:
+            results = await asyncio.gather(
+                *(self.comfy.cancel(job_id) for job_id in targets),
+                return_exceptions=True,
+            )
+            for job_id, result in zip(targets, results):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "could not cancel t2i job %s of batch %s: %s",
+                        job_id,
+                        batch.id,
+                        result,
+                    )
+        # The cancelled jobs' own updates have usually done this already;
+        # a cancel that failed has not, and must leave nothing behind either.
+        for job_id in targets:
+            self._release_slot(batch, job_id)
+            self._job_batch.pop(job_id, None)
+            self._job_meta.pop(job_id, None)
+        self._retire(batch, kind, error)
+        return True
+
+    async def cancel_batch(self, batch_id: str) -> bool:
+        """Cancel a batch: stop its run (even mid VLM call) and cancel every
+        unfinished job. False if it is known but already over; unknown ids
+        raise ``T2iNotFoundError``."""
+        batch = self._batches.get(batch_id)
+        if batch is None:
+            if batch_id in self._finished:
+                return False
+            raise T2iNotFoundError(f"No t2i batch {batch_id}")
+        # Shielded: a caller that goes away mid-cancel must not leave the
+        # batch half-cancelled.
+        return await asyncio.shield(self._abort_batch(batch, "cancelled"))
+
+    async def wait_batch(self, batch_id: str) -> None:
+        """Wait for a batch's run to end: every prompt written and every job
+        submitted -- not for the jobs to finish. Returns at once for a batch
+        that is already over."""
+        batch = self._batches.get(batch_id) or self._finished.get(batch_id)
+        if batch is None:
+            raise T2iNotFoundError(f"No t2i batch {batch_id}")
+        task = batch.task
+        if task is not None and not task.done():
+            await asyncio.wait({task})
+
+    # ---- job events ---------------------------------------------------------------
+
+    def handle_job_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Registered via comfy_client.on_job_event. Sync; never raises."""
+        try:
+            if event == "job_update":
+                self._on_job_update(payload)
+        except Exception:
+            logger.warning("t2i job event handling failed", exc_info=True)
+
+    def _on_job_update(self, payload: Dict[str, Any]) -> None:
+        if payload.get("state") not in _TERMINAL_JOB_STATES:
+            return
+        job_id = payload.get("job_id")
+        if not isinstance(job_id, int):
+            return
+        batch_id = self._job_batch.pop(job_id, None)
+        if batch_id is None:
+            return  # not ours, or already handled
+        batch = self._batches.get(batch_id)
+        if batch is not None:
+            self._release_slot(batch, job_id)
+
+    async def aclose(self) -> None:
+        """Stop every batch's run. The jobs already in ComfyUI are left to
+        ComfyClient."""
+        tasks = [b.task for b in self._batches.values() if b.task and not b.task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
