@@ -23,6 +23,7 @@ import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
 import I2VDialog from '../components/dialogs/I2VDialog.vue'
+import T2IDialog from '../components/dialogs/T2IDialog.vue'
 import UpscaleQueue from '../components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from '../components/dialogs/ConfigDialog.vue'
 import ScopeBreadcrumb from '../components/layout/ScopeBreadcrumb.vue'
@@ -61,6 +62,7 @@ const upscaleTargets = ref<Media[]>([])
 const playgroundMedia = ref<Media | null>(null)
 const i2vMedia = ref<Media | null>(null)
 const configOpen = ref(false)
+const t2iOpen = ref(false)
 
 onMounted(async () => {
   await Promise.all([
@@ -193,6 +195,7 @@ watch(isMobile, () => {
             @find-duplicates="dupFinderOpen = true"
             @similarity-settings="simSettingsOpen = true"
             @config="configOpen = true"
+            @t2i="t2iOpen = true"
           />
           <ViewMenubar @slideshow="openSlideshow" />
           <ScopeBreadcrumb />
@@ -290,6 +293,9 @@ watch(isMobile, () => {
 
     <!-- Image to Video dialog -->
     <I2VDialog v-if="i2vMedia" :media="i2vMedia" @close="i2vMedia = null" />
+
+    <!-- Text to Image dialog -->
+    <T2IDialog v-if="t2iOpen" @close="t2iOpen = false" />
 
     <!-- Config dialog -->
     <ConfigDialog

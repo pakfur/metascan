@@ -10,6 +10,7 @@ const emit = defineEmits<{
   'find-duplicates': []
   'similarity-settings': []
   config: []
+  t2i: []
 }>()
 
 const modelsStore = useModelsStore()
@@ -84,6 +85,15 @@ function openStoryboards() {
         rounded
         aria-label="Config"
         @click="emit('config')"
+      />
+      <Button
+        v-tooltip.bottom="'Text to Image'"
+        icon="pi pi-sparkles"
+        severity="secondary"
+        text
+        rounded
+        aria-label="Text to Image"
+        @click="emit('t2i')"
       />
       <Button
         v-tooltip.bottom="'Storyboards'"
