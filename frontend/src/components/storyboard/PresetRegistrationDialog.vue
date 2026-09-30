@@ -14,9 +14,17 @@ import { VIDEO_MODES, presetTag } from '../../types/storyboard'
 import type { WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
 
-const props = withDefaults(defineProps<{ initialMode?: string }>(), {
-  initialMode: 'ref2va',
-})
+// `kind` is the preset kind this dialog registers: 'ref2v' (video workflows —
+// the storyboard and i2v callers, and the default) or 't2i' (the T2I config
+// tab). A t2i preset is never tagged with a video dialect.
+const props = withDefaults(
+  defineProps<{ initialMode?: string; kind?: 'ref2v' | 't2i' }>(),
+  {
+    initialMode: 'ref2va',
+    kind: 'ref2v',
+  },
+)
+const isT2i = computed(() => props.kind === 't2i')
 
 const emit = defineEmits<{
   close: []
@@ -28,8 +36,10 @@ const workflowText = ref('')
 // Dialect association (workflow_presets.video_target/video_mode) — drives
 // target-specific validation and the generate_video mismatch guard.
 // "" = untagged (legacy behavior, generic validation only).
-const videoTarget = ref('minimax')
-const videoMode = ref(props.initialMode)
+const defaultTarget = computed(() => (isT2i.value ? '' : 'minimax'))
+const defaultMode = computed(() => (isT2i.value ? '' : props.initialMode))
+const videoTarget = ref(defaultTarget.value)
+const videoMode = ref(defaultMode.value)
 
 // ---- update mode ----------------------------------------------------------
 // Selecting a preset in the list below loads it into the form for an
@@ -40,8 +50,8 @@ const videoMode = ref(props.initialMode)
 // keep pointing at it.
 const editingId = ref<number | null>(null)
 // Validation must run against the preset's own kind (legacy t2i/ref
-// presets can be updated too), not the 'ref2v' new registrations use.
-const editingKind = ref<WorkflowPreset['kind']>('ref2v')
+// presets can be updated too), not the `kind` new registrations use.
+const editingKind = ref<WorkflowPreset['kind']>(props.kind)
 const loadingPreset = ref(false)
 const savedNotice = ref<string | null>(null)
 const isUpdating = computed(() => editingId.value !== null)
@@ -82,7 +92,7 @@ async function onValidate(): Promise<void> {
   validating.value = true
   try {
     validation.value = await validatePreset({
-      kind: isUpdating.value ? editingKind.value : 'ref2v',
+      kind: isUpdating.value ? editingKind.value : props.kind,
       workflow,
       video_target: videoTarget.value || null,
       video_mode: videoMode.value || null,
@@ -104,6 +114,11 @@ async function onApplyFixes(): Promise<void> {
 }
 
 const presets = ref<WorkflowPreset[]>([])
+// The t2i dialog lists only t2i presets; the video callers keep seeing every
+// kind, exactly as before.
+const listedPresets = computed(() =>
+  isT2i.value ? presets.value.filter((p) => p.kind === 't2i') : presets.value,
+)
 const presetsLoading = ref(true)
 const deleteError = ref<string | null>(null)
 
@@ -132,10 +147,10 @@ async function onFileChange(e: Event) {
 function resetForm() {
   selectSeq++ // orphan any preset load still in flight
   editingId.value = null
-  editingKind.value = 'ref2v'
+  editingKind.value = props.kind
   name.value = ''
-  videoTarget.value = 'minimax'
-  videoMode.value = props.initialMode
+  videoTarget.value = defaultTarget.value
+  videoMode.value = defaultMode.value
   workflowText.value = ''
   jsonError.value = null
   submitError.value = null
@@ -199,11 +214,11 @@ async function submit() {
       await refreshPresets()
       return
     }
-    // The storyboard UX is video-only, so registration is fixed to the
-    // ref2v (video workflow) kind.
+    // Registration follows the `kind` prop: ref2v (video workflow) for the
+    // storyboard/i2v callers, t2i for the T2I config tab (untagged).
     const res = await createPreset({
       name: trimmedName,
-      kind: 'ref2v',
+      kind: props.kind,
       workflow,
       video_target: videoTarget.value || null,
       video_mode: videoMode.value || null,
@@ -267,11 +282,16 @@ function close() {
         <!-- Locked while updating: no edit popup, just the value. -->
         <InputText v-if="isUpdating" id="preset-name" :model-value="name" disabled />
         <TextEditPopup v-else title="Name" :value="name" @save="name = $event">
-          <InputText id="preset-name" v-model="name" placeholder="e.g. H3 ref2v" />
+          <InputText
+            id="preset-name"
+            v-model="name"
+            :placeholder="isT2i ? 'e.g. Krea2 T2I API' : 'e.g. H3 ref2v'"
+          />
         </TextEditPopup>
       </div>
 
-      <div class="field-row">
+      <!-- Video dialect tag: not applicable to a t2i preset. -->
+      <div v-if="!isT2i" class="field-row">
         <div class="field">
           <label for="preset-target">Video model</label>
           <select id="preset-target" v-model="videoTarget" :disabled="isUpdating">
@@ -354,10 +374,10 @@ function close() {
 
       <h4 class="presets-heading">Existing presets</h4>
       <div v-if="presetsLoading" class="muted">Loading…</div>
-      <div v-else-if="presets.length === 0" class="muted">No presets registered yet.</div>
+      <div v-else-if="listedPresets.length === 0" class="muted">No presets registered yet.</div>
       <div v-else class="preset-list">
         <div
-          v-for="p in presets"
+          v-for="p in listedPresets"
           :key="p.id"
           class="preset-row"
           :class="{ selected: editingId === p.id }"
