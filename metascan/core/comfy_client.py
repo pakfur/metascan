@@ -531,6 +531,7 @@ class ComfyClient:
         output_prefix: Optional[str] = None,
         i2v_source_path: Optional[str] = None,
         output_name: Optional[str] = None,
+        t2i_batch_id: Optional[str] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -544,6 +545,11 @@ class ComfyClient:
         output directory is cleared, so it cannot be trusted for
         uniqueness in a long-lived library folder) and only its suffix is
         kept; ``output_prefix`` is ignored when it is set.
+
+        ``t2i_batch_id`` tags the job row with the text-to-image batch it
+        belongs to (``generation_jobs.t2i_batch_id``); the T2I runner keys
+        ingest and accounting on it. Like ``i2v_source_path`` it is opaque
+        to the driver.
 
         The preset is validated up front -- both that it exists
         (PresetNotFoundError) and that `params` binds cleanly against it
@@ -570,6 +576,7 @@ class ComfyClient:
                 output_prefix,
                 i2v_source_path,
                 output_name,
+                t2i_batch_id,
             )
         )
         if priority:
