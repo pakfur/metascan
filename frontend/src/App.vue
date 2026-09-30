@@ -33,6 +33,13 @@ useWebSocket('folders', (event, data) => {
 useWebSocket('i2v', (event) => {
   if (event === 'i2v_videos_changed') void foldersStore.refreshI2vSources()
 })
+
+// New (or deleted) T2I images change the "Generated with T2I" smart-folder
+// rule's membership. Always on, so it works whether or not the T2I dialog
+// is open.
+useWebSocket('t2i', (event) => {
+  if (event === 't2i_images_changed') void foldersStore.refreshT2iPaths()
+})
 </script>
 
 <template>

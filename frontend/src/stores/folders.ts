@@ -14,6 +14,8 @@ import type {
 import { fileName } from '../utils/path'
 import { fetchTagPaths } from '../api/filters'
 import { listI2vSources } from '../api/i2v'
+import { listT2iPaths } from '../api/t2i'
+import { makePathSetCache } from '../utils/pathSetCache'
 import * as foldersApi from '../api/folders'
 import type { FolderRecord } from '../api/folders'
 
@@ -120,6 +122,13 @@ let tagPathSets: Record<string, Set<string>> = {}
 // while some smart folder (or the open editor) uses the rule.
 let i2vSourcePaths: Set<string> | null = null
 
+// Output paths of every T2I image, for the 't2i' rule. Module-scoped like the
+// two caches above so the synchronous evaluateCondition() can read it. The
+// folders live inside the store, so the store installs the real "does any
+// saved folder use the rule" check when it is created.
+let t2iRuleUsed: () => boolean = () => false
+const t2iPaths = makePathSetCache(listT2iPaths, () => t2iRuleUsed())
+
 function normalizeModel(m: Media): string {
   if (Array.isArray(m.model) && m.model.length > 0) return m.model[0]
   return ''
@@ -171,6 +180,10 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
     }
     case 'i2v': {
       const has = i2vSourcePaths?.has(m.file_path) ?? false
+      return op === 'is' ? has === Boolean(value) : has !== Boolean(value)
+    }
+    case 't2i': {
+      const has = t2iPaths.has(m.file_path)
       return op === 'is' ? has === Boolean(value) : has !== Boolean(value)
     }
     case 'modified':
@@ -272,6 +285,7 @@ export const useFoldersStore = defineStore('folders', () => {
     await Promise.all([
       ensureTagPathsFor(referencedTagKeys()),
       options.force ? refreshI2vSources() : ensureI2vSources(),
+      options.force ? refreshT2iPaths() : ensureT2iPaths(),
     ])
   }
 
@@ -314,11 +328,35 @@ export const useFoldersStore = defineStore('folders', () => {
     await fetchI2vSources()
   }
 
+  // --- t2i output-path cache (the 't2i' rule) --------------------------
+  // The same shape as the i2v cache above, built on makePathSetCache (the i2v
+  // cache predates the helper and is left as it was). Membership changes
+  // whenever an image is generated or deleted, so the whole set is refetched;
+  // a change bumps tagPathsVersion, the counter every membership computed
+  // watches.
+
+  t2iRuleUsed = () =>
+    smartFolders.value.some((f) =>
+      f.rules.conditions.some((c) => c.field === 't2i'),
+    )
+
+  /** Load the set once, if anything uses it (or `always`, for the editor). */
+  async function ensureT2iPaths(always = false): Promise<void> {
+    if (await t2iPaths.ensure(always)) tagPathsVersion.value++
+  }
+
+  /** Refetch after images change (the `t2i` channel's t2i_images_changed,
+   * or an image delete); a no-op while nothing has loaded the set. */
+  async function refreshT2iPaths(): Promise<void> {
+    if (await t2iPaths.refresh()) tagPathsVersion.value++
+  }
+
   watch(
     smartFolders,
     () => {
       void ensureTagPathsFor(referencedTagKeys())
       void ensureI2vSources()
+      void ensureT2iPaths()
     },
     { deep: true },
   )
@@ -761,6 +799,8 @@ export const useFoldersStore = defineStore('folders', () => {
     ensureTagPathsFor,
     ensureI2vSources,
     refreshI2vSources,
+    ensureT2iPaths,
+    refreshT2iPaths,
     onFolderCreated,
     onFolderUpdated,
     onFolderDeleted,
@@ -839,6 +879,12 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
   },
   i2v: {
     label: 'Has I2V video',
+    ops: ['is', 'is_not'],
+    value: 'bool',
+    defaultValue: () => true,
+  },
+  t2i: {
+    label: 'Generated with T2I',
     ops: ['is', 'is_not'],
     value: 'bool',
     defaultValue: () => true,
