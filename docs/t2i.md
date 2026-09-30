@@ -11,7 +11,7 @@ A caption comes from one of two places:
 
 The pipeline is always the same:
 
-1. **Resolve** — character-name tokens (`__ALICE__`, …) and body-part tokens (`__HAIR__`, …) become seeded, deterministic character descriptions.
+1. **Resolve** — character-name tokens (`__ALICE__`, …) and body-part tokens (`__HAIR__`, …) become deterministic character descriptions: the same caption always gets the same characters, whatever the seed.
 2. **Rewrite** — the local VLM turns the resolved caption into a prompt in the selected model's style (Krea 2, Qwen-Image, SDXL, Z-Image).
 3. **Render** — a registered ComfyUI workflow renders it. Every image is its own job with its own seed.
 
@@ -22,7 +22,7 @@ Generated images are ordinary library media. They appear in the strip at the bot
 | Control | What it does |
 |---|---|
 | **Caption** | The description to expand. Plain text; tokens are optional. A collapsible *Resolved caption* shows exactly what the VLM will be given. |
-| **Generate Prompt** | Resolves the caption with the current seed and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first step (see Batches). |
+| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first step (see Batches). |
 | **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption so you can preview it; **Generate** renders that caption only if you have also pressed **Generate Prompt** for it. |
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
 | **Model** | Krea 2, Qwen-Image, SDXL or Z-Image. Chooses the prompt style and the default workflow. |
@@ -42,7 +42,7 @@ Generated images are ordinary library media. They appear in the strip at the bot
 - **Manual:** one step — your caption and prompt — rendered `Count per Batch` times.
 - **Random Caption:** for each of `Batch Size` steps the server picks an unused caption, takes its aspect ratio, writes a prompt, then renders `Count per Batch` images. The one exception is the **first step when the Prompt box holds a prompt you generated with *Generate Prompt* or wrote yourself, and no batch has rendered it yet**: that prompt, with the Caption, Aspect Ratio and Negative in the boxes, is step 1 — nothing is drawn and no prompt is written for it, so what you reviewed is what renders — and the remaining steps are drawn as above. A prompt a batch has already used, including the last step a finished run hands back in the boxes, is never reused: the next **Generate** draws every caption itself. Closing and reopening the dialog keeps a prompt ready; reloading the page forgets it, so press **Generate Prompt** again first. While it runs, the Caption, Prompt, Aspect and Seed boxes show the current step and cannot be edited. Only one Random batch runs at a time.
 
-Seeds advance across the whole run according to the policy and stop the run early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). Under **Randomize** the first image uses the seed shown in the dialog, so it reproduces that prompt, and the rest are drawn at random. The character description for a step is drawn from that step's **first** image seed, so the same caption and seed always give the same cast. With **Fixed**, every step uses the same seed and therefore the same cast. When a run ends, the seed box shows the next unused seed.
+Seeds advance across the whole run according to the policy and stop the run early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). Under **Randomize** the first image uses the seed shown in the dialog, and the rest are drawn at random. **The seed does not choose the characters.** A caption's cast is drawn from the text of the caption itself, so the same caption always describes the same people whatever the seed, and a new seed changes the image (and the value of any plain `__TOKEN__` wildcard) but not who is in it. The flip side: editing the caption, even by a comma, draws a new cast. When a run ends, the seed box shows the next unused seed.
 
 **GPU order** follows the existing `comfy.unload_vlm_during_generation` setting:
 
@@ -61,9 +61,9 @@ Batch state lives in memory. If the server restarts mid-run, steps that were not
 
 A token is a name in capitals between double underscores.
 
-- **Characters** — `__ALICE__ __BELLA__ __CLARA__ __DIANNA__ __EMMA__` (female) and `__ADAM__ __BOB__` (male). The first time a character appears it is replaced by a generated description; later mentions become a short handle tied to the same character.
+- **Characters** — `__ALICE__ __BELLA__ __CLARA__ __DIANNA__ __EMMA__` (female) and `__ADAM__ __BOB__` (male). The first time a character appears it is replaced by a generated description; later mentions become a short handle tied to the same character. The description depends on the caption text alone.
 - **Body-part tokens** — `__HAIR__ __BREASTS__ __VAGINA__ __PENIS__` stand in for the word itself and belong to a character (`her __HAIR__`). They resolve from a list of the same name.
-- **Anything else** — `__TOKEN__` resolves from `token.txt` if that list exists, as one value used everywhere in the caption; otherwise it becomes the plain lowercase word.
+- **Anything else** — `__TOKEN__` resolves from `token.txt` if that list exists, as one value used everywhere in the caption, picked by the seed; otherwise it becomes the plain lowercase word.
 
 Malformed underscores (`____ALICE____`) are tolerated. A caption with no tokens passes through unchanged.
 
@@ -79,7 +79,7 @@ Each characteristic is a text file with one value per line; blank lines and `#` 
 
 Write values so they read after `with`: `an oval face`, `green eyes`, `olive skin`, `an athletic build`. Write every `age` value with its number (`45-year-old`): the age wording above reads it. Hair values must end in ` hair` (`auburn hair`) — the short handle for a later mention is built from it (`the auburn-haired woman`).
 
-Lists reload automatically when a file changes. **Editing or reordering a list changes which value a given caption and seed picks.**
+Lists reload automatically when a file changes. **Editing or reordering a list changes which value a given caption picks.**
 
 **Adult only.** Any line in an `age` list containing a number under 18, in digits or spelled out (`twelve-year-old`), is rejected. Any line in any list containing a minor-indicating word, phrase or word family (`teen…`, `child…`, `loli…`, `school girl`, plurals included) or an age under 18 (`14-year-old`, `aged 12`) is rejected. The `nouns` and `names` in `characters.yml` are screened the same way. It is a word screen for careless edits, not a promise about what a list can express: keep your lists adult. A line containing a parenthesis is rejected too, because parentheses never belong in a generated prompt. Rejections are logged and listed in the `wildcards.warnings` of `GET /api/t2i/config`.
 

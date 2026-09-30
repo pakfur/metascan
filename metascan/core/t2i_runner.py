@@ -193,7 +193,7 @@ class _Batch:
 
     def step_seeds(self, index: int) -> List[int]:
         """The seeds of step ``index`` (0-based); the first is the step's
-        character seed."""
+        prompt seed."""
         return self.seeds[index * self.per_step : (index + 1) * self.per_step]
 
 
@@ -215,7 +215,8 @@ class _Step:
 
     @property
     def prompt_seed(self) -> int:
-        """The seed the step's characters were drawn with: its first image's."""
+        """The seed the step's plain wildcards were drawn with: its first
+        image's. The characters do not use it; they follow the caption."""
         return self.seeds[0]
 
 
