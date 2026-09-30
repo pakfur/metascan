@@ -280,10 +280,15 @@ class T2iRunner:
         output_root: Path,
         get_config: Callable[[], Dict[str, Any]],
         unload_vlm_during_generation: bool = True,
+        vlm_installed: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
         self.get_vlm = get_vlm
+        # Says whether a model's files are on disk (None: trust the picker).
+        # A model that is not installed is "no VLM" -- the resolved caption
+        # is the prompt -- not a failure to retry.
+        self.vlm_installed = vlm_installed
         self.captions = captions  # public: the routes read them too
         self.library = library
         self.output_root = Path(output_root)
@@ -340,6 +345,18 @@ class T2iRunner:
         _check_seed(seed)
         return await self._resolve(profile, caption, seed, self._get_config())
 
+    async def _usable_model(self, vlm: Any) -> Optional[str]:
+        """The model to ask, or None when there is none: the picker found no
+        loadable model, or the one it found is not installed."""
+        try:
+            model_id = pick_vlm_model(vlm)
+        except VlmSelectError:
+            return None
+        check = self.vlm_installed
+        if check is not None and not await asyncio.to_thread(check, model_id):
+            return None
+        return model_id
+
     async def _vlm_prompt(
         self,
         vlm: Any,
@@ -349,15 +366,22 @@ class T2iRunner:
         user_prompt: str,
     ) -> Tuple[str, Optional[str]]:
         """One VLM round trip: start the model, ask, split off the negative.
-        Raises whatever the client raises (VlmError, TimeoutError, ...)."""
-        await vlm.ensure_started(model_id)
-        raw = await vlm.generate_text(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=_VLM_TEMPERATURE,
-            max_tokens=profile.max_tokens,
-            timeout=_VLM_TIMEOUT_S,
-        )
+        Raises VlmError, TimeoutError or RuntimeError; an OSError (the spawn
+        of a missing or non-executable llama-server, a dropped connection)
+        becomes a VlmError so callers handle it like any other VLM failure."""
+        try:
+            await vlm.ensure_started(model_id)
+            raw = await vlm.generate_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=_VLM_TEMPERATURE,
+                max_tokens=profile.max_tokens,
+                timeout=_VLM_TIMEOUT_S,
+            )
+        except TimeoutError:
+            raise  # a TimeoutError is an OSError: callers already know it
+        except OSError as exc:
+            raise VlmError(f"the VLM could not be used: {exc}") from exc
         prompt, negative = parse_t2i_output(profile, raw)
         if not prompt.strip():
             raise VlmError("the VLM returned an empty prompt")
@@ -384,12 +408,7 @@ class T2iRunner:
         warnings = list(resolved.warnings)
 
         vlm = self.get_vlm()
-        model_id: Optional[str] = None
-        if vlm is not None:
-            try:
-                model_id = pick_vlm_model(vlm)
-            except VlmSelectError:
-                model_id = None
+        model_id = await self._usable_model(vlm) if vlm is not None else None
         if vlm is None or model_id is None:
             prompt, negative = fallback_prompt(profile, resolved.text)
             warnings.append(WARN_VLM_UNAVAILABLE)
@@ -660,9 +679,8 @@ class T2iRunner:
         vlm = self.get_vlm()
         if vlm is None:
             return fall_back(WARN_VLM_UNAVAILABLE)
-        try:
-            model_id = pick_vlm_model(vlm)
-        except VlmSelectError:
+        model_id = await self._usable_model(vlm)
+        if model_id is None:
             return fall_back(WARN_VLM_UNAVAILABLE)
         system_prompt, user_prompt = compose_t2i_prompts(
             profile, resolved_text, batch.content_mode

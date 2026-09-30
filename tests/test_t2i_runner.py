@@ -710,6 +710,36 @@ class TestGeneratePrompt(RunnerCase):
         self.assertEqual(self.vlm.calls, [])
         self.assertEqual(self.vlm.ensure_calls, [])
 
+    async def test_a_model_that_is_not_installed_falls_back_like_no_vlm(self) -> None:
+        # A fresh install on a recommended GPU tier has no weights and no
+        # llama-server yet: that is "no VLM", not a failure to retry.
+        assert self.vlm is not None
+        asked: List[str] = []
+
+        def installed(model_id: str) -> bool:
+            asked.append(model_id)
+            return False
+
+        self.runner.vlm_installed = installed
+        result = await self.runner.generate_prompt(
+            caption=CAPTION, seed=101, model="krea2"
+        )
+        self.assertEqual(
+            result.warnings, ["VLM unavailable - used the resolved caption"]
+        )
+        self.assertEqual(asked, ["qwen3vl-8b"])
+        self.assertEqual(self.vlm.ensure_calls, [])  # never started
+        self.assertEqual(self.vlm.calls, [])
+
+    async def test_an_installed_model_is_used(self) -> None:
+        assert self.vlm is not None
+        self.runner.vlm_installed = lambda model_id: True
+        result = await self.runner.generate_prompt(
+            caption=CAPTION, seed=101, model="krea2"
+        )
+        self.assertEqual(len(self.vlm.calls), 1)
+        self.assertNotIn("VLM unavailable - used the resolved caption", result.warnings)
+
     async def test_vlm_failures_propagate_so_the_route_can_answer_502(self) -> None:
         assert self.vlm is not None
         for error in (VlmError("bad body"), TimeoutError("slow"), RuntimeError("boom")):
@@ -726,6 +756,31 @@ class TestGeneratePrompt(RunnerCase):
         with self.assertRaises(VlmError):
             await self.runner.generate_prompt(caption=CAPTION, seed=1, model="krea2")
         self.assertEqual(self.vlm.calls, [])
+
+    async def test_a_model_that_cannot_be_spawned_is_a_vlm_error(self) -> None:
+        # VlmClient.start spawns llama-server with subprocess.Popen, which
+        # raises OSError -- not VlmError -- when the binary is missing or not
+        # executable. Left raw the route answered 500; as a VlmError it is
+        # the usual 502 that names the reason.
+        assert self.vlm is not None
+        for error in (
+            FileNotFoundError(2, "No such file or directory", "llama-server"),
+            PermissionError(13, "Permission denied", "llama-server"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.vlm.start_errors.append(error)
+                with self.assertRaises(VlmError) as raised:
+                    await self.runner.generate_prompt(
+                        caption=CAPTION, seed=1, model="krea2"
+                    )
+                self.assertIn("llama-server", str(raised.exception))
+                self.assertIs(raised.exception.__cause__, error)
+
+    async def test_an_oserror_while_asking_is_a_vlm_error_too(self) -> None:
+        assert self.vlm is not None
+        self.vlm.replies.append(ConnectionResetError("reset by peer"))
+        with self.assertRaises(VlmError):
+            await self.runner.generate_prompt(caption=CAPTION, seed=1, model="krea2")
 
     async def test_an_empty_reply_is_a_failure_not_an_empty_prompt(self) -> None:
         assert self.vlm is not None
@@ -2351,6 +2406,34 @@ class TestPromptRetryAndFallback(BatchCase):
             step["warnings"], ["VLM unavailable - used the resolved caption"]
         )
         self.assertEqual(self.vlm.calls, [])
+
+    async def test_a_model_that_is_not_installed_falls_back_without_retrying(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.runner.vlm_installed = lambda model_id: False
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(
+            step["warnings"], ["VLM unavailable - used the resolved caption"]
+        )
+        self.assertEqual(self.vlm.ensure_calls, [])
+        self.assertEqual(len(self.comfy.submits), 1)
+
+    async def test_a_model_that_cannot_be_spawned_falls_back_like_any_failure(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        missing = FileNotFoundError(2, "No such file or directory", "llama-server")
+        self.vlm.start_errors.extend([missing, missing])
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(len(step["warnings"]), 1)
+        self.assertTrue(step["warnings"][0].startswith("VLM failed ("))
+        self.assertEqual(self.frames("batch_error"), [])
+        self.assertEqual(len(self.comfy.submits), 1)  # the fallback prompt renders
 
     async def test_each_step_falls_back_on_its_own(self) -> None:
         assert self.vlm is not None

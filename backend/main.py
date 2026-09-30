@@ -53,6 +53,7 @@ from metascan.core.i2v_runner import I2vRunner
 from metascan.core.t2i_captions import CaptionStore
 from metascan.core.t2i_runner import T2iRunner
 from metascan.core.t2i_wildcards import LibraryCache
+from metascan.core.vlm_select import vlm_model_installed
 from metascan.core.scanner import Scanner
 from metascan.utils.app_paths import get_data_dir
 from metascan.utils.log_files import install_server_log
@@ -246,6 +247,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         db=get_db(),
         comfy=comfy_client,
         get_vlm=get_vlm_client,
+        vlm_installed=vlm_model_installed,
         captions=CaptionStore(t2i_dir / "t2i_captions.csv"),
         library=LibraryCache(t2i_dir),
         output_root=Path(comfy_cfg["output_root"]),

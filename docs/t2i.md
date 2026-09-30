@@ -108,7 +108,7 @@ Override per model with `t2i.identity` in `config.json`.
 
 Each model's guideline is an entry in `data/meta_prompt.yml`, edited live: `META_KREA2`, `META_QWEN`, `META_SDXL`, `META_ZIMAGE`. `T2I_CAPTION_PREAMBLE` tells the VLM that the caption stands in for the image. `META_KREA2` is a starting point — tune it. The **content mode** (`t2i.content_mode`) appends the existing *Uncensored* or *Keep SFW* directive, or nothing.
 
-If no VLM is installed, or it fails inside a batch, the prompt falls back to the resolved caption (SDXL and Qwen-Image also get a stock negative, SDXL a quality prefix) and the step carries a warning.
+If no VLM is installed (its weights or `llama-server` are missing), or it fails inside a batch, the prompt falls back to the resolved caption (SDXL and Qwen-Image also get a stock negative, SDXL a quality prefix) and the step carries a warning.
 
 ## Workflows
 
@@ -144,7 +144,7 @@ The **Validate** button lists everything at once and warns when `MS_LORA_STACK` 
 | Random Caption is disabled | The CSV is missing or unreadable; the reason is in `csv.error` from `GET /api/t2i/config`. |
 | "…has no MS_LORA_STACK node" | You added LoRAs but the workflow cannot take them; remove them or add an `MS_LORA_STACK` node. |
 | A negative was ignored | The workflow has no `MS_NEGATIVE` node; the start response carries a warning. |
-| Prompts are just the caption | No VLM is available or it failed; see the step's warnings. |
+| Prompts are just the caption | No VLM is installed or it failed; see the step's warnings. Install one under Configuration → Models. |
 | Images are slow to start | ComfyUI's queue is shared with Image to Video and the storyboard. |
 
 The rules engineers must follow when changing this feature are the t2i decisions in [CLAUDE.md](../CLAUDE.md).
