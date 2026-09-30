@@ -72,4 +72,4 @@ The pytest suite covers core modules, async service wrappers, hardware probes/ga
 
 ## Common Tasks
 
-The patterns for adding API endpoints, dialogs, smart-folder fields, hardware probes, and tag axes are documented inline in [`CLAUDE.md`](../CLAUDE.md) under "Common Tasks". That document is the source of truth — keep it updated when you change the relevant pattern.
+The patterns for adding API endpoints, dialogs, smart-folder fields, hardware probes, and tag axes are documented inline in [`CLAUDE.md`](../CLAUDE.md) ("Common Tasks") and in the path-scoped files under `.claude/rules/`. Those files are the source of truth — keep them updated when you change the relevant pattern.

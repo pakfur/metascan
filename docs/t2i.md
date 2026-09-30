@@ -147,4 +147,4 @@ The **Validate** button lists everything at once and warns when `MS_LORA_STACK` 
 | Prompts are just the caption | No VLM is installed or it failed; see the step's warnings. Install one under Configuration → Models. |
 | Images are slow to start | ComfyUI's queue is shared with Image to Video and the storyboard. |
 
-The rules engineers must follow when changing this feature are the t2i decisions in [CLAUDE.md](../CLAUDE.md).
+The rules engineers must follow when changing this feature are in [`.claude/rules/t2i.md`](../.claude/rules/t2i.md).
