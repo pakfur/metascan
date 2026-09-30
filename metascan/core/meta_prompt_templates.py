@@ -15,6 +15,9 @@ Surface area (kept intentionally small):
   ``(positive, negative)`` for targets that emit a ``Negative:`` block
   (sd / pony / chroma / qwen). For other targets ``negative`` is ``None``.
 
+* ``split_negative_block(raw)`` is the target-independent half of that:
+  it cleans a raw response and splits off a ``Negative:`` block.
+
 * ``EXTRA_OPTION_LABELS`` / ``MUTEX_PAIRS`` / ``TARGET_PRESETS`` mirror
   the same names exported by ``prompt_templates`` so the API and the
   frontend can swap import sources without restructuring callers.
@@ -526,6 +529,43 @@ def _strip_json_commit_header(text: str) -> str:
     return stripped[end + 1 :].lstrip("\n")
 
 
+def _clean_output(raw: str) -> str:
+    """Strip a code fence, a leading JSON commit header, stray ``Block N:``
+    labels and surrounding whitespace from a model response."""
+    text = _strip_markdown_fence(raw)
+    text = _strip_json_commit_header(text)
+    return _BLOCK_LABEL_RX.sub("", text).strip()
+
+
+def split_negative_block(raw: str) -> tuple[str, str | None]:
+    """Split a model response into ``(positive, negative_or_none)``.
+
+    Takes the raw response: it is cleaned first (code fence, JSON commit
+    header, ``Block N:`` labels, whitespace), then split at the first line
+    that begins with ``Negative:`` (Markdown emphasis and the "Negative
+    prompt:" variant are accepted). With no such line the whole cleaned text
+    is the positive prompt and ``negative`` is ``None``; so is an empty
+    negative. This is the negative handling :func:`parse_output` applies to
+    targets in :data:`MODELS_WITH_NEGATIVE`, exposed for callers (the t2i
+    runner) that pick by model profile rather than by ``TargetModel``.
+    """
+    text = _clean_output(raw)
+    match = _NEGATIVE_LINE_RX.search(text)
+    if not match:
+        return text, None
+
+    positive = text[: match.start()].rstrip()
+    inline_tail = match.group(1).strip()
+    after_line = text[match.end() :].strip()
+
+    if inline_tail and after_line:
+        negative = f"{inline_tail}\n{after_line}".strip()
+    else:
+        negative = (inline_tail or after_line).strip()
+
+    return positive.strip(), (negative or None)
+
+
 def parse_output(target_model: TargetModel, raw: str) -> tuple[str, str | None]:
     """Split a Qwen3 response into ``(positive, negative_or_none)``.
 
@@ -543,27 +583,9 @@ def parse_output(target_model: TargetModel, raw: str) -> tuple[str, str | None]:
     * stray ``Block 1:`` / ``Block 2:`` labels
     * the model failing to emit a Negative block (returns ``None``)
     """
-    text = _strip_markdown_fence(raw)
-    text = _strip_json_commit_header(text)
-    text = _BLOCK_LABEL_RX.sub("", text).strip()
-
     if target_model not in MODELS_WITH_NEGATIVE:
-        return text, None
-
-    match = _NEGATIVE_LINE_RX.search(text)
-    if not match:
-        return text, None
-
-    positive = text[: match.start()].rstrip()
-    inline_tail = match.group(1).strip()
-    after_line = text[match.end() :].strip()
-
-    if inline_tail and after_line:
-        negative = f"{inline_tail}\n{after_line}".strip()
-    else:
-        negative = (inline_tail or after_line).strip()
-
-    return positive.strip(), (negative or None)
+        return _clean_output(raw), None
+    return split_negative_block(raw)
 
 
 __all__ = [
@@ -580,4 +602,5 @@ __all__ = [
     "compose_generate_prompts",
     "elements_for",
     "parse_output",
+    "split_negative_block",
 ]

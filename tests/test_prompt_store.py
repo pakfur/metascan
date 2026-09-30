@@ -194,6 +194,12 @@ def test_active_yaml_has_every_required_key() -> None:
         "TAGGING_SYSTEM_PROMPT",
         "TAGGING_USER_PROMPT",
         "TAGGING_GRAMMAR",
+        # t2i caption-to-prompt (metascan/core/t2i_prompt.py)
+        "META_KREA2",
+        "T2I_CAPTION_PREAMBLE",
+        "T2I_FALLBACK_PREFIX_SD",
+        "T2I_FALLBACK_NEGATIVE_SD",
+        "T2I_FALLBACK_NEGATIVE_QWEN",
     }
     missing = required - set(store.keys())
     assert not missing, f"data/meta_prompt.yml missing keys: {sorted(missing)}"
