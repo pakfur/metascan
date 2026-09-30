@@ -16,6 +16,7 @@ import json
 import os
 import random
 import tempfile
+import threading
 import unittest
 from collections import deque
 from datetime import datetime, timezone
@@ -24,9 +25,10 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from unittest import mock
 
 from backend.config import get_t2i_config
-from metascan.core.comfy_bindings import BindingError
-from metascan.core.comfy_client import ComfyError
+from metascan.core.comfy_bindings import BindingError, GenerationParams
+from metascan.core.comfy_client import ComfyClient, ComfyError
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.scanner import Scanner
 from metascan.core.t2i_captions import CaptionFilterError, CaptionStore
 from metascan.core.t2i_characters import resolve_caption
 from metascan.core.t2i_form import SEED_MAX, T2iFormError, t2i_dims
@@ -48,6 +50,7 @@ from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
+from tests._fake_comfy_server import FakeComfy as FakeComfyServer
 
 # ---- hand-written data ----------------------------------------------------
 
@@ -255,6 +258,7 @@ class FakeComfy:
         # A job that reaches this state on the very next loop iteration after
         # submit returns -- before the caller has necessarily resumed.
         self.finish_at_once: Optional[str] = None
+        self.cancel_gate: Optional[asyncio.Event] = None  # cancel waits here
 
     def on_job_event(self, cb: Callable[[str, Dict[str, Any]], None]) -> None:
         self.listeners.append(cb)
@@ -299,6 +303,8 @@ class FakeComfy:
     async def cancel(self, job_id: int) -> None:
         self.log.append(("comfy", "cancel", job_id))
         self.cancelled.append(job_id)
+        if self.cancel_gate is not None:
+            await self.cancel_gate.wait()
         error = self.cancel_errors.get(job_id)
         if error is not None:
             raise error
@@ -2488,6 +2494,7 @@ class TestCancel(BatchCase):
         await self.runner.cancel_batch(started.batch_id)
         batch = self.runner._finished[started.batch_id]
         self.assertEqual(batch.pending, set())
+        self.assertEqual((batch.unresolved, batch.ingesting), (set(), set()))
         self.assertEqual(batch.window._value, 2)  # every slot is back
         self.assertEqual(self.runner._job_batch, {})
         self.assertEqual(self.runner._job_meta, {})
@@ -2863,6 +2870,1083 @@ class TestWaitBatchAndClose(BatchCase):
         self.assertEqual(self.comfy.cancelled, [])  # the jobs are ComfyClient's to keep
         self.assertEqual(self.terminal_frames(), [])
         await self.runner.aclose()  # idempotent
+
+
+# ---- job events: ingest and accounting -------------------------------------
+
+
+class AccountingCase(BatchCase):
+    """Jobs that live out their whole life. The tests play ComfyClient's part:
+    they announce outputs, then the end of the job, as it does."""
+
+    def image(self, job_id: int, suffix: str = ".png") -> str:
+        return str(self.root / "images" / f"job{job_id}{suffix}")
+
+    def stamp(self, job_id: int, started: str, finished: Optional[str]) -> None:
+        self.db.update_generation_job(job_id, started_at=started, finished_at=finished)
+
+    async def ingested(self) -> None:
+        """Wait for every ingest the runner has started."""
+        tasks = list(self.runner._ingest_tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    def outputs(self, job_id: int, files: Optional[List[str]] = None) -> None:
+        paths = [self.image(job_id)] if files is None else files
+        self.comfy.emit("job_outputs", {"job_id": job_id, "files": paths})
+
+    def end(self, job_id: int, state: str, error: Optional[str] = None) -> None:
+        """The row goes terminal first, then the update is announced."""
+        fields: Dict[str, Any] = {
+            "state": state,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if error is not None:
+            fields["error"] = error
+        self.db.update_generation_job(job_id, **fields)
+        self.job_update(job_id, state, error)
+
+    async def job_done(self, job_id: int, files: Optional[List[str]] = None) -> None:
+        """A job ending as ComfyClient ends one: outputs first, then done."""
+        self.outputs(job_id, files)
+        self.end(job_id, "done")
+        await self.ingested()
+
+    def job_failed(self, job_id: int, error: str = "node exploded") -> None:
+        self.end(job_id, "failed", error)
+
+    def job_cancelled(self, job_id: int) -> None:
+        self.end(job_id, "cancelled")
+
+    async def manual_batch(self, count: int = 3, **over: Any) -> str:
+        """A Manual batch, fully submitted, its window never in the way."""
+        self.roomy()
+        return await self.run_to_end(self.manual(count_per_batch=count, **over))
+
+    def after_step(self) -> List[str]:
+        """The frame names after the batch's own opening frames."""
+        return self.names()[self.names().index("batch_step") + 1 :]
+
+
+class TestIngest(AccountingCase):
+    async def test_a_finished_job_becomes_a_row_with_its_facts(self) -> None:
+        batch_id = await self.manual_batch(
+            preset_id=self.with_negative, negative="blurry"
+        )
+        first, second, _ = self.comfy.job_ids
+        self.stamp(
+            first, "2026-09-29T10:00:00+00:00", "2026-09-29T10:00:41.500000+00:00"
+        )
+        self.db.update_generation_job(first, comfy_prompt_id="prompt-abc")
+        # The image is recorded before the row is marked done (which would
+        # restamp finished_at): job_outputs comes first, as in ComfyClient.
+        self.outputs(first)
+        await self.ingested()
+        self.end(first, "done")
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(row["file_path"], self.image(first))
+        self.assertEqual(row["batch_id"], batch_id)
+        self.assertEqual(row["model"], "krea2")
+        self.assertEqual(row["preset_id"], self.with_negative)
+        self.assertEqual(row["caption"], "a red kite")
+        self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
+        self.assertEqual(row["negative_used"], "blurry")
+        self.assertEqual((row["seed"], row["prompt_seed"]), (100, 100))
+        self.assertEqual((row["width"], row["height"]), (1232, 816))
+        self.assertEqual(row["megapixels"], 1.0)
+        self.assertEqual(row["aspect_ratio"], "3:2")
+        self.assertEqual(row["loras"], [])
+        self.assertEqual(row["render_s"], 41.5)
+        self.assertEqual(row["comfy_prompt_id"], "prompt-abc")
+        # The next image has its own seed; the step's character seed is shared.
+        await self.job_done(second)
+        again = self.db.get_t2i_image(2)
+        assert again is not None
+        self.assertEqual((again["seed"], again["prompt_seed"]), (101, 100))
+
+    async def test_a_manual_batch_without_a_caption_stores_none(self) -> None:
+        await self.manual_batch(count=1, caption=None)
+        await self.job_done(self.comfy.job_ids[0])
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertIsNone(row["caption"])
+        self.assertIsNone(row["form_state"]["caption"])
+
+    async def test_the_form_state_is_the_dialog_as_submitted(self) -> None:
+        await self.manual_batch(
+            preset_id=self.with_stack,
+            negative="blurry",  # the workflow has no MS_NEGATIVE: not sent, still typed
+            loras=[{"name": "kite.safetensors", "strength": "0.5"}],
+        )
+        first, second, _ = self.comfy.job_ids
+        await self.job_done(first)
+        await self.job_done(second)
+        one, two = self.db.get_t2i_image(1), self.db.get_t2i_image(2)
+        assert one is not None and two is not None
+        self.assertEqual(
+            one["form_state"],
+            {
+                "mode": "manual",
+                "filter": None,
+                "caption": "a red kite",
+                "model": "krea2",
+                "preset_id": self.with_stack,
+                "megapixels": 1.0,
+                "aspect_ratio": "3:2",
+                "seed": 100,
+                "prompt": "A red kite over a gray sea.",
+                "negative": "blurry",
+                "loras": [{"name": "kite.safetensors", "strength": 0.5}],
+            },
+        )
+        self.assertEqual(two["form_state"]["seed"], 101)  # that image's own seed
+        self.assertIsNone(one["negative_used"])  # what was rendered: no negative
+        self.assertEqual(one["loras"], [{"name": "kite.safetensors", "strength": 0.5}])
+
+    async def test_random_rows_carry_the_raw_caption_and_the_step_values(self) -> None:
+        self.roomy()
+        flt = {"aspect_ratios": ["3:2"]}
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=2, count_per_batch=2, filter=flt)
+        )
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        rows = [self.db.get_t2i_image(n) for n in (1, 2, 3, 4)]
+        for row in rows:
+            assert row is not None
+            self.assertEqual(row["caption"], CSV_ROWS[0][0])  # tokens and all
+            self.assertEqual(row["prompt_used"], "A calm beach scene at dawn.")
+            self.assertEqual(row["aspect_ratio"], "3:2")
+            self.assertEqual(row["form_state"]["mode"], "random")
+            self.assertEqual(row["form_state"]["filter"], flt)
+            self.assertEqual(row["form_state"]["caption"], CSV_ROWS[0][0])
+            self.assertEqual(row["form_state"]["prompt"], "A calm beach scene at dawn.")
+            self.assertEqual(row["form_state"]["seed"], row["seed"])
+        assert all(r is not None for r in rows)
+        self.assertEqual([r["seed"] for r in rows if r], [10, 11, 12, 13])
+        self.assertEqual([r["prompt_seed"] for r in rows if r], [10, 10, 12, 12])
+
+    async def test_random_sdxl_keeps_the_negative_it_rendered_with(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                model="sd",
+                preset_id=self.with_negative,
+                batch_size=1,
+                count_per_batch=1,
+                filter={"aspect_ratios": ["3:2"]},
+            )
+        )
+        await self.job_done(self.comfy.job_ids[0])
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(row["negative_used"], "blurry, watermark")
+        self.assertEqual(row["form_state"]["negative"], "blurry, watermark")
+
+    async def test_render_time_when_the_finish_is_not_stamped_yet(self) -> None:
+        # job_outputs fires before the job is marked done.
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        started = datetime.now(timezone.utc).timestamp() - 12
+        self.stamp(job, datetime.fromtimestamp(started, timezone.utc).isoformat(), None)
+        self.outputs(job)
+        await self.ingested()
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertGreaterEqual(row["render_s"], 12.0)
+        self.assertLess(row["render_s"], 20.0)
+
+    async def test_no_start_stamp_means_no_render_time(self) -> None:
+        await self.manual_batch(count=1)
+        await self.job_done(self.comfy.job_ids[0])
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertIsNone(row["render_s"])
+
+    async def test_each_ingest_announces_its_files(self) -> None:
+        batch_id = await self.manual_batch()
+        first, second, _ = self.comfy.job_ids
+        await self.job_done(first)
+        await self.job_done(second, [self.image(second), self.image(second, "_b.png")])
+        self.assertEqual(
+            self.frames("t2i_images_changed"),
+            [
+                {"batch_id": batch_id, "files": [self.image(first)]},
+                {
+                    "batch_id": batch_id,
+                    "files": [self.image(second), self.image(second, "_b.png")],
+                },
+            ],
+        )
+
+    async def test_two_files_of_one_job_are_two_rows_and_one_job(self) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        await self.job_done(job, [self.image(job), self.image(job, "_b.png")])
+        self.assertIsNotNone(self.db.get_t2i_image(2))
+        (progress,) = self.frames("batch_progress")[-1:]
+        self.assertEqual(progress["images_done"], 2)
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])  # still one job
+
+    async def test_a_done_job_with_no_files_counts_as_failed(self) -> None:
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        await self.job_done(first, [])
+        (progress,) = self.frames("batch_progress")[-1:]
+        self.assertEqual(progress["images_failed"], 1)
+        self.assertEqual(progress["last_error"], "the job produced no image")
+        self.assertEqual(self.frames("t2i_images_changed"), [])
+        await self.job_done(second)
+        self.assertEqual(self.frames("batch_complete")[0]["images_failed"], 1)
+
+    async def test_a_path_that_already_has_a_row_is_skipped_not_counted(self) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        self.db.create_t2i_image(file_path=self.image(job), prompt_used="the older row")
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING") as logs:
+            await self.job_done(job)
+        self.assertTrue(any("already has a row" in line for line in logs.output))
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(row["prompt_used"], "the older row")  # left alone
+        self.assertIsNone(self.db.get_t2i_image(2))
+        self.assertEqual(self.frames("t2i_images_changed"), [])
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_failed"]), (0, 1))
+        self.assertEqual(frame["last_error"], "the job's image could not be recorded")
+
+    async def test_an_unusable_form_state_is_stored_as_null_and_the_image_is_kept(
+        self,
+    ) -> None:
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        self.runner._job_meta[first]["aspect_ratio"] = "banana"  # PATCH would refuse it
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING") as logs:
+            await self.job_done(first)
+        self.assertTrue(any("form state" in line for line in logs.output))
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertIsNone(row["form_state"])
+        self.assertEqual(
+            row["prompt_used"], "A red kite over a gray sea."
+        )  # facts intact
+        self.assertEqual(
+            self.frames("t2i_images_changed")[0]["files"], [self.image(first)]
+        )
+        self.runner._job_meta[second]["model"] = ""  # another refusal
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING"):
+            await self.job_done(second)
+        again = self.db.get_t2i_image(2)
+        assert again is not None
+        self.assertIsNone(again["form_state"])
+        self.assertEqual(self.frames("batch_complete")[0]["images_done"], 2)
+
+    async def test_a_snapshot_that_is_missing_fields_costs_only_the_form(self) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        self.runner._job_meta[job] = {}
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING"):
+            await self.job_done(job)
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertIsNone(row["form_state"])
+        self.assertEqual(row["seed"], 100)
+
+    async def test_a_database_error_reading_the_job_fails_that_job_not_the_batch(
+        self,
+    ) -> None:
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        with mock.patch.object(
+            self.db, "get_generation_job", side_effect=RuntimeError("db is locked")
+        ):
+            with self.assertLogs("metascan.core.t2i_runner", level="WARNING") as logs:
+                await self.job_done(first)
+        self.assertTrue(any("db is locked" in line for line in logs.output))
+        (progress,) = self.frames("batch_progress")[-1:]
+        self.assertEqual(progress["images_failed"], 1)
+        self.assertNotIn(first, self.runner._job_meta)
+        await self.job_done(second)
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+
+
+class TestAccounting(AccountingCase):
+    async def test_the_frames_of_a_batch_that_ends_three_ways(self) -> None:
+        batch_id = await self.manual_batch()
+        first, second, third = self.comfy.job_ids
+        await self.job_done(first)
+        self.job_failed(second, "node exploded")
+        self.job_cancelled(third)
+        self.assertEqual(
+            self.after_step(),
+            [
+                "t2i_images_changed",
+                "batch_progress",  # one image done
+                "batch_progress",  # one failed
+                "batch_complete",  # the cancelled one changes no counter
+            ],
+        )
+        progress = self.frames("batch_progress")
+        self.assertEqual(
+            progress[1:],
+            [
+                {
+                    "batch_id": batch_id,
+                    "phase": "rendering",
+                    "images_done": 1,
+                    "images_failed": 0,
+                    "images_total": 3,
+                    "next_seed": 103,
+                },
+                {
+                    "batch_id": batch_id,
+                    "phase": "rendering",
+                    "images_done": 1,
+                    "images_failed": 1,
+                    "images_total": 3,
+                    "next_seed": 103,
+                    "last_error": "node exploded",
+                },
+            ],
+        )
+        self.assertEqual(
+            self.frames("batch_complete"),
+            [
+                {
+                    "batch_id": batch_id,
+                    "images_done": 1,
+                    "images_failed": 1,
+                    "images_total": 3,
+                    "images_cancelled": 1,
+                    "next_seed": 103,
+                    "last_error": "node exploded",
+                }
+            ],
+        )
+        self.assertEqual(self.runner.active_batches(), [])
+        # Review focus 4: the counters sum to the total.
+        (final,) = self.frames("batch_complete")
+        self.assertEqual(
+            final["images_done"] + final["images_failed"] + final["images_cancelled"],
+            final["images_total"],
+        )
+
+    async def test_the_counters_are_listed_while_the_batch_runs(self) -> None:
+        batch_id = await self.manual_batch(count=4)
+        first, second, _, _ = self.comfy.job_ids
+        await self.job_done(first)
+        self.job_failed(second)
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["batch_id"], batch_id)
+        self.assertEqual((row["images_done"], row["images_failed"]), (1, 1))
+        self.assertEqual(row["images_total"], 4)
+        self.assertEqual(row["state"], "rendering")
+        self.assertEqual(row["next_seed"], 104)
+
+    async def test_a_failed_job_frees_its_slot_and_the_run_carries_on(self) -> None:
+        # Review focus 4: a failed job leaves nothing behind.
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        self.job_failed(self.comfy.job_ids[0], "out of memory")
+        await self.until(lambda: len(self.comfy.submits) == 2, "the second submit")
+        await self.job_done(self.comfy.job_ids[1])
+        await self.until(lambda: len(self.comfy.submits) == 3, "the third submit")
+        await self.wait(started.batch_id)
+        await self.job_done(self.comfy.job_ids[2])
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_failed"]), (2, 1))
+        batch = self.runner._finished[started.batch_id]
+        self.assertEqual(batch.window._value, 1)
+        self.assertEqual(batch.pending, set())
+        self.assertEqual(batch.unresolved, set())
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._job_meta, {})
+
+    async def test_a_finished_batch_leaves_no_bookkeeping(self) -> None:
+        batch_id = await self.manual_batch(count=2)
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        batch = self.runner._finished[batch_id]
+        self.assertEqual(batch.finished, "complete")
+        self.assertEqual(
+            (batch.pending, batch.unresolved, batch.ingesting), (set(), set(), set())
+        )
+        self.assertEqual(batch.window._value, 50)
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._job_meta, {})
+        self.assertEqual(self.runner._ingest_tasks, set())
+        self.assertIsNone(batch.picker)
+
+    async def test_the_terminal_frame_fires_exactly_once(self) -> None:
+        batch_id = await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        self.outputs(first)
+        self.end(first, "done")
+        self.job_failed(second)  # back to back, nothing awaited between
+        await self.ingested()
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        # Whatever ComfyClient says afterwards changes nothing.
+        seen = len(self.events)
+        self.job_update(first, "done")
+        self.job_update(second, "failed", "again")
+        self.job_update(second, "cancelled")
+        self.outputs(first)
+        await self.ingested()
+        self.assertEqual(len(self.events), seen)
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        self.assertNotIn(
+            batch_id, [b["batch_id"] for b in self.runner.active_batches()]
+        )
+
+    async def test_a_repeated_outputs_event_records_nothing_twice(self) -> None:
+        await self.manual_batch(count=2)
+        first = self.comfy.job_ids[0]
+        await self.job_done(first)
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING"):
+            self.outputs(first)
+            await self.ingested()
+        self.assertIsNone(self.db.get_t2i_image(2))
+        (progress,) = self.frames("batch_progress")[-1:]
+        self.assertEqual(progress["images_done"], 1)  # not counted again
+        self.assertEqual(progress["images_failed"], 0)  # nor as a failure
+        self.assertEqual(len(self.frames("t2i_images_changed")), 1)
+        self.assertEqual(self.terminal_frames(), [])  # one job is still out
+        (row,) = self.runner.active_batches()
+        self.assertEqual((row["images_done"], row["images_failed"]), (1, 0))
+
+    async def test_the_ingest_may_finish_before_or_after_the_done_update(self) -> None:
+        release = threading.Event()
+        original = self.db.create_t2i_image
+
+        def slow(**facts: Any) -> int:
+            release.wait(5)
+            return original(**facts)
+
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        # Update first: the ingest is still writing when "done" arrives.
+        with mock.patch.object(self.db, "create_t2i_image", side_effect=slow):
+            self.outputs(first)
+            self.end(first, "done")
+            await self.quiet()
+            self.assertEqual(self.frames("batch_progress")[-1]["images_done"], 0)
+            self.assertEqual(len(self.runner.active_batches()), 1)
+            release.set()
+            await self.ingested()
+        self.assertEqual(self.frames("batch_progress")[-1]["images_done"], 1)
+        # Ingest first: the image is recorded before the update is announced,
+        # and that is what ends the batch; the update then changes nothing.
+        self.outputs(second)
+        await self.ingested()
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        finished = next(iter(self.runner._finished.values()))
+        self.assertEqual(finished.window._value, 50)  # the slot came back at once
+        self.assertEqual(self.runner._job_batch, {})  # ...and the link went
+        self.end(second, "done")
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        batch = next(iter(self.runner._finished.values()))
+        self.assertEqual(batch.window._value, 50)  # the last slot came back too
+
+    async def test_a_job_that_is_done_without_outputs_is_failed_not_awaited(
+        self,
+    ) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        self.end(job, "done")  # no job_outputs ever came
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_failed"]), (0, 1))
+        self.assertEqual(frame["last_error"], "the job finished without an image")
+
+    async def test_completion_frees_the_random_slot(self) -> None:
+        self.roomy()
+        started = await self.start(self.random_mode(batch_size=1, count_per_batch=1))
+        await self.wait(started.batch_id)
+        await self.job_done(self.comfy.job_ids[0])
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        again = await self.start(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertNotEqual(again.batch_id, started.batch_id)
+
+    async def test_the_window_is_freed_by_the_update_not_by_the_ingest(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        await self.start(self.manual(count_per_batch=2))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        first = self.comfy.job_ids[0]
+        self.outputs(first)
+        await self.ingested()  # the image is recorded...
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 1)  # ...but the job is not over yet
+        self.end(first, "done")
+        await self.until(lambda: len(self.comfy.submits) == 2, "the second submit")
+
+    async def test_a_cancelled_batch_ignores_what_comes_after(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        started = await self.start(self.manual(count_per_batch=4))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        first = self.comfy.job_ids[0]
+        await self.runner.cancel_batch(started.batch_id)
+        seen = len(self.events)
+        self.job_update(first, "done")
+        self.job_failed(self.comfy.job_ids[1])
+        await self.quiet()
+        self.assertEqual(len(self.events), seen)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+
+    async def test_images_that_land_after_the_cancel_are_kept_but_not_counted(
+        self,
+    ) -> None:
+        self.roomy()
+        started = await self.start(self.manual(count_per_batch=2))
+        await self.wait(started.batch_id)
+        first, second = self.comfy.job_ids
+        await self.runner.cancel_batch(started.batch_id)
+        for job_id in (first, second):  # both finished just as the cancel went out
+            self.outputs(job_id)
+        await self.ingested()
+        for image_id, job_id in ((1, first), (2, second)):
+            row = self.db.get_t2i_image(image_id)
+            assert row is not None
+            self.assertEqual(row["file_path"], self.image(job_id))
+            self.assertEqual(row["batch_id"], started.batch_id)
+            self.assertIsNone(row["form_state"])  # the snapshot went with the cancel
+        self.assertEqual(len(self.frames("t2i_images_changed")), 2)
+        # Every job of the batch is now accounted for -- and still the batch
+        # ended once, as cancelled, with the counters it had at the time.
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertEqual(self.frames("batch_cancelled")[0]["images_done"], 0)
+
+    async def test_an_image_that_lands_mid_cancel_cannot_end_the_batch_twice(
+        self,
+    ) -> None:
+        self.roomy()
+        started = await self.start(self.manual(count_per_batch=2))
+        await self.wait(started.batch_id)
+        first, second = self.comfy.job_ids
+        await self.job_done(first)  # job 0 is over and accounted for
+        self.comfy.cancel_gate = asyncio.Event()
+        cancel = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        self.assertFalse(cancel.done())  # waiting on ComfyUI for job 1
+        self.outputs(second)  # the last image lands meanwhile
+        await self.ingested()
+        self.comfy.cancel_gate.set()
+        self.assertTrue(await cancel)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertIsNotNone(self.db.get_t2i_image(2))  # kept...
+        self.assertEqual(
+            self.frames("batch_cancelled")[0]["images_done"], 1
+        )  # ...uncounted
+
+    async def test_a_batch_that_stopped_early_completes_at_its_shorter_total(
+        self,
+    ) -> None:
+        self.roomy()
+        started = await self.start(
+            self.manual(seed=1, seed_policy="decrement", count_per_batch=5)
+        )
+        await self.wait(started.batch_id)
+        self.assertEqual(len(self.comfy.job_ids), 2)
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual(frame["images_total"], 2)
+        self.assertEqual(frame["images_done"], 2)
+        self.assertIsNone(frame["next_seed"])  # the range ran out with the run
+
+    async def test_a_random_batch_completes_across_its_steps(self) -> None:
+        self.roomy()
+        started = await self.start(
+            self.random_mode(seed=10, batch_size=2, count_per_batch=2)
+        )
+        await self.wait(started.batch_id)
+        for job_id in self.comfy.job_ids[:-1]:
+            await self.job_done(job_id)
+        self.assertEqual(self.terminal_frames(), [])
+        await self.job_done(self.comfy.job_ids[-1])
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_total"]), (4, 4))
+        self.assertEqual(frame["next_seed"], 14)
+
+    async def test_progress_frames_name_the_last_failure(self) -> None:
+        await self.manual_batch(count=3)
+        first, second, _ = self.comfy.job_ids
+        self.job_failed(first, "first failure")
+        self.job_failed(second, "second failure")
+        self.assertEqual(
+            [f.get("last_error") for f in self.frames("batch_progress")],
+            [None, "first failure", "second failure"],
+        )
+
+    async def test_a_failure_without_a_message_still_says_something(self) -> None:
+        await self.manual_batch(count=1)
+        self.job_update(self.comfy.job_ids[0], "failed", None)
+        self.assertEqual(
+            self.frames("batch_complete")[0]["last_error"], "the job failed"
+        )
+
+
+class TestSnapshotLifecycle(AccountingCase):
+    async def test_the_ingest_pops_a_done_jobs_snapshot(self) -> None:
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        self.outputs(first)  # the update has not arrived yet
+        await self.ingested()
+        self.assertNotIn(first, self.runner._job_meta)  # the ingest owns it
+        self.assertIn(first, self.runner._job_batch)  # the update still finds its batch
+        self.assertIn(second, self.runner._job_meta)
+        self.end(first, "done")
+        self.assertNotIn(first, self.runner._job_batch)
+
+    async def test_a_failed_job_leaves_no_entry(self) -> None:
+        await self.manual_batch(count=2)
+        first, second = self.comfy.job_ids
+        self.job_failed(first)
+        self.assertNotIn(first, self.runner._job_meta)
+        self.assertNotIn(first, self.runner._job_batch)
+        self.assertIn(second, self.runner._job_meta)  # the others are untouched
+
+    async def test_a_cancelled_job_leaves_no_entry(self) -> None:
+        await self.manual_batch(count=2)
+        first, _ = self.comfy.job_ids
+        self.job_cancelled(first)
+        self.assertNotIn(first, self.runner._job_meta)
+        self.assertNotIn(first, self.runner._job_batch)
+
+    async def test_the_snapshot_goes_even_when_the_ingest_fails(self) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        with mock.patch.object(
+            self.db, "get_generation_job", side_effect=RuntimeError("db is locked")
+        ):
+            with self.assertLogs("metascan.core.t2i_runner", level="WARNING"):
+                self.outputs(job)
+                await self.ingested()
+        self.assertNotIn(job, self.runner._job_meta)
+
+    async def test_every_job_of_a_finished_batch_is_forgotten(self) -> None:
+        await self.manual_batch(count=3)
+        first, second, third = self.comfy.job_ids
+        await self.job_done(first)
+        self.job_failed(second)
+        self.job_cancelled(third)
+        self.assertEqual(self.runner._job_meta, {})
+        self.assertEqual(self.runner._job_batch, {})
+
+
+class TestForeignAndRestartedJobs(AccountingCase):
+    def orphan_job(self, batch_id: Optional[str], **over: Any) -> int:
+        """A generation_jobs row the runner has no memory of."""
+        params = GenerationParams(
+            positive="A kite.", seed=5, width=640, height=480, batch_size=1, **over
+        )
+        return self.db.create_generation_job(
+            self.plain,
+            params.to_json(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "t2i_x",
+            batch_id,
+        )
+
+    async def test_an_image_of_a_batch_from_before_a_restart_is_still_ingested(
+        self,
+    ) -> None:
+        job = self.orphan_job("old-batch")
+        self.db.update_generation_job(job, comfy_prompt_id="prompt-9")
+        self.runner.handle_job_event(
+            "job_outputs", {"job_id": job, "files": [self.image(job)]}
+        )
+        await self.ingested()
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(row["batch_id"], "old-batch")
+        self.assertEqual(row["file_path"], self.image(job))
+        self.assertEqual(row["prompt_used"], "A kite.")
+        self.assertEqual((row["seed"], row["width"], row["height"]), (5, 640, 480))
+        self.assertEqual(row["comfy_prompt_id"], "prompt-9")
+        self.assertIsNone(row["negative_used"])
+        self.assertEqual(row["loras"], [])
+        for unknown in (
+            "model",
+            "caption",
+            "prompt_seed",
+            "megapixels",
+            "aspect_ratio",
+        ):
+            self.assertIsNone(row[unknown], unknown)
+        self.assertIsNone(row["form_state"])  # nothing to seed it from
+        self.assertEqual(
+            self.events,
+            [
+                (
+                    "t2i_images_changed",
+                    {"batch_id": "old-batch", "files": [self.image(job)]},
+                )
+            ],
+        )
+
+    async def test_an_unknown_batch_has_no_counters_and_no_terminal_frame(self) -> None:
+        job = self.orphan_job("old-batch")
+        self.runner.handle_job_event(
+            "job_outputs", {"job_id": job, "files": [self.image(job)]}
+        )
+        self.runner.handle_job_event("job_update", {"job_id": job, "state": "done"})
+        await self.ingested()
+        self.assertEqual(self.terminal_frames(), [])
+        self.assertEqual(self.frames("batch_progress"), [])
+        self.assertEqual(self.runner.active_batches(), [])
+
+    async def test_a_live_batch_whose_snapshot_is_gone_is_still_accounted_for(
+        self,
+    ) -> None:
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        del self.runner._job_meta[job]  # evicted by the backstop, say
+        await self.job_done(job)
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertIsNone(row["form_state"])
+        self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
+        self.assertEqual(self.frames("batch_complete")[0]["images_done"], 1)
+
+    async def test_an_unreadable_params_blob_costs_only_the_facts(self) -> None:
+        job = self.db.create_generation_job(
+            self.plain, "not json", None, None, None, None, None, None, "old-batch"
+        )
+        self.runner.handle_job_event(
+            "job_outputs", {"job_id": job, "files": [self.image(job)]}
+        )
+        await self.ingested()
+        row = self.db.get_t2i_image(1)
+        assert row is not None
+        self.assertEqual(row["file_path"], self.image(job))
+        self.assertIsNone(row["prompt_used"])
+        self.assertIsNone(row["seed"])
+
+    async def test_jobs_of_other_features_are_ignored(self) -> None:
+        plain = self.db.create_generation_job(self.plain, "{}", None, None)
+        i2v = self.db.create_generation_job(
+            self.plain, "{}", None, None, None, None, "/lib/a.png", None
+        )
+        panel = self.db.create_generation_job(self.plain, "{}", 7)
+        for job in (plain, i2v, panel, 987654):
+            self.runner.handle_job_event(
+                "job_outputs", {"job_id": job, "files": [self.image(job)]}
+            )
+            self.runner.handle_job_event("job_update", {"job_id": job, "state": "done"})
+        await self.ingested()
+        self.assertIsNone(self.db.get_t2i_image(1))
+        self.assertEqual(self.events, [])
+
+    async def test_malformed_events_are_ignored_and_never_raise(self) -> None:
+        for event, payload in (
+            ("job_outputs", {}),
+            ("job_outputs", {"job_id": "7", "files": []}),
+            ("job_outputs", {"job_id": None}),
+            ("job_update", {"job_id": [1], "state": "done"}),
+            ("job_update", None),
+            ("job_outputs", None),
+            ("job_progress", {"job_id": 1}),
+            ("something_else", {}),
+        ):
+            with self.subTest(event=event, payload=payload):
+                self.runner.handle_job_event(event, payload)  # type: ignore[arg-type]
+        await self.ingested()
+        self.assertEqual(self.events, [])
+
+    async def test_an_event_with_no_running_loop_is_dropped(self) -> None:
+        # ComfyClient calls listeners from its loop, but a stray call from a
+        # plain thread must not raise or leave a half-registered ingest.
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        errors: List[BaseException] = []
+
+        def from_a_thread() -> None:
+            try:
+                self.runner.handle_job_event(
+                    "job_outputs", {"job_id": job, "files": [self.image(job)]}
+                )
+            except BaseException as exc:  # pragma: no cover - the failure case
+                errors.append(exc)
+
+        thread = threading.Thread(target=from_a_thread)
+        thread.start()
+        thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.runner._ingest_tasks, set())
+        batch = next(iter(self.runner._batches.values()))
+        self.assertEqual(batch.ingesting, set())
+
+
+class TestClose(AccountingCase):
+    async def test_aclose_drains_the_ingests_in_flight(self) -> None:
+        release = threading.Event()
+        original = self.db.create_t2i_image
+
+        def slow(**facts: Any) -> int:
+            release.wait(5)
+            return original(**facts)
+
+        await self.manual_batch(count=1)
+        (job,) = self.comfy.job_ids
+        with mock.patch.object(self.db, "create_t2i_image", side_effect=slow):
+            self.outputs(job)
+            await self.until(
+                lambda: bool(self.runner._ingest_tasks), "an ingest to start"
+            )
+            closing = asyncio.ensure_future(self.runner.aclose())
+            await self.quiet()
+            self.assertFalse(closing.done())  # waiting for the ingest
+            release.set()
+            await asyncio.wait_for(closing, 5)
+        self.assertIsNotNone(self.db.get_t2i_image(1))  # the image was not lost
+        self.assertEqual(self.runner._ingest_tasks, set())
+
+    async def test_aclose_stops_runs_and_drains_ingests_together(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        self.outputs(self.comfy.job_ids[0])
+        await self.runner.aclose()
+        self.assertTrue(self.runner._batches[started.batch_id].task.done())
+        self.assertIsNotNone(self.db.get_t2i_image(1))
+        self.assertEqual(self.comfy.cancelled, [])
+
+
+class RealClientCase(BatchCase):
+    """The runner over the REAL ComfyClient and the repo's in-process fake
+    ComfyUI. Everything above plays ComfyClient's part from what the runner
+    assumes about it (outputs are announced before the job is marked done,
+    a cancel emits its own update, ...); this case shows the real one does it."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.server = FakeComfyServer()
+        await self.server.start()
+        self.server.images_per_job = 1  # a t2i job renders one image
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        # What ComfyClient announced, and how many jobs were unfinished at once.
+        self.announced: List[Tuple[str, Any, Any]] = []
+        self.unfinished = 0
+        self.peak = 0
+        await self.boot(in_flight=2)
+
+    async def boot(self, in_flight: int) -> None:
+        """A ComfyClient and a T2iRunner over this database: what a server
+        start builds (the second time, what a restart builds)."""
+        self.client = ComfyClient(
+            base_url=self.server.base_url,
+            output_root=self.out_root,
+            db=self.db,
+            scanner=Scanner(self.db),  # as in the lifespan: files reach the library
+            in_flight=in_flight,
+        )
+        await self.client.start()
+        self.runner = T2iRunner(
+            db=self.db,
+            comfy=self.client,
+            get_vlm=lambda: self.vlm,
+            captions=self.captions,
+            library=self.library,
+            output_root=self.out_root,
+            get_config=lambda: self.cfg,
+        )
+        self.runner.on_event(self._record)
+        self.client.on_job_event(self.runner.handle_job_event)
+        self.client.on_job_event(self._watch)
+
+    def _watch(self, event: str, payload: Dict[str, Any]) -> None:
+        self.announced.append((event, payload.get("job_id"), payload.get("state")))
+        if event == "job_update" and payload.get("state") == "queued":
+            self.unfinished += 1
+            self.peak = max(self.peak, self.unfinished)
+        elif event == "job_update" and payload.get("state") in (
+            "done",
+            "failed",
+            "cancelled",
+        ):
+            self.unfinished -= 1
+
+    async def asyncTearDown(self) -> None:
+        await self.client.shutdown()
+        await super().asyncTearDown()
+        await self.server.stop()
+
+    def comfy_job_ids(self) -> List[int]:
+        """The ids of the jobs in the database, in submit order."""
+        return [j["id"] for j in self.db.list_generation_jobs(limit=50)]
+
+    async def until_over(self) -> None:
+        await self.until(lambda: bool(self.terminal_frames()), "the batch to end")
+
+
+class TestWithTheRealComfyClient(RealClientCase):
+    async def test_a_batch_runs_to_completion(self) -> None:
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.until_over()
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual(
+            frame,
+            {
+                "batch_id": started.batch_id,
+                "images_done": 5,
+                "images_failed": 0,
+                "images_total": 5,
+                "images_cancelled": 0,
+                "next_seed": 105,
+            },
+        )
+        rows = self.db.list_t2i_images(limit=50)
+        # (Two jobs that finish together are recorded in either order.)
+        self.assertEqual(sorted(r["seed"] for r in rows), [100, 101, 102, 103, 104])
+        for row in rows:
+            path = Path(row["file_path"])
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.parent.parent, self.out_root / "t2i")
+            self.assertRegex(path.name, r"^t2i_\d+\.png$")
+            self.assertEqual(row["batch_id"], started.batch_id)
+            self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
+            self.assertEqual(row["form_state"]["seed"], row["seed"])
+        self.assertEqual(len(self.frames("t2i_images_changed")), 5)
+        self.assertLessEqual(self.peak, 2)  # the window held
+        # Nothing is left behind.
+        self.assertEqual(self.runner.active_batches(), [])
+        self.assertEqual(self.runner._job_meta, {})
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._finished[started.batch_id].window._value, 2)
+
+    async def test_comfyclient_announces_outputs_before_it_marks_a_job_done(
+        self,
+    ) -> None:
+        # The order the ingest and the accounting are built on.
+        await self.start(self.manual(count_per_batch=3))
+        await self.until_over()
+        jobs = {job for _, job, _ in self.announced if job is not None}
+        self.assertEqual(len(jobs), 3)
+        for job in jobs:
+            events = [(e, s) for e, j, s in self.announced if j == job]
+            self.assertLess(
+                events.index(("job_outputs", None)),
+                events.index(("job_update", "done")),
+            )
+            self.assertLess(
+                events.index(("job_update", "queued")),
+                events.index(("job_outputs", None)),
+            )
+
+    async def test_failed_jobs_are_counted_with_the_nodes_error(self) -> None:
+        self.server.fail_with = "boom: node exploded"
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until_over()
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_failed"]), (0, 3))
+        self.assertIn("boom: node exploded", frame["last_error"])
+        self.assertEqual(self.db.list_t2i_images(limit=10), [])
+        self.assertEqual(self.frames("t2i_images_changed"), [])
+        self.assertEqual(self.runner._finished[started.batch_id].window._value, 2)
+
+    async def test_cancelling_a_running_batch_interrupts_its_jobs(self) -> None:
+        self.server.hold = asyncio.Event()  # the first prompt stays running
+        started = await self.start(self.manual(count_per_batch=6))
+        await self.until(
+            lambda: len(self.server.submitted) >= 1, "a prompt to reach ComfyUI"
+        )
+        self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+
+        def states() -> set:
+            return {j["state"] for j in self.db.list_generation_jobs(limit=50)}
+
+        # ComfyClient.cancel does not wait for a job that is mid-dispatch: it
+        # ends the row a moment later, when the dispatch notices.
+        await self.until(
+            lambda: states() == {"cancelled"}, "every job to end cancelled"
+        )
+        self.assertLessEqual(len(self.db.list_generation_jobs(limit=50)), 2)  # window
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        submitted = len(self.server.submitted)
+        self.server.hold.set()
+        await self.quiet(0.2)
+        self.assertEqual(len(self.server.submitted), submitted)  # nothing more goes out
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertEqual(self.frames("t2i_images_changed"), [])
+
+    async def test_a_random_batch_runs_end_to_end(self) -> None:
+        started = await self.start(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=1)
+        )
+        await self.until_over()
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_total"]), (3, 3))
+        self.assertEqual(frame["next_seed"], 13)
+        rows = self.db.list_t2i_images(limit=10)
+        self.assertEqual(sorted(r["seed"] for r in rows), [10, 11, 12])
+        captions = {row[0] for row in CSV_ROWS}
+        for row in rows:
+            self.assertIn(row["caption"], captions)  # the raw row, tokens and all
+            self.assertEqual(row["prompt_used"], "A calm beach scene at dawn.")
+            self.assertEqual(row["prompt_seed"], row["seed"])  # one image per step
+            self.assertEqual(row["form_state"]["mode"], "random")
+            self.assertEqual(row["batch_id"], started.batch_id)
+        # GPU order, for real: the prompts, then the unload, then the jobs.
+        assert self.vlm is not None
+        self.assertEqual(self.vlm.shutdowns, 1)
+        timeline = self.timeline()
+        self.assertLess(
+            timeline.index(("vlm", "shutdown")),
+            timeline.index(("event", "t2i_images_changed")),
+        )
+
+    async def test_jobs_queued_across_a_restart_still_ingest_without_a_form_state(
+        self,
+    ) -> None:
+        self.server.hold = asyncio.Event()  # the running prompt does not finish yet
+        await self.client.shutdown()
+        await self.runner.aclose()
+        await self.boot(in_flight=1)  # one job runs, the next waits in ComfyClient
+        started = await self.start(self.manual(count_per_batch=2))
+        await self.wait(started.batch_id)
+        first, second = self.comfy_job_ids()
+        await self.until(
+            lambda: self.db.get_generation_job(first)["state"] == "running",
+            "the first job to be running",
+        )
+        self.assertEqual(self.db.get_generation_job(second)["state"], "queued")
+
+        # The server restarts: both the runner's memory and the client's go.
+        await self.client.shutdown()
+        await self.runner.aclose()
+        self.events.clear()
+        await self.boot(in_flight=1)
+        self.server.hold.set()  # ComfyUI gets on with the work
+
+        await self.until(lambda: self.frames("t2i_images_changed"), "the image")
+        (frame,) = self.frames("t2i_images_changed")
+        self.assertEqual(frame["batch_id"], started.batch_id)
+        (row,) = self.db.list_t2i_images(limit=10)
+        self.assertEqual(row["seed"], 101)  # the job that was still queued
+        self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
+        self.assertIsNone(row["form_state"])  # nothing remembers the dialog
+        self.assertIsNone(row["model"])
+        states = [j["state"] for j in self.db.list_generation_jobs(limit=10)]
+        self.assertEqual(states, ["failed", "done"])  # the running one was lost
+        # The batch left with the old process: no counters, no terminal frame.
+        self.assertEqual(self.terminal_frames(), [])
+        self.assertEqual(self.runner.active_batches(), [])
+
+    async def test_a_job_with_two_outputs_is_one_job_and_two_images(self) -> None:
+        self.server.images_per_job = 2
+        await self.start(self.manual(count_per_batch=3))
+        await self.until_over()
+        (frame,) = self.frames("batch_complete")
+        self.assertEqual((frame["images_done"], frame["images_total"]), (6, 3))
+        self.assertEqual(len(self.db.list_t2i_images(limit=50)), 6)
+        self.assertEqual(self.runner.active_batches(), [])
 
 
 if __name__ == "__main__":

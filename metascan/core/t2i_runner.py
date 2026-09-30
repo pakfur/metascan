@@ -1,13 +1,23 @@
-"""Text-to-image runner: caption resolution, prompt writing, batch planning.
+"""Text-to-image runner: caption resolution, prompt writing, batches.
 
 Layering mirrors I2vRunner: this is the only module that knows about
 ``t2i_images``; ``ComfyClient`` stays a generic job driver. Correlation
-flows one way -- a batch stamps ``t2i_batch_id`` on every job it submits.
+flows one way -- a batch stamps ``t2i_batch_id`` on every job it submits,
+and ``handle_job_event`` (registered with ``ComfyClient.on_job_event``)
+turns the finished jobs back into ``t2i_images`` rows and counters.
 
 A batch is planned completely before anything happens (``start_batch``):
 every static problem is a named error, the whole seed sequence is known,
 and so is the seed the dialog should show afterwards (``next_seed``). Only
-then is state created and events are emitted.
+then is state created, events are emitted and a background task takes over.
+That task is a producer (it writes the prompts) and a consumer (it submits
+the jobs, at most ``window`` unfinished at a time) over a small queue;
+whether they take turns or overlap follows ``unload_vlm_during_generation``
+(spec 6.3). Every batch ends with exactly one terminal frame:
+``batch_complete``, ``batch_cancelled`` or ``batch_error``.
+
+State is in memory, event-loop only (no locks): a restart drops unsubmitted
+steps, and jobs ComfyClient re-enqueues still ingest, without a form state.
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ import json
 import logging
 import os
 import random
+import sqlite3
 import time
 import uuid
 from collections import OrderedDict
@@ -37,8 +48,10 @@ from metascan.core.t2i_form import (
     SEED_POLICIES,
     T2I_MODES,
     T2iFormError,
+    build_form_state,
     next_seed,
     normalize_loras,
+    render_seconds,
     t2i_dims,
 )
 from metascan.core.t2i_models import (
@@ -56,7 +69,7 @@ from metascan.core.t2i_prompt import (
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
-from metascan.utils.path_utils import to_native_path
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +174,13 @@ class _Batch:
     pending: Set[int] = field(default_factory=set)
     # "complete" | "cancelled" | "error" once the terminal frame is decided.
     finished: Optional[str] = None
+    # Submitted jobs not yet accounted for: waiting for their image to be
+    # ingested, or for a failed / cancelled update. A job leaves this set
+    # exactly once, which is what makes every counter exact.
+    unresolved: Set[int] = field(default_factory=set)
+    # Jobs whose outputs have been announced and whose ingest is running.
+    ingesting: Set[int] = field(default_factory=set)
+    resolved: int = 0  # jobs accounted for; the batch ends when it reaches the total
 
     @property
     def mode(self) -> str:
@@ -278,6 +298,9 @@ class T2iRunner:
         # has not arrived; and the per-job snapshot the ingest will need.
         self._job_batch: Dict[int, str] = {}
         self._job_meta: Dict[int, Dict[str, Any]] = {}
+        # Ingest tasks spawned by handle_job_event; held so they are not
+        # garbage-collected mid-flight and can be drained by aclose().
+        self._ingest_tasks: Set["asyncio.Task[None]"] = set()
         # Last filename number handed out (epoch seconds). Two images in the
         # same second must not share one -- see _next_output_number.
         self._last_output_number = 0
@@ -779,6 +802,7 @@ class T2iRunner:
         """Remember a submitted job: it owns a window slot until its terminal
         job_update, and the ingest will need what the dialog showed."""
         batch.pending.add(job_id)
+        batch.unresolved.add(job_id)
         self._job_batch[job_id] = batch.id
         manual = batch.mode == "manual"
         self._job_meta[job_id] = {
@@ -955,6 +979,14 @@ class T2iRunner:
         if batch.last_error is not None:
             data["last_error"] = batch.last_error
         self._emit("t2i", event, data)
+        for job_id in sorted(batch.pending | batch.unresolved):
+            self._release_slot(batch, job_id)
+            self._job_batch.pop(job_id, None)
+            self._job_meta.pop(job_id, None)
+        # Nothing is owed once the batch is over: a straggler's event finds
+        # nothing to account for (its image is still kept).
+        batch.unresolved.clear()
+        batch.ingesting.clear()
         self._batches.pop(batch.id, None)
         self._finished[batch.id] = batch
         while len(self._finished) > _FINISHED_KEEP:
@@ -1030,11 +1062,15 @@ class T2iRunner:
         try:
             if event == "job_update":
                 self._on_job_update(payload)
+            elif event == "job_outputs":
+                self._on_job_outputs(payload)
         except Exception:
             logger.warning("t2i job event handling failed", exc_info=True)
 
     def _on_job_update(self, payload: Dict[str, Any]) -> None:
-        if payload.get("state") not in _TERMINAL_JOB_STATES:
+        """A job ended: free its window slot and account for it."""
+        state = payload.get("state")
+        if state not in _TERMINAL_JOB_STATES:
             return
         job_id = payload.get("job_id")
         if not isinstance(job_id, int):
@@ -1042,15 +1078,231 @@ class T2iRunner:
         batch_id = self._job_batch.pop(job_id, None)
         if batch_id is None:
             return  # not ours, or already handled
+        if state != "done":
+            # A done job's snapshot belongs to its ingest (job_outputs comes
+            # first and the ingest may still be running); the others end here.
+            self._job_meta.pop(job_id, None)
         batch = self._batches.get(batch_id)
+        if batch is None:
+            return
+        self._release_slot(batch, job_id)
+        if batch.finished is not None:
+            return  # winding down: the abort owns the counters
+        if state == "failed":
+            self._settle(
+                batch, job_id, failure=str(payload.get("error") or "the job failed")
+            )
+        elif state == "cancelled":
+            self._settle(batch, job_id, cancelled=True)
+        elif job_id not in batch.ingesting:
+            # ComfyClient announces a job's outputs before it marks it done,
+            # so a done job that is neither being ingested nor already
+            # accounted for has produced nothing to wait for.
+            self._settle(batch, job_id, failure="the job finished without an image")
+
+    def _on_job_outputs(self, payload: Dict[str, Any]) -> None:
+        job_id = payload.get("job_id")
+        if not isinstance(job_id, int):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("t2i handle_job_event: no running loop", exc_info=True)
+            return
+        # Read now, hand to the task: by the time it runs the job's done
+        # update may already have dropped the link, and the snapshot is the
+        # ingest's to take (spec 6.4).
+        batch_id = self._job_batch.get(job_id)
+        meta = self._job_meta.pop(job_id, None)
+        batch = self._batches.get(batch_id) if batch_id is not None else None
         if batch is not None:
-            self._release_slot(batch, job_id)
+            batch.ingesting.add(job_id)
+        task = loop.create_task(
+            self._ingest_outputs(payload, batch_id, meta), name=f"t2i-ingest-{job_id}"
+        )
+        self._ingest_tasks.add(task)
+        task.add_done_callback(self._ingest_tasks.discard)
+
+    def _form_state(
+        self,
+        job: Dict[str, Any],
+        meta: Optional[Dict[str, Any]],
+        params: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """The dialog exactly as submitted, for this image; None when the
+        runner has no snapshot (after a restart) or it does not validate --
+        an image is never lost over its form."""
+        if meta is None:
+            return None
+        try:
+            return build_form_state(
+                mode=meta.get("mode"),
+                filter=meta.get("filter"),
+                caption=meta.get("caption"),
+                model=meta.get("model"),
+                preset_id=job.get("preset_id"),
+                megapixels=meta.get("megapixels"),
+                aspect_ratio=meta.get("aspect_ratio"),
+                seed=params.get("seed"),
+                prompt=meta.get("prompt"),
+                negative=meta.get("negative"),
+                loras=meta.get("loras"),
+            )
+        except T2iFormError as exc:
+            logger.warning(
+                "t2i ingest: the form state of job %s is unusable (%s); "
+                "stored without one",
+                job.get("id"),
+                exc,
+            )
+            return None
+
+    async def _insert_images(
+        self,
+        job: Dict[str, Any],
+        meta: Optional[Dict[str, Any]],
+        batch_id: str,
+        files: List[Any],
+    ) -> List[str]:
+        """One ``t2i_images`` row per file: the as-rendered facts from the
+        job's stored params and the snapshot. Returns the POSIX paths that
+        got a row; a file that cannot be recorded is logged and skipped."""
+        try:
+            params = json.loads(job["params"])
+        except (TypeError, ValueError):
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        known = meta if meta is not None else {}
+        form = self._form_state(job, meta, params)
+        render_s = render_seconds(job.get("started_at"), job.get("finished_at"))
+        inserted: List[str] = []
+        for entry in files:
+            posix = to_posix_path(entry)
+            try:
+                await asyncio.to_thread(
+                    self.db.create_t2i_image,
+                    file_path=posix,
+                    batch_id=batch_id,
+                    model=known.get("model"),
+                    preset_id=job.get("preset_id"),
+                    caption=known.get("caption"),
+                    prompt_used=params.get("positive"),
+                    negative_used=params.get("negative"),
+                    seed=params.get("seed"),
+                    prompt_seed=known.get("prompt_seed"),
+                    width=params.get("width"),
+                    height=params.get("height"),
+                    megapixels=known.get("megapixels"),
+                    aspect_ratio=known.get("aspect_ratio"),
+                    loras=(
+                        known.get("loras") if meta is not None else params.get("loras")
+                    ),
+                    render_s=render_s,
+                    comfy_prompt_id=job.get("comfy_prompt_id"),
+                    form_state=form,
+                )
+            except sqlite3.IntegrityError:
+                logger.warning("t2i ingest: %s already has a row; skipped", posix)
+                continue
+            except Exception:
+                logger.warning(
+                    "Could not ingest t2i image %s for job %s",
+                    entry,
+                    job.get("id"),
+                    exc_info=True,
+                )
+                continue
+            inserted.append(posix)
+        return inserted
+
+    async def _ingest_outputs(
+        self,
+        payload: Dict[str, Any],
+        batch_id: Optional[str],
+        meta: Optional[Dict[str, Any]],
+    ) -> None:
+        """Record the images a job produced and account for the job.
+        ``batch_id`` is what the runner remembered when the outputs were
+        announced (None after a restart); it is what lets a failed database
+        read still fail the right job. The row's own ``t2i_batch_id`` wins."""
+        job_id = payload["job_id"]
+        files = list(payload.get("files") or [])
+        inserted: List[str] = []
+        try:
+            job = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if job is None or not job.get("t2i_batch_id"):
+                return  # a job of another feature: not ours to account for
+            batch_id = str(job["t2i_batch_id"])
+            inserted = await self._insert_images(job, meta, batch_id, files)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Could not ingest the outputs of t2i job %s: %s",
+                job_id,
+                exc,
+                exc_info=True,
+            )
+        self._account_ingest(batch_id, job_id, inserted, bool(files))
+
+    def _account_ingest(
+        self, batch_id: Optional[str], job_id: int, inserted: List[str], had_files: bool
+    ) -> None:
+        """Announce the new images, then account for the job -- unless its
+        batch is over (a restart, a cancel): the images are kept and shown,
+        but no counter moves and no second terminal frame can happen."""
+        if inserted and batch_id is not None:
+            self._emit(
+                "t2i",
+                "t2i_images_changed",
+                {"batch_id": batch_id, "files": [to_native_path(p) for p in inserted]},
+            )
+        batch = self._batches.get(batch_id) if batch_id is not None else None
+        if batch is None or batch.finished is not None:
+            return
+        if inserted:
+            self._settle(batch, job_id, images=len(inserted))
+        elif had_files:
+            self._settle(batch, job_id, failure="the job's image could not be recorded")
+        else:
+            self._settle(batch, job_id, failure="the job produced no image")
+
+    def _settle(
+        self,
+        batch: _Batch,
+        job_id: int,
+        *,
+        images: int = 0,
+        failure: Optional[str] = None,
+        cancelled: bool = False,
+    ) -> None:
+        """Account for one job, once; the last one ends the batch."""
+        if job_id not in batch.unresolved:
+            return
+        batch.unresolved.discard(job_id)
+        batch.ingesting.discard(job_id)
+        batch.resolved += 1
+        if not cancelled:
+            if failure is not None:
+                batch.images_failed += 1
+                batch.last_error = failure
+            else:
+                batch.images_done += images
+            self._emit_progress(batch)
+        if batch.resolved >= batch.total_images:
+            batch.finished = "complete"
+            self._retire(batch, "complete")
 
     async def aclose(self) -> None:
-        """Stop every batch's run. The jobs already in ComfyUI are left to
-        ComfyClient."""
+        """Stop every batch's run and let the ingests in flight finish, so no
+        image that ComfyUI already produced is lost. The jobs already in
+        ComfyUI are left to ComfyClient."""
         tasks = [b.task for b in self._batches.values() if b.task and not b.task.done()]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        ingests = [t for t in self._ingest_tasks if not t.done()]
+        if ingests:
+            await asyncio.gather(*ingests, return_exceptions=True)
