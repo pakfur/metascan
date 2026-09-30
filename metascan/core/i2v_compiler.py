@@ -91,6 +91,7 @@ _NSFW_HINT = (
     "Carry over the users explicit use of sexual positions and slang that are present in the users idea for the video"
 )
 
+
 def build_i2v_user_prompt(idea: str, duration_s: float) -> str:
     n = beat_count(duration_s)
     idea_line = idea.strip() or "(none -- infer a natural continuation)"
