@@ -77,6 +77,7 @@ function onFieldChange(idx: number, field: RuleField) {
   // The saved folders may not use the rule yet, so load its set now for
   // the live match count.
   if (field === 'i2v') void foldersStore.ensureI2vSources(true)
+  if (field === 't2i') void foldersStore.ensureT2iPaths(true)
 }
 
 function onOpChange(idx: number, op: RuleOp) {

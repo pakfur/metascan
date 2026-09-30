@@ -10,6 +10,7 @@ export type RuleField =
   | 'modified'
   | 'added'
   | 'i2v'
+  | 't2i'
 
 export type RuleOp =
   | 'is'
