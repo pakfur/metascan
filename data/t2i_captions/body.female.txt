@@ -1,0 +1,19 @@
+# Read after the word "with": with <value>. body.male.txt is the male list.
+a slim build
+a slender frame
+a petite frame
+a willowy frame
+a toned build
+an athletic build
+a compact athletic build
+a lean build
+a strong build
+a sturdy build
+a solid build
+an average build
+a soft curvy build
+a curvy build
+a full-figured build
+a tall slender build
+a muscular build
+a graceful slim build

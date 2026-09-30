@@ -1,0 +1,24 @@
+# Colour only -- the caption supplies length and style ("her long wavy __HAIR__").
+# Every value must end in " hair": later mentions become "the copper-red-haired woman".
+auburn hair
+jet-black hair
+black hair
+raven black hair
+dark brown hair
+espresso brown hair
+chestnut brown hair
+light brown hair
+caramel brown hair
+mahogany hair
+copper red hair
+dark red hair
+ginger hair
+strawberry blonde hair
+honey blonde hair
+golden blonde hair
+sandy blonde hair
+ash blonde hair
+platinum blonde hair
+silver hair
+grey hair
+salt-and-pepper hair

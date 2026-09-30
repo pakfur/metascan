@@ -1,0 +1,27 @@
+# Character engine settings for the T2I dialog (metascan/core/t2i_characters.py).
+#
+# Every key is optional: a missing key -- or a missing file -- uses the built-in
+# default shown here. Edits apply to the next caption that is resolved.
+#
+# names:               caption tokens that mean a person, e.g. __ALICE__
+# nouns:               the word used for each gender in descriptions
+# slots:               characteristics drawn per person, in this order; each one
+#                      reads a list file named <slot>.txt, or <slot>.female.txt /
+#                      <slot>.male.txt to override it for one gender
+# intro:               how a first mention is assembled: "head" slots go in front
+#                      of the noun, "with" slots follow the word "with"
+# token_slots:         tokens that stand in for the word itself, e.g. __HAIR__
+# token_gender:        slots that belong to one gender (the others follow pronouns)
+# body_hair_prefixes:  a word before __HAIR__ that makes it body hair, not head hair
+
+names:
+  female: [ALICE, BELLA, CLARA, DIANNA, EMMA]
+  male: [ADAM, BOB]
+nouns: {female: woman, male: man}
+slots: [age, ethnicity, skin, eyes, face, hair, body]
+intro:
+  head: [age, ethnicity]
+  with: [skin, eyes, face, hair, body]
+token_slots: [hair, breasts, vagina, penis]
+token_gender: {breasts: female, vagina: female, penis: male}
+body_hair_prefixes: [pubic, body, facial, chest, arm, leg, underarm, armpit, stomach]
