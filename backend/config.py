@@ -218,3 +218,130 @@ def get_i2v_config(config: dict) -> dict:
         "output_root": output_root,
         "output_prefix": output_prefix.strip(),
     }
+
+
+T2I_DEFAULT_OUTPUT_PREFIX = "/%Y-%m-%d/t2i_"
+
+
+def get_t2i_config(config: dict) -> dict:
+    """Return the ``t2i`` section with defaults filled in.
+
+    Shape:
+        {
+            "output_root": "",           # "" = <comfy.output_root>/t2i
+            "output_prefix": "/%Y-%m-%d/t2i_",
+            "megapixels": [0.5, 1.0, 1.5, 2.0],
+            "default_megapixels": 1.0,
+            "default_model": "krea2",    # a t2i_models profile id
+            "model_workflows": {"krea2": None, "qwen": None, "sd": None,
+                                "zimage": None},   # workflow_presets.id or None
+            "content_mode": "uncensored",  # uncensored | sfw | default
+            "identity": {},              # per-model override: ref | noun | name
+            "window": 4,                 # unfinished jobs per batch
+            "max_batch_size": 500,
+            "max_count_per_batch": 32,
+        }
+
+    ``output_root`` + ``output_prefix`` place generated images the way the
+    i2v pair places clips (metascan/core/i2v_output.py). ``window`` and the
+    two limits are config-file-only; the config tab never writes them.
+
+    Values are sanitised, not coerced: one of the wrong JSON type is
+    ignored (``True`` is not 1, ``"3"`` is not 3, ``3.0`` is not a preset
+    id). Unknown model ids and identity styles are dropped, megapixel
+    entries outside ``(0, MAX_MEGAPIXELS]`` are dropped one by one, and the
+    integer settings are clamped to at least 1.
+    """
+    # Function-level: keeps this module free of import cycles and stops
+    # every route module that reads config.json from loading the prompt
+    # store (t2i_prompt) just to import backend.config.
+    from metascan.core.t2i_characters import IDENTITY_STYLES
+    from metascan.core.t2i_form import MAX_MEGAPIXELS
+    from metascan.core.t2i_models import MODEL_PROFILES
+    from metascan.core.t2i_prompt import CONTENT_MODES
+
+    raw = config.get("t2i")
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def _number(value: object) -> Optional[float]:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return float(value)
+            except OverflowError:  # an int too large for a float
+                return None
+        return None
+
+    def _whole(value: object) -> Optional[int]:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
+    def _preset_id(value: object) -> Optional[int]:
+        whole = _whole(value)
+        return whole if whole is not None and whole >= 1 else None
+
+    def _at_least_one(value: object, default: int) -> int:
+        whole = _whole(value)
+        return default if whole is None else max(1, whole)
+
+    output_root = raw.get("output_root")
+    output_root = output_root.strip() if isinstance(output_root, str) else ""
+    # An explicit "" is a real choice (files straight into the root, bare
+    # number as the name); only an absent/junk value gets the default.
+    output_prefix = raw.get("output_prefix")
+    if not isinstance(output_prefix, str):
+        output_prefix = T2I_DEFAULT_OUTPUT_PREFIX
+
+    raw_megapixels = raw.get("megapixels")
+    megapixels: List[float] = []
+    for entry in raw_megapixels if isinstance(raw_megapixels, list) else []:
+        number = _number(entry)
+        # The range test is False for nan, and inf is above the cap.
+        if number is not None and 0 < number <= MAX_MEGAPIXELS:
+            megapixels.append(number)
+    if not megapixels:
+        megapixels = [0.5, 1.0, 1.5, 2.0]
+    default_mp = _number(raw.get("default_megapixels"))
+    if default_mp is None:
+        default_mp = 1.0
+    if default_mp not in megapixels:
+        default_mp = megapixels[0]
+
+    default_model = raw.get("default_model")
+    if not isinstance(default_model, str) or default_model not in MODEL_PROFILES:
+        default_model = "krea2"
+
+    raw_workflows = raw.get("model_workflows")
+    if not isinstance(raw_workflows, dict):
+        raw_workflows = {}
+    model_workflows = {
+        model_id: _preset_id(raw_workflows.get(model_id)) for model_id in MODEL_PROFILES
+    }
+
+    content_mode = raw.get("content_mode")
+    if not isinstance(content_mode, str) or content_mode not in CONTENT_MODES:
+        content_mode = "uncensored"
+
+    raw_identity = raw.get("identity")
+    if not isinstance(raw_identity, dict):
+        raw_identity = {}
+    identity = {
+        model_id: raw_identity[model_id]
+        for model_id in MODEL_PROFILES
+        if raw_identity.get(model_id) in IDENTITY_STYLES
+    }
+
+    return {
+        "output_root": output_root,
+        "output_prefix": output_prefix.strip(),
+        "megapixels": megapixels,
+        "default_megapixels": default_mp,
+        "default_model": default_model,
+        "model_workflows": model_workflows,
+        "content_mode": content_mode,
+        "identity": identity,
+        "window": _at_least_one(raw.get("window"), 4),
+        "max_batch_size": _at_least_one(raw.get("max_batch_size"), 500),
+        "max_count_per_batch": _at_least_one(raw.get("max_count_per_batch"), 32),
+    }
