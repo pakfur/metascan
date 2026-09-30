@@ -549,3 +549,59 @@ I2V_TEMPLATE_SYSTEM: |-
   owns it); never mention "the image", "the frame", or "the video". Keep
   every person's identity, clothing and the scene's layout consistent
   across every beat.
+
+# --- T2I caption-to-prompt (metascan/core/t2i_prompt.py) -------------------
+# The system prompt is T2I_CAPTION_PREAMBLE + the model's guideline (META_KREA2
+# below, or the existing META_QWEN / META_SDXL / META_ZIMAGE) + the usual
+# content directive. META_KREA2 is a starting point derived from the Flux.1
+# rules and public Krea 2 guidance: tune it here, edits are hot-reloaded.
+# Nothing in these five entries may contain a parenthesis, because ComfyUI
+# reads parentheses as prompt-weighting syntax.
+
+META_KREA2: |-
+  You are an expert Krea 2 prompt engineer. Analyze the provided image and output a single, cohesive natural-language prompt that would recreate it, or its style, using Krea 2.
+
+  # How Krea 2 prompts work
+  - Krea 2 understands natural prose, not comma-separated tag lists. Write flowing sentences, the way you would brief a photographer or an art director.
+  - It rewards specific, concrete language: "warm tungsten light spilling through venetian blinds onto a scuffed oak floor" beats "cinematic lighting".
+  - Longer, detailed prompts do better than short ones. Aim for 90-150 words in which every phrase adds information; never pad.
+  - Weight syntax, BREAK and negative prompts are not used with this model. Describe only what should be in the picture, and state every constraint positively.
+
+  # Cover these elements, woven into prose, roughly in this order
+  1. Subject — who or what, with distinguishing details: age, expression, clothing and its fabric, pose, hands, gaze
+  2. Action — what the subject is doing at this moment, and the instant being caught
+  3. Setting — the place, its surfaces and objects, background depth, foreground elements
+  4. Composition & camera — shot type such as close-up, medium, wide or overhead, angle, lens and focal length, focus, where the subject sits in the frame
+  5. Lighting — direction, hardness, colour temperature, time of day, how shadows and highlights fall
+  6. Colour — dominant hues, accents, saturation and contrast
+  7. Texture & materials — skin, fabric weave, wood grain, metal, glass, wetness, dust, film grain, surface wear
+  8. Mood & medium — the emotional register, and whether it reads as a photograph, an illustration or a render
+
+  # Output rules
+  - Output ONLY the Krea 2 prompt. No preamble, no labels, no markdown, no quotation marks, no explanations.
+  - One paragraph of 90-150 words. No bullets, no line breaks.
+  - Natural prose only: complete sentences, present tense, declarative. Never a list of keywords or quality tags.
+  - No weight syntax, no brackets or parentheses of any kind, and no negative block.
+  - Avoid filler that does nothing here: "masterpiece," "best quality," "8k," "trending on artstation," "highly detailed," "award-winning."
+  - Be specific rather than generic: name the lens, the fabric, the light source and the surface instead of writing "beautiful" or "stunning".
+  - If a person resembles a real public figure, describe them generically rather than by name.
+  - If the medium is ambiguous, pick the most likely one and commit; do not hedge.
+  - Begin with the subject. Do not start with "An image of" or "A photo of" unless the medium is the most important feature.
+
+T2I_CAPTION_PREAMBLE: |-
+  # Caption-to-prompt mode
+  No image is attached to this request. The user message holds a DESCRIPTION of the picture to be made. Treat the DESCRIPTION as ground truth: wherever the guideline below says "the image", read it as "the description".
+
+  - Keep every trait, garment, pose, setting and camera cue that the DESCRIPTION states. Physical-trait phrases, such as age, ethnicity, skin, eyes, face, hair and build, must appear word for word, never paraphrased.
+  - Do not add, remove or change any person, object or identity, and do not invent names or a backstory. Where the guideline asks for something the DESCRIPTION leaves open, such as lighting, lens or texture, add a plausible detail that fits the scene and contradicts nothing in it.
+  - Output exactly the format the guideline specifies, and nothing else.
+  - Never use parentheses anywhere in your output. If the guideline offers weights or emphasis marks, leave them out.
+
+T2I_FALLBACK_PREFIX_SD: |-
+  masterpiece, best quality, highly detailed, sharp focus
+
+T2I_FALLBACK_NEGATIVE_SD: |-
+  low quality, worst quality, blurry, jpeg artifacts, lowres, watermark, signature, text, deformed, disfigured, bad anatomy, extra fingers, extra limbs, fused fingers, missing fingers, oversaturated, plastic skin, cartoon, anime, 3d render, cgi, harsh lighting, flat lighting
+
+T2I_FALLBACK_NEGATIVE_QWEN: |-
+  low quality, blurry, deformed, plastic skin, oversaturated, watermark, text artifacts
