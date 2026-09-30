@@ -80,8 +80,14 @@ export const useMediaStore = defineStore('media', () => {
     return folders.scopeMedia(displayedMedia.value)
   })
 
-  async function loadAllMedia() {
-    loading.value = true
+  // `silent` is for background refreshes that must not raise `loading`, the
+  // flag behind the dimmed "Loading media..." overlay (the T2I image bridge
+  // reloads every few seconds while a batch runs). Only a literal `true` is
+  // silent: a caller that passes anything else, say an Event from a handler
+  // bound straight to this function, gets the overlay as before.
+  async function loadAllMedia(options?: { silent?: boolean }) {
+    const silent = options?.silent === true
+    if (!silent) loading.value = true
     try {
       const data = await fetchAllMedia(sortOrder.value, false, true)
       allMedia.value = data
@@ -89,7 +95,7 @@ export const useMediaStore = defineStore('media', () => {
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
       )
     } finally {
-      loading.value = false
+      if (!silent) loading.value = false
     }
   }
 

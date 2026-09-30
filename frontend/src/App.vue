@@ -2,8 +2,10 @@
 import ToastHost from './components/layout/ToastHost.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useFoldersStore } from './stores/folders'
+import { useT2iStore } from './stores/t2i'
 
 const foldersStore = useFoldersStore()
+const t2iStore = useT2iStore()
 
 // Live-sync folder mutations from other tabs / sessions.
 useWebSocket('folders', (event, data) => {
@@ -35,10 +37,16 @@ useWebSocket('i2v', (event) => {
 })
 
 // New (or deleted) T2I images change the "Generated with T2I" smart-folder
-// rule's membership. Always on, so it works whether or not the T2I dialog
-// is open.
+// rule's membership and belong in the library grid. Always on, so it works
+// whether or not the T2I dialog is open: batches keep running on the server
+// after the dialog closes. The grid reload is the store's own debounced
+// function, which the dialog's forwarder shares, so an open dialog does not
+// reload twice.
 useWebSocket('t2i', (event) => {
-  if (event === 't2i_images_changed') void foldersStore.refreshT2iPaths()
+  if (event === 't2i_images_changed') {
+    void foldersStore.refreshT2iPaths()
+    void t2iStore.scheduleMediaReload()
+  }
 })
 </script>
 
