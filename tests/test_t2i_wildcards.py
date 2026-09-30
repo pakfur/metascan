@@ -262,7 +262,8 @@ class AdultOnlyGuardTests(TempDirCase):
             "canteen green eyes",
             "kidney red hair",
             "minority language",
-            "childlike wonder",
+            "kidskin gloves",
+            "in between shades",
             "nineteen freckles",
             "sixteen braids",
         )
@@ -296,6 +297,92 @@ class AdultOnlyGuardTests(TempDirCase):
         _, warnings = load_library(self.dir)
         self.assertEqual(len(warnings), 1)
         self.assertTrue(warnings[0].startswith("hair.txt:4: "), warnings[0])
+
+    # -- the guard is a screen for ordinary phrasing, not a whitelist of
+    # -- the spec's exact words (whole-branch review, finding 1)
+
+    def test_every_spelled_out_age_under_18_is_rejected_in_age_lists(self) -> None:
+        rejected = (
+            "twelve-year-old",
+            "a ten year old",
+            "nine years old",
+            "eleven",
+            "Zero years old",
+            "seven-year-old",
+            "seventeen",
+            "one year old",
+        )
+        accepted = (
+            "eighteen-year-old",
+            "nineteen",
+            "twenty-one-year-old",
+            "twenty one years old",
+            "thirty-six-year-old",
+            "forty five years old",
+            "ninety-year-old",
+            "twenty-seven-year-old",
+        )
+        self.write("age.txt", "\n".join(rejected + accepted) + "\n")
+        library, warnings = load_library(self.dir)
+        self.assertEqual(library.lists["age"], accepted)
+        self.assertEqual(len(warnings), len(rejected), warnings)
+        self.assertTrue(all("age under 18" in w for w in warnings), warnings)
+
+    def test_minor_word_families_are_rejected_in_every_list(self) -> None:
+        values = (
+            "a teenaged figure",
+            "lolita style",
+            "a lolicon look",
+            "shotacon",
+            "childlike face",
+            "a childish grin",
+            "school girl look",
+            "school-boy haircut",
+            "an adolescent build",
+            "prepubescent frame",
+            "pubescent",
+            "a tween look",
+            "toddler proportions",
+            "an infant face",
+            "jailbait",
+            "under18",
+            "under age",
+            "a kiddo grin",
+            "little girl energy",
+            "young boy features",
+            "pre-teen",
+            "pre teen",
+        )
+        for name in ("face.txt", "body.female.txt"):
+            with self.subTest(name=name):
+                self.write(name, "a fine value\n" + "\n".join(values) + "\n")
+                library, warnings = load_library(self.dir)
+                self.assertEqual(library.lists[name[:-4]], ("a fine value",))
+                self.assertEqual(len(warnings), len(values), warnings)
+                (self.dir / name).unlink()  # one file per pass
+
+    def test_an_age_under_18_is_rejected_in_every_list(self) -> None:
+        rejected = (
+            "a 14-year-old body",
+            "a 9 yo build",
+            "15 years old look",
+            "aged 12 frame",
+            "body at age 16",
+            "twelve-year-old",
+            "a thirteen year old",
+        )
+        accepted = (
+            "an 18-year-old look",
+            "a 25 years old look",
+            "14-karat gold hair",
+            "3-strand braided hair",
+            "a twenty-one-year-old look",
+            "in between shades",
+        )
+        self.write("body.txt", "\n".join(rejected + accepted) + "\n")
+        library, warnings = load_library(self.dir)
+        self.assertEqual(library.lists["body"], accepted)
+        self.assertEqual(len(warnings), len(rejected), warnings)
 
 
 class CharactersYmlTests(TempDirCase):
@@ -389,6 +476,31 @@ class CharactersYmlTests(TempDirCase):
         self.assertIn("bad name", text)
         self.assertIn("7", text)
         self.assertIn("ALICE", text)  # the female/male clash
+
+    def test_nouns_go_through_the_adult_guard(self) -> None:
+        self.write(
+            "characters.yml",
+            "nouns:\n  female: teen girl\n  male: 'man (tall)'\n",
+        )
+        library, warnings = load_library(self.dir)
+        self.assertEqual(library.config.noun_female, CharacterConfig().noun_female)
+        self.assertEqual(library.config.noun_male, CharacterConfig().noun_male)
+        text = "\n".join(warnings)
+        self.assertIn("nouns.female", text)
+        self.assertIn("nouns.male", text)
+        self.assertIn("minor term", text)
+        self.assertIn("parenthes", text)
+
+    def test_names_go_through_the_adult_guard(self) -> None:
+        self.write(
+            "characters.yml", "names:\n  female: [ZOE, LOLITA, KIDDO]\n  male: [MAX]\n"
+        )
+        library, warnings = load_library(self.dir)
+        self.assertEqual(library.config.female_names, ("ZOE",))
+        self.assertEqual(library.config.male_names, ("MAX",))
+        text = "\n".join(warnings)
+        self.assertIn("LOLITA", text)
+        self.assertIn("KIDDO", text)
 
     def test_unknown_intro_slots_are_dropped_with_a_warning(self) -> None:
         self.write(
@@ -513,6 +625,31 @@ class LibraryCacheTests(TempDirCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 320)
         self.assertEqual(len({id(library) for library in results}), 1)
+
+
+class GuardEndToEndTests(TempDirCase):
+    """Ordinary careless list edits must not reach a resolved caption.
+
+    The starters plus one bad line each in an age list, a body list and the
+    ``characters.yml`` noun: every one is reported, none is ever drawn.
+    """
+
+    def test_no_minor_cue_survives_into_a_resolved_caption(self) -> None:
+        for name in STARTER_FILES:
+            if name != "characters.yml":
+                shutil.copy(SHIPPED_DIR / name, self.dir / name)
+        with (self.dir / "age.txt").open("a", encoding="utf-8") as handle:
+            handle.write("twelve-year-old\n")
+        with (self.dir / "body.female.txt").open("a", encoding="utf-8") as handle:
+            handle.write("a teenaged figure\n")
+        self.write("characters.yml", "nouns:\n  female: 'teen girl (petite)'\n")
+        library, warnings = load_library(self.dir)
+        self.assertEqual(len(warnings), 3, warnings)
+        caption = "__ALICE__ and __ADAM__ sit on a bench. __BELLA__ waves."
+        for seed in range(400):
+            for style in ("ref", "noun", "name"):
+                text = resolve_caption(caption, seed, style, library).text.lower()
+                self.assertNotRegex(text, r"twelve|teen|[()]", (seed, style, text))
 
 
 class ShippedStarterTests(TempDirCase):

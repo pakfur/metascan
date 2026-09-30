@@ -77,17 +77,106 @@ def _term_pattern(term: str) -> str:
     return r"[\s-]+".join(re.escape(word) for word in term.split())
 
 
+# More wording that names someone under 18, beyond the spec's deny list
+# above. A space or a hyphen may separate the words ("school girl",
+# "school-boy"); a plural is fine.
+MINOR_PHRASES: Tuple[str, ...] = (
+    "school girl",
+    "school boy",
+    "little girl",
+    "little boy",
+    "young girl",
+    "young boy",
+    "pre teen",
+    "under age",
+    "under18",
+    "kiddo",
+    "kiddie",
+)
+
+# Word families matched from the start of a word whatever follows, so
+# "teenaged", "childlike", "lolita", "adolescent" and "prepubescent" are
+# caught along with their plurals. The leading ``\b`` keeps "canteen",
+# "between" and "kidney" legal.
+MINOR_STEMS: Tuple[str, ...] = (
+    "teen",
+    "child",
+    "loli",
+    "shota",
+    "adolescen",
+    "pubescen",
+    "prepubescen",
+    "tween",
+    "toddler",
+    "infant",
+    "juvenile",
+    "underage",
+    "preteen",
+    "jailbait",
+)
+
 # ``\b`` on both sides keeps "canteen" and "kidney" legal; the optional
-# suffix catches "teens", "kids", "minors"; "children" is irregular.
+# suffix catches "teens", "kids", "minors"; "children" is irregular; the
+# second alternative is the stem families above.
 _MINOR_RE = re.compile(
     r"\b(?:"
-    + "|".join(_term_pattern(term) for term in MINOR_TERMS)
-    + r"|children)(?:s|es)?\b",
+    + "|".join(_term_pattern(term) for term in MINOR_TERMS + MINOR_PHRASES)
+    + r"|children)(?:s|es)?\b"
+    + r"|\b(?:"
+    + "|".join(MINOR_STEMS)
+    + r")\w*",
     re.IGNORECASE,
 )
-_SPELLED_MINOR_AGE_RE = re.compile(
-    r"\b(?:thirteen|fourteen|fifteen|sixteen|seventeen)\b", re.IGNORECASE
+
+_UNIT_WORDS: Dict[str, int] = {
+    word: number
+    for number, word in enumerate(
+        (
+            "zero one two three four five six seven eight nine ten eleven twelve "
+            "thirteen fourteen fifteen sixteen seventeen eighteen nineteen"
+        ).split()
+    )
+}
+_TENS_WORDS: Dict[str, int] = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fourty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+# A spelled-out number below 100. The tens-plus-unit form comes first so
+# "twenty-one" is one number (21), not "twenty" and a stray "one".
+_NUMBER_WORD = (
+    r"(?:(?:"
+    + "|".join(_TENS_WORDS)
+    + r")(?:[\s-]+(?:"
+    + "|".join(w for w, n in _UNIT_WORDS.items() if 1 <= n <= 9)
+    + r"))?|"
+    + "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
+    + r")"
 )
+_YEARS_OLD = r"(?:years?[\s-]*old|yrs?[\s-]*old|y/?o)"
+_SPELLED_NUMBER_RE = re.compile(r"\b" + _NUMBER_WORD + r"\b", re.IGNORECASE)
+# "14-year-old", "9 yo", "twelve year old", "aged 12", "age 16".
+_DIGIT_AGE_RE = re.compile(
+    r"(?<!\d)(\d{1,3})[\s-]*" + _YEARS_OLD + r"\b", re.IGNORECASE
+)
+_SPELLED_AGE_RE = re.compile(
+    r"\b(" + _NUMBER_WORD + r")[\s-]*" + _YEARS_OLD + r"\b", re.IGNORECASE
+)
+_AGED_RE = re.compile(r"\bage[ds]?[\s:-]*(\d{1,3})\b", re.IGNORECASE)
+
+
+def _spelled_value(words: str) -> int:
+    """The value of a spelled-out number matched by ``_NUMBER_WORD``."""
+    return sum(
+        _TENS_WORDS.get(word, _UNIT_WORDS.get(word, 0))
+        for word in re.split(r"[\s-]+", words.lower())
+    )
 
 
 def default_library_config() -> CharacterConfig:
@@ -151,6 +240,12 @@ def _names(value: Any, where: str, warnings: List[str]) -> Optional[Tuple[str, .
                     "starting with a letter; skipped"
                 )
             )
+            continue
+        reason = _reject_reason("name", name.lower())
+        if reason is not None:
+            warnings.append(
+                _config_warning(f"'{where}' entry {item!r} rejected: {reason}; skipped")
+            )
         elif name not in found:
             found.append(name)
     return tuple(found)
@@ -192,7 +287,16 @@ def _noun_updates(value: Any, warnings: List[str]) -> Dict[str, Any]:
     updates: Dict[str, Any] = {}
     for gender, raw in _by_gender(value, "nouns", warnings).items():
         if isinstance(raw, str) and raw.strip():
-            updates[f"noun_{gender}"] = raw.strip()
+            noun = raw.strip()
+            reason = _reject_reason("noun", noun)
+            if reason is None:
+                updates[f"noun_{gender}"] = noun
+            else:
+                warnings.append(
+                    _config_warning(
+                        f"'nouns.{gender}' rejected: {reason}; using the default"
+                    )
+                )
         else:
             warnings.append(
                 _config_warning(f"'nouns.{gender}' must be a word; using the default")
@@ -327,16 +431,42 @@ def _load_config(path: Path, warnings: List[str]) -> CharacterConfig:
 # --- list files -------------------------------------------------------------
 
 
-def _reject_reason(slot: str, value: str) -> Optional[str]:
-    if "(" in value or ")" in value:
-        return "contains parentheses (ComfyUI reads them as weights)"
+def _age_under_18(slot: str, value: str) -> bool:
+    """True if ``value`` states an age below 18.
+
+    In an ``age`` list any number on the line counts, digits or words. In
+    every other text ("14-year-old body", "aged 12", "a thirteen year old")
+    only a number that is plainly an age does.
+    """
     if slot == "age":
         for run in re.findall(r"\d+", value):
             digits = run.lstrip("0") or "0"
             if len(digits) <= 2 and int(digits) < 18:
-                return "age under 18"
-        if _SPELLED_MINOR_AGE_RE.search(value):
-            return "age under 18"
+                return True
+        return any(
+            _spelled_value(found.group(0)) < 18
+            for found in _SPELLED_NUMBER_RE.finditer(value)
+        )
+    return (
+        any(int(found.group(1)) < 18 for found in _DIGIT_AGE_RE.finditer(value))
+        or any(int(found.group(1)) < 18 for found in _AGED_RE.finditer(value))
+        or any(
+            _spelled_value(found.group(1)) < 18
+            for found in _SPELLED_AGE_RE.finditer(value)
+        )
+    )
+
+
+def _reject_reason(slot: str, value: str) -> Optional[str]:
+    """Why ``value`` must not reach a prompt, or None if it may.
+
+    Used for every list line and for the free text of ``characters.yml``
+    (nouns, names), so nothing a user edits bypasses the adult-only screen.
+    """
+    if "(" in value or ")" in value:
+        return "contains parentheses (ComfyUI reads them as weights)"
+    if _age_under_18(slot, value):
+        return "age under 18"
     found = _MINOR_RE.search(value)
     if found:
         return f'contains minor term "{found.group(0).lower()}"'

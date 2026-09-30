@@ -81,7 +81,7 @@ Write values so they read after `with`: `an oval face`, `green eyes`, `olive ski
 
 Lists reload automatically when a file changes. **Editing or reordering a list changes which value a given caption and seed picks.**
 
-**Adult only.** Any line in an `age` list containing a number under 18, or a spelled-out age from thirteen to seventeen, is rejected, and any line in any list containing a minor-indicating term (plurals included) is rejected. A line containing a parenthesis is rejected too, because parentheses never belong in a generated prompt. Rejections are logged and listed in the `wildcards.warnings` of `GET /api/t2i/config`.
+**Adult only.** Any line in an `age` list containing a number under 18, in digits or spelled out (`twelve-year-old`), is rejected. Any line in any list containing a minor-indicating word, phrase or word family (`teen…`, `child…`, `loli…`, `school girl`, plurals included) or an age under 18 (`14-year-old`, `aged 12`) is rejected. The `nouns` and `names` in `characters.yml` are screened the same way. It is a word screen for careless edits, not a promise about what a list can express: keep your lists adult. A line containing a parenthesis is rejected too, because parentheses never belong in a generated prompt. Rejections are logged and listed in the `wildcards.warnings` of `GET /api/t2i/config`.
 
 ### `characters.yml`
 
