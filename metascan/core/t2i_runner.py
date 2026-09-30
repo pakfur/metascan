@@ -117,7 +117,8 @@ class BatchRequest:
     count_per_batch: int = 1
     loras: List[Dict[str, Any]] = field(default_factory=list)
     # Manual fields. A Random request may carry them too: one with a prompt
-    # renders it as its first step (see ``_supplies_first_step``).
+    # renders it as its first step (see ``_supplies_first_step``), one with
+    # only a caption has a prompt written for it (``_names_first_caption``).
     caption: Optional[str] = None
     prompt: Optional[str] = None
     negative: Optional[str] = None
@@ -164,7 +165,11 @@ class _Batch:
     started_at: str
     phase: str  # "prompting" | "rendering"
     prompting: bool  # still writing prompts (Random batches only)
-    step: Optional[Dict[str, Any]] = None  # snapshot of the latest step
+    step: Optional[Dict[str, Any]] = None  # snapshot of the step on show
+    # Every step written so far, in order: a prompt can be written well ahead
+    # of the render, and waits here until its images are the ones rendering.
+    steps: List[Dict[str, Any]] = field(default_factory=list)
+    shown: int = -1  # index in ``steps`` of the step on show
     images_done: int = 0
     images_failed: int = 0
     last_error: Optional[str] = None
@@ -195,6 +200,21 @@ class _Batch:
         """The seeds of step ``index`` (0-based); the first is the step's
         prompt seed."""
         return self.seeds[index * self.per_step : (index + 1) * self.per_step]
+
+    @property
+    def rendering_step(self) -> int:
+        """Index (0-based) of the step being rendered: the first one whose
+        images are not all accounted for. Renders run in submission order, so
+        this is the step of the image ComfyUI is working on."""
+        return min(self.resolved // self.per_step, self.total_steps - 1)
+
+    @property
+    def current_seed(self) -> Optional[int]:
+        """The seed of the image being rendered (the first one not yet
+        accounted for); once every image is, the next unused seed."""
+        if self.resolved < len(self.seeds):
+            return self.seeds[self.resolved]
+        return self.next_seed
 
 
 @dataclass
@@ -281,6 +301,20 @@ def _supplies_first_step(req: BatchRequest) -> bool:
         req.mode == "random"
         and isinstance(req.prompt, str)
         and req.prompt.strip() != ""
+    )
+
+
+def _names_first_caption(req: BatchRequest) -> bool:
+    """A Random request that names a caption but carries no prompt (the
+    dialog's Prompt box is empty, its Caption box is not): step 1 has a prompt
+    written for THAT caption and no caption is drawn for it; the rest are
+    drawn as usual. A prompt wins over a caption, and a blank caption names
+    nothing."""
+    return (
+        req.mode == "random"
+        and not _supplies_first_step(req)
+        and isinstance(req.caption, str)
+        and req.caption.strip() != ""
     )
 
 
@@ -543,7 +577,7 @@ class T2iRunner:
                 raise T2iRequestError("Prompt is empty")
             _check_aspect(req.aspect_ratio)
         else:
-            if supplied:
+            if supplied or _names_first_caption(req):
                 _check_aspect(req.aspect_ratio)  # no CSV row to take one from
             if not await asyncio.to_thread(self.captions.available):
                 reason = await asyncio.to_thread(self.captions.error)
@@ -566,11 +600,11 @@ class T2iRunner:
                 f"{len(seeds)} image(s), so the run was shortened from "
                 f"{requested} to {len(seeds)}"
             )
-        # Increment/decrement know the seed after the run; fixed repeats its
-        # own; random has none. None also means "the range ran out".
-        following: Optional[int] = None
-        if req.seed_policy != "random":
-            following = next_seed(req.seed_policy, seeds[-1], random.Random())
+        # The seed the dialog shows once the run is over: increment/decrement
+        # step past the last image, fixed repeats its own, and random plans one
+        # more draw so the seed box still moves on. None means "the range ran
+        # out": no unused seed remains.
+        following = next_seed(req.seed_policy, seeds[-1], random.Random())
         # A negative the workflow has no node for is dropped, once, loudly:
         # the user typed one (Manual, or a Random first step) or the model
         # writes one (each step a Random batch draws).
@@ -657,6 +691,7 @@ class T2iRunner:
             "images_done": batch.images_done,
             "images_failed": batch.images_failed,
             "images_total": batch.total_images,
+            "seed": batch.current_seed,
             "next_seed": batch.next_seed,
         }
         if batch.last_error is not None:
@@ -675,6 +710,7 @@ class T2iRunner:
                 "images_total": b.total_images,
                 "images_done": b.images_done,
                 "images_failed": b.images_failed,
+                "seed": b.current_seed,
                 "next_seed": b.next_seed,
                 "started_at": b.started_at,
             }
@@ -752,12 +788,17 @@ class T2iRunner:
         )
 
     async def _random_step(self, batch: _Batch, index: int) -> _Step:
-        if batch.picker is None:
-            raise RuntimeError("a Random batch has no caption picker")
-        row = await asyncio.to_thread(batch.picker.next)
+        if index == 0 and _names_first_caption(batch.req):
+            # The caption the user named: nothing is drawn for this step. Its
+            # ratio was checked when the batch was planned.
+            caption, aspect = str(batch.req.caption), str(batch.req.aspect_ratio)
+        else:
+            if batch.picker is None:
+                raise RuntimeError("a Random batch has no caption picker")
+            row = await asyncio.to_thread(batch.picker.next)
+            caption, aspect = row.caption, row.aspect_ratio
         seeds = batch.step_seeds(index)
         warnings: List[str] = []
-        aspect = row.aspect_ratio
         megapixels = batch.req.megapixels
         multiple = batch.profile.dim_multiple
         try:
@@ -771,13 +812,13 @@ class T2iRunner:
             aspect = "1:1"
             width, height = t2i_dims(aspect, megapixels, multiple)
         library, _ = await asyncio.to_thread(self.library.get)
-        resolved = resolve_caption(row.caption, seeds[0], batch.identity, library)
+        resolved = resolve_caption(caption, seeds[0], batch.identity, library)
         warnings.extend(resolved.warnings)
         prompt, negative, notes = await self._write_prompt(batch, resolved.text)
         warnings.extend(notes)
         return _Step(
             index=index,
-            caption=row.caption,
+            caption=caption,
             aspect_ratio=aspect,
             seeds=seeds,
             prompt=prompt,
@@ -788,19 +829,34 @@ class T2iRunner:
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
-        snapshot: Dict[str, Any] = {
-            "step": step.index + 1,
-            "total_steps": batch.total_steps,
-            "caption": step.caption,
-            "aspect_ratio": step.aspect_ratio,
-            "seed": step.prompt_seed,
-            "prompt": step.prompt,
-            "negative": step.negative,
-            "warnings": list(step.warnings),
-        }
-        batch.step = snapshot
+        """Keep a written step and, if it is the one being rendered, show it."""
+        batch.steps.append(
+            {
+                "step": step.index + 1,
+                "total_steps": batch.total_steps,
+                "caption": step.caption,
+                "aspect_ratio": step.aspect_ratio,
+                "seed": step.prompt_seed,
+                "prompt": step.prompt,
+                "negative": step.negative,
+                "warnings": list(step.warnings),
+            }
+        )
+        self._show_step(batch)
+
+    def _show_step(self, batch: _Batch) -> None:
+        """Put the step being rendered on show (``batch_step``): its caption,
+        prompt and ratio are what the dialog's boxes hold while its images
+        render, and only the seed moves. A prompt written ahead of the render
+        -- every one, with the VLM unloaded for the render; the next one,
+        otherwise -- is kept and shown when its turn comes, never before."""
+        index = batch.rendering_step
+        if index == batch.shown or index >= len(batch.steps):
+            return
+        batch.shown = index
+        batch.step = batch.steps[index]
         self._emit(
-            "t2i", "batch_step", {"batch_id": batch.id, **copy.deepcopy(snapshot)}
+            "t2i", "batch_step", {"batch_id": batch.id, **copy.deepcopy(batch.step)}
         )
 
     def _set_phase(self, batch: _Batch, phase: str) -> None:
@@ -1341,6 +1397,7 @@ class T2iRunner:
                 batch.last_error = failure
             else:
                 batch.images_done += images
+            self._show_step(batch)  # before the progress that says it moved
             self._emit_progress(batch)
         if batch.resolved >= batch.total_images:
             batch.finished = "complete"

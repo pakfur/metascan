@@ -1051,17 +1051,16 @@ class TestValidation(ValidationCase):
                     self.random_mode(prompt="A red kite.", aspect_ratio=aspect),
                 )
 
-    async def test_a_random_request_with_a_blank_prompt_supplies_no_first_step(
+    async def test_a_random_request_with_neither_prompt_nor_caption_is_plain(
         self,
     ) -> None:
-        # Guard: only a prompt supplies a step. A blank one, with or without a
-        # stray caption, is a plain Random request and needs no ratio.
-        for prompt in (None, "", "  \n"):
-            with self.subTest(prompt=prompt):
+        # Guard: only a prompt supplies the first step and only a caption names
+        # it. With both blank (or absent) the request is a plain Random one and
+        # needs no ratio. (A caption alone names step 1: TestRandomFirstCaption.)
+        for prompt, caption in ((None, None), ("", ""), ("  \n", "  "), (None, "\n")):
+            with self.subTest(prompt=prompt, caption=caption):
                 started = await self.runner.start_batch(
-                    self.random_mode(
-                        prompt=prompt, caption="a red kite", aspect_ratio=None
-                    )
+                    self.random_mode(prompt=prompt, caption=caption, aspect_ratio=None)
                 )
                 self.assertEqual(started.total_images, 6)
                 await self.runner.cancel_batch(started.batch_id)  # frees the slot
@@ -1355,12 +1354,14 @@ class TestPlanning(ParkedRunCase):
             777,
         )
 
-    async def test_the_random_policy_reports_no_next_seed(self) -> None:
-        self.assertIsNone(
-            await self.next_seed_of(
-                self.manual(seed_policy="random", count_per_batch=3)
-            )
+    async def test_the_random_policy_plans_a_fresh_seed_as_its_next(self) -> None:
+        # Randomize has no successor to compute, but the seed box must still
+        # move on after a run: one more random seed is planned for it.
+        following = await self.next_seed_of(
+            self.manual(seed_policy="random", count_per_batch=3)
         )
+        assert following is not None
+        self.assertTrue(0 <= following <= SEED_MAX)
 
     async def test_random_mode_plans_its_steps_arithmetically(self) -> None:
         # batch_size 3 x count 2, increment from 10: six images, 10..15 -> 16.
@@ -1502,6 +1503,7 @@ class TestPlanning(ParkedRunCase):
                     "images_done": 0,
                     "images_failed": 0,
                     "images_total": 3,
+                    "seed": 100,
                     "next_seed": 103,
                 }
             ],
@@ -1514,17 +1516,22 @@ class TestPlanning(ParkedRunCase):
         (progress,) = self.frames("batch_progress")
         self.assertEqual(progress["phase"], "prompting")
         self.assertEqual(progress["images_total"], 6)
+        self.assertEqual(progress["seed"], 10)
         self.assertEqual(progress["next_seed"], 16)
         (frame,) = self.frames("batch_started")
         self.assertEqual(frame["mode"], "random")
         self.assertEqual(frame["total_steps"], 3)
         self.assertEqual(frame["batch_id"], started.batch_id)
 
-    async def test_the_random_policy_progress_frame_has_a_null_next_seed(self) -> None:
+    async def test_the_random_policy_progress_frame_carries_the_planned_seed(
+        self,
+    ) -> None:
         await self.runner.start_batch(self.manual(seed_policy="random"))
         (progress,) = self.frames("batch_progress")
-        self.assertIn("next_seed", progress)
-        self.assertIsNone(progress["next_seed"])
+        (row,) = self.runner.active_batches()
+        self.assertIsInstance(progress["next_seed"], int)
+        self.assertTrue(0 <= progress["next_seed"] <= SEED_MAX)
+        self.assertEqual(progress["next_seed"], row["next_seed"])
 
     async def test_a_progress_frame_carries_no_last_error_yet(self) -> None:
         await self.runner.start_batch(self.manual())
@@ -1551,6 +1558,7 @@ class TestPlanning(ParkedRunCase):
                 "images_total",
                 "mode",
                 "next_seed",
+                "seed",
                 "started_at",
                 "state",
                 "step",
@@ -1560,6 +1568,7 @@ class TestPlanning(ParkedRunCase):
         self.assertEqual(row["batch_id"], started.batch_id)
         self.assertEqual(row["mode"], "manual")
         self.assertEqual(row["state"], "rendering")
+        self.assertEqual(row["seed"], 100)  # the first image's, rendering first
         self.assertIsNone(row["step"])  # no step has been written yet
         self.assertEqual((row["images_done"], row["images_failed"]), (0, 0))
         stamp = datetime.fromisoformat(row["started_at"])
@@ -1611,6 +1620,13 @@ class BatchCase(RunnerCase):
 
     def params(self) -> List[Any]:
         return [params for _, params, _ in self.comfy.submits]
+
+    def written(self, batch_id: str) -> List[Dict[str, Any]]:
+        """Every step the batch has written so far, in order. ``batch_step``
+        puts them on show one at a time, as their images render, so the
+        frames are not where to look for a step that is only written."""
+        batch = self.runner._batches.get(batch_id) or self.runner._finished[batch_id]
+        return copy.deepcopy(batch.steps)
 
     def timeline(self) -> List[Tuple[Any, ...]]:
         """The shared log without the per-start bookkeeping calls."""
@@ -1831,7 +1847,10 @@ class TestGpuOrder(BatchCase):
             ("event", "batch_started"),
             ("event", "batch_progress"),
         ]
-        expected += [("vlm", "generate_text"), ("event", "batch_step")] * 3
+        # Batch 1 goes on show when its prompt is written; the prompts written
+        # after it wait for their images to render.
+        expected += [("vlm", "generate_text"), ("event", "batch_step")]
+        expected += [("vlm", "generate_text")] * 2
         expected += [("event", "batch_progress"), ("vlm", "shutdown")]
         expected += [("comfy", "submit")] * 6
         self.assertEqual(self.timeline(), expected)
@@ -2058,20 +2077,22 @@ class TestWindow(BatchCase):
 class TestRandomBatchRun(BatchCase):
     async def test_a_caption_is_never_repeated_within_a_batch(self) -> None:
         self.roomy()
-        await self.run_to_end(self.random_mode(batch_size=6, count_per_batch=1))
-        captions = [step["caption"] for step in self.frames("batch_step")]
+        batch_id = await self.run_to_end(
+            self.random_mode(batch_size=6, count_per_batch=1)
+        )
+        captions = [step["caption"] for step in self.written(batch_id)]
         self.assertEqual(len(captions), 6)
         self.assertEqual(sorted(captions), sorted(row[0] for row in CSV_ROWS))
 
     async def test_the_step_takes_its_aspect_ratio_from_the_row(self) -> None:
         self.roomy()
-        await self.run_to_end(
+        batch_id = await self.run_to_end(
             self.random_mode(
                 batch_size=2, count_per_batch=2, filter={"aspect_ratios": ["2:3"]}
             )
         )
         self.assertEqual(
-            [s["aspect_ratio"] for s in self.frames("batch_step")], ["2:3"] * 2
+            [s["aspect_ratio"] for s in self.written(batch_id)], ["2:3"] * 2
         )
         self.assertEqual(
             [(p.width, p.height) for p in self.params()], [(816, 1232)] * 4
@@ -2116,13 +2137,13 @@ class TestRandomBatchRun(BatchCase):
         self.assertEqual(len(step["warnings"]), 1)
         self.assertIn("0:5", step["warnings"][0])
 
-    async def test_the_character_seed_is_the_first_seed_of_the_step(self) -> None:
+    async def test_the_prompt_seed_is_the_first_seed_of_the_step(self) -> None:
         assert self.vlm is not None
         self.roomy()
-        await self.run_to_end(
+        batch_id = await self.run_to_end(
             self.random_mode(seed=10, batch_size=3, count_per_batch=2)
         )
-        steps = self.frames("batch_step")
+        steps = self.written(batch_id)
         self.assertEqual([s["seed"] for s in steps], [10, 12, 14])
         self.assertEqual([p.seed for p in self.params()], [10, 11, 12, 13, 14, 15])
         for step, call in zip(steps, self.vlm.calls):
@@ -2179,12 +2200,12 @@ class TestRandomBatchRun(BatchCase):
         self._write_csv(
             [[caption, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]] * 3
         )
-        await self.run_to_end(
+        batch_id = await self.run_to_end(
             self.random_mode(
                 seed=55, seed_policy="increment", batch_size=3, count_per_batch=1
             )
         )
-        steps = self.frames("batch_step")
+        steps = self.written(batch_id)
         self.assertEqual([s["seed"] for s in steps], [55, 56, 57])
         self.assertEqual([p.seed for p in self.params()], [55, 56, 57])
         self.assertEqual(len(self.vlm.calls), 3)
@@ -2302,7 +2323,7 @@ class TestRandomBatchRun(BatchCase):
         )
         await self.wait(started.batch_id)
         self.assertEqual(started.total_images, 4)
-        self.assertEqual(len(self.frames("batch_step")), 2)
+        self.assertEqual(len(self.written(started.batch_id)), 2)
         self.assertEqual([p.seed for p in self.params()], [3, 2, 1, 0])
         self.assertTrue(any("shortened" in w for w in started.warnings))
 
@@ -2317,10 +2338,13 @@ class TestRandomBatchRun(BatchCase):
         self.assertEqual(seeds[0], 7)
         self.assertEqual(len(set(seeds)), 4)
         self.assertTrue(all(0 <= s <= SEED_MAX for s in seeds))
-        self.assertEqual([s["seed"] for s in self.frames("batch_step")], seeds)
         self.assertEqual(
-            {f["next_seed"] for f in self.frames("batch_progress")}, {None}
-        )
+            [s["seed"] for s in self.frames("batch_step")], seeds[:1]
+        )  # only the batch being rendered is on show
+        following = {f["next_seed"] for f in self.frames("batch_progress")}
+        self.assertEqual(len(following), 1)  # one fresh seed, planned once
+        (planned,) = following
+        self.assertTrue(0 <= planned <= SEED_MAX)
 
 
 class TestRandomFirstStep(BatchCase):
@@ -2356,8 +2380,10 @@ class TestRandomFirstStep(BatchCase):
     ) -> None:
         assert self.vlm is not None
         self.roomy()
-        await self.run_to_end(self.supplied(seed=10, batch_size=3, count_per_batch=2))
-        steps = self.frames("batch_step")
+        batch_id = await self.run_to_end(
+            self.supplied(seed=10, batch_size=3, count_per_batch=2)
+        )
+        steps = self.written(batch_id)
         self.assertEqual([s["seed"] for s in steps], [10, 12, 14])
         self.assertEqual(steps[0]["caption"], "a red kite")
         drawn = [s["caption"] for s in steps[1:]]
@@ -2436,6 +2462,105 @@ class TestRandomFirstStep(BatchCase):
             self.log.index(("vlm", "generate_text")),
         )
         await self.runner.cancel_batch(started.batch_id)
+
+
+class TestRandomFirstCaption(BatchCase):
+    """A Random request that names a caption but carries no prompt (the dialog's
+    Prompt box is empty, its Caption box is not): step 1 has a prompt written
+    for THAT caption and no caption is drawn for it. The later steps are drawn
+    and written as always."""
+
+    # Not a row of the test CSV, so a later drawn step can never contain it.
+    CAPTION = "__ALICE__ feeds ducks at a pond."
+
+    def named(self, **over: Any) -> BatchRequest:
+        fields: Dict[str, Any] = dict(caption=self.CAPTION, aspect_ratio="2:3")
+        fields.update(over)
+        return self.random_mode(**fields)
+
+    async def test_step_one_is_written_for_the_caption_given(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(self.named(seed=42, batch_size=1, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["caption"], self.CAPTION)
+        self.assertEqual(step["aspect_ratio"], "2:3")
+        self.assertEqual(step["seed"], 42)
+        self.assertEqual(len(self.vlm.calls), 1)
+        self.assertIn(
+            self.expected_text(self.CAPTION, 42), self.vlm.calls[0]["user_prompt"]
+        )
+        (params,) = self.params()
+        self.assertEqual(params.positive, step["prompt"])
+        self.assertEqual((params.width, params.height), (816, 1232))
+
+    async def test_no_caption_is_drawn_for_step_one(self) -> None:
+        # One draw per later step and none for the named one (see
+        # test_a_supplied_step_draws_no_caption for why this is a spy).
+        self.roomy()
+        with mock.patch.object(
+            CaptionPicker, "next", autospec=True, side_effect=CaptionPicker.next
+        ) as draw:
+            await self.run_to_end(self.named(batch_size=3, count_per_batch=1))
+        self.assertEqual(draw.call_count, 2)
+
+    async def test_the_steps_after_it_are_drawn_and_written(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        await self.run_to_end(self.named(seed=10, batch_size=3, count_per_batch=2))
+        self.assertEqual(len(self.vlm.calls), 3)  # one prompt per step
+        asked = [call["user_prompt"] for call in self.vlm.calls]
+        self.assertIn(self.expected_text(self.CAPTION, 10), asked[0])
+        for later in asked[1:]:
+            self.assertNotIn("feeds ducks", later)
+        self.assertEqual([p.seed for p in self.params()], [10, 11, 12, 13, 14, 15])
+
+    async def test_a_prompt_wins_over_a_caption(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(
+            self.named(
+                prompt="A red kite over a gray sea.", batch_size=1, count_per_batch=1
+            )
+        )
+        self.assertEqual(self.vlm.calls, [])
+        (params,) = self.params()
+        self.assertEqual(params.positive, "A red kite over a gray sea.")
+
+    async def test_a_blank_caption_names_nothing(self) -> None:
+        self.roomy()
+        with mock.patch.object(
+            CaptionPicker, "next", autospec=True, side_effect=CaptionPicker.next
+        ) as draw:
+            await self.run_to_end(
+                self.named(caption="   ", batch_size=2, count_per_batch=1)
+            )
+        self.assertEqual(draw.call_count, 2)
+
+    async def test_its_aspect_ratio_is_checked_like_a_supplied_prompts(self) -> None:
+        for bad in (None, "", "wide", "0:5"):
+            with self.subTest(aspect=bad):
+                with self.assertRaises(T2iRequestError):
+                    await self.runner.start_batch(self.named(aspect_ratio=bad))
+        self.assertEqual(self.runner.active_batches(), [])
+
+    async def test_a_negative_the_model_will_write_is_warned_about_when_unusable(
+        self,
+    ) -> None:
+        # The model writes step 1's negative here, so a workflow with no
+        # MS_NEGATIVE node drops it, once, loudly (a supplied prompt has no
+        # negative to drop unless the user typed one).
+        started = await self.start(
+            self.named(model="sd", batch_size=1, count_per_batch=1)
+        )
+        self.assertEqual(
+            started.warnings,
+            ["negative prompt ignored: the workflow has no MS_NEGATIVE node"],
+        )
+        await self.wait(started.batch_id)
+
+    async def test_the_named_caption_is_remembered_with_its_images(self) -> None:
+        await self.run_to_end(self.named(batch_size=1, count_per_batch=1))
+        (job_id,) = self.comfy.job_ids
+        self.assertEqual(self.runner._job_meta[job_id]["caption"], self.CAPTION)
 
 
 class TestPromptRetryAndFallback(BatchCase):
@@ -2591,8 +2716,10 @@ class TestPromptRetryAndFallback(BatchCase):
         assert self.vlm is not None
         self.roomy()
         self.vlm.replies.extend([VlmError("x"), VlmError("x"), "Written by the model."])
-        await self.run_to_end(self.random_mode(batch_size=2, count_per_batch=1))
-        first, second = self.frames("batch_step")
+        batch_id = await self.run_to_end(
+            self.random_mode(batch_size=2, count_per_batch=1)
+        )
+        first, second = self.written(batch_id)
         self.assertEqual(
             first["warnings"], ["VLM failed (x) - used the resolved caption"]
         )
@@ -3477,6 +3604,7 @@ class TestAccounting(AccountingCase):
                     "images_done": 1,
                     "images_failed": 0,
                     "images_total": 3,
+                    "seed": 101,  # the image rendering now is the second
                     "next_seed": 103,
                 },
                 {
@@ -3485,6 +3613,7 @@ class TestAccounting(AccountingCase):
                     "images_done": 1,
                     "images_failed": 1,
                     "images_total": 3,
+                    "seed": 102,
                     "next_seed": 103,
                     "last_error": "node exploded",
                 },
@@ -3766,6 +3895,198 @@ class TestAccounting(AccountingCase):
         self.assertEqual(
             self.frames("batch_complete")[0]["last_error"], "the job failed"
         )
+
+
+class TestWhatTheDialogShows(AccountingCase):
+    """While a batch renders the dialog shows ONE image's worth of state: the
+    seed of the image being rendered, and the batch (caption, prompt, aspect
+    ratio) that image belongs to. Both move on as images are accounted for.
+    Writing a later batch's prompt never takes the boxes away from the batch
+    that is rendering, whatever order the GPU work runs in."""
+
+    def seeds_after_images(self) -> List[Optional[int]]:
+        """The seed in every progress frame sent after an image was accounted for."""
+        return [
+            f["seed"] for f in self.frames("batch_progress") if f["images_done"] > 0
+        ]
+
+    def shown_steps(self) -> List[int]:
+        return [s["step"] for s in self.frames("batch_step")]
+
+    async def test_the_progress_frame_carries_the_seed_of_the_image_rendering_now(
+        self,
+    ) -> None:
+        await self.manual_batch(count=3)  # 100, 101, 102, then 103 is next
+        first, second, third = self.comfy.job_ids
+        self.assertEqual([f["seed"] for f in self.frames("batch_progress")], [100])
+        await self.job_done(first)
+        await self.job_done(second)
+        await self.job_done(third)
+        self.assertEqual(
+            [f["seed"] for f in self.frames("batch_progress")], [100, 101, 102, 103]
+        )
+
+    async def test_a_failed_image_moves_the_seed_on_too(self) -> None:
+        await self.manual_batch(count=3)
+        first, second, _ = self.comfy.job_ids
+        self.job_failed(first)
+        await self.job_done(second)
+        self.assertEqual(
+            [f["seed"] for f in self.frames("batch_progress")], [100, 101, 102]
+        )
+
+    async def test_decrement_counts_down_and_ends_on_the_next_unused_seed(
+        self,
+    ) -> None:
+        await self.manual_batch(count=3, seed=50, seed_policy="decrement")
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        self.assertEqual(self.seeds_after_images(), [49, 48, 47])
+
+    async def test_the_random_policy_follows_its_drawn_seeds_to_a_fresh_one(
+        self,
+    ) -> None:
+        self.roomy()
+        batch_id = await self.run_to_end(
+            self.random_mode(
+                seed=7, seed_policy="random", batch_size=2, count_per_batch=2
+            )
+        )
+        batch = self.runner._batches[batch_id]
+        assert batch.next_seed is not None
+        for job_id in list(self.comfy.job_ids):
+            await self.job_done(job_id)
+        self.assertEqual(self.seeds_after_images(), batch.seeds[1:] + [batch.next_seed])
+        self.assertEqual(batch.seeds[0], 7)
+
+    async def test_fixed_keeps_showing_its_seed(self) -> None:
+        await self.manual_batch(count=1, seed=321, seed_policy="fixed")
+        await self.job_done(self.comfy.job_ids[0])
+        self.assertEqual({f["seed"] for f in self.frames("batch_progress")}, {321})
+
+    async def test_the_listed_batch_shows_the_seed_rendering_now(self) -> None:
+        await self.manual_batch(count=3)
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["seed"], 100)
+        await self.job_done(self.comfy.job_ids[0])
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["seed"], 101)
+
+    # -- the batch on show -----------------------------------------------------
+
+    async def drive(self, total: int = 6) -> List[List[int]]:
+        """Finish the jobs one by one; the batches on show after each."""
+        seen: List[List[int]] = []
+        for job_id in list(self.comfy.job_ids)[:total]:
+            await self.job_done(job_id)
+            seen.append(self.shown_steps())
+        return seen
+
+    async def test_with_the_prompts_written_first_batch_one_stays_on_show(
+        self,
+    ) -> None:
+        # Unload on (the default): all three prompts are written before the
+        # first image renders, and still only batch 1 is on show.
+        assert self.vlm is not None
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        self.assertEqual(len(self.vlm.calls), 3)
+        self.assertEqual(self.shown_steps(), [1])
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["step"]["step"], 1)
+        self.assertEqual(row["step"]["seed"], 10)
+
+    async def test_the_next_batch_comes_on_show_when_the_last_image_of_one_is_done(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        self.assertEqual(
+            await self.drive(),
+            [[1], [1, 2], [1, 2], [1, 2, 3], [1, 2, 3], [1, 2, 3]],
+        )
+
+    async def test_each_batch_on_show_is_its_own_caption_and_seed(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        await self.drive()
+        steps = self.frames("batch_step")
+        self.assertEqual([s["seed"] for s in steps], [10, 12, 14])
+        self.assertEqual(len({s["caption"] for s in steps}), 3)
+        self.assertEqual([s["total_steps"] for s in steps], [3, 3, 3])
+
+    async def test_the_listed_batch_follows_the_render_too(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        first, second, third, *_ = self.comfy.job_ids
+        await self.job_done(first)
+        await self.job_done(second)
+        await self.job_done(third)
+        (row,) = self.runner.active_batches()
+        self.assertEqual((row["step"]["step"], row["seed"]), (2, 13))
+
+    async def test_a_batch_on_show_arrives_before_the_progress_that_moved_it(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=2, count_per_batch=1)
+        )
+        await self.job_done(self.comfy.job_ids[0])
+        self.assertEqual(
+            self.names()[-3:], ["t2i_images_changed", "batch_step", "batch_progress"]
+        )
+
+    async def test_with_the_prompts_overlapping_a_later_prompt_does_not_take_the_boxes(
+        self,
+    ) -> None:
+        # Unload off: batch 1 is rendering while batches 2 and 3 are written.
+        self.runner.unload_vlm_during_generation = False
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        self.assertEqual(self.shown_steps(), [1])
+        self.assertEqual(
+            await self.drive(),
+            [[1], [1, 2], [1, 2], [1, 2, 3], [1, 2, 3], [1, 2, 3]],
+        )
+
+    async def test_the_last_batch_is_the_one_a_finished_run_leaves_on_show(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=2, count_per_batch=2)
+        )
+        await self.drive(4)
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        self.assertEqual(self.shown_steps(), [1, 2])
+        self.assertEqual(self.frames("batch_step")[-1]["total_steps"], 2)
+
+    async def test_a_failed_image_moves_the_batch_on_too(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=2, count_per_batch=1)
+        )
+        first, _ = self.comfy.job_ids
+        self.assertEqual(self.shown_steps(), [1])  # batch 2 is written, not on show
+        self.job_failed(first)
+        self.assertEqual(self.shown_steps(), [1, 2])
+
+    async def test_a_manual_batch_shows_its_one_step_throughout(self) -> None:
+        await self.manual_batch(count=3)
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        self.assertEqual(self.shown_steps(), [1])
 
 
 class TestSnapshotLifecycle(AccountingCase):

@@ -22,8 +22,8 @@ Generated images are ordinary library media. They appear in the strip at the bot
 | Control | What it does |
 |---|---|
 | **Caption** | The description to expand. Plain text; tokens are optional. A collapsible *Resolved caption* shows exactly what the VLM will be given. |
-| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first step (see Batches). |
-| **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption so you can preview it; **Generate** renders that caption only if you have also pressed **Generate Prompt** for it. |
+| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first batch (see Batches). |
+| **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption and **empties the Prompt**, so the next **Generate** writes a prompt for that caption and renders it. |
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
 | **Model** | Krea 2, Qwen-Image, SDXL or Z-Image. Chooses the prompt style and the default workflow. |
 | **Workflow** | Every registered `t2i` workflow. |
@@ -32,22 +32,29 @@ Generated images are ordinary library media. They appear in the strip at the bot
 | **Seed** and policy | The seed, plus how it advances: **Fixed**, **Increment**, **Decrement** or **Randomize**. |
 | **LoRAs** | Same editor as Image to Video. Needs an `MS_LORA_STACK` node in the workflow. |
 | **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL) and is sent only if the workflow has an `MS_NEGATIVE` node. |
-| **Batch Size** | How many captions a run uses; the first is your prompt when one is ready. Locked at 1 in Manual mode. |
-| **Count per Batch** | How many images each caption renders, one seed apiece. Above 1 needs a non-Fixed policy. |
+| **Batch Size** | How many batches a run renders (Random mode). Batch 1 is the prompt in the box when there is one. Locked at 1 in Manual mode. |
+| **Count per Batch** | How many images each batch renders, differing only in their seed. Above 1 needs a non-Fixed policy. |
 
 ## Batches
 
 **Generate** starts a batch on the server, so it keeps running if you close the dialog or reload the page; reopening the dialog reattaches to it. **Cancel** stops every running batch and cancels its unfinished jobs.
 
 - **Manual:** one step — your caption and prompt — rendered `Count per Batch` times.
-- **Random Caption:** for each of `Batch Size` steps the server picks an unused caption, takes its aspect ratio, writes a prompt, then renders `Count per Batch` images. The one exception is the **first step when the Prompt box holds a prompt you generated with *Generate Prompt* or wrote yourself, and no batch has rendered it yet**: that prompt, with the Caption, Aspect Ratio and Negative in the boxes, is step 1 — nothing is drawn and no prompt is written for it, so what you reviewed is what renders — and the remaining steps are drawn as above. A prompt a batch has already used, including the last step a finished run hands back in the boxes, is never reused: the next **Generate** draws every caption itself. Closing and reopening the dialog keeps a prompt ready; reloading the page forgets it, so press **Generate Prompt** again first. While it runs, the Caption, Prompt, Aspect and Seed boxes show the current step and cannot be edited. Only one Random batch runs at a time.
+- **Random Caption:** a run is `Batch Size` batches. A **batch** is one caption, one prompt and `Count per Batch` images that differ only in their seed. The boxes decide what **batch 1** is, and nothing else does (nothing is remembered about how the text got there):
+  - the **Prompt** box holds text → that prompt is rendered as it stands (with the Caption, Aspect Ratio and Negative in the boxes); no caption is rolled and no prompt is written;
+  - the Prompt is empty but the **Caption** box is not → a prompt is written for that caption, then rendered; no caption is rolled;
+  - both are empty → a caption is rolled from the Filter and a prompt written for it.
 
-Seeds advance across the whole run according to the policy and stop the run early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). Under **Randomize** the first image uses the seed shown in the dialog, and the rest are drawn at random. **The seed does not choose the characters.** A caption's cast is drawn from the text of the caption itself, so the same caption always describes the same people whatever the seed, and a new seed changes the image (and the value of any plain `__TOKEN__` wildcard) but not who is in it. The flip side: editing the caption, even by a comma, draws a new cast. When a run ends, the seed box shows the next unused seed.
+  Every later batch rolls a new caption from the Filter, takes its aspect ratio, writes its prompt, then renders its images. Within a batch the prompt and every setting are kept; only the seed changes from image to image. When a run ends the boxes keep the last batch's caption and prompt, so the next **Generate** starts with that prompt and the next seeds; to start on something new, empty the Prompt (or press 🎲, which loads a caption and empties the Prompt). While a run is going, the Caption, Prompt, Aspect and Seed boxes show the batch being rendered and cannot be edited. Only one Random batch runs at a time. If you close the dialog during a run it carries on: reopening shows it live, and if it has already finished the boxes are as you left them (the last batch's values are handed back only to an open dialog), though the Seed box is always current.
+
+**Seed.** The box always holds the seed the next image will use, and it moves on after every image unless the policy is **Fixed**: **Increment** and **Decrement** step by one, **Randomize** draws a random one. While a Random run renders, the box shows the seed of the image being rendered; when **Generate** is pressed the dialog's own seed also jumps to the next unused one, so it is right when the boxes unlock, after a reload, and if you closed the dialog mid-run. Under **Randomize** the first image of a Generate uses the seed shown in the box, the rest are random, and the run ends on a fresh random seed. A run stops early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). **The seed does not choose the characters.** A caption's cast is drawn from the text of the caption itself, so the same caption always describes the same people whatever the seed, and a new seed changes the image (and the value of any plain `__TOKEN__` wildcard) but not who is in it. The flip side: editing the caption, even by a comma, draws a new cast.
 
 **GPU order** follows the existing `comfy.unload_vlm_during_generation` setting:
 
 - **On (default):** all prompts are written first, then the VLM is unloaded, then the images render. The first image appears only after the last prompt is written. A Manual **Generate** also unloads the VLM, so the next **Generate Prompt** reloads it.
-- **Off:** each step renders as soon as its prompt is ready, overlapping the next prompt.
+- **Off:** each batch renders as soon as its prompt is ready, overlapping the next prompt.
+
+Either way the boxes stay on the batch being rendered: a prompt written ahead of the render waits, and is shown when that batch's images start.
 
 Jobs are submitted through a small window (`t2i.window`, default 4 unfinished jobs per batch) so a large batch cannot bury Image to Video and storyboard jobs in ComfyUI's shared queue.
 

@@ -30,7 +30,7 @@ import { useWebSocket } from '../../composables/useWebSocket'
 import {
   buildBatchRequest,
   defaultPresetFor,
-  firstStepReady,
+  firstBatchSource,
   generateBlocker,
   initialFields,
   mergeFormState,
@@ -157,16 +157,20 @@ watch(connected, (up) => {
 
 // ---- Random batches take over the boxes ----------------------------------------------------
 // While a Random batch runs, Caption / Prompt / Negative / Aspect / Seed are
-// read-only live views of its current step. They are a display only: the form
-// itself is untouched until the batch ends, when the last step's values are
-// copied in (a finished batch hands its values over exactly once).
+// read-only live views of it. The server decides what to show: the batch being
+// rendered (its caption, prompt and aspect stay put while its images render) and
+// the seed of the image being rendered, which moves on after each image. They are
+// a display only: the form itself is untouched until the batch ends, when the
+// last batch's values are copied in (a finished batch hands its values over
+// exactly once).
 const randomLocked = computed(() => store.randomBatch !== null)
 const step = computed(() => (randomLocked.value ? store.currentStep : null))
-// A run whose first step is the user's own prompt already knows that step. From
-// the moment Generate is pressed until the server's batch_step frame arrives
-// (milliseconds, but the batch is announced first) the locked boxes keep showing
-// the form's values instead of going blank and filling in again. Only while no
-// step has arrived: a later step's null negative must not fall back to the form.
+// A run whose first batch is already known to the dialog (the user's own prompt,
+// or their caption to write a prompt for) has nothing to wait for. From the moment
+// Generate is pressed until the server's batch_step frame arrives (milliseconds
+// with a prompt, the model's time without) the locked boxes keep showing the
+// form's values instead of going blank and filling in again. Only while no step
+// has arrived: a later step's null negative must not fall back to the form.
 const supplyingFirstStep = ref(false)
 const holdForm = computed(() => randomLocked.value && step.value === null && supplyingFirstStep.value)
 const liveBoxes = computed(() => randomLocked.value && !holdForm.value)
@@ -174,7 +178,11 @@ const shownCaption = computed(() => (liveBoxes.value ? (step.value?.caption ?? '
 const shownPrompt = computed(() => (liveBoxes.value ? (step.value?.prompt ?? '') : form.prompt))
 const shownNegative = computed(() => (liveBoxes.value ? (step.value?.negative ?? '') : form.negative))
 const shownAspect = computed(() => (step.value ? step.value.aspect_ratio : form.aspect))
-const shownSeed = computed(() => (step.value ? step.value.seed : form.seed))
+// The seed box always holds the seed the next image will use. While a Random run
+// renders that is the image being rendered; the form's own seed was advanced to
+// the next unused one when Generate was pressed, so it is right the moment the
+// boxes unlock, and after a reload or a dialog closed mid-run.
+const shownSeed = computed(() => (randomLocked.value ? (store.liveSeed ?? form.seed) : form.seed))
 const stepWarnings = computed(() => step.value?.warnings ?? [])
 
 // The flag means exactly "waiting for the first step's frame": it ends when a
@@ -255,8 +263,7 @@ async function onGeneratePrompt() {
       toast.show('The prompt was ready, but you switched images meanwhile, so it was not used.', 'info', 4000)
       return
     }
-    form.prompt = r.prompt
-    store.readyPrompt = r.prompt // a Random Generate renders it as its first step
+    form.prompt = r.prompt // a Random Generate renders it as its first batch
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
     promptWarnings.value = r.warnings
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
@@ -274,17 +281,10 @@ async function onGeneratePrompt() {
   }
 }
 
-// Typing a prompt makes it ready too: whatever the box holds after an edit is
-// what the user wants rendered next (an emptied box is not ready: see
-// firstStepReady). Only the user's own input goes through here, so a prompt a
-// batch handed back or a tile loaded is never taken for one.
-function onPromptInput(e: Event) {
-  form.prompt = (e.target as HTMLTextAreaElement).value
-  store.readyPrompt = form.prompt
-}
-
-// The dice loads one caption (and its aspect ratio) from the caption file so
-// it can be read and edited before anything is rendered.
+// The dice loads one caption (and its aspect ratio) from the caption file so it
+// can be read and edited before anything is rendered. It empties the Prompt (and
+// its negative): they belong to the caption it replaces, and an empty Prompt is
+// what makes Generate write one for this caption instead of rendering the old.
 async function onRoll() {
   if (rolling.value) return
   const target = store.selectedId
@@ -293,6 +293,9 @@ async function onRoll() {
     const row = await store.rollCaption(form.filter)
     if (store.selectedId !== target) return // another image was loaded meanwhile
     form.caption = row.caption
+    form.prompt = ''
+    form.negative = ''
+    promptWarnings.value = []
     if (store.config?.aspect_ratios.includes(row.aspect_ratio)) form.aspect = row.aspect_ratio
   } catch (e) {
     toast.show(
@@ -383,10 +386,29 @@ const submitting = ref(false)
 const cancelling = ref(false)
 const batchWarnings = ref<string[]>([])
 
-// Random Caption mode: a prompt the user wrote or generated (and no batch has
-// taken yet) is what the run's first step renders. Nothing is drawn and no
-// prompt is written for it: what they reviewed is what renders.
-const firstStepFromBox = computed(() => firstStepReady(form, store.readyPrompt))
+// Random Caption mode: the boxes alone say what the first batch is (the Prompt
+// box, rendered as it stands; else the Caption box, which has a prompt written
+// for it; else a rolled caption). The batches after it always roll a caption
+// and write a prompt.
+const firstBatch = computed(() => firstBatchSource(form))
+// Says what Generate will do, from the same boxes that decide it.
+const firstBatchHint = computed(() => {
+  const more = shownBatchSize.value > 1
+  switch (firstBatch.value) {
+    case 'prompt':
+      return more
+        ? 'Batch 1 renders the prompt above; the others roll new captions and write their prompts'
+        : 'Renders the prompt above'
+    case 'caption':
+      return more
+        ? 'Batch 1 writes a prompt for the caption above; the others roll new captions'
+        : 'Writes a prompt for the caption above, then renders it'
+    default:
+      return more
+        ? 'Every batch rolls a new caption and writes its prompt'
+        : 'Rolls a caption, writes its prompt, then renders it'
+  }
+})
 
 const blocker = computed(() =>
   generateBlocker(form, {
@@ -412,9 +434,7 @@ async function onGenerate() {
     hasNegative: hasNegative.value,
     maxBatchSize: maxBatchSize.value,
     maxCount: maxCount.value,
-    firstStepFromForm: firstStepFromBox.value,
   })
-  const sentPrompt = form.prompt
   const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
   if (
     signature !== null &&
@@ -428,14 +448,10 @@ async function onGenerate() {
     return
   }
   // Set before the request goes out: the batch's WebSocket frames can beat the response.
-  supplyingFirstStep.value = req.mode === 'random' && !!req.prompt
+  supplyingFirstStep.value = req.mode === 'random' && (!!req.prompt || !!req.caption)
   submitting.value = true
   try {
     const r = await store.startBatch(req)
-    // The prompt this Generate sent has been taken by its batch: the next
-    // Generate must not render it again. Compared by value, so a prompt the
-    // user typed while the request was in flight is left ready.
-    if (store.readyPrompt === sentPrompt) store.readyPrompt = null
     // A batch makes NEW images, so an image being edited is saved (pending edits
     // go in as usual) and let go before anything below touches the form: neither
     // the seed advance nor a Random batch's live and unlocked values can then
@@ -446,8 +462,11 @@ async function onGenerate() {
     if (signature !== null) lastSubmitted = signature
     batchWarnings.value = r.warnings
     promptWarnings.value = []
-    // The box then shows the next unused seed (unless the user already changed it).
-    if (req.mode === 'manual' && r.next_seed !== null && form.seed === req.seed) form.seed = r.next_seed
+    // The seed box then holds the next unused seed, for both modes (unless the
+    // user already changed it). A Random run shows the seed of the image being
+    // rendered meanwhile (shownSeed), and this value is what is there when the
+    // boxes unlock, whether or not the dialog was open to see the run end.
+    if (r.next_seed !== null && form.seed === req.seed) form.seed = r.next_seed
     toast.show(
       r.total_images === 1 ? 'Image job queued' : `${r.total_images} image jobs queued`,
       'success',
@@ -614,7 +633,7 @@ onBeforeUnmount(() => {
               spellcheck="false"
               :value="shownCaption"
               :readonly="randomLocked"
-              :placeholder="randomLocked ? 'A caption is drawn from the caption file for each step…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
+              :placeholder="randomLocked ? 'A caption is drawn from the caption file for each batch…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
               @input="form.caption = ($event.target as HTMLTextAreaElement).value"
             />
             <div>
@@ -673,7 +692,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="icon-btn dice"
-              title="Load a random caption from the caption file"
+              title="Load a random caption from the caption file (this empties the prompt, so Generate writes one for it)"
               aria-label="Roll a random caption"
               :disabled="rolling || randomLocked || !csvAvailable"
               @click="onRoll"
@@ -734,7 +753,7 @@ onBeforeUnmount(() => {
               >
                 <option v-for="a in aspectOptions" :key="a" :value="a">{{ a }}</option>
               </select>
-              <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstStepFromBox ? 'used for step 1, then taken from each caption' : 'taken from each caption' }}</small>
+              <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatch !== 'draw' ? 'used for batch 1, then taken from each caption' : 'taken from each caption' }}</small>
             </label>
             <SeedControls
               :seed="shownSeed"
@@ -762,8 +781,8 @@ onBeforeUnmount(() => {
               spellcheck="false"
               :value="shownPrompt"
               :readonly="randomLocked"
-              :placeholder="randomLocked ? 'A prompt is written for each step…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
-              @input="onPromptInput"
+              :placeholder="randomLocked ? 'A prompt is written for each batch…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
+              @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
             />
             <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
               <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
@@ -807,12 +826,12 @@ onBeforeUnmount(() => {
               @click="onCancel"
             >{{ cancelling ? 'Cancelling…' : 'Cancel' }}</button>
             <span v-if="blocker !== null && blocker !== 'Still loading'" class="hint">{{ blocker }}</span>
-            <span v-else-if="firstStepFromBox" class="hint">Step 1 renders the prompt above; the rest are drawn</span>
+            <span v-else-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatchHint }}</span>
           </div>
           <div class="counts">
             <label
               class="fld fld-inline"
-              title="Random Caption: how many captions a run uses (the first is the prompt above when one is ready). Manual always renders one prompt."
+              title="Random Caption: how many batches a run renders. Each batch is one caption, one prompt and Count Per Batch images; batch 1 uses the prompt above when there is one. Manual always renders one prompt."
             >
               <span>Batch Size</span>
               <input

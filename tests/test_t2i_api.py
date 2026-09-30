@@ -115,6 +115,7 @@ class FakeRunner:
                 "images_total": 3,
                 "images_done": 1,
                 "images_failed": 0,
+                "seed": 101,
                 "next_seed": 103,
                 "started_at": "2026-09-29T10:00:00+00:00",
             }
@@ -725,6 +726,31 @@ class TestBatches(T2iApiCase):
         self.assertEqual(req.prompt, "A red kite over a gray sea.")
         self.assertEqual(req.negative, "blurry")
         self.assertEqual(req.aspect_ratio, "2:3")
+
+    def test_a_random_request_may_name_a_caption_with_no_prompt(self) -> None:
+        # The dialog's Prompt box is empty and its Caption box is not: the
+        # runner gets the caption and ratio, and no prompt, and writes one.
+        body = {
+            "mode": "random",
+            "model": "sd",
+            "preset_id": 2,
+            "megapixels": 1.0,
+            "seed": 7,
+            "seed_policy": "increment",
+            "batch_size": 2,
+            "count_per_batch": 1,
+            "filter": {},
+            "caption": "a red kite",
+            "aspect_ratio": "2:3",
+        }
+        self.assertEqual(
+            self.client.post("/api/t2i/batches", json=body).status_code, 200
+        )
+        ((_, req),) = self.runner.calls
+        self.assertEqual(
+            (req.mode, req.caption, req.aspect_ratio), ("random", "a red kite", "2:3")
+        )
+        self.assertIsNone(req.prompt)
 
     def test_optional_fields_default(self) -> None:
         minimal = {

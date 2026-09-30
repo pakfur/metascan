@@ -310,6 +310,10 @@ export interface T2iBatchInfo {
   images_total: number
   images_done: number
   images_failed: number
+  // The seed of the image being rendered (the first one not yet accounted
+  // for); once every image is, the next unused seed. Moves after each image.
+  seed: number | null
+  // The first unused seed after the whole run; null when the range ran out.
   next_seed: number | null
   started_at: string
 }
@@ -354,6 +358,7 @@ export interface T2iBatchProgressEvent {
   images_done: number
   images_failed: number
   images_total: number
+  seed: number | null
   next_seed: number | null
   last_error?: string | null
 }
@@ -557,8 +562,8 @@ export function mergeOlderPage(existing: T2iImage[], page: T2iImage[]): T2iImage
 /**
  * "Batch 12/40 · 37/160 images · 2 failed · rendering". The batch part is
  * dropped for a single-step (Manual) batch; images appear once one finished.
- * With the VLM-unload GPU order the last step's prompt is written before any
- * image renders, so the batch part reads N/N while rendering.
+ * The batch part is the one being rendered (the server puts it on show), even
+ * while later prompts are still being written.
  */
 export function batchStatusLine(b: T2iActiveBatch): string {
   const parts: string[] = []
