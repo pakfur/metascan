@@ -30,8 +30,18 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from metascan.core.t2i_ages import stated_age
+
 IDENTITY_STYLES: Tuple[str, ...] = ("ref", "noun", "name")
 DEFAULT_IDENTITY_STYLE = "ref"
+
+# A bare "woman" or "man" makes image models draw the subject younger than the
+# stated number, so a first mention names the age bracket in words as well: from
+# MIDDLE_AGED_FROM the noun becomes "middle aged woman", from OLD_FROM "old
+# woman" (a 70-year-old is still middle aged). Later mentions keep the plain
+# noun.
+MIDDLE_AGED_FROM = 40
+OLD_FROM = 71
 
 _FEMALE = "female"
 _MALE = "male"
@@ -545,6 +555,21 @@ class _Renderer:
         female = self.genders[name] == _FEMALE
         return self.cfg.noun_female if female else self.cfg.noun_male
 
+    def head_noun(self, name: str) -> str:
+        """The noun of a first mention: ``middle aged woman`` or ``old man``
+        when the drawn age says so, the plain noun otherwise (no age list, or
+        an age value with no number in it)."""
+        noun = self.noun(name)
+        value = self.characters[name].get("age")
+        age = stated_age(value) if value else None
+        if age is None:
+            return noun
+        if age >= OLD_FROM:
+            return f"old {noun}"
+        if age >= MIDDLE_AGED_FROM:
+            return f"middle aged {noun}"
+        return noun
+
     def handle_carries_hair(self, name: str) -> bool:
         return (
             self.style == "ref"
@@ -593,7 +618,8 @@ class _Renderer:
     ) -> str:
         drawn = self.characters[name]
         head = " ".join(
-            [drawn[s] for s in self.cfg.head_slots if s in drawn] + [self.noun(name)]
+            [drawn[s] for s in self.cfg.head_slots if s in drawn]
+            + [self.head_noun(name)]
         )
         head = f"{_article(head)} {head}"
         if self.style == "name":

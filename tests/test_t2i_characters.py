@@ -169,8 +169,9 @@ class AppendixBGoldenTests(unittest.TestCase):
             "and her __HAIR__ is tied back. __ADAM__ carries a surfboard."
         )
         expected = (
-            "A 52-year-old South Asian man and a 31-year-old Latina woman walk "
-            "along a beach. His short auburn hair is damp and her copper red hair "
+            "A 52-year-old South Asian middle aged man and a 31-year-old Latina "
+            "woman walk along a beach. His short auburn hair is damp and her "
+            "copper red hair "
             "is tied back. The auburn-haired man carries a surfboard. The "
             "auburn-haired man has warm tan skin, green eyes, high cheekbones and "
             "a lean build. The copper-red-haired woman has olive skin, green eyes, "
@@ -473,13 +474,13 @@ class FirstMentionTests(unittest.TestCase):
 
     def test_an_before_a_vowel_or_a_number_spoken_with_a_vowel(self) -> None:
         cases = (
-            ({"age": ("82-year-old",)}, "An 82-year-old West African woman"),
-            ({"age": ("88-year-old",)}, "An 88-year-old West African woman"),
-            ({"age": ("80-year-old",)}, "An 80-year-old West African woman"),
+            ({"age": ("82-year-old",)}, "An 82-year-old West African old woman"),
+            ({"age": ("88-year-old",)}, "An 88-year-old West African old woman"),
+            ({"age": ("80-year-old",)}, "An 80-year-old West African old woman"),
             ({"age": ("18-year-old",)}, "An 18-year-old West African woman"),
             ({"age": ("27-year-old",)}, "A 27-year-old West African woman"),
-            ({"age": ("100-year-old",)}, "A 100-year-old West African woman"),
-            ({"age": ("108-year-old",)}, "A 108-year-old West African woman"),
+            ({"age": ("100-year-old",)}, "A 100-year-old West African old woman"),
+            ({"age": ("108-year-old",)}, "A 108-year-old West African old woman"),
         )
         for extra, expected in cases:
             with self.subTest(age=extra["age"][0]):
@@ -517,6 +518,207 @@ class FirstMentionTests(unittest.TestCase):
         library = make_library({"age": (), "ethnicity": ()})
         text = resolve("__ALICE__ waves.", library=library).text
         self.assertTrue(text.startswith("A woman with olive skin"), text)
+
+
+class AgedNounTests(unittest.TestCase):
+    """A first mention says "middle aged" from 40 and "old" past 70: a bare
+    "woman" or "man" makes image models draw the subject younger than the
+    number. Every list here has one value, so every draw is forced and the
+    expected text is written out by hand."""
+
+    def resolve_with(
+        self,
+        age: str,
+        caption: str = "__ALICE__ waves.",
+        style: str = "ref",
+        extra: Optional[Mapping[str, Tuple[str, ...]]] = None,
+    ) -> str:
+        lists: Dict[str, Tuple[str, ...]] = {
+            "age": (age,),
+            "ethnicity": ("Nordic",),
+            "hair": ("auburn hair",),
+        }
+        lists.update(extra or {})
+        return resolve(caption, style=style, library=make_library(lists)).text
+
+    def test_under_forty_keeps_the_plain_noun(self) -> None:
+        cases = (
+            ("27-year-old", "A 27-year-old Nordic woman with"),
+            ("39-year-old", "A 39-year-old Nordic woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_forty_and_up_is_middle_aged(self) -> None:
+        cases = (
+            ("40-year-old", "A 40-year-old Nordic middle aged woman with"),
+            ("55-year-old", "A 55-year-old Nordic middle aged woman with"),
+            ("70-year-old", "A 70-year-old Nordic middle aged woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_over_seventy_is_old(self) -> None:
+        cases = (
+            ("71-year-old", "A 71-year-old Nordic old woman with"),
+            ("82-year-old", "An 82-year-old Nordic old woman with"),
+            ("108-year-old", "A 108-year-old Nordic old woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_men_get_the_same_words(self) -> None:
+        cases = (
+            ("39-year-old", "A 39-year-old Nordic man with"),
+            ("40-year-old", "A 40-year-old Nordic middle aged man with"),
+            ("70-year-old", "A 70-year-old Nordic middle aged man with"),
+            ("71-year-old", "A 71-year-old Nordic old man with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                text = self.resolve_with(age, caption="__ADAM__ waves.")
+                self.assertTrue(text.startswith(expected), text)
+
+    def test_spelled_out_ages_count_too(self) -> None:
+        cases = (
+            ("thirty-nine-year-old", "A thirty-nine-year-old Nordic woman with"),
+            ("forty-year-old", "A forty-year-old Nordic middle aged woman with"),
+            ("seventy-year-old", "A seventy-year-old Nordic middle aged woman with"),
+            ("seventy-one-year-old", "A seventy-one-year-old Nordic old woman with"),
+            ("eighty-year-old", "An eighty-year-old Nordic old woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_an_age_with_no_number_is_left_alone(self) -> None:
+        cases = (
+            ("elderly", "An elderly Nordic woman with"),
+            ("middle-aged", "A middle-aged Nordic woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_the_first_number_in_the_value_is_the_age(self) -> None:
+        cases = (
+            ("35-to-45-year-old", "A 35-to-45-year-old Nordic woman with"),
+            ("45-to-50-year-old", "A 45-to-50-year-old Nordic middle aged woman with"),
+        )
+        for age, expected in cases:
+            with self.subTest(age=age):
+                self.assertTrue(self.resolve_with(age).startswith(expected))
+
+    def test_no_age_list_means_no_age_wording(self) -> None:
+        text = self.resolve_with("ignored", extra={"age": ()})
+        self.assertTrue(text.startswith("A Nordic woman with"), text)
+
+    def test_only_the_first_mention_changes(self) -> None:
+        caption = "__ALICE__ waves. __ALICE__ smiles."
+        for age, phrase in (
+            ("52-year-old", "middle aged"),
+            ("82-year-old", "old woman"),
+        ):
+            with self.subTest(age=age):
+                text = self.resolve_with(age, caption=caption)
+                self.assertEqual(text.count(phrase), 1, text)
+                self.assertTrue(text.endswith("The auburn-haired woman smiles."), text)
+
+    def test_every_identity_style_keeps_the_words_on_the_first_mention(self) -> None:
+        cases = (
+            (
+                "ref",
+                "A 52-year-old Nordic middle aged woman with",
+                "The auburn-haired woman smiles.",
+            ),
+            (
+                "noun",
+                "A 52-year-old Nordic middle aged woman with",
+                "The woman smiles.",
+            ),
+            (
+                "name",
+                "A 52-year-old Nordic middle aged woman named Alice with",
+                "Alice smiles.",
+            ),
+        )
+        for style, start, end in cases:
+            with self.subTest(style=style):
+                text = self.resolve_with(
+                    "52-year-old",
+                    caption="__ALICE__ waves. __ALICE__ smiles.",
+                    style=style,
+                )
+                self.assertTrue(text.startswith(start), text)
+                self.assertTrue(text.endswith(end), text)
+
+    def test_a_deferred_first_mention_has_the_words_and_its_trailing_sentence_does_not(
+        self,
+    ) -> None:
+        text = self.resolve_with(
+            "52-year-old", caption="A close-up of __ALICE__'s hands."
+        )
+        self.assertTrue(
+            text.startswith(
+                "A close-up of a 52-year-old Nordic middle aged woman's hands."
+            ),
+            text,
+        )
+        self.assertIn("The auburn-haired woman has ", text)
+        self.assertEqual(text.count("middle aged"), 1, text)
+
+    def test_each_character_is_judged_by_their_own_age(self) -> None:
+        text = self.resolve_with(
+            "unused",
+            caption="__ADAM__ and __CLARA__ walk.",
+            extra={"age.male": ("71-year-old",), "age.female": ("27-year-old",)},
+        )
+        self.assertTrue(
+            text.startswith(
+                "A 71-year-old Nordic old man and a 27-year-old Nordic woman walk."
+            ),
+            text,
+        )
+
+    def test_the_drawn_values_are_not_rewritten(self) -> None:
+        resolved = resolve(
+            "__ALICE__ waves.",
+            library=make_library({"age": ("52-year-old",), "ethnicity": ("Nordic",)}),
+        )
+        self.assertEqual(resolved.characters["ALICE"]["age"], "52-year-old")
+
+    def test_the_configured_noun_is_the_one_that_gets_the_words(self) -> None:
+        library = make_library(
+            {
+                "age": ("52-year-old",),
+                "ethnicity": ("Nordic",),
+                "hair": ("auburn hair",),
+            },
+            config=CharacterConfig(noun_female="lady"),
+        )
+        text = resolve("__ALICE__ waves. __ALICE__ smiles.", library=library).text
+        self.assertTrue(
+            text.startswith("A 52-year-old Nordic middle aged lady with"), text
+        )
+        self.assertTrue(text.endswith("The auburn-haired lady smiles."), text)
+
+    def test_the_rule_follows_whatever_age_the_seed_draws(self) -> None:
+        # The stand-in age list holds 27, 31, 24, 38, 45 and 52: only 45 and 52
+        # are middle aged. The expectation is this literal table, not the code.
+        middle_aged = {"45-year-old", "52-year-old"}
+        seen = set()
+        for seed in range(120):
+            resolved = resolve("__ALICE__ waves.", seed=seed)
+            drawn = resolved.characters["ALICE"]
+            seen.add(drawn["age"])
+            noun = "middle aged woman" if drawn["age"] in middle_aged else "woman"
+            head = resolved.text.split(" with ")[0]
+            with self.subTest(seed=seed):
+                self.assertTrue(head.endswith(f"{drawn['ethnicity']} {noun}"), head)
+        self.assertEqual(seen, set(LISTS["age"]))  # the loop really met every age
 
 
 class CharacteristicTokenTests(unittest.TestCase):

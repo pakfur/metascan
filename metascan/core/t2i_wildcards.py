@@ -35,6 +35,12 @@ import yaml  # type: ignore[import-untyped]
 
 from metascan.core.t2i_characters import CharacterConfig, Library
 
+# The number vocabulary lives in t2i_ages so the caption engine reads ages the
+# same way the adult-only screen below does; the private names are unchanged.
+from metascan.core.t2i_ages import NUMBER_WORD as _NUMBER_WORD
+from metascan.core.t2i_ages import SPELLED_NUMBER_RE as _SPELLED_NUMBER_RE
+from metascan.core.t2i_ages import spelled_value as _spelled_value
+
 logger = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "characters.yml"
@@ -128,39 +134,7 @@ _MINOR_RE = re.compile(
     re.IGNORECASE,
 )
 
-_UNIT_WORDS: Dict[str, int] = {
-    word: number
-    for number, word in enumerate(
-        (
-            "zero one two three four five six seven eight nine ten eleven twelve "
-            "thirteen fourteen fifteen sixteen seventeen eighteen nineteen"
-        ).split()
-    )
-}
-_TENS_WORDS: Dict[str, int] = {
-    "twenty": 20,
-    "thirty": 30,
-    "forty": 40,
-    "fourty": 40,
-    "fifty": 50,
-    "sixty": 60,
-    "seventy": 70,
-    "eighty": 80,
-    "ninety": 90,
-}
-# A spelled-out number below 100. The tens-plus-unit form comes first so
-# "twenty-one" is one number (21), not "twenty" and a stray "one".
-_NUMBER_WORD = (
-    r"(?:(?:"
-    + "|".join(_TENS_WORDS)
-    + r")(?:[\s-]+(?:"
-    + "|".join(w for w, n in _UNIT_WORDS.items() if 1 <= n <= 9)
-    + r"))?|"
-    + "|".join(sorted(_UNIT_WORDS, key=len, reverse=True))
-    + r")"
-)
 _YEARS_OLD = r"(?:years?[\s-]*old|yrs?[\s-]*old|y/?o)"
-_SPELLED_NUMBER_RE = re.compile(r"\b" + _NUMBER_WORD + r"\b", re.IGNORECASE)
 # "14-year-old", "9 yo", "twelve year old", "aged 12", "age 16".
 _DIGIT_AGE_RE = re.compile(
     r"(?<!\d)(\d{1,3})[\s-]*" + _YEARS_OLD + r"\b", re.IGNORECASE
@@ -169,14 +143,6 @@ _SPELLED_AGE_RE = re.compile(
     r"\b(" + _NUMBER_WORD + r")[\s-]*" + _YEARS_OLD + r"\b", re.IGNORECASE
 )
 _AGED_RE = re.compile(r"\bage[ds]?[\s:-]*(\d{1,3})\b", re.IGNORECASE)
-
-
-def _spelled_value(words: str) -> int:
-    """The value of a spelled-out number matched by ``_NUMBER_WORD``."""
-    return sum(
-        _TENS_WORDS.get(word, _UNIT_WORDS.get(word, 0))
-        for word in re.split(r"[\s-]+", words.lower())
-    )
 
 
 def default_library_config() -> CharacterConfig:
