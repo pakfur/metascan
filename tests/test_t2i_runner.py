@@ -18,17 +18,18 @@ import random
 import tempfile
 import unittest
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from unittest import mock
 
 from backend.config import get_t2i_config
 from metascan.core.comfy_bindings import BindingError
+from metascan.core.comfy_client import ComfyError
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.t2i_captions import CaptionFilterError, CaptionStore
 from metascan.core.t2i_characters import resolve_caption
-from metascan.core.t2i_form import SEED_MAX, T2iFormError
+from metascan.core.t2i_form import SEED_MAX, T2iFormError, t2i_dims
 from metascan.core.t2i_models import MODEL_PROFILES
 from metascan.core.t2i_prompt import CONTENT_MODES, fallback_prompt
 from metascan.core.t2i_runner import (
@@ -183,8 +184,12 @@ REPLY_WITH_NEGATIVE = "A calm beach scene at dawn.\n\nNegative: blurry, watermar
 class FakeVlm:
     """Stands in for VlmClient. ``replies`` is consumed one entry per
     generate_text call: a string is returned, an exception is raised; when
-    it runs dry ``default_reply`` answers. ``log`` is shared with the other
-    fakes so a test can assert the order of calls across them."""
+    it runs dry ``default_reply`` answers. ``gates`` holds one entry per
+    call as well: an Event that call waits on (None lets it straight
+    through). ``log`` is shared with the other fakes so a test can assert
+    the order of calls across them. Like the real client, ``shutdown``
+    leaves ``model_id`` set: it names the model to restart, not whether one
+    is running."""
 
     def __init__(self, log: List[Tuple[Any, ...]]) -> None:
         self.model_id: Optional[str] = "qwen3vl-8b"
@@ -193,6 +198,10 @@ class FakeVlm:
         self.ensure_calls: List[str] = []
         self.replies: Deque[Any] = deque()
         self.start_errors: Deque[BaseException] = deque()
+        self.gates: Deque[Optional[asyncio.Event]] = deque()
+        self.cancelled_calls = 0
+        self.shutdowns = 0
+        self.shutdown_error: Optional[BaseException] = None
         self.default_reply = REPLY_WITH_NEGATIVE
 
     async def ensure_started(self, model_id: str) -> None:
@@ -204,19 +213,101 @@ class FakeVlm:
     async def generate_text(self, **kwargs: Any) -> str:
         self.log.append(("vlm", "generate_text"))
         self.calls.append(kwargs)
+        gate = self.gates.popleft() if self.gates else None
+        if gate is not None:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled_calls += 1
+                raise
         reply = self.replies.popleft() if self.replies else self.default_reply
         if isinstance(reply, BaseException):
             raise reply
         return str(reply)
 
+    async def shutdown(self) -> None:
+        self.log.append(("vlm", "shutdown"))
+        self.shutdowns += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
 
 class FakeComfy:
-    """Stands in for ComfyClient. Nothing is submitted in these tests: a
-    batch that has been planned and registered never reaches ComfyUI."""
+    """Stands in for ComfyClient. ``submit`` writes the generation_jobs row
+    the real one writes (state queued, carrying t2i_batch_id) and returns
+    its id; ``cancel`` records the id, marks the row cancelled and emits the
+    job_update the real one would. Tests drive the rest of a job's life with
+    ``emit``: the runner listens to this exactly as it listens to
+    ComfyClient."""
 
     def __init__(self, db: DatabaseManager, log: List[Tuple[Any, ...]]) -> None:
         self.db = db
         self.log = log
+        # Every submit call, the failing ones too: (preset_id, params, kwargs).
+        self.submits: List[Tuple[int, Any, Dict[str, Any]]] = []
+        self.job_ids: List[int] = []  # the ids handed back, in order
+        self.cancelled: List[int] = []
+        self.listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+        self.submit_errors: Dict[int, BaseException] = {}  # nth call (0-based) raises
+        self.cancel_errors: Dict[int, BaseException] = {}  # job id -> cancel raises
+        self.gate: Optional[asyncio.Event] = None  # submit waits here first
+        self.hold: Optional[asyncio.Event] = None  # ...and here after the row
+        # A job that reaches this state on the very next loop iteration after
+        # submit returns -- before the caller has necessarily resumed.
+        self.finish_at_once: Optional[str] = None
+
+    def on_job_event(self, cb: Callable[[str, Dict[str, Any]], None]) -> None:
+        self.listeners.append(cb)
+
+    def emit(self, event: str, payload: Dict[str, Any]) -> None:
+        for cb in list(self.listeners):
+            cb(event, payload)
+
+    async def submit(self, preset_id: int, params: Any, **kwargs: Any) -> int:
+        self.log.append(("comfy", "submit"))
+        call = len(self.submits)
+        self.submits.append((preset_id, params, dict(kwargs)))
+        if self.gate is not None:
+            await self.gate.wait()
+        error = self.submit_errors.get(call)
+        if error is not None:
+            raise error
+        output_dir = kwargs.get("output_dir")
+        job_id = self.db.create_generation_job(
+            preset_id,
+            params.to_json(),
+            None,
+            str(output_dir) if output_dir else None,
+            None,
+            None,
+            None,
+            kwargs.get("output_name"),
+            kwargs.get("t2i_batch_id"),
+        )
+        if self.hold is not None:
+            await self.hold.wait()
+        self.job_ids.append(job_id)
+        self.emit("job_update", {"job_id": job_id, "state": "queued", "error": None})
+        if self.finish_at_once is not None:
+            asyncio.get_running_loop().call_soon(
+                self.emit,
+                "job_update",
+                {"job_id": job_id, "state": self.finish_at_once, "error": None},
+            )
+        return job_id
+
+    async def cancel(self, job_id: int) -> None:
+        self.log.append(("comfy", "cancel", job_id))
+        self.cancelled.append(job_id)
+        error = self.cancel_errors.get(job_id)
+        if error is not None:
+            raise error
+        self.db.update_generation_job(
+            job_id,
+            state="cancelled",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.emit("job_update", {"job_id": job_id, "state": "cancelled", "error": None})
 
 
 # ---- fixtures -------------------------------------------------------------
@@ -264,6 +355,18 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
             get_config=lambda: self.cfg,
         )
         self.runner.on_event(self._record)
+        self.comfy.on_job_event(self.runner.handle_job_event)
+        # Which model to start is not what these tests are about; the real
+        # picker would probe this machine's GPU once the fake has no id.
+        patcher = mock.patch(
+            "metascan.core.t2i_runner.pick_vlm_model",
+            side_effect=lambda vlm: vlm.model_id or "qwen3vl-8b",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def asyncTearDown(self) -> None:
+        await self.runner.aclose()
 
     def _record(self, channel: str, event: str, data: Dict[str, Any]) -> None:
         self.assertEqual(channel, "t2i")
@@ -314,6 +417,31 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         )
         fields.update(over)
         return BatchRequest(**fields)
+
+    async def until(
+        self, predicate: Callable[[], bool], what: str, timeout: float = 5.0
+    ) -> None:
+        """Wait for ``predicate``; fail the test if it never holds."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not predicate():
+            if loop.time() > deadline:
+                self.fail(f"timed out waiting for {what}")
+            await asyncio.sleep(0.005)
+
+    async def quiet(self, seconds: float = 0.05) -> None:
+        """Give the runner time to do anything it is going to do."""
+        await asyncio.sleep(seconds)
+
+    def job_update(self, job_id: int, state: str, error: Optional[str] = None) -> None:
+        """A job_update from ComfyUI, as the runner hears it."""
+        self.comfy.emit(
+            "job_update", {"job_id": job_id, "state": state, "error": error}
+        )
+
+    def roomy(self) -> None:
+        """A window big enough that no test batch ever waits for it."""
+        self.cfg = get_t2i_config({"t2i": {"window": 50}})
 
     def names(self) -> List[str]:
         return [name for name, _ in self.events]
@@ -681,7 +809,24 @@ class TestResolve(RunnerCase):
 # ---- start_batch: validation ---------------------------------------------
 
 
-class ValidationCase(RunnerCase):
+async def _parked(self: T2iRunner, batch: Any) -> None:
+    """A run that never gets going, so a registered batch stays exactly as
+    start_batch left it."""
+    await asyncio.Event().wait()
+
+
+class ParkedRunCase(RunnerCase):
+    """For the tests about validation and planning: batches are registered
+    and announced but nothing runs."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        patcher = mock.patch.object(T2iRunner, "_run", _parked)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ValidationCase(ParkedRunCase):
     async def rejects(self, exc_type: type, needle: str, req: BatchRequest) -> None:
         """start_batch raises ``exc_type`` naming ``needle`` and leaves no
         state behind: no batch, no event."""
@@ -979,7 +1124,7 @@ class TestValidation(ValidationCase):
 # ---- start_batch: planning ------------------------------------------------
 
 
-class TestPlanning(RunnerCase):
+class TestPlanning(ParkedRunCase):
     def planned_seeds(self, batch_id: str) -> List[int]:
         return list(self.runner._batches[batch_id].seeds)
 
@@ -1310,6 +1455,1414 @@ class TestPlanning(RunnerCase):
         before = copy.deepcopy(req)
         await self.runner.start_batch(req)
         self.assertEqual(req, before)
+
+
+# ---- running batches ------------------------------------------------------
+
+
+class BatchCase(RunnerCase):
+    """Real batches: the run task is live; ComfyUI and the VLM are fakes."""
+
+    async def start(self, req: BatchRequest) -> BatchStarted:
+        return await self.runner.start_batch(req)
+
+    async def wait(self, batch_id: str, timeout: float = 10.0) -> None:
+        """wait_batch, but a run that is stuck fails the test instead of
+        hanging it (a window too small for the batch is the usual cause)."""
+        try:
+            await asyncio.wait_for(self.runner.wait_batch(batch_id), timeout)
+        except asyncio.TimeoutError:
+            self.fail("the batch's run did not finish")
+
+    async def run_to_end(self, req: BatchRequest) -> str:
+        """Start a batch and wait until every job has been submitted."""
+        started = await self.start(req)
+        await self.wait(started.batch_id)
+        return started.batch_id
+
+    def params(self) -> List[Any]:
+        return [params for _, params, _ in self.comfy.submits]
+
+    def timeline(self) -> List[Tuple[Any, ...]]:
+        """The shared log without the per-start bookkeeping calls."""
+        return [e for e in self.log if e != ("vlm", "ensure_started")]
+
+    def terminal_frames(self) -> List[str]:
+        return [
+            n
+            for n in self.names()
+            if n in ("batch_complete", "batch_cancelled", "batch_error")
+        ]
+
+
+class TestManualBatchRun(BatchCase):
+    async def test_submits_count_jobs_with_the_documented_params(self) -> None:
+        started = await self.start(self.manual())
+        await self.wait(started.batch_id)
+        self.assertEqual(len(self.comfy.submits), 3)
+        for index, (preset_id, params, kwargs) in enumerate(self.comfy.submits):
+            self.assertEqual(preset_id, self.plain)
+            self.assertEqual(params.positive, "A red kite over a gray sea.")
+            self.assertEqual(params.seed, 100 + index)
+            self.assertEqual((params.width, params.height), (1232, 816))
+            self.assertEqual(params.batch_size, 1)
+            self.assertIsNone(params.negative)
+            self.assertEqual(params.loras, [])
+            self.assertEqual(kwargs["t2i_batch_id"], started.batch_id)
+            self.assertEqual(
+                sorted(kwargs), ["output_dir", "output_name", "t2i_batch_id"]
+            )
+        self.assertEqual(
+            self.comfy.job_ids,
+            [j["id"] for j in self.db.list_generation_jobs(limit=10)],
+        )
+
+    async def test_sdxl_renders_on_the_64_grid(self) -> None:
+        await self.run_to_end(self.manual(model="sd", count_per_batch=1))
+        (params,) = self.params()
+        self.assertEqual((params.width, params.height), (1216, 832))
+
+    async def test_the_dims_follow_the_aspect_ratio_and_size(self) -> None:
+        await self.run_to_end(
+            self.manual(aspect_ratio="2:3", megapixels=1.0, count_per_batch=1)
+        )
+        await self.run_to_end(
+            self.manual(aspect_ratio="1:1", megapixels=0.5, count_per_batch=1)
+        )
+        dims = [(p.width, p.height) for p in self.params()]
+        self.assertEqual(
+            dims,
+            [t2i_dims("2:3", 1.0, 16), t2i_dims("1:1", 0.5, 16)],
+        )
+        self.assertEqual(dims[0], (816, 1232))
+
+    async def test_the_negative_is_sent_only_when_the_workflow_binds_one(self) -> None:
+        await self.run_to_end(
+            self.manual(
+                preset_id=self.with_negative, negative="blurry", count_per_batch=1
+            )
+        )
+        await self.run_to_end(self.manual(negative="blurry", count_per_batch=1))
+        bound, unbound = self.params()
+        self.assertEqual(bound.negative, "blurry")
+        self.assertIsNone(unbound.negative)
+
+    async def test_a_blank_negative_is_not_sent(self) -> None:
+        await self.run_to_end(
+            self.manual(preset_id=self.with_negative, negative="  ", count_per_batch=1)
+        )
+        (params,) = self.params()
+        self.assertIsNone(params.negative)
+
+    async def test_loras_are_sent_normalised(self) -> None:
+        await self.run_to_end(
+            self.manual(
+                preset_id=self.with_stack,
+                count_per_batch=2,
+                loras=[{"name": "kite.safetensors", "strength": "0.5", "junk": 1}],
+            )
+        )
+        for params in self.params():
+            self.assertEqual(
+                params.loras, [{"name": "kite.safetensors", "strength": 0.5}]
+            )
+
+    async def test_output_lands_in_the_default_root_by_date(self) -> None:
+        before = datetime.now().strftime("%Y-%m-%d")
+        await self.run_to_end(self.manual(count_per_batch=2))
+        after = datetime.now().strftime("%Y-%m-%d")
+        for _, _, kwargs in self.comfy.submits:
+            directory = Path(kwargs["output_dir"])
+            self.assertIn(
+                directory,
+                (self.out_root / "t2i" / before, self.out_root / "t2i" / after),
+            )
+            self.assertRegex(kwargs["output_name"], r"^t2i_\d+$")
+
+    async def test_output_lands_under_a_configured_root_and_prefix(self) -> None:
+        library = self.root / "library"
+        library.mkdir()
+        self.cfg = get_t2i_config(
+            {"t2i": {"output_root": str(library), "output_prefix": "/shots/%Y/kite_"}}
+        )
+        await self.run_to_end(self.manual(count_per_batch=1))
+        ((_, _, kwargs),) = self.comfy.submits
+        self.assertEqual(
+            Path(kwargs["output_dir"]),
+            library / "shots" / datetime.now().strftime("%Y"),
+        )
+        self.assertRegex(kwargs["output_name"], r"^kite_\d+$")
+        self.assertFalse((self.out_root / "t2i").exists())
+
+    async def test_output_numbers_strictly_increase(self) -> None:
+        self.roomy()
+        await self.run_to_end(self.manual(count_per_batch=6))
+        numbers = [
+            int(k["output_name"].split("_")[-1]) for _, _, k in self.comfy.submits
+        ]
+        self.assertEqual(numbers, sorted(set(numbers)))
+        self.assertEqual(len(numbers), 6)
+
+    async def test_the_job_rows_carry_the_batch_and_the_params(self) -> None:
+        started = await self.start(self.manual(count_per_batch=2))
+        await self.wait(started.batch_id)
+        rows = self.db.list_generation_jobs(limit=10)
+        self.assertEqual([r["t2i_batch_id"] for r in rows], [started.batch_id] * 2)
+        self.assertEqual([json.loads(r["params"])["seed"] for r in rows], [100, 101])
+        self.assertEqual(
+            [r["output_name"] for r in rows],
+            [k["output_name"] for _, _, k in self.comfy.submits],
+        )
+
+    async def test_the_frames_are_started_progress_step(self) -> None:
+        started = await self.start(self.manual())
+        await self.wait(started.batch_id)
+        self.assertEqual(
+            self.names(), ["batch_started", "batch_progress", "batch_step"]
+        )
+
+    async def test_the_step_frame_carries_the_given_values(self) -> None:
+        started = await self.start(
+            self.manual(preset_id=self.with_negative, negative="blurry")
+        )
+        await self.wait(started.batch_id)
+        self.assertEqual(
+            self.frames("batch_step"),
+            [
+                {
+                    "batch_id": started.batch_id,
+                    "step": 1,
+                    "total_steps": 1,
+                    "caption": "a red kite",
+                    "aspect_ratio": "3:2",
+                    "seed": 100,
+                    "prompt": "A red kite over a gray sea.",
+                    "negative": "blurry",
+                    "warnings": [],
+                }
+            ],
+        )
+
+    async def test_the_step_is_announced_before_the_first_submit(self) -> None:
+        await self.run_to_end(self.manual())
+        timeline = self.timeline()
+        self.assertLess(
+            timeline.index(("event", "batch_step")), timeline.index(("comfy", "submit"))
+        )
+        self.assertEqual(self.names().count("batch_step"), 1)
+
+    async def test_a_manual_batch_without_a_caption_has_an_empty_one_in_the_frame(
+        self,
+    ) -> None:
+        await self.run_to_end(self.manual(caption=None, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["caption"], "")
+
+    async def test_the_prompt_is_the_users_text_untouched(self) -> None:
+        # Parentheses are the user's to write in a Manual prompt.
+        await self.run_to_end(
+            self.manual(prompt="A (red) kite,  over a sea.", count_per_batch=1)
+        )
+        (params,) = self.params()
+        self.assertEqual(params.positive, "A (red) kite,  over a sea.")
+
+    async def test_a_manual_batch_never_asks_the_vlm_to_write_anything(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(self.manual())
+        self.assertEqual(self.vlm.calls, [])
+        self.assertEqual(self.vlm.ensure_calls, [])
+
+    async def test_every_submitted_job_is_remembered_until_it_is_accounted_for(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(self.manual(count_per_batch=4))
+        self.assertEqual(set(self.runner._job_meta), set(self.comfy.job_ids))
+        self.assertEqual(set(self.runner._job_batch), set(self.comfy.job_ids))
+
+    async def test_the_job_snapshots_are_bounded(self) -> None:
+        # A backstop for anything that never gets its terminal update: the
+        # oldest snapshots go first.
+        self.roomy()
+        with mock.patch("metascan.core.t2i_runner._JOB_META_LIMIT", 5):
+            await self.run_to_end(self.manual(count_per_batch=9))
+        self.assertEqual(set(self.runner._job_meta), set(self.comfy.job_ids[-5:]))
+
+
+class TestGpuOrder(BatchCase):
+    """Spec 6.3: with unload on, every prompt is written first, then the VLM
+    is unloaded, then the first job is submitted."""
+
+    async def test_unload_on_writes_every_prompt_then_unloads_then_renders(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(self.random_mode())  # 3 steps x 2 images
+        expected: List[Tuple[Any, ...]] = [
+            ("event", "batch_started"),
+            ("event", "batch_progress"),
+        ]
+        expected += [("vlm", "generate_text"), ("event", "batch_step")] * 3
+        expected += [("event", "batch_progress"), ("vlm", "shutdown")]
+        expected += [("comfy", "submit")] * 6
+        self.assertEqual(self.timeline(), expected)
+
+    async def test_unload_on_writes_every_prompt_even_when_the_window_is_full(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.random_mode())
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        await self.quiet()
+        self.assertEqual(len(self.vlm.calls), 3)  # all three prompts are in
+        self.assertEqual(self.vlm.shutdowns, 1)
+        self.assertEqual(len(self.comfy.submits), 1)  # the window holds the rest
+        self.job_update(self.comfy.job_ids[0], "done")
+        await self.until(lambda: len(self.comfy.submits) == 2, "the second submit")
+        self.assertEqual(self.vlm.shutdowns, 1)
+        self.assertIn(
+            started.batch_id, [b["batch_id"] for b in self.runner.active_batches()]
+        )
+
+    async def test_unload_off_overlaps_prompts_and_renders(self) -> None:
+        assert self.vlm is not None
+        self.runner.unload_vlm_during_generation = False
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=4, count_per_batch=1))
+        timeline = self.timeline()
+        first_submit = timeline.index(("comfy", "submit"))
+        last_prompt = max(
+            i for i, e in enumerate(timeline) if e == ("vlm", "generate_text")
+        )
+        self.assertLess(
+            first_submit, last_prompt
+        )  # a job went out before the last prompt
+        self.assertLess(timeline.index(("event", "batch_step")), first_submit)
+        self.assertEqual(self.vlm.shutdowns, 0)
+        self.assertEqual(len(self.comfy.submits), 4)
+
+    async def test_unload_off_keeps_the_prompt_writer_only_a_step_or_two_ahead(
+        self,
+    ) -> None:
+        # Window of one and nothing ever finishing: the consumer holds one
+        # step, the queue one more, and the writer one it cannot hand over.
+        assert self.vlm is not None
+        self.runner.unload_vlm_during_generation = False
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        await self.start(self.random_mode(batch_size=6, count_per_batch=1))
+        await self.until(lambda: len(self.vlm.calls) >= 4, "the writer to run ahead")
+        await self.quiet()
+        self.assertEqual(len(self.vlm.calls), 4)
+        self.assertEqual(len(self.comfy.submits), 1)
+
+    async def test_a_manual_batch_unloads_before_its_first_submit(self) -> None:
+        assert self.vlm is not None
+        await self.run_to_end(self.manual(count_per_batch=2))
+        self.assertEqual(self.vlm.shutdowns, 1)
+        timeline = self.timeline()
+        self.assertLess(
+            timeline.index(("vlm", "shutdown")), timeline.index(("comfy", "submit"))
+        )
+        self.assertLess(
+            timeline.index(("event", "batch_step")), timeline.index(("vlm", "shutdown"))
+        )
+
+    async def test_a_manual_batch_does_not_unload_when_unload_is_off(self) -> None:
+        assert self.vlm is not None
+        self.runner.unload_vlm_during_generation = False
+        await self.run_to_end(self.manual())
+        self.assertEqual(self.vlm.shutdowns, 0)
+
+    async def test_nothing_is_unloaded_when_no_model_is_loaded(self) -> None:
+        assert self.vlm is not None
+        self.vlm.model_id = None
+        await self.run_to_end(self.manual())
+        self.assertEqual(self.vlm.shutdowns, 0)
+        self.assertEqual(len(self.comfy.submits), 3)
+
+    async def test_no_vlm_at_all_is_fine(self) -> None:
+        self.vlm = None
+        await self.run_to_end(self.manual())
+        self.assertEqual(len(self.comfy.submits), 3)
+
+    async def test_a_failing_unload_does_not_stop_the_run(self) -> None:
+        assert self.vlm is not None
+        self.vlm.shutdown_error = RuntimeError("llama-server would not die")
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING") as logs:
+            await self.run_to_end(self.manual(count_per_batch=2))
+        self.assertTrue(
+            any("llama-server would not die" in line for line in logs.output)
+        )
+        self.assertEqual(len(self.comfy.submits), 2)
+
+    async def test_the_vlm_stays_up_while_another_random_batch_is_still_prompting(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        gate = asyncio.Event()
+        self.vlm.gates.append(gate)  # batch A's first prompt waits
+        a = await self.start(self.random_mode(batch_size=1, count_per_batch=1))
+        await self.until(lambda: len(self.vlm.calls) == 1, "batch A to be writing")
+        b = await self.start(self.manual(count_per_batch=2))
+        await self.wait(b.batch_id)
+        self.assertEqual(len(self.comfy.submits), 2)  # B rendered...
+        self.assertEqual(self.vlm.shutdowns, 0)  # ...without unloading A's model
+        gate.set()
+        await self.wait(a.batch_id)
+        self.assertEqual(self.vlm.shutdowns, 1)  # A unloads once ITS prompts are in
+        self.assertEqual(len(self.comfy.submits), 3)
+
+    async def test_a_finished_random_batch_no_longer_holds_the_unload_back(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertEqual(self.vlm.shutdowns, 1)
+        await self.run_to_end(self.manual(count_per_batch=1))
+        self.assertEqual(self.vlm.shutdowns, 2)
+
+
+class TestWindow(BatchCase):
+    async def test_the_run_blocks_at_the_window_and_resumes_on_job_updates(
+        self,
+    ) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 2)  # blocked: nothing finished yet
+
+        # Progress inside ComfyUI is not a way out of the window.
+        self.job_update(self.comfy.job_ids[0], "running")
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 2)
+
+        self.job_update(self.comfy.job_ids[0], "done")
+        await self.until(lambda: len(self.comfy.submits) == 3, "a third submit")
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 3)
+
+        self.job_update(self.comfy.job_ids[1], "failed", "node exploded")
+        await self.until(lambda: len(self.comfy.submits) == 4, "a fourth submit")
+        self.job_update(self.comfy.job_ids[2], "cancelled")
+        await self.until(lambda: len(self.comfy.submits) == 5, "a fifth submit")
+        await self.wait(started.batch_id)  # all five are out
+        self.assertEqual([p.seed for p in self.params()], [100, 101, 102, 103, 104])
+
+    async def test_a_job_that_finishes_the_moment_it_is_submitted_is_still_seen(
+        self,
+    ) -> None:
+        # ComfyClient can announce a job's end a loop iteration after submit
+        # returns. The runner must already know the job by then, or its slot
+        # is never freed and the run sticks at the window.
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        self.comfy.finish_at_once = "done"
+        started = await self.start(self.manual(count_per_batch=4))
+        await self.wait(started.batch_id)
+        self.assertEqual(len(self.comfy.submits), 4)
+
+    async def test_a_repeated_terminal_update_frees_only_one_slot(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        first = self.comfy.job_ids[0]
+        self.job_update(first, "done")
+        self.job_update(first, "done")
+        self.job_update(first, "failed", "late")
+        await self.until(lambda: len(self.comfy.submits) == 2, "the second submit")
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 2)  # one slot, freed once
+
+    async def test_a_terminal_update_forgets_the_jobs_batch_link(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        first, second = self.comfy.job_ids
+        self.assertEqual(set(self.runner._job_batch), {first, second})
+        self.job_update(first, "done")
+        await self.until(lambda: len(self.comfy.submits) == 3, "a third submit")
+        self.assertEqual(set(self.runner._job_batch), {second, self.comfy.job_ids[2]})
+
+    async def test_an_update_for_a_job_of_another_batch_frees_nothing(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        a = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 1, "batch A's first submit")
+        b = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 2, "batch B's first submit")
+        job_a, job_b = self.comfy.job_ids
+        self.job_update(job_a, "done")  # frees A's window, not B's
+        await self.until(
+            lambda: len(self.comfy.submits) == 3, "batch A's second submit"
+        )
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 3)
+        owners = [k["t2i_batch_id"] for _, _, k in self.comfy.submits]
+        self.assertEqual(sorted(owners), sorted([a.batch_id, a.batch_id, b.batch_id]))
+        self.job_update(job_b, "done")
+        await self.until(
+            lambda: len(self.comfy.submits) == 4, "batch B's second submit"
+        )
+
+    async def test_an_update_for_a_job_nobody_submitted_is_ignored(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        await self.start(self.manual(count_per_batch=2))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        self.job_update(987654, "done")
+        self.comfy.emit("job_update", {"job_id": None, "state": "done"})
+        self.comfy.emit("job_update", {"state": "done"})
+        self.comfy.emit("job_progress", {"job_id": self.comfy.job_ids[0], "value": 1})
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 1)
+
+    async def test_the_window_size_is_read_from_the_config_at_start(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 3}})
+        await self.start(self.manual(count_per_batch=6))
+        await self.until(lambda: len(self.comfy.submits) == 3, "three submits")
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})  # too late for this batch
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 3)
+
+
+class TestRandomBatchRun(BatchCase):
+    async def test_a_caption_is_never_repeated_within_a_batch(self) -> None:
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=6, count_per_batch=1))
+        captions = [step["caption"] for step in self.frames("batch_step")]
+        self.assertEqual(len(captions), 6)
+        self.assertEqual(sorted(captions), sorted(row[0] for row in CSV_ROWS))
+
+    async def test_the_step_takes_its_aspect_ratio_from_the_row(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                batch_size=2, count_per_batch=2, filter={"aspect_ratios": ["2:3"]}
+            )
+        )
+        self.assertEqual(
+            [s["aspect_ratio"] for s in self.frames("batch_step")], ["2:3"] * 2
+        )
+        self.assertEqual(
+            [(p.width, p.height) for p in self.params()], [(816, 1232)] * 4
+        )
+
+    async def test_the_steps_use_the_size_in_the_request(self) -> None:
+        # The CSV has no size column: only the ratio comes from the row.
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                batch_size=1,
+                count_per_batch=1,
+                megapixels=0.5,
+                filter={"aspect_ratios": ["1:1"]},
+            )
+        )
+        (params,) = self.params()
+        self.assertEqual((params.width, params.height), t2i_dims("1:1", 0.5, 16))
+
+    async def test_a_ratio_outside_the_eleven_is_used_as_the_row_gives_it(self) -> None:
+        self.roomy()
+        self._write_csv(
+            [["__ALICE__ stands.", "5:7", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]]
+        )
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        (params,) = self.params()
+        self.assertEqual(step["aspect_ratio"], "5:7")
+        self.assertEqual((params.width, params.height), t2i_dims("5:7", 1.0, 16))
+        self.assertEqual(step["warnings"], [])
+
+    async def test_an_unusable_ratio_falls_back_to_square_with_a_warning(self) -> None:
+        self.roomy()
+        self._write_csv(
+            [["__ALICE__ stands.", "0:5", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]]
+        )
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        (params,) = self.params()
+        self.assertEqual(step["aspect_ratio"], "1:1")
+        self.assertEqual((params.width, params.height), t2i_dims("1:1", 1.0, 16))
+        self.assertEqual(len(step["warnings"]), 1)
+        self.assertIn("0:5", step["warnings"][0])
+
+    async def test_the_character_seed_is_the_first_seed_of_the_step(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        steps = self.frames("batch_step")
+        self.assertEqual([s["seed"] for s in steps], [10, 12, 14])
+        self.assertEqual([p.seed for p in self.params()], [10, 11, 12, 13, 14, 15])
+        for step, call in zip(steps, self.vlm.calls):
+            resolved = self.expected_text(step["caption"], step["seed"])
+            self.assertEqual(
+                call["user_prompt"],
+                f"DESCRIPTION:\n{resolved}\n\nWrite the prompt now.",
+            )
+
+    async def test_the_images_of_a_step_share_one_prompt_and_size(self) -> None:
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=2, count_per_batch=3))
+        params = self.params()
+        self.assertEqual(len(params), 6)
+        for start in (0, 3):
+            group = params[start : start + 3]
+            self.assertEqual(len({p.positive for p in group}), 1)
+            self.assertEqual(len({(p.width, p.height) for p in group}), 1)
+            self.assertEqual(len({p.seed for p in group}), 3)
+
+    async def test_the_prompt_is_written_in_the_models_identity_style(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self._write_csv(
+            [
+                [
+                    "__ALICE__ smiles. __ALICE__ waves.",
+                    "3:2",
+                    "none",
+                    "0.9",
+                    "0.1",
+                    "0.0",
+                    "0",
+                    "1",
+                    "[]",
+                ]
+            ]
+        )
+        await self.run_to_end(
+            self.random_mode(model="sd", seed=4, batch_size=1, count_per_batch=1)
+        )
+        text = self.vlm.calls[0]["user_prompt"]
+        self.assertIn(
+            self.expected_text("__ALICE__ smiles. __ALICE__ waves.", 4, "noun"), text
+        )
+        self.assertIn("The woman waves.", text)
+
+    async def test_fixed_gives_every_step_the_same_cast(self) -> None:
+        # Review focus 5: same seed, same characters, whatever the caption.
+        assert self.vlm is not None
+        self.roomy()
+        self._write_csv(
+            [
+                [text, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]
+                for text in (
+                    "__ALICE__ walks along a beach.",
+                    "__ALICE__ paints a mural.",
+                    "__ALICE__ reads in a library.",
+                )
+            ]
+        )
+        await self.run_to_end(
+            self.random_mode(
+                seed=55, seed_policy="fixed", batch_size=3, count_per_batch=1
+            )
+        )
+        steps = self.frames("batch_step")
+        self.assertEqual([s["seed"] for s in steps], [55, 55, 55])
+        self.assertEqual([p.seed for p in self.params()], [55, 55, 55])
+        library, _ = self.library.get()
+        casts = [
+            resolve_caption(s["caption"], 55, "ref", library).characters["ALICE"]
+            for s in steps
+        ]
+        self.assertEqual(casts[0], casts[1])
+        self.assertEqual(casts[1], casts[2])
+        for call in self.vlm.calls:
+            self.assertIn(casts[0]["hair"], call["user_prompt"])
+            self.assertIn(casts[0]["eyes"], call["user_prompt"])
+
+    async def test_an_incrementing_seed_gives_each_step_a_new_cast(self) -> None:
+        self.roomy()
+        self._write_csv(
+            [
+                [text, "3:2", "none", "0.9", "0.1", "0.0", "0", "1", "[]"]
+                for text in (
+                    "__ALICE__ walks.",
+                    "__ALICE__ paints.",
+                    "__ALICE__ reads.",
+                    "__ALICE__ sings.",
+                )
+            ]
+        )
+        await self.run_to_end(self.random_mode(seed=1, batch_size=4, count_per_batch=1))
+        library, _ = self.library.get()
+        casts = [
+            resolve_caption(s["caption"], s["seed"], "ref", library).characters["ALICE"]
+            for s in self.frames("batch_step")
+        ]
+        self.assertGreater(len({tuple(sorted(c.items())) for c in casts}), 1)
+
+    async def test_the_step_frame_carries_prompt_negative_and_warnings(self) -> None:
+        self.roomy()
+        started = await self.start(
+            self.random_mode(
+                model="sd",
+                preset_id=self.with_negative,
+                batch_size=1,
+                count_per_batch=1,
+                filter={"aspect_ratios": ["3:2"]},
+            )
+        )
+        await self.wait(started.batch_id)
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["batch_id"], started.batch_id)
+        self.assertEqual(step["step"], 1)
+        self.assertEqual(step["total_steps"], 1)
+        self.assertEqual(step["caption"], CSV_ROWS[0][0])
+        self.assertEqual(step["aspect_ratio"], "3:2")
+        self.assertEqual(step["seed"], 10)
+        self.assertEqual(step["prompt"], "A calm beach scene at dawn.")
+        self.assertEqual(step["negative"], "blurry, watermark")
+        self.assertEqual(step["warnings"], [])
+        (params,) = self.params()
+        self.assertEqual(params.negative, "blurry, watermark")
+
+    async def test_a_step_with_no_negative_model_sends_none(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                preset_id=self.with_negative, batch_size=1, count_per_batch=1
+            )
+        )
+        (step,) = self.frames("batch_step")
+        (params,) = self.params()
+        self.assertIsNone(step["negative"])  # krea2 has no negative prompt
+        self.assertIsNone(params.negative)
+
+    async def test_engine_warnings_ride_on_the_step(self) -> None:
+        self.roomy()
+        self._write_csv(
+            [
+                [
+                    "__ALICE__ adjusts her __BREASTS__ top.",
+                    "3:2",
+                    "none",
+                    "0.9",
+                    "0.1",
+                    "0.0",
+                    "0",
+                    "1",
+                    "[]",
+                ]
+            ]
+        )
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        (step,) = self.frames("batch_step")
+        self.assertEqual(len(step["warnings"]), 1)
+        self.assertIn("BREASTS", step["warnings"][0])
+
+    async def test_the_phase_flips_to_rendering_and_next_seed_never_changes(
+        self,
+    ) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        frames = self.frames("batch_progress")
+        self.assertEqual([f["phase"] for f in frames], ["prompting", "rendering"])
+        self.assertEqual({f["next_seed"] for f in frames}, {16})
+        self.assertEqual({f["images_total"] for f in frames}, {6})
+
+    async def test_a_step_is_listed_while_the_next_prompt_is_written(self) -> None:
+        assert self.vlm is not None
+        self.vlm.gates.extend([None, asyncio.Event()])
+        started = await self.start(self.random_mode(batch_size=3, count_per_batch=1))
+        (row,) = self.runner.active_batches()
+        self.assertIsNone(row["step"])
+        await self.until(lambda: len(self.vlm.calls) == 2, "the second prompt to start")
+        (row,) = self.runner.active_batches()
+        self.assertEqual(row["batch_id"], started.batch_id)
+        self.assertEqual(row["state"], "prompting")
+        self.assertEqual(row["total_steps"], 3)
+        step = row["step"]
+        self.assertEqual(
+            sorted(step),
+            [
+                "aspect_ratio",
+                "caption",
+                "negative",
+                "prompt",
+                "seed",
+                "step",
+                "total_steps",
+                "warnings",
+            ],
+        )
+        self.assertEqual((step["step"], step["total_steps"], step["seed"]), (1, 3, 10))
+        self.assertEqual(step["prompt"], "A calm beach scene at dawn.")
+        self.assertEqual(self.comfy.submits, [])  # unload on: nothing renders yet
+
+    async def test_a_batch_that_stops_early_runs_the_steps_it_planned(self) -> None:
+        self.roomy()
+        started = await self.start(
+            self.random_mode(
+                seed=3, seed_policy="decrement", batch_size=5, count_per_batch=2
+            )
+        )
+        await self.wait(started.batch_id)
+        self.assertEqual(started.total_images, 4)
+        self.assertEqual(len(self.frames("batch_step")), 2)
+        self.assertEqual([p.seed for p in self.params()], [3, 2, 1, 0])
+        self.assertTrue(any("shortened" in w for w in started.warnings))
+
+    async def test_the_random_policy_draws_a_fresh_seed_for_every_image(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                seed=7, seed_policy="random", batch_size=4, count_per_batch=1
+            )
+        )
+        seeds = [p.seed for p in self.params()]
+        self.assertEqual(seeds[0], 7)
+        self.assertEqual(len(set(seeds)), 4)
+        self.assertTrue(all(0 <= s <= SEED_MAX for s in seeds))
+        self.assertEqual([s["seed"] for s in self.frames("batch_step")], seeds)
+        self.assertEqual(
+            {f["next_seed"] for f in self.frames("batch_progress")}, {None}
+        )
+
+
+class TestPromptRetryAndFallback(BatchCase):
+    def one_step(self, **over: Any) -> BatchRequest:
+        """One caption, always the first CSV row (the only 3:2 one)."""
+        fields: Dict[str, Any] = dict(
+            batch_size=1, count_per_batch=1, filter={"aspect_ratios": ["3:2"]}
+        )
+        fields.update(over)
+        return self.random_mode(**fields)
+
+    async def test_a_failed_call_is_retried_once(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError("boom"), "A crisp prompt."])
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(step["prompt"], "A crisp prompt.")
+        self.assertEqual(step["warnings"], [])
+        self.assertEqual(len(self.vlm.calls), 2)
+        self.assertEqual(
+            len(self.vlm.ensure_calls), 2
+        )  # the model is started again too
+        self.assertEqual([p.positive for p in self.params()], ["A crisp prompt."])
+
+    async def test_timeouts_and_runtime_errors_are_retried_too(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        for error in (TimeoutError("slow"), RuntimeError("odd")):
+            with self.subTest(error=type(error).__name__):
+                self.vlm.calls.clear()
+                self.events.clear()
+                self.vlm.replies.extend([error, "Second time lucky."])
+                batch_id = await self.run_to_end(self.one_step())
+                self.assertEqual(len(self.vlm.calls), 2)
+                self.assertEqual(
+                    self.frames("batch_step")[0]["prompt"], "Second time lucky."
+                )
+                await self.runner.cancel_batch(batch_id)  # frees the Random slot
+
+    async def test_two_failures_fall_back_to_the_resolved_caption(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError("first"), VlmError("boom")])
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        library, _ = self.library.get()
+        resolved = resolve_caption(CSV_ROWS[0][0], 10, "ref", library).text
+        self.assertEqual(step["prompt"], resolved)
+        self.assertEqual(
+            step["warnings"], ["VLM failed (boom) - used the resolved caption"]
+        )
+        self.assertEqual(len(self.vlm.calls), 2)  # one retry, no more
+        # The run does not stop: the fallback prompt is rendered.
+        self.assertEqual([p.positive for p in self.params()], [resolved])
+
+    async def test_the_failure_reason_is_one_short_line(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        long_reason = "first line\nsecond line " + "x" * 400
+        self.vlm.replies.extend([VlmError(long_reason), VlmError(long_reason)])
+        await self.run_to_end(self.one_step())
+        (warning,) = self.frames("batch_step")[0]["warnings"]
+        self.assertTrue(warning.startswith("VLM failed (first line second line xxx"))
+        self.assertTrue(warning.endswith(") - used the resolved caption"))
+        self.assertNotIn("\n", warning)
+        self.assertLess(len(warning), 250)
+
+    async def test_a_blank_reason_names_the_exception(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError(""), VlmError("")])
+        await self.run_to_end(self.one_step())
+        self.assertEqual(
+            self.frames("batch_step")[0]["warnings"],
+            ["VLM failed (VlmError) - used the resolved caption"],
+        )
+
+    async def test_a_model_that_will_not_start_counts_as_a_failed_attempt(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.start_errors.extend([VlmError("no gpu"), VlmError("no gpu")])
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(
+            step["warnings"], ["VLM failed (no gpu) - used the resolved caption"]
+        )
+        self.assertEqual(self.vlm.calls, [])
+        self.assertEqual(len(self.comfy.submits), 1)
+
+    async def test_an_empty_reply_is_a_failed_attempt(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend(["", "  "])
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(len(self.vlm.calls), 2)
+        self.assertIn("empty prompt", step["warnings"][0])
+
+    async def test_no_vlm_falls_back_without_retrying(self) -> None:
+        self.roomy()
+        self.vlm = None
+        await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(
+            step["warnings"], ["VLM unavailable - used the resolved caption"]
+        )
+        self.assertEqual(len(self.comfy.submits), 1)
+
+    async def test_no_loadable_model_falls_back_without_retrying(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        with mock.patch(
+            "metascan.core.t2i_runner.pick_vlm_model",
+            side_effect=VlmSelectError("no VLM model available on this hardware"),
+        ):
+            await self.run_to_end(self.one_step())
+        (step,) = self.frames("batch_step")
+        self.assertEqual(
+            step["warnings"], ["VLM unavailable - used the resolved caption"]
+        )
+        self.assertEqual(self.vlm.calls, [])
+
+    async def test_each_step_falls_back_on_its_own(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError("x"), VlmError("x"), "Written by the model."])
+        await self.run_to_end(self.random_mode(batch_size=2, count_per_batch=1))
+        first, second = self.frames("batch_step")
+        self.assertEqual(
+            first["warnings"], ["VLM failed (x) - used the resolved caption"]
+        )
+        self.assertEqual(second["warnings"], [])
+        self.assertEqual(second["prompt"], "Written by the model.")
+
+    async def test_the_sdxl_fallback_brings_its_stock_negative_and_prefix(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError("x"), VlmError("x")])
+        await self.run_to_end(self.one_step(model="sd", preset_id=self.with_negative))
+        store = get_prompt_store()
+        (step,) = self.frames("batch_step")
+        self.assertTrue(
+            step["prompt"].startswith(store.get("T2I_FALLBACK_PREFIX_SD").strip())
+        )
+        self.assertEqual(
+            step["negative"], store.get("T2I_FALLBACK_NEGATIVE_SD").strip()
+        )
+        (params,) = self.params()
+        self.assertEqual(params.negative, store.get("T2I_FALLBACK_NEGATIVE_SD").strip())
+
+    async def test_the_fallback_has_no_parentheses(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self._write_csv(
+            [
+                [
+                    "A (very) quiet harbour.",
+                    "3:2",
+                    "none",
+                    "0.9",
+                    "0.1",
+                    "0.0",
+                    "0",
+                    "0",
+                    "[]",
+                ]
+            ]
+        )
+        self.vlm.replies.extend([VlmError("x"), VlmError("x")])
+        await self.run_to_end(self.one_step())
+        (params,) = self.params()
+        self.assertEqual(params.positive, "A very quiet harbour.")
+
+    async def test_an_unexpected_error_fails_the_batch_instead_of_being_swallowed(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.append(ValueError("a bug, not a VLM failure"))
+        started = await self.start(self.one_step())
+        await self.wait(started.batch_id)
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+        (frame,) = self.frames("batch_error")
+        self.assertIn("a bug, not a VLM failure", frame["error"])
+        self.assertEqual(self.comfy.submits, [])
+        self.assertEqual(len(self.vlm.calls), 1)  # not retried
+        self.assertEqual(self.runner.active_batches(), [])
+
+    async def test_a_caption_file_that_vanishes_mid_run_fails_the_batch(self) -> None:
+        self.roomy()
+        started = await self.runner.start_batch(self.one_step(batch_size=2))
+        self.csv_path.unlink()
+        await self.wait(started.batch_id)
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+        self.assertEqual(self.runner.active_batches(), [])
+
+
+class TestCancel(BatchCase):
+    async def test_cancel_during_the_prompt_phase(self) -> None:
+        assert self.vlm is not None
+        gate = asyncio.Event()
+        self.vlm.gates.append(gate)  # the first prompt never comes back
+        started = await self.start(
+            self.random_mode(seed=10, batch_size=3, count_per_batch=2)
+        )
+        await self.until(
+            lambda: len(self.vlm.calls) == 1, "the VLM call to be in flight"
+        )
+
+        self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+
+        self.assertEqual(
+            self.vlm.cancelled_calls, 1
+        )  # the in-flight call was cancelled
+        self.assertEqual(self.comfy.submits, [])  # nothing was ever submitted
+        self.assertEqual(self.vlm.shutdowns, 0)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])  # exactly one
+        (frame,) = self.frames("batch_cancelled")
+        self.assertEqual(
+            frame,
+            {
+                "batch_id": started.batch_id,
+                "images_done": 0,
+                "images_failed": 0,
+                "images_total": 6,
+                "images_cancelled": 6,
+                "next_seed": 16,
+            },
+        )
+        self.assertEqual(self.runner.active_batches(), [])
+        await asyncio.wait_for(self.runner.wait_batch(started.batch_id), 1)
+        leftover = [
+            t.get_name()
+            for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and t.get_name().startswith("t2i-")
+        ]
+        self.assertEqual(leftover, [])
+
+    async def test_cancel_during_rendering_cancels_the_unfinished_jobs(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+
+        self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids)
+        self.assertEqual(len(self.comfy.submits), 2)  # the run stopped for good
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        timeline = self.timeline()
+        self.assertLess(
+            timeline.index(("comfy", "cancel", self.comfy.job_ids[-1])),
+            timeline.index(("event", "batch_cancelled")),
+        )
+        await self.quiet()  # the jobs' own cancelled updates arrive: nothing more happens
+        self.assertEqual(len(self.comfy.submits), 2)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+
+    async def test_cancel_leaves_no_orphan_state(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        await self.runner.cancel_batch(started.batch_id)
+        batch = self.runner._finished[started.batch_id]
+        self.assertEqual(batch.pending, set())
+        self.assertEqual(batch.window._value, 2)  # every slot is back
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._job_meta, {})
+        rows = self.db.list_generation_jobs(limit=10)
+        self.assertEqual({r["state"] for r in rows}, {"cancelled"})
+
+    async def test_cancel_only_touches_jobs_that_have_not_finished(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        self.job_update(self.comfy.job_ids[0], "done")
+        await self.until(lambda: len(self.comfy.submits) == 3, "a third submit")
+        await self.runner.cancel_batch(started.batch_id)
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids[1:])
+
+    async def test_cancel_is_idempotent_and_unknown_ids_are_not_found(self) -> None:
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.wait(started.batch_id)
+        self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+        self.assertFalse(await self.runner.cancel_batch(started.batch_id))
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        with self.assertRaises(T2iNotFoundError):
+            await self.runner.cancel_batch("no-such-batch")
+
+    async def test_a_failing_comfy_cancel_does_not_stop_the_cancel(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 3}})
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 3, "three submits")
+        self.comfy.cancel_errors[self.comfy.job_ids[1]] = RuntimeError(
+            "ComfyUI is gone"
+        )
+        with self.assertLogs("metascan.core.t2i_runner", level="WARNING") as logs:
+            self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+        self.assertTrue(any("ComfyUI is gone" in line for line in logs.output))
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids)  # all were attempted
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        batch = self.runner._finished[started.batch_id]
+        self.assertEqual(batch.window._value, 3)
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._job_meta, {})
+
+    async def test_cancel_while_a_submit_is_in_flight_still_cancels_that_job(
+        self,
+    ) -> None:
+        # ComfyClient.submit writes the job row and only then queues it, so
+        # a cancel landing in between must not lose the id: the job would sit
+        # queued in the database and run after the next restart.
+        self.comfy.hold = asyncio.Event()
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(
+            lambda: len(self.comfy.submits) == 1, "the first submit to start"
+        )
+        cancel = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        self.assertFalse(cancel.done())  # waiting for the submit to land
+        self.comfy.hold.set()
+        self.assertTrue(await cancel)
+        self.assertEqual(len(self.comfy.submits), 1)
+        (job,) = self.db.list_generation_jobs(limit=10)
+        self.assertEqual(self.comfy.cancelled, [job["id"]])
+        self.assertEqual(job["state"], "cancelled")
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        # The landed job owned the slot: it comes back once, not twice.
+        self.assertEqual(self.runner._finished[started.batch_id].window._value, 4)
+
+    async def test_a_caller_that_goes_away_mid_cancel_does_not_strand_the_batch(
+        self,
+    ) -> None:
+        # The cancel is shielded from the request that asked for it: if that
+        # request is dropped while the cancel waits on an in-flight submit,
+        # the batch must still end, once.
+        self.comfy.hold = asyncio.Event()
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(
+            lambda: len(self.comfy.submits) == 1, "the first submit to start"
+        )
+        caller = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        self.comfy.hold.set()
+        await self.until(
+            lambda: self.runner.active_batches() == [], "the cancel to finish anyway"
+        )
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids)
+
+    async def test_a_cancelled_submit_that_then_fails_gives_its_slot_back(self) -> None:
+        self.comfy.gate = asyncio.Event()  # the submit is in flight...
+        self.comfy.submit_errors[0] = ComfyError("nope")  # ...and will fail
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(
+            lambda: len(self.comfy.submits) == 1, "the first submit to start"
+        )
+        cancel = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        self.assertFalse(cancel.done())
+        self.comfy.gate.set()
+        self.assertTrue(await cancel)
+        self.assertEqual(self.comfy.cancelled, [])  # no job ever existed
+        batch = self.runner._finished[started.batch_id]
+        self.assertEqual(batch.window._value, 4)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+
+    async def test_two_cancels_at_once_end_the_batch_once(self) -> None:
+        self.comfy.hold = asyncio.Event()  # keeps the first cancel waiting
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(
+            lambda: len(self.comfy.submits) == 1, "the first submit to start"
+        )
+        first = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        second = asyncio.ensure_future(self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        self.assertTrue(second.done())
+        self.assertFalse(second.result())  # already being cancelled
+        self.comfy.hold.set()
+        self.assertTrue(await first)
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids)
+
+    async def test_a_finished_random_batch_lets_go_of_the_caption_index(self) -> None:
+        started = await self.start(self.random_mode())
+        batch = self.runner._batches[started.batch_id]
+        self.assertIsNotNone(batch.picker)
+        await self.runner.cancel_batch(started.batch_id)
+        self.assertIsNone(batch.picker)
+
+    async def test_only_the_last_fifty_finished_batches_are_remembered(self) -> None:
+        ids = []
+        for _ in range(55):
+            started = await self.start(self.manual(count_per_batch=1))
+            await self.runner.cancel_batch(started.batch_id)
+            ids.append(started.batch_id)
+        self.assertEqual(len(self.runner._finished), 50)
+        for forgotten in ids[:5]:
+            with self.assertRaises(T2iNotFoundError):
+                await self.runner.cancel_batch(forgotten)
+        for remembered in ids[5:]:
+            self.assertFalse(await self.runner.cancel_batch(remembered))
+
+    async def test_cancel_right_after_start_is_clean(self) -> None:
+        started = await self.start(self.manual(count_per_batch=4))
+        self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+        await self.quiet()
+        self.assertEqual(self.terminal_frames(), ["batch_cancelled"])
+        self.assertEqual(self.runner.active_batches(), [])
+        submitted = len(self.comfy.submits)
+        self.assertEqual(self.comfy.cancelled, self.comfy.job_ids)
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), submitted)  # nothing after the cancel
+
+    async def test_cancelling_one_batch_leaves_the_others_alone(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        a = await self.start(self.manual(count_per_batch=4))
+        b = await self.start(self.manual(count_per_batch=4))
+        await self.until(
+            lambda: len(self.comfy.submits) == 4, "both batches to fill their windows"
+        )
+        await self.runner.cancel_batch(a.batch_id)
+        self.assertEqual(
+            [r["batch_id"] for r in self.runner.active_batches()], [b.batch_id]
+        )
+        job_b = [
+            j["id"]
+            for j in self.db.list_generation_jobs(limit=10)
+            if j["t2i_batch_id"] == b.batch_id
+        ]
+        self.assertEqual(set(job_b) & set(self.comfy.cancelled), set())
+        self.job_update(job_b[0], "done")
+        await self.until(lambda: len(self.comfy.submits) == 5, "batch B to carry on")
+
+    async def test_a_cancelled_random_batch_frees_the_random_slot(self) -> None:
+        started = await self.start(self.random_mode())
+        await self.runner.cancel_batch(started.batch_id)
+        again = await self.start(self.random_mode())
+        self.assertNotEqual(again.batch_id, started.batch_id)
+
+    async def test_a_cancelled_batch_stays_known_for_a_while(self) -> None:
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.runner.cancel_batch(started.batch_id)
+        self.assertNotIn(
+            started.batch_id, [b["batch_id"] for b in self.runner.active_batches()]
+        )
+        self.assertIn(started.batch_id, self.runner._finished)
+
+
+class TestSubmitError(BatchCase):
+    async def test_a_submit_error_stops_the_run_and_reports_once(self) -> None:
+        self.comfy.submit_errors[2] = ComfyError("ComfyUI rejected the job: 400")
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.wait(started.batch_id)
+
+        self.assertEqual(len(self.comfy.submits), 3)  # two out, the third refused
+        self.assertEqual(
+            self.comfy.cancelled, self.comfy.job_ids
+        )  # the two are pulled back
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+        self.assertNotIn("batch_complete", self.names())
+        (frame,) = self.frames("batch_error")
+        self.assertEqual(
+            frame,
+            {
+                "batch_id": started.batch_id,
+                "error": "ComfyUI rejected the job: 400",
+                "images_done": 0,
+                "images_failed": 0,
+                "images_total": 5,
+                "images_cancelled": 5,
+                "next_seed": 105,
+            },
+        )
+        self.assertEqual(self.runner.active_batches(), [])
+        await self.quiet()
+        self.assertEqual(len(self.comfy.submits), 3)  # never tried again
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+
+    async def test_a_submit_error_leaves_no_orphan_state(self) -> None:
+        self.comfy.submit_errors[2] = ComfyError("nope")
+        started = await self.start(self.manual(count_per_batch=5))
+        await self.wait(started.batch_id)
+        batch = self.runner._finished[started.batch_id]
+        self.assertEqual(batch.pending, set())
+        self.assertEqual(
+            batch.window._value, 4
+        )  # the failing submit's slot is back too
+        self.assertEqual(self.runner._job_batch, {})
+        self.assertEqual(self.runner._job_meta, {})
+        self.assertEqual(
+            {r["state"] for r in self.db.list_generation_jobs(limit=10)}, {"cancelled"}
+        )
+
+    async def test_an_error_on_the_very_first_submit(self) -> None:
+        self.comfy.submit_errors[0] = ComfyError("ComfyUI is down")
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.wait(started.batch_id)
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+        self.assertEqual(self.comfy.cancelled, [])
+        self.assertEqual(self.runner._finished[started.batch_id].window._value, 4)
+
+    async def test_binding_errors_and_any_other_exception_are_handled_the_same_way(
+        self,
+    ) -> None:
+        for error in (
+            BindingError("no MS_NEGATIVE node"),
+            ValueError("odd"),
+            OSError("disk full"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.events.clear()
+                self.comfy.submits.clear()
+                self.comfy.submit_errors = {0: error}
+                started = await self.start(self.manual(count_per_batch=2))
+                await self.wait(started.batch_id)
+                self.assertEqual(self.terminal_frames(), ["batch_error"])
+                self.assertIn(str(error), self.frames("batch_error")[0]["error"])
+
+    async def test_an_exception_without_a_message_is_reported_by_name(self) -> None:
+        self.comfy.submit_errors[0] = KeyError()
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.wait(started.batch_id)
+        self.assertEqual(self.frames("batch_error")[0]["error"], "KeyError")
+
+    async def test_jobs_that_already_finished_are_left_alone(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 2}})
+        self.comfy.submit_errors[2] = ComfyError("nope")
+        started = await self.start(self.manual(count_per_batch=4))
+        await self.until(lambda: len(self.comfy.submits) == 2, "two submits")
+        self.job_update(
+            self.comfy.job_ids[0], "done"
+        )  # frees a slot -> third submit fails
+        await self.wait(started.batch_id)
+        self.assertEqual(self.comfy.cancelled, [self.comfy.job_ids[1]])
+        rows = {r["id"]: r["state"] for r in self.db.list_generation_jobs(limit=10)}
+        self.assertEqual(
+            rows[self.comfy.job_ids[0]], "queued"
+        )  # untouched by the abort
+        self.assertEqual(rows[self.comfy.job_ids[1]], "cancelled")
+
+    async def test_a_submit_error_stops_a_writer_that_is_still_prompting(self) -> None:
+        assert self.vlm is not None
+        self.runner.unload_vlm_during_generation = False
+        self.roomy()
+        self.vlm.gates.extend(
+            [None, asyncio.Event()]
+        )  # step 2's prompt never comes back
+        self.comfy.submit_errors[0] = ComfyError("nope")
+        self.comfy.gate = asyncio.Event()  # the first submit waits for the writer
+        started = await self.start(self.random_mode(batch_size=3, count_per_batch=1))
+        await self.until(lambda: len(self.vlm.calls) == 2, "the writer to be mid-call")
+        self.comfy.gate.set()  # now the submit fails
+        await self.wait(started.batch_id)
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+        self.assertEqual(self.vlm.cancelled_calls, 1)  # the writer was stopped mid-call
+        leftover = [
+            t.get_name()
+            for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and t.get_name().startswith("t2i-")
+        ]
+        self.assertEqual(leftover, [])
+
+    async def test_an_error_frees_the_random_slot(self) -> None:
+        self.comfy.submit_errors[0] = ComfyError("nope")
+        started = await self.start(self.random_mode(batch_size=1, count_per_batch=1))
+        await self.wait(started.batch_id)
+        self.comfy.submit_errors.clear()
+        again = await self.start(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertNotEqual(again.batch_id, started.batch_id)
+
+    async def test_cancel_after_an_error_reports_it_is_already_over(self) -> None:
+        self.comfy.submit_errors[0] = ComfyError("nope")
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.wait(started.batch_id)
+        self.assertFalse(await self.runner.cancel_batch(started.batch_id))
+        self.assertEqual(self.terminal_frames(), ["batch_error"])
+
+
+class TestWaitBatchAndClose(BatchCase):
+    async def test_an_unknown_batch_is_not_found(self) -> None:
+        with self.assertRaises(T2iNotFoundError):
+            await self.runner.wait_batch("no-such-batch")
+
+    async def test_wait_returns_when_the_last_job_is_submitted_not_finished(
+        self,
+    ) -> None:
+        started = await self.start(self.manual(count_per_batch=3))
+        await asyncio.wait_for(self.runner.wait_batch(started.batch_id), 5)
+        self.assertEqual(len(self.comfy.submits), 3)
+        # The jobs are still queued; the batch is still active.
+        self.assertEqual(
+            [b["batch_id"] for b in self.runner.active_batches()], [started.batch_id]
+        )
+
+    async def test_wait_blocks_while_the_window_holds_the_run(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.manual(count_per_batch=2))
+        waiter = asyncio.ensure_future(self.runner.wait_batch(started.batch_id))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        await self.quiet()
+        self.assertFalse(waiter.done())
+        self.job_update(self.comfy.job_ids[0], "done")
+        await asyncio.wait_for(waiter, 5)
+        self.assertEqual(len(self.comfy.submits), 2)
+
+    async def test_a_cancelled_waiter_does_not_cancel_the_run(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.manual(count_per_batch=2))
+        waiter = asyncio.ensure_future(self.runner.wait_batch(started.batch_id))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+        self.job_update(self.comfy.job_ids[0], "done")
+        await self.until(lambda: len(self.comfy.submits) == 2, "the run to carry on")
+
+    async def test_wait_on_a_finished_batch_returns_at_once(self) -> None:
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.runner.cancel_batch(started.batch_id)
+        await asyncio.wait_for(self.runner.wait_batch(started.batch_id), 1)
+
+    async def test_wait_does_not_raise_when_the_run_failed(self) -> None:
+        self.comfy.submit_errors[0] = ComfyError("nope")
+        started = await self.start(self.manual(count_per_batch=1))
+        await self.wait(started.batch_id)  # returns; the error is a frame
+
+    async def test_aclose_stops_the_runs_without_cancelling_their_jobs(self) -> None:
+        self.cfg = get_t2i_config({"t2i": {"window": 1}})
+        started = await self.start(self.manual(count_per_batch=3))
+        await self.until(lambda: len(self.comfy.submits) == 1, "the first submit")
+        await self.runner.aclose()
+        self.assertTrue(self.runner._batches[started.batch_id].task.done())
+        self.assertEqual(self.comfy.cancelled, [])  # the jobs are ComfyClient's to keep
+        self.assertEqual(self.terminal_frames(), [])
+        await self.runner.aclose()  # idempotent
 
 
 if __name__ == "__main__":
