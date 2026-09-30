@@ -30,6 +30,7 @@ import { useWebSocket } from '../../composables/useWebSocket'
 import {
   buildBatchRequest,
   defaultPresetFor,
+  firstStepReady,
   generateBlocker,
   initialFields,
   mergeFormState,
@@ -161,12 +162,29 @@ watch(connected, (up) => {
 // copied in (a finished batch hands its values over exactly once).
 const randomLocked = computed(() => store.randomBatch !== null)
 const step = computed(() => (randomLocked.value ? store.currentStep : null))
-const shownCaption = computed(() => (randomLocked.value ? (step.value?.caption ?? '') : form.caption))
-const shownPrompt = computed(() => (randomLocked.value ? (step.value?.prompt ?? '') : form.prompt))
-const shownNegative = computed(() => (randomLocked.value ? (step.value?.negative ?? '') : form.negative))
+// A run whose first step is the user's own prompt already knows that step. From
+// the moment Generate is pressed until the server's batch_step frame arrives
+// (milliseconds, but the batch is announced first) the locked boxes keep showing
+// the form's values instead of going blank and filling in again. Only while no
+// step has arrived: a later step's null negative must not fall back to the form.
+const supplyingFirstStep = ref(false)
+const holdForm = computed(() => randomLocked.value && step.value === null && supplyingFirstStep.value)
+const liveBoxes = computed(() => randomLocked.value && !holdForm.value)
+const shownCaption = computed(() => (liveBoxes.value ? (step.value?.caption ?? '') : form.caption))
+const shownPrompt = computed(() => (liveBoxes.value ? (step.value?.prompt ?? '') : form.prompt))
+const shownNegative = computed(() => (liveBoxes.value ? (step.value?.negative ?? '') : form.negative))
 const shownAspect = computed(() => (step.value ? step.value.aspect_ratio : form.aspect))
 const shownSeed = computed(() => (step.value ? step.value.seed : form.seed))
 const stepWarnings = computed(() => step.value?.warnings ?? [])
+
+// The flag means exactly "waiting for the first step's frame": it ends when a
+// step arrives or the lock ends (the start failing is handled in onGenerate).
+watch(randomLocked, (locked) => {
+  if (!locked) supplyingFirstStep.value = false
+})
+watch(step, (s) => {
+  if (s) supplyingFirstStep.value = false
+})
 
 watch(
   () => store.lastFinished,
@@ -238,6 +256,7 @@ async function onGeneratePrompt() {
       return
     }
     form.prompt = r.prompt
+    store.readyPrompt = r.prompt // a Random Generate renders it as its first step
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
     promptWarnings.value = r.warnings
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
@@ -253,6 +272,15 @@ async function onGeneratePrompt() {
   } finally {
     generating.value = false
   }
+}
+
+// Typing a prompt makes it ready too: whatever the box holds after an edit is
+// what the user wants rendered next (an emptied box is not ready: see
+// firstStepReady). Only the user's own input goes through here, so a prompt a
+// batch handed back or a tile loaded is never taken for one.
+function onPromptInput(e: Event) {
+  form.prompt = (e.target as HTMLTextAreaElement).value
+  store.readyPrompt = form.prompt
 }
 
 // The dice loads one caption (and its aspect ratio) from the caption file so
@@ -355,6 +383,11 @@ const submitting = ref(false)
 const cancelling = ref(false)
 const batchWarnings = ref<string[]>([])
 
+// Random Caption mode: a prompt the user wrote or generated (and no batch has
+// taken yet) is what the run's first step renders. Nothing is drawn and no
+// prompt is written for it: what they reviewed is what renders.
+const firstStepFromBox = computed(() => firstStepReady(form, store.readyPrompt))
+
 const blocker = computed(() =>
   generateBlocker(form, {
     ready: ready.value,
@@ -379,7 +412,9 @@ async function onGenerate() {
     hasNegative: hasNegative.value,
     maxBatchSize: maxBatchSize.value,
     maxCount: maxCount.value,
+    firstStepFromForm: firstStepFromBox.value,
   })
+  const sentPrompt = form.prompt
   const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
   if (
     signature !== null &&
@@ -392,9 +427,15 @@ async function onGenerate() {
   ) {
     return
   }
+  // Set before the request goes out: the batch's WebSocket frames can beat the response.
+  supplyingFirstStep.value = req.mode === 'random' && !!req.prompt
   submitting.value = true
   try {
     const r = await store.startBatch(req)
+    // The prompt this Generate sent has been taken by its batch: the next
+    // Generate must not render it again. Compared by value, so a prompt the
+    // user typed while the request was in flight is left ready.
+    if (store.readyPrompt === sentPrompt) store.readyPrompt = null
     // A batch makes NEW images, so an image being edited is saved (pending edits
     // go in as usual) and let go before anything below touches the form: neither
     // the seed advance nor a Random batch's live and unlocked values can then
@@ -412,6 +453,7 @@ async function onGenerate() {
       'success',
     )
   } catch (e) {
+    supplyingFirstStep.value = false
     toast.show(startErrorText(e), 'warn', 6000)
   } finally {
     submitting.value = false
@@ -692,7 +734,7 @@ onBeforeUnmount(() => {
               >
                 <option v-for="a in aspectOptions" :key="a" :value="a">{{ a }}</option>
               </select>
-              <small v-if="form.mode === 'random' && !randomLocked" class="hint">taken from each caption</small>
+              <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstStepFromBox ? 'used for step 1, then taken from each caption' : 'taken from each caption' }}</small>
             </label>
             <SeedControls
               :seed="shownSeed"
@@ -721,7 +763,7 @@ onBeforeUnmount(() => {
               :value="shownPrompt"
               :readonly="randomLocked"
               :placeholder="randomLocked ? 'A prompt is written for each step…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
-              @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
+              @input="onPromptInput"
             />
             <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
               <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
@@ -765,11 +807,12 @@ onBeforeUnmount(() => {
               @click="onCancel"
             >{{ cancelling ? 'Cancelling…' : 'Cancel' }}</button>
             <span v-if="blocker !== null && blocker !== 'Still loading'" class="hint">{{ blocker }}</span>
+            <span v-else-if="firstStepFromBox" class="hint">Step 1 renders the prompt above; the rest are drawn</span>
           </div>
           <div class="counts">
             <label
               class="fld fld-inline"
-              title="Random Caption: how many captions to draw. Manual always renders one prompt."
+              title="Random Caption: how many captions a run uses (the first is the prompt above when one is ready). Manual always renders one prompt."
             >
               <span>Batch Size</span>
               <input

@@ -98,6 +98,15 @@ export const useT2iStore = defineStore('t2i', () => {
   // Random batch its `step` fills Caption / Prompt / Aspect and `next_seed`
   // the Seed box. Reset to null when the next batch begins.
   const lastFinished = ref<T2iFinishedBatch | null>(null)
+  // The Prompt box's text at the moment the user made a prompt ready for the
+  // next Generate (Generate Prompt wrote it, or they typed it), until a batch
+  // takes it. A Random Generate renders it as the run's first step instead of
+  // drawing a caption and writing a new prompt (utils/t2iDialogForm.ts,
+  // firstStepReady). It lives here, not in the dialog, so closing and reopening
+  // the dialog does not turn a prompt the user wrote into a redraw, and it is
+  // NOT reset by open(). A page reload forgets it, which just means the old
+  // behaviour: the next Random run draws everything itself.
+  const readyPrompt = ref<string | null>(null)
 
   const randomBatch = computed(() => activeBatches.value.find((b) => b.mode === 'random') ?? null)
   // Anything still running that Cancel could stop.
@@ -709,6 +718,7 @@ export const useT2iStore = defineStore('t2i', () => {
     randomBatch,
     currentStep,
     lastFinished,
+    readyPrompt,
     isBusy,
     statusText,
     jobs: tracker.jobs,
