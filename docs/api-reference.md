@@ -744,3 +744,67 @@ where they're picked.
 ### `i2v` WebSocket channel
 - **`i2v_videos_changed`** — `{source_path, files}`, sent once a ComfyUI
   job's outputs have been downloaded and ingested as `i2v_videos` rows.
+
+## Text-to-image (`/api/t2i/*`)
+
+The `T2iRunner` singleton is constructed in the FastAPI lifespan after the `I2vRunner` and installed via `set_t2i_runner`. It owns caption resolution, prompt generation, server-side batches and image ingest. A batch is a background task: closing the dialog does not stop it. Generated images are ordinary visible library media. See [Text to Image](t2i.md) for the feature guide.
+
+Errors follow the i2v routes: **400** validation, **404** unknown id, **409** a Random batch is already running, **502** ComfyUI/VLM failure, **503** the runner is not running. The image, path and output-preview routes need neither the runner nor ComfyUI.
+
+### `GET /api/t2i/config`
+The `t2i` config section with defaults filled in (see `docs/configuration.md`), plus `models` (`[{id, label, has_negative, identity}]`), `aspect_ratios`, `seed_policies`, `seed_max`, `csv` (`{available, total, error}`) and `wildcards` (`{slots, warnings}` — `warnings` lists every rejected list line).
+
+### `GET /api/t2i/captions/meta`
+`{total, columns}` for the Filter popover. Each column is `{key, label, type: "choice" | "tags", options: [{value, count}]}`, `{key, label, type: "range", min, max, step}` (the three scores) or `{key, label, type: "int_range", min, max}` (`males`, `females`). Only columns present in the CSV appear.
+
+### `POST /api/t2i/captions/count`
+Body: `{filter}`. Returns `{count, total}`. A `filter` may carry `nudity` (any-of), `artistic_quality` / `erotic_score` / `pornographic_score` / `males` / `females` (`{min?, max?}`), `aspect_ratios` (any-of), `clothing_any`, `clothing_none`. **400** on an unknown key or a bad value.
+
+### `POST /api/t2i/captions/random`
+Body: `{filter}`. Returns one caption row `{id, caption, aspect_ratio, nudity, artistic_quality, erotic_score, pornographic_score, males, females, clothing}` with its tokens intact. **400** for a bad filter, **404** if nothing matches, **503** if the caption CSV is unavailable. `captions/count` and `captions/meta` answer `0` / empty for an unavailable CSV rather than an error.
+
+### `POST /api/t2i/captions/resolve`
+Body: `{caption, seed, model}`. Returns `{resolved_caption, characters: {NAME: {slot: value}}, warnings}`. Pure and deterministic — the same caption and seed always resolve identically.
+
+### `POST /api/t2i/prompt`
+Body: `{caption, seed, model}`. Resolves the caption, then has the VLM write the model-styled prompt; writes nothing. Returns `{prompt, negative, resolved_caption, warnings}` (`negative` is `null` for models that write none). With no VLM available it returns **200** with the resolved caption as the prompt and a warning.
+- **400** for an empty caption or unknown model.
+- **502** when the VLM call fails or times out.
+
+### `POST /api/t2i/batches`
+Body: `{mode: "manual" | "random", model, preset_id, megapixels, seed, seed_policy: "fixed" | "increment" | "decrement" | "random", batch_size = 1, count_per_batch = 1, loras: [{name, strength}], caption?, prompt?, negative?, aspect_ratio?, filter?}`. `caption`, `prompt`, `negative` and `aspect_ratio` are Manual fields; `filter` is a Random field. Returns `{batch_id, total_images, warnings}` and starts a background task.
+- **400** with a named reason for: unknown model; missing or non-`t2i` workflow; LoRAs against a workflow with no `MS_LORA_STACK`; `count_per_batch > 1` with a Fixed seed; Manual with `batch_size != 1`; counts above the configured limits; Manual with an empty prompt or an unsupported aspect ratio; Random whose filter matches nothing; a configured `output_root` that is not a directory; a seed outside `0..2147483647`; non-positive `megapixels`.
+- **409** `random_batch_active` when a Random batch is already running.
+- **502** if ComfyUI rejects the job at submit time.
+`warnings` carries non-fatal notes (e.g. a negative dropped because the workflow has no `MS_NEGATIVE`).
+
+### `GET /api/t2i/batches`
+Active batches: `[{batch_id, mode, state: "prompting" | "rendering", total_steps, step, images_total, images_done, images_failed, next_seed, started_at}]` (`next_seed` is the *planned* next unused seed from the moment the batch starts; `null` under Randomize or when the seed range ran out), where `step` is the current `{step, total_steps, caption, aspect_ratio, seed, prompt, negative, warnings}` or `null`. The dialog uses it to reattach after a reload.
+
+### `POST /api/t2i/batches/{batch_id}/cancel`
+Cancels the batch's task (including an in-flight VLM call) and every unfinished job. Returns `{status: "cancelled"}`; idempotent for a batch that already finished. **404** for an id the server has never seen.
+
+### `GET /api/t2i/images?limit=60&before_id=`
+Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, form_state}`. Rows whose media is gone are pruned.
+
+### `PATCH /api/t2i/images/{image_id}`
+Autosaves the dialog's form into one image's editable `form_state`. Partial: send only what changed. The as-rendered columns are not reachable from here. **400** for an unknown field or a bad value (the message names the field); **404** for an unknown id.
+
+### `DELETE /api/t2i/images/{image_id}`
+Deletes the `t2i_images` row plus its media row (the file goes to the OS trash). Returns `{status: "deleted"}`. **404** for an unknown id.
+
+### `GET /api/t2i/paths`
+Native paths of every T2I image still in the library, for the smart-folder rule *Generated with T2I*.
+
+### `GET /api/t2i/output-preview?root=&prefix=`
+Where an image generated now would land for the given (possibly unsaved) `output_root` / `output_prefix`: `{path, error, warnings}`. Always **200**; `path` is `null` on error. A blank `root` previews the default location, `<comfy.output_root>/t2i`.
+
+### `t2i` WebSocket channel
+- **`batch_started`** — `{batch_id, mode, total_steps, total_images}`.
+- **`batch_step`** — `{batch_id, step, total_steps, caption, aspect_ratio, seed, prompt, negative, warnings}`; fills the dialog's Caption, Prompt, Aspect and Seed boxes.
+- **`batch_progress`** — `{batch_id, phase: "prompting" | "rendering", images_done, images_failed, images_total, next_seed, last_error?}`.
+- **`batch_complete`** / **`batch_cancelled`** — `{batch_id, images_done, images_failed, images_total, images_cancelled, next_seed}`; exactly one terminal event per batch.
+- **`batch_error`** — the same counters plus `error` (and `last_error` when a job failed earlier). A failed submit cancels the batch's unfinished jobs first.
+- **`t2i_images_changed`** — `{batch_id, files}`, sent once a job's outputs have been ingested as `t2i_images` rows.
+
+Per-job progress reuses the `comfy` channel (`job_update`, `job_progress`).
