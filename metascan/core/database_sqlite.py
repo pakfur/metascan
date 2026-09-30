@@ -1184,6 +1184,39 @@ class DatabaseManager:
                 "form_state",
                 "ALTER TABLE i2v_videos ADD COLUMN form_state TEXT",
             )
+            # Text-to-image flow: one row per generated picture. Same shape
+            # of contract as i2v_videos -- no REFERENCES on any column,
+            # list_t2i_images JOINs media and lazily prunes rows whose media
+            # is gone. The columns before form_state are the as-rendered
+            # facts (written once at ingest); form_state is the editable
+            # copy, and set_t2i_image_form_state the only UPDATE there is
+            # (see metascan/core/t2i_form.py). No extra index: the list
+            # queries order by id, which is the rowid.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS t2i_images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL UNIQUE,
+                    batch_id TEXT,
+                    model TEXT,
+                    preset_id INTEGER,
+                    caption TEXT,
+                    prompt_used TEXT,
+                    negative_used TEXT,
+                    seed INTEGER,
+                    prompt_seed INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    megapixels REAL,
+                    aspect_ratio TEXT,
+                    loras TEXT,
+                    render_s REAL,
+                    comfy_prompt_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    form_state TEXT
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -1419,6 +1452,15 @@ class DatabaseManager:
                 "generation_jobs",
                 "i2v_source_path",
                 "ALTER TABLE generation_jobs ADD COLUMN i2v_source_path TEXT",
+            )
+            # t2i flow correlation: the batch (uuid4 hex) a job belongs to.
+            # Nullable TEXT, no REFERENCES -- the panel_id / i2v_source_path
+            # precedent. GET /api/comfy/jobs returns it (SELECT *).
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "t2i_batch_id",
+                "ALTER TABLE generation_jobs ADD COLUMN t2i_batch_id TEXT",
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
@@ -1958,13 +2000,14 @@ class DatabaseManager:
         output_prefix: Optional[str] = None,
         i2v_source_path: Optional[str] = None,
         output_name: Optional[str] = None,
+        t2i_batch_id: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs (preset_id, params, panel_id, "
                 "output_dir, beat_id, output_prefix, i2v_source_path, "
-                "output_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "output_name, t2i_batch_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset_id,
                     params,
@@ -1974,6 +2017,7 @@ class DatabaseManager:
                     output_prefix,
                     i2v_source_path,
                     output_name,
+                    t2i_batch_id,
                 ),
             )
             conn.commit()
@@ -3746,6 +3790,195 @@ class DatabaseManager:
             if row is None:
                 return False, []
             conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
+            deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.commit()
+            return True, deleted_files
+
+    # ---- t2i images ------------------------------------------------------
+
+    def create_t2i_image(
+        self,
+        *,
+        file_path: str,
+        batch_id: Optional[str] = None,
+        model: Optional[str] = None,
+        preset_id: Optional[int] = None,
+        caption: Optional[str] = None,
+        prompt_used: Optional[str] = None,
+        negative_used: Optional[str] = None,
+        seed: Optional[int] = None,
+        prompt_seed: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        megapixels: Optional[float] = None,
+        aspect_ratio: Optional[str] = None,
+        loras: Optional[List[Dict[str, Any]]] = None,
+        render_s: Optional[float] = None,
+        comfy_prompt_id: Optional[str] = None,
+        form_state: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Record one generated picture: its as-rendered facts, plus the
+        form_state the dialog will load when its tile is selected. Raises
+        sqlite3.IntegrityError for a file_path that already has a row."""
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO t2i_images (file_path, batch_id, model, preset_id, "
+                "caption, prompt_used, negative_used, seed, prompt_seed, width, "
+                "height, megapixels, aspect_ratio, loras, render_s, "
+                "comfy_prompt_id, form_state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    to_posix_path(file_path),
+                    batch_id,
+                    model,
+                    preset_id,
+                    caption,
+                    prompt_used,
+                    negative_used,
+                    seed,
+                    prompt_seed,
+                    width,
+                    height,
+                    megapixels,
+                    aspect_ratio,
+                    _json.dumps(loras) if loras is not None else None,
+                    render_s,
+                    comfy_prompt_id,
+                    _json.dumps(form_state) if form_state is not None else None,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    # media LEFT JOIN: a NULL media_path marks a row whose media is gone.
+    _T2I_IMAGE_SELECT: ClassVar[str] = (
+        "SELECT t.*, m.file_path AS media_path, m.is_favorite "
+        "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path"
+    )
+
+    @staticmethod
+    def _t2i_image_row(row: Any) -> Dict[str, Any]:
+        """One _T2I_IMAGE_SELECT row as the API shape: native path plus
+        file_name, is_favorite as a bool, and the two JSON columns parsed.
+        Unparseable or wrong-shape JSON reads as None so a single bad row
+        can never break the dialog's strip."""
+        import json as _json
+
+        d = dict(row)
+        d.pop("media_path", None)
+        posix = str(d["file_path"])
+        d["file_path"] = to_native_path(posix)
+        d["file_name"] = posix.rsplit("/", 1)[-1]
+        d["is_favorite"] = bool(d.get("is_favorite"))
+        for column, kind in (("loras", list), ("form_state", dict)):
+            raw = d.get(column)
+            parsed = None
+            if raw:
+                try:
+                    parsed = _json.loads(raw)
+                except (TypeError, ValueError):
+                    parsed = None
+            d[column] = parsed if isinstance(parsed, kind) else None
+        return d
+
+    def get_t2i_image(self, image_id: int) -> Optional[Dict[str, Any]]:
+        """One image in the same shape list_t2i_images returns (so a PATCH
+        can answer with a row the strip can drop in). Never prunes."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                self._T2I_IMAGE_SELECT + " WHERE t.id = ?", (image_id,)
+            ).fetchone()
+            return self._t2i_image_row(row) if row is not None else None
+
+    def set_t2i_image_form_state(
+        self, image_id: int, form_state: Dict[str, Any]
+    ) -> bool:
+        """Replace an image's EDITABLE form state. Deliberately the only
+        t2i_images update there is: the as-rendered columns (prompt_used,
+        seed, model, ...) are facts about the picture and never change."""
+        import json as _json
+
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE t2i_images SET form_state = ? WHERE id = ?",
+                (_json.dumps(form_state), image_id),
+            )
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    def list_t2i_images(
+        self, limit: int = 60, before_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Generated images newest first, with media.is_favorite merged in.
+        ``before_id`` pages: only rows with a smaller id. Rows whose media
+        row no longer exists (deleted from the library) are pruned in the
+        same call -- the JOIN is the referential integrity here, by design
+        -- and the page is refilled past them, because the strip treats a
+        short page as the last one."""
+        out: List[Dict[str, Any]] = []
+        stale: List[int] = []
+        cursor = before_id
+        with self.lock, self._get_connection() as conn:
+            while len(out) < limit:
+                want = limit - len(out)
+                if cursor is None:
+                    rows = conn.execute(
+                        self._T2I_IMAGE_SELECT + " ORDER BY t.id DESC LIMIT ?",
+                        (want,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        self._T2I_IMAGE_SELECT
+                        + " WHERE t.id < ? ORDER BY t.id DESC LIMIT ?",
+                        (cursor, want),
+                    ).fetchall()
+                for r in rows:
+                    cursor = int(r["id"])
+                    if r["media_path"] is None:
+                        stale.append(cursor)
+                    else:
+                        out.append(self._t2i_image_row(r))
+                if len(rows) < want:
+                    break
+            for start in range(0, len(stale), 500):
+                chunk = stale[start : start + 500]
+                conn.execute(
+                    "DELETE FROM t2i_images WHERE id IN ("
+                    + ",".join("?" * len(chunk))
+                    + ")",
+                    chunk,
+                )
+            if stale:
+                conn.commit()
+        return out
+
+    def list_t2i_paths(self) -> List[str]:
+        """Native paths of every generated image still in the library, in
+        creation order. Feeds the "Generated with T2I" smart-folder rule.
+        Read-only: the media JOIN filters dangling rows rather than pruning
+        them (list_t2i_images owns the prune)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT t.file_path FROM t2i_images t "
+                "JOIN media m ON m.file_path = t.file_path ORDER BY t.id"
+            ).fetchall()
+            return [to_native_path(str(r["file_path"])) for r in rows]
+
+    def delete_t2i_image(self, image_id: int) -> Tuple[bool, List[str]]:
+        """Delete one generated image completely: its t2i_images row, then
+        its media row (indices and folder_items cascade) via
+        _purge_media_rows' survival rules -- a file a storyboard still
+        references is released, not purged. Returns (deleted,
+        purged_native_paths) for the caller to trash."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT file_path FROM t2i_images WHERE id = ?", (image_id,)
+            ).fetchone()
+            if row is None:
+                return False, []
+            conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
             conn.commit()
             return True, deleted_files
