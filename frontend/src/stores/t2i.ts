@@ -319,9 +319,13 @@ export const useT2iStore = defineStore('t2i', () => {
     return finished
   }
 
+  // Silent: a reload every few seconds must not flash the library's dimmed
+  // "Loading media..." overlay.
   const scheduleMediaReload = useDebounceFn(
     () => {
-      media.loadAllMedia().catch((e) => console.warn('T2I: could not reload the library', e))
+      media
+        .loadAllMedia({ silent: true })
+        .catch((e) => console.warn('T2I: could not reload the library', e))
     },
     MEDIA_RELOAD_DEBOUNCE_MS,
     { maxWait: MEDIA_RELOAD_MAX_WAIT_MS },
@@ -712,6 +716,10 @@ export const useT2iStore = defineStore('t2i', () => {
     // loading
     open,
     close,
+    // The one debounced library-grid reload. App.vue's always-on `t2i` bridge
+    // calls it too, so images a batch finishes while the dialog is closed
+    // still reach the grid, and an open dialog does not reload twice.
+    scheduleMediaReload,
     loadConfig,
     loadCaptionMeta,
     refreshImages,
