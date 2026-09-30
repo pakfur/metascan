@@ -19,7 +19,8 @@ data/*
 !data/t2i_captions/
 data/t2i_captions/*.csv
 
-.claude/
+.claude/*
+!.claude/rules/
 
 # Other runtime artifacts
 logs/
