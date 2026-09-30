@@ -9,13 +9,17 @@ one fix that is safe to compute without knowing anything about a
 target's node classes: renaming a misspelled ``MS_*`` title to the
 closest known one).
 
-The target/mode axis is the extension point: validators are registered
+The target/mode axis is an extension point: validators are registered
 per ``(video_target, video_mode)`` pair in ``_VALIDATORS``. Only
 ``("minimax", "ref2va")`` and ``("minimax", "i2va")`` ship today; a pair
 without a validator gets a single "no target-specific validation"
 warning on top of the generic contract checks, so registering a preset
 for a future target/mode never hard-fails just because its validator
 hasn't been written yet.
+
+The preset ``kind`` is the other one: ``_KIND_VALIDATORS`` maps a kind to
+a validator that runs after the generic pass whatever the target and
+mode (image presets have neither). Only ``"t2i"`` ships today.
 """
 
 from __future__ import annotations
@@ -400,6 +404,42 @@ _VALIDATORS: Dict[Tuple[str, str], Validator] = {
 }
 
 
+# -- Per-kind validators ----------------------------------------------------
+
+
+def _validate_t2i(workflow: Dict[str, Any], found: Dict[str, str]) -> List[Finding]:
+    """Text-to-image presets: the T2I dialog offers a LoRA list and, for
+    models that take one, a negative prompt. Neither is needed to render --
+    their absence silently drops a capability rather than breaking the
+    workflow, so both are warnings."""
+    findings: List[Finding] = []
+    if "MS_LORA_STACK" not in found:
+        findings.append(
+            Finding(
+                "warning",
+                "no_lora_stack",
+                "No MS_LORA_STACK node: LoRAs chosen in the T2I dialog cannot "
+                "be applied, and a batch that includes one is refused.",
+            )
+        )
+    if "MS_NEGATIVE" not in found:
+        findings.append(
+            Finding(
+                "warning",
+                "no_negative",
+                "No MS_NEGATIVE node: the T2I dialog's negative prompt cannot "
+                "be applied and will be ignored. That is expected for a model "
+                "that takes none (Krea 2, Z-Image).",
+            )
+        )
+    return findings
+
+
+_KIND_VALIDATORS: Dict[str, Validator] = {
+    "t2i": _validate_t2i,
+}
+
+
 def validate_workflow(
     workflow: Dict[str, Any],
     kind: str,
@@ -407,8 +447,12 @@ def validate_workflow(
     video_mode: Optional[str] = None,
 ) -> ValidationReport:
     """Full-workflow validation: the generic MS_* contract for ``kind``,
-    plus the (target, mode) validator when one is registered."""
+    then the kind's own validator when one is registered (whatever the
+    target and mode), then the (target, mode) validator when one is."""
     findings, fixes, found = _generic_findings(workflow, kind)
+    kind_validator = _KIND_VALIDATORS.get(kind)
+    if kind_validator is not None:
+        findings.extend(kind_validator(workflow, found))
     if video_target and video_mode:
         validator = _VALIDATORS.get((video_target, video_mode))
         if validator is not None:
