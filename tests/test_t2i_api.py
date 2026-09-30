@@ -1173,6 +1173,7 @@ class TestAppWiring(unittest.TestCase):
             'unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"]',
             "comfy=comfy_client",
             "get_vlm=get_vlm_client",
+            "vlm_installed=vlm_model_installed",
         ):
             self.assertIn(wanted, built)
         self.assertIn('get_data_dir() / "t2i_captions"', source)
