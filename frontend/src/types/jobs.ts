@@ -38,7 +38,7 @@ export function jobChipLabel(chip: JobChip): string {
   return chip.state
 }
 
-/** One image tile in a ThumbStrip; the caller builds `title` (tooltip) and `label`. */
+/** One image tile in a ThumbGrid; the caller builds `title` (tooltip) and `label`. */
 export interface ThumbItem {
   id: number | string
   file_path: string

@@ -37,6 +37,12 @@ the root CLAUDE.md still applies.
   uncommitted edit for that specific field. Apply the same pattern to any
   other detail editor that caches server fields in local commit-on-change
   refs.
+- **Never set `scrollbar-width` or `scrollbar-color`.** `style.css` styles
+  every scrollbar through `::-webkit-scrollbar` (8 px, theme colours), and
+  Chrome 121+ ignores those pseudo-elements on any element that sets either
+  standard property to anything but `auto`, so that one box would get a
+  different, native scrollbar. To keep a box from changing width when its scrollbar appears,
+  use `scrollbar-gutter: stable` (it reserves the same 8 px).
 
 ## Common tasks
 

@@ -3,7 +3,7 @@ import { thumbnailUrl } from '../../api/client'
 import type { ThumbItem } from '../../types/jobs'
 
 // One image tile: thumbnail, hover overlays (favourite, delete) and a label
-// underneath. It only reports what the user did; ThumbStrip adds the item.
+// underneath. It only reports what the user did; ThumbGrid adds the item.
 defineProps<{ item: ThumbItem; selected?: boolean }>()
 const emit = defineEmits<{
   select: [evt: MouseEvent]
