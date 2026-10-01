@@ -481,7 +481,7 @@ export function t2iImageTitle(img: Pick<T2iImage, 'model' | 'prompt_used'>): str
   return lines.join('\n')
 }
 
-export function toStripItem(img: T2iImage): ThumbItem {
+export function toThumbItem(img: T2iImage): ThumbItem {
   return {
     id: img.id,
     file_path: img.file_path,
@@ -555,6 +555,31 @@ export function mergeImagePage(
 export function mergeOlderPage(existing: T2iImage[], page: T2iImage[]): T2iImage[] {
   const seen = new Set(existing.map((i) => i.id))
   return [...existing, ...page.filter((i) => !seen.has(i.id))].sort((a, b) => b.id - a.id)
+}
+
+/** What the image grid shows of the rows held; see imageWindow. */
+export interface ImageWindow {
+  // How many of the held rows (newest first) the grid shows.
+  shown: number
+  // "Show more" has something to add: held rows past the window, or older ones on the server.
+  more: boolean
+  // Showing the next page needs an older page from the server first.
+  fetch: boolean
+}
+
+/**
+ * The grid shows whole pages, `pages` × `pageSize` of the `held` rows at most,
+ * so images arriving during a run push the oldest shown ones behind "Show
+ * more" instead of growing the grid. The held list itself keeps every row (a
+ * refresh never drops what was paged in), so showing them again needs no fetch.
+ */
+export function imageWindow(held: number, pages: number, pageSize: number, serverHasMore: boolean): ImageWindow {
+  const shown = Math.min(held, pages * pageSize)
+  return {
+    shown,
+    more: held > shown || serverHasMore,
+    fetch: serverHasMore && held < (pages + 1) * pageSize,
+  }
 }
 
 // ---- status line -------------------------------------------------------------

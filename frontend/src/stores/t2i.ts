@@ -11,6 +11,7 @@ import {
   DRAFT_STORAGE_KEY,
   batchStatusLine,
   cleanFilter,
+  imageWindow,
   mergeImagePage,
   mergeOlderPage,
   sanitizeDraft,
@@ -76,15 +77,24 @@ export const useT2iStore = defineStore('t2i', () => {
   const metaLoading = ref(false)
   const metaError = ref<string | null>(null)
 
-  // The strip, newest first. `imagesLoaded` turns true after the first
-  // successful load of a session: the strip waits for it before it may say
-  // "No images yet".
+  // Every image row held this session, newest first. `imagesLoaded` turns true
+  // after the first successful load of a session: the grid waits for it before
+  // it may say "No images yet".
   const images = ref<T2iImage[]>([])
   const hasMoreImages = ref(false)
   const imagesLoaded = ref(false)
   const imagesLoading = ref(false)
   const imagesError = ref<string | null>(null)
   const loadingOlder = ref(false)
+  // The dialog's grid shows whole pages of `images` (imageWindow): images
+  // arriving during a run push the oldest shown ones behind "Show more"
+  // instead of growing the grid. Back to one page when the dialog opens.
+  const shownPages = ref(1)
+  const imagePaging = computed(() =>
+    imageWindow(images.value.length, shownPages.value, IMAGE_PAGE_SIZE, hasMoreImages.value),
+  )
+  const shownImages = computed(() => images.value.slice(0, imagePaging.value.shown))
+  const canShowMore = computed(() => imagePaging.value.more)
   const selectedId = ref<number | null>(null)
   const selectedImage = computed(() => images.value.find((i) => i.id === selectedId.value) ?? null)
 
@@ -205,6 +215,16 @@ export const useT2iStore = defineStore('t2i', () => {
     }
   }
 
+  // "Show more": one more page in the grid. Older rows are fetched only when
+  // the rows already held cannot fill it; a failed fetch (already reported)
+  // still shows the held rows waiting past the window.
+  async function showMoreImages(): Promise<void> {
+    const paging = imagePaging.value
+    if (!paging.more || loadingOlder.value) return
+    if (paging.fetch) await loadOlder()
+    if (images.value.length > paging.shown) shownPages.value += 1
+  }
+
   /** Opening the dialog: a fresh session over whatever the server is still running. */
   async function open(): Promise<void> {
     imagesSeq += 1
@@ -212,6 +232,7 @@ export const useT2iStore = defineStore('t2i', () => {
     selectedId.value = null
     images.value = []
     hasMoreImages.value = false
+    shownPages.value = 1
     imagesLoaded.value = false
     imagesError.value = null
     activeBatches.value = []
@@ -395,7 +416,7 @@ export const useT2iStore = defineStore('t2i', () => {
   /**
    * On open, and after a WebSocket reconnect: rebuild from the server
    * everything a missed frame could have changed (running batches, job
-   * chips, the strip).
+   * chips, the image list).
    */
   async function reattach(): Promise<void> {
     await Promise.all([
@@ -658,8 +679,8 @@ export const useT2iStore = defineStore('t2i', () => {
 
   /**
    * Deletes the image (the server moves its file to the OS trash) and drops
-   * it from the strip, the library grid and manual folders. A failure throws
-   * and changes nothing. Does not touch the smart-folder path caches.
+   * it from the dialog's grid, the library grid and manual folders. A failure
+   * throws and changes nothing. Does not touch the smart-folder path caches.
    */
   async function deleteImage(id: number): Promise<void> {
     const image = images.value.find((i) => i.id === id)
@@ -710,6 +731,8 @@ export const useT2iStore = defineStore('t2i', () => {
     metaLoading,
     metaError,
     images,
+    shownImages,
+    canShowMore,
     hasMoreImages,
     imagesLoaded,
     imagesLoading,
@@ -736,7 +759,7 @@ export const useT2iStore = defineStore('t2i', () => {
     loadConfig,
     loadCaptionMeta,
     refreshImages,
-    loadOlder,
+    showMoreImages,
     reattach,
     refreshBatches,
     // captions and prompts

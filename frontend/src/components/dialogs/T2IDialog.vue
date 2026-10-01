@@ -13,7 +13,7 @@ import {
   plannedImages,
   randomSeed,
   t2iImageToMedia,
-  toStripItem,
+  toThumbItem,
   withCurrentOption,
   type T2iFormState,
 } from '../../types/t2i'
@@ -44,7 +44,7 @@ import {
 import CaptionFilterPopover from '../t2i/CaptionFilterPopover.vue'
 import JobTile from '../generation/JobTile.vue'
 import SeedControls from '../generation/SeedControls.vue'
-import ThumbStrip from '../generation/ThumbStrip.vue'
+import ThumbGrid from '../generation/ThumbGrid.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
 import MediaViewer from '../viewer/MediaViewer.vue'
 
@@ -325,8 +325,8 @@ const refreshFilterCount = useDebounceFn(async () => {
 }, 300)
 
 // The panel is `position: fixed` under the Filter button, right edges aligned,
-// and no taller than the room below it: inside the dialog card (which scrolls
-// and clips) its footer, where the match count is, would be cut off.
+// and no taller than the room below it: inside the form (which scrolls and
+// clips) its footer, where the match count is, would be cut off.
 function placeFilter() {
   const el = filterAnchor.value
   if (!el) return
@@ -493,13 +493,14 @@ async function onCancel() {
   }
 }
 
-// ---- the strip: select, favourite, delete, view ---------------------------------------------------------------
-const stripItems = computed(() => store.images.map(toStripItem))
+// ---- the image grid: select, favourite, delete, view ----------------------------------------------------------
+// Whole pages of the images held, newest first (the store's window over them).
+const gridItems = computed(() => store.shownImages.map(toThumbItem))
 
 // Clicking an image loads its saved form_state into the form and starts
 // autosaving into it. Seed policy, Batch Size and Count per Batch stay as they
 // are, and nothing is started (a stored Random mode only restores the mode
-// and its filter). The strip only reports the FIRST click of a double-click,
+// and its filter). The grid only reports the FIRST click of a double-click,
 // so opening the viewer never selects twice.
 function onSelectTile(item: ThumbItem) {
   const id = Number(item.id)
@@ -553,12 +554,12 @@ async function onCancelJob(jobId: number) {
   }
 }
 
-// The viewer gets a snapshot taken when it opens: images arriving mid-batch
-// would otherwise shift the list under its index.
+// The viewer gets a snapshot of what the grid shows, taken when it opens:
+// images arriving mid-batch would otherwise shift the list under its index.
 const viewerImages = shallowRef<Media[]>([])
 const viewerIndex = ref<number | null>(null)
 function onOpenViewer(index: number) {
-  viewerImages.value = store.images.map(t2iImageToMedia)
+  viewerImages.value = store.shownImages.map(t2iImageToMedia)
   viewerIndex.value = index
 }
 
@@ -602,322 +603,328 @@ onBeforeUnmount(() => {
 <template>
   <!-- No @click.self close, deliberately: a stray click on the backdrop must
        not throw away a written prompt or hide running batches. The header ✕
-       is the only way out. -->
+       is the only way out. Scroll events do not bubble, so the card listens in
+       the capture phase: the fixed Filter panel follows its button whichever
+       box scrolls. -->
   <div class="dialog-overlay">
     <div
       class="t2i-card"
       role="dialog"
       aria-modal="true"
       aria-labelledby="t2i-title"
-      @scroll="filterOpen && placeFilter()"
+      @scroll.capture="filterOpen && placeFilter()"
     >
       <header class="t2i-header">
         <h3 id="t2i-title">Text to Image</h3>
         <button type="button" class="icon-btn" title="Close" aria-label="Close" @click="close()">✕</button>
       </header>
 
-      <div v-if="!store.config && store.configError" class="bar failed" role="alert">
-        <span>Couldn't load the Text to Image settings: {{ store.configError }}</span>
-        <button type="button" class="link-btn" @click="retryLoad">Retry</button>
-      </div>
-      <p v-else-if="!ready" class="note">Loading…</p>
-
-      <fieldset class="t2i-form" :disabled="!ready">
-        <div class="grid-row">
-          <label class="lbl" for="t2i-caption">Caption</label>
-          <div class="stack">
-            <textarea
-              id="t2i-caption"
-              class="area"
-              rows="3"
-              spellcheck="false"
-              :value="shownCaption"
-              :readonly="randomLocked"
-              :placeholder="randomLocked ? 'A caption is drawn from the caption file for each batch…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
-              @input="form.caption = ($event.target as HTMLTextAreaElement).value"
-            />
-            <div>
+      <div class="t2i-body">
+        <!-- The form column scrolls as one box, so everything in it shares one
+             right edge. The bars stick to its top and the run controls to its
+             bottom. The editing bar shows only while an image is selected: it
+             says where edits are going; with none selected the form is an
+             unsaved scratch area. -->
+        <div class="t2i-main">
+          <div class="t2i-top">
+            <div v-if="!store.config && store.configError" class="bar failed" role="alert">
+              <span>Couldn't load the Text to Image settings: {{ store.configError }}</span>
+              <button type="button" class="link-btn" @click="retryLoad">Retry</button>
+            </div>
+            <p v-else-if="!ready" class="note">Loading…</p>
+            <div v-if="store.selectedImage" class="bar" :class="{ failed: saveFailed }" role="status">
+              <span v-if="saveFailed">
+                Couldn't save your changes to this image — they'll be retried on the next edit.
+              </span>
+              <span v-else>
+                Editing the image from {{ formatT2iTimestamp(store.selectedImage.created_at) }} ·
+                changes save automatically
+              </span>
               <button
                 type="button"
-                class="link-btn fold"
-                :aria-expanded="resolvedOpen"
-                :disabled="randomLocked"
-                @click="toggleResolved"
-              >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
-            </div>
-            <div v-if="resolvedOpen && !randomLocked" class="resolved">
-              <p v-if="!form.caption.trim()" class="note">Nothing to resolve yet: write a caption first.</p>
-              <template v-else-if="resolved">
-                <textarea
-                  class="area resolved-text"
-                  :class="{ stale: resolvedStale }"
-                  rows="4"
-                  readonly
-                  spellcheck="false"
-                  aria-label="Resolved caption"
-                  :value="resolved.text"
-                />
-                <ul v-if="resolved.warnings.length" class="lint">
-                  <li v-for="w in resolved.warnings" :key="w">⚠ {{ w }}</li>
-                </ul>
-              </template>
-              <p v-else class="note">Resolving…</p>
+                class="link-btn"
+                title="Keep these values in the form, but stop saving them to this image"
+                @click="stopEditing"
+              >Stop editing</button>
             </div>
           </div>
-        </div>
 
-        <div class="grid-row">
-          <span class="lbl" />
-          <div class="caption-actions">
-            <button
-              type="button"
-              class="btn"
-              :disabled="generating || randomLocked || !form.caption.trim() || !form.model"
-              @click="onGeneratePrompt"
-            >{{ generating ? 'Writing prompt…' : 'Generate Prompt' }}</button>
-            <label class="radio">
-              <input v-model="form.mode" type="radio" name="t2i-mode" value="manual" :disabled="randomLocked" />
-              Manual
-            </label>
-            <label class="radio" :title="csvAvailable ? '' : (store.config?.csv.error ?? 'The caption file is not available')">
-              <input
-                v-model="form.mode"
-                type="radio"
-                name="t2i-mode"
-                value="random"
-                :disabled="randomLocked || !csvAvailable"
-              />
-              Random Caption
-            </label>
-            <button
-              type="button"
-              class="icon-btn dice"
-              title="Load a random caption from the caption file (this empties the prompt, so Generate writes one for it)"
-              aria-label="Roll a random caption"
-              :disabled="rolling || randomLocked || !csvAvailable"
-              @click="onRoll"
-            >🎲</button>
-            <span ref="filterAnchor" class="filter-anchor">
-              <button
-                type="button"
-                class="btn"
-                :aria-expanded="filterOpen"
-                :disabled="!csvAvailable"
-                @click="filterOpen = !filterOpen"
-              >Filter<span v-if="filterActive > 0" class="badge">{{ filterActive }}</span></button>
-              <CaptionFilterPopover
-                v-if="filterOpen"
-                v-model="form.filter"
-                class="filter-pop"
-                :style="filterStyle"
-                :meta="store.captionMeta"
-                :count="filterCount"
-                :total="filterTotal"
-                @close="filterOpen = false"
-              />
-            </span>
-          </div>
-        </div>
-
-        <div class="grid-row">
-          <span class="lbl" />
-          <div class="params">
-            <label class="fld">
-              <span>Model</span>
-              <select :value="form.model" @change="onModelChange(($event.target as HTMLSelectElement).value)">
-                <option v-for="m in modelOptions" :key="m.id" :value="m.id">{{ m.label }}</option>
-              </select>
-            </label>
-            <label class="fld">
-              <span>Workflow</span>
-              <select v-model="form.presetId">
-                <option :value="null" disabled>Choose a workflow…</option>
-                <option v-if="presetMissing" :value="form.presetId" disabled>Workflow #{{ form.presetId }} (not found)</option>
-                <option v-for="p in presets" :key="p.id" :value="p.id">{{ p.name }}</option>
-              </select>
-              <small v-if="ready && !presets.length" class="hint">none registered: add one under Configuration</small>
-            </label>
-            <label class="fld">
-              <span>Size</span>
-              <select v-model="form.megapixels">
-                <option v-for="m in sizeOptions" :key="m" :value="m">{{ m }} MP</option>
-              </select>
-            </label>
-            <label class="fld">
-              <span>Aspect Ratio</span>
-              <select
-                :value="shownAspect"
-                :disabled="randomLocked"
-                :title="form.mode === 'random' ? 'A Random batch takes the aspect ratio of each caption' : ''"
-                @change="form.aspect = ($event.target as HTMLSelectElement).value"
-              >
-                <option v-for="a in aspectOptions" :key="a" :value="a">{{ a }}</option>
-              </select>
-              <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatch !== 'draw' ? 'used for batch 1, then taken from each caption' : 'taken from each caption' }}</small>
-            </label>
-            <SeedControls
-              :seed="shownSeed"
-              :policy="form.seedPolicy"
-              :disabled="randomLocked"
-              :max="seedMax"
-              @update:seed="form.seed = $event"
-              @update:policy="form.seedPolicy = $event"
-            />
-          </div>
-        </div>
-
-        <div class="grid-row">
-          <span class="lbl" />
-          <LoraListEditor label="LoRAs" :entries="form.loras" @change="form.loras = $event" />
-        </div>
-
-        <div class="grid-row">
-          <label class="lbl" for="t2i-prompt">Prompt</label>
-          <div class="stack">
-            <textarea
-              id="t2i-prompt"
-              class="area"
-              rows="7"
-              spellcheck="false"
-              :value="shownPrompt"
-              :readonly="randomLocked"
-              :placeholder="randomLocked ? 'A prompt is written for each batch…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
-              @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
-            />
-            <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
-              <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
-            </ul>
-            <template v-if="hasNegative">
-              <div>
-                <button
-                  type="button"
-                  class="link-btn fold"
-                  :aria-expanded="negativeOpen"
-                  @click="negativeOpen = !negativeOpen"
-                >{{ negativeOpen ? '▾' : '▸' }} Negative prompt{{ shownNegative.trim() ? ' •' : '' }}</button>
+          <fieldset class="t2i-form" :disabled="!ready">
+            <section class="sec">
+              <div class="sec-head">
+                <label class="sec-title" for="t2i-caption">Caption</label>
+                <div class="source">
+                  <div class="seg" role="radiogroup" aria-label="Caption source">
+                    <label class="seg-opt">
+                      <input v-model="form.mode" type="radio" name="t2i-mode" value="manual" :disabled="randomLocked" />
+                      <span>Manual</span>
+                    </label>
+                    <label class="seg-opt" :title="csvAvailable ? '' : (store.config?.csv.error ?? 'The caption file is not available')">
+                      <input
+                        v-model="form.mode"
+                        type="radio"
+                        name="t2i-mode"
+                        value="random"
+                        :disabled="randomLocked || !csvAvailable"
+                      />
+                      <span>Random Caption</span>
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    class="icon-btn dice"
+                    title="Load a random caption from the caption file (this empties the prompt, so Generate writes one for it)"
+                    aria-label="Roll a random caption"
+                    :disabled="rolling || randomLocked || !csvAvailable"
+                    @click="onRoll"
+                  >🎲</button>
+                  <span ref="filterAnchor" class="filter-anchor">
+                    <button
+                      type="button"
+                      class="btn"
+                      :aria-expanded="filterOpen"
+                      :disabled="!csvAvailable"
+                      @click="filterOpen = !filterOpen"
+                    >Filter<span v-if="filterActive > 0" class="badge">{{ filterActive }}</span></button>
+                    <CaptionFilterPopover
+                      v-if="filterOpen"
+                      v-model="form.filter"
+                      class="filter-pop"
+                      :style="filterStyle"
+                      :meta="store.captionMeta"
+                      :count="filterCount"
+                      :total="filterTotal"
+                      @close="filterOpen = false"
+                    />
+                  </span>
+                </div>
               </div>
               <textarea
-                v-if="negativeOpen"
+                id="t2i-caption"
                 class="area"
                 rows="3"
                 spellcheck="false"
-                aria-label="Negative prompt"
-                :value="shownNegative"
+                :value="shownCaption"
                 :readonly="randomLocked"
-                @input="form.negative = ($event.target as HTMLTextAreaElement).value"
+                :placeholder="randomLocked ? 'A caption is drawn from the caption file for each batch…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
+                @input="form.caption = ($event.target as HTMLTextAreaElement).value"
+              />
+              <div class="sec-foot">
+                <button
+                  type="button"
+                  class="link-btn fold"
+                  :aria-expanded="resolvedOpen"
+                  :disabled="randomLocked"
+                  @click="toggleResolved"
+                >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
+                <button
+                  type="button"
+                  class="btn"
+                  :disabled="generating || randomLocked || !form.caption.trim() || !form.model"
+                  @click="onGeneratePrompt"
+                >{{ generating ? 'Writing prompt…' : 'Generate Prompt' }}</button>
+              </div>
+              <div v-if="resolvedOpen && !randomLocked" class="resolved">
+                <p v-if="!form.caption.trim()" class="note">Nothing to resolve yet: write a caption first.</p>
+                <template v-else-if="resolved">
+                  <textarea
+                    class="area resolved-text"
+                    :class="{ stale: resolvedStale }"
+                    rows="4"
+                    readonly
+                    spellcheck="false"
+                    aria-label="Resolved caption"
+                    :value="resolved.text"
+                  />
+                  <ul v-if="resolved.warnings.length" class="lint">
+                    <li v-for="w in resolved.warnings" :key="w">⚠ {{ w }}</li>
+                  </ul>
+                </template>
+                <p v-else class="note">Resolving…</p>
+              </div>
+            </section>
+
+            <section class="sec">
+              <label class="sec-title" for="t2i-prompt">Prompt</label>
+              <textarea
+                id="t2i-prompt"
+                class="area"
+                rows="6"
+                spellcheck="false"
+                :value="shownPrompt"
+                :readonly="randomLocked"
+                :placeholder="randomLocked ? 'A prompt is written for each batch…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
+                @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
+              />
+              <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
+                <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
+              </ul>
+              <template v-if="hasNegative">
+                <div>
+                  <button
+                    type="button"
+                    class="link-btn fold"
+                    :aria-expanded="negativeOpen"
+                    @click="negativeOpen = !negativeOpen"
+                  >{{ negativeOpen ? '▾' : '▸' }} Negative prompt{{ shownNegative.trim() ? ' •' : '' }}</button>
+                </div>
+                <textarea
+                  v-if="negativeOpen"
+                  class="area"
+                  rows="3"
+                  spellcheck="false"
+                  aria-label="Negative prompt"
+                  :value="shownNegative"
+                  :readonly="randomLocked"
+                  @input="form.negative = ($event.target as HTMLTextAreaElement).value"
+                />
+              </template>
+            </section>
+
+            <!-- Two rows on a four-column grid: Model | Workflow, then
+                 Size | Aspect Ratio | Seed. -->
+            <section class="sec settings">
+              <label class="fld f-model">
+                <span>Model</span>
+                <select :value="form.model" @change="onModelChange(($event.target as HTMLSelectElement).value)">
+                  <option v-for="m in modelOptions" :key="m.id" :value="m.id">{{ m.label }}</option>
+                </select>
+              </label>
+              <label class="fld f-workflow">
+                <span>Workflow</span>
+                <select v-model="form.presetId">
+                  <option :value="null" disabled>Choose a workflow…</option>
+                  <option v-if="presetMissing" :value="form.presetId" disabled>Workflow #{{ form.presetId }} (not found)</option>
+                  <option v-for="p in presets" :key="p.id" :value="p.id">{{ p.name }}</option>
+                </select>
+                <small v-if="ready && !presets.length" class="hint">none registered: add one under Configuration</small>
+              </label>
+              <label class="fld f-size">
+                <span>Size</span>
+                <select v-model="form.megapixels">
+                  <option v-for="m in sizeOptions" :key="m" :value="m">{{ m }} MP</option>
+                </select>
+              </label>
+              <label class="fld f-aspect">
+                <span>Aspect Ratio</span>
+                <select
+                  :value="shownAspect"
+                  :disabled="randomLocked"
+                  :title="form.mode === 'random' ? 'A Random batch takes the aspect ratio of each caption' : ''"
+                  @change="form.aspect = ($event.target as HTMLSelectElement).value"
+                >
+                  <option v-for="a in aspectOptions" :key="a" :value="a">{{ a }}</option>
+                </select>
+                <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatch !== 'draw' ? 'used for batch 1, then taken from each caption' : 'taken from each caption' }}</small>
+              </label>
+              <SeedControls
+                class="f-seed"
+                :seed="shownSeed"
+                :policy="form.seedPolicy"
+                :disabled="randomLocked"
+                :max="seedMax"
+                @update:seed="form.seed = $event"
+                @update:policy="form.seedPolicy = $event"
+              />
+            </section>
+
+            <section class="sec">
+              <LoraListEditor label="LoRAs" :entries="form.loras" @change="form.loras = $event" />
+            </section>
+          </fieldset>
+
+          <footer class="t2i-run">
+            <div class="run-row">
+              <div class="counts">
+                <label
+                  class="fld fld-inline"
+                  title="Random Caption: how many batches a run renders. Each batch is one caption, one prompt and Count Per Batch images; batch 1 uses the prompt above when there is one. Manual always renders one prompt."
+                >
+                  <span>Batch Size</span>
+                  <input
+                    type="number"
+                    min="1"
+                    :max="maxBatchSize"
+                    step="1"
+                    :value="shownBatchSize"
+                    :disabled="form.mode === 'manual'"
+                    @change="onBatchSize"
+                  />
+                </label>
+                <label
+                  class="fld fld-inline"
+                  :class="{ 'fld-off': countIgnored }"
+                  :title="countIgnored ? 'Ignored while the seed is Fixed: the same seed would render the same image again' : 'How many images to render for each prompt'"
+                >
+                  <span>Count Per Batch</span>
+                  <input
+                    type="number"
+                    min="1"
+                    :max="maxCount"
+                    step="1"
+                    :value="form.countPerBatch"
+                    @change="onCountPerBatch"
+                  />
+                </label>
+              </div>
+              <div class="actions">
+                <button
+                  type="button"
+                  class="btn danger"
+                  :disabled="!store.isBusy || cancelling"
+                  :title="store.isBusy ? 'Stop the running batches and drop their queued jobs' : 'Nothing is running'"
+                  @click="onCancel"
+                >{{ cancelling ? 'Cancelling…' : 'Cancel' }}</button>
+                <button type="button" class="btn primary" :disabled="blocker !== null" @click="onGenerate">
+                  {{ submitting ? 'Submitting…' : generateLabel }}
+                </button>
+              </div>
+            </div>
+            <!-- Left: what is running. Right, under Generate: what it will do, or why it can't. -->
+            <div class="run-info">
+              <p class="status" role="status" aria-live="polite">{{ store.statusText }}</p>
+              <p v-if="blocker !== null && blocker !== 'Still loading'" class="hint">{{ blocker }}</p>
+              <p v-else-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatchHint }}</p>
+            </div>
+            <ul v-if="batchWarnings.length" class="lint">
+              <li v-for="w in batchWarnings" :key="w">⚠ {{ w }}</li>
+            </ul>
+          </footer>
+        </div>
+
+        <!-- The images, newest first, a page of 60 at a time. -->
+        <section class="t2i-gallery" aria-labelledby="t2i-images-title">
+          <h4 id="t2i-images-title" class="sec-title">Images</h4>
+          <p v-if="store.imagesError" class="lint" role="alert">
+            ⚠ Couldn't load your images: {{ store.imagesError }}
+            <button type="button" class="link-btn" @click="store.refreshImages()">Retry</button>
+          </p>
+          <ThumbGrid
+            class="gallery-grid"
+            :items="gridItems"
+            :selected-id="store.selectedId"
+            empty-text="No images yet — generated images appear here."
+            :loading="!store.imagesLoaded || store.imagesLoading || store.isBusy"
+            :has-more="store.canShowMore"
+            :loading-more="store.loadingOlder"
+            @select="onSelectTile"
+            @open="onOpenViewer"
+            @favorite="onFavorite"
+            @delete="onDelete"
+            @more="store.showMoreImages()"
+          >
+            <template #jobs>
+              <JobTile
+                v-for="[jobId, chip] in store.jobs"
+                :key="`job-${jobId}`"
+                :chip="chip"
+                @cancel="onCancelJob(jobId)"
+                @dismiss="store.dismissJob(jobId)"
               />
             </template>
-          </div>
-        </div>
-      </fieldset>
-
-      <div class="grid-row">
-        <span class="lbl" />
-        <div class="footer">
-          <div class="actions">
-            <button type="button" class="btn primary" :disabled="blocker !== null" @click="onGenerate">
-              {{ submitting ? 'Submitting…' : generateLabel }}
-            </button>
-            <button
-              type="button"
-              class="btn danger"
-              :disabled="!store.isBusy || cancelling"
-              :title="store.isBusy ? 'Stop the running batches and drop their queued jobs' : 'Nothing is running'"
-              @click="onCancel"
-            >{{ cancelling ? 'Cancelling…' : 'Cancel' }}</button>
-            <span v-if="blocker !== null && blocker !== 'Still loading'" class="hint">{{ blocker }}</span>
-            <span v-else-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatchHint }}</span>
-          </div>
-          <div class="counts">
-            <label
-              class="fld fld-inline"
-              title="Random Caption: how many batches a run renders. Each batch is one caption, one prompt and Count Per Batch images; batch 1 uses the prompt above when there is one. Manual always renders one prompt."
-            >
-              <span>Batch Size</span>
-              <input
-                type="number"
-                min="1"
-                :max="maxBatchSize"
-                step="1"
-                :value="shownBatchSize"
-                :disabled="form.mode === 'manual'"
-                @change="onBatchSize"
-              />
-            </label>
-            <label
-              class="fld fld-inline"
-              :class="{ 'fld-off': countIgnored }"
-              :title="countIgnored ? 'Ignored while the seed is Fixed: the same seed would render the same image again' : 'How many images to render for each prompt'"
-            >
-              <span>Count Per Batch</span>
-              <input
-                type="number"
-                min="1"
-                :max="maxCount"
-                step="1"
-                :value="form.countPerBatch"
-                @change="onCountPerBatch"
-              />
-            </label>
-          </div>
-        </div>
+          </ThumbGrid>
+        </section>
       </div>
-
-      <div class="grid-row">
-        <span class="lbl" />
-        <div class="stack">
-          <p class="status" role="status" aria-live="polite">{{ store.statusText }}</p>
-          <ul v-if="batchWarnings.length" class="lint">
-            <li v-for="w in batchWarnings" :key="w">⚠ {{ w }}</li>
-          </ul>
-        </div>
-      </div>
-
-      <!-- Shown only while an image is selected: says where edits are going.
-           With none selected the form is an unsaved scratch area. -->
-      <div v-if="store.selectedImage" class="bar" :class="{ failed: saveFailed }" role="status">
-        <span v-if="saveFailed">
-          Couldn't save your changes to this image — they'll be retried on the next edit.
-        </span>
-        <span v-else>
-          Editing the image from {{ formatT2iTimestamp(store.selectedImage.created_at) }} ·
-          changes save automatically
-        </span>
-        <button
-          type="button"
-          class="link-btn"
-          title="Keep these values in the form, but stop saving them to this image"
-          @click="stopEditing"
-        >Stop editing</button>
-      </div>
-      <p v-if="store.imagesError" class="lint" role="alert">
-        ⚠ Couldn't load your images: {{ store.imagesError }}
-        <button type="button" class="link-btn" @click="store.refreshImages()">Retry</button>
-      </p>
-
-      <ThumbStrip
-        :items="stripItems"
-        :selected-id="store.selectedId"
-        empty-text="No images yet — generated images appear here."
-        :loading="!store.imagesLoaded || store.imagesLoading || store.isBusy"
-        :has-more="store.hasMoreImages"
-        :loading-more="store.loadingOlder"
-        @select="onSelectTile"
-        @open="onOpenViewer"
-        @favorite="onFavorite"
-        @delete="onDelete"
-        @more="store.loadOlder()"
-      >
-        <template #jobs>
-          <JobTile
-            v-for="[jobId, chip] in store.jobs"
-            :key="`job-${jobId}`"
-            :chip="chip"
-            @cancel="onCancelJob(jobId)"
-            @dismiss="store.dismissJob(jobId)"
-          />
-        </template>
-      </ThumbStrip>
     </div>
 
     <MediaViewer
@@ -941,13 +948,18 @@ onBeforeUnmount(() => {
   justify-content: center;
 }
 
+/* Two panes: the form and the image grid, which scrolls on its own. The form
+   decides the height (the grid takes whatever the form leaves it), up to 94%
+   of the viewport; past that the form column scrolls under its pinned run
+   controls. */
 .t2i-card {
   background: var(--surface-section);
   border-radius: 12px;
-  padding: 20px 26px 22px;
-  width: min(1080px, 96vw);
+  padding: 16px 22px 18px;
+  width: min(1180px, 96vw);
+  min-height: min(560px, 94vh);
   max-height: 94vh;
-  overflow-y: auto;
+  overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
@@ -964,6 +976,42 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 18px;
   color: var(--text-color);
+}
+
+.t2i-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 20px;
+}
+
+/* The gutter is reserved so nothing changes width when a fold opens and the
+   column starts to scroll. */
+.t2i-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.t2i-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface-section);
+}
+
+.t2i-top:empty {
+  display: none;
 }
 
 .icon-btn {
@@ -986,39 +1034,115 @@ onBeforeUnmount(() => {
 
 .dice {
   font-size: 18px;
+  line-height: 1;
 }
 
 /* A fieldset only to switch every control off at once while the dialog loads. */
 .t2i-form {
+  flex: 1 0 auto;
   border: 0;
   padding: 0;
   margin: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 
-/* Label column, then the content (the wireframe's layout). */
-.grid-row {
-  display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
-  column-gap: 12px;
-  align-items: start;
-}
-
-.lbl {
-  padding-top: 6px;
-  text-align: right;
-  font-size: 12px;
-  color: var(--text-color-secondary);
-}
-
-.stack {
+.sec {
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+}
+
+/* Same look as the LoRA editor's label, so every section reads alike. */
+.sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-color-secondary);
+}
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.sec-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Manual | Random Caption as one segmented control. The radios stay real and
+   focusable (arrow keys switch); only their circles are hidden. */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--surface-border);
+  border-radius: 7px;
+  background: var(--surface-ground);
+}
+
+.seg-opt {
+  position: relative;
+  display: inline-flex;
+}
+
+.seg-opt input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.seg-opt span {
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+}
+
+.seg-opt:hover input:not(:disabled):not(:checked) + span {
+  color: var(--text-color);
+}
+
+.seg-opt input:checked + span {
+  background: var(--surface-section);
+  color: var(--primary-color);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.seg-opt input:focus-visible + span {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 1px;
+}
+
+.seg-opt input:disabled {
+  cursor: default;
+}
+
+.seg-opt input:disabled + span {
+  opacity: 0.5;
 }
 
 .area {
@@ -1044,6 +1168,12 @@ onBeforeUnmount(() => {
   border-color: var(--primary-color);
 }
 
+.resolved {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .resolved-text {
   font-family: var(--font-mono, monospace);
   font-size: 12px;
@@ -1053,25 +1183,8 @@ onBeforeUnmount(() => {
   opacity: 0.55;
 }
 
-.caption-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-}
-
-.radio {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  color: var(--text-color);
-  cursor: pointer;
-}
-
 .filter-anchor {
   position: relative;
-  margin-left: auto;
 }
 
 .filter-pop {
@@ -1092,17 +1205,25 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
-.params {
-  display: flex;
-  flex-wrap: wrap;
+.settings {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  align-items: flex-start;
+  padding-top: 16px;
+  border-top: 1px solid var(--surface-border);
+}
+
+.f-model,
+.f-workflow,
+.f-seed {
+  grid-column: span 2;
 }
 
 .fld {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-color-secondary);
 }
@@ -1119,9 +1240,32 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
 }
 
+.fld select {
+  width: 100%;
+}
+
+.fld select:focus,
+.fld input:focus,
+.f-seed :deep(.sc-input:focus),
+.f-seed :deep(.sc-policy:focus) {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
 .fld select:disabled,
 .fld input:disabled {
   opacity: 0.6;
+}
+
+/* The seed box takes the room its cell has left after the dice and the policy. */
+.f-seed :deep(.sc-row) {
+  display: flex;
+}
+
+.f-seed :deep(.sc-input) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
 }
 
 .fld-off {
@@ -1141,6 +1285,7 @@ onBeforeUnmount(() => {
   color: var(--text-color);
   cursor: pointer;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .btn:disabled {
@@ -1164,23 +1309,40 @@ onBeforeUnmount(() => {
   color: var(--primary-color-text, #fff);
 }
 
-.footer {
+/* Grows no taller than its content; the form above it fills the rest, so
+   the run controls sit at the bottom even when the fields are short. */
+.t2i-run {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  flex: none;
+  background: var(--surface-section);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-border);
+}
+
+.run-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px 24px;
+  gap: 10px 20px;
+}
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
 }
 
 .actions {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.counts {
-  display: flex;
-  gap: 16px;
+  margin-left: auto;
 }
 
 .fld-inline {
@@ -1193,8 +1355,21 @@ onBeforeUnmount(() => {
   width: 72px;
 }
 
-.status {
+.run-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 16px;
   min-height: 1.4em;
+}
+
+.run-info .hint {
+  margin-left: auto;
+  text-align: right;
+}
+
+.status {
   margin: 0;
   font-size: 12px;
   color: var(--text-color-secondary);
@@ -1254,5 +1429,70 @@ onBeforeUnmount(() => {
 
 .fold {
   color: var(--text-color-secondary);
+}
+
+/* The image pane: as wide as three tiles (ThumbGrid sizes itself) and as tall
+   as the form. Height 0 keeps its tiles from making the row taller; the
+   min-height then stretches it over the row the form sets. */
+.t2i-gallery {
+  height: 0;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 4px 0 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+}
+
+.gallery-grid {
+  flex: 1 1 auto;
+}
+
+/* A narrower form: the settings grid drops to two columns. */
+@media (max-width: 1100px) {
+  .settings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .f-model,
+  .f-workflow {
+    grid-column: span 1;
+  }
+}
+
+/* Too narrow for two panes: one column with the images below the form (still
+   three wide), and the whole card scrolls. Nothing in it may shrink to fit the
+   card's height, or the run controls and the images would overlap the form. */
+@media (max-width: 899px) {
+  .t2i-card {
+    height: auto;
+    max-height: 94vh;
+    overflow-y: auto;
+  }
+
+  .t2i-body,
+  .t2i-main {
+    flex: none;
+    min-height: auto;
+  }
+
+  .t2i-body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .t2i-main {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .t2i-gallery {
+    flex: none;
+    align-self: center;
+    height: 440px;
+    min-height: 0;
+  }
 }
 </style>

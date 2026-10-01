@@ -15,23 +15,25 @@ The pipeline is always the same:
 2. **Rewrite** — the local VLM turns the resolved caption into a prompt in the selected model's style (Krea 2, Qwen-Image, SDXL, Z-Image).
 3. **Render** — a registered ComfyUI workflow renders it. Every image is its own job with its own seed.
 
-Generated images are ordinary library media. They appear in the strip at the bottom of the dialog, and each one remembers the dialog contents that produced it.
+Generated images are ordinary library media. They appear in the grid on the right of the dialog, and each one remembers the dialog contents that produced it.
 
 ## The form
+
+The form is on the left, top to bottom: the caption and where it comes from, the prompt, then the model, image and seed settings and the LoRAs. **Batch Size**, **Count per Batch**, **Cancel** and **Generate** stay pinned at its bottom, so they are in reach however far the form is scrolled; while an image is selected, a bar pinned at its top says so.
 
 | Control | What it does |
 |---|---|
 | **Caption** | The description to expand. Plain text; tokens are optional. A collapsible *Resolved caption* shows exactly what the VLM will be given. |
-| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first batch (see Batches). |
 | **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption and **empties the Prompt**, so the next **Generate** writes a prompt for that caption and renders it. |
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
+| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first batch (see Batches). |
+| **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL) and is sent only if the workflow has an `MS_NEGATIVE` node. |
 | **Model** | Krea 2, Qwen-Image, SDXL or Z-Image. Chooses the prompt style and the default workflow. |
 | **Workflow** | Every registered `t2i` workflow. |
 | **Size** | Pixel budget in megapixels. |
 | **Aspect Ratio** | Manual: your choice. Random: taken from each caption's row (read-only while a batch runs). |
 | **Seed** and policy | The seed, plus how it advances: **Fixed**, **Increment**, **Decrement** or **Randomize**. |
 | **LoRAs** | Same editor as Image to Video. Needs an `MS_LORA_STACK` node in the workflow. |
-| **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL) and is sent only if the workflow has an `MS_NEGATIVE` node. |
 | **Batch Size** | How many batches a run renders (Random mode). Batch 1 is the prompt in the box when there is one. Locked at 1 in Manual mode. |
 | **Count per Batch** | How many images each batch renders, differing only in their seed. Above 1 needs a non-Fixed policy. |
 
@@ -138,10 +140,11 @@ The **Validate** button lists everything at once and warns when `MS_LORA_STACK` 
 
 ## Results
 
+- The grid on the right shows your images newest first, three to a row, 60 at a time: **Show more** at the end of the grid adds the next 60. It scrolls on its own, beside the form. A running job shows as a placeholder in front of the images (its progress, ✕ cancels it). While a run adds images the grid stays at the pages you have open, so new images push the oldest shown ones behind **Show more** instead of making the grid longer; reopening the dialog starts again at 60.
 - Click a thumbnail to load the dialog contents that produced it (mode, filter, caption, model, workflow, size, aspect ratio, seed, prompt, negative, LoRAs). Edits save automatically into that image. **Stop editing** returns to a scratch form. Seed policy, Batch Size and Count per Batch are never restored, so selecting an image cannot trigger a large re-run.
 - **Generate** with an image selected first saves your pending edits into it, then leaves editing mode before the seed advances (the form keeps its values), so the automatic seed advance never rewrites the saved form of the image it came from. Thumbnails cannot be selected while a Random batch runs.
 - New images reach the library grid while the dialog is open *and* after you close it, without the dimming "Loading media…" overlay.
-- Double-click to view; **★** stars it (the library's favorite flag); **✕** deletes the file and its library entry.
+- Double-click to view (the viewer steps through the images the grid shows); **★** stars it (the library's favorite flag); **✕** deletes the file and its library entry.
 - With no image selected, the scratch form is remembered between openings in your browser.
 
 ## Smart folders
