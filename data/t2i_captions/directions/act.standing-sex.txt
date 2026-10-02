@@ -1,0 +1,2 @@
+# Used when the this act score passes act_min
+standing sex
