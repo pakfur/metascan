@@ -5,7 +5,7 @@ Usage:
         [--results PATH] [--replace]
 
 Writes <csv stem>.merged.csv next to the captions CSV. With --replace the
-original is kept as <csv>.bak-<timestamp> and the merged file takes its
+original is kept as <stem>.bak-<timestamp>.csv and the merged file takes its
 place (an atomic rename). A row gets classification cells only when its
 caption's SHA-1 still equals the one recorded at classification time; an
 edited, failed or unclassified row gets blank cells, which means "no
@@ -141,8 +141,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"{stats.blank} blank captions → {merged}"
     )
     if args.replace:
+        # <stem>.bak-<time>.csv: ends in .csv so the captions .gitignore
+        # rule keeps this copy of user data out of git.
         backup = args.csv.with_name(
-            f"{args.csv.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+            f"{args.csv.stem}.bak-{time.strftime('%Y%m%d-%H%M%S')}{args.csv.suffix}"
         )
         shutil.copy2(args.csv, backup)
         os.replace(merged, args.csv)

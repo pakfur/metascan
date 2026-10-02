@@ -121,7 +121,9 @@ def test_replace_keeps_a_backup_and_swaps_the_file(tmp_path):
     assert src.read_bytes() == original  # without --replace nothing is swapped
     assert (tmp_path / "c.merged.csv").exists()
     assert merge.main(["--csv", str(src), "--out", str(out), "--replace"]) == 0
-    backups = list(tmp_path.glob("c.csv.bak-*"))
+    backups = list(tmp_path.glob("c.bak-*.csv"))
     assert len(backups) == 1 and backups[0].read_bytes() == original
+    # It must end in .csv so the captions .gitignore rule (*.csv) covers it.
+    assert not list(tmp_path.glob("c.csv.bak-*"))
     assert _read(src)[0]["Act"] == "doggy"
     assert not (tmp_path / "c.merged.csv").exists()
