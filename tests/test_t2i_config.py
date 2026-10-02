@@ -28,6 +28,14 @@ DEFAULTS = {
     "window": 4,
     "max_batch_size": 500,
     "max_count_per_batch": 32,
+    "directions": {
+        "enabled": True,
+        "emotion_missing_min": 0.70,
+        "emotion_sensual_from": 0.60,
+        "kiss_min": 0.80,
+        "act_min": 0.80,
+        "skip_act_on_conflict": True,
+    },
 }
 
 JUNK = [None, True, False, 5, 1.5, "x", "", [], ["x"], {}, {"a": 1}]
@@ -109,6 +117,14 @@ class TestValuesPassThrough(unittest.TestCase):
             "window": 8,
             "max_batch_size": 100,
             "max_count_per_batch": 10,
+            "directions": {
+                "enabled": False,
+                "emotion_missing_min": 0.5,
+                "emotion_sensual_from": 0.4,
+                "kiss_min": 0.9,
+                "act_min": 0.95,
+                "skip_act_on_conflict": False,
+            },
         }
         self.assertEqual(get_t2i_config({"t2i": section}), section)
 
@@ -331,3 +347,30 @@ def test_no_junk_value_in_any_field_can_raise(junk):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDirections(unittest.TestCase):
+    def test_valid_values_pass_through(self):
+        section = {
+            "enabled": False,
+            "emotion_missing_min": 0.5,
+            "emotion_sensual_from": 0.4,
+            "kiss_min": 0.9,
+            "act_min": 0.95,
+            "skip_act_on_conflict": False,
+        }
+        self.assertEqual(cfg(directions=section)["directions"], section)
+
+    def test_out_of_range_numbers_are_clamped(self):
+        got = cfg(directions={"act_min": 1.7, "kiss_min": -0.2})["directions"]
+        self.assertEqual((got["act_min"], got["kiss_min"]), (1.0, 0.0))
+
+    def test_junk_falls_back_to_the_defaults(self):
+        for junk in JUNK:
+            with self.subTest(junk=junk):
+                got = cfg(directions=junk)["directions"]
+                self.assertEqual(got, DEFAULTS["directions"])
+        got = cfg(
+            directions={"enabled": "yes", "act_min": "0.9", "kiss_min": float("nan")}
+        )["directions"]
+        self.assertEqual(got, DEFAULTS["directions"])
