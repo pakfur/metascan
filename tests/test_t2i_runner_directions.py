@@ -157,3 +157,14 @@ class TestRandomStepDirections(DirectionCase):
             self.random_mode(batch_size=2, count_per_batch=1, directions=False)
         )
         self.assertFalse(any("DIRECTION" in u for u in self.user_turns()))
+
+
+class TestSnippetWarnings(DirectionCase):
+    async def test_a_rejected_snippet_line_is_reported_on_the_prompt(self) -> None:
+        emotion = Path(self.root) / "directions" / "emotion.txt"
+        emotion.write_text("a soft unguarded smile\na grin (wide)\n", encoding="utf-8")
+        result = await self.runner.generate_prompt(
+            caption=ACT_CAPTION, seed=5, model="krea2"
+        )
+        self.assertTrue(any("emotion.txt:2" in w for w in result.warnings))
+        self.assertEqual(result.direction_parts, ["act:doggy", "emotion"])

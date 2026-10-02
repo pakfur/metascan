@@ -156,8 +156,10 @@ classifier (`scripts/caption_classifier/`, see its README): after a full run,
   - `act.<act>.txt` for each act
   - optional `act.<act>.pov.txt`, used when the partner is out of frame
 
-  The same adult-only screen as the other lists applies. A list that is
-  empty when its threshold passes adds a warning to the step.
+  The same adult-only screen as the other lists applies, and a rejected
+  line is reported as a warning on the step. An empty list means "not
+  written yet" and is skipped quietly. A missing list adds a warning when
+  its threshold passes.
 - **SFW mode.** In the *Keep SFW* content mode, act and kissing directions
   are never used.
 

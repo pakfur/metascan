@@ -11,6 +11,8 @@ from the cached file reads:
 * the line is picked from the seed exactly like a plain wildcard:
   ``sha256(f"{seed}|direction|{key}|0")`` modulo the list length;
 * parts come in a fixed order -- act, kissing, emotion -- one sentence each;
+* an empty list file means "not written yet": that part is skipped quietly,
+  while a missing list file adds a warning;
 * ``sfw`` content mode never gets an act or kissing part, and its emotion
   part always comes from ``emotion.txt``.
 """
@@ -65,7 +67,7 @@ def load_snippets(directory: Path) -> Tuple[Dict[str, Tuple[str, ...]], List[str
         return snippets, warnings
     for path in sorted(directory.glob("*.txt")):
         values = _read_list(path, "direction", warnings)
-        if values:
+        if values is not None:  # None: unreadable, so it counts as missing
             snippets[path.stem] = values
     return snippets, warnings
 
@@ -136,10 +138,10 @@ def build_direction(
                 )
                 parts.append(label)
                 return
-        warnings.append(
-            f"no direction snippets for {keys[-1]}: "
-            f"{DIRECTIONS_DIRNAME}/{keys[-1]}.txt is missing or empty"
-        )
+        if keys[-1] in snippets:
+            return  # the base list exists but is empty: not written yet
+        tried = " or ".join(f"{DIRECTIONS_DIRNAME}/{k}.txt" for k in keys)
+        warnings.append(f"no direction snippets for {keys[-1]}: {tried} is missing")
 
     act_ok = (
         not sfw
