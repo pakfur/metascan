@@ -487,10 +487,12 @@ class T2iRunner:
         """The direction for this caption, or None. Warnings go to ``warnings``."""
         if not enabled or self.directions is None or row is None:
             return None
-        snippets, _ = await asyncio.to_thread(self.directions.get)
+        snippets, list_warnings = await asyncio.to_thread(self.directions.get)
         direction = build_direction(row, seed, content_mode, settings, snippets)
         if direction is None:
             return None
+        # A rejected or unreadable snippet line shows where its absence would.
+        warnings.extend(w for w in list_warnings if w not in warnings)
         warnings.extend(direction.warnings)
         if not direction.text:
             return None

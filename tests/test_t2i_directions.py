@@ -189,3 +189,28 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(cache.get()[0]["kissing"], ("they kiss softly",))
         missing = SnippetCache(self.dir / "nope")
         self.assertEqual(missing.get(), ({}, []))
+
+
+class EmptyListTests(unittest.TestCase):
+    def test_an_empty_list_is_silent_but_a_missing_one_warns(self) -> None:
+        snippets = dict(SNIPPETS, **{"act.cowgirl": ()})
+        d = build(row(act="cowgirl", act_p=0.9), snippets=snippets)
+        assert d is not None
+        self.assertEqual((d.parts, d.warnings), ((), ()))
+
+    def test_the_pov_warning_names_both_lists(self) -> None:
+        d = build(row(act="cowgirl", act_p=0.9, partner="male"))
+        assert d is not None
+        (warning,) = d.warnings
+        self.assertIn("act.cowgirl.pov.txt", warning)
+        self.assertIn("act.cowgirl.txt", warning)
+
+    def test_an_empty_file_loads_as_an_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "act.doggy.txt").write_text("", encoding="utf-8")
+            (Path(tmp) / "kissing.txt").write_text(
+                "# only a comment\n", encoding="utf-8"
+            )
+            snippets, warnings = load_snippets(Path(tmp))
+        self.assertEqual(snippets, {"act.doggy": (), "kissing": ()})
+        self.assertEqual(warnings, [])
