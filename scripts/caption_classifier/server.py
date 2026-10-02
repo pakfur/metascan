@@ -101,7 +101,13 @@ class LlamaServer:
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
         assert proc.stderr is not None
         while True:
-            line = await proc.stderr.readline()
+            try:
+                line = await proc.stderr.readline()
+            except ValueError:
+                # A line longer than the stream limit; readline drops it.
+                # Keep draining or the pipe fills and llama-server hangs.
+                logger.debug("llama-server: <overlong stderr line dropped>")
+                continue
             if not line:
                 return
             logger.debug("llama-server: %s", line.decode("utf-8", "replace").rstrip())

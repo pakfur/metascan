@@ -83,3 +83,14 @@ def test_truncated_answer_is_rejected():
         build_record(
             caption=CAPTION, males=0, females=1, content=content[:-3], tokens=tokens
         )
+
+
+def test_raw_control_character_inside_a_quote_still_parses():
+    issues = [{"type": "extra_limb", "quote_a": "holds\ta cup", "quote_b": "strokes"}]
+    content, tokens = answer(issues=issues)
+    content = content.replace("\\t", "\t")
+    tokens[-1] = dict(tokens[-1], token=tokens[-1]["token"].replace("\\t", "\t"))
+    rec = build_record(
+        caption=CAPTION, males=0, females=1, content=content, tokens=tokens
+    )
+    assert rec["issues"][0]["quote_a"] == "holds\ta cup"

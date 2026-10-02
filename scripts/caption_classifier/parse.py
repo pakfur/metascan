@@ -120,7 +120,7 @@ def build_record(
     """Classification fields for one answer: distributions, gated act, issues."""
     dists = field_distributions(content, tokens)
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(content, strict=False)
     except json.JSONDecodeError as exc:
         raise ParseError(f"answer is not JSON: {exc}") from exc
 

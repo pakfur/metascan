@@ -91,6 +91,7 @@ class Runner:
         timeout: float = 60.0,
         attempts: int = 3,
         max_restarts: int = 1,
+        max_transport_failures: int = 20,
         progress_every: float = 30.0,
     ) -> None:
         self._rows = rows
@@ -102,6 +103,8 @@ class Runner:
         self._timeout = timeout
         self._attempts = attempts
         self._max_restarts = max_restarts
+        self._max_transport_failures = max_transport_failures
+        self._transport_streak = 0
         self._progress_every = progress_every
         self._stop = False
         self._restart_lock: Optional[asyncio.Lock] = None
@@ -149,7 +152,9 @@ class Runner:
         reason = ""
         for _ in range(self._attempts):
             try:
-                return self._record(row, "ok", await self._classify_once(row))
+                fields = await self._classify_once(row)
+                self._transport_streak = 0
+                return self._record(row, "ok", fields)
             except ParseError as exc:
                 reason = f"unparseable answer: {exc}"
             except httpx.HTTPStatusError as exc:
@@ -158,7 +163,15 @@ class Runner:
                 reason = f"timed out after {self._timeout:.0f}s"
             except httpx.TransportError as exc:
                 reason = f"connection failed: {exc!r}"
+                self._transport_streak += 1
+                if self._transport_streak >= self._max_transport_failures:
+                    raise FatalServerError(
+                        f"{self._transport_streak} connection failures in a row; "
+                        "is llama-server reachable?"
+                    ) from exc
                 await self._recover()
+            except (KeyError, IndexError, TypeError, AttributeError, ValueError) as exc:
+                reason = f"malformed response: {exc!r}"
         return self._record(row, "error", {"error": reason})
 
     async def _classify_once(self, row: CaptionRow) -> Dict[str, Any]:

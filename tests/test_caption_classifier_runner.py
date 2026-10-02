@@ -156,3 +156,42 @@ async def test_stop_request_finishes_the_current_row_then_stops(
     finally:
         await srv.stop()
     assert len(sink.records) == 1 and stats.stopped
+
+
+async def test_malformed_response_becomes_an_error_row_not_a_crash(tmp_path):
+    _, tokens = answer()
+    path = tmp_path / "null.json"
+    path.write_text(json.dumps({"content": None, "tokens": tokens}))
+    _, stats, sink, _ = await _run({}, 2, path, tmp_path)
+    assert [r["status"] for r in sink.records] == ["error", "error"]
+    assert "malformed" in sink.records[0]["error"]
+
+
+class _DeadExternal:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    def alive(self) -> bool:
+        return True
+
+    async def restart(self) -> None:
+        raise AssertionError("must not restart")
+
+
+async def test_server_that_never_answers_stops_the_run(tmp_path):
+    from scripts.caption_classifier.server import free_port
+
+    sink = Sink()
+    runner = Runner(
+        rows=Rows(50),
+        server=_DeadExternal(f"http://127.0.0.1:{free_port()}"),
+        writer=sink,
+        model_id="fake",
+        prompt_version=PROMPT_VERSION,
+        workers=1,
+        timeout=5,
+        max_transport_failures=4,
+    )
+    with pytest.raises(FatalServerError, match="in a row"):
+        await runner.run(list(range(50)))
+    assert len(sink.records) < 50
