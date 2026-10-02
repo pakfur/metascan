@@ -40,7 +40,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
-from metascan.core.t2i_captions import CaptionPicker, CaptionStore
+from metascan.core.t2i_captions import CaptionPicker, CaptionRow, CaptionStore
+from metascan.core.t2i_directions import (
+    Direction,
+    DirectionSettings,
+    SnippetCache,
+    build_direction,
+)
 from metascan.core.t2i_characters import ResolvedCaption, resolve_caption
 from metascan.core.t2i_form import (
     ASPECT_RATIOS,
@@ -125,6 +131,8 @@ class BatchRequest:
     aspect_ratio: Optional[str] = None
     # Random field
     filter: Optional[Dict[str, Any]] = None
+    # Caption directions; None means the config's t2i.directions.enabled.
+    directions: Optional[bool] = None
 
 
 @dataclass
@@ -140,6 +148,8 @@ class PromptResult:
     negative: Optional[str]
     resolved_caption: str
     warnings: List[str]
+    direction: Optional[str] = None
+    direction_parts: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +169,8 @@ class _Batch:
     prefix: str  # output prefix template, relative to the root
     content_mode: str
     identity: str
+    directions: bool  # caption directions on for this batch
+    direction_settings: DirectionSettings
     window: asyncio.Semaphore
     picker: Optional[CaptionPicker]
     warnings: List[str]
@@ -232,6 +244,8 @@ class _Step:
     warnings: List[str]
     width: int
     height: int
+    direction: Optional[str] = None
+    direction_parts: List[str] = field(default_factory=list)
 
     @property
     def prompt_seed(self) -> int:
@@ -339,6 +353,7 @@ class T2iRunner:
         get_config: Callable[[], Dict[str, Any]],
         unload_vlm_during_generation: bool = True,
         vlm_installed: Optional[Callable[[str], bool]] = None,
+        directions: Optional[SnippetCache] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
@@ -348,6 +363,8 @@ class T2iRunner:
         # is the prompt -- not a failure to retry.
         self.vlm_installed = vlm_installed
         self.captions = captions  # public: the routes read them too
+        # Snippet lists for caption directions; None turns directions off.
+        self.directions = directions
         self.library = library
         self.output_root = Path(output_root)
         self.unload_vlm_during_generation = unload_vlm_during_generation
@@ -445,8 +462,48 @@ class T2iRunner:
             raise VlmError("the VLM returned an empty prompt")
         return prompt, negative
 
+    async def _find_row(
+        self, caption: str, warnings: List[str]
+    ) -> Optional[CaptionRow]:
+        """The CSV row with exactly this caption; a failing lookup is a warning."""
+        try:
+            return await asyncio.to_thread(self.captions.find, caption)
+        except Exception as exc:  # never fail a prompt over a direction
+            logger.warning("t2i direction lookup failed: %s", exc)
+            warnings.append(
+                f"caption direction skipped: lookup failed ({self._reason(exc)})"
+            )
+            return None
+
+    async def _direction(
+        self,
+        row: Optional[CaptionRow],
+        seed: int,
+        content_mode: str,
+        settings: DirectionSettings,
+        enabled: bool,
+        warnings: List[str],
+    ) -> Optional[Direction]:
+        """The direction for this caption, or None. Warnings go to ``warnings``."""
+        if not enabled or self.directions is None or row is None:
+            return None
+        snippets, _ = await asyncio.to_thread(self.directions.get)
+        direction = build_direction(row, seed, content_mode, settings, snippets)
+        if direction is None:
+            return None
+        warnings.extend(direction.warnings)
+        if not direction.text:
+            return None
+        logger.info("t2i direction for row %d: %s", row.id, ", ".join(direction.parts))
+        return direction
+
     async def generate_prompt(
-        self, *, caption: str, seed: int, model: str
+        self,
+        *,
+        caption: str,
+        seed: int,
+        model: str,
+        directions: Optional[bool] = None,
     ) -> PromptResult:
         """Resolve ``caption`` and have the VLM write ``model``'s prompt for
         it. Writes nothing.
@@ -465,20 +522,39 @@ class T2iRunner:
         resolved = await self._resolve(profile, caption, seed, cfg)
         warnings = list(resolved.warnings)
 
+        enabled = (
+            cfg["directions"]["enabled"] if directions is None else bool(directions)
+        )
+        row = (
+            await self._find_row(caption, warnings)
+            if enabled and self.directions is not None
+            else None
+        )
+        direction = await self._direction(
+            row,
+            seed,
+            cfg["content_mode"],
+            DirectionSettings.from_config(cfg["directions"]),
+            enabled,
+            warnings,
+        )
+        text = direction.text if direction else None
+        parts = list(direction.parts) if direction else []
+
         vlm = self.get_vlm()
         model_id = await self._usable_model(vlm) if vlm is not None else None
         if vlm is None or model_id is None:
-            prompt, negative = fallback_prompt(profile, resolved.text)
+            prompt, negative = fallback_prompt(profile, resolved.text, text)
             warnings.append(WARN_VLM_UNAVAILABLE)
-            return PromptResult(prompt, negative, resolved.text, warnings)
+            return PromptResult(prompt, negative, resolved.text, warnings, text, parts)
 
         system_prompt, user_prompt = compose_t2i_prompts(
-            profile, resolved.text, cfg["content_mode"]
+            profile, resolved.text, cfg["content_mode"], text
         )
         prompt, negative = await self._vlm_prompt(
             vlm, model_id, profile, system_prompt, user_prompt
         )
-        return PromptResult(prompt, negative, resolved.text, warnings)
+        return PromptResult(prompt, negative, resolved.text, warnings, text, parts)
 
     # ---- batch planning ----------------------------------------------------
 
@@ -633,6 +709,12 @@ class T2iRunner:
             prefix=prefix,
             content_mode=cfg["content_mode"],
             identity=effective_identity(profile, cfg["identity"]),
+            directions=(
+                cfg["directions"]["enabled"]
+                if req.directions is None
+                else bool(req.directions)
+            ),
+            direction_settings=DirectionSettings.from_config(cfg["directions"]),
             window=asyncio.Semaphore(cfg["window"]),
             picker=picker,
             warnings=warnings,
@@ -725,7 +807,7 @@ class T2iRunner:
         return " ".join(str(exc).split())[:160] or type(exc).__name__
 
     async def _write_prompt(
-        self, batch: _Batch, resolved_text: str
+        self, batch: _Batch, resolved_text: str, direction: Optional[str] = None
     ) -> Tuple[str, Optional[str], List[str]]:
         """``(prompt, negative, warnings)`` for one step of a running batch.
 
@@ -737,7 +819,7 @@ class T2iRunner:
         profile = batch.profile
 
         def fall_back(warning: str) -> Tuple[str, Optional[str], List[str]]:
-            prompt, negative = fallback_prompt(profile, resolved_text)
+            prompt, negative = fallback_prompt(profile, resolved_text, direction)
             return prompt, negative, [warning]
 
         vlm = self.get_vlm()
@@ -747,7 +829,7 @@ class T2iRunner:
         if model_id is None:
             return fall_back(WARN_VLM_UNAVAILABLE)
         system_prompt, user_prompt = compose_t2i_prompts(
-            profile, resolved_text, batch.content_mode
+            profile, resolved_text, batch.content_mode, direction
         )
         failure: BaseException = VlmError("no attempt was made")
         for attempt in (1, 2):
@@ -788,17 +870,20 @@ class T2iRunner:
         )
 
     async def _random_step(self, batch: _Batch, index: int) -> _Step:
+        warnings: List[str] = []
+        row: Optional[CaptionRow] = None
         if index == 0 and _names_first_caption(batch.req):
             # The caption the user named: nothing is drawn for this step. Its
             # ratio was checked when the batch was planned.
             caption, aspect = str(batch.req.caption), str(batch.req.aspect_ratio)
+            if batch.directions and self.directions is not None:
+                row = await self._find_row(caption, warnings)
         else:
             if batch.picker is None:
                 raise RuntimeError("a Random batch has no caption picker")
             row = await asyncio.to_thread(batch.picker.next)
             caption, aspect = row.caption, row.aspect_ratio
         seeds = batch.step_seeds(index)
-        warnings: List[str] = []
         megapixels = batch.req.megapixels
         multiple = batch.profile.dim_multiple
         try:
@@ -814,7 +899,17 @@ class T2iRunner:
         library, _ = await asyncio.to_thread(self.library.get)
         resolved = resolve_caption(caption, seeds[0], batch.identity, library)
         warnings.extend(resolved.warnings)
-        prompt, negative, notes = await self._write_prompt(batch, resolved.text)
+        direction = await self._direction(
+            row,
+            seeds[0],
+            batch.content_mode,
+            batch.direction_settings,
+            batch.directions,
+            warnings,
+        )
+        prompt, negative, notes = await self._write_prompt(
+            batch, resolved.text, direction.text if direction else None
+        )
         warnings.extend(notes)
         return _Step(
             index=index,
@@ -826,6 +921,8 @@ class T2iRunner:
             warnings=warnings,
             width=width,
             height=height,
+            direction=direction.text if direction else None,
+            direction_parts=list(direction.parts) if direction else [],
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -840,6 +937,8 @@ class T2iRunner:
                 "prompt": step.prompt,
                 "negative": step.negative,
                 "warnings": list(step.warnings),
+                "direction": step.direction,
+                "direction_parts": list(step.direction_parts),
             }
         )
         self._show_step(batch)

@@ -1784,6 +1784,8 @@ class TestManualBatchRun(BatchCase):
                     "prompt": "A red kite over a gray sea.",
                     "negative": "blurry",
                     "warnings": [],
+                    "direction": None,
+                    "direction_parts": [],
                 }
             ],
         )
@@ -2302,6 +2304,8 @@ class TestRandomBatchRun(BatchCase):
             [
                 "aspect_ratio",
                 "caption",
+                "direction",
+                "direction_parts",
                 "negative",
                 "prompt",
                 "seed",
