@@ -2,10 +2,13 @@
 
 Usage:
     python -m scripts.caption_classifier.summarize [--out DIR] [--results PATH]
-        [--output PATH]
+        [--output PATH] [--csv PATH]
 
 Without --results the newest results-*.jsonl in --out is used; the CSV is
-written next to it unless --output says otherwise.
+written next to it unless --output says otherwise. The first column,
+``prompt``, is a short excerpt of each caption read from --csv (read-only)
+so rows can be matched to captions by eye; it is blank for a row the CSV
+no longer has.
 """
 
 from __future__ import annotations
@@ -15,13 +18,16 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .classify import DEFAULT_OUT
+from metascan.core.t2i_captions import CaptionStore
+
+from .classify import DEFAULT_CSV, DEFAULT_OUT
 from .results import load_records, newest_results
 from .rubric import ACT_BY_LETTER, EMOTION, PARTNER
 
 COLUMNS: List[str] = [
+    "prompt",
     "row_id",
     "caption_sha1",
     "status",
@@ -55,9 +61,18 @@ def _p(value: float) -> str:
     return f"{value:.4g}"
 
 
-def summarize_record(rec: Dict[str, Any]) -> Dict[str, str]:
+def prompt_excerpt(caption: str, edge: int = 10) -> str:
+    """The first and last ``edge`` characters of a caption, on one line."""
+    text = " ".join(caption.split())
+    if not text:
+        return ""
+    return f"{text[:edge]}...{text[-edge:]}"
+
+
+def summarize_record(rec: Dict[str, Any], caption: str = "") -> Dict[str, str]:
     row = {col: "" for col in COLUMNS}
     row.update(
+        prompt=prompt_excerpt(caption),
         row_id=str(rec["row_id"]),
         caption_sha1=str(rec["caption_sha1"]),
         status=str(rec["status"]),
@@ -91,13 +106,15 @@ def summarize_record(rec: Dict[str, Any]) -> Dict[str, str]:
     return row
 
 
-def write_csv(records: Dict[int, Dict[str, Any]], output: Path) -> int:
+def write_csv(
+    records: Dict[int, Dict[str, Any]], output: Path, captions: Mapping[int, str]
+) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
         for row_id in sorted(records):
-            writer.writerow(summarize_record(records[row_id]))
+            writer.writerow(summarize_record(records[row_id], captions.get(row_id, "")))
     return len(records)
 
 
@@ -108,6 +125,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--results", type=Path)
     ap.add_argument("--output", type=Path)
+    ap.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     args = ap.parse_args(argv)
     try:
         results = args.results or newest_results(args.out)
@@ -115,7 +133,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(exc, file=sys.stderr)
         return 2
     output = args.output or results.parent / "classifications.csv"
-    count = write_csv(load_records(results), output)
+    records = load_records(results)
+    store = CaptionStore(args.csv)
+    if not store.available():
+        print(f"cannot read captions from {args.csv}: {store.error()}", file=sys.stderr)
+        return 2
+    total = store.total()
+    captions = {
+        row_id: store.get(row_id).caption for row_id in records if row_id < total
+    }
+    count = write_csv(records, output, captions)
     print(f"{count} rows from {results.name} → {output}")
     return 0
 
