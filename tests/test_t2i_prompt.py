@@ -400,3 +400,39 @@ class StripParenthesesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectionTests(unittest.TestCase):
+    def test_no_direction_leaves_both_prompts_unchanged(self) -> None:
+        profile = MODEL_PROFILES["krea2"]
+        plain = compose_t2i_prompts(profile, "A woman reads.", "uncensored")
+        for blank in (None, "", "   "):
+            self.assertEqual(
+                compose_t2i_prompts(profile, "A woman reads.", "uncensored", blank),
+                plain,
+            )
+        self.assertEqual(
+            plain[1], "DESCRIPTION:\nA woman reads.\n\nWrite the prompt now."
+        )
+
+    def test_a_direction_is_its_own_block_after_the_description(self) -> None:
+        profile = MODEL_PROFILES["krea2"]
+        system, user = compose_t2i_prompts(
+            profile, "A woman reads.", "uncensored", "Give her a soft smile."
+        )
+        self.assertEqual(
+            user,
+            "DESCRIPTION:\nA woman reads.\n\nDIRECTION:\nGive her a soft smile."
+            "\n\nWrite the prompt now.",
+        )
+        self.assertIn("DIRECTION", system)  # the preamble explains the block
+
+    def test_the_fallback_appends_the_direction(self) -> None:
+        sd = MODEL_PROFILES["sd"]
+        plain, _ = fallback_prompt(sd, "A woman reads.")
+        with_direction, _ = fallback_prompt(sd, "A woman reads.", "She smiles.")
+        self.assertEqual(with_direction, plain + " She smiles.")
+        self.assertEqual(
+            fallback_prompt(sd, "A woman reads.", "  "),
+            fallback_prompt(sd, "A woman reads."),
+        )

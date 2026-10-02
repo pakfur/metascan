@@ -596,6 +596,7 @@ T2I_CAPTION_PREAMBLE: |-
   - Do not add, remove or change any person, object or identity, and do not invent names or a backstory. Where the guideline asks for something the DESCRIPTION leaves open, such as lighting, lens or texture, add a plausible detail that fits the scene and contradicts nothing in it.
   - Output exactly the format the guideline specifies, and nothing else.
   - Never use parentheses anywhere in your output. If the guideline offers weights or emphasis marks, leave them out.
+  - If a DIRECTION block follows the description, carry it out: work each instruction into the prompt naturally, in the guideline's style. A direction adds detail but never overrides the description; where they disagree, the description wins.
 
 T2I_FALLBACK_PREFIX_SD: |-
   masterpiece, best quality, highly detailed, sharp focus

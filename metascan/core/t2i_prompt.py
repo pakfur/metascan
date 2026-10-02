@@ -45,16 +45,24 @@ _FALLBACK_NEGATIVE_KEYS: Dict[str, str] = {
 }
 
 _USER_TEMPLATE = "DESCRIPTION:\n{description}\n\nWrite the prompt now."
+_USER_TEMPLATE_DIRECTED = (
+    "DESCRIPTION:\n{description}\n\nDIRECTION:\n{direction}\n\nWrite the prompt now."
+)
 
 
 def compose_t2i_prompts(
-    profile: T2iModelProfile, resolved_caption: str, content_mode: str
+    profile: T2iModelProfile,
+    resolved_caption: str,
+    content_mode: str,
+    direction: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Return ``(system_prompt, user_prompt)`` for ``VlmClient.generate_text``.
 
     ``content_mode`` is one of :data:`CONTENT_MODES`: ``uncensored`` and
     ``sfw`` append the matching existing directive to the system prompt,
     ``default`` adds nothing. The caption goes into the user turn verbatim.
+    A non-blank ``direction`` (caption directions, ``t2i_directions``) adds a
+    DIRECTION block after it; without one the user turn is unchanged.
     """
     if content_mode not in CONTENT_MODES:
         raise ValueError(
@@ -67,6 +75,10 @@ def compose_t2i_prompts(
     directive_key = _DIRECTIVE_KEYS.get(content_mode)
     if directive_key is not None:
         system += store.get(directive_key)
+    if direction is not None and direction.strip():
+        return system, _USER_TEMPLATE_DIRECTED.format(
+            description=resolved_caption, direction=direction.strip()
+        )
     return system, _USER_TEMPLATE.format(description=resolved_caption)
 
 
@@ -96,16 +108,22 @@ def parse_t2i_output(profile: T2iModelProfile, raw: str) -> Tuple[str, Optional[
 
 
 def fallback_prompt(
-    profile: T2iModelProfile, resolved_caption: str
+    profile: T2iModelProfile,
+    resolved_caption: str,
+    direction: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """``(prompt, negative)`` to use when no VLM prompt is available.
 
     The prompt is the resolved caption (whitespace-trimmed, parentheses
     removed), with the stock quality prefix in front for SDXL. Models that
     take a negative prompt get their stock negative; the others get ``None``.
+    A non-blank ``direction`` is appended to the caption.
     """
     store = get_prompt_store()
-    prompt = strip_parentheses(resolved_caption.strip())
+    text = resolved_caption.strip()
+    if direction is not None and direction.strip():
+        text = f"{text} {direction.strip()}" if text else direction.strip()
+    prompt = strip_parentheses(text)
     prefix_key = _FALLBACK_PREFIX_KEYS.get(profile.id)
     if prefix_key is not None:
         prefix = store.get(prefix_key).strip()
