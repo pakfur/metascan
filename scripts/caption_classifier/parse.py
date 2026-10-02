@@ -12,10 +12,19 @@ only that ASCII prefix has to line up with the token stream.
 from __future__ import annotations
 
 import bisect
+import json
 import math
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .rubric import ACT_BY_LETTER, EMOTION, KISS, PARTNER
+from .rubric import (
+    ACT_BY_LETTER,
+    EMOTION,
+    ISSUE_TYPES,
+    KISS,
+    PARTNER,
+    UNCLEAR,
+    allowed_acts,
+)
 
 
 class ParseError(ValueError):
@@ -81,3 +90,77 @@ def field_distributions(
         prefix = content[starts[index] : offset]
         out[field] = letter_distribution(usable[index], prefix, letters)
     return out
+
+
+_QUOTE_EDGES = " .,;:!?\"'“”‘’"
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def verify_quote(quote: str, caption: str) -> bool:
+    """True when ``quote`` appears in ``caption``, ignoring case, spacing and edge punctuation."""
+    needle = _norm(quote).strip(_QUOTE_EDGES)
+    return bool(needle) and needle in _norm(caption)
+
+
+def _argmax(dist: Mapping[str, float]) -> str:
+    return max(dist, key=lambda k: dist[k])
+
+
+def build_record(
+    *,
+    caption: str,
+    males: Optional[int],
+    females: Optional[int],
+    content: str,
+    tokens: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Classification fields for one answer: distributions, gated act, issues."""
+    dists = field_distributions(content, tokens)
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ParseError(f"answer is not JSON: {exc}") from exc
+
+    partner = _argmax(dists["partner"])
+    allowed = allowed_acts(males, females, partner)
+    act_raw = dists["act"]
+    kept = {k: (p if k in allowed else 0.0) for k, p in act_raw.items()}
+    total = sum(kept.values())
+    raw_top = _argmax(act_raw)
+    if total > 0:
+        act_gated = {k: round(p / total, 4) for k, p in kept.items()}
+        conflict = raw_top not in allowed and act_raw[raw_top] >= 0.5
+    else:
+        act_gated = {k: (1.0 if k == UNCLEAR else 0.0) for k in act_raw}
+        conflict = True
+
+    issues: List[Dict[str, Any]] = []
+    for item in parsed.get("issues") or []:
+        kind = str(item.get("type", ""))
+        if kind not in ISSUE_TYPES:
+            raise ParseError(f"unknown issue type {kind!r}")
+        quote_a = str(item.get("quote_a", ""))
+        quote_b = str(item.get("quote_b", ""))
+        issues.append(
+            {
+                "type": kind,
+                "quote_a": quote_a,
+                "quote_b": quote_b,
+                "quote_verified": verify_quote(quote_a, caption)
+                and verify_quote(quote_b, caption),
+            }
+        )
+
+    return {
+        "partner": dists["partner"],
+        "kiss": dists["kiss"],
+        "emotion": dists["emotion"],
+        "act_raw": act_raw,
+        "act_gated": act_gated,
+        "act_gate_conflict": conflict,
+        "issues": issues,
+        "raw_output": content,
+    }
