@@ -18,6 +18,7 @@ data/*
 # (tens of MB, user-supplied) is not.
 !data/t2i_captions/
 data/t2i_captions/*.csv
+data/t2i_captions/classifier/
 
 .claude/*
 !.claude/rules/
