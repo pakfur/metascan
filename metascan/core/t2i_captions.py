@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import hashlib
 import io
 import logging
 import math
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import (
     Any,
     BinaryIO,
+    Callable,
     Dict,
     Iterator,
     List,
@@ -93,6 +95,21 @@ class _CaptionFileError(Exception):
 
 
 @dataclass(frozen=True)
+class Classification:
+    """A row's caption-classifier result (merged in by
+    ``scripts/caption_classifier/merge.py``); drives t2i directions."""
+
+    emotion: str
+    emotion_explicit: float
+    kiss: float
+    partner: str
+    act: str
+    act_p: float
+    act_conflict: bool
+    issues: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CaptionRow:
     id: int
     caption: str
@@ -104,6 +121,7 @@ class CaptionRow:
     males: Optional[int]
     females: Optional[int]
     clothing: Tuple[str, ...]
+    classification: Optional[Classification] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -174,6 +192,15 @@ def _as_array(values: "array[Any]", dtype: "type[_T]") -> "npt.NDArray[_T]":
     return np.frombuffer(values, dtype=dtype).copy()
 
 
+def _caption_key(caption: str) -> bytes:
+    """Hash-map key for ``CaptionStore.find``: SHA-1 prefix of the exact text."""
+    return hashlib.sha1(caption.encode("utf-8", "surrogatepass")).digest()[:8]
+
+
+def _sha1_hex(caption: str) -> str:
+    return hashlib.sha1(caption.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 # --- The index --------------------------------------------------------------
 
 
@@ -191,6 +218,7 @@ class _Index:
     scores: Dict[str, "npt.NDArray[np.float32]"]  # NaN = blank or unusable
     counts: Dict[str, "npt.NDArray[np.uint8]"]  # 255 = blank or unusable
     clothing: Optional[Dict[str, "npt.NDArray[np.intc]"]]  # item -> row ids
+    by_hash: Dict[bytes, int]  # _caption_key(caption) -> first row id
 
     @property
     def total(self) -> int:
@@ -224,6 +252,7 @@ class _Accumulator:
         }
         self.clothing_rows: Dict[str, "array[int]"] = {}
         self._clothing_cache: Dict[str, Tuple[str, ...]] = {}
+        self.by_hash: Dict[bytes, int] = {}
         self.total = 0
 
     def add(self, row: List[str], start: int, end: int) -> None:
@@ -231,6 +260,7 @@ class _Accumulator:
             return  # nothing to render from a blank caption
         row_id = self.total
         self.total += 1
+        self.by_hash.setdefault(_caption_key(_cell(row, self.caption_at)), row_id)
         self.starts.append(start)
         self.ends.append(end)
         self.aspect_codes.append(
@@ -311,6 +341,7 @@ class _Accumulator:
                 if self.clothing_at is not None
                 else None
             ),
+            by_hash=self.by_hash,
         )
 
 
@@ -374,6 +405,36 @@ def _build_index(path: Path, signature: Tuple[int, int]) -> _Index:
 # --- Reading one record -----------------------------------------------------
 
 
+def _classification(
+    cell: Callable[[str], str], caption: str
+) -> Optional[Classification]:
+    """The row's classification, or None when the cells are blank, unusable,
+    or were computed for a different caption text."""
+    act = cell("act").strip()
+    if not act:
+        return None
+    digest = cell("caption sha1").strip().lower()
+    if digest and digest != _sha1_hex(caption):
+        return None
+    numbers = [
+        _parse_score(cell(name)) for name in ("emotion explicit", "kiss", "act p")
+    ]
+    if any(math.isnan(n) for n in numbers):
+        return None
+    emotion_explicit, kiss, act_p = numbers
+    issues = tuple(t for t in (p.strip() for p in cell("issues").split(";")) if t)
+    return Classification(
+        emotion=cell("emotion").strip().lower(),
+        emotion_explicit=emotion_explicit,
+        kiss=kiss,
+        partner=cell("partner").strip().lower() or "none",
+        act=act,
+        act_p=act_p,
+        act_conflict=cell("act conflict").strip().lower() == "true",
+        issues=issues,
+    )
+
+
 def _read_row(index: _Index, row_id: int) -> CaptionRow:
     start = int(index.starts[row_id])
     end = int(index.ends[row_id])
@@ -401,9 +462,10 @@ def _read_row(index: _Index, row_id: int) -> CaptionRow:
         value = _parse_count(cell(_COUNT_COLUMNS[key][0]))
         return None if value == _MISSING_COUNT else value
 
+    caption = cell("caption")
     return CaptionRow(
         id=row_id,
-        caption=cell("caption"),
+        caption=caption,
         aspect_ratio=cell("aspect ratio").strip(),
         nudity=(cell("nudity").strip().lower() or None),
         artistic_quality=score("artistic_quality"),
@@ -412,6 +474,7 @@ def _read_row(index: _Index, row_id: int) -> CaptionRow:
         males=count("males"),
         females=count("females"),
         clothing=_parse_clothing(cell("clothing")),
+        classification=_classification(cell, caption),
     )
 
 
@@ -733,6 +796,20 @@ class CaptionStore:
         if index is None or not 0 <= row_id < index.total:
             raise KeyError(row_id)
         return _read_row(index, int(row_id))
+
+    def find(self, caption: str) -> Optional[CaptionRow]:
+        """The first row whose caption is exactly ``caption``, or None."""
+        index = self._current()
+        if index is None:
+            return None
+        row_id = index.by_hash.get(_caption_key(caption))
+        if row_id is None:
+            return None
+        try:
+            row = _read_row(index, row_id)
+        except KeyError:
+            return None
+        return row if row.caption == caption else None
 
     def picker(
         self, flt: Optional[Mapping[str, Any]], rng: random.Random
