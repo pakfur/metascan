@@ -213,6 +213,38 @@ watch(
 const generating = ref(false)
 const rolling = ref(false)
 const promptWarnings = ref<string[]>([])
+
+// Caption directions: remembered per browser, not per image (nothing about
+// them is stored with an image). Defaults to the config's switch.
+const DIRECTIONS_KEY = 'metascan.t2i.directions.v1'
+function readDirectionsPref(): boolean | null {
+  try {
+    const v = localStorage.getItem(DIRECTIONS_KEY)
+    return v === null ? null : v === '1'
+  } catch {
+    return null
+  }
+}
+const directionsPref = ref<boolean | null>(readDirectionsPref())
+const useDirections = computed(() => directionsPref.value ?? store.config?.directions?.enabled ?? true)
+function setDirections(on: boolean) {
+  directionsPref.value = on
+  try {
+    localStorage.setItem(DIRECTIONS_KEY, on ? '1' : '0')
+  } catch {
+    /* private mode: the choice lasts for this session */
+  }
+}
+// The direction the prompt in the box was written with (Generate Prompt), or
+// the running step's while a Random batch has the boxes. Display only.
+const promptDirection = ref<{ text: string; parts: string[] } | null>(null)
+const shownDirection = computed(() => {
+  if (liveBoxes.value) {
+    const s = step.value
+    return s?.direction ? { text: s.direction, parts: s.direction_parts } : null
+  }
+  return promptDirection.value
+})
 const negativeOpen = ref(false)
 
 // The Resolved caption: the caption with its __TOKEN__s filled in for the
@@ -252,7 +284,7 @@ function toggleResolved() {
 // failed (or timed out): the caption is fine and a retry usually works.
 async function onGeneratePrompt() {
   if (!form.caption.trim() || !form.model || generating.value) return
-  const body = { caption: form.caption, seed: form.seed, model: form.model }
+  const body = { caption: form.caption, seed: form.seed, model: form.model, directions: useDirections.value }
   const target = store.selectedId
   generating.value = true
   try {
@@ -266,6 +298,7 @@ async function onGeneratePrompt() {
     form.prompt = r.prompt // a Random Generate renders it as its first batch
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
     promptWarnings.value = r.warnings
+    promptDirection.value = r.direction ? { text: r.direction, parts: r.direction_parts } : null
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
     resolvedOpen.value = true
   } catch (e) {
@@ -296,6 +329,7 @@ async function onRoll() {
     form.prompt = ''
     form.negative = ''
     promptWarnings.value = []
+    promptDirection.value = null
     if (store.config?.aspect_ratios.includes(row.aspect_ratio)) form.aspect = row.aspect_ratio
   } catch (e) {
     toast.show(
@@ -435,6 +469,7 @@ async function onGenerate() {
     maxBatchSize: maxBatchSize.value,
     maxCount: maxCount.value,
   })
+  req.directions = useDirections.value
   const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
   if (
     signature !== null &&
@@ -462,6 +497,7 @@ async function onGenerate() {
     if (signature !== null) lastSubmitted = signature
     batchWarnings.value = r.warnings
     promptWarnings.value = []
+    promptDirection.value = null
     // The seed box then holds the next unused seed, for both modes (unless the
     // user already changed it). A Random run shows the seed of the image being
     // rendered meanwhile (shownSeed), and this value is what is there when the
@@ -745,7 +781,18 @@ onBeforeUnmount(() => {
             </section>
 
             <section class="sec">
-              <label class="sec-title" for="t2i-prompt">Prompt</label>
+              <div class="sec-head">
+                <label class="sec-title" for="t2i-prompt">Prompt</label>
+                <label class="check" title="Use the caption's classification to add a direction when the prompt is written">
+                  <input
+                    type="checkbox"
+                    :checked="useDirections"
+                    :disabled="randomLocked"
+                    @change="setDirections(($event.target as HTMLInputElement).checked)"
+                  />
+                  Caption directions
+                </label>
+              </div>
               <textarea
                 id="t2i-prompt"
                 class="area"
@@ -759,6 +806,9 @@ onBeforeUnmount(() => {
               <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
                 <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
               </ul>
+              <p v-if="shownDirection" class="direction" :title="shownDirection.text">
+                Direction · {{ shownDirection.parts.join(' · ') }}: {{ shownDirection.text }}
+              </p>
               <template v-if="hasNegative">
                 <div>
                   <button
@@ -1379,6 +1429,20 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--text-color-secondary);
   font-size: 12px;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.direction {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.8;
 }
 
 .lint {

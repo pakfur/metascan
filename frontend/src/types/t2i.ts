@@ -19,6 +19,16 @@ export interface T2iModelInfo {
   identity: IdentityStyle
 }
 
+/** GET /api/t2i/config `directions`: when caption directions apply (config.json t2i.directions). */
+export interface T2iDirectionsConfig {
+  enabled: boolean
+  emotion_missing_min: number
+  emotion_sensual_from: number
+  kiss_min: number
+  act_min: number
+  skip_act_on_conflict: boolean
+}
+
 /** GET /api/t2i/config: the sanitised `t2i` config section plus server-derived facts. */
 export interface T2iConfig {
   output_root: string
@@ -32,6 +42,7 @@ export interface T2iConfig {
   window: number
   max_batch_size: number
   max_count_per_batch: number
+  directions: T2iDirectionsConfig
   models: T2iModelInfo[]
   aspect_ratios: string[]
   seed_policies: SeedPolicy[]
@@ -244,6 +255,9 @@ export interface T2iPromptResult {
   negative: string | null
   resolved_caption: string
   warnings: string[]
+  /** The caption direction the prompt was written with, if any. */
+  direction: string | null
+  direction_parts: string[]
 }
 
 /** POST /api/t2i/captions/resolve. */
@@ -274,6 +288,8 @@ export interface T2iBatchRequest {
   negative?: string | null
   aspect_ratio?: string | null
   filter?: CaptionFilter | null
+  /** Caption directions; omitted or null means the config's default. */
+  directions?: boolean | null
 }
 
 /** POST /api/t2i/batches response. */
@@ -298,6 +314,8 @@ export interface T2iBatchStep {
   prompt: string
   negative: string | null
   warnings: string[]
+  direction: string | null
+  direction_parts: string[]
 }
 
 /** One entry of GET /api/t2i/batches. */

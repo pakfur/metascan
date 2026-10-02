@@ -260,6 +260,7 @@ export const useT2iStore = defineStore('t2i', () => {
     caption: string
     seed: number
     model: string
+    directions?: boolean
   }): Promise<T2iPromptResult> {
     return t2iApi.generateT2iPrompt(body)
   }
@@ -548,6 +549,8 @@ export const useT2iStore = defineStore('t2i', () => {
       prompt: asStr(d.prompt),
       negative: d.negative == null ? null : asStr(d.negative),
       warnings: Array.isArray(d.warnings) ? d.warnings.map(String) : [],
+      direction: d.direction == null ? null : asStr(d.direction),
+      direction_parts: Array.isArray(d.direction_parts) ? d.direction_parts.map(String) : [],
     }
     batch.step = step
     batch.total_steps = step.total_steps
