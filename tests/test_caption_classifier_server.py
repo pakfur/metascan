@@ -77,3 +77,23 @@ def test_build_command_rejects_unknown_model_and_missing_files(tmp_path, monkeyp
         build_command("no-such-model", 1, 1, 1)
     with pytest.raises(ServerError, match="missing"):
         build_command("qwen3vl-30b-a3b", 1, 1, 1)
+
+
+async def test_overlong_stderr_line_does_not_stop_the_drain():
+    from tests._fake_caption_llama import FAKE_SCRIPT
+
+    def command(port):
+        code = (
+            "import runpy, sys; sys.stderr.write('x' * 200000 + '\\n'); "
+            "sys.stderr.flush(); "
+            f"sys.argv = [{str(FAKE_SCRIPT)!r}, '--port', '{port}']; "
+            f"runpy.run_path({str(FAKE_SCRIPT)!r}, run_name='__main__')"
+        )
+        return [sys.executable, "-c", code]
+
+    srv = LlamaServer(command, health_timeout=20)
+    await srv.start()
+    try:
+        assert srv._drain is not None and not srv._drain.done()
+    finally:
+        await srv.stop()
