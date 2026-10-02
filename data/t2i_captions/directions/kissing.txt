@@ -1,0 +1,3 @@
+# Used when the caption's Kiss score passes kiss_min.
+they are kissing deeply, eyes closed
+their lips meet in a slow, intimate kiss

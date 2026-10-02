@@ -34,7 +34,15 @@ venv/bin/python -m scripts.caption_classifier.classify --parallel 16
 
 # 4. Write classifications.csv
 venv/bin/python -m scripts.caption_classifier.summarize
+
+# 5. Add the classification columns to the captions CSV (for t2i directions)
+venv/bin/python -m scripts.caption_classifier.merge            # writes t2i_captions.merged.csv
+venv/bin/python -m scripts.caption_classifier.merge --replace  # swaps it in, keeps t2i_captions.csv.bak-<time>
 ```
+
+Step 5 fills a row only when its caption is unchanged since classification;
+other rows get blank cells and no direction. Running it again replaces the
+columns.
 
 Rows already classified are skipped, so the rows from step 1 aren't redone
 in step 3, and an interrupted run continues where it stopped when you rerun

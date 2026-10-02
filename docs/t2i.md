@@ -123,6 +123,44 @@ Each model's guideline is an entry in `data/meta_prompt.yml`, edited live: `META
 
 If no VLM is installed (its weights or `llama-server` are missing), or it fails inside a batch, the prompt falls back to the resolved caption (SDXL and Qwen-Image also get a stock negative, SDXL a quality prefix) and the step carries a warning.
 
+## Caption directions
+
+Captions that never name an emotion, or only imply a sexual act, can get a
+**direction**: one or two sentences handed to the prompt writer next to the
+caption, which it works into the prompt. Directions come from the caption
+classifier (`scripts/caption_classifier/`, see its README): after a full run,
+`merge.py` adds classification columns to the captions CSV.
+
+- **Turning it on and off.** The *Caption directions* checkbox next to the
+  Prompt title. The choice is remembered in this browser; its default is
+  `t2i.directions.enabled`.
+- **Seeing what was used.** A *Direction* line under the Prompt box shows
+  the parts used (for example `act:doggy · emotion`) and the text sent.
+- **Which captions get one.** Only captions found in the CSV with
+  classification columns, typed exactly as they are there.
+- **Thresholds.** These live under `t2i.directions` in `config.json`:
+
+  | Key | Default | Meaning |
+  |---|---|---|
+  | `enabled` | `true` | Default for the checkbox |
+  | `emotion_missing_min` | `0.70` | Emotion snippet when the chance of *no explicit emotion* is at least this |
+  | `emotion_sensual_from` | `0.60` | Use `emotion.sensual.txt` when the caption's Erotic Score is at least this |
+  | `kiss_min` | `0.80` | Kissing snippet threshold |
+  | `act_min` | `0.80` | Act snippet threshold |
+  | `skip_act_on_conflict` | `true` | No act snippet when the act contradicts the caption's people counts |
+
+- **Snippet lists.** These live in `data/t2i_captions/directions/`, one
+  instruction per line, and the seed picks a line:
+  - `emotion.txt` and `emotion.sensual.txt`
+  - `kissing.txt`
+  - `act.<act>.txt` for each act
+  - optional `act.<act>.pov.txt`, used when the partner is out of frame
+
+  The same adult-only screen as the other lists applies. A list that is
+  empty when its threshold passes adds a warning to the step.
+- **SFW mode.** In the *Keep SFW* content mode, act and kissing directions
+  are never used.
+
 ## Workflows
 
 Register workflows in **Configuration → Text to Image**. A `t2i` workflow is a ComfyUI API-format graph whose nodes are titled with the `MS_*` convention:
