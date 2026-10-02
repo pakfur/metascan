@@ -34,6 +34,7 @@ def _ok(row_id):
 
 def test_columns_are_in_the_documented_order():
     assert summarize.COLUMNS == [
+        "prompt",
         "row_id",
         "caption_sha1",
         "status",
@@ -86,9 +87,10 @@ def test_error_record_is_kept_and_marked(tmp_path):
         0: _ok(0),
     }
     out = tmp_path / "classifications.csv"
-    assert summarize.write_csv(records, out) == 2
+    assert summarize.write_csv(records, out, {}) == 2
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     assert [r["row_id"] for r in rows] == ["0", "1"]
+    assert rows[0]["prompt"] == ""
     assert rows[1]["status"] == "error" and rows[1]["error"] == "HTTP 400"
     assert rows[1]["act_1"] == ""
 
@@ -97,5 +99,27 @@ def test_main_reads_the_newest_results_file(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     (out_dir / "results-aaaaaaaaaaaa.jsonl").write_text(json.dumps(_ok(0)) + "\n")
-    assert summarize.main(["--out", str(out_dir)]) == 0
-    assert (out_dir / "classifications.csv").exists()
+    captions = tmp_path / "c.csv"
+    with captions.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["Caption", "Aspect Ratio"])
+        w.writerow(["__ALICE__ stands by the window in the morning light.", "1:1"])
+    argv = ["--out", str(out_dir), "--csv", str(captions)]
+    assert summarize.main(argv) == 0
+    rows = list(
+        csv.DictReader((out_dir / "classifications.csv").open(encoding="utf-8"))
+    )
+    assert rows[0]["prompt"] == "__ALICE__ ...ing light."
+    assert list(rows[0])[0] == "prompt"
+
+
+def test_prompt_excerpt_is_first_ten_dots_last_ten():
+    assert (
+        summarize.prompt_excerpt("abcdefghijKLMNOPqrstuvwxyz")
+        == "abcdefghij...qrstuvwxyz"
+    )
+    assert (
+        summarize.prompt_excerpt("two\nlines and a\r\nbreak here ok")
+        == "two lines ...ak here ok"
+    )
+    assert summarize.prompt_excerpt("") == ""
