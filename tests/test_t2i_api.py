@@ -331,6 +331,7 @@ class TestConfig(T2iApiCase):
                     "seed_max",
                     "csv",
                     "wildcards",
+                    "directions",
                 ]
             ),
         )
@@ -599,9 +600,23 @@ class TestPrompt(T2iApiCase):
                 "negative": "blurry",
                 "resolved_caption": "Resolved caption.",
                 "warnings": ["a warning"],
+                "direction": None,
+                "direction_parts": [],
             },
         )
-        self.assertEqual(self.runner.calls, [("generate_prompt", self.BODY)])
+        self.assertEqual(
+            self.runner.calls, [("generate_prompt", {**self.BODY, "directions": None})]
+        )
+
+    def test_the_directions_flag_reaches_the_runner(self) -> None:
+        resp = self.client.post(
+            "/api/t2i/prompt", json={**self.BODY, "directions": False}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            self.runner.calls,
+            [("generate_prompt", {**self.BODY, "directions": False})],
+        )
 
     def test_error_mapping(self) -> None:
         cases: List[Tuple[BaseException, int]] = [

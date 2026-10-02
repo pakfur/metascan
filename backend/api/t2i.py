@@ -123,6 +123,8 @@ class CaptionRequest(BaseModel):
     caption: str
     seed: int
     model: str
+    # Caption directions for /prompt; None means the config's default.
+    directions: Optional[bool] = None
 
 
 class BatchBody(BaseModel):
@@ -142,6 +144,8 @@ class BatchBody(BaseModel):
     aspect_ratio: Optional[str] = None
     # Random field
     filter: Optional[Dict[str, Any]] = None
+    # Caption directions; None means the config's default.
+    directions: Optional[bool] = None
 
 
 def _list_slots(library: Library) -> List[str]:
@@ -261,7 +265,10 @@ async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
     runner = _require_runner()
     try:
         result = await runner.generate_prompt(
-            caption=body.caption, seed=body.seed, model=body.model
+            caption=body.caption,
+            seed=body.seed,
+            model=body.model,
+            directions=body.directions,
         )
     except Exception as exc:
         mapped = _http_error(exc)
@@ -273,6 +280,8 @@ async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
         "negative": result.negative,
         "resolved_caption": result.resolved_caption,
         "warnings": result.warnings,
+        "direction": result.direction,
+        "direction_parts": result.direction_parts,
     }
 
 
@@ -294,6 +303,7 @@ async def start_batch(body: BatchBody) -> Dict[str, Any]:
         negative=body.negative,
         aspect_ratio=body.aspect_ratio,
         filter=body.filter,
+        directions=body.directions,
     )
     try:
         started = await runner.start_batch(request)

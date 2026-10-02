@@ -52,6 +52,7 @@ from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.i2v_runner import I2vRunner
 from metascan.core.t2i_captions import CaptionStore
 from metascan.core.t2i_runner import T2iRunner
+from metascan.core.t2i_directions import DIRECTIONS_DIRNAME, SnippetCache
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.vlm_select import vlm_model_installed
 from metascan.core.scanner import Scanner
@@ -250,6 +251,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         vlm_installed=vlm_model_installed,
         captions=CaptionStore(t2i_dir / "t2i_captions.csv"),
         library=LibraryCache(t2i_dir),
+        directions=SnippetCache(t2i_dir / DIRECTIONS_DIRNAME),
         output_root=Path(comfy_cfg["output_root"]),
         get_config=lambda: get_t2i_config(load_app_config()),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
