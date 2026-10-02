@@ -1,10 +1,12 @@
 """Server configuration for the metascan backend."""
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
+from metascan.core.t2i_directions import DirectionSettings
 from metascan.utils.app_paths import get_config_path
 
 
@@ -240,6 +242,14 @@ def get_t2i_config(config: dict) -> dict:
             "window": 4,                 # unfinished jobs per batch
             "max_batch_size": 500,
             "max_count_per_batch": 32,
+            "directions": {              # caption directions (t2i_directions)
+                "enabled": True,
+                "emotion_missing_min": 0.70,
+                "emotion_sensual_from": 0.60,
+                "kiss_min": 0.80,
+                "act_min": 0.80,
+                "skip_act_on_conflict": True,
+            },
         }
 
     ``output_root`` + ``output_prefix`` place generated images the way the
@@ -332,6 +342,21 @@ def get_t2i_config(config: dict) -> dict:
         if raw_identity.get(model_id) in IDENTITY_STYLES
     }
 
+    raw_directions = raw.get("directions")
+    if not isinstance(raw_directions, dict):
+        raw_directions = {}
+    base = DirectionSettings()
+    directions: Dict[str, Any] = {}
+    for name in ("enabled", "skip_act_on_conflict"):
+        flag = raw_directions.get(name)
+        directions[name] = flag if isinstance(flag, bool) else getattr(base, name)
+    for name in ("emotion_missing_min", "emotion_sensual_from", "kiss_min", "act_min"):
+        number = _number(raw_directions.get(name))
+        if number is None or not math.isfinite(number):
+            directions[name] = getattr(base, name)
+        else:
+            directions[name] = min(1.0, max(0.0, number))
+
     return {
         "output_root": output_root,
         "output_prefix": output_prefix.strip(),
@@ -344,4 +369,5 @@ def get_t2i_config(config: dict) -> dict:
         "window": _at_least_one(raw.get("window"), 4),
         "max_batch_size": _at_least_one(raw.get("max_batch_size"), 500),
         "max_count_per_batch": _at_least_one(raw.get("max_count_per_batch"), 32),
+        "directions": directions,
     }
