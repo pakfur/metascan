@@ -50,6 +50,7 @@ export function generateT2iPrompt(body: {
   caption: string
   seed: number
   model: string
+  directions?: boolean
 }): Promise<T2iPromptResult> {
   return post('/t2i/prompt', body)
 }
