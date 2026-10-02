@@ -1,0 +1,4 @@
+# One expression per line; the seed picks one. Used when a caption names no explicit emotion.
+give each person a facial expression that suits the moment, such as a soft unguarded smile
+give each person a natural, readable expression, such as calm attentiveness
+give each person an expression that fits the scene, such as quiet amusement
