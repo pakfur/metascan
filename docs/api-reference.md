@@ -142,6 +142,26 @@ Body: `{model_id: string}`. Switches the loaded VLM to a different model
 in the `vlm_models.REGISTRY`. Cancels any in-flight retag jobs first.
 Returns the new VlmClient snapshot. 400 if `model_id` isn't recognised.
 
+## Chat (`/api/chat`)
+
+Backs the Prompt Playground chat window. Separate from `/api/prompt/*`,
+which keeps serving the single-shot generate / transform / clean calls.
+
+### `POST /api/chat`
+Body: `{messages: [{role: "user"|"assistant", content}], system_prompt,
+file_path?, include_image, temperature, max_tokens}`. The last message
+must be from the user. With `include_image: true` the image at
+`file_path` is attached to the **first** user message (llama-server is
+stateless, so the full history is resent each turn and the image is
+sent once). A blank `system_prompt` is omitted.
+
+Streams NDJSON (`application/x-ndjson`), one object per line:
+`{type: "delta", text}`, `{type: "reasoning", text}` (reasoning models
+only), then `{type: "done", elapsed_ms, vlm_model_id}` or
+`{type: "error", message}` if llama-server fails mid-stream. Pre-stream
+failures are plain HTTP errors: 503 (VLM not ready), 404 (file
+missing), 422 (bad history, or a non-image file with `include_image`).
+
 ## ComfyUI driver (`/api/comfy/*`)
 
 The `ComfyClient` singleton is constructed in the FastAPI lifespan from the

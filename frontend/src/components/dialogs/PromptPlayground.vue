@@ -1,8 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { ApiError, streamUrl } from '../../api/client'
-import * as promptApi from '../../api/prompt'
-import { usePromptStore } from '../../stores/prompt'
+// Prompt Playground — a chat window with the active Qwen VLM.
+//
+// Opened from an image's context menu. Supports plain multi-turn chat and,
+// optionally, sending the image as context (attached to the first user
+// message; see backend/api/chat.py). The system prompt, temperature and
+// max tokens are editable so prompting strategies can be tried quickly;
+// system prompts can be saved as named presets.
+//
+// The old single-shot generate / transform / clean UI was replaced by this
+// window. Its backend (/api/prompt/*) is untouched and still serves the
+// T2I / I2V pipelines and the Saved Prompts metadata section.
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ApiError, streamUrl, thumbnailUrl } from '../../api/client'
+import { streamChat, type ChatMessageIn } from '../../api/chat'
+import { fetchMediaDetails } from '../../api/media'
+import { useChatStore, DEFAULT_SYSTEM_PROMPT, type ChatTurn } from '../../stores/chat'
+import { useModelsStore } from '../../stores/models'
 import { useToast } from '../../composables/useToast'
 import { copyToClipboard } from '../../utils/clipboard'
 import type { Media } from '../../types/media'
@@ -10,536 +23,430 @@ import type { Media } from '../../types/media'
 const props = defineProps<{ media: Media }>()
 const emit = defineEmits<{ close: [] }>()
 
-const promptStore = usePromptStore()
+const chatStore = useChatStore()
+const modelsStore = useModelsStore()
 const toast = useToast()
+
+const key = props.media.file_path
+chatStore.conversation(key) // ensure the slot exists before the computed reads it
+const turns = computed<ChatTurn[]>(() => chatStore.conversations[key] ?? [])
+
 const cardRef = ref<HTMLElement | null>(null)
+const scrollRef = ref<HTMLElement | null>(null)
+const inputRef = ref<HTMLTextAreaElement | null>(null)
 
-type Mode = 'generate' | 'transform' | 'clean'
-
-const mode = ref<Mode>('generate')
-const target = ref<promptApi.TargetModel>(promptStore.settings.target_model)
-const architecture = ref<promptApi.Architecture>(promptStore.settings.architecture)
-const extras = ref<promptApi.ExtraOption[]>([...promptStore.settings.extras])
-const temperature = ref(promptStore.settings.temperature)
-const maxTokens = ref(promptStore.settings.max_tokens)
-const prefix = ref(promptStore.settings.prefix)
-const suffix = ref(promptStore.settings.suffix)
-const sourcePrompt = ref(props.media.prompt ?? '')
-const showExtras = ref(true)
-
-const generated = ref('')
-const generatedNegative = ref('')
-const generating = ref(false)
-const error = ref<string | null>(null)
-const elapsedMs = ref<number | null>(null)
-const dirty = ref(false)  // generated text modified since last save / clear
-
+const draft = ref('')
+const showSettings = ref(false)
+const streaming = ref(false)
+const presetName = ref('')
 let abortCtrl: AbortController | null = null
 
-const TARGET_OPTIONS: promptApi.TargetModel[] = [...promptApi.TARGET_MODEL_ORDER]
+const embeddedPrompt = ref<string | null>(props.media.prompt ?? null)
+const embeddedNegative = ref<string | null>(props.media.negative_prompt ?? null)
 
-const hasExistingPrompt = computed(() => sourcePrompt.value.trim().length > 0)
-const transformDisabled = computed(() => !hasExistingPrompt.value)
-const cleanDisabled = computed(() => !hasExistingPrompt.value)
-
-const currentPreset = computed(() => promptApi.TARGET_PRESETS[target.value])
-const showTargetControls = computed(() => mode.value !== 'clean')
-const showExtrasControls = computed(() => mode.value !== 'clean')
-// Negative-prompt textarea is only relevant for generate-mode targets
-// whose meta-prompts ask Qwen3 for a Negative block (sd / pony /
-// chroma / qwen). Hidden for Flux.1, Flux.2, Z-Image, transform, clean.
-const showNegative = computed(
-  () => mode.value === 'generate' && currentPreset.value.hasNegative,
+const isImage = computed(() => !props.media.is_video)
+const imageUrl = computed(() =>
+  isImage.value ? streamUrl(props.media.file_path) : thumbnailUrl(props.media.file_path),
 )
-
-// Per-element policy table. Each row carries the row's read-only title,
-// the user-selected policy (Extract / Override / Auto), and an override
-// value used only when policy === 'override'. ``defaultPolicy`` controls
-// whether the row is locked (AUTO rows from the meta-prompt's structural
-// elements like Pony's score/source/rating block). ``defaultBody`` is
-// shown as placeholder/help text — it's the meta-prompt's instruction
-// for the row, useful as a hint when typing an override value.
-//
-// Reset on every target change — per spec, edits do not survive
-// switching models. Only used in generate mode; transform/clean use the
-// legacy builders.
-type ElementRow = {
-  title: string
-  defaultBody: string
-  defaultPolicy: promptApi.Policy
-  policy: promptApi.Policy
-  body: string
-}
-const elementRows = ref<ElementRow[]>([])
-const showElementTable = computed(
-  () => mode.value === 'generate' && elementRows.value.length > 0,
+const fileName = computed(
+  () => props.media.file_name ?? props.media.file_path.split(/[\\/]/).pop() ?? '',
 )
-
-function setRowPolicy(row: ElementRow, next: promptApi.Policy) {
-  if (row.defaultPolicy === 'auto') return  // locked
-  row.policy = next
-}
-
-async function loadElementsForTarget(t: promptApi.TargetModel) {
-  try {
-    const resp = await promptApi.getElements(t)
-    elementRows.value = resp.elements.map((e) => ({
-      title: e.title,
-      defaultBody: e.default_body,
-      defaultPolicy: e.default_policy,
-      policy: e.default_policy,
-      body: '',
-    }))
-  } catch {
-    // Non-fatal: the table just stays empty and the meta-prompt's
-    // built-in defaults are used. Generate still works.
-    elementRows.value = []
-  }
-}
-
-const fullImageUrl = computed(() => streamUrl(props.media.file_path))
-
-const savedPrompts = computed(() =>
-  promptStore.savedByPath[props.media.file_path] ?? [],
-)
-
-const assembledPrompt = computed(() => {
-  const body = generated.value
-  if (!body.trim()) return ''
-  return `${prefix.value}${body}${suffix.value}`
+const includeImage = computed({
+  get: () => isImage.value && chatStore.settings.include_image,
+  set: (v: boolean) => {
+    chatStore.settings.include_image = v
+  },
 })
+const firstUserId = computed(() => turns.value.find((t) => t.role === 'user')?.id ?? null)
+const lastAssistant = computed(() => {
+  const t = turns.value[turns.value.length - 1]
+  return t && t.role === 'assistant' ? t : null
+})
+const canSend = computed(
+  () => !streaming.value && draft.value.trim().length > 0 && modelsStore.isVlmReady,
+)
+const systemIsDefault = computed(
+  () => chatStore.settings.system_prompt.trim() === DEFAULT_SYSTEM_PROMPT,
+)
 
-function isExtraDisabled(_key: promptApi.ExtraOption): boolean {
-  // All targets currently support all 16 options. The hook is here so future
-  // targets can opt out by narrowing TARGET_PRESETS.supportedOptions.
-  return false
-}
+watch(
+  () => chatStore.settings,
+  () => chatStore.persistSettings(),
+  { deep: true },
+)
 
-function counterpartFor(key: promptApi.ExtraOption): promptApi.ExtraOption | null {
-  for (const [a, b] of promptApi.MUTEX_PAIRS) {
-    if (key === a) return b
-    if (key === b) return a
+onMounted(async () => {
+  inputRef.value?.focus()
+  scrollToBottom(true)
+  // The grid hands us a summary row without the prompt; fetch the detail
+  // so the embedded prompt can be inserted into the chat.
+  try {
+    const full = await fetchMediaDetails(props.media.file_path)
+    embeddedPrompt.value = full.prompt ?? null
+    embeddedNegative.value = full.negative_prompt ?? null
+  } catch {
+    /* non-fatal */
   }
-  return null
-}
-
-function isExtraChecked(key: promptApi.ExtraOption): boolean {
-  return extras.value.includes(key)
-}
-
-function toggleExtra(key: promptApi.ExtraOption) {
-  if (isExtraDisabled(key)) return
-  const idx = extras.value.indexOf(key)
-  if (idx >= 0) {
-    extras.value.splice(idx, 1)
-    return
-  }
-  // Adding — drop the mutex counterpart if it's currently checked.
-  const counter = counterpartFor(key)
-  if (counter) {
-    const cidx = extras.value.indexOf(counter)
-    if (cidx >= 0) extras.value.splice(cidx, 1)
-  }
-  extras.value.push(key)
-}
-
-onMounted(() => {
-  promptStore.loadSavedPrompts(props.media.file_path).catch(() => {/* non-fatal */})
-  // Populate the element table for the initially-selected target.
-  // Fire-and-forget; the table just stays empty if the request fails.
-  void loadElementsForTarget(target.value)
-  cardRef.value?.focus()
 })
 
 onBeforeUnmount(() => {
   if (abortCtrl) abortCtrl.abort()
 })
 
-// When target changes, refill prefix/suffix to the new preset defaults.
-// Caption-length clamping is gone — the meta-prompts embed their own
-// length guidance and the dropdown was removed.
-watch(target, (next, prev) => {
-  if (next === prev) return
-  const preset = promptApi.TARGET_PRESETS[next]
-  prefix.value = preset.prefix
-  suffix.value = preset.suffix
-  // A negative produced for the previous target won't apply to the new
-  // target's UI (different model conventions); clear it to avoid stale
-  // negatives leaking into a save.
-  if (!preset.hasNegative) {
-    generatedNegative.value = ''
-  }
-  // Per spec: edits to the element table are scoped to the current
-  // target. Switching models refreshes from defaults; any in-progress
-  // edits from the previous target are dropped.
-  void loadElementsForTarget(next)
-})
+// ---- scrolling -----------------------------------------------------------
 
-watch(
-  [mode, target, architecture, extras, temperature, maxTokens, prefix, suffix],
-  () => {
-    promptStore.settings.target_model = target.value
-    promptStore.settings.architecture = architecture.value
-    promptStore.settings.extras = [...extras.value]
-    promptStore.settings.temperature = temperature.value
-    promptStore.settings.max_tokens = maxTokens.value
-    promptStore.settings.prefix = prefix.value
-    promptStore.settings.suffix = suffix.value
-    promptStore.persistSettings()
-  },
-  { deep: true },
-)
+function nearBottom(): boolean {
+  const el = scrollRef.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
 
-async function run() {
-  if (generating.value) return
-  generating.value = true
-  error.value = null
-  elapsedMs.value = null
+function scrollToBottom(force = false) {
+  const stick = force || nearBottom()
+  void nextTick(() => {
+    const el = scrollRef.value
+    if (el && stick) el.scrollTop = el.scrollHeight
+  })
+}
+
+// ---- sending -------------------------------------------------------------
+
+function historyForRequest(): ChatMessageIn[] {
+  // Drop failed / empty assistant turns so a retry doesn't feed the model
+  // its own error placeholder.
+  return turns.value
+    .filter((t) => !t.streaming)
+    .filter((t) => t.role === 'user' || (!t.error && t.content.trim()))
+    .map((t) => ({ role: t.role, content: t.content }))
+}
+
+async function runAssistant() {
+  const conv = chatStore.conversation(key)
+  const messages = historyForRequest()
+  if (!messages.length || messages[messages.length - 1].role !== 'user') return
+
+  conv.push(chatStore.newTurn('assistant', ''))
+  const reply = conv[conv.length - 1] // reactive proxy
+  reply.streaming = true
+  streaming.value = true
   abortCtrl = new AbortController()
+  scrollToBottom(true)
+
   try {
-    let resp: promptApi.GenerateResponse
-    if (mode.value === 'generate') {
-      // Send per-row policy + override value. element_overrides[i] is
-      // null for non-override rows so the backend can ignore them
-      // cleanly. If the table didn't populate (e.g. /elements failed at
-      // mount), both arrays are empty and the backend falls back to
-      // per-row defaults.
-      const policies = elementRows.value.map((r) => r.policy)
-      const overrides = elementRows.value.map((r) =>
-        r.policy === 'override' ? r.body : null,
-      )
-      resp = await promptApi.generatePrompt(
-        {
-          file_path: props.media.file_path,
-          target_model: target.value,
-          architecture: architecture.value,
-          extras: [...extras.value],
-          element_policies: policies,
-          element_overrides: overrides,
-          temperature: temperature.value,
-          max_tokens: maxTokens.value,
-        },
-        abortCtrl.signal,
-      )
-    } else if (mode.value === 'transform') {
-      resp = await promptApi.transformPrompt(
-        {
-          source_prompt: sourcePrompt.value,
-          target_model: target.value,
-          architecture: architecture.value,
-          extras: [...extras.value],
-          file_path: props.media.file_path,
-          temperature: temperature.value,
-          max_tokens: maxTokens.value,
-        },
-        abortCtrl.signal,
-      )
-    } else {
-      resp = await promptApi.cleanPrompt(
-        {
-          source_prompt: sourcePrompt.value,
-          temperature: temperature.value,
-          max_tokens: maxTokens.value,
-        },
-        abortCtrl.signal,
-      )
-    }
-    generated.value = resp.prompt
-    // resp.negative is populated only for generate mode against negative-
-    // bearing targets; transform/clean leave it null. Clear stale values
-    // so repeat runs don't carry an old negative from a prior target.
-    generatedNegative.value = resp.negative ?? ''
-    elapsedMs.value = resp.elapsed_ms
-    dirty.value = true
+    await streamChat(
+      {
+        messages,
+        system_prompt: chatStore.settings.system_prompt,
+        file_path: props.media.file_path,
+        include_image: includeImage.value,
+        temperature: chatStore.settings.temperature,
+        max_tokens: chatStore.settings.max_tokens,
+      },
+      (ev) => {
+        switch (ev.type) {
+          case 'delta':
+            reply.content += ev.text
+            scrollToBottom()
+            break
+          case 'reasoning':
+            reply.reasoning = (reply.reasoning ?? '') + ev.text
+            scrollToBottom()
+            break
+          case 'done':
+            reply.elapsedMs = ev.elapsed_ms
+            reply.modelId = ev.vlm_model_id
+            break
+          case 'error':
+            reply.error = ev.message
+            break
+        }
+      },
+      abortCtrl.signal,
+    )
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      // user-initiated stop; not an error
-      return
+      reply.stopped = true
+    } else {
+      reply.error = e instanceof ApiError ? e.message : String(e)
     }
-    error.value = e instanceof ApiError ? e.message : String(e)
   } finally {
-    generating.value = false
+    reply.streaming = false
+    streaming.value = false
     abortCtrl = null
+    scrollToBottom()
+    void nextTick(() => inputRef.value?.focus())
   }
+}
+
+async function send() {
+  if (!canSend.value) return
+  const text = draft.value
+  draft.value = ''
+  chatStore.conversation(key).push(chatStore.newTurn('user', text))
+  await runAssistant()
 }
 
 function stop() {
   if (abortCtrl) abortCtrl.abort()
 }
 
-async function copyAssembled() {
-  if (!assembledPrompt.value) return
-  await copyToClipboard(assembledPrompt.value)
+async function regenerate() {
+  if (streaming.value || !lastAssistant.value) return
+  chatStore.conversation(key).pop()
+  await runAssistant()
+}
+
+function editTurn(turn: ChatTurn) {
+  if (streaming.value) return
+  if (draft.value.trim() && !window.confirm('Replace the text in the message box?')) return
+  const conv = chatStore.conversation(key)
+  const idx = conv.findIndex((t) => t.id === turn.id)
+  if (idx < 0) return
+  draft.value = turn.content
+  conv.splice(idx)
+  void nextTick(() => inputRef.value?.focus())
+}
+
+function newChat() {
+  if (streaming.value) stop()
+  if (turns.value.length && !window.confirm('Clear this conversation?')) return
+  chatStore.clearConversation(key)
+  inputRef.value?.focus()
+}
+
+function onComposerKey(e: KeyboardEvent) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    void send()
+  }
+}
+
+function insertIntoDraft(text: string) {
+  draft.value = draft.value.trim() ? `${draft.value.trimEnd()}\n\n${text}` : text
+  void nextTick(() => inputRef.value?.focus())
+}
+
+async function copy(text: string) {
+  if (!text) return
+  await copyToClipboard(text)
   toast.show('Copied to clipboard', 'success')
 }
 
-async function regenerate() {
-  generated.value = ''
-  generatedNegative.value = ''
-  await run()
+// ---- system prompt presets ------------------------------------------------
+
+function loadPreset(name: string) {
+  const p = chatStore.presets.find((x) => x.name === name)
+  if (p) chatStore.settings.system_prompt = p.prompt
 }
 
-async function saveCurrent() {
-  if (!assembledPrompt.value.trim()) return
-  const name = window.prompt('Name this prompt:')
-  if (!name) return
-  // Only persist a negative if (a) the target supports one and (b) the
-  // user actually has text in the box. Empty strings save as null so
-  // listeners can rely on truthiness without trimming.
-  const trimmedNegative = generatedNegative.value.trim()
-  const negativeToSave =
-    showNegative.value && trimmedNegative ? trimmedNegative : null
-  try {
-    await promptStore.savePrompt({
-      file_path: props.media.file_path,
-      name,
-      prompt: assembledPrompt.value,
-      target_model: target.value,
-      architecture: architecture.value,
-      styles: [],
-      temperature: temperature.value,
-      max_tokens: maxTokens.value,
-      source_prompt: mode.value !== 'generate' ? sourcePrompt.value : null,
-      mode: mode.value,
-      negative: negativeToSave,
-      vlm_model_id: null,
-    })
-    dirty.value = false
-    toast.show(`Saved "${name}"`, 'success')
-  } catch (e) {
-    toast.show(`Save failed: ${e instanceof Error ? e.message : String(e)}`, 'warn')
-  }
+function savePreset() {
+  const name = window.prompt('Save system prompt as:', presetName.value || '')
+  if (!name?.trim()) return
+  chatStore.savePreset(name.trim(), chatStore.settings.system_prompt)
+  presetName.value = name.trim()
+  toast.show(`Saved "${name.trim()}"`, 'success')
+}
+
+function deletePreset() {
+  if (!presetName.value) return
+  if (!window.confirm(`Delete preset "${presetName.value}"?`)) return
+  chatStore.deletePreset(presetName.value)
+  presetName.value = ''
+}
+
+function resetSystemPrompt() {
+  chatStore.settings.system_prompt = DEFAULT_SYSTEM_PROMPT
+  presetName.value = ''
 }
 
 function tryClose() {
-  if (generating.value && abortCtrl) abortCtrl.abort()
-  if (dirty.value && generated.value.trim()) {
-    if (!window.confirm('Discard unsaved generated prompt?')) return
-  }
+  if (streaming.value) stop()
   emit('close')
-}
-
-function targetLabel(t: promptApi.TargetModel): string {
-  return promptApi.TARGET_MODEL_LABELS[t]
 }
 </script>
 
 <template>
   <div class="dialog-overlay" @click.self="tryClose">
-    <div class="dialog-card playground-card" tabindex="-1" @keydown.esc.stop="tryClose" ref="cardRef">
-      <div class="dialog-header">
+    <div
+      ref="cardRef"
+      class="chat-card"
+      tabindex="-1"
+      role="dialog"
+      aria-label="Prompt Playground"
+      @keydown.esc.stop="tryClose"
+    >
+      <header class="chat-header">
         <h3>Prompt Playground</h3>
-        <button class="close-btn" @click="tryClose" title="Close" aria-label="Close">×</button>
-      </div>
-
-      <div class="playground-body">
-        <!-- Top row: image + controls -->
-        <div class="top-row">
-          <img class="preview-img" :src="fullImageUrl" :alt="media.file_name ?? ''" />
-
-          <div class="controls">
-            <div class="ctrl-row">
-              <span class="ctrl-label">Mode</span>
-              <label><input type="radio" v-model="mode" value="generate" /> Generate</label>
-              <label :class="{ disabled: transformDisabled }">
-                <input type="radio" v-model="mode" value="transform" :disabled="transformDisabled" />
-                Transform
-              </label>
-              <label :class="{ disabled: cleanDisabled }">
-                <input type="radio" v-model="mode" value="clean" :disabled="cleanDisabled" />
-                Clean
-              </label>
-            </div>
-
-            <div class="ctrl-row" v-if="showTargetControls">
-              <span class="ctrl-label">Target model</span>
-              <select v-model="target">
-                <option v-for="t in TARGET_OPTIONS" :key="t" :value="t">
-                  {{ targetLabel(t) }}
-                </option>
-              </select>
-            </div>
-
-            <div class="ctrl-row">
-              <span class="ctrl-label">Temperature</span>
-              <input type="range" min="0" max="1.5" step="0.05" v-model.number="temperature" />
-              <span class="ctrl-value">{{ temperature.toFixed(2) }}</span>
-            </div>
-
-            <div class="ctrl-row">
-              <span class="ctrl-label">Max tokens</span>
-              <input type="range" min="50" max="1000" step="10" v-model.number="maxTokens" />
-              <span class="ctrl-value">{{ maxTokens }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Extra options -->
-        <div class="section" v-if="showExtrasControls">
-          <button class="extras-toggle" type="button" @click="showExtras = !showExtras">
-            <span class="chevron">{{ showExtras ? '▼' : '▶' }}</span>
-            <span class="section-label">Extra options ({{ extras.length }})</span>
+        <span
+          class="model-chip"
+          :class="{ ready: modelsStore.isVlmReady }"
+          :title="modelsStore.vlmError ?? ''"
+        >
+          <span class="dot" />
+          {{ modelsStore.vlmModelId ?? 'no model' }} · {{ modelsStore.vlmState }}
+        </span>
+        <div class="header-actions">
+          <button
+            class="hdr-btn"
+            :class="{ active: showSettings }"
+            title="System prompt and sampling settings"
+            @click="showSettings = !showSettings"
+          >
+            <i class="pi pi-sliders-h" /> Settings
           </button>
-          <div v-if="showExtras" class="extras-grid">
-            <label
-              v-for="opt in promptApi.EXTRA_OPTIONS"
-              :key="opt.key"
-              class="extra-row"
-              :class="{ disabled: isExtraDisabled(opt.key) }"
-              :title="opt.full"
-            >
-              <input
-                type="checkbox"
-                :disabled="isExtraDisabled(opt.key)"
-                :checked="isExtraChecked(opt.key)"
-                @change="toggleExtra(opt.key)"
-              />
-              <span>{{ opt.short }}</span>
-            </label>
-          </div>
+          <button class="hdr-btn" title="Start a new conversation" @click="newChat">
+            <i class="pi pi-plus" /> New chat
+          </button>
+          <button class="close-btn" title="Close" aria-label="Close" @click="tryClose">×</button>
         </div>
+      </header>
 
-        <!-- Prefix / suffix -->
-        <div class="section" v-if="showTargetControls">
-          <div class="ctrl-row prefix-row">
-            <span class="ctrl-label">Prefix</span>
-            <input
-              type="text"
-              v-model="prefix"
-              class="affix-input"
-              placeholder="(prepended on copy / save)"
-            />
-          </div>
-          <div class="ctrl-row prefix-row">
-            <span class="ctrl-label">Suffix</span>
-            <input
-              type="text"
-              v-model="suffix"
-              class="affix-input"
-              placeholder="(appended on copy / save)"
-            />
-          </div>
-        </div>
+      <div class="chat-body">
+        <!-- Image context -->
+        <aside class="image-pane">
+          <a :href="imageUrl" target="_blank" rel="noopener" class="image-link" title="Open full size">
+            <img :src="imageUrl" :alt="fileName" class="preview-img" />
+          </a>
+          <div class="file-name" :title="media.file_path">{{ fileName }}</div>
 
-        <!-- Per-element policy table. Each row picks Extract (pull from
-             the image), Override (use the textarea value), or — for
-             rows the meta-prompt structurally fixes (Pony's score/
-             source/rating block) — Auto (locked, model-managed).
-             Refreshes on every target change. Generate mode only. -->
-        <div class="section" v-if="showElementTable">
-          <label class="section-label">Prompt elements ({{ elementRows.length }})</label>
-          <div class="element-table">
+          <label class="toggle" :class="{ disabled: !isImage }">
+            <input v-model="includeImage" type="checkbox" :disabled="!isImage" />
+            <span>
+              Send image to the model
+              <small v-if="isImage">Attached to the first message of the conversation.</small>
+              <small v-else>Videos can't be sent to the VLM.</small>
+            </span>
+          </label>
+
+          <div v-if="embeddedPrompt" class="embedded">
+            <div class="embedded-head">
+              <span class="label">Embedded prompt</span>
+              <button class="link-btn" title="Copy" @click="copy(embeddedPrompt)">Copy</button>
+              <button class="link-btn" title="Insert into the message box" @click="insertIntoDraft(embeddedPrompt)">Insert</button>
+            </div>
+            <div class="embedded-text">{{ embeddedPrompt }}</div>
+            <template v-if="embeddedNegative">
+              <div class="embedded-head">
+                <span class="label">Negative</span>
+                <button class="link-btn" @click="copy(embeddedNegative)">Copy</button>
+                <button class="link-btn" @click="insertIntoDraft(embeddedNegative)">Insert</button>
+              </div>
+              <div class="embedded-text">{{ embeddedNegative }}</div>
+            </template>
+          </div>
+        </aside>
+
+        <!-- Conversation -->
+        <section class="chat-pane">
+          <div v-if="showSettings" class="settings">
+            <div class="settings-row">
+              <span class="label">System prompt</span>
+              <select
+                v-model="presetName"
+                class="preset-select"
+                @change="loadPreset(presetName)"
+              >
+                <option value="">Presets…</option>
+                <option v-for="p in chatStore.presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+              </select>
+              <button class="small-btn" @click="savePreset">Save as…</button>
+              <button class="small-btn" :disabled="!presetName" @click="deletePreset">Delete</button>
+              <button class="small-btn" :disabled="systemIsDefault" @click="resetSystemPrompt">Reset</button>
+            </div>
+            <textarea
+              v-model="chatStore.settings.system_prompt"
+              class="system-input"
+              rows="5"
+              spellcheck="false"
+              placeholder="(no system prompt)"
+            />
+            <div class="settings-row sliders">
+              <label>
+                <span class="label">Temperature</span>
+                <input v-model.number="chatStore.settings.temperature" type="range" min="0" max="1.5" step="0.05" />
+                <span class="value">{{ chatStore.settings.temperature.toFixed(2) }}</span>
+              </label>
+              <label>
+                <span class="label">Max tokens</span>
+                <input v-model.number="chatStore.settings.max_tokens" type="range" min="64" max="4096" step="64" />
+                <span class="value">{{ chatStore.settings.max_tokens }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div ref="scrollRef" class="messages">
+            <div v-if="!turns.length" class="empty">
+              <p>Chat about anything, or ask about the image.</p>
+              <p class="hint">
+                Paste a long prompt to try a prompting strategy, or open
+                <b>Settings</b> to change the system prompt.
+                Enter sends · Shift+Enter adds a new line.
+              </p>
+            </div>
+
             <div
-              v-for="(row, idx) in elementRows"
-              :key="idx"
-              class="element-row"
-              :class="{ 'is-locked': row.defaultPolicy === 'auto' }"
+              v-for="t in turns"
+              :key="t.id"
+              class="msg"
+              :class="[t.role, { errored: !!t.error }]"
             >
-              <div class="element-title" :title="row.title">{{ row.title }}</div>
-
-              <div class="element-policy">
-                <template v-if="row.defaultPolicy === 'auto'">
-                  <span class="policy-locked" title="This element is structurally fixed by the meta-prompt and cannot be overridden.">Auto · model-managed</span>
+              <div class="bubble">
+                <span
+                  v-if="t.role === 'user' && t.id === firstUserId && includeImage"
+                  class="img-chip"
+                  title="The image is sent with this message"
+                ><i class="pi pi-image" /> image</span>
+                <details v-if="t.reasoning" class="reasoning">
+                  <summary>Thinking</summary>
+                  <div class="text">{{ t.reasoning }}</div>
+                </details>
+                <div v-if="t.content" class="text">{{ t.content }}</div>
+                <div v-else-if="t.streaming" class="typing"><span /><span /><span /></div>
+                <div v-if="t.error" class="error-text">{{ t.error }}</div>
+              </div>
+              <div class="msg-meta">
+                <template v-if="t.role === 'assistant'">
+                  <span v-if="t.stopped">stopped</span>
+                  <span v-if="t.elapsedMs != null">{{ (t.elapsedMs / 1000).toFixed(1) }}s</span>
+                  <button v-if="t.content" class="link-btn" @click="copy(t.content)">Copy</button>
+                  <button
+                    v-if="t.id === lastAssistant?.id && !streaming"
+                    class="link-btn"
+                    @click="regenerate"
+                  >Regenerate</button>
                 </template>
                 <template v-else>
-                  <div class="policy-toggle" role="radiogroup" :aria-label="`Policy for ${row.title}`">
-                    <button
-                      type="button"
-                      class="policy-btn"
-                      :class="{ active: row.policy === 'extract' }"
-                      :aria-pressed="row.policy === 'extract'"
-                      @click="setRowPolicy(row, 'extract')"
-                      title="Pull this element from the image"
-                    >Extract</button>
-                    <button
-                      type="button"
-                      class="policy-btn"
-                      :class="{ active: row.policy === 'override' }"
-                      :aria-pressed="row.policy === 'override'"
-                      @click="setRowPolicy(row, 'override')"
-                      title="Replace this element with the value below"
-                    >Override</button>
-                  </div>
-                  <textarea
-                    v-if="row.policy === 'override'"
-                    v-model="row.body"
-                    class="element-body"
-                    rows="2"
-                    spellcheck="false"
-                    :placeholder="row.defaultBody"
-                  />
+                  <button class="link-btn" @click="copy(t.content)">Copy</button>
+                  <button class="link-btn" :disabled="streaming" title="Edit and resend from here" @click="editTurn(t)">Edit</button>
                 </template>
               </div>
             </div>
           </div>
-        </div>
 
-        <!-- Existing prompt (for transform/clean mode) -->
-        <div class="section" v-if="mode !== 'generate'">
-          <label class="section-label">Existing prompt</label>
-          <textarea
-            v-model="sourcePrompt"
-            class="prompt-area"
-            rows="4"
-            :placeholder="hasExistingPrompt ? '' : '(no embedded prompt — paste one to transform)'"
-          />
-        </div>
-
-        <!-- Run controls -->
-        <div class="run-row">
-          <button class="primary" :disabled="generating" @click="run">
-            {{ generating ? 'Generating…' : (generated ? 'Re-run' : 'Generate') }}
-          </button>
-          <button v-if="generating" class="secondary" @click="stop">Stop</button>
-          <span v-if="elapsedMs !== null && !generating" class="elapsed">
-            {{ (elapsedMs / 1000).toFixed(1) }}s
-          </span>
-          <span v-if="error" class="error">{{ error }}</span>
-        </div>
-
-        <!-- Generated -->
-        <div class="section">
-          <label class="section-label">Generated prompt</label>
-          <textarea
-            v-model="generated"
-            @input="dirty = true"
-            class="prompt-area"
-            rows="6"
-            placeholder="(generated prompt will appear here)"
-          />
-          <div v-if="generated.trim() && (prefix || suffix)" class="assembled-preview">
-            <span class="assembled-label">With prefix/suffix:</span>
-            <code>{{ assembledPrompt }}</code>
+          <div v-if="!modelsStore.isVlmReady" class="not-ready">
+            The VLM isn't loaded{{ modelsStore.isVlmLoading ? ' yet — it is starting up' : '' }}.
+            Load a Qwen model from Settings → Models to chat.
           </div>
-          <div class="action-row">
-            <button :disabled="!assembledPrompt.trim()" @click="copyAssembled">Copy</button>
-            <button :disabled="!assembledPrompt.trim()" @click="saveCurrent">Save…</button>
-            <button :disabled="!generated.trim()" @click="regenerate">Regenerate</button>
-          </div>
-        </div>
 
-        <!-- Negative prompt (only for sd / pony / chroma / qwen in generate mode) -->
-        <div class="section" v-if="showNegative">
-          <label class="section-label">Negative prompt</label>
-          <textarea
-            v-model="generatedNegative"
-            @input="dirty = true"
-            class="prompt-area"
-            rows="3"
-            placeholder="(negative prompt will appear here when the target supports one)"
-          />
-        </div>
-
-        <!-- Saved list -->
-        <div class="section" v-if="savedPrompts.length">
-          <label class="section-label">Saved for this image</label>
-          <div v-for="p in savedPrompts" :key="p.id" class="saved-row">
-            <span class="saved-name">{{ p.name }}</span>
-            <span class="saved-meta">{{ p.target_model }} · {{ p.architecture }}</span>
-            <button class="link-btn" @click="generated = p.prompt; generatedNegative = p.negative ?? ''; dirty = false">Load</button>
-            <button class="link-btn danger" @click="promptStore.deleteSavedPrompt(p.id, media.file_path)">Delete</button>
+          <div class="composer">
+            <textarea
+              ref="inputRef"
+              v-model="draft"
+              class="composer-input"
+              rows="3"
+              placeholder="Message the model…"
+              @keydown="onComposerKey"
+            />
+            <div class="composer-actions">
+              <button v-if="streaming" class="stop-btn" @click="stop">
+                <i class="pi pi-stop" /> Stop
+              </button>
+              <button v-else class="send-btn" :disabled="!canSend" @click="send">
+                <i class="pi pi-send" /> Send
+              </button>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
     </div>
   </div>
@@ -556,70 +463,270 @@ function targetLabel(t: promptApi.TargetModel): string {
   justify-content: center;
 }
 
-.dialog-card {
+.chat-card {
+  width: min(1200px, 96vw);
+  height: min(860px, 92vh);
+  display: flex;
+  flex-direction: column;
   background: var(--surface-section);
+  color: var(--text-color);
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  outline: none;
 }
 
-.playground-card { width: min(960px, 95vw); max-height: 90vh; display: flex; flex-direction: column; }
-.dialog-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--surface-border); }
-.dialog-header h3 { margin: 0; }
-.close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: inherit; }
-.playground-body { padding: 12px 16px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+/* header */
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--surface-border);
+}
+.chat-header h3 { margin: 0; font-size: 16px; }
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-border);
+  color: var(--text-color-secondary);
+}
+.model-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-color-secondary); }
+.model-chip.ready .dot { background: #22c55e; }
+.header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.hdr-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hdr-btn:hover, .hdr-btn.active { background: var(--surface-hover); }
+.close-btn { background: none; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: inherit; padding: 0 4px; }
 
-.top-row { display: flex; gap: 16px; align-items: flex-start; }
-.preview-img { width: 320px; height: auto; max-height: 320px; object-fit: contain; background: #000; border-radius: 6px; flex-shrink: 0; }
-.controls { flex: 1; display: flex; flex-direction: column; gap: 10px; }
-.ctrl-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.ctrl-label { font-size: 12px; opacity: 0.75; min-width: 110px; }
-.ctrl-value { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; opacity: 0.8; }
-.ctrl-row label.disabled { opacity: 0.4; }
+/* body */
+.chat-body { flex: 1; min-height: 0; display: flex; }
 
-.section { display: flex; flex-direction: column; gap: 4px; }
-.section-label { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
-.prompt-area { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; padding: 8px; background: var(--surface-card); color: inherit; border: 1px solid var(--surface-border); border-radius: 4px; }
+.image-pane {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-right: 1px solid var(--surface-border);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.image-link { display: block; }
+.preview-img {
+  width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+  background: #000;
+  border-radius: 8px;
+  display: block;
+}
+.file-name { font-size: 12px; color: var(--text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toggle { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.toggle input { margin-top: 3px; }
+.toggle small { display: block; font-size: 11px; color: var(--text-color-secondary); }
+.toggle.disabled { opacity: 0.55; cursor: not-allowed; }
 
-.extras-toggle { background: none; border: none; padding: 0; display: flex; align-items: center; gap: 6px; cursor: pointer; color: inherit; }
-.extras-toggle .chevron { font-size: 10px; opacity: 0.6; }
-.extras-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; padding: 8px 4px 0 16px; }
-.extra-row { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
-.extra-row.disabled { opacity: 0.4; cursor: not-allowed; }
-.extra-row input[type="checkbox"] { margin: 0; }
+.embedded { display: flex; flex-direction: column; gap: 4px; }
+.embedded-head { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.embedded-head .label { margin-right: auto; }
+.embedded-text {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+}
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-color-secondary); }
 
-.prefix-row .affix-input { flex: 1; min-width: 200px; padding: 4px 8px; background: var(--surface-card); color: inherit; border: 1px solid var(--surface-border); border-radius: 4px; font-family: inherit; font-size: 12px; }
+.chat-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
-.assembled-preview { margin-top: 4px; padding: 6px 8px; background: var(--surface-card); border: 1px dashed var(--surface-border); border-radius: 4px; font-size: 11px; opacity: 0.85; word-break: break-word; }
-.assembled-preview .assembled-label { display: block; opacity: 0.6; margin-bottom: 2px; }
-.assembled-preview code { font-family: inherit; }
+/* settings */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--surface-border);
+  background: var(--surface-ground);
+}
+.settings-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-row .label { margin-right: auto; }
+.settings-row.sliders { gap: 24px; }
+.settings-row.sliders label { display: flex; align-items: center; gap: 8px; }
+.settings-row.sliders .label { margin-right: 0; }
+.value { font-size: 12px; font-variant-numeric: tabular-nums; min-width: 36px; }
+.preset-select, .small-btn {
+  font-size: 12px;
+  padding: 3px 8px;
+  background: var(--surface-card);
+  color: inherit;
+  border: 1px solid var(--surface-border);
+  border-radius: 4px;
+}
+.small-btn { cursor: pointer; }
+.small-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.system-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 60px;
+  max-height: 40vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 8px;
+  background: var(--surface-card);
+  color: inherit;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+}
 
-.run-row { display: flex; align-items: center; gap: 12px; }
-.run-row .primary { padding: 6px 14px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; }
-.run-row .primary:disabled { opacity: 0.6; cursor: not-allowed; }
-.run-row .secondary { padding: 6px 14px; background: transparent; border: 1px solid var(--surface-border); color: inherit; border-radius: 4px; cursor: pointer; }
-.run-row .elapsed { font-size: 12px; opacity: 0.7; }
-.run-row .error { color: var(--danger-color); font-size: 12px; }
-.action-row { display: flex; gap: 8px; margin-top: 4px; }
-.action-row button { padding: 4px 10px; background: transparent; border: 1px solid var(--surface-border); color: inherit; border-radius: 4px; cursor: pointer; font-size: 12px; }
-.action-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* messages */
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.empty { margin: auto; text-align: center; color: var(--text-color-secondary); max-width: 420px; }
+.empty p { margin: 4px 0; }
+.empty .hint { font-size: 12px; }
 
-.saved-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--surface-border); }
-.saved-name { font-weight: 600; flex: 1; }
-.saved-meta { font-size: 11px; opacity: 0.7; }
-.link-btn { background: none; border: none; color: var(--primary-color); cursor: pointer; font-size: 12px; }
-.link-btn.danger { color: var(--danger-color); }
+.msg { display: flex; flex-direction: column; max-width: 85%; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg.assistant { align-self: flex-start; align-items: flex-start; }
+.bubble {
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 100%;
+}
+.msg.user .bubble { background: var(--primary-color); color: #fff; border-bottom-right-radius: 4px; }
+.msg.assistant .bubble { background: var(--surface-hover); border-bottom-left-radius: 4px; }
+.msg.errored .bubble { border: 1px solid var(--danger-color); }
+.text { white-space: pre-wrap; word-break: break-word; }
+.error-text { color: var(--danger-color); font-size: 12px; margin-top: 4px; }
+.img-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 6px;
+  margin-bottom: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+}
+.reasoning { font-size: 12px; color: var(--text-color-secondary); margin-bottom: 6px; }
+.reasoning summary { cursor: pointer; }
+.reasoning .text { padding: 4px 0 0 10px; border-left: 2px solid var(--surface-border); }
 
-.element-table { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--surface-border); border-radius: 4px; padding: 4px; background: var(--surface-card); max-height: 360px; overflow-y: auto; }
-.element-row { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: start; padding: 6px 4px; border-bottom: 1px solid var(--surface-border); }
-.element-row:last-child { border-bottom: none; }
-.element-row.is-locked { opacity: 0.7; }
-.element-title { font-weight: 600; font-size: 12px; padding-top: 6px; overflow: hidden; text-overflow: ellipsis; word-break: break-word; }
-.element-policy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.policy-toggle { display: inline-flex; gap: 0; border: 1px solid var(--surface-border); border-radius: 4px; overflow: hidden; align-self: flex-start; }
-.policy-btn { background: transparent; border: none; color: inherit; font-size: 11px; padding: 3px 10px; cursor: pointer; font-family: inherit; }
-.policy-btn + .policy-btn { border-left: 1px solid var(--surface-border); }
-.policy-btn.active { background: var(--primary-color); color: white; }
-.policy-btn:not(.active):hover { background: var(--surface-section); }
-.policy-locked { font-size: 11px; opacity: 0.75; padding-top: 4px; font-style: italic; }
-.element-body { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 12px; padding: 6px 8px; background: var(--surface-section); color: inherit; border: 1px solid var(--surface-border); border-radius: 3px; min-height: 40px; }
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-color-secondary);
+  margin-top: 3px;
+  min-height: 16px;
+}
+
+.typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-color-secondary);
+  animation: blink 1.2s infinite ease-in-out;
+}
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+.not-ready {
+  margin: 0 14px 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--danger-color);
+  color: var(--danger-color);
+}
+
+/* composer */
+.composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--surface-border);
+}
+.composer-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 45vh;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  background: var(--surface-card);
+  color: inherit;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+}
+.composer-input:focus { outline: none; border-color: var(--primary-color); }
+.send-btn, .stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.send-btn { background: var(--primary-color); color: #fff; border: none; }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stop-btn { background: transparent; color: inherit; border: 1px solid var(--surface-border); }
+
+.link-btn { background: none; border: none; padding: 0; color: var(--primary-color); cursor: pointer; font-size: 11px; }
+.link-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+@media (max-width: 767px) {
+  .chat-card { width: 100vw; height: 100vh; border-radius: 0; }
+  .chat-body { flex-direction: column; }
+  .image-pane {
+    width: auto;
+    max-height: 30vh;
+    border-right: none;
+    border-bottom: 1px solid var(--surface-border);
+  }
+  .preview-img { max-height: 120px; }
+  .chat-header { flex-wrap: wrap; }
+  .settings { max-height: 40vh; overflow-y: auto; }
+  .msg { max-width: 95%; }
+  .hdr-btn { padding: 5px 7px; }
+}
 </style>
