@@ -32,6 +32,7 @@ from backend.api import (
     embeddings,
     models,
     prompt as prompt_api,
+    chat as chat_api,
     vlm,
     comfy as comfy_api,
     storyboard as storyboard_api,
@@ -434,6 +435,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(models.router)
     app.include_router(vlm.router)
     app.include_router(prompt_api.router)
+    app.include_router(chat_api.router)
     app.include_router(comfy_api.router)
     app.include_router(storyboard_api.router)
     app.include_router(i2v.router)
