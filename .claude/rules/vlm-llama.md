@@ -3,6 +3,7 @@ paths:
   - "metascan/core/vlm_*.py"
   - "metascan/utils/llama_server.py"
   - "backend/api/vlm.py"
+  - "backend/api/chat.py"
   - "backend/services/vlm_tag_pump.py"
   - "backend/services/scan_dispatch.py"
   - "frontend/src/api/vlm.ts"
@@ -105,6 +106,12 @@ the root CLAUDE.md still applies.
   corrupted tokens (Gated DeltaNet kernel bug). `LLAMA_CPP_RELEASE` is
   pinned accordingly; a stale `data/bin/local/llama-server` built from an
   older tag reproduces the garbage-output failure even with a correct pin.
+- **Chat streaming is its own path.** `VlmClient.chat_stream` (used only
+  by `backend/api/chat.py`, the Prompt Playground chat window) sends
+  `stream: true`, takes a full multi-turn history, attaches the image to
+  the first user message only, and sends no grammar. Keep
+  `generate_text`'s request shape unchanged for the prompt / T2I / I2V /
+  storyboard pipelines rather than folding chat into it.
 - **Per-model llama-server flags live in `VlmModelSpec.extra_args`**, and
   the context budget in `VlmModelSpec.ctx_size` — never re-introduce
   model-id string matching in `vlm_client._build_command` or
