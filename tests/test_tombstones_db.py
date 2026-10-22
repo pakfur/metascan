@@ -164,7 +164,6 @@ def test_category_link_makes_tombstone_with_names(db):
     assert json.loads(t["categories"]) == ["Anime"]
 
 
-@pytest.mark.skip(reason="Task 5")
 def test_categorized_only_item_tombstoned_with_names(db):
     db.save_media(_media("/p/a.png"))
     cid = db.create_category("Anime").id
