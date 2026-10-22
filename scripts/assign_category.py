@@ -11,7 +11,8 @@ Usage:
 
 Sends ``Authorization: Bearer $METASCAN_API_KEY`` when that variable is set.
 Exit codes: 0 done; 1 server unreachable or answered with an error; 2 the
-category does not exist and --no-create was given.
+category does not exist and --no-create was given; 3 no library item lies
+under FOLDER (nothing is created, dry run included).
 """
 
 from __future__ import annotations
@@ -70,6 +71,16 @@ def _run(client: httpx.Client, args: argparse.Namespace) -> int:
         m["file_path"] for m in resp.json() if is_under(m["file_path"], args.folder)
     ]
     n = len(paths)
+
+    if n == 0:
+        # Almost always a typo or a path in the wrong form (the server's
+        # paths, not this machine's). Stop before creating the category.
+        print(
+            f"warning: no library items under {args.folder}; nothing changed "
+            "(check the path matches how the server stores it)",
+            file=sys.stderr,
+        )
+        return 3
 
     if args.dry_run:
         print(f"{n} items under {args.folder} (dry run, nothing changed)")
