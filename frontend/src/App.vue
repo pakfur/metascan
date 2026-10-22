@@ -3,9 +3,12 @@ import ToastHost from './components/layout/ToastHost.vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useFoldersStore } from './stores/folders'
 import { useT2iStore } from './stores/t2i'
+import { useCategoriesStore } from './stores/categories'
+import type { CategoriesWsEvent } from './types/websocket'
 
 const foldersStore = useFoldersStore()
 const t2iStore = useT2iStore()
+const categoriesStore = useCategoriesStore()
 
 // Live-sync folder mutations from other tabs / sessions.
 useWebSocket('folders', (event, data) => {
@@ -28,6 +31,14 @@ useWebSocket('folders', (event, data) => {
         removed: string[]
       },
     )
+  }
+})
+
+// Category mutations from any tab (or a sticky-category verdict) refresh the
+// list the media viewer's category picker reads.
+useWebSocket('categories', (event) => {
+  if (event === ('categories_changed' satisfies CategoriesWsEvent)) {
+    categoriesStore.load().catch((e) => console.error('Failed to load categories', e))
   }
 })
 
