@@ -38,6 +38,8 @@ export const useTasteStore = defineStore('taste', () => {
   // Throws ApiError on 409 (detail.code already_training / not_enough_data).
   async function train(): Promise<void> {
     await startTasteTraining()
+    // Invalidate any in-flight loadStatus so it can't overwrite the flag below.
+    statusToken++
     // Reflect "training" at once; training_started / loadStatus confirm it.
     if (status.value) status.value = { ...status.value, training: true }
   }

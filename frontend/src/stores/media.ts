@@ -222,11 +222,12 @@ export const useMediaStore = defineStore('media', () => {
 
   function setSortOrder(order: string) {
     if (order === sortOrder.value) return
+    const prev = sortOrder.value
     sortOrder.value = order
-    // Relevance sorts client-side from the search score map; Taste also
-    // sorts client-side but refetches so its unscored tail is in date-added
-    // order. Every other order defers to the server.
-    if (order === 'relevance') return
+    // Relevance and Taste sort client-side; the server fetch is identical to
+    // date-added for them, so a switch between orders that map to the same
+    // server sort needs no refetch.
+    if (serverSort(prev) === serverSort(order)) return
     loadAllMedia()
   }
 
