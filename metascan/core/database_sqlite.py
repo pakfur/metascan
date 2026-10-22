@@ -1233,6 +1233,11 @@ class DatabaseManager:
                 )
                 """
             )
+            # get_t2i_batch_position counts a batch on every judgment GET.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_t2i_images_batch "
+                "ON t2i_images(batch_id)"
+            )
             # Taste-rating capture. media_judgments cascades with its media
             # row; judgment_events and media_tombstones deliberately carry
             # no FK so the history outlives a deleted file.
@@ -5652,6 +5657,39 @@ class DatabaseManager:
                     ):
                         out[r["file_path"]] = r["score"]
             return int(head["model_id"]), out
+
+    def taste_review_queue(self, limit: int = 200) -> List[str]:
+        """Scored images with no verdict and never seen, the most uncertain
+        (score nearest 0.5) first, ties by path. Posix paths."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT s.file_path FROM taste_scores s "
+                "JOIN media m ON m.file_path = s.file_path "
+                "LEFT JOIN media_judgments j ON j.file_path = s.file_path "
+                "WHERE m.is_favorite = 0 AND COALESCE(j.passed, 0) = 0 "
+                "AND j.seen_at IS NULL "
+                "ORDER BY ABS(s.score - 0.5), s.file_path LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [r["file_path"] for r in rows]
+
+    def get_t2i_batch_position(self, file_path: str) -> Optional[Tuple[int, int]]:
+        """``(1-based index, size)`` of a T2I image within its ``batch_id``,
+        ordered by ``t2i_images.id``; None for a non-T2I item or one with
+        no batch."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id, batch_id FROM t2i_images WHERE file_path = ?",
+                (to_posix_path(file_path),),
+            ).fetchone()
+            if row is None or row["batch_id"] is None:
+                return None
+            pos = conn.execute(
+                "SELECT SUM(CASE WHEN id <= ? THEN 1 ELSE 0 END) AS idx, "
+                "COUNT(*) AS size FROM t2i_images WHERE batch_id = ?",
+                (row["id"], row["batch_id"]),
+            ).fetchone()
+        return int(pos["idx"]), int(pos["size"])
 
     def toggle_favorite(self, file_path: Path) -> bool:
         try:

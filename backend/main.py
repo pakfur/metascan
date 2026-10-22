@@ -18,6 +18,7 @@ from backend.config import (
     get_models_config,
     get_server_config,
     get_t2i_config,
+    get_taste_config,
     load_app_config,
 )
 from backend.api import (
@@ -40,10 +41,12 @@ from backend.api import (
     storyboard as storyboard_api,
     i2v,
     t2i,
+    taste as taste_api,
     websocket,
 )
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.judgments_service import faiss_embedding_lookup
+from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import apply_pending_taste_snapshot
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
@@ -59,6 +62,7 @@ from metascan.core.t2i_captions import CaptionStore
 from metascan.core.t2i_runner import T2iRunner
 from metascan.core.t2i_directions import DIRECTIONS_DIRNAME, SnippetCache
 from metascan.core.t2i_wildcards import LibraryCache
+from metascan.core.taste_runner import TasteRunner
 from metascan.core.vlm_select import vlm_model_installed
 from metascan.core.scanner import Scanner
 from metascan.utils.app_paths import get_data_dir
@@ -348,6 +352,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
+    # Taste scorer: the runner reads the same FAISS index the embedding
+    # queue writes; the service retrains in the background and rescores
+    # new images after every embedding run (the hook fires on a worker
+    # thread and only posts onto this loop).
+    taste_service = TasteService(
+        get_db(),
+        TasteRunner(
+            get_db(),
+            index_dir=similarity.embedding_index_dir(),
+            work_dir=get_data_dir() / "taste",
+        ),
+        get_config=lambda: get_taste_config(load_app_config()),
+    )
+    taste_service.attach_loop(asyncio.get_running_loop())
+    taste_api.set_taste_service(taste_service)
+    similarity.set_embedding_complete_hook(taste_service.schedule_rescore_threadsafe)
+    taste_service.start_retrain_loop()
+
     try:
         yield
     finally:
@@ -357,7 +379,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except (asyncio.CancelledError, Exception):
             pass
         await upscale.shutdown_upscale_queue()
+        # The embedding queue is the rescore trigger: stop it (and unhook)
+        # before closing the taste service that consumes it.
         await similarity.shutdown_embedding_queue()
+        similarity.set_embedding_complete_hook(None)
+        try:
+            await taste_service.aclose()
+        except Exception:
+            logger.exception("Taste service shutdown raised")
+        taste_api.set_taste_service(None)
         try:
             await client.shutdown()
         except Exception:
@@ -470,6 +500,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(storyboard_api.router)
     app.include_router(i2v.router)
     app.include_router(t2i.router)
+    app.include_router(taste_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

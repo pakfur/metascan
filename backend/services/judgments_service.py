@@ -3,7 +3,7 @@ FAISS-backed embedding lookup used to snapshot tombstones."""
 
 import asyncio
 import logging
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +20,11 @@ class JudgmentsService:
 
     async def get(self, path: str) -> Optional[JudgmentState]:
         return await asyncio.to_thread(self.db.get_judgment, path)
+
+    async def batch_position(self, path: str) -> Optional[Dict[str, int]]:
+        """``{"index", "size"}`` of a T2I image in its batch, else None."""
+        pos = await asyncio.to_thread(self.db.get_t2i_batch_position, path)
+        return {"index": pos[0], "size": pos[1]} if pos is not None else None
 
     async def mark_seen(self, path: str) -> Optional[JudgmentState]:
         return await asyncio.to_thread(self.db.mark_seen, path)

@@ -133,7 +133,14 @@ class TasteRunner:
         if stream is None:
             return
         while True:
-            line = await stream.readline()
+            try:
+                line = await stream.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # A line over the reader's limit (64 KiB default): readline
+                # has already dropped it from the buffer. Keep draining, or
+                # the worker blocks on a full stderr pipe until the timeout.
+                logger.info("taste_worker: <overlong stderr line dropped>")
+                continue
             if not line:
                 return
             text = line.decode("utf-8", errors="replace").rstrip()
@@ -143,7 +150,7 @@ class TasteRunner:
     async def _run_worker(self, task: Dict[str, Any]) -> Dict[str, Any]:
         out_dir = Path(task["out_dir"])
         task_path = out_dir / "taste_task.json"
-        _write_json(task_path, task)
+        await asyncio.to_thread(_write_json, task_path, task)
         env = dict(os.environ)
         env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         env["PYTHONPATH"] = os.pathsep.join(
@@ -231,7 +238,9 @@ class TasteRunner:
         run_dir = self._new_run_dir("train")
         try:
             try:
-                image_paths, image_cats = self._scoring_targets(raw)
+                image_paths, image_cats = await asyncio.to_thread(
+                    self._scoring_targets, raw
+                )
                 labels_path = run_dir / "labels.json"
                 await asyncio.to_thread(_write_json, labels_path, _labels_doc(ls))
                 result = await self._run_worker(
@@ -334,10 +343,10 @@ class TasteRunner:
 
     async def _rescore(self) -> Optional[int]:
         model = await asyncio.to_thread(self.db.get_active_taste_model)
-        if model is None or self.is_stale(model):
+        if model is None or await asyncio.to_thread(self.is_stale, model):
             return None
         raw = await asyncio.to_thread(self.db.taste_training_raw)
-        image_paths, image_cats = self._scoring_targets(raw)
+        image_paths, image_cats = await asyncio.to_thread(self._scoring_targets, raw)
         run_dir = self._new_run_dir("score")
         try:
             result = await self._run_worker(
