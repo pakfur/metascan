@@ -25,6 +25,7 @@ import { listPresets } from '../../api/comfy'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
 import { useFormAutosave } from '../../composables/useFormAutosave'
+import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
 import { useWebSocket } from '../../composables/useWebSocket'
 import {
@@ -42,6 +43,7 @@ import {
   type T2iFields,
 } from '../../utils/t2iDialogForm'
 import CaptionFilterPopover from '../t2i/CaptionFilterPopover.vue'
+import CategorySelect from '../generation/CategorySelect.vue'
 import JobTile from '../generation/JobTile.vue'
 import SeedControls from '../generation/SeedControls.vue'
 import ThumbGrid from '../generation/ThumbGrid.vue'
@@ -235,6 +237,13 @@ function setDirections(on: boolean) {
     /* private mode: the choice lasts for this session */
   }
 }
+// Categories every image of the next batch is tagged with. Session-local, like
+// the directions switch: not part of form_state, so selecting a tile never
+// changes it, and no watcher here touches the form.
+const { selected: categoryIds, refresh: refreshCategories } = useGenerationCategories(
+  'metascan.t2i.categories.v1',
+)
+
 // The direction the prompt in the box was written with (Generate Prompt), or
 // the running step's while a Random batch has the boxes. Display only.
 const promptDirection = ref<{ text: string; parts: string[] } | null>(null)
@@ -457,6 +466,10 @@ function startErrorText(e: unknown): string {
   if (e instanceof ApiError && e.status === 409) {
     return 'A Random batch is already running. Cancel it or wait for it to finish.'
   }
+  if (isUnknownCategoryError(e)) {
+    void refreshCategories()
+    return 'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'
+  }
   return errMsg(e)
 }
 
@@ -470,6 +483,7 @@ async function onGenerate() {
     maxCount: maxCount.value,
   })
   req.directions = useDirections.value
+  req.category_ids = [...categoryIds.value]
   const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
   if (
     signature !== null &&
@@ -831,8 +845,8 @@ onBeforeUnmount(() => {
               </template>
             </section>
 
-            <!-- Two rows on a four-column grid: Model | Workflow, then
-                 Size | Aspect Ratio | Seed. -->
+            <!-- Three rows on a four-column grid: Model | Workflow, then
+                 Size | Aspect Ratio | Seed, then Categories. -->
             <section class="sec settings">
               <label class="fld f-model">
                 <span>Model</span>
@@ -876,6 +890,7 @@ onBeforeUnmount(() => {
                 @update:seed="form.seed = $event"
                 @update:policy="form.seedPolicy = $event"
               />
+              <CategorySelect v-model="categoryIds" class="f-categories" />
             </section>
 
             <section class="sec">
@@ -982,6 +997,8 @@ onBeforeUnmount(() => {
       :media-list="viewerImages"
       :initial-index="viewerIndex"
       :allow-destructive="false"
+      :allow-rating="true"
+      :favorite-mirror="store.applyFavoriteFlag"
       @close="viewerIndex = null"
     />
   </div>
@@ -1267,6 +1284,10 @@ onBeforeUnmount(() => {
 .f-workflow,
 .f-seed {
   grid-column: span 2;
+}
+
+.f-categories {
+  grid-column: 1 / -1;
 }
 
 .fld {

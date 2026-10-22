@@ -263,3 +263,4 @@ the root CLAUDE.md still applies.
   fixes** only when `fixes.length > 0` AND `lintedFor === prompt` (a
   stale rewrite must never clobber newer typing). Never auto-apply on
   Generate: the box is "Generate uses this text".
+- **Generation categories.** `POST /api/i2v/generate` takes `category_ids` (default `[]`), validated by `checked_category_ids` (404 `{code: "unknown_category"}` before upload/queue) and passed to `I2vRunner.generate(category_ids=…)`, which keeps them in the in-memory `_job_meta` (not the form). Ingest tags each new clip via `generation_categories.tag_generated_media` (source `generation`) before `i2v_videos_changed`; a deleted category is a logged skip. The dialog's selection is session-local like the seed policy (`metascan.i2v.categories.v1`).

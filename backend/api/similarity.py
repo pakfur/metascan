@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -72,9 +73,33 @@ def _get_faiss_manager() -> FaissIndexManager:
     read."""
     global _faiss_manager
     if _faiss_manager is None:
-        _faiss_manager = FaissIndexManager(_get_embedding_queue().index_dir)
-        _faiss_manager.load()  # No-op if no on-disk index exists
+        fm = FaissIndexManager(_get_embedding_queue().index_dir)
+        fm.load()  # No-op if no on-disk index exists
+        _faiss_manager = fm
+        if fm.is_loaded:
+            _start_tombstone_backfill(fm)
     return _faiss_manager
+
+
+def _start_tombstone_backfill(fm: FaissIndexManager) -> None:
+    """Fill tombstones whose CLIP vector was NULL (deleted while the index
+    wasn't in memory) from the freshly loaded index. Runs on a daemon
+    thread: callers of _get_faiss_manager may be on the event loop, and
+    the backfill takes the DB lock (never while reading FAISS)."""
+
+    def _run() -> None:
+        try:
+            from backend.services.judgments_service import (
+                backfill_tombstone_embeddings,
+            )
+
+            backfill_tombstone_embeddings(get_db(), fm)
+        except Exception:
+            logger.warning("Tombstone embedding backfill failed", exc_info=True)
+
+    threading.Thread(
+        target=_run, name="tombstone-embedding-backfill", daemon=True
+    ).start()
 
 
 def warm_faiss_index() -> None:

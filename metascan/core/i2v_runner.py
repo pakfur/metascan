@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
+from metascan.core.generation_categories import tag_generated_media
 from metascan.core.i2v_compiler import (
     assemble_i2v_prompt,
     build_i2v_user_prompt,
@@ -251,6 +252,7 @@ class I2vRunner:
         template_id: Optional[str] = None,
         output_root: Optional[str] = None,
         output_prefix: Optional[str] = None,
+        category_ids: Optional[List[int]] = None,
     ) -> int:
         preset = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if preset is None:
@@ -334,6 +336,9 @@ class I2vRunner:
             "idea": idea,
             "megapixels": float(megapixels),
             "loras": [dict(entry) for entry in loras],
+            # Tagged onto the clip at ingest; session-local in the dialog,
+            # so not part of the form.
+            "category_ids": list(category_ids or []),
             "form": build_form_state(
                 idea=idea,
                 prompt=prompt,
@@ -410,6 +415,10 @@ class I2vRunner:
                 )
         if not inserted:
             return
+        # Before the clip is announced, so a refetch already sees its chips.
+        await tag_generated_media(
+            self.db, inserted, meta.get("category_ids") or [], self._emit
+        )
         self._emit(
             "i2v",
             "i2v_videos_changed",
