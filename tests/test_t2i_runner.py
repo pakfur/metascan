@@ -3582,6 +3582,53 @@ class TestIngest(AccountingCase):
         self.assertEqual(self.terminal_frames(), ["batch_complete"])
 
 
+class TestWriterLineage(AccountingCase):
+    """Which writer produced the prompt an image was rendered from."""
+
+    async def writer_ids(self) -> List[Any]:
+        for job_id in self.comfy.job_ids:
+            await self.job_done(job_id)
+        rows = [self.db.get_t2i_image(n) for n in range(1, len(self.comfy.job_ids) + 1)]
+        return [r["writer_id"] if r else "missing" for r in rows]
+
+    async def test_a_vlm_written_prompt_is_the_base_writer(self) -> None:
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertEqual(await self.writer_ids(), ["base"])
+
+    async def test_a_missing_vlm_is_the_fallback_writer(self) -> None:
+        self.roomy()
+        self.runner.vlm_installed = lambda model_id: False
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertEqual(await self.writer_ids(), ["fallback"])
+
+    async def test_a_failed_then_fallen_back_prompt_is_the_fallback_writer(
+        self,
+    ) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.vlm.replies.extend([VlmError("x"), VlmError("x")])
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        self.assertEqual(await self.writer_ids(), ["fallback"])
+
+    async def test_a_supplied_first_step_has_no_writer(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.random_mode(
+                batch_size=1,
+                count_per_batch=1,
+                caption="a red kite",
+                prompt="A red kite over a gray sea.",
+                aspect_ratio="2:3",
+            )
+        )
+        self.assertEqual(await self.writer_ids(), [None])
+
+    async def test_a_manual_batch_has_no_writer(self) -> None:
+        await self.manual_batch(count=1)
+        self.assertEqual(await self.writer_ids(), [None])
+
+
 class TestAccounting(AccountingCase):
     async def test_the_frames_of_a_batch_that_ends_three_ways(self) -> None:
         batch_id = await self.manual_batch()

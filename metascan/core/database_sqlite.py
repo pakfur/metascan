@@ -3781,6 +3781,9 @@ class DatabaseManager:
         megapixels: Optional[float] = None,
         loras: Optional[List[Dict[str, Any]]] = None,
         form_state: Optional[Dict[str, Any]] = None,
+        writer_id: Optional[str] = None,
+        variant_group: Optional[str] = None,
+        variant_index: Optional[int] = None,
     ) -> int:
         import json as _json
 
@@ -3789,8 +3792,8 @@ class DatabaseManager:
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
                 "idea, seed, duration_s, quality, width, height, steps, "
                 "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
-                "form_state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "form_state, writer_id, variant_group, variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -3808,6 +3811,9 @@ class DatabaseManager:
                     megapixels,
                     _json.dumps(loras) if loras is not None else None,
                     _json.dumps(form_state) if form_state is not None else None,
+                    writer_id,
+                    variant_group,
+                    variant_index,
                 ),
             )
             conn.commit()
@@ -3939,6 +3945,9 @@ class DatabaseManager:
         render_s: Optional[float] = None,
         comfy_prompt_id: Optional[str] = None,
         form_state: Optional[Dict[str, Any]] = None,
+        writer_id: Optional[str] = None,
+        variant_group: Optional[str] = None,
+        variant_index: Optional[int] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -3950,8 +3959,9 @@ class DatabaseManager:
                 "INSERT INTO t2i_images (file_path, batch_id, model, preset_id, "
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
-                "comfy_prompt_id, form_state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "comfy_prompt_id, form_state, writer_id, variant_group, "
+                "variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -3970,6 +3980,9 @@ class DatabaseManager:
                     render_s,
                     comfy_prompt_id,
                     _json.dumps(form_state) if form_state is not None else None,
+                    writer_id,
+                    variant_group,
+                    variant_index,
                 ),
             )
             conn.commit()
