@@ -290,6 +290,8 @@ export interface T2iBatchRequest {
   filter?: CaptionFilter | null
   /** Caption directions; omitted or null means the config's default. */
   directions?: boolean | null
+  /** Categories every image is tagged with at ingest; an unknown id is a 404. */
+  category_ids?: number[]
 }
 
 /** POST /api/t2i/batches response. */

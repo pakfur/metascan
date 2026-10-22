@@ -653,6 +653,57 @@ class TestFormStateAtIngest(I2vRunnerBase):
         self.assertEqual(row["seed"], 123)  # facts still come from the job row
 
 
+class TestCategoryTagging(TestFormStateAtIngest):
+    """A clip carries the categories chosen in the dialog that made it."""
+
+    def _link_sources(self, path):
+        with self.db.lock, self.db._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT c.name, mc.source FROM media_categories mc "
+                "JOIN categories c ON c.id = mc.category_id WHERE mc.file_path = ?",
+                (Path(path).as_posix(),),
+            ).fetchall()
+        return {r["name"]: r["source"] for r in rows}
+
+    def test_i2v_generate_tags_video(self):
+        events = []
+        self.runner.on_event(lambda ch, ev, data: events.append((ch, ev, data)))
+        cid = self.db.create_category("Anime").id
+        job_id = self._generate(category_ids=[cid])
+        self._ingest(job_id)
+
+        self.assertEqual(len(self.db.list_i2v_videos(str(self.src))), 1)
+        self.assertEqual(
+            {c.name for c in self.db.get_media_categories(str(self.out))}, {"Anime"}
+        )
+        self.assertEqual(self._link_sources(self.out), {"Anime": "generation"})
+        self.assertIn(("categories", "categories_changed", {}), events)
+        # Tagged before the clip is announced, so a refetch sees the chip.
+        names = [(ch, ev) for ch, ev, _ in events]
+        self.assertLess(
+            names.index(("categories", "categories_changed")),
+            names.index(("i2v", "i2v_videos_changed")),
+        )
+
+    def test_a_category_deleted_before_ingest_is_skipped(self):
+        keep = self.db.create_category("Keep").id
+        gone = self.db.create_category("Gone").id
+        job_id = self._generate(category_ids=[gone, keep])
+        self.assertTrue(self.db.delete_category(gone))
+        with self.assertLogs("metascan.core.generation_categories", "WARNING"):
+            self._ingest(job_id)
+        self.assertEqual(len(self.db.list_i2v_videos(str(self.src))), 1)
+        self.assertEqual(self._link_sources(self.out), {"Keep": "generation"})
+
+    def test_no_categories_emits_no_categories_event(self):
+        events = []
+        self.runner.on_event(lambda ch, ev, data: events.append((ch, ev)))
+        self.db.create_category("Anime")
+        self._ingest(self._generate())
+        self.assertEqual(self._link_sources(self.out), {})
+        self.assertEqual(events, [("i2v", "i2v_videos_changed")])
+
+
 class TestGeneratePromptWithTemplate(I2vRunnerBase):
     def setUp(self):
         super().setUp()

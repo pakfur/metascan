@@ -32,6 +32,8 @@ export function generateVideo(body: {
   // High quality only; the server ignores it for Fast.
   steps?: number
   template_id?: string | null
+  // Categories the clip is tagged with at ingest; an unknown id is a 404.
+  category_ids?: number[]
 }): Promise<{ job_id: number; warnings: string[] }> {
   return post('/i2v/generate', body)
 }

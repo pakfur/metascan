@@ -28,6 +28,7 @@ from backend.config import get_t2i_config
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyClient, ComfyError
 from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media import Media
 from metascan.core.scanner import Scanner
 from metascan.core.t2i_captions import CaptionFilterError, CaptionPicker, CaptionStore
 from metascan.core.t2i_characters import resolve_caption
@@ -351,6 +352,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         self.out_root = self.root / "out"
         self.cfg = get_t2i_config({"t2i": {"window": 4}})
         self.events: List[Tuple[str, Dict[str, Any]]] = []
+        self.category_events: List[Tuple[str, Dict[str, Any]]] = []
         self.runner = T2iRunner(
             db=self.db,
             comfy=self.comfy,
@@ -375,6 +377,11 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         await self.runner.aclose()
 
     def _record(self, channel: str, event: str, data: Dict[str, Any]) -> None:
+        if channel == "categories":
+            # Tagging a batch's images with its categories: kept apart so
+            # the t2i frame sequences the other tests assert stay as they are.
+            self.category_events.append((event, copy.deepcopy(data)))
+            return
         self.assertEqual(channel, "t2i")
         self.events.append((event, copy.deepcopy(data)))
         self.log.append(("event", event))
@@ -3627,6 +3634,90 @@ class TestWriterLineage(AccountingCase):
     async def test_a_manual_batch_has_no_writer(self) -> None:
         await self.manual_batch(count=1)
         self.assertEqual(await self.writer_ids(), [None])
+
+
+class TestCategoryTagging(AccountingCase):
+    """A batch's images carry the categories chosen in its dialog."""
+
+    def scanned(self, job_id: int) -> None:
+        """What ComfyClient's scanner does before it announces the outputs:
+        the image gets its media row."""
+        self.db.save_media(
+            Media(
+                file_path=Path(self.image(job_id)),
+                file_size=1,
+                width=8,
+                height=8,
+                format="png",
+                created_at=datetime.now(),
+                modified_at=datetime.now(),
+            )
+        )
+
+    def link_sources(self, path: str) -> Dict[str, str]:
+        with self.db.lock, self.db._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT c.name, mc.source FROM media_categories mc "
+                "JOIN categories c ON c.id = mc.category_id WHERE mc.file_path = ?",
+                (Path(path).as_posix(),),
+            ).fetchall()
+        return {r["name"]: r["source"] for r in rows}
+
+    async def test_t2i_batch_tags_generated_images(self) -> None:
+        cid = self.db.create_category("Anime").id
+        await self.manual_batch(count=2, category_ids=[cid])
+        for job_id in self.comfy.job_ids:
+            self.scanned(job_id)
+            await self.job_done(job_id)
+        self.assertEqual(len(self.comfy.job_ids), 2)
+        for job_id in self.comfy.job_ids:
+            path = self.image(job_id)
+            self.assertEqual(
+                {c.name for c in self.db.get_media_categories(path)}, {"Anime"}
+            )
+            self.assertEqual(self.link_sources(path), {"Anime": "generation"})
+        self.assertIn(("categories_changed", {}), self.category_events)
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+
+    async def test_images_are_tagged_before_the_batch_announces_them(self) -> None:
+        cid = self.db.create_category("Anime").id
+        await self.manual_batch(count=1, category_ids=[cid])
+        (job_id,) = self.comfy.job_ids
+        seen: List[Dict[str, str]] = []
+        self.runner.on_event(
+            lambda channel, event, data: (
+                seen.append(self.link_sources(self.image(job_id)))
+                if event == "t2i_images_changed"
+                else None
+            )
+        )
+        self.scanned(job_id)
+        await self.job_done(job_id)
+        self.assertEqual(seen, [{"Anime": "generation"}])
+
+    async def test_a_category_deleted_mid_batch_is_skipped(self) -> None:
+        keep = self.db.create_category("Keep").id
+        gone = self.db.create_category("Gone").id
+        await self.manual_batch(count=1, category_ids=[gone, keep])
+        (job_id,) = self.comfy.job_ids
+        self.assertTrue(self.db.delete_category(gone))
+        self.scanned(job_id)
+        with self.assertLogs("metascan.core.generation_categories", "WARNING"):
+            await self.job_done(job_id)
+        # The image is still ingested and counted; only the dead id is skipped.
+        self.assertIsNotNone(self.db.get_t2i_image(1))
+        self.assertEqual(self.link_sources(self.image(job_id)), {"Keep": "generation"})
+        self.assertEqual(self.terminal_frames(), ["batch_complete"])
+        self.assertEqual(self.frames("batch_complete")[0]["images_done"], 1)
+
+    async def test_no_categories_tags_nothing_and_says_nothing(self) -> None:
+        self.db.create_category("Anime")
+        await self.manual_batch(count=1)
+        (job_id,) = self.comfy.job_ids
+        self.scanned(job_id)
+        await self.job_done(job_id)
+        self.assertEqual(self.link_sources(self.image(job_id)), {})
+        self.assertEqual(self.category_events, [])
 
 
 class TestAccounting(AccountingCase):

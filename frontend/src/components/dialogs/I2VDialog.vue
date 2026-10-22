@@ -17,9 +17,11 @@ import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '..
 import { thumbnailUrl } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useToast } from '../../composables/useToast'
+import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
 import MediaViewer from '../viewer/MediaViewer.vue'
+import CategorySelect from '../generation/CategorySelect.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
 import TextEditPopup from '../storyboard/TextEditPopup.vue'
 import {
@@ -188,6 +190,13 @@ const MAX_GENERATE_COUNT = 20
 
 const seedPolicy = ref<SeedPolicy>('fixed')
 const generateCount = ref(1)
+
+// Categories every clip of the next Generate is tagged with. Session-local
+// like the seed policy: not part of form_state, so loading a clip never
+// changes it.
+const { selected: categoryIds, refresh: refreshCategories } = useGenerationCategories(
+  'metascan.i2v.categories.v1',
+)
 const batchProgress = ref('')
 
 // A Fixed seed would render the same video N times, so the count is ignored
@@ -503,6 +512,7 @@ async function onGenerate() {
           loras: loras.value,
           idea: idea.value,
           template_id: templateId.value || null,
+          category_ids: [...categoryIds.value],
           ...(stepsEnabled.value ? { steps: steps.value } : {}),
         })
         warnings.value = res.warnings
@@ -512,7 +522,13 @@ async function onGenerate() {
         store.trackJob(res.job_id)
         queued += 1
       } catch (e) {
-        stopped = e instanceof Error ? e.message : String(e)
+        if (isUnknownCategoryError(e)) {
+          void refreshCategories()
+          stopped =
+            'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'
+        } else {
+          stopped = e instanceof Error ? e.message : String(e)
+        }
         break
       }
       const advanced = nextSeed(seed.value)
@@ -739,6 +755,7 @@ function jobLabel(chip: {
                   : `${effectiveCount} video${effectiveCount > 1 ? 's' : ''}` }}
               </small>
             </label>
+            <CategorySelect v-model="categoryIds" class="i2v-categories" />
           </div>
           <LoraListEditor
             label="LoRAs"
@@ -1037,6 +1054,7 @@ function jobLabel(chip: {
 }
 
 .params { display: flex; gap: 12px; flex-wrap: wrap; }
+.i2v-categories { flex: 1 1 100%; }
 .seed-row { display: inline-flex; gap: 4px; }
 .i2v-prompt { margin-top: 14px; }
 .i2v-panels { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
