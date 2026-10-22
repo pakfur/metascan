@@ -2,11 +2,13 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
+from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar, Callable
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
 from threading import Lock
+
+import numpy as np
 
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
@@ -239,6 +241,10 @@ class DatabaseManager:
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.db_file = self.db_path / "metascan.db"
         self.lock = Lock()
+        # fn(native_path) -> (vector, model_key) | None; see set_embedding_lookup.
+        self._embedding_lookup: Optional[Callable[[str], Optional[Tuple[Any, str]]]] = (
+            None
+        )
 
         # Lazy-initialize prompt tokenizer (deferred until first use)
         self._prompt_tokenizer: Optional[PromptTokenizer] = None
@@ -3118,9 +3124,102 @@ class DatabaseManager:
             if still_referenced:
                 conn.execute("UPDATE media SET hidden = 0 WHERE file_path = ?", (path,))
             else:
+                self._write_tombstones(conn, [path], self._iso(None))
                 conn.execute("DELETE FROM media WHERE file_path = ?", (path,))
                 deleted.append(to_native_path(path))
         return deleted
+
+    def set_embedding_lookup(
+        self, fn: Optional[Callable[[str], Optional[Tuple[Any, str]]]]
+    ) -> None:
+        """Install the callable tombstones use to snapshot a deleted item's
+        embedding: ``fn(native_path)`` returns ``(vector, model_key)`` or
+        None. It runs while the DB lock is held, so it must be a fast
+        in-memory lookup. Default: no lookup (embedding columns stay NULL)."""
+        self._embedding_lookup = fn
+
+    def _write_tombstones(
+        self, conn: sqlite3.Connection, posix_paths: List[str], now: str
+    ) -> None:
+        """Record a media_tombstones row for each path that carries training
+        signal (a judgment, a category link, or a generated-image/video
+        row). Must run before the media DELETE, inside the caller's
+        transaction and lock -- never takes the lock itself."""
+        for path in posix_paths:
+            judgment = conn.execute(
+                "SELECT passed, reasons, seen_at, confirmed_at "
+                "FROM media_judgments WHERE file_path = ?",
+                (path,),
+            ).fetchone()
+            cat_names = [
+                r["name"]
+                for r in conn.execute(
+                    "SELECT c.name FROM media_categories mc "
+                    "JOIN categories c ON c.id = mc.category_id "
+                    "WHERE mc.file_path = ?",
+                    (path,),
+                ).fetchall()
+            ]
+            t2i = conn.execute(
+                "SELECT * FROM t2i_images WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone()
+            i2v = conn.execute(
+                "SELECT * FROM i2v_videos WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone()
+            if judgment is None and not cat_names and t2i is None and i2v is None:
+                continue
+            media = conn.execute(
+                "SELECT is_favorite FROM media WHERE file_path = ?", (path,)
+            ).fetchone()
+            if media is None:
+                continue
+            lineage: Optional[Dict[str, Any]] = None
+            for key, row in (("t2i", t2i), ("i2v", i2v)):
+                if row is not None:
+                    data = {k: row[k] for k in row.keys() if k != "form_state"}
+                    lineage = {key: data}
+                    break
+            blob: Optional[bytes] = None
+            model_key: Optional[str] = None
+            if self._embedding_lookup is not None:
+                try:
+                    found = self._embedding_lookup(to_native_path(path))
+                    if found is not None:
+                        vector, key = found
+                        blob = np.asarray(vector).astype(np.float32).tobytes()
+                        model_key = key
+                except Exception as e:
+                    logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
+                    blob, model_key = None, None
+            conn.execute(
+                "INSERT INTO media_tombstones (file_path, deleted_at, "
+                "is_favorite, passed, reasons, categories, seen_at, "
+                "confirmed_at, embedding, embedding_model, lineage) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    path,
+                    now,
+                    1 if media["is_favorite"] else 0,
+                    int(judgment["passed"]) if judgment is not None else 0,
+                    judgment["reasons"] if judgment is not None else "[]",
+                    json.dumps(sorted(cat_names)),
+                    judgment["seen_at"] if judgment is not None else None,
+                    judgment["confirmed_at"] if judgment is not None else None,
+                    blob,
+                    model_key,
+                    json.dumps(lineage, default=str) if lineage else None,
+                ),
+            )
+
+    def list_tombstones(self) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM media_tombstones ORDER BY id").fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["lineage"] = json.loads(d["lineage"]) if d["lineage"] else None
+            out.append(d)
+        return out
 
     def _panel_ids_for_storyboard(
         self, conn: sqlite3.Connection, storyboard_id: int
@@ -3918,8 +4017,9 @@ class DatabaseManager:
             ).fetchone()
             if row is None:
                 return False, []
-            conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
+            # Purge first so the tombstone can still read the lineage row.
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
             conn.commit()
             return True, deleted_files
 
@@ -4114,8 +4214,9 @@ class DatabaseManager:
             ).fetchone()
             if row is None:
                 return False, []
-            conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
+            # Purge first so the tombstone can still read the lineage row.
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
             conn.commit()
             return True, deleted_files
 
@@ -4381,6 +4482,7 @@ class DatabaseManager:
                     # Convert to POSIX format for database lookup
                     posix_path = to_posix_path(file_path)
                     # Delete from media table (indices will cascade delete)
+                    self._write_tombstones(conn, [posix_path], self._iso(None))
                     cursor = conn.execute(
                         "DELETE FROM media WHERE file_path = ?", (posix_path,)
                     )
@@ -4406,6 +4508,11 @@ class DatabaseManager:
                 with self._get_connection() as conn:
                     # Convert paths to POSIX format for database lookup
                     path_tuples = [(to_posix_path(fp),) for fp in file_paths]
+                    self._write_tombstones(
+                        conn,
+                        list(dict.fromkeys(t[0] for t in path_tuples)),
+                        self._iso(None),
+                    )
                     conn.executemany(
                         "DELETE FROM media WHERE file_path = ?", path_tuples
                     )

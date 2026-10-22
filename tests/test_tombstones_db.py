@@ -1,0 +1,173 @@
+"""Tombstones written on every media delete path (taste-rating capture)."""
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.media import Media
+
+
+@pytest.fixture
+def db(tmp_path):
+    mgr = DatabaseManager(tmp_path / "db")
+    yield mgr
+    mgr.close()
+
+
+def _media(path: str) -> Media:
+    return Media(
+        file_path=Path(path),
+        file_size=1,
+        width=8,
+        height=8,
+        format="png",
+        created_at=datetime.now(),
+        modified_at=datetime.now(),
+    )
+
+
+def test_untouched_item_leaves_no_tombstone(db):
+    db.save_media(_media("/p/a.png"))
+    db.delete_media(Path("/p/a.png"))
+    assert db.list_tombstones() == []
+
+
+def test_judged_item_tombstone_has_judgment_and_embedding(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "pass")
+    db.set_reason("/p/a.png", "composition", True)
+    vec = np.arange(32, dtype=np.float32)
+    db.set_embedding_lookup(lambda p: (vec, "clip-medium"))
+    db.delete_media(Path("/p/a.png"))
+    [t] = db.list_tombstones()
+    assert (t["passed"], json.loads(t["reasons"]), t["embedding_model"]) == (
+        1,
+        ["composition"],
+        "clip-medium",
+    )
+    assert np.array_equal(np.frombuffer(t["embedding"], dtype=np.float32), vec)
+    assert db.list_judgment_events("/p/a.png")  # event log survives the delete
+
+
+def test_lookup_failure_does_not_block_delete(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "favorite")
+    db.set_embedding_lookup(lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert db.delete_media(Path("/p/a.png")) is True
+    [t] = db.list_tombstones()
+    assert t["embedding"] is None and t["embedding_model"] is None
+    assert t["is_favorite"] == 1 and t["passed"] == 0
+
+
+def test_lookup_none_leaves_embedding_null(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "favorite")
+    db.set_embedding_lookup(lambda p: None)
+    db.delete_media(Path("/p/a.png"))
+    assert db.list_tombstones()[0]["embedding"] is None
+
+
+def test_t2i_delete_writes_one_tombstone_with_lineage(db):
+    db.save_media(_media("/p/gen.png"))
+    image_id = db.create_t2i_image(
+        file_path="/p/gen.png",
+        batch_id="b1",
+        model="krea2",
+        prompt_used="synthetic prompt",
+        writer_id="base",
+        form_state={"x": 1},
+    )
+    db.delete_t2i_image(image_id)
+    [t] = db.list_tombstones()
+    assert t["lineage"]["t2i"]["writer_id"] == "base"
+    assert "form_state" not in t["lineage"]["t2i"]
+    assert "i2v" not in t["lineage"]
+
+
+def test_i2v_delete_writes_one_tombstone(db):
+    db.save_media(_media("/p/src.png"))
+    db.save_media(_media("/p/clip.mp4"))
+    vid = db.create_i2v_video(
+        source_path="/p/src.png",
+        file_path="/p/clip.mp4",
+        prompt_used="synthetic",
+        writer_id="w1",
+        form_state={"x": 1},
+    )
+    db.delete_i2v_video(vid)
+    [t] = db.list_tombstones()
+    assert t["file_path"] == "/p/clip.mp4"
+    assert t["lineage"]["i2v"]["writer_id"] == "w1"
+    assert "form_state" not in t["lineage"]["i2v"]
+
+
+def test_i2v_source_image_is_not_tombstoned(db):
+    db.save_media(_media("/p/src.png"))
+    db.save_media(_media("/p/clip.mp4"))
+    db.create_i2v_video(source_path="/p/src.png", file_path="/p/clip.mp4")
+    db.delete_media(Path("/p/src.png"))
+    assert db.list_tombstones() == []
+
+
+def test_batch_delete_tombstones_only_judged(db):
+    for n in ("a", "b", "c"):
+        db.save_media(_media(f"/p/{n}.png"))
+    db.set_verdict("/p/b.png", "favorite")
+    n = db.delete_media_batch([Path(f"/p/{x}.png") for x in "abc"])
+    assert n == 3
+    [t] = db.list_tombstones()
+    assert t["file_path"] == "/p/b.png"
+
+
+def test_storyboard_purge_released_path_has_no_tombstone(db):
+    sb = db.create_storyboard(
+        name="Yard", target_model="sd", architecture="t2i", base_seed=42
+    )
+    sc = db.create_scene(sb, name="s", sort_order=0)
+    pa = db.create_panel(sc, action="a", sort_order=0)
+    beat_id = db.create_beat(pa, action="a beat")
+    db.save_media(_media("/p/gen.png"))
+    db.set_verdict("/p/gen.png", "favorite")
+    image_id = db.create_t2i_image(file_path="/p/gen.png", writer_id="base")
+    db.create_beat_image(beat_id, file_path="/p/gen.png")
+    deleted, purged = db.delete_t2i_image(image_id)
+    assert deleted is True and purged == []
+    assert db.list_tombstones() == []
+    assert db.get_judgment("/p/gen.png") is not None  # media survived
+
+
+def test_purged_path_is_tombstoned(db):
+    db.save_media(_media("/p/gen.png"))
+    db.set_verdict("/p/gen.png", "pass")
+    image_id = db.create_t2i_image(file_path="/p/gen.png", writer_id="base")
+    deleted, purged = db.delete_t2i_image(image_id)
+    assert deleted is True and len(purged) == 1
+    assert len(db.list_tombstones()) == 1
+
+
+def test_category_link_makes_tombstone_with_names(db):
+    db.save_media(_media("/p/a.png"))
+    cid = db.create_category("Anime").id
+    with db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO media_categories (file_path, category_id, source, "
+            "assigned_at) VALUES (?, ?, 'bulk', 'now')",
+            ("/p/a.png", cid),
+        )
+        conn.commit()
+    db.delete_media(Path("/p/a.png"))
+    [t] = db.list_tombstones()
+    assert json.loads(t["categories"]) == ["Anime"]
+
+
+@pytest.mark.skip(reason="Task 5")
+def test_categorized_only_item_tombstoned_with_names(db):
+    db.save_media(_media("/p/a.png"))
+    cid = db.create_category("Anime").id
+    db.add_media_categories(["/p/a.png"], cid, "bulk")
+    db.delete_media(Path("/p/a.png"))
+    assert json.loads(db.list_tombstones()[0]["categories"]) == ["Anime"]
