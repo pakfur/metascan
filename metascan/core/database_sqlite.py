@@ -14,6 +14,8 @@ from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
 from metascan.core.judgments import (
+    CATEGORY_NAME_MAX,
+    CATEGORY_SOURCES,
     REASONS,
     RECONFIRM_MIN_INTERVAL_S,
     CategoryRef,
@@ -5066,15 +5068,176 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             return self._read_media_categories(conn, posix_path)
 
+    @staticmethod
+    def _clean_category_name(name: str) -> str:
+        name = (name or "").strip()
+        if not name or len(name) > CATEGORY_NAME_MAX:
+            raise ValueError("invalid_name")
+        return name
+
     def create_category(self, name: str) -> CategoryRef:
-        name = name.strip()
+        name = self._clean_category_name(name)
         with self.lock, self._get_connection() as conn:
-            cur = conn.execute(
-                "INSERT INTO categories (name, created_at) VALUES (?, ?)",
-                (name, self._iso(None)),
-            )
+            try:
+                cur = conn.execute(
+                    "INSERT INTO categories (name, created_at) VALUES (?, ?)",
+                    (name, self._iso(None)),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
             conn.commit()
-            return CategoryRef(id=int(cur.lastrowid or 0), name=name)
+            assert cur.lastrowid is not None
+            return CategoryRef(id=int(cur.lastrowid), name=name)
+
+    def list_categories(self) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT c.id, c.name, c.created_at, "
+                "(SELECT COUNT(*) FROM media_categories mc "
+                " WHERE mc.category_id = c.id) AS item_count "
+                "FROM categories c ORDER BY c.name COLLATE NOCASE, c.id"
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "item_count": r["item_count"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+
+    def rename_category(self, category_id: int, name: str) -> Optional[CategoryRef]:
+        name = self._clean_category_name(name)
+        with self.lock, self._get_connection() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM categories WHERE id = ?", (category_id,)
+                ).fetchone()
+                is None
+            ):
+                return None
+            try:
+                conn.execute(
+                    "UPDATE categories SET name = ? WHERE id = ?",
+                    (name, category_id),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            return CategoryRef(id=category_id, name=name)
+
+    def delete_category(self, category_id: int) -> bool:
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                return False
+            ts = self._iso(None)
+            linked = conn.execute(
+                "SELECT file_path FROM media_categories WHERE category_id = ?",
+                (category_id,),
+            ).fetchall()
+            for r in linked:
+                self._log_judgment_event(
+                    conn,
+                    r["file_path"],
+                    "category_off",
+                    ts,
+                    category=cat["name"],
+                )
+            conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+            conn.commit()
+            return True
+
+    def _link_category(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        category_id: int,
+        category_name: str,
+        source: str,
+        ts: str,
+        score_shown: Optional[float] = None,
+    ) -> bool:
+        """Link a media row to a category; log category_on only for a new link.
+
+        Caller holds the lock and commits.
+        """
+        cur = conn.execute(
+            "INSERT INTO media_categories "
+            "(file_path, category_id, source, assigned_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(file_path, category_id) DO NOTHING",
+            (posix_path, category_id, source, ts),
+        )
+        if cur.rowcount <= 0:
+            return False
+        self._log_judgment_event(
+            conn,
+            posix_path,
+            "category_on",
+            ts,
+            score_shown,
+            category=category_name,
+        )
+        return True
+
+    def add_media_categories(
+        self, file_paths: List[str], category_id: int, source: str
+    ) -> int:
+        if source not in CATEGORY_SOURCES:
+            raise ValueError("invalid_source")
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                raise ValueError("unknown_category")
+            ts = self._iso(None)
+            added = 0
+            for posix_path in dict.fromkeys(to_posix_path(p) for p in file_paths):
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM media WHERE file_path = ?", (posix_path,)
+                    ).fetchone()
+                    is None
+                ):
+                    continue
+                if self._link_category(
+                    conn, posix_path, category_id, cat["name"], source, ts
+                ):
+                    added += 1
+            conn.commit()
+            return added
+
+    def remove_media_categories(self, file_paths: List[str], category_id: int) -> int:
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                return 0
+            ts = self._iso(None)
+            removed = 0
+            for posix_path in dict.fromkeys(to_posix_path(p) for p in file_paths):
+                cur = conn.execute(
+                    "DELETE FROM media_categories "
+                    "WHERE file_path = ? AND category_id = ?",
+                    (posix_path, category_id),
+                )
+                if cur.rowcount > 0:
+                    removed += 1
+                    self._log_judgment_event(
+                        conn,
+                        posix_path,
+                        "category_off",
+                        ts,
+                        category=cat["name"],
+                    )
+            conn.commit()
+            return removed
 
     def set_verdict(
         self,
@@ -5100,22 +5263,15 @@ class DatabaseManager:
                 return None
             if category_name is not None:
                 ts = self._iso(now)
-                cur = conn.execute(
-                    "INSERT INTO media_categories "
-                    "(file_path, category_id, source, assigned_at) "
-                    "VALUES (?, ?, 'sticky', ?) "
-                    "ON CONFLICT(file_path, category_id) DO NOTHING",
-                    (posix_path, sticky_category_id, ts),
-                )
-                if cur.rowcount > 0:
-                    self._log_judgment_event(
-                        conn,
-                        posix_path,
-                        "category_on",
-                        ts,
-                        score_shown,
-                        category=category_name,
-                    )
+                if self._link_category(
+                    conn,
+                    posix_path,
+                    sticky_category_id or 0,
+                    category_name,
+                    "sticky",
+                    ts,
+                    score_shown,
+                ):
                     state = self._read_judgment(conn, posix_path)
             conn.commit()
             return state
