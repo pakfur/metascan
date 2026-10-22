@@ -3236,6 +3236,37 @@ class DatabaseManager:
             ),
         )
 
+    def tombstones_missing_embedding(self) -> List[Tuple[int, str]]:
+        """``(id, posix file_path)`` for every tombstone whose embedding is
+        NULL -- written while the FAISS index wasn't loaded in memory."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, file_path FROM media_tombstones "
+                "WHERE embedding IS NULL ORDER BY id"
+            ).fetchall()
+        return [(int(r["id"]), str(r["file_path"])) for r in rows]
+
+    def set_tombstone_embeddings(self, rows: List[Tuple[int, bytes, str]]) -> int:
+        """Fill ``(id, float32 vector bytes, model_key)`` into tombstones in
+        one transaction. Only rows whose embedding is still NULL are
+        written; returns how many were."""
+        if not rows:
+            return 0
+        filled = 0
+        with self.lock, self._get_connection() as conn:
+            for tomb_id, blob, model_key in rows:
+                cur = conn.execute(
+                    "UPDATE media_tombstones SET embedding = ?, embedding_model = ? "
+                    "WHERE id = ? AND embedding IS NULL",
+                    (blob, model_key, tomb_id),
+                )
+                filled += max(cur.rowcount, 0)
+            conn.commit()
+        return filled
+
+    def set_tombstone_embedding(self, tomb_id: int, blob: bytes, model_key: str) -> int:
+        return self.set_tombstone_embeddings([(tomb_id, blob, model_key)])
+
     def list_tombstones(self) -> List[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:
             rows = conn.execute("SELECT * FROM media_tombstones ORDER BY id").fetchall()
