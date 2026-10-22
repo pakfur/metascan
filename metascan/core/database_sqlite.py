@@ -1,3 +1,4 @@
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,13 @@ from threading import Lock
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.judgments import (
+    REASONS,
+    RECONFIRM_MIN_INTERVAL_S,
+    CategoryRef,
+    JudgmentState,
+    Verdict,
+)
 from metascan.core.prompt_tokenizer import PromptTokenizer
 
 logger = logging.getLogger(__name__)
@@ -4800,51 +4808,328 @@ class DatabaseManager:
             logger.error(f"Failed to get filtered media paths: {e}")
             return set()
 
+    # ------------------------------------------------------------------
+    # Judgments (taste-rating capture)
+    # ------------------------------------------------------------------
+    # Every public method takes self.lock once and delegates to the private
+    # helpers below, which take an open connection and never touch the lock
+    # (it is a plain, non-reentrant Lock).
+
+    @staticmethod
+    def _iso(now: Optional[datetime]) -> str:
+        return (now or datetime.now(timezone.utc)).isoformat()
+
+    @staticmethod
+    def _log_judgment_event(
+        conn: sqlite3.Connection,
+        posix_path: str,
+        event: str,
+        created_at: str,
+        score_shown: Optional[float] = None,
+        reason: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO judgment_events "
+            "(file_path, event, reason, category, score_shown, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (posix_path, event, reason, category, score_shown, created_at),
+        )
+
+    @staticmethod
+    def _read_media_categories(
+        conn: sqlite3.Connection, posix_path: str
+    ) -> List[CategoryRef]:
+        rows = conn.execute(
+            "SELECT c.id, c.name FROM media_categories mc "
+            "JOIN categories c ON c.id = mc.category_id "
+            "WHERE mc.file_path = ? ORDER BY c.name COLLATE NOCASE, c.id",
+            (posix_path,),
+        ).fetchall()
+        return [CategoryRef(id=r["id"], name=r["name"]) for r in rows]
+
+    def _read_judgment(
+        self, conn: sqlite3.Connection, posix_path: str
+    ) -> Optional[JudgmentState]:
+        media = conn.execute(
+            "SELECT is_favorite FROM media WHERE file_path = ?", (posix_path,)
+        ).fetchone()
+        if media is None:
+            return None
+        row = conn.execute(
+            "SELECT passed, reasons, seen_at, confirmed_at "
+            "FROM media_judgments WHERE file_path = ?",
+            (posix_path,),
+        ).fetchone()
+        is_fav = bool(media["is_favorite"])
+        passed = bool(row["passed"]) if row is not None else False
+        verdict: Optional[Verdict] = (
+            "favorite" if is_fav else ("pass" if passed else None)
+        )
+        reasons: List[str] = []
+        if row is not None and verdict is not None:
+            try:
+                reasons = [r for r in json.loads(row["reasons"]) if r in REASONS]
+            except (TypeError, ValueError):
+                reasons = []
+        return JudgmentState(
+            file_path=posix_path,
+            verdict=verdict,
+            reasons=reasons,
+            seen_at=row["seen_at"] if row is not None else None,
+            confirmed_at=row["confirmed_at"] if row is not None else None,
+            is_favorite=is_fav,
+            categories=self._read_media_categories(conn, posix_path),
+        )
+
+    @staticmethod
+    def _ensure_judgment_row(conn: sqlite3.Connection, posix_path: str) -> None:
+        conn.execute(
+            "INSERT INTO media_judgments (file_path) VALUES (?) "
+            "ON CONFLICT(file_path) DO NOTHING",
+            (posix_path,),
+        )
+
+    def _apply_verdict(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        verdict: Optional[Verdict],
+        score_shown: Optional[float],
+        now: Optional[datetime],
+    ) -> Optional[JudgmentState]:
+        """Set the verdict and log events. Caller holds the lock and commits."""
+        current = self._read_judgment(conn, posix_path)
+        if current is None:
+            return None
+        ts = self._iso(now)
+        if verdict == current.verdict:
+            if verdict is not None:
+                self._ensure_judgment_row(conn, posix_path)
+                conn.execute(
+                    "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+            return self._read_judgment(conn, posix_path)
+
+        log = self._log_judgment_event
+        if current.verdict == "favorite":
+            log(conn, posix_path, "unfavorite", ts, score_shown)
+        elif current.verdict == "pass":
+            log(conn, posix_path, "unpass", ts, score_shown)
+        if verdict == "favorite":
+            log(conn, posix_path, "favorite", ts, score_shown)
+        elif verdict == "pass":
+            log(conn, posix_path, "pass", ts, score_shown)
+
+        conn.execute(
+            "UPDATE media SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE file_path = ?",
+            (1 if verdict == "favorite" else 0, posix_path),
+        )
+        self._ensure_judgment_row(conn, posix_path)
+        conn.execute(
+            "UPDATE media_judgments SET passed = ?, reasons = '[]', "
+            "judged_at = ?, confirmed_at = ?, seen_at = COALESCE(seen_at, ?) "
+            "WHERE file_path = ?",
+            (1 if verdict == "pass" else 0, ts, ts, ts, posix_path),
+        )
+        return self._read_judgment(conn, posix_path)
+
+    def get_judgment(self, file_path: str) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            return self._read_judgment(conn, posix_path)
+
+    def get_media_categories(self, file_path: str) -> List[CategoryRef]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            return self._read_media_categories(conn, posix_path)
+
+    def create_category(self, name: str) -> CategoryRef:
+        name = name.strip()
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO categories (name, created_at) VALUES (?, ?)",
+                (name, self._iso(None)),
+            )
+            conn.commit()
+            return CategoryRef(id=int(cur.lastrowid or 0), name=name)
+
+    def set_verdict(
+        self,
+        file_path: str,
+        verdict: Optional[Verdict],
+        score_shown: Optional[float] = None,
+        now: Optional[datetime] = None,
+        sticky_category_id: Optional[int] = None,
+    ) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            category_name: Optional[str] = None
+            if verdict is not None and sticky_category_id is not None:
+                cat = conn.execute(
+                    "SELECT name FROM categories WHERE id = ?",
+                    (sticky_category_id,),
+                ).fetchone()
+                if cat is None:
+                    raise ValueError("unknown_category")
+                category_name = cat["name"]
+            state = self._apply_verdict(conn, posix_path, verdict, score_shown, now)
+            if state is None:
+                return None
+            if category_name is not None:
+                ts = self._iso(now)
+                cur = conn.execute(
+                    "INSERT INTO media_categories "
+                    "(file_path, category_id, source, assigned_at) "
+                    "VALUES (?, ?, 'sticky', ?) "
+                    "ON CONFLICT(file_path, category_id) DO NOTHING",
+                    (posix_path, sticky_category_id, ts),
+                )
+                if cur.rowcount > 0:
+                    self._log_judgment_event(
+                        conn,
+                        posix_path,
+                        "category_on",
+                        ts,
+                        score_shown,
+                        category=category_name,
+                    )
+                    state = self._read_judgment(conn, posix_path)
+            conn.commit()
+            return state
+
+    def set_reason(
+        self,
+        file_path: str,
+        reason: str,
+        on: bool,
+        score_shown: Optional[float] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[JudgmentState]:
+        if reason not in REASONS:
+            raise ValueError("unknown_reason")
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            state = self._read_judgment(conn, posix_path)
+            if state is None:
+                return None
+            if state.verdict is None:
+                raise ValueError("no_verdict")
+            if (reason in state.reasons) == on:
+                return state
+            reasons = set(state.reasons)
+            if on:
+                reasons.add(reason)
+            else:
+                reasons.discard(reason)
+            ordered = [r for r in REASONS if r in reasons]
+            ts = self._iso(now)
+            conn.execute(
+                "UPDATE media_judgments SET reasons = ? WHERE file_path = ?",
+                (json.dumps(ordered), posix_path),
+            )
+            self._log_judgment_event(
+                conn,
+                posix_path,
+                "reason_on" if on else "reason_off",
+                ts,
+                score_shown,
+                reason=reason,
+            )
+            conn.commit()
+            return self._read_judgment(conn, posix_path)
+
+    def mark_seen(
+        self, file_path: str, now: Optional[datetime] = None
+    ) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            state = self._read_judgment(conn, posix_path)
+            if state is None:
+                return None
+            ts = self._iso(now)
+            if state.seen_at is None:
+                self._ensure_judgment_row(conn, posix_path)
+                conn.execute(
+                    "UPDATE media_judgments SET seen_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+                self._log_judgment_event(conn, posix_path, "seen", ts)
+            elif state.verdict is not None and self._reconfirm_due(
+                state.confirmed_at, now
+            ):
+                conn.execute(
+                    "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+                self._log_judgment_event(conn, posix_path, "reconfirm", ts)
+            else:
+                return state
+            conn.commit()
+            return self._read_judgment(conn, posix_path)
+
+    @staticmethod
+    def _reconfirm_due(confirmed_at: Optional[str], now: Optional[datetime]) -> bool:
+        if confirmed_at is None:
+            return True
+        try:
+            last = datetime.fromisoformat(confirmed_at)
+        except ValueError:
+            return True
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return (current - last).total_seconds() >= RECONFIRM_MIN_INTERVAL_S
+
+    def list_judgment_events(
+        self, file_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            if file_path is None:
+                rows = conn.execute(
+                    "SELECT * FROM judgment_events ORDER BY id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM judgment_events WHERE file_path = ? ORDER BY id",
+                    (to_posix_path(file_path),),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
     def toggle_favorite(self, file_path: Path) -> bool:
         try:
-            with self.lock:
-                with self._get_connection() as conn:
-                    # Convert to POSIX format for database lookup
-                    posix_path = to_posix_path(file_path)
-                    # Get current favorite status
-                    row = conn.execute(
-                        "SELECT is_favorite FROM media WHERE file_path = ?",
-                        (posix_path,),
-                    ).fetchone()
-
-                    if row is not None:
-                        new_status = 0 if row["is_favorite"] else 1
-                        conn.execute(
-                            """
-                            UPDATE media
-                            SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE file_path = ?
-                        """,
-                            (new_status, posix_path),
-                        )
-                        conn.commit()
-                        return bool(new_status)
+            posix_path = to_posix_path(file_path)
+            with self.lock, self._get_connection() as conn:
+                state = self._read_judgment(conn, posix_path)
+                if state is None:
                     return False
+                target: Optional[Verdict] = (
+                    None if state.verdict == "favorite" else "favorite"
+                )
+                self._apply_verdict(conn, posix_path, target, None, None)
+                conn.commit()
+                return target == "favorite"
         except Exception as e:
             logger.error(f"Failed to toggle favorite for {file_path}: {e}")
             return False
 
     def set_favorite(self, file_path: Path, is_favorite: bool) -> bool:
         try:
-            with self.lock:
-                with self._get_connection() as conn:
-                    # Convert to POSIX format for database lookup
-                    posix_path = to_posix_path(file_path)
-                    cursor = conn.execute(
-                        """
-                        UPDATE media
-                        SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE file_path = ?
-                    """,
-                        (1 if is_favorite else 0, posix_path),
-                    )
-                    conn.commit()
-                    return cursor.rowcount > 0  # type: ignore[no-any-return]
+            posix_path = to_posix_path(file_path)
+            with self.lock, self._get_connection() as conn:
+                state = self._read_judgment(conn, posix_path)
+                if state is None:
+                    return False
+                if is_favorite:
+                    self._apply_verdict(conn, posix_path, "favorite", None, None)
+                elif state.verdict == "favorite":
+                    self._apply_verdict(conn, posix_path, None, None, None)
+                conn.commit()
+                return True
         except Exception as e:
             logger.error(f"Failed to set favorite for {file_path}: {e}")
             return False
