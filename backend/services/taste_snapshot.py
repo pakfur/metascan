@@ -17,12 +17,14 @@ back yet, and it is only deleted once nothing is left in it.
   so it is neither retried forever nor lost.
 """
 
+import itertools
 import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -41,35 +43,122 @@ def _is_empty(snapshot: Dict[str, Any]) -> bool:
     )
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in ``directory`` durable. Best effort: Windows (and
+    some filesystems) cannot open or fsync a directory."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def write_snapshot_file(data_dir: Path, snapshot: Dict[str, Any]) -> None:
-    """Atomically replace the pending file with ``snapshot``."""
+    """Atomically and durably replace the pending file with ``snapshot``.
+
+    The full clean truncates the DB right after this returns, and that
+    DELETE is durable -- so the file's bytes and the rename are fsynced
+    first, or a power loss could leave an empty DB beside a zero-length
+    snapshot."""
     target = snapshot_file_path(data_dir)
     tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(snapshot), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(snapshot))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, target)
+    _fsync_dir(target.parent)
+
+
+def _empty_like(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "taken_at": snapshot.get("taken_at"),
+        "judgments": [],
+        "categories": [],
+        "favorites": [],
+    }
+
+
+def _consume_pending_file(data_dir: Path, snapshot: Dict[str, Any]) -> None:
+    """Remove the pending file once nothing is left in it. Retries the
+    unlink once (e.g. a virus scanner holding it on Windows); if it still
+    fails, overwrites it with an empty snapshot so already-handled entries
+    are never restored or tombstoned a second time. Never raises."""
+    target = snapshot_file_path(data_dir)
+    for attempt in (1, 2):
+        try:
+            target.unlink(missing_ok=True)
+            return
+        except OSError as e:
+            err = e
+            if attempt == 1:
+                time.sleep(0.2)
+    try:
+        write_snapshot_file(data_dir, _empty_like(snapshot))
+        logger.warning(
+            "Could not delete pending taste snapshot %s (%s); emptied it instead",
+            target,
+            err,
+        )
+    except OSError as e:
+        logger.error(
+            "Could not delete or empty pending taste snapshot %s (%s, %s); "
+            "remove it by hand -- its entries were already handled",
+            target,
+            err,
+            e,
+        )
 
 
 def _persist_remaining(data_dir: Path, remaining: Dict[str, Any]) -> None:
     """Rewrite the pending file with ``remaining``; delete it if empty."""
     if _is_empty(remaining):
-        snapshot_file_path(data_dir).unlink(missing_ok=True)
+        _consume_pending_file(data_dir, remaining)
     else:
         write_snapshot_file(data_dir, remaining)
 
 
-_JUDGMENT_KEYS = {
-    "file_path",
-    "passed",
-    "reasons",
-    "seen_at",
-    "judged_at",
-    "confirmed_at",
-}
-_LINK_KEYS = {"file_path", "category_id", "category_name", "source", "assigned_at"}
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _opt_str(v: Any) -> bool:
+    return v is None or isinstance(v, str)
+
+
+def _valid_judgment(j: Any) -> bool:
+    return (
+        isinstance(j, dict)
+        and isinstance(j.get("file_path"), str)
+        and (_is_int(j.get("passed")) or isinstance(j.get("passed"), bool))
+        and isinstance(j.get("reasons"), str)
+        and all(
+            k in j and _opt_str(j[k]) for k in ("seen_at", "judged_at", "confirmed_at")
+        )
+    )
+
+
+def _valid_link(lk: Any) -> bool:
+    return (
+        isinstance(lk, dict)
+        and isinstance(lk.get("file_path"), str)
+        and _is_int(lk.get("category_id"))
+        and isinstance(lk.get("category_name"), str)
+        and isinstance(lk.get("source"), str)
+        and isinstance(lk.get("assigned_at"), str)
+    )
 
 
 def _valid_shape(snap: Any) -> bool:
-    """Enough structure for ``restore_taste_state`` not to choke on it."""
+    """Structure *and* value types ``restore_taste_state`` relies on, so a
+    bad file is quarantined instead of failing every restore forever."""
     if not isinstance(snap, dict):
         return False
     lists = [snap.get(k, []) for k in ("judgments", "categories", "favorites")]
@@ -77,15 +166,20 @@ def _valid_shape(snap: Any) -> bool:
         return False
     judgments, links, favorites = lists
     return (
-        all(isinstance(j, dict) and _JUDGMENT_KEYS <= j.keys() for j in judgments)
-        and all(isinstance(lk, dict) and _LINK_KEYS <= lk.keys() for lk in links)
+        all(_valid_judgment(j) for j in judgments)
+        and all(_valid_link(lk) for lk in links)
         and all(isinstance(p, str) for p in favorites)
     )
 
 
+_quarantine_seq = itertools.count()
+
+
 def _quarantine(target: Path, why: str) -> None:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = target.with_name(f"{target.name}.corrupt-{stamp}")
+    dest = target.with_name(
+        f"{target.name}.corrupt-{stamp}-{os.getpid()}-{next(_quarantine_seq)}"
+    )
     try:
         os.replace(target, dest)
         logger.warning(
@@ -96,7 +190,7 @@ def _quarantine(target: Path, why: str) -> None:
         )
     except OSError as e:
         logger.warning(
-            "Pending taste snapshot %s is corrupt (%s) and could not be " "renamed: %s",
+            "Pending taste snapshot %s is corrupt (%s) and could not be renamed: %s",
             target,
             why,
             e,
@@ -105,14 +199,20 @@ def _quarantine(target: Path, why: str) -> None:
 
 def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     """The pending snapshot, or None when there is none. A file that cannot
-    be parsed (or has the wrong shape) is quarantined and None returned."""
+    be parsed (or has the wrong shape / value types) is quarantined and None
+    returned. A read error (locked, permissions) leaves the file in place
+    -- it may well be valid -- and returns None for this attempt."""
     target = snapshot_file_path(data_dir)
     try:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except OSError as e:
-        _quarantine(target, f"unreadable: {e}")
+        logger.warning(
+            "Pending taste snapshot %s could not be read (%s); will retry later",
+            target,
+            e,
+        )
         return None
     try:
         snap = json.loads(raw)
@@ -122,7 +222,7 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     if not _valid_shape(snap):
         _quarantine(target, "unexpected structure")
         return None
-    return snap
+    return cast(Dict[str, Any], snap)
 
 
 def restore_and_persist(
@@ -133,7 +233,7 @@ def restore_and_persist(
     with the unrestored entries (deleted if none). Returns the int counts."""
     result = db.restore_taste_state(snapshot, tombstone_missing)
     if tombstone_missing:
-        snapshot_file_path(data_dir).unlink(missing_ok=True)
+        _consume_pending_file(data_dir, snapshot)
     else:
         _persist_remaining(data_dir, result["remaining"])
     return {k: int(v) for k, v in result.items() if k != "remaining"}
@@ -146,7 +246,13 @@ def apply_pending_taste_snapshot(db: Any, data_dir: Path) -> Dict[str, int]:
     snap = load_pending_snapshot(data_dir)
     if snap is None:
         return {"restored": 0, "missing": 0}
-    counts = restore_and_persist(db, data_dir, snap, False)
+    try:
+        counts = restore_and_persist(db, data_dir, snap, False)
+    except (TypeError, ValueError, KeyError, sqlite3.IntegrityError) as e:
+        # The data itself is unusable (the restore rolled back): quarantine
+        # it rather than fail -- and block every full clean -- forever.
+        _quarantine(snapshot_file_path(data_dir), f"restore rejected it: {e!r}")
+        return {"restored": 0, "missing": 0}
     if counts["restored"]:
         logger.info(
             "Pending taste snapshot: restored %d paths, %d still pending",
