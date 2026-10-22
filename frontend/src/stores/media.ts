@@ -169,6 +169,26 @@ export const useMediaStore = defineStore('media', () => {
     }
   }
 
+  // Mirror a favorite flag the server already holds (e.g. from a judgments
+  // verdict response) onto the local records. In-place, like the T2I
+  // store's mirror, so the viewer's current item keeps its identity.
+  function applyFavoriteFlag(filePath: string, isFavorite: boolean): void {
+    const entry = allMedia.value.find((m) => m.file_path === filePath)
+    if (entry && entry.is_favorite !== isFavorite) entry.is_favorite = isFavorite
+    if (
+      selectedMedia.value?.file_path === filePath &&
+      selectedMedia.value.is_favorite !== isFavorite
+    ) {
+      selectedMedia.value.is_favorite = isFavorite
+    }
+    if (favoritePaths.value.has(filePath) !== isFavorite) {
+      const next = new Set(favoritePaths.value)
+      if (isFavorite) next.add(filePath)
+      else next.delete(filePath)
+      favoritePaths.value = next
+    }
+  }
+
   async function removeMedia(media: Media) {
     await deleteMedia(media.file_path)
     allMedia.value = allMedia.value.filter((m) => m.file_path !== media.file_path)
@@ -205,6 +225,7 @@ export const useMediaStore = defineStore('media', () => {
     clearFilters,
     selectMedia,
     toggleFavorite,
+    applyFavoriteFlag,
     removeMedia,
     setSortOrder,
     toggleShowHidden,
