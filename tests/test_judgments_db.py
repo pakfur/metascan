@@ -229,3 +229,41 @@ def test_unknown_sticky_category_raises(db):
 def test_path_with_spaces(db):
     db.save_media(_media("/p/my pics/a b.png"))
     assert db.set_verdict("/p/my pics/a b.png", "favorite").is_favorite is True
+
+
+def test_set_reason_on_favorite_without_judgment_row(db):
+    m = _media("/p/a.png")
+    m.is_favorite = True
+    db.save_media(m)
+    with db._get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM media_judgments").fetchone()[0] == 0
+    s = db.set_reason("/p/a.png", "light", True)
+    assert s.reasons == ["light"]
+    assert db.get_judgment("/p/a.png").reasons == ["light"]
+    assert _events(db, "/p/a.png") == ["reason_on"]
+
+
+def test_pass_to_favorite_logs_unpass_first(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "pass")
+    db.set_verdict("/p/a.png", "favorite")
+    assert _events(db, "/p/a.png") == ["pass", "unpass", "favorite"]
+
+
+def test_clearing_pass_logs_unpass(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "pass")
+    s = db.set_verdict("/p/a.png", None)
+    assert s.verdict is None
+    assert _events(db, "/p/a.png") == ["pass", "unpass"]
+
+
+def test_reconfirm_when_confirmed_at_null(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_verdict("/p/a.png", "favorite", now=T0)
+    with db._get_connection() as conn:
+        conn.execute("UPDATE media_judgments SET confirmed_at = NULL")
+        conn.commit()
+    s = db.mark_seen("/p/a.png", now=T0 + timedelta(minutes=5))
+    assert _events(db, "/p/a.png") == ["favorite", "reconfirm"]
+    assert s.confirmed_at.startswith("2026-01-01T00:05")
