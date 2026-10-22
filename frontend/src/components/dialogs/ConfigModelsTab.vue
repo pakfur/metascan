@@ -27,6 +27,17 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
+const tasteLoadError = ref<string | null>(null)
+async function loadTasteStatus() {
+  try {
+    await taste.loadStatus()
+    tasteLoadError.value = null
+  } catch (e) {
+    console.error('Failed to load taste status', e)
+    tasteLoadError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 async function onTasteRetrain() {
   tasteTrainError.value = null
   try {
@@ -34,9 +45,16 @@ async function onTasteRetrain() {
   } catch (e) {
     // 409 already_training just means a run is in flight; status shows it.
     if (e instanceof ApiError && e.status === 409) {
-      await taste.loadStatus().catch(() => undefined)
-      const code = (e.detail as { code?: string } | null)?.code
-      if (code !== 'already_training') tasteTrainError.value = 'Not enough ratings to train yet.'
+      await loadTasteStatus()
+      const detail = e.detail as { code?: string; missing?: { positives: number; negatives: number } } | null
+      if (detail?.code === 'not_enough_data') {
+        const m = detail.missing
+        tasteTrainError.value = m
+          ? `Not enough ratings: need ${plural(m.positives, 'more favorite', 'more favorites')} / ${plural(m.negatives, 'more pass', 'more passes')}.`
+          : 'Not enough ratings to train yet.'
+      } else if (detail?.code !== 'already_training') {
+        tasteTrainError.value = e.message
+      }
     } else {
       tasteTrainError.value = e instanceof Error ? e.message : String(e)
     }
@@ -53,7 +71,7 @@ const loading = ref(true)
 
 onMounted(async () => {
   try {
-    await Promise.all([models.loadStatus(), taste.loadStatus().catch(() => undefined)])
+    await Promise.all([models.loadStatus(), loadTasteStatus()])
   } finally {
     loading.value = false
   }
@@ -545,6 +563,10 @@ async function onRetagLibrary() {
         <span v-if="tasteTraining" class="taste-spinner">
           <i class="pi pi-spin pi-spinner" /> Training…
         </span>
+      </div>
+      <div v-if="tasteLoadError" class="err-text">
+        Could not load taste status: {{ tasteLoadError }}
+        <button class="btn-small" @click="loadTasteStatus">Retry</button>
       </div>
       <div v-if="tasteTrainError" class="err-text">{{ tasteTrainError }}</div>
       <div v-if="tasteStatus?.last_error" class="err-text">
