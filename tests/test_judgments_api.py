@@ -115,9 +115,38 @@ def test_faiss_embedding_lookup(monkeypatch):
 
     vec = np.ones(32, dtype=np.float32)
     fake = _FakeFaiss(True, {"/p/a.png": vec})
-    monkeypatch.setattr("backend.api.similarity._get_faiss_manager", lambda: fake)
+    monkeypatch.setattr("backend.api.similarity._faiss_manager", fake)
     got = faiss_embedding_lookup("/p/a.png")
     assert got is not None and got[1] == "small" and got[0] is vec
     assert faiss_embedding_lookup("/p/missing.png") is None
     fake.is_loaded = False
     assert faiss_embedding_lookup("/p/a.png") is None
+
+
+def test_faiss_embedding_lookup_never_constructs_or_loads(monkeypatch):
+    from backend.services.judgments_service import faiss_embedding_lookup
+
+    def boom(*a, **k):
+        raise AssertionError("must not construct/load")
+
+    monkeypatch.setattr("backend.api.similarity._faiss_manager", None)
+    monkeypatch.setattr("backend.api.similarity._get_faiss_manager", boom)
+    monkeypatch.setattr("backend.api.similarity._get_embedding_queue", boom)
+    monkeypatch.setattr("backend.api.similarity.FaissIndexManager", boom)
+    assert faiss_embedding_lookup("/p/a.png") is None
+
+
+def test_faiss_embedding_lookup_failure_logs_warning(monkeypatch, caplog):
+    from backend.services.judgments_service import faiss_embedding_lookup
+
+    class Broken:
+        is_loaded = True
+        meta = {"model_key": "small"}
+
+        def get_embedding(self, key):
+            raise RuntimeError("bad index")
+
+    monkeypatch.setattr("backend.api.similarity._faiss_manager", Broken())
+    with caplog.at_level("WARNING"):
+        assert faiss_embedding_lookup("/p/a.png") is None
+    assert any(r.levelname == "WARNING" for r in caplog.records)
