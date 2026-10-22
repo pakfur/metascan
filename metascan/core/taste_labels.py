@@ -109,9 +109,11 @@ def _label_row(
     )
 
 
-def build_label_set(
-    raw: Dict[str, Any], now: datetime, half_life_days: float
-) -> LabelSet:
+def _labeled_rows(
+    raw: Dict[str, Any], now: datetime, half_life_days: float, warn: bool = True
+) -> List[LabelRow]:
+    """Every labeled row: live images, then the newest tombstone per path
+    whose path has no labeled live row. ``warn`` logs skipped rows."""
     rows: List[LabelRow] = []
     skipped = 0
     for m in raw.get("media", []):
@@ -134,13 +136,28 @@ def build_label_set(
         skipped += bad
         if lr is not None:
             rows.append(lr)
-    if skipped:
+    if skipped and warn:
         logger.warning(
             "taste labels: skipped %d labeled row(s) with an empty or "
             "unparseable timestamp",
             skipped,
         )
+    return rows
 
+
+def count_labels(raw: Dict[str, Any], now: datetime) -> Tuple[int, int]:
+    """``(n_pos, n_neg)`` exactly as ``build_label_set`` would count them;
+    ``raw`` may be the slimmer ``DatabaseManager.taste_label_counts_raw``."""
+    # Polled by status and the retrain loop: training logs the skips.
+    rows = _labeled_rows(raw, now, DEFAULT_HALF_LIFE_DAYS, warn=False)
+    n_pos = sum(1 for r in rows if r.label == 1)
+    return n_pos, len(rows) - n_pos
+
+
+def build_label_set(
+    raw: Dict[str, Any], now: datetime, half_life_days: float
+) -> LabelSet:
+    rows = _labeled_rows(raw, now, half_life_days)
     by_batch: Dict[str, List[int]] = {}
     for i, r in enumerate(rows):
         if r.batch_id:

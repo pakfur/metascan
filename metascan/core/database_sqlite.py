@@ -5538,6 +5538,40 @@ class DatabaseManager:
                 tombstones.append(d)
         return {"media": media, "tombstones": tombstones}
 
+    def taste_label_counts_raw(self) -> Dict[str, Any]:
+        """The slim shape of ``taste_training_raw`` that
+        ``taste_labels.count_labels`` needs: labeled live images only (an
+        unlabeled live row shadows no tombstone, so dropping it changes no
+        count) and every image tombstone, without embeddings, categories or
+        score_shown. Cheap enough to poll."""
+        with self.lock, self._get_connection() as conn:
+            media: List[Dict[str, Any]] = []
+            for r in conn.execute(
+                "SELECT m.file_path, m.is_favorite, j.passed, j.seen_at, "
+                "j.judged_at, j.confirmed_at FROM media m "
+                "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
+                "WHERE m.is_favorite = 1 OR j.passed = 1 "
+                "OR j.seen_at IS NOT NULL"
+            ):
+                if not self._is_image_path(r["file_path"]):
+                    continue
+                d = dict(r)
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                media.append(d)
+            tombstones: List[Dict[str, Any]] = []
+            for r in conn.execute(
+                "SELECT id, file_path, is_favorite, passed, seen_at, "
+                "confirmed_at FROM media_tombstones ORDER BY id"
+            ):
+                if not self._is_image_path(r["file_path"]):
+                    continue
+                d = dict(r)
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                tombstones.append(d)
+        return {"media": media, "tombstones": tombstones}
+
     def count_training_events_since(
         self, since: Optional[str]
     ) -> Tuple[int, Optional[str]]:

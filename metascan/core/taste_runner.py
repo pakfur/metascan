@@ -102,6 +102,22 @@ class TasteRunner:
             model.get("embedding_model") or ""
         ) or int(meta.get("embedding_dim") or 0) != int(model.get("dim") or 0)
 
+    def index_fingerprint(self) -> Optional[Tuple[str, int, float]]:
+        """``(model_key, embedding_dim, index_meta.json mtime)`` or None when
+        unreadable. Changes whenever the index is rewritten. Blocking."""
+        meta = self._index_meta()
+        if meta is None:
+            return None
+        try:
+            mtime = (self.index_dir / "index_meta.json").stat().st_mtime
+        except OSError:
+            return None
+        return (
+            str(meta.get("model_key") or ""),
+            int(meta.get("embedding_dim") or 0),
+            float(mtime),
+        )
+
     def _indexed_paths(self) -> set:
         try:
             with open(self.index_dir / "id_mapping.json", "r") as f:

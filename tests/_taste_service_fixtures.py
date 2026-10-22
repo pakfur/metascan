@@ -74,6 +74,12 @@ class FakeRunner:
         self.gate: Optional[asyncio.Event] = None
         self.started = asyncio.Event()
         self.record_model_at: Optional[datetime] = None
+        self.rescore_gate: Optional[asyncio.Event] = None
+        self.rescore_started = asyncio.Event()
+        self.fingerprint: Any = ("small", 32, 1.0)
+
+    def index_fingerprint(self) -> Any:
+        return self.fingerprint
 
     def is_stale(self, model: Dict[str, Any]) -> bool:
         return self.stale
@@ -105,6 +111,9 @@ class FakeRunner:
 
     async def rescore(self) -> Optional[int]:
         self.rescore_calls += 1
+        self.rescore_started.set()
+        if self.rescore_gate is not None:
+            await self.rescore_gate.wait()
         if self.raise_on_rescore is not None:
             raise self.raise_on_rescore
         return self.rescore_result

@@ -256,3 +256,17 @@ async def test_scoring_targets_and_task_write_off_loop(setup, monkeypatch):
     assert (await runner.train(180))["status"] == "ok"
     assert "_scoring_targets" in calls
     assert calls.count("_write_json") >= 2  # labels doc + task file
+
+
+def test_index_fingerprint_tracks_meta(setup):
+    import os
+
+    runner, _, index_dir, _, _ = setup
+    fp = runner.index_fingerprint()
+    assert fp is not None and fp[:2] == (MODEL_KEY, DIM)
+    meta_path = index_dir / "index_meta.json"
+    st = meta_path.stat()
+    os.utime(meta_path, (st.st_atime, st.st_mtime + 10))
+    assert runner.index_fingerprint() != fp
+    meta_path.unlink()
+    assert runner.index_fingerprint() is None

@@ -327,3 +327,29 @@ def test_embedding_complete_runs_hook_and_survives_its_error(monkeypatch):
         eq.on_complete(5)  # logged, not raised
     finally:
         similarity.set_embedding_complete_hook(None)
+
+
+async def test_rescore_during_training_runs_after(service, db, fake_runner):
+    seed_labels(db)
+    db.record_taste_model(model_row())
+    fake_runner.gate = asyncio.Event()
+    await service.start_training()
+    await fake_runner.started.wait()
+    assert await service.rescore() is None
+    assert fake_runner.rescore_calls == 0
+    fake_runner.gate.set()
+    await service.wait_idle()
+    assert fake_runner.rescore_calls == 1
+
+
+async def test_rescore_during_rescore_runs_once_more(service, db, fake_runner):
+    db.record_taste_model(model_row())
+    fake_runner.rescore_gate = asyncio.Event()
+    first = asyncio.create_task(service.rescore())
+    await fake_runner.rescore_started.wait()
+    assert await service.rescore() is None
+    assert await service.rescore() is None  # coalesced into one follow-up
+    fake_runner.rescore_gate.set()
+    await first
+    await service.wait_idle()
+    assert fake_runner.rescore_calls == 2
