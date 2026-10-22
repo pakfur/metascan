@@ -5512,9 +5512,13 @@ class DatabaseManager:
                 media.append(d)
             tombstones: List[Dict[str, Any]] = []
             for r in conn.execute(
-                "SELECT id, file_path, is_favorite, passed, seen_at, "
+                "SELECT id, file_path, deleted_at, is_favorite, passed, seen_at, "
                 "confirmed_at, embedding, embedding_model, categories, lineage, "
-                + score_sql.format(col="media_tombstones.file_path")
+                + score_sql.format(col="media_tombstones.file_path").replace(
+                    "ORDER BY e.id DESC",
+                    "AND e.created_at <= media_tombstones.deleted_at "
+                    "ORDER BY e.id DESC",
+                )
                 + " AS last_verdict_score_shown FROM media_tombstones ORDER BY id",
                 verdict_kinds,
             ):

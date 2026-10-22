@@ -223,3 +223,95 @@ def test_replace_scores_and_active_model(db):
     assert db.get_taste_scores() == (m2, {"/l/b.png": 0.3})
     db.delete_media(Path("/l/b.png"))
     assert db.get_taste_scores() == (None, {})
+
+
+def _tomb(i, path="/l/a.png", **over):
+    d = dict(
+        id=i,
+        file_path=path,
+        is_favorite=True,
+        passed=False,
+        seen_at=None,
+        confirmed_at="2026-01-01T00:00:00+00:00",
+        embedding=None,
+        embedding_model=None,
+        categories=[],
+        batch_id="b1",
+        last_verdict_score_shown=None,
+    )
+    d.update(over)
+    return d
+
+
+def _live(path="/l/a.png", **over):
+    d = dict(
+        file_path=path,
+        is_favorite=True,
+        passed=False,
+        seen_at=None,
+        judged_at=None,
+        confirmed_at="2026-01-01T00:00:00+00:00",
+        last_verdict_score_shown=None,
+        categories=[],
+        t2i_batch_id="b1",
+    )
+    d.update(over)
+    return d
+
+
+def test_live_row_beats_tombstone_of_same_path():
+    raw = {"media": [_live(is_favorite=False, passed=True)], "tombstones": [_tomb(1)]}
+    ls = build_label_set(raw, T0, 180)
+    assert [(r.key, r.label) for r in ls.rows] == [("/l/a.png", 0)]
+    assert ls.pairs == []
+
+
+def test_newest_tombstone_per_path_only():
+    raw = {
+        "media": [],
+        "tombstones": [_tomb(1), _tomb(3, is_favorite=False, passed=True), _tomb(2)],
+    }
+    ls = build_label_set(raw, T0, 180)
+    assert [(r.key, r.label) for r in ls.rows] == [("tombstone:3", 0)]
+
+
+def test_no_self_pairs_after_rescan(db):
+    db.save_media(_media("/l/a.png"))
+    db.create_t2i_image(file_path="/l/a.png", batch_id="b1")
+    db.set_verdict("/l/a.png", "favorite", now=T0)
+    db.delete_media(Path("/l/a.png"))
+    db.save_media(_media("/l/a.png"))
+    db.set_verdict("/l/a.png", "pass", now=T0)
+    ls = _labels(db)
+    assert [r.label for r in ls.rows] == [0] and ls.pairs == []
+
+
+def test_tombstone_ignores_events_after_deletion(db):
+    db.save_media(_media("/l/a.png"))
+    db.set_verdict("/l/a.png", "favorite", now=T0)
+    db.delete_media(Path("/l/a.png"))
+    db.save_media(_media("/l/a.png"))
+    db.set_verdict("/l/a.png", "favorite", score_shown=0.9)  # after deletion
+    raw = db.taste_training_raw()
+    assert raw["tombstones"][0]["last_verdict_score_shown"] is None
+
+
+def test_unparseable_and_empty_timestamps_skipped_with_warning(caplog):
+    raw = {
+        "media": [
+            _live("/l/x.png", confirmed_at=None),
+            _live("/l/y.png", confirmed_at="not-a-date"),
+            _live("/l/ok.png"),
+        ],
+        "tombstones": [_tomb(1, "/l/z.png", confirmed_at="nope")],
+    }
+    with caplog.at_level("WARNING", logger="metascan.core.taste_labels"):
+        ls = build_label_set(raw, T0, 180)
+    assert [r.file_path for r in ls.rows] == ["/l/ok.png"]
+    assert "skipped 3" in caplog.text
+
+
+def test_no_warning_when_nothing_skipped(caplog):
+    with caplog.at_level("WARNING", logger="metascan.core.taste_labels"):
+        build_label_set({"media": [_live()], "tombstones": []}, T0, 180)
+    assert caplog.text == ""

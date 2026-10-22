@@ -3,6 +3,7 @@ scorer. Pure: ``DatabaseManager.taste_training_raw`` reads the rows,
 ``build_label_set`` turns them into labels. Images only -- the DB layer drops
 videos before they get here."""
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,8 @@ TRAINING_EVENT_KINDS: Tuple[str, ...] = (
 )
 
 _SECONDS_PER_DAY = 86_400.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,28 +79,33 @@ def _label_for(row: Dict[str, Any]) -> Optional[int]:
 
 def _label_row(
     row: Dict[str, Any], key: str, now: datetime, half_life_days: float
-) -> Optional[LabelRow]:
+) -> Tuple[Optional[LabelRow], bool]:
+    """``(row, skipped)``; ``skipped`` is True for a labeled row dropped
+    because its timestamp is empty or unparseable."""
     label = _label_for(row)
     if label is None:
-        return None
+        return None, False
     rated_at = row.get("confirmed_at") or row.get("judged_at") or row.get("seen_at")
     if not rated_at:
-        return None
+        return None, True
     try:
         weight = decay_weight(rated_at, now, half_life_days)
     except ValueError:
-        return None
+        return None, True
     if row.get("last_verdict_score_shown") is not None:
         weight *= SCORE_SHOWN_WEIGHT
-    return LabelRow(
-        key=key,
-        file_path=row["file_path"],
-        label=label,
-        weight=weight,
-        categories=list(row.get("categories") or []),
-        batch_id=row.get("t2i_batch_id") or row.get("batch_id"),
-        embedding=row.get("embedding"),
-        embedding_model=row.get("embedding_model"),
+    return (
+        LabelRow(
+            key=key,
+            file_path=row["file_path"],
+            label=label,
+            weight=weight,
+            categories=list(row.get("categories") or []),
+            batch_id=row.get("t2i_batch_id") or row.get("batch_id"),
+            embedding=row.get("embedding"),
+            embedding_model=row.get("embedding_model"),
+        ),
+        False,
     )
 
 
@@ -105,14 +113,33 @@ def build_label_set(
     raw: Dict[str, Any], now: datetime, half_life_days: float
 ) -> LabelSet:
     rows: List[LabelRow] = []
+    skipped = 0
     for m in raw.get("media", []):
-        lr = _label_row(m, m["file_path"], now, half_life_days)
+        lr, bad = _label_row(m, m["file_path"], now, half_life_days)
+        skipped += bad
         if lr is not None:
             rows.append(lr)
+    # A re-scanned path has a live row plus its old tombstone(s): live wins,
+    # and among tombstones only the newest survives.
+    live_paths = {r.file_path for r in rows}
+    newest: Dict[str, Dict[str, Any]] = {}
     for t in raw.get("tombstones", []):
-        lr = _label_row(t, f"tombstone:{t['id']}", now, half_life_days)
+        cur = newest.get(t["file_path"])
+        if cur is None or t["id"] > cur["id"]:
+            newest[t["file_path"]] = t
+    for t in sorted(newest.values(), key=lambda t: t["id"]):
+        if t["file_path"] in live_paths:
+            continue
+        lr, bad = _label_row(t, f"tombstone:{t['id']}", now, half_life_days)
+        skipped += bad
         if lr is not None:
             rows.append(lr)
+    if skipped:
+        logger.warning(
+            "taste labels: skipped %d labeled row(s) with an empty or "
+            "unparseable timestamp",
+            skipped,
+        )
 
     by_batch: Dict[str, List[int]] = {}
     for i, r in enumerate(rows):
