@@ -38,7 +38,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from metascan.core.judgments import WRITER_BASE, WRITER_FALLBACK
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
+from metascan.core.generation_categories import tag_generated_media
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
 from metascan.core.t2i_captions import CaptionPicker, CaptionRow, CaptionStore
 from metascan.core.t2i_directions import (
@@ -133,6 +135,9 @@ class BatchRequest:
     filter: Optional[Dict[str, Any]] = None
     # Caption directions; None means the config's t2i.directions.enabled.
     directions: Optional[bool] = None
+    # Categories every image of the batch is tagged with at ingest. The
+    # route has already checked they exist; one deleted mid-batch is skipped.
+    category_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -246,6 +251,8 @@ class _Step:
     height: int
     direction: Optional[str] = None
     direction_parts: List[str] = field(default_factory=list)
+    # Who wrote the prompt (judgments.WRITER_*); None for a supplied step.
+    writer_id: Optional[str] = None
 
     @property
     def prompt_seed(self) -> int:
@@ -810,8 +817,8 @@ class T2iRunner:
 
     async def _write_prompt(
         self, batch: _Batch, resolved_text: str, direction: Optional[str] = None
-    ) -> Tuple[str, Optional[str], List[str]]:
-        """``(prompt, negative, warnings)`` for one step of a running batch.
+    ) -> Tuple[str, Optional[str], List[str], str]:
+        """``(prompt, negative, warnings, writer_id)`` for one step of a running batch.
 
         An unattended run never dies on one bad VLM call: a call that fails
         is tried once more (starting the model again first), then the
@@ -820,9 +827,9 @@ class T2iRunner:
         """
         profile = batch.profile
 
-        def fall_back(warning: str) -> Tuple[str, Optional[str], List[str]]:
+        def fall_back(warning: str) -> Tuple[str, Optional[str], List[str], str]:
             prompt, negative = fallback_prompt(profile, resolved_text, direction)
-            return prompt, negative, [warning]
+            return prompt, negative, [warning], WRITER_FALLBACK
 
         vlm = self.get_vlm()
         if vlm is None:
@@ -839,7 +846,7 @@ class T2iRunner:
                 prompt, negative = await self._vlm_prompt(
                     vlm, model_id, profile, system_prompt, user_prompt
                 )
-                return prompt, negative, []
+                return prompt, negative, [], WRITER_BASE
             except asyncio.CancelledError:
                 raise
             except (VlmError, TimeoutError, RuntimeError) as exc:
@@ -909,7 +916,7 @@ class T2iRunner:
             batch.directions,
             warnings,
         )
-        prompt, negative, notes = await self._write_prompt(
+        prompt, negative, notes, writer_id = await self._write_prompt(
             batch, resolved.text, direction.text if direction else None
         )
         warnings.extend(notes)
@@ -925,6 +932,7 @@ class T2iRunner:
             height=height,
             direction=direction.text if direction else None,
             direction_parts=list(direction.parts) if direction else [],
+            writer_id=writer_id,
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -1024,9 +1032,11 @@ class T2iRunner:
             "megapixels": batch.req.megapixels,
             "loras": [dict(entry) for entry in batch.loras],
             "prompt": step.prompt,
+            "writer_id": step.writer_id,
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
             "negative": batch.req.negative if manual else step.negative,
+            "category_ids": list(batch.req.category_ids),
         }
         while len(self._job_meta) > _JOB_META_LIMIT:
             self._job_meta.pop(next(iter(self._job_meta)))
@@ -1410,6 +1420,7 @@ class T2iRunner:
                     render_s=render_s,
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                     form_state=form,
+                    writer_id=known.get("writer_id"),
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)
@@ -1444,6 +1455,12 @@ class T2iRunner:
                 return  # a job of another feature: not ours to account for
             batch_id = str(job["t2i_batch_id"])
             inserted = await self._insert_images(job, meta, batch_id, files)
+            # Before the images are announced, so a client refetching on
+            # t2i_images_changed already sees their categories.
+            if meta is not None:
+                await tag_generated_media(
+                    self.db, inserted, meta.get("category_ids") or [], self._emit
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

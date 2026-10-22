@@ -1,15 +1,27 @@
+import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
+from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar, Callable
 from contextlib import contextmanager
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
+
+import numpy as np
 
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.judgments import (
+    CATEGORY_NAME_MAX,
+    CATEGORY_SOURCES,
+    REASONS,
+    RECONFIRM_MIN_INTERVAL_S,
+    CategoryRef,
+    JudgmentState,
+    Verdict,
+)
 from metascan.core.prompt_tokenizer import PromptTokenizer
 
 logger = logging.getLogger(__name__)
@@ -231,6 +243,10 @@ class DatabaseManager:
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.db_file = self.db_path / "metascan.db"
         self.lock = Lock()
+        # fn(native_path) -> (vector, model_key) | None; see set_embedding_lookup.
+        self._embedding_lookup: Optional[Callable[[str], Optional[Tuple[Any, str]]]] = (
+            None
+        )
 
         # Lazy-initialize prompt tokenizer (deferred until first use)
         self._prompt_tokenizer: Optional[PromptTokenizer] = None
@@ -1217,6 +1233,98 @@ class DatabaseManager:
                 )
                 """
             )
+            # Taste-rating capture. media_judgments cascades with its media
+            # row; judgment_events and media_tombstones deliberately carry
+            # no FK so the history outlives a deleted file.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_judgments (
+                    file_path TEXT PRIMARY KEY
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    passed INTEGER NOT NULL DEFAULT 0,
+                    reasons TEXT NOT NULL DEFAULT '[]',
+                    seen_at TEXT,
+                    judged_at TEXT,
+                    confirmed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS judgment_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    reason TEXT,
+                    category TEXT,
+                    score_shown REAL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_judgment_events_path "
+                "ON judgment_events(file_path)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_tombstones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL,
+                    is_favorite INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    reasons TEXT NOT NULL,
+                    categories TEXT NOT NULL DEFAULT '[]',
+                    seen_at TEXT,
+                    confirmed_at TEXT,
+                    embedding BLOB,
+                    embedding_model TEXT,
+                    lineage TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_categories (
+                    file_path TEXT NOT NULL
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    category_id INTEGER NOT NULL
+                        REFERENCES categories(id) ON DELETE CASCADE,
+                    source TEXT NOT NULL,
+                    assigned_at TEXT NOT NULL,
+                    PRIMARY KEY (file_path, category_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_categories_category "
+                "ON media_categories(category_id)"
+            )
+            # Generation lineage on both generated-media tables; nullable,
+            # existing rows stay NULL.
+            for _lineage_table in ("t2i_images", "i2v_videos"):
+                for _lineage_col, _lineage_type in (
+                    ("writer_id", "TEXT"),
+                    ("variant_group", "TEXT"),
+                    ("variant_index", "INTEGER"),
+                ):
+                    _idempotent_add_column(
+                        conn,
+                        _lineage_table,
+                        _lineage_col,
+                        f"ALTER TABLE {_lineage_table} ADD COLUMN "
+                        f"{_lineage_col} {_lineage_type}",
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -1596,6 +1704,29 @@ class DatabaseManager:
                             (inferred, r["id"]),
                         )
                 conn.execute("PRAGMA user_version = 4")
+
+            if user_version < 5:
+                # Taste-rating capture: every existing favorite becomes a
+                # confirmed judgment so the new tables start consistent
+                # with media.is_favorite.
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "INSERT INTO media_judgments "
+                    "(file_path, passed, reasons, seen_at, judged_at, "
+                    "confirmed_at) "
+                    "SELECT file_path, 0, '[]', ?, ?, ? FROM media "
+                    "WHERE is_favorite = 1 "
+                    "ON CONFLICT(file_path) DO NOTHING",
+                    (now, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO judgment_events "
+                    "(file_path, event, created_at) "
+                    "SELECT file_path, 'favorite', ? FROM media "
+                    "WHERE is_favorite = 1",
+                    (now,),
+                )
+                conn.execute("PRAGMA user_version = 5")
 
             conn.commit()
 
@@ -2995,9 +3126,156 @@ class DatabaseManager:
             if still_referenced:
                 conn.execute("UPDATE media SET hidden = 0 WHERE file_path = ?", (path,))
             else:
+                self._write_tombstones(conn, [path], self._iso(None))
                 conn.execute("DELETE FROM media WHERE file_path = ?", (path,))
                 deleted.append(to_native_path(path))
         return deleted
+
+    def set_embedding_lookup(
+        self, fn: Optional[Callable[[str], Optional[Tuple[Any, str]]]]
+    ) -> None:
+        """Install the callable tombstones use to snapshot a deleted item's
+        embedding: ``fn(native_path)`` returns ``(vector, model_key)`` or
+        None. It runs while the DB lock is held, so it must be a fast
+        in-memory lookup. Default: no lookup (embedding columns stay NULL)."""
+        self._embedding_lookup = fn
+
+    def _write_tombstones(
+        self, conn: sqlite3.Connection, posix_paths: List[str], now: str
+    ) -> None:
+        """Record a media_tombstones row for each path that carries training
+        signal (a judgment, a category link, or a generated-image/video
+        row). Must run before the media DELETE, inside the caller's
+        transaction and lock -- never takes the lock itself."""
+        for path in posix_paths:
+            judgment = conn.execute(
+                "SELECT passed, reasons, seen_at, confirmed_at "
+                "FROM media_judgments WHERE file_path = ?",
+                (path,),
+            ).fetchone()
+            cat_names = [
+                r["name"]
+                for r in conn.execute(
+                    "SELECT c.name FROM media_categories mc "
+                    "JOIN categories c ON c.id = mc.category_id "
+                    "WHERE mc.file_path = ?",
+                    (path,),
+                ).fetchall()
+            ]
+            t2i = conn.execute(
+                "SELECT * FROM t2i_images WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone()
+            i2v = conn.execute(
+                "SELECT * FROM i2v_videos WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone()
+            if judgment is None and not cat_names and t2i is None and i2v is None:
+                continue
+            media = conn.execute(
+                "SELECT is_favorite FROM media WHERE file_path = ?", (path,)
+            ).fetchone()
+            if media is None:
+                continue
+            self._insert_tombstone(
+                conn,
+                path,
+                now,
+                bool(media["is_favorite"]),
+                dict(judgment) if judgment is not None else None,
+                cat_names,
+                t2i,
+                i2v,
+            )
+
+    def _insert_tombstone(
+        self,
+        conn: sqlite3.Connection,
+        path: str,
+        now: str,
+        is_favorite: bool,
+        judgment: Optional[Dict[str, Any]],
+        cat_names: List[str],
+        t2i: Optional[sqlite3.Row],
+        i2v: Optional[sqlite3.Row],
+    ) -> None:
+        """Insert one media_tombstones row. Caller holds the lock."""
+        lineage: Optional[Dict[str, Any]] = None
+        for key, row in (("t2i", t2i), ("i2v", i2v)):
+            if row is not None:
+                data = {k: row[k] for k in row.keys() if k != "form_state"}
+                lineage = {key: data}
+                break
+        blob: Optional[bytes] = None
+        model_key: Optional[str] = None
+        if self._embedding_lookup is not None:
+            try:
+                found = self._embedding_lookup(to_native_path(path))
+                if found is not None:
+                    vector, key = found
+                    blob = np.asarray(vector).astype(np.float32).tobytes()
+                    model_key = key
+            except Exception as e:
+                logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
+                blob, model_key = None, None
+        conn.execute(
+            "INSERT INTO media_tombstones (file_path, deleted_at, "
+            "is_favorite, passed, reasons, categories, seen_at, "
+            "confirmed_at, embedding, embedding_model, lineage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                path,
+                now,
+                1 if is_favorite else 0,
+                int(judgment["passed"]) if judgment is not None else 0,
+                judgment["reasons"] if judgment is not None else "[]",
+                json.dumps(sorted(cat_names)),
+                judgment["seen_at"] if judgment is not None else None,
+                judgment["confirmed_at"] if judgment is not None else None,
+                blob,
+                model_key,
+                json.dumps(lineage, default=str) if lineage else None,
+            ),
+        )
+
+    def tombstones_missing_embedding(self) -> List[Tuple[int, str]]:
+        """``(id, posix file_path)`` for every tombstone whose embedding is
+        NULL -- written while the FAISS index wasn't loaded in memory."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, file_path FROM media_tombstones "
+                "WHERE embedding IS NULL ORDER BY id"
+            ).fetchall()
+        return [(int(r["id"]), str(r["file_path"])) for r in rows]
+
+    def set_tombstone_embeddings(self, rows: List[Tuple[int, bytes, str]]) -> int:
+        """Fill ``(id, float32 vector bytes, model_key)`` into tombstones in
+        one transaction. Only rows whose embedding is still NULL are
+        written; returns how many were."""
+        if not rows:
+            return 0
+        filled = 0
+        with self.lock, self._get_connection() as conn:
+            for tomb_id, blob, model_key in rows:
+                cur = conn.execute(
+                    "UPDATE media_tombstones SET embedding = ?, embedding_model = ? "
+                    "WHERE id = ? AND embedding IS NULL",
+                    (blob, model_key, tomb_id),
+                )
+                filled += max(cur.rowcount, 0)
+            conn.commit()
+        return filled
+
+    def set_tombstone_embedding(self, tomb_id: int, blob: bytes, model_key: str) -> int:
+        return self.set_tombstone_embeddings([(tomb_id, blob, model_key)])
+
+    def list_tombstones(self) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM media_tombstones ORDER BY id").fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["lineage"] = json.loads(d["lineage"]) if d["lineage"] else None
+            out.append(d)
+        return out
 
     def _panel_ids_for_storyboard(
         self, conn: sqlite3.Connection, storyboard_id: int
@@ -3658,6 +3936,9 @@ class DatabaseManager:
         megapixels: Optional[float] = None,
         loras: Optional[List[Dict[str, Any]]] = None,
         form_state: Optional[Dict[str, Any]] = None,
+        writer_id: Optional[str] = None,
+        variant_group: Optional[str] = None,
+        variant_index: Optional[int] = None,
     ) -> int:
         import json as _json
 
@@ -3666,8 +3947,8 @@ class DatabaseManager:
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
                 "idea, seed, duration_s, quality, width, height, steps, "
                 "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
-                "form_state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "form_state, writer_id, variant_group, variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -3685,6 +3966,9 @@ class DatabaseManager:
                     megapixels,
                     _json.dumps(loras) if loras is not None else None,
                     _json.dumps(form_state) if form_state is not None else None,
+                    writer_id,
+                    variant_group,
+                    variant_index,
                 ),
             )
             conn.commit()
@@ -3789,8 +4073,9 @@ class DatabaseManager:
             ).fetchone()
             if row is None:
                 return False, []
-            conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
+            # Purge first so the tombstone can still read the lineage row.
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
             conn.commit()
             return True, deleted_files
 
@@ -3816,6 +4101,9 @@ class DatabaseManager:
         render_s: Optional[float] = None,
         comfy_prompt_id: Optional[str] = None,
         form_state: Optional[Dict[str, Any]] = None,
+        writer_id: Optional[str] = None,
+        variant_group: Optional[str] = None,
+        variant_index: Optional[int] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -3827,8 +4115,9 @@ class DatabaseManager:
                 "INSERT INTO t2i_images (file_path, batch_id, model, preset_id, "
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
-                "comfy_prompt_id, form_state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "comfy_prompt_id, form_state, writer_id, variant_group, "
+                "variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -3847,6 +4136,9 @@ class DatabaseManager:
                     render_s,
                     comfy_prompt_id,
                     _json.dumps(form_state) if form_state is not None else None,
+                    writer_id,
+                    variant_group,
+                    variant_index,
                 ),
             )
             conn.commit()
@@ -3978,8 +4270,9 @@ class DatabaseManager:
             ).fetchone()
             if row is None:
                 return False, []
-            conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
+            # Purge first so the tombstone can still read the lineage row.
             deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
             conn.commit()
             return True, deleted_files
 
@@ -4245,6 +4538,7 @@ class DatabaseManager:
                     # Convert to POSIX format for database lookup
                     posix_path = to_posix_path(file_path)
                     # Delete from media table (indices will cascade delete)
+                    self._write_tombstones(conn, [posix_path], self._iso(None))
                     cursor = conn.execute(
                         "DELETE FROM media WHERE file_path = ?", (posix_path,)
                     )
@@ -4270,6 +4564,11 @@ class DatabaseManager:
                 with self._get_connection() as conn:
                     # Convert paths to POSIX format for database lookup
                     path_tuples = [(to_posix_path(fp),) for fp in file_paths]
+                    self._write_tombstones(
+                        conn,
+                        list(dict.fromkeys(t[0] for t in path_tuples)),
+                        self._iso(None),
+                    )
                     conn.executemany(
                         "DELETE FROM media WHERE file_path = ?", path_tuples
                     )
@@ -4685,51 +4984,483 @@ class DatabaseManager:
             logger.error(f"Failed to get filtered media paths: {e}")
             return set()
 
+    # ------------------------------------------------------------------
+    # Judgments (taste-rating capture)
+    # ------------------------------------------------------------------
+    # Every public method takes self.lock once and delegates to the private
+    # helpers below, which take an open connection and never touch the lock
+    # (it is a plain, non-reentrant Lock).
+
+    @staticmethod
+    def _iso(now: Optional[datetime]) -> str:
+        return (now or datetime.now(timezone.utc)).isoformat()
+
+    @staticmethod
+    def _log_judgment_event(
+        conn: sqlite3.Connection,
+        posix_path: str,
+        event: str,
+        created_at: str,
+        score_shown: Optional[float] = None,
+        reason: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO judgment_events "
+            "(file_path, event, reason, category, score_shown, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (posix_path, event, reason, category, score_shown, created_at),
+        )
+
+    @staticmethod
+    def _read_media_categories(
+        conn: sqlite3.Connection, posix_path: str
+    ) -> List[CategoryRef]:
+        rows = conn.execute(
+            "SELECT c.id, c.name FROM media_categories mc "
+            "JOIN categories c ON c.id = mc.category_id "
+            "WHERE mc.file_path = ? ORDER BY c.name COLLATE NOCASE, c.id",
+            (posix_path,),
+        ).fetchall()
+        return [CategoryRef(id=r["id"], name=r["name"]) for r in rows]
+
+    def _read_judgment(
+        self, conn: sqlite3.Connection, posix_path: str
+    ) -> Optional[JudgmentState]:
+        media = conn.execute(
+            "SELECT is_favorite FROM media WHERE file_path = ?", (posix_path,)
+        ).fetchone()
+        if media is None:
+            return None
+        row = conn.execute(
+            "SELECT passed, reasons, seen_at, confirmed_at "
+            "FROM media_judgments WHERE file_path = ?",
+            (posix_path,),
+        ).fetchone()
+        is_fav = bool(media["is_favorite"])
+        passed = bool(row["passed"]) if row is not None else False
+        verdict: Optional[Verdict] = (
+            "favorite" if is_fav else ("pass" if passed else None)
+        )
+        reasons: List[str] = []
+        if row is not None and verdict is not None:
+            try:
+                reasons = [r for r in json.loads(row["reasons"]) if r in REASONS]
+            except (TypeError, ValueError):
+                reasons = []
+        return JudgmentState(
+            file_path=posix_path,
+            verdict=verdict,
+            reasons=reasons,
+            seen_at=row["seen_at"] if row is not None else None,
+            confirmed_at=row["confirmed_at"] if row is not None else None,
+            is_favorite=is_fav,
+            categories=self._read_media_categories(conn, posix_path),
+        )
+
+    @staticmethod
+    def _ensure_judgment_row(conn: sqlite3.Connection, posix_path: str) -> None:
+        conn.execute(
+            "INSERT INTO media_judgments (file_path) VALUES (?) "
+            "ON CONFLICT(file_path) DO NOTHING",
+            (posix_path,),
+        )
+
+    def _apply_verdict(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        verdict: Optional[Verdict],
+        score_shown: Optional[float],
+        now: Optional[datetime],
+    ) -> Optional[JudgmentState]:
+        """Set the verdict and log events. Caller holds the lock and commits."""
+        current = self._read_judgment(conn, posix_path)
+        if current is None:
+            return None
+        ts = self._iso(now)
+        if verdict == current.verdict:
+            if verdict is not None:
+                self._ensure_judgment_row(conn, posix_path)
+                conn.execute(
+                    "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+            return self._read_judgment(conn, posix_path)
+
+        log = self._log_judgment_event
+        if current.verdict == "favorite":
+            log(conn, posix_path, "unfavorite", ts, score_shown)
+        elif current.verdict == "pass":
+            log(conn, posix_path, "unpass", ts, score_shown)
+        if verdict == "favorite":
+            log(conn, posix_path, "favorite", ts, score_shown)
+        elif verdict == "pass":
+            log(conn, posix_path, "pass", ts, score_shown)
+
+        conn.execute(
+            "UPDATE media SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE file_path = ?",
+            (1 if verdict == "favorite" else 0, posix_path),
+        )
+        self._ensure_judgment_row(conn, posix_path)
+        conn.execute(
+            "UPDATE media_judgments SET passed = ?, reasons = '[]', "
+            "judged_at = ?, confirmed_at = ?, seen_at = COALESCE(seen_at, ?) "
+            "WHERE file_path = ?",
+            (1 if verdict == "pass" else 0, ts, ts, ts, posix_path),
+        )
+        return self._read_judgment(conn, posix_path)
+
+    def get_judgment(self, file_path: str) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            return self._read_judgment(conn, posix_path)
+
+    def get_media_categories(self, file_path: str) -> List[CategoryRef]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            return self._read_media_categories(conn, posix_path)
+
+    @staticmethod
+    def _clean_category_name(name: str) -> str:
+        name = (name or "").strip()
+        if not name or len(name) > CATEGORY_NAME_MAX:
+            raise ValueError("invalid_name")
+        return name
+
+    def create_category(self, name: str) -> CategoryRef:
+        name = self._clean_category_name(name)
+        with self.lock, self._get_connection() as conn:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO categories (name, created_at) VALUES (?, ?)",
+                    (name, self._iso(None)),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            assert cur.lastrowid is not None
+            return CategoryRef(id=int(cur.lastrowid), name=name)
+
+    def list_categories(self) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT c.id, c.name, c.created_at, "
+                "(SELECT COUNT(*) FROM media_categories mc "
+                " WHERE mc.category_id = c.id) AS item_count "
+                "FROM categories c ORDER BY c.name COLLATE NOCASE, c.id"
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "item_count": r["item_count"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+
+    def rename_category(self, category_id: int, name: str) -> Optional[CategoryRef]:
+        name = self._clean_category_name(name)
+        with self.lock, self._get_connection() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM categories WHERE id = ?", (category_id,)
+                ).fetchone()
+                is None
+            ):
+                return None
+            try:
+                conn.execute(
+                    "UPDATE categories SET name = ? WHERE id = ?",
+                    (name, category_id),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            return CategoryRef(id=category_id, name=name)
+
+    def delete_category(self, category_id: int) -> bool:
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                return False
+            ts = self._iso(None)
+            linked = conn.execute(
+                "SELECT file_path FROM media_categories WHERE category_id = ?",
+                (category_id,),
+            ).fetchall()
+            for r in linked:
+                self._log_judgment_event(
+                    conn,
+                    r["file_path"],
+                    "category_off",
+                    ts,
+                    category=cat["name"],
+                )
+            conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+            conn.commit()
+            return True
+
+    def _link_category(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        category_id: int,
+        category_name: str,
+        source: str,
+        ts: str,
+        score_shown: Optional[float] = None,
+    ) -> bool:
+        """Link a media row to a category; log category_on only for a new link.
+
+        Caller holds the lock and commits.
+        """
+        cur = conn.execute(
+            "INSERT INTO media_categories "
+            "(file_path, category_id, source, assigned_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(file_path, category_id) DO NOTHING",
+            (posix_path, category_id, source, ts),
+        )
+        if cur.rowcount <= 0:
+            return False
+        self._log_judgment_event(
+            conn,
+            posix_path,
+            "category_on",
+            ts,
+            score_shown,
+            category=category_name,
+        )
+        return True
+
+    def add_media_categories(
+        self, file_paths: List[str], category_id: int, source: str
+    ) -> int:
+        if source not in CATEGORY_SOURCES:
+            raise ValueError("invalid_source")
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                raise ValueError("unknown_category")
+            ts = self._iso(None)
+            added = 0
+            for posix_path in dict.fromkeys(to_posix_path(p) for p in file_paths):
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM media WHERE file_path = ?", (posix_path,)
+                    ).fetchone()
+                    is None
+                ):
+                    continue
+                if self._link_category(
+                    conn, posix_path, category_id, cat["name"], source, ts
+                ):
+                    added += 1
+            conn.commit()
+            return added
+
+    def remove_media_categories(self, file_paths: List[str], category_id: int) -> int:
+        with self.lock, self._get_connection() as conn:
+            cat = conn.execute(
+                "SELECT name FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if cat is None:
+                return 0
+            ts = self._iso(None)
+            removed = 0
+            for posix_path in dict.fromkeys(to_posix_path(p) for p in file_paths):
+                cur = conn.execute(
+                    "DELETE FROM media_categories "
+                    "WHERE file_path = ? AND category_id = ?",
+                    (posix_path, category_id),
+                )
+                if cur.rowcount > 0:
+                    removed += 1
+                    self._log_judgment_event(
+                        conn,
+                        posix_path,
+                        "category_off",
+                        ts,
+                        category=cat["name"],
+                    )
+            conn.commit()
+            return removed
+
+    def set_verdict(
+        self,
+        file_path: str,
+        verdict: Optional[Verdict],
+        score_shown: Optional[float] = None,
+        now: Optional[datetime] = None,
+        sticky_category_id: Optional[int] = None,
+    ) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            category_name: Optional[str] = None
+            if verdict is not None and sticky_category_id is not None:
+                cat = conn.execute(
+                    "SELECT name FROM categories WHERE id = ?",
+                    (sticky_category_id,),
+                ).fetchone()
+                if cat is None:
+                    raise ValueError("unknown_category")
+                category_name = cat["name"]
+            state = self._apply_verdict(conn, posix_path, verdict, score_shown, now)
+            if state is None:
+                return None
+            if category_name is not None:
+                ts = self._iso(now)
+                if self._link_category(
+                    conn,
+                    posix_path,
+                    sticky_category_id or 0,
+                    category_name,
+                    "sticky",
+                    ts,
+                    score_shown,
+                ):
+                    state = self._read_judgment(conn, posix_path)
+            conn.commit()
+            return state
+
+    def set_reason(
+        self,
+        file_path: str,
+        reason: str,
+        on: bool,
+        score_shown: Optional[float] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[JudgmentState]:
+        if reason not in REASONS:
+            raise ValueError("unknown_reason")
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            state = self._read_judgment(conn, posix_path)
+            if state is None:
+                return None
+            if state.verdict is None:
+                raise ValueError("no_verdict")
+            if (reason in state.reasons) == on:
+                return state
+            reasons = set(state.reasons)
+            if on:
+                reasons.add(reason)
+            else:
+                reasons.discard(reason)
+            ordered = [r for r in REASONS if r in reasons]
+            ts = self._iso(now)
+            self._ensure_judgment_row(conn, posix_path)
+            conn.execute(
+                "UPDATE media_judgments SET reasons = ? WHERE file_path = ?",
+                (json.dumps(ordered), posix_path),
+            )
+            self._log_judgment_event(
+                conn,
+                posix_path,
+                "reason_on" if on else "reason_off",
+                ts,
+                score_shown,
+                reason=reason,
+            )
+            conn.commit()
+            return self._read_judgment(conn, posix_path)
+
+    def mark_seen(
+        self, file_path: str, now: Optional[datetime] = None
+    ) -> Optional[JudgmentState]:
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            state = self._read_judgment(conn, posix_path)
+            if state is None:
+                return None
+            ts = self._iso(now)
+            if state.seen_at is None:
+                self._ensure_judgment_row(conn, posix_path)
+                conn.execute(
+                    "UPDATE media_judgments SET seen_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+                self._log_judgment_event(conn, posix_path, "seen", ts)
+            elif state.verdict is not None and self._reconfirm_due(
+                state.confirmed_at, now
+            ):
+                conn.execute(
+                    "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
+                    (ts, posix_path),
+                )
+                self._log_judgment_event(conn, posix_path, "reconfirm", ts)
+            else:
+                return state
+            conn.commit()
+            return self._read_judgment(conn, posix_path)
+
+    @staticmethod
+    def _reconfirm_due(confirmed_at: Optional[str], now: Optional[datetime]) -> bool:
+        if confirmed_at is None:
+            return True
+        try:
+            last = datetime.fromisoformat(confirmed_at)
+        except ValueError:
+            return True
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return (current - last).total_seconds() >= RECONFIRM_MIN_INTERVAL_S
+
+    def list_judgment_events(
+        self, file_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            if file_path is None:
+                rows = conn.execute(
+                    "SELECT * FROM judgment_events ORDER BY id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM judgment_events WHERE file_path = ? ORDER BY id",
+                    (to_posix_path(file_path),),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
     def toggle_favorite(self, file_path: Path) -> bool:
         try:
-            with self.lock:
-                with self._get_connection() as conn:
-                    # Convert to POSIX format for database lookup
-                    posix_path = to_posix_path(file_path)
-                    # Get current favorite status
-                    row = conn.execute(
-                        "SELECT is_favorite FROM media WHERE file_path = ?",
-                        (posix_path,),
-                    ).fetchone()
-
-                    if row is not None:
-                        new_status = 0 if row["is_favorite"] else 1
-                        conn.execute(
-                            """
-                            UPDATE media
-                            SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE file_path = ?
-                        """,
-                            (new_status, posix_path),
-                        )
-                        conn.commit()
-                        return bool(new_status)
+            posix_path = to_posix_path(file_path)
+            with self.lock, self._get_connection() as conn:
+                state = self._read_judgment(conn, posix_path)
+                if state is None:
                     return False
+                target: Optional[Verdict] = (
+                    None if state.verdict == "favorite" else "favorite"
+                )
+                self._apply_verdict(conn, posix_path, target, None, None)
+                conn.commit()
+                return target == "favorite"
         except Exception as e:
             logger.error(f"Failed to toggle favorite for {file_path}: {e}")
             return False
 
     def set_favorite(self, file_path: Path, is_favorite: bool) -> bool:
         try:
-            with self.lock:
-                with self._get_connection() as conn:
-                    # Convert to POSIX format for database lookup
-                    posix_path = to_posix_path(file_path)
-                    cursor = conn.execute(
-                        """
-                        UPDATE media
-                        SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE file_path = ?
-                    """,
-                        (1 if is_favorite else 0, posix_path),
-                    )
-                    conn.commit()
-                    return cursor.rowcount > 0  # type: ignore[no-any-return]
+            posix_path = to_posix_path(file_path)
+            with self.lock, self._get_connection() as conn:
+                state = self._read_judgment(conn, posix_path)
+                if state is None:
+                    return False
+                if is_favorite:
+                    self._apply_verdict(conn, posix_path, "favorite", None, None)
+                elif state.verdict == "favorite":
+                    self._apply_verdict(conn, posix_path, None, None, None)
+                conn.commit()
+                return True
         except Exception as e:
             logger.error(f"Failed to set favorite for {file_path}: {e}")
             return False
@@ -5170,6 +5901,204 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to truncate database: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Taste-state snapshot (full clean & rescan)
+    # ------------------------------------------------------------------
+    #
+    # ``truncate_all_data`` deletes every media row, and media_judgments /
+    # media_categories cascade with it. judgment_events, categories and
+    # media_tombstones carry no FK to media and survive. The full-clean
+    # scan takes this snapshot first and puts it back verbatim afterwards.
+
+    def export_taste_state(self) -> Dict[str, Any]:
+        """Snapshot every media_judgments row, every media_categories link
+        (with its category name) and every ``is_favorite = 1`` path. Paths
+        are the stored POSIX form. Plain JSON-serialisable data."""
+        with self.lock, self._get_connection() as conn:
+            judgments = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT file_path, passed, reasons, seen_at, judged_at, "
+                    "confirmed_at FROM media_judgments ORDER BY file_path"
+                ).fetchall()
+            ]
+            links = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT mc.file_path, mc.category_id, c.name AS category_name, "
+                    "mc.source, mc.assigned_at FROM media_categories mc "
+                    "JOIN categories c ON c.id = mc.category_id "
+                    "ORDER BY mc.file_path, mc.category_id"
+                ).fetchall()
+            ]
+            favorites = [
+                r["file_path"]
+                for r in conn.execute(
+                    "SELECT file_path FROM media WHERE is_favorite = 1 "
+                    "ORDER BY file_path"
+                ).fetchall()
+            ]
+        return {
+            "taken_at": self._iso(None),
+            "judgments": judgments,
+            "categories": links,
+            "favorites": favorites,
+        }
+
+    def restore_taste_state(
+        self, snapshot: Dict[str, Any], tombstone_missing: bool = False
+    ) -> Dict[str, Any]:
+        """Put an ``export_taste_state`` snapshot back for every path whose
+        media row exists again: judgment rows and category links verbatim
+        (original timestamps; links only for categories that still exist)
+        and ``media.is_favorite`` by raw UPDATE. Logs **no** judgment_events
+        -- this is a put-back, not a re-judgment. Idempotent.
+
+        Never overwrites newer data: a path that already carries a real
+        judgment (verdict, reasons or favorite -- the user re-rated it after
+        it re-appeared) keeps its row and ``is_favorite`` untouched; a
+        seen-only row is filled from the snapshot. Category links are
+        added with ON CONFLICT DO NOTHING.
+
+        With ``tombstone_missing``, each snapshot path whose media row did
+        not come back gets one media_tombstones row built from the snapshot
+        (embedding via the installed lookup, else NULL; lineage from the
+        surviving t2i/i2v row). Returns ``{restored, missing, tombstoned}``
+        counted in paths plus ``remaining``: the snapshot narrowed to the
+        paths that were not restored (same shape, same ``taken_at``)."""
+        judgments: Dict[str, Dict[str, Any]] = {
+            j["file_path"]: j for j in snapshot.get("judgments") or []
+        }
+        links_by_path: Dict[str, List[Dict[str, Any]]] = {}
+        for link in snapshot.get("categories") or []:
+            links_by_path.setdefault(link["file_path"], []).append(link)
+        favorites = set(snapshot.get("favorites") or [])
+        paths = sorted(set(judgments) | set(links_by_path) | favorites)
+
+        restored = missing = tombstoned = 0
+        missing_paths: List[str] = []
+        with self.lock, self._get_connection() as conn:
+            existing_cats = {
+                int(r["id"]) for r in conn.execute("SELECT id FROM categories")
+            }
+            now = self._iso(None)
+            for path in paths:
+                media_row = conn.execute(
+                    "SELECT is_favorite FROM media WHERE file_path = ?", (path,)
+                ).fetchone()
+                path_links = links_by_path.get(path, [])
+                if media_row is None:
+                    missing += 1
+                    missing_paths.append(path)
+                    if tombstone_missing:
+                        self._insert_tombstone(
+                            conn,
+                            path,
+                            now,
+                            path in favorites,
+                            judgments.get(path),
+                            [lk["category_name"] for lk in path_links],
+                            conn.execute(
+                                "SELECT * FROM t2i_images WHERE file_path = ? "
+                                "LIMIT 1",
+                                (path,),
+                            ).fetchone(),
+                            conn.execute(
+                                "SELECT * FROM i2v_videos WHERE file_path = ? "
+                                "LIMIT 1",
+                                (path,),
+                            ).fetchone(),
+                        )
+                        tombstoned += 1
+                    continue
+                restored += 1
+                if not self._has_newer_judgment(conn, path, media_row):
+                    self._put_back_judgment(
+                        conn, path, judgments.get(path), path in favorites
+                    )
+                for lk in path_links:
+                    if int(lk["category_id"]) not in existing_cats:
+                        continue
+                    conn.execute(
+                        "INSERT INTO media_categories "
+                        "(file_path, category_id, source, assigned_at) "
+                        "VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(file_path, category_id) DO NOTHING",
+                        (path, int(lk["category_id"]), lk["source"], lk["assigned_at"]),
+                    )
+            conn.commit()
+        keep = set(missing_paths)
+        remaining = {
+            "taken_at": snapshot.get("taken_at"),
+            "judgments": [j for p, j in judgments.items() if p in keep],
+            "categories": [
+                lk for p, links in links_by_path.items() if p in keep for lk in links
+            ],
+            "favorites": sorted(favorites & keep),
+        }
+        return {
+            "restored": restored,
+            "missing": missing,
+            "tombstoned": tombstoned,
+            "remaining": remaining,
+        }
+
+    @staticmethod
+    def _has_newer_judgment(
+        conn: sqlite3.Connection, path: str, media_row: sqlite3.Row
+    ) -> bool:
+        """True when the live row carries a rating the snapshot must not
+        overwrite: favorite, pass, any reason, or a recorded judgment."""
+        if int(media_row["is_favorite"] or 0):
+            return True
+        row = conn.execute(
+            "SELECT passed, reasons, judged_at FROM media_judgments "
+            "WHERE file_path = ?",
+            (path,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(
+            int(row["passed"])
+            or row["judged_at"] is not None
+            or (row["reasons"] or "[]") != "[]"
+        )
+
+    @staticmethod
+    def _put_back_judgment(
+        conn: sqlite3.Connection,
+        path: str,
+        j: Optional[Dict[str, Any]],
+        is_favorite: bool,
+    ) -> None:
+        """Write the snapshot judgment verbatim over an absent or seen-only
+        row (keeping the live seen_at only when the snapshot has none) and
+        set ``is_favorite`` by raw UPDATE. Caller holds the lock."""
+        if j is not None:
+            conn.execute(
+                "INSERT INTO media_judgments (file_path, passed, "
+                "reasons, seen_at, judged_at, confirmed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(file_path) DO UPDATE SET "
+                "passed = excluded.passed, reasons = excluded.reasons, "
+                "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
+                "judged_at = excluded.judged_at, "
+                "confirmed_at = excluded.confirmed_at",
+                (
+                    path,
+                    int(j["passed"]),
+                    j["reasons"],
+                    j["seen_at"],
+                    j["judged_at"],
+                    j["confirmed_at"],
+                ),
+            )
+        if is_favorite:
+            conn.execute(
+                "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
+                (path,),
+            )
 
     # ------------------------------------------------------------------
     # Folders (manual + smart)

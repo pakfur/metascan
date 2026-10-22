@@ -89,6 +89,9 @@ class TestT2iImagesDb(unittest.TestCase):
                 "comfy_prompt_id",
                 "created_at",
                 "form_state",
+                "writer_id",
+                "variant_group",
+                "variant_index",
             ],
         )
         self.assertEqual(foreign, [])

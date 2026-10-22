@@ -526,6 +526,44 @@ class TestI2vApi(_I2vApiBase):
         self.assertFalse(body["quality_steps_supported"])
 
 
+class TestI2vGenerateCategories(_I2vApiBase):
+    def _body(self, **over):
+        body = {
+            "source_path": "/lib/a.png",
+            "prompt": "For the target video, the shot begins mid-air.",
+            "duration_s": 6,
+            "quality": "fast",
+            "seed": 1,
+            "loras": [],
+        }
+        body.update(over)
+        return body
+
+    def test_i2v_unknown_category_rejected_before_queueing(self):
+        known = self.db.create_category("Anime").id
+        resp = self.client.post(
+            "/api/i2v/generate", json=self._body(category_ids=[known, 999])
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["detail"]["code"], "unknown_category")
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.db.list_generation_jobs(limit=10), [])
+
+    def test_known_categories_reach_the_runner(self):
+        anime = self.db.create_category("Anime").id
+        scifi = self.db.create_category("Sci-Fi").id
+        resp = self.client.post(
+            "/api/i2v/generate", json=self._body(category_ids=[anime, scifi, anime])
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.generate_calls[0]["category_ids"], [anime, scifi])
+
+    def test_category_ids_default_to_none_chosen(self):
+        resp = self.client.post("/api/i2v/generate", json=self._body())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.generate_calls[0]["category_ids"], [])
+
+
 class TestI2vFormStateApi(_I2vApiBase):
     """GET /videos hands the dialog a complete form_state per clip, and
     PATCH /videos/{id} autosaves into it without touching the rendered

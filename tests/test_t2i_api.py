@@ -871,6 +871,37 @@ class TestBatches(T2iApiCase):
         self.assertEqual(resp.json()["detail"], "No t2i batch nope")
 
 
+class TestBatchCategories(T2iApiCase):
+    def test_t2i_unknown_category_rejected_before_queueing(self) -> None:
+        known = self.db.create_category("Anime").id
+        resp = self.client.post(
+            "/api/t2i/batches", json=self.batch_body(category_ids=[known, 999])
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["detail"]["code"], "unknown_category")
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.db.list_generation_jobs(limit=10), [])
+
+    def test_known_categories_reach_the_runner(self) -> None:
+        anime = self.db.create_category("Anime").id
+        scifi = self.db.create_category("Sci-Fi").id
+        resp = self.client.post(
+            "/api/t2i/batches",
+            json=self.batch_body(category_ids=[scifi, anime, scifi]),
+        )
+        self.assertEqual(resp.status_code, 200)
+        ((_, req),) = self.runner.calls
+        self.assertEqual(req.category_ids, [scifi, anime])
+
+    def test_category_ids_default_to_none_chosen(self) -> None:
+        self.assertEqual(
+            self.client.post("/api/t2i/batches", json=self.batch_body()).status_code,
+            200,
+        )
+        ((_, req),) = self.runner.calls
+        self.assertEqual(req.category_ids, [])
+
+
 class TestImages(T2iApiCase):
     def facts(self, **over: Any) -> Dict[str, Any]:
         facts: Dict[str, Any] = dict(
@@ -927,6 +958,9 @@ class TestImages(T2iApiCase):
                     "created_at",
                     "is_favorite",
                     "form_state",
+                    "writer_id",
+                    "variant_group",
+                    "variant_index",
                 ]
             ),
         )

@@ -158,6 +158,16 @@ export const useI2vStore = defineStore('i2v', () => {
     }
   }
 
+  // Follow a favorite flag the server returned from the result viewer's
+  // F / X / ☆ so the strip's star matches.
+  function applyFavoriteFlag(path: string, favorite: boolean): void {
+    for (const v of videos.value) {
+      if (norm(v.file_path) === norm(path) && v.is_favorite !== favorite) {
+        v.is_favorite = favorite
+      }
+    }
+  }
+
   // Autosave target for the dialog. Writes the clip's EDITABLE form state
   // only, then mirrors the server's merged result onto the local row so a
   // later click on that clip loads what was just saved.
@@ -185,6 +195,7 @@ export const useI2vStore = defineStore('i2v', () => {
     handleComfyEvent,
     handleI2vEvent,
     toggleFavorite,
+    applyFavoriteFlag,
     saveFormState,
   }
 })

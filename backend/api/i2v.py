@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
+from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.i2v_service import I2vService
 from metascan.core.comfy_bindings import BindingError
@@ -103,6 +104,9 @@ class GenerateRequest(BaseModel):
     # Recorded into the clip's form_state only; the prompt text already
     # embodies the cadence, so the render never needs the template.
     template_id: Optional[str] = None
+    # Categories the clip is tagged with at ingest; unknown ids are a 404
+    # before anything is uploaded or queued.
+    category_ids: List[int] = Field(default_factory=list)
 
 
 @router.post("/prompt")
@@ -202,6 +206,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             detail=f"No {body.quality} preset is configured -- set one in "
             "Configuration → Image to Video.",
         )
+    category_ids = await checked_category_ids(body.category_ids)
     try:
         job_id = await runner.generate(
             source_path=body.source_path,
@@ -217,6 +222,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             output_root=cfg["output_root"] or None,
             output_prefix=cfg["output_prefix"],
             template_id=body.template_id,
+            category_ids=category_ids,
         )
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

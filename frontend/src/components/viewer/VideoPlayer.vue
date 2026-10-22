@@ -17,6 +17,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   speedChange: [speed: number]
+  play: []
 }>()
 
 const videoEl = ref<HTMLVideoElement | null>(null)
@@ -114,7 +115,10 @@ function onLoadedMetadata() {
   }
 }
 
-function onPlay() { playing.value = true }
+function onPlay() {
+  playing.value = true
+  emit('play')
+}
 function onPause() { playing.value = false }
 
 watch(() => props.filePath, async () => {

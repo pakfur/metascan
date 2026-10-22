@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -13,6 +13,15 @@ from backend.api import similarity as similarity_api
 from backend.config import load_app_config, get_directories
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
+from backend.services.taste_snapshot import TASTE_SNAPSHOT_FILENAME  # noqa: F401
+from backend.services.taste_snapshot import (
+    PendingSnapshotUnreadable,
+    apply_pending_taste_snapshot,
+    merge_pending_into_snapshot,
+    restore_and_persist,
+    snapshot_file_path,
+    write_snapshot_file,
+)
 from metascan.core.scanner import Scanner
 
 logger = logging.getLogger(__name__)
@@ -24,9 +33,14 @@ _scan_task: Optional[asyncio.Task] = None
 _cancel_requested = False
 
 
+def _data_dir(db: Any) -> Optional[Path]:
+    base = getattr(db, "db_path", None)
+    return Path(base) if base is not None else None
+
+
 class ScanRequest(BaseModel):
     full_cleanup: bool = False
-    full_clean: bool = False  # destructive: truncates DB, preserves favorites
+    full_clean: bool = False  # destructive: truncates DB, preserves ratings
 
 
 @router.post("/prepare")
@@ -120,37 +134,104 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
 
     await ws_manager.broadcast("scan", "started", {"full_clean": full_clean})
 
-    # Snapshot favorites before any destructive operation
-    favorites_snapshot: list = []
+    # Snapshot the taste state (judgments, category links, favorites)
+    # before any destructive operation: truncating media cascades away
+    # media_judgments and media_categories. The snapshot is written to
+    # disk as *pending state* (backend/services/taste_snapshot.py) before
+    # the truncate; if either step fails the full clean is aborted before
+    # anything is deleted. Leftovers of an earlier interrupted full clean
+    # are first applied, and whatever is still pending is merged in so it
+    # isn't overwritten.
+    data_dir = _data_dir(db)
+    taste_snapshot: Optional[Dict[str, Any]] = None
     if full_clean:
-        favorites_snapshot = await asyncio.to_thread(db.get_favorite_file_paths)
+        try:
+            if data_dir is None:
+                raise RuntimeError("database has no data directory")
+            # raise_unreadable: a pending file we can't read may hold valid
+            # ratings -- abort instead of overwriting it below.
+            await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir, True)
+            taste_snapshot = await asyncio.to_thread(db.export_taste_state)
+            taste_snapshot = await asyncio.to_thread(
+                merge_pending_into_snapshot, data_dir, taste_snapshot
+            )
+            await asyncio.to_thread(write_snapshot_file, data_dir, taste_snapshot)
+        except PendingSnapshotUnreadable as pend_err:
+            logger.error(f"Full clean aborted: {pend_err}")
+            await ws_manager.broadcast(
+                "scan",
+                "error",
+                {
+                    "message": (
+                        "Full clean aborted: the pending ratings file from an "
+                        "earlier interrupted full clean could not be read, so "
+                        f"nothing was deleted ({pend_err})"
+                    )
+                },
+            )
+            return
+        except Exception as snap_err:
+            logger.error(
+                f"Full clean aborted: could not snapshot taste state: {snap_err}",
+                exc_info=True,
+            )
+            await ws_manager.broadcast(
+                "scan",
+                "error",
+                {"message": f"Full clean aborted (taste snapshot failed): {snap_err}"},
+            )
+            return
         await asyncio.to_thread(db.truncate_all_data)
         await ws_manager.broadcast(
             "scan",
             "phase_changed",
-            {"phase": "full_clean", "favorites_preserved": len(favorites_snapshot)},
+            {
+                "phase": "full_clean",
+                "favorites_preserved": len(taste_snapshot["favorites"]),
+                "judgments_preserved": len(taste_snapshot["judgments"]),
+            },
         )
 
-    async def _restore_favorites_from_snapshot() -> None:
-        """Best-effort: re-mark favorite paths from the snapshot that exist
-        in the current DB. Safe to call even if no snapshot was taken."""
-        if not (full_clean and favorites_snapshot):
+    restore_done = False
+
+    async def _restore_taste_from_snapshot(completed: bool) -> None:
+        """Put the snapshot back for paths that re-appeared. On a completed
+        run the rest is tombstoned and the pending file deleted; on cancel
+        or error the rest stays pending (file rewritten, no tombstones).
+        Runs at most once per scan; no-op when no snapshot was taken.
+        Never called on CancelledError (shutdown): the pending file is
+        left as written and applied at the next startup."""
+        nonlocal restore_done
+        if restore_done or taste_snapshot is None or data_dir is None:
             return
+        restore_done = True
         try:
-            existing = set(await asyncio.to_thread(db.get_existing_file_paths))
-            restored = 0
-            for path in favorites_snapshot:
-                if path in existing:
-                    await asyncio.to_thread(db.set_favorite, Path(path), True)
-                    restored += 1
-            await ws_manager.broadcast(
-                "scan", "favorites_restored", {"count": restored}
+            counts = await asyncio.to_thread(
+                restore_and_persist, db, data_dir, taste_snapshot, completed
             )
+            logger.info(
+                "Full clean: taste state restored for %d paths, %d %s",
+                counts["restored"],
+                counts["missing"],
+                "tombstoned" if completed else "still pending",
+            )
+            await ws_manager.broadcast("scan", "taste_restored", counts)
         except Exception as restore_err:
             logger.error(
-                f"Failed to restore favorites after scan: {restore_err}",
+                f"Failed to restore taste state after scan (pending snapshot "
+                f"kept at {snapshot_file_path(data_dir)}): {restore_err}",
                 exc_info=True,
             )
+
+    async def _apply_pending() -> None:
+        """Restore anything pending from an earlier interrupted full clean
+        that this scan brought back. Never tombstones, never raises."""
+        if data_dir is None:
+            return
+        try:
+            await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir)
+        except Exception as e:
+            logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
     try:
         total_processed = 0
@@ -158,7 +239,8 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
 
         for dir_idx, dir_config in enumerate(directories):
             if _cancel_requested:
-                await _restore_favorites_from_snapshot()
+                await _restore_taste_from_snapshot(completed=False)
+                await _apply_pending()
                 await ws_manager.broadcast("scan", "cancelled", {})
                 return
 
@@ -207,8 +289,11 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
                     db.delete_media_batch, stale_paths
                 )
 
-        # Restore favorites for files that re-appeared in the rescan
-        await _restore_favorites_from_snapshot()
+        # Restore ratings for files that re-appeared in the rescan. A cancel
+        # that landed during the last directory still leaves the loop
+        # normally -- it must not tombstone what wasn't re-imported yet.
+        await _restore_taste_from_snapshot(completed=not _cancel_requested)
+        await _apply_pending()
 
         # Auto-trigger embedding build when:
         #   - the scan was not cancelled,
@@ -234,8 +319,9 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
         )
 
     except Exception as e:
-        # Best-effort restore so users don't silently lose favorites on a
+        # Best-effort restore so users don't silently lose ratings on a
         # failed full-clean rescan.
-        await _restore_favorites_from_snapshot()
+        await _restore_taste_from_snapshot(completed=False)
+        await _apply_pending()
         logger.error(f"Scan error: {e}", exc_info=True)
         await ws_manager.broadcast("scan", "error", {"message": str(e)})

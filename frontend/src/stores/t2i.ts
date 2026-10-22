@@ -655,6 +655,19 @@ export const useT2iStore = defineStore('t2i', () => {
     }
   }
 
+  /**
+   * Follow a favorite flag the server returned elsewhere (the result
+   * viewer's F / X / ☆), so the strip's tile star matches. The library copy
+   * is already handled by the viewer itself.
+   */
+  function applyFavoriteFlag(path: string, favorite: boolean): void {
+    for (const image of images.value) {
+      if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
+        image.is_favorite = favorite
+      }
+    }
+  }
+
   /** Optimistic; the library copy is updated too. Reverts and rethrows on failure. */
   async function toggleFavorite(id: number): Promise<void> {
     const image = images.value.find((i) => i.id === id)
@@ -782,6 +795,7 @@ export const useT2iStore = defineStore('t2i', () => {
     clearSelection,
     saveFormState,
     toggleFavorite,
+    applyFavoriteFlag,
     deleteImage,
     // draft
     loadDraft,
