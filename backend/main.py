@@ -44,6 +44,7 @@ from backend.api import (
 )
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.judgments_service import faiss_embedding_lookup
+from backend.services.taste_snapshot import apply_pending_taste_snapshot
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
 from metascan.core.prompt_store import get_prompt_store
@@ -143,6 +144,21 @@ async def _event_loop_heartbeat() -> None:
         last = now
 
 
+async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
+    """Startup: put back ratings left pending by an interrupted full clean
+    (backend/services/taste_snapshot.py). Never raises."""
+    try:
+        counts = await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir)
+        if counts["restored"] or counts["missing"]:
+            logger.info(
+                "Pending taste snapshot at startup: %d restored, %d still pending",
+                counts["restored"],
+                counts["missing"],
+            )
+    except Exception:
+        logger.exception("Applying the pending taste snapshot failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Until now the server logged to the console only, so anything that
@@ -191,6 +207,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         get_db().set_embedding_lookup(faiss_embedding_lookup)
     except Exception:
         logger.exception("Failed to install tombstone embedding lookup")
+
+    await _apply_pending_taste_snapshot(get_db(), get_data_dir())
 
     app_config = load_app_config()
     models_cfg = get_models_config(app_config)

@@ -135,6 +135,7 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     db.set_embedding_lookup(lambda p: (vec, "clip-small"))
 
     counts = db.restore_taste_state(snapshot, tombstone_missing=True)
+    counts.pop("remaining")
 
     assert counts == {"restored": 3, "missing": 1, "tombstoned": 1}
     [t] = db.list_tombstones()
@@ -152,6 +153,7 @@ def test_restore_without_tombstones_flag_writes_none(db):
     snapshot = db.export_taste_state()
     db.truncate_all_data()
     counts = db.restore_taste_state(snapshot)
+    assert counts.pop("remaining")["judgments"] == snapshot["judgments"]
     assert counts == {"restored": 0, "missing": 4, "tombstoned": 0}
     assert db.list_tombstones() == []
 
@@ -186,3 +188,94 @@ def test_snapshot_survives_json_roundtrip(db):
     db.save_media(_media("/l/fav.png"))
     assert db.restore_taste_state(snapshot)["restored"] == 1
     assert db.get_judgment("/l/fav.png").verdict == "favorite"
+
+
+# ----------------------------------------------------------------------
+# Pending restore: never overwrite newer data, report what is left
+# ----------------------------------------------------------------------
+
+
+def test_restore_reports_the_unrestored_remainder(db):
+    _seed(db)
+    snapshot = db.export_taste_state()
+    db.truncate_all_data()
+    db.save_media(_media("/l/fav.png"))
+
+    counts = db.restore_taste_state(snapshot)
+
+    rem = counts["remaining"]
+    assert sorted(j["file_path"] for j in rem["judgments"]) == [
+        "/l/gone.png",
+        "/l/pass.png",
+        "/l/seen.png",
+    ]
+    assert rem["favorites"] == ["/l/gone.png"]
+    assert sorted({lk["file_path"] for lk in rem["categories"]}) == [
+        "/l/gone.png",
+        "/l/pass.png",
+    ]
+    assert rem["taken_at"] == snapshot["taken_at"]
+    # The remainder restores the rest later, exactly like the original.
+    for p in ("/l/pass.png", "/l/gone.png"):
+        db.save_media(_media(p))
+    again = db.restore_taste_state(json.loads(json.dumps(rem)))
+    assert again["restored"] == 2 and again["missing"] == 1
+    assert db.get_judgment("/l/gone.png").verdict == "favorite"
+    assert db.get_judgment("/l/pass.png").reasons == ["composition"]
+
+
+def test_restore_never_overwrites_a_newer_judgment(db):
+    anime, scifi = _seed(db)
+    snapshot = db.export_taste_state()
+    db.truncate_all_data()
+    for p in ("/l/fav.png", "/l/pass.png"):
+        db.save_media(_media(p))
+    # The user re-rated both after they re-appeared, before the restore.
+    db.set_verdict("/l/fav.png", "pass", now=T1)
+    db.set_verdict("/l/pass.png", "favorite", now=T0)
+    db.add_media_categories(["/l/pass.png"], scifi.id, "bulk")
+    newer = _state(db)
+    newer_scifi_link = [
+        lk
+        for lk in newer[1]
+        if lk["file_path"] == "/l/pass.png" and lk["category_id"] == scifi.id
+    ]
+
+    counts = db.restore_taste_state(snapshot)
+
+    assert counts["restored"] == 2
+    fav = db.get_judgment("/l/fav.png")
+    assert fav.verdict == "pass" and fav.confirmed_at == T1.isoformat()
+    assert fav.is_favorite is False
+    passed = db.get_judgment("/l/pass.png")
+    assert passed.verdict == "favorite" and passed.reasons == []
+    j2, l2, _ = _state(db)
+    assert [j for j in j2] == newer[0]
+    # Category links: the existing (newer) link is kept as-is, missing
+    # snapshot links are added.
+    scifi_now = [
+        lk
+        for lk in l2
+        if lk["file_path"] == "/l/pass.png" and lk["category_id"] == scifi.id
+    ]
+    assert scifi_now == newer_scifi_link
+    assert sorted(c.name for c in passed.categories) == ["Anime", "Sci-Fi"]
+    assert [c.name for c in fav.categories] == ["Anime"]
+
+
+def test_restore_fills_a_seen_only_row(db):
+    """Just viewing a re-appeared item (seen-only row) is not a rating:
+    the snapshot verdict still comes back."""
+    _seed(db)
+    snapshot = db.export_taste_state()
+    db.truncate_all_data()
+    db.save_media(_media("/l/fav.png"))
+    db.mark_seen("/l/fav.png", now=T1)
+
+    db.restore_taste_state(snapshot)
+
+    fav = db.get_judgment("/l/fav.png")
+    assert fav.verdict == "favorite" and fav.is_favorite is True
+    assert fav.reasons == ["realism", "light"]
+    assert fav.confirmed_at == T0.isoformat()
+    assert fav.seen_at == T0.isoformat()

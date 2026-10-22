@@ -5948,18 +5948,25 @@ class DatabaseManager:
 
     def restore_taste_state(
         self, snapshot: Dict[str, Any], tombstone_missing: bool = False
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """Put an ``export_taste_state`` snapshot back for every path whose
         media row exists again: judgment rows and category links verbatim
         (original timestamps; links only for categories that still exist)
         and ``media.is_favorite`` by raw UPDATE. Logs **no** judgment_events
         -- this is a put-back, not a re-judgment. Idempotent.
 
+        Never overwrites newer data: a path that already carries a real
+        judgment (verdict, reasons or favorite -- the user re-rated it after
+        it re-appeared) keeps its row and ``is_favorite`` untouched; a
+        seen-only row is filled from the snapshot. Category links are
+        added with ON CONFLICT DO NOTHING.
+
         With ``tombstone_missing``, each snapshot path whose media row did
         not come back gets one media_tombstones row built from the snapshot
         (embedding via the installed lookup, else NULL; lineage from the
         surviving t2i/i2v row). Returns ``{restored, missing, tombstoned}``
-        counted in paths."""
+        counted in paths plus ``remaining``: the snapshot narrowed to the
+        paths that were not restored (same shape, same ``taken_at``)."""
         judgments: Dict[str, Dict[str, Any]] = {
             j["file_path"]: j for j in snapshot.get("judgments") or []
         }
@@ -5970,21 +5977,20 @@ class DatabaseManager:
         paths = sorted(set(judgments) | set(links_by_path) | favorites)
 
         restored = missing = tombstoned = 0
+        missing_paths: List[str] = []
         with self.lock, self._get_connection() as conn:
             existing_cats = {
                 int(r["id"]) for r in conn.execute("SELECT id FROM categories")
             }
             now = self._iso(None)
             for path in paths:
-                present = (
-                    conn.execute(
-                        "SELECT 1 FROM media WHERE file_path = ?", (path,)
-                    ).fetchone()
-                    is not None
-                )
+                media_row = conn.execute(
+                    "SELECT is_favorite FROM media WHERE file_path = ?", (path,)
+                ).fetchone()
                 path_links = links_by_path.get(path, [])
-                if not present:
+                if media_row is None:
                     missing += 1
+                    missing_paths.append(path)
                     if tombstone_missing:
                         self._insert_tombstone(
                             conn,
@@ -6007,25 +6013,9 @@ class DatabaseManager:
                         tombstoned += 1
                     continue
                 restored += 1
-                j = judgments.get(path)
-                if j is not None:
-                    conn.execute(
-                        "INSERT INTO media_judgments (file_path, passed, "
-                        "reasons, seen_at, judged_at, confirmed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT(file_path) DO UPDATE SET "
-                        "passed = excluded.passed, reasons = excluded.reasons, "
-                        "seen_at = excluded.seen_at, "
-                        "judged_at = excluded.judged_at, "
-                        "confirmed_at = excluded.confirmed_at",
-                        (
-                            path,
-                            int(j["passed"]),
-                            j["reasons"],
-                            j["seen_at"],
-                            j["judged_at"],
-                            j["confirmed_at"],
-                        ),
+                if not self._has_newer_judgment(conn, path, media_row):
+                    self._put_back_judgment(
+                        conn, path, judgments.get(path), path in favorites
                     )
                 for lk in path_links:
                     if int(lk["category_id"]) not in existing_cats:
@@ -6034,18 +6024,81 @@ class DatabaseManager:
                         "INSERT INTO media_categories "
                         "(file_path, category_id, source, assigned_at) "
                         "VALUES (?, ?, ?, ?) "
-                        "ON CONFLICT(file_path, category_id) DO UPDATE SET "
-                        "source = excluded.source, "
-                        "assigned_at = excluded.assigned_at",
+                        "ON CONFLICT(file_path, category_id) DO NOTHING",
                         (path, int(lk["category_id"]), lk["source"], lk["assigned_at"]),
                     )
-                if path in favorites:
-                    conn.execute(
-                        "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
-                        (path,),
-                    )
             conn.commit()
-        return {"restored": restored, "missing": missing, "tombstoned": tombstoned}
+        keep = set(missing_paths)
+        remaining = {
+            "taken_at": snapshot.get("taken_at"),
+            "judgments": [j for p, j in judgments.items() if p in keep],
+            "categories": [
+                lk for p, links in links_by_path.items() if p in keep for lk in links
+            ],
+            "favorites": sorted(favorites & keep),
+        }
+        return {
+            "restored": restored,
+            "missing": missing,
+            "tombstoned": tombstoned,
+            "remaining": remaining,
+        }
+
+    @staticmethod
+    def _has_newer_judgment(
+        conn: sqlite3.Connection, path: str, media_row: sqlite3.Row
+    ) -> bool:
+        """True when the live row carries a rating the snapshot must not
+        overwrite: favorite, pass, any reason, or a recorded judgment."""
+        if int(media_row["is_favorite"] or 0):
+            return True
+        row = conn.execute(
+            "SELECT passed, reasons, judged_at FROM media_judgments "
+            "WHERE file_path = ?",
+            (path,),
+        ).fetchone()
+        if row is None:
+            return False
+        return bool(
+            int(row["passed"])
+            or row["judged_at"] is not None
+            or (row["reasons"] or "[]") != "[]"
+        )
+
+    @staticmethod
+    def _put_back_judgment(
+        conn: sqlite3.Connection,
+        path: str,
+        j: Optional[Dict[str, Any]],
+        is_favorite: bool,
+    ) -> None:
+        """Write the snapshot judgment verbatim over an absent or seen-only
+        row (keeping the live seen_at only when the snapshot has none) and
+        set ``is_favorite`` by raw UPDATE. Caller holds the lock."""
+        if j is not None:
+            conn.execute(
+                "INSERT INTO media_judgments (file_path, passed, "
+                "reasons, seen_at, judged_at, confirmed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(file_path) DO UPDATE SET "
+                "passed = excluded.passed, reasons = excluded.reasons, "
+                "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
+                "judged_at = excluded.judged_at, "
+                "confirmed_at = excluded.confirmed_at",
+                (
+                    path,
+                    int(j["passed"]),
+                    j["reasons"],
+                    j["seen_at"],
+                    j["judged_at"],
+                    j["confirmed_at"],
+                ),
+            )
+        if is_favorite:
+            conn.execute(
+                "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
+                (path,),
+            )
 
     # ------------------------------------------------------------------
     # Folders (manual + smart)
