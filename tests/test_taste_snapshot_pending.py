@@ -5,6 +5,8 @@ the server down."""
 import asyncio
 import json
 import logging
+import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,3 +141,178 @@ def test_lifespan_helper_applies_and_never_raises(db, monkeypatch):
 
     monkeypatch.setattr(main_mod, "apply_pending_taste_snapshot", boom)
     asyncio.run(main_mod._apply_pending_taste_snapshot(db, Path(db.db_path)))
+
+
+# ----------------------------------------------------------------------
+# Review fixes
+# ----------------------------------------------------------------------
+
+
+def test_write_fsyncs_file_and_directory_before_returning(tmp_path, monkeypatch):
+    calls = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd):
+        calls.append(("fsync", stat.S_ISDIR(os.fstat(fd).st_mode)))
+        real_fsync(fd)
+
+    def spy_replace(a, b):
+        calls.append(("replace", None))
+        real_replace(a, b)
+
+    monkeypatch.setattr(ts.os, "fsync", spy_fsync)
+    monkeypatch.setattr(ts.os, "replace", spy_replace)
+    ts.write_snapshot_file(
+        tmp_path, {"judgments": [], "categories": [], "favorites": []}
+    )
+    assert calls[0] == ("fsync", False)  # file data durable before the rename
+    assert calls[1] == ("replace", None)
+    if os.name != "nt":
+        assert calls[2] == ("fsync", True)  # and the rename itself
+
+
+def test_write_tolerates_an_unsupported_directory_fsync(tmp_path, monkeypatch):
+    real_fsync = os.fsync
+
+    def picky_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("not supported")
+        real_fsync(fd)
+
+    monkeypatch.setattr(ts.os, "fsync", picky_fsync)
+    ts.write_snapshot_file(
+        tmp_path, {"judgments": [], "categories": [], "favorites": []}
+    )
+    assert ts.snapshot_file_path(tmp_path).exists()
+
+
+_GOOD_J = {
+    "file_path": "/x.png",
+    "passed": 0,
+    "reasons": "[]",
+    "seen_at": None,
+    "judged_at": None,
+    "confirmed_at": None,
+}
+_GOOD_L = {
+    "file_path": "/x.png",
+    "category_id": 1,
+    "category_name": "A",
+    "source": "viewer",
+    "assigned_at": "2026-01-01T00:00:00+00:00",
+}
+
+
+@pytest.mark.parametrize(
+    "snap",
+    [
+        {"judgments": [{**_GOOD_J, "passed": None}]},
+        {"judgments": [{**_GOOD_J, "passed": "yes"}]},
+        {"judgments": [{**_GOOD_J, "reasons": ["light"]}]},
+        {"judgments": [{**_GOOD_J, "file_path": 3}]},
+        {"judgments": [{**_GOOD_J, "seen_at": 5}]},
+        {"categories": [{**_GOOD_L, "category_id": "x"}]},
+        {"categories": [{**_GOOD_L, "category_id": None}]},
+        {"categories": [{**_GOOD_L, "source": None}]},
+    ],
+)
+def test_bad_value_types_are_quarantined(db, snap):
+    data_dir = Path(db.db_path)
+    ts.snapshot_file_path(data_dir).write_text(json.dumps(snap), encoding="utf-8")
+    assert ts.apply_pending_taste_snapshot(db, data_dir) == {
+        "restored": 0,
+        "missing": 0,
+    }
+    assert not ts.snapshot_file_path(data_dir).exists()
+    assert len(list(data_dir.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*"))) == 1
+
+
+def test_good_value_types_pass_validation():
+    assert ts._valid_shape(
+        {
+            "taken_at": "t",
+            "judgments": [_GOOD_J, {**_GOOD_J, "passed": 1, "seen_at": "t"}],
+            "categories": [_GOOD_L],
+            "favorites": ["/x.png"],
+        }
+    )
+
+
+@pytest.mark.parametrize("exc", [TypeError("bad"), ValueError("bad")])
+def test_restore_rejecting_the_data_quarantines_the_file(db, monkeypatch, caplog, exc):
+    _pending_snapshot(db)
+    data_dir = Path(db.db_path)
+
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(db, "restore_taste_state", boom)
+    with caplog.at_level(logging.WARNING, logger=ts.logger.name):
+        assert ts.apply_pending_taste_snapshot(db, data_dir) == {
+            "restored": 0,
+            "missing": 0,
+        }
+    assert not ts.snapshot_file_path(data_dir).exists()
+    assert len(list(data_dir.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*"))) == 1
+    assert any("corrupt" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_read_error_keeps_the_file_in_place(db, monkeypatch, caplog):
+    snap = _pending_snapshot(db)
+    data_dir = Path(db.db_path)
+    target = ts.snapshot_file_path(data_dir)
+    real_read = Path.read_text
+
+    def locked(self, *a, **k):
+        if self == target:
+            raise PermissionError("locked")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    with caplog.at_level(logging.WARNING, logger=ts.logger.name):
+        assert ts.apply_pending_taste_snapshot(db, data_dir) == {
+            "restored": 0,
+            "missing": 0,
+        }
+    monkeypatch.setattr(Path, "read_text", real_read)
+    assert json.loads(target.read_text(encoding="utf-8")) == snap
+    assert list(data_dir.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*")) == []
+    assert any("locked" in r.getMessage() for r in caplog.records)
+
+
+def test_completed_restore_with_a_stuck_file_never_re_pends_tombstoned_paths(
+    db, monkeypatch
+):
+    snap = _pending_snapshot(db)  # a.png and b.png, neither in the DB
+    data_dir = Path(db.db_path)
+    target = ts.snapshot_file_path(data_dir)
+    real_unlink = Path.unlink
+    attempts = []
+
+    def stuck(self, *a, **k):
+        if self == target:
+            attempts.append(1)
+            raise PermissionError("held by antivirus")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", stuck)
+    counts = ts.restore_and_persist(db, data_dir, snap, True)
+    assert counts["tombstoned"] == 2
+    assert len(attempts) == 2  # retried once
+
+    # The end-of-scan apply must not bring the tombstoned paths back.
+    ts.apply_pending_taste_snapshot(db, data_dir)
+    fresh = db.export_taste_state()
+    merged = ts.merge_pending_into_snapshot(data_dir, fresh)
+    assert merged["judgments"] == [] and merged["favorites"] == []
+    assert len(db.list_tombstones()) == 2
+
+
+def test_quarantine_names_never_collide(tmp_path):
+    for _ in range(3):
+        ts.snapshot_file_path(tmp_path).write_text("{bad", encoding="utf-8")
+        assert ts.load_pending_snapshot(tmp_path) is None
+    kept = list(tmp_path.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*"))
+    assert len(kept) == 3
+    assert all(str(os.getpid()) in k.name for k in kept)

@@ -165,7 +165,7 @@ function handleClose() {
             <input type="radio" value="full_clean" v-model="scanStore.scanMode" />
             <span>
               <strong>Full clean &amp; rescan</strong>
-              <em>Wipe the database and reimport every file. Ratings (favorite/pass), reasons and categories are preserved; if the rescan is cancelled or interrupted, they come back as soon as the files are imported again.</em>
+              <em>Wipe the database and reimport every file. Ratings (favorite/pass), reasons and categories are preserved; if the rescan is cancelled or interrupted, they come back when the next scan or restart finds the files again.</em>
             </span>
           </label>
         </fieldset>
