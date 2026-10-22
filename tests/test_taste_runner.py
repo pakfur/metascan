@@ -229,3 +229,30 @@ def test_record_failed_model_keeps_active(tmp_path):
     with pytest.raises(ValueError):
         db.record_taste_model({**base, "status": "retired"})
     db.close()
+
+
+async def test_drain_survives_overlong_stderr_line(tmp_path, caplog):
+    import logging
+
+    runner = TasteRunner(None, tmp_path / "idx", tmp_path / "taste")
+    stream = asyncio.StreamReader(limit=1024)
+    stream.feed_data(b"x" * 5000 + b"\n" + b"after the long line\n")
+    stream.feed_eof()
+    with caplog.at_level(logging.INFO, logger="metascan.core.taste_runner"):
+        await asyncio.wait_for(runner._drain(stream), timeout=5)
+    assert "after the long line" in caplog.text
+
+
+async def test_scoring_targets_and_task_write_off_loop(setup, monkeypatch):
+    runner, *_ = setup
+    calls = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        calls.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    assert (await runner.train(180))["status"] == "ok"
+    assert "_scoring_targets" in calls
+    assert calls.count("_write_json") >= 2  # labels doc + task file

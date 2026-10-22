@@ -49,7 +49,9 @@ async def get_judgment(
     state = await service.get(file_path)
     if state is None:
         raise _not_found()
-    return state.to_dict()
+    out = state.to_dict()
+    out["batch"] = await service.batch_position(file_path)
+    return out
 
 
 @router.patch("/judgments/{file_path:path}")

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -31,9 +31,20 @@ _embed_poll_task: Optional[asyncio.Task] = None
 _inference_client: Optional[InferenceClient] = None
 _EMBED_POLL_INTERVAL_SECONDS = 0.5
 
+# Called (from the embedding poller's worker thread) after every completed
+# embedding run; the lifespan installs the taste scorer's rescore here.
+_on_embedding_complete: Optional[Callable[[], None]] = None
+
 # Tracks whether the *current* (or most recent) scan was started with VLM
 # tagging enabled.  Set by build_index; read by the on_complete callback.
 _current_scan_tag_with_vlm: bool = False
+
+
+def set_embedding_complete_hook(hook: Optional[Callable[[], None]]) -> None:
+    """Install (or clear, with None) the post-embedding-run hook. It runs
+    on a worker thread, so it must only schedule work, never block."""
+    global _on_embedding_complete
+    _on_embedding_complete = hook
 
 
 def get_inference_client() -> InferenceClient:
@@ -102,6 +113,11 @@ def _start_tombstone_backfill(fm: FaissIndexManager) -> None:
     ).start()
 
 
+def embedding_index_dir() -> Path:
+    """Directory holding the FAISS index the embedding worker writes."""
+    return _get_embedding_queue().index_dir
+
+
 def warm_faiss_index() -> None:
     """Construct the FaissIndexManager singleton and load the on-disk
     index. Blocking — must be called from a worker thread. Safe to invoke
@@ -147,6 +163,12 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
         except Exception as e:
             logger.exception(f"Failed to reload FAISS after index build: {e}")
         ws_manager.broadcast_sync("embedding", "complete", {"total": total})
+        hook = _on_embedding_complete
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                logger.exception("Post-embedding hook failed")
         if _current_scan_tag_with_vlm:
             _schedule_vlm_drain_after_complete(eq)
 
