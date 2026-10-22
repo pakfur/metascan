@@ -128,3 +128,96 @@ async def test_retrain_loop_ticks_swallows_errors_and_cancels(service, monkeypat
     task = service._loop_task
     await service.aclose()
     assert task is not None and task.done()
+
+
+async def test_failed_stale_retry_after_index_change(service, db, fake_runner):
+    seed_labels(db)
+    db.record_taste_model(model_row(labels_as_of=after(1).isoformat()))
+    fake_runner.stale = True
+    fake_runner.fingerprint = None  # index missing mid-rebuild
+    fake_runner.result = {"status": "error", "error": "no index"}
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    assert await service.maybe_retrain(now=after(600)) is False
+    fake_runner.fingerprint = ("large", 64, 2.0)  # new index written
+    assert await service.maybe_retrain(now=after(700)) is True
+    await service.wait_idle()
+    assert len(fake_runner.train_calls) == 2
+
+
+async def test_embedding_complete_clears_failed_guard(service, db, fake_runner):
+    seed_labels(db)
+    fake_runner.result = {"status": "error", "error": "boom"}
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    assert await service.maybe_retrain(now=after(600)) is False
+    service.attach_loop(asyncio.get_running_loop())
+    service.schedule_rescore_threadsafe()
+    await asyncio.sleep(0.05)
+    await service.wait_idle()
+    assert await service.maybe_retrain(now=after(700)) is True
+    await service.wait_idle()
+
+
+async def test_not_enough_data_clears_last_error(service, db, fake_runner):
+    seed_labels(db)
+    fake_runner.raise_on_train = RuntimeError("boom")
+    await service.start_training()
+    await service.wait_idle()
+    assert (await service.status())["last_error"] == "boom"
+    fake_runner.raise_on_train = None
+    fake_runner.result = {"status": "not_enough_data", "missing": {}}
+    await service.start_training()
+    await service.wait_idle()
+    assert (await service.status())["last_error"] is None
+
+
+async def test_config_read_off_the_event_loop(db, fake_runner, recorder):
+    import threading
+
+    from backend.services.taste_service import TasteService
+
+    loop_thread = threading.get_ident()
+    readers = []
+
+    def get_config():
+        readers.append(threading.get_ident())
+        return {"half_life_days": 90.0, "auto_retrain": True}
+
+    svc = TasteService(db, fake_runner, get_config=get_config, broadcast=recorder)
+    await svc.status()
+    await svc.maybe_retrain(now=after(500))
+    assert readers and loop_thread not in readers
+
+
+def test_label_counts_match_build_label_set(db):
+    from pathlib import Path
+
+    from metascan.core.taste_labels import build_label_set, count_labels
+
+    seed_labels(db, n_fav=4, n_pass=3)
+    for p in ("/m/seen.png", "/m/unseen.png", "/m/vid.mp4", "/m/gone.png"):
+        db.save_media(media(p))
+    db.mark_seen("/m/seen.png")
+    db.set_verdict("/m/vid.mp4", "favorite")
+    # Tombstoned favorite, path never re-added.
+    db.set_verdict("/m/gone.png", "favorite")
+    db.delete_media(Path("/m/gone.png"))
+    # Tombstoned pass, path re-added live and labeled: live wins.
+    db.set_verdict("/lib/f00.png", "pass")
+    db.delete_media(Path("/lib/f00.png"))
+    db.save_media(media("/lib/f00.png"))
+    db.set_verdict("/lib/f00.png", "favorite")
+    # Tombstoned twice: only the newest tombstone counts.
+    db.save_media(media("/m/twice.png"))
+    db.set_verdict("/m/twice.png", "favorite")
+    db.delete_media(Path("/m/twice.png"))
+    db.save_media(media("/m/twice.png"))
+    db.set_verdict("/m/twice.png", "pass")
+    db.delete_media(Path("/m/twice.png"))
+    full = build_label_set(db.taste_training_raw(), after(1000), 180.0)
+    assert count_labels(db.taste_label_counts_raw(), after(1000)) == (
+        full.n_pos,
+        full.n_neg,
+    )
+    assert (full.n_pos, full.n_neg) == (5, 5)

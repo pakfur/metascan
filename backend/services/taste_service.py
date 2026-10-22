@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from metascan.core.taste_labels import (
+    DEFAULT_HALF_LIFE_DAYS,
     RETRAIN_CHECK_S,
     RETRAIN_IDLE_S,
     RETRAIN_MIN_EVENTS,
-    build_label_set,
+    count_labels,
     missing_for_training,
 )
 from metascan.utils.path_utils import to_native_path
@@ -78,26 +79,31 @@ class TasteService:
         # Inputs of the last automatic run that did not produce a model;
         # the loop does not retry the same inputs every tick.
         self._failed_auto_inputs: Optional[Tuple[Any, ...]] = None
+        self._rescoring = False
+        self._rescore_pending = False
         self._closed = False
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
 
-    def _config(self) -> Dict[str, Any]:
+    def _read_config(self) -> Dict[str, Any]:
         try:
             return dict(self._get_config())
         except Exception:
             logger.exception("reading the taste config failed; using defaults")
             return {}
 
-    def _half_life(self) -> float:
-        from metascan.core.taste_labels import DEFAULT_HALF_LIFE_DAYS
+    async def _config(self) -> Dict[str, Any]:
+        # get_config reads config.json from disk: keep it off the loop.
+        return await asyncio.to_thread(self._read_config)
 
-        return float(self._config().get("half_life_days") or DEFAULT_HALF_LIFE_DAYS)
+    async def _half_life(self) -> float:
+        cfg = await self._config()
+        return float(cfg.get("half_life_days") or DEFAULT_HALF_LIFE_DAYS)
 
-    def _auto_retrain(self) -> bool:
-        return bool(self._config().get("auto_retrain", True))
+    async def _auto_retrain(self) -> bool:
+        return bool((await self._config()).get("auto_retrain", True))
 
     def _emit(self, event: str, data: Dict[str, Any]) -> None:
         try:
@@ -121,15 +127,12 @@ class TasteService:
         return model
 
     def _missing(self) -> Optional[Dict[str, int]]:
-        """Sync (run in a thread): how many more labels a model needs."""
-        from metascan.core.taste_labels import DEFAULT_HALF_LIFE_DAYS
-
-        ls = build_label_set(
-            self.db.taste_training_raw(),
-            datetime.now(timezone.utc),
-            DEFAULT_HALF_LIFE_DAYS,
+        """Sync (run in a thread): how many more labels a model needs. Uses
+        the slim count query, never the full training snapshot."""
+        n_pos, n_neg = count_labels(
+            self.db.taste_label_counts_raw(), datetime.now(timezone.utc)
         )
-        return missing_for_training(ls.n_pos, ls.n_neg)
+        return missing_for_training(n_pos, n_neg)
 
     def _events_since(
         self, model: Optional[Dict[str, Any]]
@@ -162,7 +165,7 @@ class TasteService:
             "training": self.is_training,
             "new_events": new_events,
             "missing": missing,
-            "auto_retrain": self._auto_retrain(),
+            "auto_retrain": await self._auto_retrain(),
             "last_error": last_error,
         }
 
@@ -213,9 +216,15 @@ class TasteService:
         self._train_task = asyncio.create_task(self._run_training(auto_inputs))
 
     async def _run_training(self, auto_inputs: Optional[Tuple[Any, ...]]) -> None:
+        try:
+            await self._train_once(auto_inputs)
+        finally:
+            self._run_pending_rescore()
+
+    async def _train_once(self, auto_inputs: Optional[Tuple[Any, ...]]) -> None:
         self._emit("training_started", {})
         try:
-            result = await self.runner.train(self._half_life())
+            result = await self.runner.train(await self._half_life())
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -240,7 +249,9 @@ class TasteService:
         self._failed_auto_inputs = auto_inputs
         if status == "not_enough_data":
             # Labels dropped between the check and the snapshot; status
-            # already reports what is missing, so this is not an error.
+            # already reports what is missing, so this is not an error --
+            # and whatever failed before is no longer the latest news.
+            self._last_error = None
             self._emit("training_failed", {"error": "not_enough_data"})
             return
         error = str(result.get("error") or "taste training failed")
@@ -249,7 +260,7 @@ class TasteService:
 
     async def maybe_retrain(self, now: Optional[datetime] = None) -> bool:
         """One auto-retrain check; True when a training run was started."""
-        if not self._auto_retrain() or self.is_training or self._closed:
+        if self.is_training or self._closed or not await self._auto_retrain():
             return False
         now = now or datetime.now(timezone.utc)
         model = await asyncio.to_thread(self.db.get_active_taste_model)
@@ -266,7 +277,10 @@ class TasteService:
                 and (now - newest_dt).total_seconds() < RETRAIN_IDLE_S
             ):
                 return False
-        inputs = (model["id"] if model else None, stale, count, newest)
+        # The index fingerprint is part of the key: a run that failed while
+        # the index was missing or mid-rebuild is retried once it changes.
+        fingerprint = await asyncio.to_thread(self.runner.index_fingerprint)
+        inputs = (model["id"] if model else None, stale, count, newest, fingerprint)
         if inputs == self._failed_auto_inputs:
             return False
         if await asyncio.to_thread(self._missing) is not None:
@@ -304,7 +318,13 @@ class TasteService:
 
     async def rescore(self) -> Optional[int]:
         """Rescore every image with the active model; broadcasts
-        ``scores_updated`` on success. Never raises (except cancellation)."""
+        ``scores_updated`` on success. Never raises (except cancellation).
+        Requested while a train or rescore runs, it is remembered and runs
+        once when that work finishes (any number of requests coalesce)."""
+        if self.is_training or self._rescoring:
+            self._rescore_pending = True
+            return None
+        self._rescoring = True
         try:
             n = await self.runner.rescore()
         except asyncio.CancelledError:
@@ -312,6 +332,9 @@ class TasteService:
         except Exception:
             logger.exception("taste rescore failed")
             return None
+        finally:
+            self._rescoring = False
+            self._run_pending_rescore()
         if n is None:
             return None
         try:
@@ -325,6 +348,20 @@ class TasteService:
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """The server loop; ``schedule_rescore_threadsafe`` posts onto it."""
         self._loop = loop
+
+    def _run_pending_rescore(self) -> None:
+        """Called as a train or rescore finishes. The spawned task's first
+        step runs only after the caller's task has completed, so it no
+        longer sees that work as in flight."""
+        if self._rescore_pending and not self._closed:
+            self._rescore_pending = False
+            self._spawn_rescore()
+
+    def _on_embedding_complete(self) -> None:
+        # New vectors (possibly a whole new index): a failed auto-retrain
+        # may succeed now, so let the loop try again.
+        self._failed_auto_inputs = None
+        self._spawn_rescore()
 
     def _spawn_rescore(self) -> None:
         if self._closed:
@@ -341,7 +378,7 @@ class TasteService:
             logger.debug("taste rescore skipped: no server loop attached")
             return
         try:
-            loop.call_soon_threadsafe(self._spawn_rescore)
+            loop.call_soon_threadsafe(self._on_embedding_complete)
         except RuntimeError:
             logger.debug("taste rescore skipped: server loop closed")
 
@@ -350,9 +387,16 @@ class TasteService:
     # ------------------------------------------------------------------
 
     async def wait_idle(self) -> None:
-        """Await the current training and rescore tasks (tests, shutdown)."""
-        tasks = [t for t in (self._train_task, *self._rescore_tasks) if t]
-        if tasks:
+        """Await training and rescore tasks, including follow-ups they
+        spawn, until none is left (tests)."""
+        while True:
+            tasks = [
+                t
+                for t in (self._train_task, *self._rescore_tasks)
+                if t is not None and not t.done()
+            ]
+            if not tasks:
+                return
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self) -> None:
