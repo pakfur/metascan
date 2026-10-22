@@ -1310,6 +1310,40 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_categories_category "
                 "ON media_categories(category_id)"
             )
+            # Taste scorer: one row per trained model (at most one 'active')
+            # and the latest model's score per image. Scores cascade with
+            # their media row; no backfill, so no user_version bump.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS taste_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    labels_as_of TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('active','retired','failed')),
+                    embedding_model TEXT NOT NULL,
+                    dim INTEGER NOT NULL,
+                    categories TEXT NOT NULL,
+                    n_pos INTEGER NOT NULL,
+                    n_neg INTEGER NOT NULL,
+                    n_pairs INTEGER NOT NULL,
+                    holdout_auc REAL,
+                    half_life_days REAL NOT NULL,
+                    params_path TEXT NOT NULL,
+                    error TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS taste_scores (
+                    file_path TEXT PRIMARY KEY
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    model_id INTEGER NOT NULL,
+                    score REAL NOT NULL
+                )
+                """
+            )
             # Generation lineage on both generated-media tables; nullable,
             # existing rows stay NULL.
             for _lineage_table in ("t2i_images", "i2v_videos"):
@@ -5430,6 +5464,182 @@ class DatabaseManager:
                     (to_posix_path(file_path),),
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Taste scorer: training rows, models, scores
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_image_path(path: str) -> bool:
+        from metascan.core.duplicate_detection import VIDEO_EXTENSIONS
+
+        return Path(path).suffix.lower() not in VIDEO_EXTENSIONS
+
+    def taste_training_raw(self) -> Dict[str, Any]:
+        """Raw rows for ``taste_labels.build_label_set``: live images and
+        tombstoned images only (videos are never training data)."""
+        verdict_kinds = ("favorite", "unfavorite", "pass", "unpass")
+        marks = ",".join("?" * len(verdict_kinds))
+        score_sql = (
+            "(SELECT e.score_shown FROM judgment_events e "
+            f"WHERE e.file_path = {{col}} AND e.event IN ({marks}) "
+            "ORDER BY e.id DESC LIMIT 1)"
+        )
+        with self.lock, self._get_connection() as conn:
+            cats: Dict[str, List[str]] = {}
+            for r in conn.execute(
+                "SELECT mc.file_path AS p, c.name AS n FROM media_categories mc "
+                "JOIN categories c ON c.id = mc.category_id ORDER BY c.name"
+            ):
+                cats.setdefault(r["p"], []).append(r["n"])
+            media: List[Dict[str, Any]] = []
+            for r in conn.execute(
+                "SELECT m.file_path, m.is_favorite, j.passed, j.seen_at, "
+                "j.judged_at, j.confirmed_at, "
+                + score_sql.format(col="m.file_path")
+                + " AS last_verdict_score_shown, t.batch_id AS t2i_batch_id "
+                "FROM media m "
+                "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
+                "LEFT JOIN t2i_images t ON t.file_path = m.file_path",
+                verdict_kinds,
+            ):
+                if not self._is_image_path(r["file_path"]):
+                    continue
+                d = dict(r)
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                d["categories"] = cats.get(d["file_path"], [])
+                media.append(d)
+            tombstones: List[Dict[str, Any]] = []
+            for r in conn.execute(
+                "SELECT id, file_path, is_favorite, passed, seen_at, "
+                "confirmed_at, embedding, embedding_model, categories, lineage, "
+                + score_sql.format(col="media_tombstones.file_path")
+                + " AS last_verdict_score_shown FROM media_tombstones ORDER BY id",
+                verdict_kinds,
+            ):
+                if not self._is_image_path(r["file_path"]):
+                    continue
+                d = dict(r)
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                d["categories"] = json.loads(d["categories"] or "[]")
+                lineage = json.loads(d.pop("lineage") or "null") or {}
+                d["batch_id"] = (lineage.get("t2i") or {}).get("batch_id")
+                tombstones.append(d)
+        return {"media": media, "tombstones": tombstones}
+
+    def count_training_events_since(
+        self, since: Optional[str]
+    ) -> Tuple[int, Optional[str]]:
+        """``(count, newest created_at)`` of judgment events that change
+        labels (not ``seen`` / ``reconfirm``) logged after ``since``."""
+        from metascan.core.taste_labels import TRAINING_EVENT_KINDS
+
+        marks = ",".join("?" * len(TRAINING_EVENT_KINDS))
+        sql = (
+            "SELECT COUNT(*) AS n, MAX(created_at) AS newest "
+            f"FROM judgment_events WHERE event IN ({marks})"
+        )
+        params: List[Any] = list(TRAINING_EVENT_KINDS)
+        if since is not None:
+            sql += " AND created_at > ?"
+            params.append(since)
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row["n"]), row["newest"]
+
+    @staticmethod
+    def _taste_model_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        d["categories"] = json.loads(d["categories"] or "[]")
+        return d
+
+    def record_taste_model(self, row: Dict[str, Any]) -> int:
+        """Insert ``row`` as the active model and retire the previous one."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE taste_models SET status = 'retired' WHERE status = 'active'"
+            )
+            cur = conn.execute(
+                "INSERT INTO taste_models (created_at, labels_as_of, status, "
+                "embedding_model, dim, categories, n_pos, n_neg, n_pairs, "
+                "holdout_auc, half_life_days, params_path, error) "
+                "VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["created_at"],
+                    row["labels_as_of"],
+                    row["embedding_model"],
+                    int(row["dim"]),
+                    json.dumps(list(row.get("categories") or [])),
+                    int(row["n_pos"]),
+                    int(row["n_neg"]),
+                    int(row["n_pairs"]),
+                    row.get("holdout_auc"),
+                    float(row["half_life_days"]),
+                    row["params_path"],
+                    row.get("error"),
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_active_taste_model(self) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM taste_models WHERE status = 'active' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return self._taste_model_dict(row) if row is not None else None
+
+    def list_taste_models(self, limit: int = 10) -> List[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM taste_models ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._taste_model_dict(r) for r in rows]
+
+    def replace_taste_scores(self, model_id: int, scores: Dict[str, float]) -> int:
+        """Swap the whole score table in one transaction. Paths with no
+        media row are skipped; returns how many rows were written."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute("DELETE FROM taste_scores")
+            written = 0
+            for path, score in scores.items():
+                cur = conn.execute(
+                    "INSERT INTO taste_scores (file_path, model_id, score) "
+                    "SELECT file_path, ?, ? FROM media WHERE file_path = ?",
+                    (model_id, float(score), to_posix_path(path)),
+                )
+                written += max(cur.rowcount, 0)
+            conn.commit()
+        return written
+
+    def get_taste_scores(
+        self, file_paths: Optional[List[str]] = None
+    ) -> Tuple[Optional[int], Dict[str, float]]:
+        """``(model_id, {posix path: score})``; ``model_id`` is None when
+        no scores are stored."""
+        with self.lock, self._get_connection() as conn:
+            head = conn.execute("SELECT model_id FROM taste_scores LIMIT 1").fetchone()
+            if head is None:
+                return None, {}
+            out: Dict[str, float] = {}
+            if file_paths is None:
+                rows = conn.execute("SELECT file_path, score FROM taste_scores")
+                out = {r["file_path"]: r["score"] for r in rows}
+            else:
+                paths = [to_posix_path(p) for p in file_paths]
+                for i in range(0, len(paths), 500):
+                    chunk = paths[i : i + 500]
+                    marks = ",".join("?" * len(chunk))
+                    for r in conn.execute(
+                        "SELECT file_path, score FROM taste_scores "
+                        f"WHERE file_path IN ({marks})",
+                        chunk,
+                    ):
+                        out[r["file_path"]] = r["score"]
+            return int(head["model_id"]), out
 
     def toggle_favorite(self, file_path: Path) -> bool:
         try:
