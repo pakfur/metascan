@@ -99,3 +99,4 @@ ehthumbs.db
 *.log
 temp/
 .worktrees/
+.superpowers/

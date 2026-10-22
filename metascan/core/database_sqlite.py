@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar
 from contextlib import contextmanager
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
 
 from metascan.utils.startup_profiler import log_startup
@@ -1217,6 +1217,98 @@ class DatabaseManager:
                 )
                 """
             )
+            # Taste-rating capture. media_judgments cascades with its media
+            # row; judgment_events and media_tombstones deliberately carry
+            # no FK so the history outlives a deleted file.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_judgments (
+                    file_path TEXT PRIMARY KEY
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    passed INTEGER NOT NULL DEFAULT 0,
+                    reasons TEXT NOT NULL DEFAULT '[]',
+                    seen_at TEXT,
+                    judged_at TEXT,
+                    confirmed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS judgment_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    reason TEXT,
+                    category TEXT,
+                    score_shown REAL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_judgment_events_path "
+                "ON judgment_events(file_path)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_tombstones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path TEXT NOT NULL,
+                    deleted_at TEXT NOT NULL,
+                    is_favorite INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    reasons TEXT NOT NULL,
+                    categories TEXT NOT NULL DEFAULT '[]',
+                    seen_at TEXT,
+                    confirmed_at TEXT,
+                    embedding BLOB,
+                    embedding_model TEXT,
+                    lineage TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS media_categories (
+                    file_path TEXT NOT NULL
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    category_id INTEGER NOT NULL
+                        REFERENCES categories(id) ON DELETE CASCADE,
+                    source TEXT NOT NULL,
+                    assigned_at TEXT NOT NULL,
+                    PRIMARY KEY (file_path, category_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_categories_category "
+                "ON media_categories(category_id)"
+            )
+            # Generation lineage on both generated-media tables; nullable,
+            # existing rows stay NULL.
+            for _lineage_table in ("t2i_images", "i2v_videos"):
+                for _lineage_col, _lineage_type in (
+                    ("writer_id", "TEXT"),
+                    ("variant_group", "TEXT"),
+                    ("variant_index", "INTEGER"),
+                ):
+                    _idempotent_add_column(
+                        conn,
+                        _lineage_table,
+                        _lineage_col,
+                        f"ALTER TABLE {_lineage_table} ADD COLUMN "
+                        f"{_lineage_col} {_lineage_type}",
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -1596,6 +1688,29 @@ class DatabaseManager:
                             (inferred, r["id"]),
                         )
                 conn.execute("PRAGMA user_version = 4")
+
+            if user_version < 5:
+                # Taste-rating capture: every existing favorite becomes a
+                # confirmed judgment so the new tables start consistent
+                # with media.is_favorite.
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "INSERT INTO media_judgments "
+                    "(file_path, passed, reasons, seen_at, judged_at, "
+                    "confirmed_at) "
+                    "SELECT file_path, 0, '[]', ?, ?, ? FROM media "
+                    "WHERE is_favorite = 1 "
+                    "ON CONFLICT(file_path) DO NOTHING",
+                    (now, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO judgment_events "
+                    "(file_path, event, created_at) "
+                    "SELECT file_path, 'favorite', ? FROM media "
+                    "WHERE is_favorite = 1",
+                    (now,),
+                )
+                conn.execute("PRAGMA user_version = 5")
 
             conn.commit()
 
