@@ -927,6 +927,9 @@ class TestImages(T2iApiCase):
                     "created_at",
                     "is_favorite",
                     "form_state",
+                    "writer_id",
+                    "variant_group",
+                    "variant_index",
                 ]
             ),
         )
