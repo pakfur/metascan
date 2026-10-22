@@ -943,6 +943,8 @@ function jobLabel(chip: {
       :media-list="viewerMedia"
       :initial-index="viewerIndex"
       :allow-destructive="false"
+      :allow-rating="true"
+      :favorite-mirror="store.applyFavoriteFlag"
       @close="viewerIndex = null"
     />
   </div>

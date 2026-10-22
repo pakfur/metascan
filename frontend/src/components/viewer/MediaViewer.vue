@@ -21,19 +21,39 @@ import type { CategoryRef, JudgmentState, Verdict } from '../../types/judgments'
 
 // allowDestructive defaults to true so every existing (desktop library)
 // mount stays byte-identical. The storyboard candidate picker
-// (PanelDetail.vue) passes false: its mediaList is synthesized from
+// (ShotHeader.vue) passes false: its mediaList is synthesized from
 // BeatImage rows (stubbed is_favorite, no real Media row for
 // mediaStore.selectMedia to resolve), so real-file delete, the favorite
 // toggle, and the library-metadata-panel selectMedia leak all need to be
 // off there.
+//
+// allowRating turns the taste-rating surface (the rail, F/X, 1–6, C, the
+// header star and seen tracking) on for a non-destructive mount. Rating is
+// enabled when allowRating OR allowDestructive is true -- i.e. it
+// effectively defaults to allowDestructive (Vue casts an absent boolean
+// prop to false, so a true "undefined = inherit" default isn't
+// expressible), and every existing mount is unchanged. The T2I and I2V
+// result viewers pass allowDestructive=false (no delete / library side
+// effects) but allowRating=true: their items are real library files
+// (the strip lists only rows JOINed to a live media row), and reviewing
+// new generations is exactly where ratings matter most.
+//
+// favoriteMirror lets a mount whose mediaList is a local copy (T2I/I2V
+// keep their own is_favorite) follow every verdict the server returns, so
+// the dialog's tile star stays correct. It is a plain callback prop, not
+// an emit, because responses can land after the viewer has closed.
 const props = withDefaults(
   defineProps<{
     mediaList: Media[]
     initialIndex: number
     allowDestructive?: boolean
+    allowRating?: boolean
+    favoriteMirror?: (filePath: string, isFavorite: boolean) => void
   }>(),
-  { allowDestructive: true },
+  { allowDestructive: true, allowRating: false, favoriteMirror: undefined },
 )
+
+const ratingEnabled = computed(() => props.allowRating || props.allowDestructive)
 
 const emit = defineEmits<{
   close: []
@@ -68,7 +88,7 @@ function goNext() { navigate(1) }
 function goPrev() { navigate(-1) }
 
 // ---------------------------------------------------------------------
-// Taste rating (only when allowDestructive). The viewer owns every
+// Taste rating (only when ratingEnabled). The viewer owns every
 // judgment request; RatingRail just displays `judgment`.
 //
 // Ordering: every request for one item (the initial GET, seen, verdicts,
@@ -117,6 +137,7 @@ function receive(path: string, state: JudgmentState): void {
   // The server's flag is the truth whether or not this item is still on
   // screen, so the grid star follows even for a stale response.
   mediaStore.applyFavoriteFlag(path, state.is_favorite)
+  props.favoriteMirror?.(path, state.is_favorite)
   if (!unmounted && path === currentPath.value) judgment.value = state
 }
 
@@ -181,7 +202,7 @@ watch(
     for (const key of lastKnown.keys()) {
       if (key !== path && !chains.has(key)) lastKnown.delete(key)
     }
-    if (!props.allowDestructive || !path) return
+    if (!ratingEnabled.value || !path) return
     enqueue(path, () => fetchJudgment(path))
     if (!current.value?.is_video) {
       seenTimer = setTimeout(() => {
@@ -196,7 +217,7 @@ watch(
 )
 
 function onVideoPlay(path: string): void {
-  if (!props.allowDestructive || path !== currentPath.value || seenSentForVisit) return
+  if (!ratingEnabled.value || path !== currentPath.value || seenSentForVisit) return
   seenSentForVisit = true
   enqueue(path, () => markSeen(path))
 }
@@ -211,7 +232,7 @@ function verdictOpts(): { stickyCategoryId?: number } {
 // faster than the server answers.
 function toggleVerdict(target: Verdict): void {
   const media = current.value
-  if (!props.allowDestructive || !media) return
+  if (!ratingEnabled.value || !media) return
   const path = media.file_path
   const opts = verdictOpts()
   enqueue(path, (state) => {
@@ -226,9 +247,14 @@ function toggleFavorite(): void {
   toggleVerdict('favorite')
 }
 
+// The header star follows the server's answer for the current item when
+// there is one: a T2I/I2V mediaList is a local copy whose is_favorite
+// never changes under the viewer.
+const starOn = computed(() => judgment.value?.is_favorite ?? current.value?.is_favorite ?? false)
+
 function toggleReason(index: number): void {
   const reason = REASONS[index]
-  if (!props.allowDestructive || !currentPath.value || !reason) return
+  if (!ratingEnabled.value || !currentPath.value || !reason) return
   const path = currentPath.value
   enqueue(path, async (state) => {
     if (!state?.verdict) {
@@ -261,7 +287,7 @@ const railJudgment = computed<JudgmentState | null>(() => {
 })
 
 function openPicker(): void {
-  if (!props.allowDestructive || !current.value) return
+  if (!ratingEnabled.value || !current.value) return
   pickerOpen.value = true
   categoriesStore.load().catch((e) => console.error('Failed to load categories', e))
 }
@@ -363,7 +389,7 @@ function onKeyDown(e: KeyboardEvent) {
   }
 
   // Rating keys: only with the rail mounted, never with a modifier held.
-  if (props.allowDestructive && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  if (ratingEnabled.value && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key >= '1' && e.key <= '6' && e.key.length === 1) {
       toggleReason(Number(e.key) - 1)
       return
@@ -436,7 +462,7 @@ function onKeyDown(e: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
-  if (props.allowDestructive) {
+  if (ratingEnabled.value) {
     categoriesStore.load().catch((e) => console.error('Failed to load categories', e))
   }
 })
@@ -461,13 +487,13 @@ function formatSize(bytes: number): string {
       <div class="viewer-header">
         <div class="header-left">
           <button
-            v-if="allowDestructive"
+            v-if="ratingEnabled"
             class="fav-btn"
-            :class="{ active: current?.is_favorite }"
+            :class="{ active: starOn }"
             @click="toggleFavorite"
-            :title="current?.is_favorite ? 'Remove favorite' : 'Add favorite'"
+            :title="starOn ? 'Remove favorite' : 'Add favorite'"
           >
-            {{ current?.is_favorite ? '★' : '☆' }}
+            {{ starOn ? '★' : '☆' }}
           </button>
           <span class="position-label">{{ positionLabel }}</span>
           <span v-if="undoData" class="undo-link" @click="undoData = null">
@@ -526,7 +552,7 @@ function formatSize(bytes: number): string {
           </Galleria>
         </div>
         <RatingRail
-          v-if="allowDestructive"
+          v-if="ratingEnabled"
           :judgment="railJudgment"
           :hint="hint"
           :sticky="stickyCategory"
@@ -561,13 +587,13 @@ function formatSize(bytes: number): string {
               <tr><td>Esc</td><td>Close viewer</td></tr>
               <tr><td>← →</td><td>Previous / Next</td></tr>
               <tr><td>Space</td><td>Play / Pause (video)</td></tr>
-              <tr v-if="allowDestructive"><td>F</td><td>Toggle favorite</td></tr>
-              <tr v-if="allowDestructive"><td>X</td><td>Pass</td></tr>
-              <tr v-if="allowDestructive">
+              <tr v-if="ratingEnabled"><td>F</td><td>Toggle favorite</td></tr>
+              <tr v-if="ratingEnabled"><td>X</td><td>Pass</td></tr>
+              <tr v-if="ratingEnabled">
                 <td>1–6</td>
                 <td>Toggle reason (realism, composition, emotion, light, concept, motion)</td>
               </tr>
-              <tr v-if="allowDestructive"><td>C</td><td>Categories (Shift+Enter: sticky)</td></tr>
+              <tr v-if="ratingEnabled"><td>C</td><td>Categories (Shift+Enter: sticky)</td></tr>
               <tr v-if="allowDestructive"><td>Ctrl+D</td><td>Delete file</td></tr>
               <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
               <tr><td>M</td><td>Mute / Unmute (video)</td></tr>

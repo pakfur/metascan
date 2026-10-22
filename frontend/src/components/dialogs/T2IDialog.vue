@@ -997,6 +997,8 @@ onBeforeUnmount(() => {
       :media-list="viewerImages"
       :initial-index="viewerIndex"
       :allow-destructive="false"
+      :allow-rating="true"
+      :favorite-mirror="store.applyFavoriteFlag"
       @close="viewerIndex = null"
     />
   </div>
