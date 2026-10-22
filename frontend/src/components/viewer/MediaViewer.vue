@@ -390,6 +390,9 @@ function onKeyDown(e: KeyboardEvent) {
 
   // Rating keys: only with the rail mounted, never with a modifier held.
   if (ratingEnabled.value && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // A held F / X / 1–6 / C must not toggle over and over (auto-repeat);
+    // held arrows and volume keys still repeat below.
+    if (e.repeat && /^[fFxXcC1-6]$/.test(e.key)) return
     if (e.key >= '1' && e.key <= '6' && e.key.length === 1) {
       toggleReason(Number(e.key) - 1)
       return

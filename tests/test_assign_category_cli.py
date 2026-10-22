@@ -111,7 +111,7 @@ def test_remove_sends_delete(capsys):
 
 
 def test_no_create_unknown_category_exits_2():
-    client = _mock_client(media=[], categories=[], record=[])
+    client = _mock_client(media=["/lib/a.png"], categories=[], record=[])
     assert cli.main(["/lib", "--category", "Nope", "--no-create"], client=client) == 2
 
 
@@ -142,3 +142,15 @@ def test_bearer_header_sent_when_env_set(monkeypatch):
     )
     cli.main(["/lib", "--category", "X", "--dry-run"])
     assert seen and all(r.headers["authorization"] == "Bearer sekrit" for r in seen)
+
+
+@pytest.mark.parametrize("extra", [[], ["--dry-run"], ["--remove"]])
+def test_zero_matches_warns_exits_3_and_creates_nothing(capsys, extra):
+    calls: List[httpx.Request] = []
+    client = _mock_client(media=["/lib/other/b.png"], categories=[], record=calls)
+    code = cli.main(["/lib/typo", "--category", "Sci-Fi", *extra], client=client)
+    assert code == 3
+    assert all(c.method == "GET" for c in calls)
+    assert not any(c.url.path == "/api/categories" for c in calls)
+    err = capsys.readouterr().err
+    assert "no library items under /lib/typo" in err
