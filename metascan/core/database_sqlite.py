@@ -5026,6 +5026,7 @@ class DatabaseManager:
                 reasons.discard(reason)
             ordered = [r for r in REASONS if r in reasons]
             ts = self._iso(now)
+            self._ensure_judgment_row(conn, posix_path)
             conn.execute(
                 "UPDATE media_judgments SET reasons = ? WHERE file_path = ?",
                 (json.dumps(ordered), posix_path),
