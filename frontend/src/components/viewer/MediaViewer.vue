@@ -12,6 +12,7 @@ import LazyThumb from './LazyThumb.vue'
 import RatingRail from './RatingRail.vue'
 import CategoryPicker from './CategoryPicker.vue'
 import { useCategoriesStore } from '../../stores/categories'
+import { useToast } from '../../composables/useToast'
 import { ApiError } from '../../api/client'
 import { fetchJudgment, markSeen, setVerdict, setReason } from '../../api/judgments'
 import { addItems, removeItems } from '../../api/categories'
@@ -79,6 +80,7 @@ function goPrev() { navigate(-1) }
 // paints the rail when that path is still the current item.
 // ---------------------------------------------------------------------
 const categoriesStore = useCategoriesStore()
+const toast = useToast()
 const judgment = ref<JudgmentState | null>(null)
 const hint = ref<string | null>(null)
 const pickerOpen = ref(false)
@@ -153,9 +155,18 @@ function onJudgmentError(path: string, e: unknown): void {
     return
   }
   console.error('Judgment request failed', e)
-  if (code === 'duplicate_name') showHint(path, 'A category with that name exists')
-  else if (code === 'invalid_name') showHint(path, 'Category names are 1–40 characters')
-  else showHint(path, 'Save failed — see console')
+  let message = 'Save failed — see console'
+  if (code === 'duplicate_name') message = 'A category with that name exists'
+  else if (code === 'invalid_name') message = 'Category names are 1–40 characters'
+  if (!unmounted && path === currentPath.value) {
+    showHint(path, message)
+    return
+  }
+  // The usual rhythm is F then → at once, so a failed write almost always
+  // lands after the item has left the screen (or the viewer has closed).
+  // The rail can't show it any more; a toast makes sure a lost rating is
+  // never silent.
+  toast.show(`Rating for ${fileName(path)} failed to save`, 'warn', 5000)
 }
 
 watch(
