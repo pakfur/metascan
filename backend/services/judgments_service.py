@@ -57,10 +57,12 @@ def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]
     index, or None. Runs under the DB lock, so it never loads the index
     from disk: an unloaded index yields None."""
     try:
-        from backend.api.similarity import _get_faiss_manager
+        from backend.api import similarity
 
-        fm = _get_faiss_manager()
-        if not fm.is_loaded:
+        # Read the module global; _get_faiss_manager() would construct the
+        # manager and load the index from disk, which must not happen here.
+        fm = similarity._faiss_manager
+        if fm is None or not fm.is_loaded:
             return None
         model_key = fm.meta.get("model_key")
         if not model_key:
@@ -70,5 +72,5 @@ def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]
             if vec is not None:
                 return vec, str(model_key)
     except Exception:
-        logger.debug("embedding lookup failed for %s", native_path, exc_info=True)
+        logger.warning("embedding lookup failed for %s", native_path, exc_info=True)
     return None
