@@ -79,6 +79,19 @@ def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]
 _BACKFILL_BATCH = 500
 
 
+def _read_vector(fm: Any, posix_path: str) -> Optional[np.ndarray]:
+    """The index may key a file by its native or its POSIX path."""
+    for key in dict.fromkeys((to_native_path(posix_path), posix_path)):
+        try:
+            vec = fm.get_embedding(key)
+        except Exception:
+            logger.debug("FAISS read failed for %s", key, exc_info=True)
+            continue
+        if vec is not None:
+            return np.asarray(vec)
+    return None
+
+
 def backfill_tombstone_embeddings(db: DatabaseManager, fm: Any) -> int:
     """Fill NULL tombstone embeddings from a loaded FAISS manager.
 
@@ -98,15 +111,7 @@ def backfill_tombstone_embeddings(db: DatabaseManager, fm: Any) -> int:
     filled = 0
     batch: List[Tuple[int, bytes, str]] = []
     for tomb_id, posix_path in missing:
-        vec = None
-        for key in dict.fromkeys((to_native_path(posix_path), posix_path)):
-            try:
-                vec = fm.get_embedding(key)
-            except Exception:
-                logger.debug("FAISS read failed for %s", key, exc_info=True)
-                vec = None
-            if vec is not None:
-                break
+        vec = _read_vector(fm, posix_path)
         if vec is None:
             continue
         batch.append(
