@@ -5560,19 +5560,27 @@ class DatabaseManager:
         return d
 
     def record_taste_model(self, row: Dict[str, Any]) -> int:
-        """Insert ``row`` as the active model and retire the previous one."""
+        """Insert ``row`` as the active model and retire the previous one.
+        ``row["status"] == "failed"`` records a failed training run instead
+        and leaves the current active model in place."""
+        status = row.get("status") or "active"
+        if status not in ("active", "failed"):
+            raise ValueError(f"cannot record a taste model as {status!r}")
         with self.lock, self._get_connection() as conn:
-            conn.execute(
-                "UPDATE taste_models SET status = 'retired' WHERE status = 'active'"
-            )
+            if status == "active":
+                conn.execute(
+                    "UPDATE taste_models SET status = 'retired' "
+                    "WHERE status = 'active'"
+                )
             cur = conn.execute(
                 "INSERT INTO taste_models (created_at, labels_as_of, status, "
                 "embedding_model, dim, categories, n_pos, n_neg, n_pairs, "
                 "holdout_auc, half_life_days, params_path, error) "
-                "VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["created_at"],
                     row["labels_as_of"],
+                    status,
                     row["embedding_model"],
                     int(row["dim"]),
                     json.dumps(list(row.get("categories") or [])),
