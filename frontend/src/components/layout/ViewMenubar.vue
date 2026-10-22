@@ -5,6 +5,7 @@ import { useFilterStore, type ViewPreset } from '../../stores/filters'
 import { useMediaStore } from '../../stores/media'
 import { useSettingsStore, type ThumbnailSize } from '../../stores/settings'
 import { useSearchStore } from '../../stores/search'
+import { useTasteStore } from '../../stores/taste'
 
 const emit = defineEmits<{
   slideshow: []
@@ -14,6 +15,7 @@ const filterStore = useFilterStore()
 const mediaStore = useMediaStore()
 const settingsStore = useSettingsStore()
 const searchStore = useSearchStore()
+const tasteStore = useTasteStore()
 
 const sizes: { value: ThumbnailSize; label: string }[] = [
   { value: 'small', label: 'S' },
@@ -29,10 +31,15 @@ const sortOptions = computed(() => {
   ]
   // Relevance only means something while a similarity search has scores;
   // keep it listed if it's the current selection so the <select> stays valid.
-  if (searchStore.similarityActive || mediaStore.sortOrder === 'relevance') {
-    return [{ label: 'Relevance', value: 'relevance' }, ...base]
+  const opts = [...base]
+  // Same for Taste: listed once a scorer has produced scores.
+  if (tasteStore.hasScores || mediaStore.sortOrder === 'taste') {
+    opts.push({ label: 'Taste', value: 'taste' })
   }
-  return base
+  if (searchStore.similarityActive || mediaStore.sortOrder === 'relevance') {
+    return [{ label: 'Relevance', value: 'relevance' }, ...opts]
+  }
+  return opts
 })
 
 function isActive(view: ViewPreset) {

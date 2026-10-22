@@ -4,6 +4,44 @@ import { useModelsStore } from '../../stores/models'
 import type { ModelGroup, ModelRow } from '../../api/models'
 import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
 import { startRetag } from '../../api/vlm'
+import { useTasteStore } from '../../stores/taste'
+import { ApiError } from '../../api/client'
+
+const taste = useTasteStore()
+const tasteStatus = computed(() => taste.status)
+const tasteTraining = computed(() => tasteStatus.value?.training === true)
+const tasteMissing = computed(() => tasteStatus.value?.missing ?? null)
+const tasteTrainError = ref<string | null>(null)
+const tasteTrainedAt = computed(() => {
+  const raw = tasteStatus.value?.active_model?.created_at
+  if (!raw) return ''
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString()
+})
+const tasteAuc = computed(() => {
+  const auc = tasteStatus.value?.active_model?.holdout_auc
+  return typeof auc === 'number' ? auc.toFixed(2) : 'n/a'
+})
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
+async function onTasteRetrain() {
+  tasteTrainError.value = null
+  try {
+    await taste.train()
+  } catch (e) {
+    // 409 already_training just means a run is in flight; status shows it.
+    if (e instanceof ApiError && e.status === 409) {
+      await taste.loadStatus().catch(() => undefined)
+      const code = (e.detail as { code?: string } | null)?.code
+      if (code !== 'already_training') tasteTrainError.value = 'Not enough ratings to train yet.'
+    } else {
+      tasteTrainError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
+}
 
 const models = useModelsStore()
 
@@ -15,7 +53,7 @@ const loading = ref(true)
 
 onMounted(async () => {
   try {
-    await models.loadStatus()
+    await Promise.all([models.loadStatus(), taste.loadStatus().catch(() => undefined)])
   } finally {
     loading.value = false
   }
@@ -476,6 +514,43 @@ async function onRetagLibrary() {
         </span>
       </div>
     </section>
+
+    <section class="preload-hint taste-block">
+      <div class="section-heading">Taste scorer</div>
+      <div v-if="tasteStatus?.active_model" class="taste-model">
+        Active model trained {{ tasteTrainedAt }} on
+        <b>{{ tasteStatus.active_model.n_pos }}</b> favorites /
+        <b>{{ tasteStatus.active_model.n_neg }}</b> passes, holdout AUC
+        <b>{{ tasteAuc }}</b>.
+        <span v-if="tasteStatus.stale" class="err-text">
+          Retrain needed (the CLIP model changed).
+        </span>
+      </div>
+      <div v-else-if="tasteStatus" class="taste-model">No taste model yet.</div>
+      <div v-if="tasteMissing" class="taste-missing">
+        Need {{ plural(tasteMissing.positives, 'more favorite', 'more favorites') }} /
+        {{ plural(tasteMissing.negatives, 'more pass', 'more passes') }} to train.
+      </div>
+      <div v-if="tasteStatus && tasteStatus.new_events > 0" class="taste-new">
+        {{ plural(tasteStatus.new_events, 'new rating', 'new ratings') }} since last training.
+      </div>
+      <div class="taste-actions">
+        <button
+          class="btn-small"
+          :disabled="tasteTraining || tasteMissing !== null || !tasteStatus"
+          @click="onTasteRetrain"
+        >
+          Retrain now
+        </button>
+        <span v-if="tasteTraining" class="taste-spinner">
+          <i class="pi pi-spin pi-spinner" /> Training…
+        </span>
+      </div>
+      <div v-if="tasteTrainError" class="err-text">{{ tasteTrainError }}</div>
+      <div v-if="tasteStatus?.last_error" class="err-text">
+        Last error: {{ tasteStatus.last_error }}
+      </div>
+    </section>
   </template>
 </template>
 
@@ -657,6 +732,9 @@ section { margin-bottom: 14px; }
 .gate-bad { color: var(--danger-color); border-color: var(--danger-color); }
 
 .vlm-status-block { display: flex; flex-direction: column; gap: 8px; }
+.taste-block { display: flex; flex-direction: column; gap: 6px; }
+.taste-actions { display: flex; align-items: center; gap: 10px; }
+.taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
 .vlm-current { font-size: 14px; }
 .vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>
