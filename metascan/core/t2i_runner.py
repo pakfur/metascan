@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from metascan.core.judgments import WRITER_BASE, WRITER_FALLBACK
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
+from metascan.core.generation_categories import tag_generated_media
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
 from metascan.core.t2i_captions import CaptionPicker, CaptionRow, CaptionStore
 from metascan.core.t2i_directions import (
@@ -134,6 +135,9 @@ class BatchRequest:
     filter: Optional[Dict[str, Any]] = None
     # Caption directions; None means the config's t2i.directions.enabled.
     directions: Optional[bool] = None
+    # Categories every image of the batch is tagged with at ingest. The
+    # route has already checked they exist; one deleted mid-batch is skipped.
+    category_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -1032,6 +1036,7 @@ class T2iRunner:
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
             "negative": batch.req.negative if manual else step.negative,
+            "category_ids": list(batch.req.category_ids),
         }
         while len(self._job_meta) > _JOB_META_LIMIT:
             self._job_meta.pop(next(iter(self._job_meta)))
@@ -1450,6 +1455,12 @@ class T2iRunner:
                 return  # a job of another feature: not ours to account for
             batch_id = str(job["t2i_batch_id"])
             inserted = await self._insert_images(job, meta, batch_id, files)
+            # Before the images are announced, so a client refetching on
+            # t2i_images_changed already sees their categories.
+            if meta is not None:
+                await tag_generated_media(
+                    self.db, inserted, meta.get("category_ids") or [], self._emit
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

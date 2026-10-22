@@ -1,5 +1,6 @@
 """REST endpoints for user-defined taste categories."""
 
+import asyncio
 from typing import Any, Dict, List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,6 +9,10 @@ from pydantic import BaseModel
 from backend.dependencies import get_db
 from backend.services.categories_service import CategoriesService
 from backend.ws.manager import ws_manager
+from metascan.core.generation_categories import (
+    unique_category_ids,
+    unknown_category_ids,
+)
 
 router = APIRouter(prefix="/api", tags=["categories"])
 
@@ -45,6 +50,16 @@ def _http(exc: ValueError, codes: Dict[str, int]) -> HTTPException:
 
 def _unknown() -> HTTPException:
     return HTTPException(status_code=404, detail={"code": "unknown_category"})
+
+
+async def checked_category_ids(category_ids: List[int]) -> List[int]:
+    """The ids once each, in order, after checking that every one names a
+    category -- 404 ``unknown_category`` otherwise. The generation routes
+    call this before anything is queued."""
+    wanted = unique_category_ids(category_ids)
+    if wanted and await asyncio.to_thread(unknown_category_ids, get_db(), wanted):
+        raise _unknown()
+    return wanted
 
 
 @router.get("/categories")

@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
+from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.t2i_service import T2iService
 from metascan.core.comfy_bindings import BindingError
@@ -146,6 +147,9 @@ class BatchBody(BaseModel):
     filter: Optional[Dict[str, Any]] = None
     # Caption directions; None means the config's default.
     directions: Optional[bool] = None
+    # Categories every image is tagged with at ingest; unknown ids are a 404
+    # before the batch starts.
+    category_ids: List[int] = Field(default_factory=list)
 
 
 def _list_slots(library: Library) -> List[str]:
@@ -288,6 +292,7 @@ async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
 @router.post("/batches")
 async def start_batch(body: BatchBody) -> Dict[str, Any]:
     runner = _require_runner()
+    category_ids = await checked_category_ids(body.category_ids)
     request = BatchRequest(
         mode=body.mode,
         model=body.model,
@@ -304,6 +309,7 @@ async def start_batch(body: BatchBody) -> Dict[str, Any]:
         aspect_ratio=body.aspect_ratio,
         filter=body.filter,
         directions=body.directions,
+        category_ids=category_ids,
     )
     try:
         started = await runner.start_batch(request)
