@@ -316,3 +316,112 @@ def test_quarantine_names_never_collide(tmp_path):
     kept = list(tmp_path.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*"))
     assert len(kept) == 3
     assert all(str(os.getpid()) in k.name for k in kept)
+
+
+def test_unreadable_file_is_signalled_and_apply_leaves_it(db, monkeypatch):
+    snap = _pending_snapshot(db)
+    data_dir = Path(db.db_path)
+    target = ts.snapshot_file_path(data_dir)
+    real_read = Path.read_text
+
+    def locked(self, *a, **k):
+        if self == target:
+            raise PermissionError("locked")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    with pytest.raises(ts.PendingSnapshotUnreadable):
+        ts.load_pending_snapshot(data_dir)
+    with pytest.raises(ts.PendingSnapshotUnreadable):
+        ts.apply_pending_taste_snapshot(db, data_dir, raise_unreadable=True)
+    with pytest.raises(ts.PendingSnapshotUnreadable):
+        ts.merge_pending_into_snapshot(data_dir, db.export_taste_state())
+    assert ts.apply_pending_taste_snapshot(db, data_dir) == {
+        "restored": 0,
+        "missing": 0,
+    }
+    monkeypatch.setattr(Path, "read_text", real_read)
+    assert json.loads(target.read_text(encoding="utf-8")) == snap
+
+
+def test_corrupt_file_that_cannot_be_renamed_is_signalled(db, monkeypatch):
+    data_dir = Path(db.db_path)
+    ts.snapshot_file_path(data_dir).write_text("{bad", encoding="utf-8")
+
+    def no_rename(a, b):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(ts.os, "replace", no_rename)
+    with pytest.raises(ts.PendingSnapshotUnreadable):
+        ts.load_pending_snapshot(data_dir)
+    assert ts.snapshot_file_path(data_dir).read_text(encoding="utf-8") == "{bad"
+
+
+def test_real_export_shapes_validate_and_restore(db):
+    """Every shape export_taste_state really produces must pass the strict
+    validator: seen-only rows (NULL judged_at / confirmed_at), favorites
+    with reasons, passes, migration-seeded favorites, a favorite with no
+    judgment row, and category links of every source."""
+    paths = [f"/r/{n}.png" for n in ("seen", "fav", "pass", "mig", "bare", "cat")]
+    for p in paths:
+        db.save_media(_media(p))
+    cat = db.create_category("Portrait")
+    db.mark_seen("/r/seen.png", now=T0)
+    db.set_verdict("/r/fav.png", "favorite", now=T0)
+    db.set_reason("/r/fav.png", "light", True, now=T0)
+    db.set_verdict("/r/pass.png", "pass", now=T0)
+    db.add_media_categories(["/r/cat.png"], cat.id, "viewer")
+    internal = {src: db.create_category(f"C-{src}") for src in ("generation", "sticky")}
+    with db._get_connection() as conn:
+        # user_version 5 migration seed: favorite + judgment row, no reasons.
+        conn.execute(
+            "UPDATE media SET is_favorite = 1 WHERE file_path = ?", ("/r/mig.png",)
+        )
+        conn.execute(
+            "INSERT INTO media_judgments (file_path, passed, reasons, seen_at, "
+            "judged_at, confirmed_at) VALUES (?, 0, '[]', ?, ?, ?)",
+            ("/r/mig.png", "2026-01-01 00:00:00", "2026-01-01 00:00:00", None),
+        )
+        # Legacy favorite with no judgment row at all.
+        conn.execute(
+            "UPDATE media SET is_favorite = 1 WHERE file_path = ?", ("/r/bare.png",)
+        )
+        # Server-internal link sources.
+        for src, other in internal.items():
+            conn.execute(
+                "INSERT INTO media_categories (file_path, category_id, source, "
+                "assigned_at) VALUES (?, ?, ?, ?)",
+                ("/r/cat.png", other.id, src, "2026-01-01T00:00:00+00:00"),
+            )
+        conn.commit()
+
+    snap = db.export_taste_state()
+    assert any(j["judged_at"] is None for j in snap["judgments"])  # seen-only
+    data_dir = Path(db.db_path)
+    ts.write_snapshot_file(data_dir, snap)
+    loaded = ts.load_pending_snapshot(data_dir)
+    assert loaded == json.loads(json.dumps(snap))
+    assert ts._valid_shape(loaded)
+
+    before = (
+        db.get_judgment("/r/fav.png"),
+        db.get_judgment("/r/mig.png"),
+        db.get_judgment("/r/seen.png"),
+        db.get_media_categories("/r/cat.png"),
+    )
+    db.truncate_all_data()
+    for p in paths:
+        db.save_media(_media(p))
+    counts = ts.apply_pending_taste_snapshot(db, data_dir)
+    assert counts == {"restored": len(paths), "missing": 0}
+    assert list(data_dir.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*")) == []
+    assert not ts.snapshot_file_path(data_dir).exists()
+    after = (
+        db.get_judgment("/r/fav.png"),
+        db.get_judgment("/r/mig.png"),
+        db.get_judgment("/r/seen.png"),
+        db.get_media_categories("/r/cat.png"),
+    )
+    assert after == before
+    assert db.get_judgment("/r/bare.png").verdict == "favorite"
+    assert db.get_judgment("/r/pass.png").verdict == "pass"

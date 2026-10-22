@@ -308,3 +308,46 @@ def test_full_clean_aborts_without_deleting_when_snapshot_fails(monkeypatch, db)
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
     assert db.get_judgment("/lib/fav.png").verdict == "favorite"
     assert any(e[1] == "error" for e in events)
+
+
+def test_full_clean_aborts_when_pending_file_is_unreadable(monkeypatch, db):
+    """A pending file that exists but can't be read may hold valid ratings:
+    the full clean must not overwrite it or truncate the DB."""
+    _seed(db)
+    events = _wire(monkeypatch, db, [])
+    target = Path(db.db_path) / scan_api.TASTE_SNAPSHOT_FILENAME
+    old = {
+        "taken_at": "t",
+        "judgments": [
+            {
+                "file_path": "/lib/old.png",
+                "passed": 1,
+                "reasons": "[]",
+                "seen_at": None,
+                "judged_at": "t",
+                "confirmed_at": "t",
+            }
+        ],
+        "categories": [],
+        "favorites": [],
+    }
+    target.write_text(json.dumps(old), encoding="utf-8")
+    real_read = Path.read_text
+
+    def locked(self, *a, **k):
+        if self == target:
+            raise PermissionError("locked by another process")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    monkeypatch.setattr(Path, "read_text", real_read)
+
+    assert json.loads(target.read_text(encoding="utf-8")) == old
+    assert db.get_judgment("/lib/fav.png").verdict == "favorite"  # not truncated
+    assert len(db.get_existing_file_paths()) == 3
+    errors = [e for e in events if e[1] == "error"]
+    assert len(errors) == 1
+    msg = errors[0][2]["message"].lower()
+    assert "pending ratings file" in msg and "could not be read" in msg
+    assert not any(e[1] == "phase_changed" for e in events)

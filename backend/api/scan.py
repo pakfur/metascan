@@ -15,6 +15,7 @@ from backend.dependencies import get_db, get_thumbnail_cache
 from backend.ws.manager import ws_manager
 from backend.services.taste_snapshot import TASTE_SNAPSHOT_FILENAME  # noqa: F401
 from backend.services.taste_snapshot import (
+    PendingSnapshotUnreadable,
     apply_pending_taste_snapshot,
     merge_pending_into_snapshot,
     restore_and_persist,
@@ -147,12 +148,28 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
         try:
             if data_dir is None:
                 raise RuntimeError("database has no data directory")
-            await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir)
+            # raise_unreadable: a pending file we can't read may hold valid
+            # ratings -- abort instead of overwriting it below.
+            await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir, True)
             taste_snapshot = await asyncio.to_thread(db.export_taste_state)
             taste_snapshot = await asyncio.to_thread(
                 merge_pending_into_snapshot, data_dir, taste_snapshot
             )
             await asyncio.to_thread(write_snapshot_file, data_dir, taste_snapshot)
+        except PendingSnapshotUnreadable as pend_err:
+            logger.error(f"Full clean aborted: {pend_err}")
+            await ws_manager.broadcast(
+                "scan",
+                "error",
+                {
+                    "message": (
+                        "Full clean aborted: the pending ratings file from an "
+                        "earlier interrupted full clean could not be read, so "
+                        f"nothing was deleted ({pend_err})"
+                    )
+                },
+            )
+            return
         except Exception as snap_err:
             logger.error(
                 f"Full clean aborted: could not snapshot taste state: {snap_err}",
