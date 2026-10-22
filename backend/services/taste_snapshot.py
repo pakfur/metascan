@@ -172,6 +172,12 @@ def _valid_shape(snap: Any) -> bool:
     )
 
 
+class PendingSnapshotUnreadable(OSError):
+    """The pending file exists but could neither be read nor quarantined.
+    It may hold valid ratings: callers must leave it alone, and a full
+    clean must abort rather than overwrite it."""
+
+
 _quarantine_seq = itertools.count()
 
 
@@ -189,31 +195,27 @@ def _quarantine(target: Path, why: str) -> None:
             dest,
         )
     except OSError as e:
-        logger.warning(
-            "Pending taste snapshot %s is corrupt (%s) and could not be renamed: %s",
-            target,
-            why,
-            e,
-        )
+        raise PendingSnapshotUnreadable(
+            f"pending ratings file {target} is corrupt ({why}) and could not "
+            f"be moved aside: {e}"
+        ) from e
 
 
 def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     """The pending snapshot, or None when there is none. A file that cannot
     be parsed (or has the wrong shape / value types) is quarantined and None
-    returned. A read error (locked, permissions) leaves the file in place
-    -- it may well be valid -- and returns None for this attempt."""
+    returned. Raises :class:`PendingSnapshotUnreadable` when the file exists
+    but can't be read (locked, permissions -- it may well be valid) or
+    can't be quarantined; the file is left in place."""
     target = snapshot_file_path(data_dir)
     try:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except OSError as e:
-        logger.warning(
-            "Pending taste snapshot %s could not be read (%s); will retry later",
-            target,
-            e,
-        )
-        return None
+        raise PendingSnapshotUnreadable(
+            f"pending ratings file {target} could not be read: {e}"
+        ) from e
     try:
         snap = json.loads(raw)
     except ValueError as e:
@@ -239,10 +241,26 @@ def restore_and_persist(
     return {k: int(v) for k, v in result.items() if k != "remaining"}
 
 
-def apply_pending_taste_snapshot(db: Any, data_dir: Path) -> Dict[str, int]:
+def apply_pending_taste_snapshot(
+    db: Any, data_dir: Path, raise_unreadable: bool = False
+) -> Dict[str, int]:
     """Restore pending entries whose media rows exist again (never
     tombstones) and rewrite / delete the pending file. Returns
-    ``{restored, missing}``; zeros when there is no usable file."""
+    ``{restored, missing}``; zeros when there is no usable file.
+
+    A file that exists but can't be read is left in place: logged and
+    skipped, or -- with ``raise_unreadable`` (the full-clean path, which
+    must not overwrite it) -- :class:`PendingSnapshotUnreadable` raised."""
+    try:
+        return _apply_pending(db, data_dir)
+    except PendingSnapshotUnreadable as e:
+        if raise_unreadable:
+            raise
+        logger.warning("%s; left in place, will retry later", e)
+        return {"restored": 0, "missing": 0}
+
+
+def _apply_pending(db: Any, data_dir: Path) -> Dict[str, int]:
     snap = load_pending_snapshot(data_dir)
     if snap is None:
         return {"restored": 0, "missing": 0}
