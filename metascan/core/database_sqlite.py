@@ -3175,43 +3175,66 @@ class DatabaseManager:
             ).fetchone()
             if media is None:
                 continue
-            lineage: Optional[Dict[str, Any]] = None
-            for key, row in (("t2i", t2i), ("i2v", i2v)):
-                if row is not None:
-                    data = {k: row[k] for k in row.keys() if k != "form_state"}
-                    lineage = {key: data}
-                    break
-            blob: Optional[bytes] = None
-            model_key: Optional[str] = None
-            if self._embedding_lookup is not None:
-                try:
-                    found = self._embedding_lookup(to_native_path(path))
-                    if found is not None:
-                        vector, key = found
-                        blob = np.asarray(vector).astype(np.float32).tobytes()
-                        model_key = key
-                except Exception as e:
-                    logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
-                    blob, model_key = None, None
-            conn.execute(
-                "INSERT INTO media_tombstones (file_path, deleted_at, "
-                "is_favorite, passed, reasons, categories, seen_at, "
-                "confirmed_at, embedding, embedding_model, lineage) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    path,
-                    now,
-                    1 if media["is_favorite"] else 0,
-                    int(judgment["passed"]) if judgment is not None else 0,
-                    judgment["reasons"] if judgment is not None else "[]",
-                    json.dumps(sorted(cat_names)),
-                    judgment["seen_at"] if judgment is not None else None,
-                    judgment["confirmed_at"] if judgment is not None else None,
-                    blob,
-                    model_key,
-                    json.dumps(lineage, default=str) if lineage else None,
-                ),
+            self._insert_tombstone(
+                conn,
+                path,
+                now,
+                bool(media["is_favorite"]),
+                dict(judgment) if judgment is not None else None,
+                cat_names,
+                t2i,
+                i2v,
             )
+
+    def _insert_tombstone(
+        self,
+        conn: sqlite3.Connection,
+        path: str,
+        now: str,
+        is_favorite: bool,
+        judgment: Optional[Dict[str, Any]],
+        cat_names: List[str],
+        t2i: Optional[sqlite3.Row],
+        i2v: Optional[sqlite3.Row],
+    ) -> None:
+        """Insert one media_tombstones row. Caller holds the lock."""
+        lineage: Optional[Dict[str, Any]] = None
+        for key, row in (("t2i", t2i), ("i2v", i2v)):
+            if row is not None:
+                data = {k: row[k] for k in row.keys() if k != "form_state"}
+                lineage = {key: data}
+                break
+        blob: Optional[bytes] = None
+        model_key: Optional[str] = None
+        if self._embedding_lookup is not None:
+            try:
+                found = self._embedding_lookup(to_native_path(path))
+                if found is not None:
+                    vector, key = found
+                    blob = np.asarray(vector).astype(np.float32).tobytes()
+                    model_key = key
+            except Exception as e:
+                logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
+                blob, model_key = None, None
+        conn.execute(
+            "INSERT INTO media_tombstones (file_path, deleted_at, "
+            "is_favorite, passed, reasons, categories, seen_at, "
+            "confirmed_at, embedding, embedding_model, lineage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                path,
+                now,
+                1 if is_favorite else 0,
+                int(judgment["passed"]) if judgment is not None else 0,
+                judgment["reasons"] if judgment is not None else "[]",
+                json.dumps(sorted(cat_names)),
+                judgment["seen_at"] if judgment is not None else None,
+                judgment["confirmed_at"] if judgment is not None else None,
+                blob,
+                model_key,
+                json.dumps(lineage, default=str) if lineage else None,
+            ),
+        )
 
     def list_tombstones(self) -> List[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:
@@ -5847,6 +5870,151 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to truncate database: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Taste-state snapshot (full clean & rescan)
+    # ------------------------------------------------------------------
+    #
+    # ``truncate_all_data`` deletes every media row, and media_judgments /
+    # media_categories cascade with it. judgment_events, categories and
+    # media_tombstones carry no FK to media and survive. The full-clean
+    # scan takes this snapshot first and puts it back verbatim afterwards.
+
+    def export_taste_state(self) -> Dict[str, Any]:
+        """Snapshot every media_judgments row, every media_categories link
+        (with its category name) and every ``is_favorite = 1`` path. Paths
+        are the stored POSIX form. Plain JSON-serialisable data."""
+        with self.lock, self._get_connection() as conn:
+            judgments = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT file_path, passed, reasons, seen_at, judged_at, "
+                    "confirmed_at FROM media_judgments ORDER BY file_path"
+                ).fetchall()
+            ]
+            links = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT mc.file_path, mc.category_id, c.name AS category_name, "
+                    "mc.source, mc.assigned_at FROM media_categories mc "
+                    "JOIN categories c ON c.id = mc.category_id "
+                    "ORDER BY mc.file_path, mc.category_id"
+                ).fetchall()
+            ]
+            favorites = [
+                r["file_path"]
+                for r in conn.execute(
+                    "SELECT file_path FROM media WHERE is_favorite = 1 "
+                    "ORDER BY file_path"
+                ).fetchall()
+            ]
+        return {
+            "taken_at": self._iso(None),
+            "judgments": judgments,
+            "categories": links,
+            "favorites": favorites,
+        }
+
+    def restore_taste_state(
+        self, snapshot: Dict[str, Any], tombstone_missing: bool = False
+    ) -> Dict[str, int]:
+        """Put an ``export_taste_state`` snapshot back for every path whose
+        media row exists again: judgment rows and category links verbatim
+        (original timestamps; links only for categories that still exist)
+        and ``media.is_favorite`` by raw UPDATE. Logs **no** judgment_events
+        -- this is a put-back, not a re-judgment. Idempotent.
+
+        With ``tombstone_missing``, each snapshot path whose media row did
+        not come back gets one media_tombstones row built from the snapshot
+        (embedding via the installed lookup, else NULL; lineage from the
+        surviving t2i/i2v row). Returns ``{restored, missing, tombstoned}``
+        counted in paths."""
+        judgments: Dict[str, Dict[str, Any]] = {
+            j["file_path"]: j for j in snapshot.get("judgments") or []
+        }
+        links_by_path: Dict[str, List[Dict[str, Any]]] = {}
+        for link in snapshot.get("categories") or []:
+            links_by_path.setdefault(link["file_path"], []).append(link)
+        favorites = set(snapshot.get("favorites") or [])
+        paths = sorted(set(judgments) | set(links_by_path) | favorites)
+
+        restored = missing = tombstoned = 0
+        with self.lock, self._get_connection() as conn:
+            existing_cats = {
+                int(r["id"]) for r in conn.execute("SELECT id FROM categories")
+            }
+            now = self._iso(None)
+            for path in paths:
+                present = (
+                    conn.execute(
+                        "SELECT 1 FROM media WHERE file_path = ?", (path,)
+                    ).fetchone()
+                    is not None
+                )
+                path_links = links_by_path.get(path, [])
+                if not present:
+                    missing += 1
+                    if tombstone_missing:
+                        self._insert_tombstone(
+                            conn,
+                            path,
+                            now,
+                            path in favorites,
+                            judgments.get(path),
+                            [lk["category_name"] for lk in path_links],
+                            conn.execute(
+                                "SELECT * FROM t2i_images WHERE file_path = ? "
+                                "LIMIT 1",
+                                (path,),
+                            ).fetchone(),
+                            conn.execute(
+                                "SELECT * FROM i2v_videos WHERE file_path = ? "
+                                "LIMIT 1",
+                                (path,),
+                            ).fetchone(),
+                        )
+                        tombstoned += 1
+                    continue
+                restored += 1
+                j = judgments.get(path)
+                if j is not None:
+                    conn.execute(
+                        "INSERT INTO media_judgments (file_path, passed, "
+                        "reasons, seen_at, judged_at, confirmed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(file_path) DO UPDATE SET "
+                        "passed = excluded.passed, reasons = excluded.reasons, "
+                        "seen_at = excluded.seen_at, "
+                        "judged_at = excluded.judged_at, "
+                        "confirmed_at = excluded.confirmed_at",
+                        (
+                            path,
+                            int(j["passed"]),
+                            j["reasons"],
+                            j["seen_at"],
+                            j["judged_at"],
+                            j["confirmed_at"],
+                        ),
+                    )
+                for lk in path_links:
+                    if int(lk["category_id"]) not in existing_cats:
+                        continue
+                    conn.execute(
+                        "INSERT INTO media_categories "
+                        "(file_path, category_id, source, assigned_at) "
+                        "VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(file_path, category_id) DO UPDATE SET "
+                        "source = excluded.source, "
+                        "assigned_at = excluded.assigned_at",
+                        (path, int(lk["category_id"]), lk["source"], lk["assigned_at"]),
+                    )
+                if path in favorites:
+                    conn.execute(
+                        "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
+                        (path,),
+                    )
+            conn.commit()
+        return {"restored": restored, "missing": missing, "tombstoned": tombstoned}
 
     # ------------------------------------------------------------------
     # Folders (manual + smart)
