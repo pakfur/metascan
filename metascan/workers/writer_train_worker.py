@@ -16,15 +16,18 @@ process may import the constants and ``validate_hyperparams`` from here.
 Task (JSON)::
 
     {"backend": "real" | "fake",
-     "base_dir": str,            # HF base weights dir (real; converter --base)
+     "base_dir": str,            # HF base weights dir (real; converter --base;
+                                 # the full VL dir, never a renamed text arch)
+     "data_root": str,           # out_dir and checkpoint_dir must be strictly
+                                 # inside it; every delete is guarded by it
      "sft_path": str, "pref_path": str, "holdout_path": str,  # JSONL, schema
                                  # in metascan.core.writer_dataset
      "out_dir": str,             # progress/result/meta, peft/, adapter.gguf
      "checkpoint_dir": str,      # trainer checkpoints + state.json
      "control_dir": str,         # pause.signal / cancel.signal
      "resume": bool,             # continue from checkpoint_dir's state
-     "hyperparams": {"rank", "lr", "epochs", ...optional, see
-                     validate_hyperparams},
+     "hyperparams": {"rank", "lr", "epochs", "dpo_lr"?, ...optional, see
+                     validate_hyperparams},   # lr = SFT, dpo_lr = DPO
      "converter": {"python": str, "script": str},   # required for real
      "init_adapter_dir": str | null,  # optional: continue an existing
                                       # PEFT adapter instead of a fresh one
@@ -53,15 +56,32 @@ Outputs in ``out_dir``:
      "base_agreement": float | null, "error": str | null,
      "stage": str | null, "step": int | null,  # paused: where (stage-local)
      "resumed_from": {"stage", "step"} | null,
-     "n_sft": int, "n_pref": int, "n_holdout": int}
+     "n_sft": int, "n_pref": int, "n_holdout": int,
+     "dropped_too_long": {"sft": int, "dpo": int, "holdout": int}}
 
-* ``peft/`` (adapter_config.json + adapter weights), ``adapter.gguf``,
-  ``meta.json`` (resolved hyperparams, method, counts, agreements, the
-  task's ``meta`` merged in).
+  An error result carries the stage / stage-local step reached and the
+  counts when known.
+
+* ``peft/`` (adapter_config.json + adapter weights; checked to hold LoRA
+  weights and no vision-tower keys), ``adapter.gguf`` (verified with the
+  ``gguf`` package: no vision / ``v.`` / mmproj tensors and at least
+  text layers x 7 targets x 2 ``.lora_a``/``.lora_b`` tensors, else the run
+  fails and keeps ``peft/``), ``meta.json`` (the task's ``meta`` plus
+  method, resolved hyperparams, ``adapter_lora`` / ``init_adapter_lora``
+  {r, lora_alpha} as actually saved / loaded, ``dpo_reference``
+  ("sft_adapter" | "init_adapter" | "base" | null when DPO was skipped),
+  ``dropped_too_long``, steps, agreements, ``converter_path``
+  ("direct" | "remapped") and ``gguf_lora_tensors``).
+
+Length: system + user + completion over ``max_seq_len`` (2048) tokens is
+dropped, never truncated. All SFT examples too long: SFT is skipped. All
+preference pairs too long: DPO is skipped and the SFT adapter is the
+result. Nothing fits at all: error.
 
 ``checkpoint_dir/state.json``: ``{"version": 1, "stage": "sft" | "dpo" |
 "eval" | "convert", "fingerprint": str, "sft_adapter_dir": str | null,
-"totals": {"sft": int, "dpo": int}, "holdout_agreement", "base_agreement"}``
+"totals": {"sft": int, "dpo": int}, "dropped": {...}, "dpo_reference",
+"holdout_agreement", "base_agreement"}``
 -- a resume after SFT finished goes straight to DPO; trainer checkpoints
 live in ``checkpoint_dir/sft/checkpoint-<step>`` and ``.../dpo/...`` and the
 latest one is resumed. A resume whose data or hyperparameters differ from
@@ -71,7 +91,8 @@ the fingerprint is refused. A fresh (``resume: false``) run wipes
 Control: the parent drops ``pause.signal`` / ``cancel.signal`` in
 ``control_dir``; they are checked between steps (and between stages).
 Pause saves a checkpoint at that step boundary, consumes ``pause.signal``
-and exits 3. Cancel deletes the checkpoints and partial outputs, consumes
+and exits 3 (a pause during eval is honoured at the convert boundary).
+Cancel deletes the checkpoints and partial outputs, consumes
 ``cancel.signal`` and exits 4. The parent should empty ``control_dir``
 before spawning a run.
 
@@ -112,6 +133,7 @@ STATE_NAME = "state.json"
 GGUF_NAME = "adapter.gguf"
 PEFT_DIRNAME = "peft"
 SFT_ADAPTER_DIRNAME = "sft_adapter"
+REMAP_DIRNAME = "peft_remapped"  # converter-input copy (fallback), scratch
 PAUSE_SIGNAL = "pause.signal"
 CANCEL_SIGNAL = "cancel.signal"
 STATE_VERSION = 1
@@ -120,10 +142,12 @@ STAGES = ("sft", "dpo", "eval", "convert")
 BACKENDS = ("real", "fake")
 
 # Effort presets (global constraints): shown resolved in the UI.
+# ``lr`` is the SFT learning rate; DPO has its own (``dpo_lr``).
+DPO_LR = 1e-5
 EFFORT_PRESETS: Dict[str, Dict[str, Any]] = {
-    "quick": {"rank": 8, "lr": 1e-4, "epochs": 1},
-    "standard": {"rank": 16, "lr": 1e-4, "epochs": 2},
-    "thorough": {"rank": 32, "lr": 5e-5, "epochs": 3},
+    "quick": {"rank": 8, "lr": 1e-4, "epochs": 1, "dpo_lr": DPO_LR},
+    "standard": {"rank": 16, "lr": 1e-4, "epochs": 2, "dpo_lr": DPO_LR},
+    "thorough": {"rank": 32, "lr": 5e-5, "epochs": 3, "dpo_lr": DPO_LR},
 }
 # Owner-facing clamps (Advanced overrides).
 CLAMPS: Dict[str, Tuple[float, float]] = {
@@ -131,7 +155,11 @@ CLAMPS: Dict[str, Tuple[float, float]] = {
     "lr": (1e-6, 5e-4),
     "epochs": (1, 5),
 }
-MAX_SEQ_LEN = 1024
+# Optional owner-facing knob, same clamps as ``lr``.
+DPO_LR_CLAMP: Tuple[float, float] = CLAMPS["lr"]
+# system + user + completion; longer examples are dropped (never truncated,
+# so the system prompt always matches inference).
+MAX_SEQ_LEN = 2048
 DPO_BETA = 0.1
 CHECKPOINT_EVERY = 50
 SEED = 0
@@ -140,6 +168,7 @@ REAL_PROGRESS_EVERY = 2  # progress.json cadence in optimizer steps
 
 # Internal knobs: (default, min, max, type). Not shown to the owner.
 _KNOBS: Dict[str, Tuple[Any, float, float, type]] = {
+    "dpo_lr": (DPO_LR, DPO_LR_CLAMP[0], DPO_LR_CLAMP[1], float),
     "lora_dropout": (0.05, 0.0, 0.5, float),
     "batch_size": (1, 1, 16, int),
     "grad_accum": (8, 1, 64, int),
@@ -149,6 +178,31 @@ _KNOBS: Dict[str, Tuple[Any, float, float, type]] = {
     "warmup_ratio": (0.03, 0.0, 0.5, float),
     "seed": (SEED, 0, 2**31 - 1, int),
 }
+
+# The language-model Linear layers LoRA targets (global constraints).
+LORA_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+# Entries a run may leave directly under checkpoint_dir / out_dir/peft; the
+# guarded deletes refuse a directory holding anything else.
+CHECKPOINT_ENTRIES = frozenset(
+    {STATE_NAME, "sft", "dpo", SFT_ADAPTER_DIRNAME, REMAP_DIRNAME}
+)
+PEFT_ENTRIES = frozenset(
+    {
+        "adapter_config.json",
+        "adapter_model.safetensors",
+        "adapter_model.bin",
+        "README.md",
+    }
+)
+DROP_KINDS = ("sft", "dpo", "holdout")
 
 SFT_KEYS = ("system", "user", "chosen")
 PREF_KEYS = ("system", "user", "chosen", "rejected")
@@ -234,6 +288,7 @@ def stage_steps(
 class TrainTask:
     backend: str
     base_dir: str
+    data_root: Path
     sft_path: Path
     pref_path: Path
     holdout_path: Path
@@ -283,6 +338,13 @@ def parse_task(raw: Any) -> TrainTask:
     init = raw.get("init_adapter_dir")
     if init is not None and (not isinstance(init, str) or not init):
         raise TrainWorkerError("task.init_adapter_dir must be a string or null")
+    data_root = Path(_str_field(raw, "data_root")).resolve()
+    out_dir = Path(_str_field(raw, "out_dir"))
+    checkpoint_dir = Path(_str_field(raw, "checkpoint_dir"))
+    for key, path in (("out_dir", out_dir), ("checkpoint_dir", checkpoint_dir)):
+        resolved = path.resolve()
+        if resolved == data_root or not resolved.is_relative_to(data_root):
+            raise TrainWorkerError(f"task.{key} must be inside task.data_root")
     meta = raw.get("meta") or {}
     fake = raw.get("fake") or {}
     if not isinstance(meta, Mapping) or not isinstance(fake, Mapping):
@@ -290,11 +352,12 @@ def parse_task(raw: Any) -> TrainTask:
     return TrainTask(
         backend=str(backend),
         base_dir=base_dir,
+        data_root=data_root,
         sft_path=Path(_str_field(raw, "sft_path")),
         pref_path=Path(_str_field(raw, "pref_path")),
         holdout_path=Path(_str_field(raw, "holdout_path")),
-        out_dir=Path(_str_field(raw, "out_dir")),
-        checkpoint_dir=Path(_str_field(raw, "checkpoint_dir")),
+        out_dir=out_dir,
+        checkpoint_dir=checkpoint_dir,
         control_dir=Path(_str_field(raw, "control_dir")),
         resume=resume,
         hyperparams=validate_hyperparams(raw.get("hyperparams")),
@@ -412,6 +475,32 @@ def checkpoint_step(path: Optional[Path]) -> int:
     return int(path.name.split("-", 1)[1]) if path is not None else 0
 
 
+def safe_rmtree(path: Path, root: Path, allowed: frozenset) -> None:
+    """Delete ``path`` only when it sits strictly inside ``root`` and holds
+    nothing but ``allowed`` entries (plus our own ``.*.tmp`` files);
+    otherwise refuse. A missing ``path`` is fine."""
+    if not path.exists():
+        return
+    resolved = path.resolve()
+    root = root.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise TrainWorkerError(f"refusing to delete {path}: outside the data root")
+    if not path.is_dir():
+        raise TrainWorkerError(f"refusing to delete {path}: not a directory")
+    unexpected = sorted(
+        e.name
+        for e in path.iterdir()
+        if e.name not in allowed
+        and not (e.name.startswith(".") and e.name.endswith(".tmp"))
+    )
+    if unexpected:
+        raise TrainWorkerError(
+            f"refusing to delete {path}: unexpected entries "
+            f"({', '.join(unexpected[:3])})"
+        )
+    shutil.rmtree(path)
+
+
 class Control:
     def __init__(self, control_dir: Path) -> None:
         self.dir = control_dir
@@ -471,6 +560,8 @@ class StageContext:
         self.base_agreement: Optional[float] = None
         self.last_checkpoint_step: Optional[int] = None
         self.last_checkpoint_at: Optional[str] = None
+        # Examples left out for exceeding max_seq_len, per kind.
+        self.dropped: Dict[str, int] = {k: 0 for k in DROP_KINDS}
         self._t0: Optional[Tuple[float, int]] = None
         self._writes = 0
 
@@ -496,6 +587,9 @@ class StageContext:
         self.set_total(stage, total)
         self.stage_total = int(total)
         self.stage_step = step
+        # The ETA clock starts at the first step reported after this (model
+        # load and data preparation are not training speed).
+        self._t0 = None
         self.flush()
 
     def report(
@@ -505,6 +599,8 @@ class StageContext:
         self.stage_step = int(step)
         if loss is not None:
             self.loss = float(loss)
+        if self._t0 is None and stage in ("sft", "dpo"):
+            self._t0 = (time.monotonic(), self.overall_step())
         if force or self.stage_step % self.progress_every == 0:
             self.flush()
 
@@ -519,7 +615,6 @@ class StageContext:
     def _eta(self, step: int, total: int) -> Optional[float]:
         now = time.monotonic()
         if self._t0 is None:
-            self._t0 = (now, step)
             return None
         t0, s0 = self._t0
         if step <= s0 or self.stage not in ("sft", "dpo"):
@@ -550,6 +645,11 @@ class StageContext:
 
 
 class Backend(Protocol):
+    """``train_*`` return False when every example of that kind is longer
+    than ``max_seq_len`` (nothing trained, nothing saved); they record the
+    per-kind drop count in ``ctx.dropped``. ``convert`` returns which
+    converter path succeeded (``"direct"`` / ``"remapped"``)."""
+
     def train_sft(
         self,
         ctx: StageContext,
@@ -557,7 +657,7 @@ class Backend(Protocol):
         init_adapter: Optional[str],
         resume_from: Optional[Path],
         save_to: Path,
-    ) -> None: ...
+    ) -> bool: ...
 
     def train_dpo(
         self,
@@ -566,13 +666,17 @@ class Backend(Protocol):
         init_adapter: Optional[str],
         resume_from: Optional[Path],
         save_to: Path,
-    ) -> None: ...
+    ) -> bool: ...
 
     def evaluate(
         self, ctx: StageContext, holdout: List[Dict[str, Any]], adapter_dir: Path
     ) -> Tuple[Optional[float], Optional[float]]: ...
 
-    def convert(self, ctx: StageContext, peft_dir: Path, gguf_path: Path) -> None: ...
+    def convert(self, ctx: StageContext, peft_dir: Path, gguf_path: Path) -> str: ...
+
+    def gguf_tensor_names(self, gguf_path: Path) -> List[str]: ...
+
+    def expected_lora_tensors(self) -> int: ...
 
 
 def make_backend(task: TrainTask) -> Backend:
@@ -625,6 +729,127 @@ def run_converter(
         raise TrainWorkerError("converter produced no output file")
 
 
+def is_unmapped_language_model_error(message: str) -> bool:
+    """The converter's ``Can not map tensor 'model.language_model...'``
+    failure: an older llama.cpp that does not strip the VL prefix."""
+    low = message.lower()
+    return "can not map tensor" in low and "language_model" in low
+
+
+_LM_PREFIX = "base_model.model.model.language_model."
+_PLAIN_PREFIX = "base_model.model.model."
+
+
+def remap_language_model_key(key: str) -> str:
+    """``base_model.model.model.language_model.X`` -> ``base_model.model.
+    model.X`` (the plain Qwen3 layout); any other key unchanged."""
+    if key.startswith(_LM_PREFIX):
+        return _PLAIN_PREFIX + key[len(_LM_PREFIX) :]
+    return key
+
+
+def build_remapped_peft(src: Path, dst: Path) -> None:
+    """A converter-input copy of the PEFT dir ``src`` at ``dst``: tensor keys
+    through ``remap_language_model_key``, ``target_modules`` the plain
+    module-name list. ``src`` is never modified."""
+    st: Any
+    try:  # torch keeps bf16; numpy is enough for fp32 adapters
+        import safetensors.torch as st
+    except ImportError:
+        import safetensors.numpy as st
+    safe_rmtree(dst, dst.parent, frozenset(PEFT_ENTRIES))
+    dst.mkdir(parents=True)
+    tensors = st.load_file(str(src / "adapter_model.safetensors"))
+    remapped = {remap_language_model_key(k): v for k, v in tensors.items()}
+    if len(remapped) != len(tensors):
+        raise TrainWorkerError("remapping adapter keys produced duplicates")
+    st.save_file(
+        remapped, str(dst / "adapter_model.safetensors"), metadata={"format": "pt"}
+    )
+    config = json.loads((src / "adapter_config.json").read_text())
+    config["target_modules"] = list(LORA_TARGETS)
+    (dst / "adapter_config.json").write_text(json.dumps(config, indent=2))
+
+
+def convert_with_fallback(
+    converter: Mapping[str, str],
+    base_dir: str,
+    peft_dir: Path,
+    gguf_path: Path,
+    scratch: Path,
+) -> str:
+    """Run the converter on ``peft_dir``; when it cannot map the VL
+    ``language_model`` tensor names, retry once on a remapped copy under
+    ``scratch``. Returns ``"direct"`` or ``"remapped"``."""
+    try:
+        run_converter(converter, base_dir, str(peft_dir), str(gguf_path))
+        return "direct"
+    except TrainWorkerError as e:
+        if not is_unmapped_language_model_error(str(e)):
+            raise
+        logger.warning(
+            "writer train: converter cannot map language_model tensors; "
+            "retrying with remapped adapter keys"
+        )
+    remapped = scratch / REMAP_DIRNAME
+    build_remapped_peft(peft_dir, remapped)
+    run_converter(converter, base_dir, str(remapped), str(gguf_path))
+    return "remapped"
+
+
+def expected_lora_tensors(base_dir: str) -> int:
+    """LoRA A+B tensors a full adapter has: the TEXT config's layers x the
+    target modules x 2."""
+    try:
+        config = json.loads((Path(base_dir) / "config.json").read_text())
+    except (OSError, ValueError) as e:
+        raise TrainWorkerError(f"cannot read the base config.json: {e}") from None
+    text = config.get("text_config") or config
+    layers = text.get("num_hidden_layers")
+    if not isinstance(layers, int) or layers <= 0:
+        raise TrainWorkerError("base config.json has no num_hidden_layers")
+    return layers * len(LORA_TARGETS) * 2
+
+
+def read_gguf_tensor_names(path: Path) -> List[str]:
+    try:
+        import gguf  # lazy: llama.cpp's gguf-py (requirements-train.txt)
+    except ImportError:
+        raise TrainWorkerError(
+            "cannot verify the GGUF adapter: the gguf package is missing "
+            "(pip install -r requirements-train.txt)"
+        ) from None
+    try:
+        reader = gguf.GGUFReader(str(path))
+    except Exception as e:
+        raise TrainWorkerError(f"the GGUF adapter is unreadable: {e}") from None
+    return [str(t.name) for t in reader.tensors]
+
+
+_VISION_PREFIXES = ("v.", "mm.", "mmproj")
+_VISION_MARKERS = ("mmproj", "visual", "vision")
+
+
+def verify_gguf_names(names: Sequence[str], expected: int) -> int:
+    """Count ``.lora_a`` / ``.lora_b`` tensors; refuse vision tensors and a
+    count below ``expected``. Returns the count."""
+    vision = [
+        n
+        for n in names
+        if n.startswith(_VISION_PREFIXES) or any(m in n for m in _VISION_MARKERS)
+    ]
+    if vision:
+        raise TrainWorkerError(
+            f"the GGUF adapter has {len(vision)} vision tensor(s) (e.g. {vision[0]})"
+        )
+    count = sum(1 for n in names if n.endswith((".lora_a", ".lora_b")))
+    if count < expected:
+        raise TrainWorkerError(
+            f"the GGUF adapter has {count} LoRA tensor(s), expected {expected}"
+        )
+    return count
+
+
 # ---- the run ---------------------------------------------------------------
 
 
@@ -643,12 +868,13 @@ def _blank_result() -> Dict[str, Any]:
         "n_sft": 0,
         "n_pref": 0,
         "n_holdout": 0,
+        "dropped_too_long": {k: 0 for k in DROP_KINDS},
     }
 
 
 def _clean_cancelled(task: TrainTask) -> None:
-    shutil.rmtree(task.checkpoint_dir, ignore_errors=True)
-    shutil.rmtree(task.out_dir / PEFT_DIRNAME, ignore_errors=True)
+    safe_rmtree(task.checkpoint_dir, task.data_root, CHECKPOINT_ENTRIES)
+    safe_rmtree(task.out_dir / PEFT_DIRNAME, task.data_root, PEFT_ENTRIES)
     for name in (GGUF_NAME, META_NAME):
         try:
             (task.out_dir / name).unlink()
@@ -673,7 +899,7 @@ def _prepare_state(task: TrainTask, fp: str, totals: Dict[str, int]) -> RunState
         return RunState(path, data)
     if task.resume:
         logger.warning("writer train: resume requested but no state; starting fresh")
-    shutil.rmtree(task.checkpoint_dir, ignore_errors=True)
+    safe_rmtree(task.checkpoint_dir, task.data_root, CHECKPOINT_ENTRIES)
     task.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     state = RunState(
         path,
@@ -683,6 +909,7 @@ def _prepare_state(task: TrainTask, fp: str, totals: Dict[str, int]) -> RunState
             "fingerprint": fp,
             "sft_adapter_dir": None,
             "totals": dict(totals),
+            "dropped": {k: 0 for k in DROP_KINDS},
             "holdout_agreement": None,
             "base_agreement": None,
         },
@@ -710,7 +937,25 @@ def _initial_totals(task: TrainTask, data: TrainData) -> Dict[str, int]:
     return totals
 
 
-def _write_meta(task: TrainTask, data: TrainData, state: RunState) -> Path:
+def _lora_of(adapter_dir: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``{"r", "lora_alpha"}`` from a PEFT dir's adapter_config.json."""
+    if not adapter_dir:
+        return None
+    try:
+        cfg = json.loads((Path(adapter_dir) / "adapter_config.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return {"r": cfg.get("r"), "lora_alpha": cfg.get("lora_alpha")}
+
+
+def _write_meta(
+    task: TrainTask,
+    data: TrainData,
+    state: RunState,
+    peft_dir: Path,
+    converter_path: str,
+    lora_tensors: int,
+) -> Path:
     meta: Dict[str, Any] = dict(task.meta)
     meta.update(
         {
@@ -720,12 +965,20 @@ def _write_meta(task: TrainTask, data: TrainData, state: RunState) -> Path:
             "beta": task.hyperparams["beta"],
             "seed": task.hyperparams["seed"],
             "init_adapter_dir": task.init_adapter_dir,
+            # The adapter's real rank/alpha: when continuing an adapter its
+            # own config wins over the requested hyperparams.
+            "init_adapter_lora": _lora_of(task.init_adapter_dir),
+            "adapter_lora": _lora_of(str(peft_dir)),
+            "dpo_reference": state.data.get("dpo_reference"),
             "n_sft": len(data.sft),
             "n_pref": len(data.prefs),
             "n_holdout": len(data.holdout),
+            "dropped_too_long": dict(state.data.get("dropped") or {}),
             "steps": dict(state.data.get("totals") or {}),
             "holdout_agreement": state.data.get("holdout_agreement"),
             "base_agreement": state.data.get("base_agreement"),
+            "converter_path": converter_path,
+            "gguf_lora_tensors": lora_tensors,
             "finished_at": _now_iso(),
         }
     )
@@ -743,95 +996,57 @@ def _stop_check(ctx: StageContext, stage: str) -> None:
 
 
 def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
-    """Run (or resume) the task; returns ``(exit code, result)``."""
+    """Run (or resume) the task; returns ``(exit code, result)``. Errors
+    after the task parsed come back as an error result carrying the stage,
+    step and counts reached."""
     result = _blank_result()
     control = Control(task.control_dir)
-    task.out_dir.mkdir(parents=True, exist_ok=True)
-    if control.check() == "cancel":
-        _clean_cancelled(task)
-        control.consume(CANCEL_SIGNAL)
-        result["status"] = "cancelled"
-        return EXIT_CANCELLED, result
-
-    data = load_data(task)
-    result.update(
-        n_sft=len(data.sft), n_pref=len(data.prefs), n_holdout=len(data.holdout)
-    )
-    logger.info(
-        "writer train: %s backend, %d SFT, %d preference, %d holdout example(s)",
-        task.backend,
-        len(data.sft),
-        len(data.prefs),
-        len(data.holdout),
-    )
-    totals = _initial_totals(task, data)
-    state = _prepare_state(task, fingerprint(task), totals)
-    totals = dict(state.data.get("totals") or totals)
-    progress_every = (
-        int(task.fake.get("progress_every", REAL_PROGRESS_EVERY))
-        if task.backend == "fake"
-        else REAL_PROGRESS_EVERY
-    )
-    ctx = StageContext(task.out_dir, control, totals, progress_every)
-    ctx.holdout_agreement = state.data.get("holdout_agreement")
-    ctx.base_agreement = state.data.get("base_agreement")
-
-    if task.resume:
-        if state.stage in ("sft", "dpo"):
-            ck = latest_checkpoint(task.checkpoint_dir / state.stage)
-            if ck is not None:
-                result["resumed_from"] = {
-                    "stage": state.stage,
-                    "step": checkpoint_step(ck),
-                }
-                ctx.last_checkpoint_step = ctx._offset(state.stage) + checkpoint_step(
-                    ck
-                )
-        logger.info("writer train: resuming at stage %s", state.stage)
-
-    backend = make_backend(task)
-    peft_dir = task.out_dir / PEFT_DIRNAME
-    gguf = task.out_dir / GGUF_NAME
+    ctx: Optional[StageContext] = None
     try:
-        if state.stage == "sft":
-            sft_adapter: Optional[str] = None
-            if data.sft:
-                ck = latest_checkpoint(task.checkpoint_dir / "sft")
-                ctx.begin("sft", totals["sft"], checkpoint_step(ck))
-                save_to = task.checkpoint_dir / SFT_ADAPTER_DIRNAME
-                backend.train_sft(ctx, data.sft, task.init_adapter_dir, ck, save_to)
-                sft_adapter = str(save_to)
-                logger.info("writer train: SFT done")
-            state.update(stage="dpo", sft_adapter_dir=sft_adapter, totals=ctx.totals)
-        if state.stage == "dpo":
-            _stop_check(ctx, "dpo")
-            ck = latest_checkpoint(task.checkpoint_dir / "dpo")
-            ctx.begin("dpo", ctx.totals["dpo"], checkpoint_step(ck))
-            init = state.data.get("sft_adapter_dir") or task.init_adapter_dir
-            backend.train_dpo(ctx, data.prefs, init, ck, peft_dir)
-            logger.info("writer train: DPO done")
-            state.update(stage="eval", totals=ctx.totals)
-        if state.stage == "eval":
-            _stop_check(ctx, "eval")
-            if not peft_dir.is_dir():
-                raise TrainWorkerError(
-                    "cannot evaluate: the trained adapter is missing"
-                )
-            ctx.begin("eval", len(data.holdout))
-            h, b = backend.evaluate(ctx, data.holdout, peft_dir)
-            ctx.holdout_agreement, ctx.base_agreement = h, b
-            logger.info(
-                "writer train: holdout agreement %s (base %s) over %d pair(s)",
-                "n/a" if h is None else f"{h:.3f}",
-                "n/a" if b is None else f"{b:.3f}",
-                len(data.holdout),
-            )
-            state.update(stage="convert", holdout_agreement=h, base_agreement=b)
-        _stop_check(ctx, "convert")
-        ctx.begin("convert", 1)
-        backend.convert(ctx, peft_dir, gguf)
-        ctx.report("convert", 1, force=True)
+        task.out_dir.mkdir(parents=True, exist_ok=True)
+        if control.check() == "cancel":
+            _clean_cancelled(task)
+            control.consume(CANCEL_SIGNAL)
+            result["status"] = "cancelled"
+            return EXIT_CANCELLED, result
+        data = load_data(task)
+        result.update(
+            n_sft=len(data.sft), n_pref=len(data.prefs), n_holdout=len(data.holdout)
+        )
+        logger.info(
+            "writer train: %s backend, %d SFT, %d preference, %d holdout example(s)",
+            task.backend,
+            len(data.sft),
+            len(data.prefs),
+            len(data.holdout),
+        )
+        totals = _initial_totals(task, data)
+        state = _prepare_state(task, fingerprint(task), totals)
+        progress_every = (
+            int(task.fake.get("progress_every", REAL_PROGRESS_EVERY))
+            if task.backend == "fake"
+            else REAL_PROGRESS_EVERY
+        )
+        ctx = StageContext(
+            task.out_dir,
+            control,
+            dict(state.data.get("totals") or totals),
+            progress_every,
+        )
+        ctx.dropped.update(state.data.get("dropped") or {})
+        ctx.holdout_agreement = state.data.get("holdout_agreement")
+        ctx.base_agreement = state.data.get("base_agreement")
+        if task.resume:
+            if state.stage in ("sft", "dpo"):
+                ck = latest_checkpoint(task.checkpoint_dir / state.stage)
+                if ck is not None:
+                    step = checkpoint_step(ck)
+                    result["resumed_from"] = {"stage": state.stage, "step": step}
+                    ctx.last_checkpoint_step = ctx._offset(state.stage) + step
+            logger.info("writer train: resuming at stage %s", state.stage)
+        code = _run_stages(task, data, state, ctx, result)
     except Paused as p:
+        assert ctx is not None
         ctx.flush()
         control.consume(PAUSE_SIGNAL)
         logger.info("writer train: paused at %s step %d", p.stage, p.step)
@@ -841,11 +1056,116 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
         _clean_cancelled(task)
         control.consume(CANCEL_SIGNAL)
         logger.info("writer train: cancelled")
-        result.update(status="cancelled", stage=ctx.stage)
+        result.update(status="cancelled", stage=ctx.stage if ctx else None)
         return EXIT_CANCELLED, result
+    except Exception as e:
+        if isinstance(e, TrainWorkerError):
+            logger.error("writer train failed: %s", e)
+        else:
+            logger.exception("writer train failed")
+        result.update(status="error", error=str(e) or repr(e))
+        if ctx is not None:
+            result.update(
+                stage=ctx.stage,
+                step=ctx.stage_step,
+                dropped_too_long=dict(ctx.dropped),
+            )
+        return EXIT_ERROR, result
+    return code, result
 
-    meta_path = _write_meta(task, data, state)
-    shutil.rmtree(task.checkpoint_dir, ignore_errors=True)
+
+def _run_stages(
+    task: TrainTask,
+    data: TrainData,
+    state: RunState,
+    ctx: StageContext,
+    result: Dict[str, Any],
+) -> int:
+    backend = make_backend(task)
+    peft_dir = task.out_dir / PEFT_DIRNAME
+    gguf = task.out_dir / GGUF_NAME
+    max_len = task.hyperparams["max_seq_len"]
+    if state.stage == "sft":
+        sft_adapter: Optional[str] = None
+        if data.sft:
+            ck = latest_checkpoint(task.checkpoint_dir / "sft")
+            ctx.begin("sft", ctx.totals["sft"], checkpoint_step(ck))
+            save_to = task.checkpoint_dir / SFT_ADAPTER_DIRNAME
+            if backend.train_sft(ctx, data.sft, task.init_adapter_dir, ck, save_to):
+                sft_adapter = str(save_to)
+                logger.info("writer train: SFT done")
+            else:
+                ctx.totals["sft"] = 0
+                logger.warning(
+                    "writer train: every SFT example is longer than %d tokens; "
+                    "SFT skipped",
+                    max_len,
+                )
+        state.update(
+            stage="dpo",
+            sft_adapter_dir=sft_adapter,
+            totals=ctx.totals,
+            dropped=ctx.dropped,
+        )
+    if state.stage == "dpo":
+        _stop_check(ctx, "dpo")
+        ck = latest_checkpoint(task.checkpoint_dir / "dpo")
+        ctx.begin("dpo", ctx.totals["dpo"], checkpoint_step(ck))
+        sft_adapter = state.data.get("sft_adapter_dir")
+        init = sft_adapter or task.init_adapter_dir
+        reference: Optional[str] = (
+            "sft_adapter" if sft_adapter else ("init_adapter" if init else "base")
+        )
+        if backend.train_dpo(ctx, data.prefs, init, ck, peft_dir):
+            logger.info("writer train: DPO done")
+        else:
+            if not sft_adapter:
+                raise TrainWorkerError(
+                    f"every training example is longer than {max_len} tokens"
+                )
+            logger.warning(
+                "writer train: every preference pair is longer than %d tokens; "
+                "DPO skipped, the SFT adapter is the result",
+                max_len,
+            )
+            ctx.totals["dpo"] = 0
+            reference = None
+            safe_rmtree(peft_dir, task.data_root, PEFT_ENTRIES)
+            shutil.copytree(sft_adapter, peft_dir)
+        state.update(
+            stage="eval",
+            totals=ctx.totals,
+            dropped=ctx.dropped,
+            dpo_reference=reference,
+        )
+    if state.stage == "eval":
+        _stop_check(ctx, "eval")
+        if not peft_dir.is_dir():
+            raise TrainWorkerError("cannot evaluate: the trained adapter is missing")
+        ctx.begin("eval", len(data.holdout))
+        h, b = backend.evaluate(ctx, data.holdout, peft_dir)
+        ctx.holdout_agreement, ctx.base_agreement = h, b
+        logger.info(
+            "writer train: holdout agreement %s (base %s) over %d pair(s)",
+            "n/a" if h is None else f"{h:.3f}",
+            "n/a" if b is None else f"{b:.3f}",
+            len(data.holdout),
+        )
+        state.update(
+            stage="convert", holdout_agreement=h, base_agreement=b, dropped=ctx.dropped
+        )
+    # Pause during eval is honoured here, at the convert boundary.
+    _stop_check(ctx, "convert")
+    ctx.begin("convert", 1)
+    path = backend.convert(ctx, peft_dir, gguf)
+    count = verify_gguf_names(
+        backend.gguf_tensor_names(gguf), backend.expected_lora_tensors()
+    )
+    logger.info("writer train: GGUF adapter has %d LoRA tensor(s) (%s)", count, path)
+    ctx.report("convert", 1, force=True)
+
+    meta_path = _write_meta(task, data, state, peft_dir, path, count)
+    safe_rmtree(task.checkpoint_dir, task.data_root, CHECKPOINT_ENTRIES)
     result.update(
         status="ok",
         adapter_dir=str(peft_dir),
@@ -853,8 +1173,9 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
         meta_path=str(meta_path),
         holdout_agreement=ctx.holdout_agreement,
         base_agreement=ctx.base_agreement,
+        dropped_too_long=dict(ctx.dropped),
     )
-    return EXIT_OK, result
+    return EXIT_OK
 
 
 def main(argv: List[str]) -> int:

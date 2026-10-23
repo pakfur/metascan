@@ -12,7 +12,15 @@ Knobs (``task.fake``, all optional)::
      "progress_every": int,                # progress.json cadence, default 2
      "signal_at": {"stage", "step", "file": "pause.signal"},
                                            # drop a control file at that step
-     "fail_at": {"stage", "step"}}         # raise at that step
+     "fail_at": {"stage", "step"},         # raise at that step
+     "text_layers": int,                   # base text layers, default 36
+     "gguf_layers": int,                   # layers the dummy GGUF carries
+     "gguf_extra_names": [str],            # extra GGUF tensor names
+     "converter_path": "direct" | "remapped"}
+
+Length filter: an example "fits" when the whitespace-separated words of
+system + user + completion number at most ``max_seq_len`` (a stand-in for
+tokens); the rest are dropped and counted like the real backend does.
 
 Every executed step is appended to ``<out_dir>/fake_trace.txt`` as
 ``<stage>:<step>`` so tests can see what ran (and what a resume skipped).
@@ -55,13 +63,36 @@ class FakeBackend:
         (ck / "fake_state.json").write_text(json.dumps({"step": step, "loss": loss}))
         ctx.note_checkpoint(stage, step)
 
-    @staticmethod
-    def _write_adapter(path: Path, rank: int) -> None:
+    def _write_adapter(self, path: Path, init_adapter: Optional[str]) -> None:
+        """A dummy PEFT dir; continuing an adapter keeps its rank/alpha."""
+        hp = self.task.hyperparams
+        cfg: Dict[str, Any] = {
+            "peft_type": "LORA",
+            "r": hp["rank"],
+            "lora_alpha": hp["lora_alpha"],
+            "fake": True,
+        }
+        if init_adapter:
+            src = json.loads((Path(init_adapter) / "adapter_config.json").read_text())
+            cfg.update(r=src.get("r"), lora_alpha=src.get("lora_alpha"))
         path.mkdir(parents=True, exist_ok=True)
-        (path / "adapter_config.json").write_text(
-            json.dumps({"peft_type": "LORA", "r": rank, "fake": True})
-        )
+        (path / "adapter_config.json").write_text(json.dumps(cfg))
         (path / "adapter_model.safetensors").write_bytes(b"\0" * 16)
+
+    def _fits(self, ex: Dict[str, Any], key: str) -> bool:
+        words = len(f"{ex['system']} {ex['user']} {ex[key]}".split())
+        return words <= int(self.task.hyperparams["max_seq_len"])
+
+    def _keep(
+        self,
+        ctx: "w.StageContext",
+        examples: List[Dict[str, Any]],
+        keys: Tuple[str, ...],
+        kind: str,
+    ) -> List[Dict[str, Any]]:
+        kept = [ex for ex in examples if all(self._fits(ex, k) for k in keys)]
+        ctx.dropped[kind] = len(examples) - len(kept)
+        return kept
 
     def _loop(
         self,
@@ -107,9 +138,12 @@ class FakeBackend:
         init_adapter: Optional[str],
         resume_from: Optional[Path],
         save_to: Path,
-    ) -> None:
+    ) -> bool:
+        if not self._keep(ctx, examples, ("chosen",), "sft"):
+            return False
         self._loop(ctx, "sft", resume_from)
-        self._write_adapter(save_to, int(self.task.hyperparams["rank"]))
+        self._write_adapter(save_to, init_adapter)
+        return True
 
     def train_dpo(
         self,
@@ -118,9 +152,12 @@ class FakeBackend:
         init_adapter: Optional[str],
         resume_from: Optional[Path],
         save_to: Path,
-    ) -> None:
+    ) -> bool:
+        if not self._keep(ctx, examples, ("chosen", "rejected"), "dpo"):
+            return False
         self._loop(ctx, "dpo", resume_from)
-        self._write_adapter(save_to, int(self.task.hyperparams["rank"]))
+        self._write_adapter(save_to, init_adapter)
+        return True
 
     def evaluate(
         self,
@@ -128,6 +165,7 @@ class FakeBackend:
         holdout: List[Dict[str, Any]],
         adapter_dir: Path,
     ) -> Tuple[Optional[float], Optional[float]]:
+        holdout = self._keep(ctx, holdout, ("chosen", "rejected"), "holdout")
         if not holdout:
             return None, None
         # Dummy but deterministic: "base" prefers the shorter completion,
@@ -141,5 +179,28 @@ class FakeBackend:
         n = len(holdout)
         return adapter / n, base / n
 
-    def convert(self, ctx: "w.StageContext", peft_dir: Path, gguf_path: Path) -> None:
+    def convert(self, ctx: "w.StageContext", peft_dir: Path, gguf_path: Path) -> str:
         gguf_path.write_bytes(b"GGUF\x03\x00\x00\x00fake-lora")
+        return str(self.knobs.get("converter_path") or "direct")
+
+    def gguf_tensor_names(self, gguf_path: Path) -> List[str]:
+        layers = int(self.knobs.get("gguf_layers", self.knobs.get("text_layers", 36)))
+        kinds = (
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        )
+        names = [
+            f"blk.{i}.{k}.weight.lora_{ab}"
+            for i in range(layers)
+            for k in kinds
+            for ab in "ab"
+        ]
+        return names + [str(n) for n in self.knobs.get("gguf_extra_names") or []]
+
+    def expected_lora_tensors(self) -> int:
+        return int(self.knobs.get("text_layers", 36)) * len(w.LORA_TARGETS) * 2
