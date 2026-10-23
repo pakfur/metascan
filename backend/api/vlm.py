@@ -18,12 +18,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
 from backend.services.vlm_roles import Role, VlmRoles, WriterModelNotAllowed
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.vlm_select import vlm_model_installed
 
 logger = logging.getLogger(__name__)

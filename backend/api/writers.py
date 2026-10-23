@@ -97,6 +97,14 @@ def _delete(adapter_id: int) -> None:
             status_code=409, detail={"code": "adapter_files_busy"}
         ) from exc
     get_db().soft_delete_writer_adapter(adapter_id)
+    # A paused / failed adapter's open run goes with it (its checkpoints
+    # could never be resumed into a deleted adapter).
+    from backend.services.training_manager import discard_open_runs
+
+    for run_id in discard_open_runs(get_db(), adapter_id):
+        ws_manager.broadcast_sync(
+            "training", "run_cancelled", {"run_id": run_id, "adapter_id": adapter_id}
+        )
 
 
 @router.delete("/adapters/{adapter_id}")
@@ -189,23 +197,17 @@ def _gate_payload(gate: Any) -> Dict[str, Any]:
 
 
 @router.get("/training")
-async def training_status(scope: str = "all") -> Dict[str, Any]:
+async def training_status(scope: str = "all", recheck: bool = False) -> Dict[str, Any]:
     """The training window's state: the active run (if any) and resumable
-    runs, the dataset counts + readiness for ``scope``, the
-    ``writer_training`` gate (each missing piece) and every effort preset
-    resolved, with the Advanced clamps."""
-    from backend.services.training_manager import (
-        OVERRIDE_CLAMPS,
-        TrainingError,
-        resolved_presets,
-    )
+    runs, the dataset counts + readiness for ``scope`` (cached ~30 s), the
+    ``writer_training`` gate (each missing piece; ``recheck=1`` re-runs its
+    subprocess probes, e.g. after installing the training deps) and every
+    effort preset resolved, with the Advanced clamps."""
+    from backend.services.training_manager import OVERRIDE_CLAMPS, resolved_presets
 
     manager = _manager()
-    try:
-        dataset = await manager.dataset_summary(scope)
-    except TrainingError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
-    gate = await asyncio.to_thread(manager.gate)
+    dataset = await _training_call(manager.dataset_summary(scope))
+    gate = await asyncio.to_thread(manager.gate, recheck)
     return {
         **manager.status(),
         "runs": await asyncio.to_thread(manager.resumable_runs),

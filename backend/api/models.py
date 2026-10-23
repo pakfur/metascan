@@ -18,13 +18,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.api import similarity
 from backend.config import get_models_config, load_app_config, save_app_config
 from backend.ws.manager import ws_manager
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.embedding_manager import CLIP_MODELS, EmbeddingManager
 from metascan.core.hardware import (
     classify_tier,

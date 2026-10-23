@@ -54,6 +54,7 @@ from metascan.core import writer_dataset as wd
 from metascan.core.hardware import (
     Gate,
     WriterTrainingPaths,
+    clear_writer_training_probe_cache,
     detect_hardware,
     writer_training_gate,
 )
@@ -196,6 +197,93 @@ def training_paths_from_config(
     )
 
 
+# ---- the worker's PID record (orphans after a hard kill) ---------------------
+
+WORKER_PID_NAME = "worker.pid"
+_CREATE_TIME_TOLERANCE_S = 1.0
+
+
+def write_worker_pid(run_dir: Path, pid: int) -> None:
+    """Record ``{pid, create_time, module}`` at spawn so a later server can
+    recognise (and stop) a worker it no longer supervises."""
+    import psutil
+
+    try:
+        created = psutil.Process(pid).create_time()
+    except (psutil.Error, OSError):
+        created = None
+    ww.write_json_atomic(
+        run_dir / WORKER_PID_NAME,
+        {"pid": pid, "create_time": created, "module": WORKER_MODULE},
+    )
+
+
+def clear_worker_pid(run_dir: Path) -> None:
+    try:
+        (run_dir / WORKER_PID_NAME).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("could not remove %s", run_dir / WORKER_PID_NAME)
+
+
+def recorded_worker(run_dir: Optional[Path]) -> Any:
+    """The live process recorded in ``run_dir/worker.pid`` -- only when it
+    is provably OUR worker: same PID, same start time (+- 1 s) and a command
+    line naming ``writer_train_worker``. None otherwise (dead, reused PID,
+    unreadable): such a process is never touched."""
+    import psutil
+
+    if run_dir is None:
+        return None
+    try:
+        rec = json.loads((Path(run_dir) / WORKER_PID_NAME).read_text())
+        pid = int(rec["pid"])
+        created = rec.get("create_time")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if created is None:
+        return None
+    try:
+        proc = psutil.Process(pid)
+        if abs(proc.create_time() - float(created)) > _CREATE_TIME_TOLERANCE_S:
+            return None
+        if "writer_train_worker" not in " ".join(proc.cmdline()):
+            return None
+        if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+            return None
+        return proc
+    except (psutil.Error, OSError):
+        return None
+
+
+def stop_orphan_worker(run_dir: Optional[Path], timeout: float = 10.0) -> bool:
+    """Terminate (then kill) the recorded worker if it is ours and alive.
+    True when one was stopped. Synchronous."""
+    import psutil
+
+    proc = recorded_worker(run_dir)
+    if proc is None:
+        return False
+    logger.warning(
+        "stopping an orphaned writer training worker (pid %d, run dir %s)",
+        proc.pid,
+        run_dir,
+    )
+    try:
+        proc.terminate()
+        _, alive = psutil.wait_procs([proc], timeout=timeout)
+        for p in alive:
+            p.kill()
+        psutil.wait_procs(alive, timeout=timeout)
+    except psutil.NoSuchProcess:
+        pass
+    except psutil.Error:
+        logger.exception("could not stop the orphaned training worker")
+        return False
+    if run_dir is not None:
+        clear_worker_pid(Path(run_dir))
+    return True
+
+
 # ---- the manager ------------------------------------------------------------
 
 
@@ -255,7 +343,9 @@ class TrainingManager:
         poll_s: float = 1.0,
         shutdown_grace_s: float = 30.0,
         on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
+        on_gpu_released: Optional[Callable[[], None]] = None,
         now: Optional[Callable[[], datetime]] = None,
+        summary_ttl_s: float = 30.0,
     ) -> None:
         self.db = db
         self.data_dir = Path(data_dir)
@@ -279,6 +369,12 @@ class TrainingManager:
         self._active: Optional[_Active] = None
         self._gpu_held = False
         self._closing = False
+        # Set once release_gpu() ran for the current hold.
+        self._released = False
+        self.on_gpu_released = on_gpu_released
+        # GET /training's dataset summary per scope: (monotonic time, value).
+        self.summary_ttl_s = float(summary_ttl_s)
+        self._summary_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
     # ---- GPU lock -------------------------------------------------------
 
@@ -295,13 +391,30 @@ class TrainingManager:
             busy = self._gpu_busy()
             if busy:
                 raise TrainingError(409, "gpu_busy", reasons=busy)
+            self._released = True
             await self._release_gpu()
             busy = self._gpu_busy()
             if busy:
                 raise TrainingError(409, "gpu_busy", reasons=busy)
         except BaseException:
-            self._gpu_held = False
+            self._drop_lock()
             raise
+
+    def _drop_lock(self) -> None:
+        """Release the GPU (completion, failure, pause, cancel or a refused
+        start) and tell the lifespan (it restarts work it interrupted, e.g.
+        the hindsight briefs job)."""
+        self._active = None
+        if not self._gpu_held:
+            return
+        self._gpu_held = False
+        released, self._released = self._released, False
+        hook = self.on_gpu_released
+        if released and hook is not None:
+            try:
+                hook()
+            except Exception:
+                logger.exception("GPU release hook failed")
 
     # ---- dataset --------------------------------------------------------
 
@@ -336,6 +449,22 @@ class TrainingManager:
         )
 
     async def dataset_summary(self, scope: Any = wd.SCOPE_ALL) -> Dict[str, Any]:
+        """Counts + readiness of ``scope``, cached ``summary_ttl_s`` per scope
+        (the window polls it; a build reads the whole library). Starting or
+        completing a run invalidates it."""
+        key = str(scope).strip().lower()
+        loop = asyncio.get_running_loop()
+        hit = self._summary_cache.get(key)
+        if hit is not None and loop.time() - hit[0] < self.summary_ttl_s:
+            return hit[1]
+        value = await self._dataset_summary(scope)
+        self._summary_cache[key] = (loop.time(), value)
+        return value
+
+    def invalidate_dataset_summary(self) -> None:
+        self._summary_cache.clear()
+
+    async def _dataset_summary(self, scope: Any) -> Dict[str, Any]:
         built = await asyncio.to_thread(self._build, scope)
         _, holdout = wd.split_holdout(built.prefs)
         return {
@@ -354,9 +483,13 @@ class TrainingManager:
             "sft": wd.preview(built.sft),
         }
 
-    def gate(self) -> Gate:
-        """Synchronous: runs the (cached) subprocess probes."""
-        return self._gate(self._paths())
+    def gate(self, recheck: bool = False) -> Gate:
+        """Synchronous: runs the subprocess probes (cached per interpreter;
+        ``recheck`` drops the cache first, e.g. after installing deps)."""
+        paths = self._paths()
+        if recheck:
+            clear_writer_training_probe_cache(paths.python)
+        return self._gate(paths)
 
     # ---- start / resume -------------------------------------------------
 
@@ -513,6 +646,7 @@ class TrainingManager:
                     render_scorecard,
                 )
                 self._active = active
+                self.invalidate_dataset_summary()
                 await self._spawn(active)
             except BaseException:
                 await self._abort_start()
@@ -546,6 +680,9 @@ class TrainingManager:
                 raise TrainingError(409, "not_resumable", run_status="adapter_deleted")
             if not run["run_dir"] or not task_path.is_file():
                 raise TrainingError(409, "not_resumable", run_status="files_missing")
+            if await asyncio.to_thread(recorded_worker, run_dir) is not None:
+                # Never two workers on one checkpoint dir.
+                raise TrainingError(409, "worker_alive")
             await self._require_gate()
             await self._take_gpu()
             active = _Active(
@@ -561,8 +698,7 @@ class TrainingManager:
                 self._active = active
                 await self._spawn(active)
             except BaseException:
-                self._active = None
-                self._gpu_held = False
+                self._drop_lock()
                 await asyncio.to_thread(
                     self._set_states, active, run["status"], adapter["status"]
                 )
@@ -608,8 +744,7 @@ class TrainingManager:
         """A start that failed after registering: the run is failed, the
         adapter too, and the GPU is released."""
         active = self._active
-        self._active = None
-        self._gpu_held = False
+        self._drop_lock()
         if active is None:
             return
         try:
@@ -649,6 +784,7 @@ class TrainingManager:
             env=env,
             limit=1 << 20,
         )
+        await asyncio.to_thread(write_worker_pid, active.run_dir, active.proc.pid)
         active.state = "running"
         active.supervisor = asyncio.create_task(
             self._supervise(active), name=f"writer-train-{active.run_id}"
@@ -713,6 +849,7 @@ class TrainingManager:
                 except asyncio.TimeoutError:
                     await self._poll_progress(active)
             await asyncio.gather(*drains, return_exceptions=True)
+            await asyncio.to_thread(clear_worker_pid, active.run_dir)
             await self._poll_progress(active)
             await self._finish(active, rc)
         except asyncio.CancelledError:
@@ -727,8 +864,7 @@ class TrainingManager:
                 logger.exception("Marking run %d failed raised", active.run_id)
         finally:
             if self._active is active:
-                self._active = None
-                self._gpu_held = False
+                self._drop_lock()
 
     async def _poll_progress(self, active: _Active) -> None:
         path = active.run_dir / "out" / ww.PROGRESS_NAME
@@ -827,6 +963,7 @@ class TrainingManager:
         if not registered:
             logger.info("writer training run %d already completed", active.run_id)
             return
+        self.invalidate_dataset_summary()
         logger.info(
             "writer training run %d completed: adapter %d (holdout %s, base %s)",
             active.run_id,
@@ -839,8 +976,7 @@ class TrainingManager:
         await asyncio.to_thread(shutil.rmtree, active.run_dir, True)
         # Release the GPU before the writer reloads with the new adapter.
         if self._active is active:
-            self._active = None
-            self._gpu_held = False
+            self._drop_lock()
         await self._registry_changed()
         self._emit(
             "run_completed",
@@ -856,8 +992,7 @@ class TrainingManager:
     async def _paused(self, active: _Active) -> None:
         await asyncio.to_thread(self._set_states, active, RUN_PAUSED, STATUS_PAUSED)
         if self._active is active:
-            self._active = None
-            self._gpu_held = False
+            self._drop_lock()
         logger.info("writer training run %d paused", active.run_id)
         self._emit(
             "run_paused",
@@ -875,8 +1010,7 @@ class TrainingManager:
             self._set_states, active, RUN_FAILED, STATUS_FAILED, error=error
         )
         if self._active is active:
-            self._active = None
-            self._gpu_held = False
+            self._drop_lock()
         logger.warning("writer training run %d failed: %s", active.run_id, error)
         self._emit(
             "run_failed",
@@ -904,8 +1038,7 @@ class TrainingManager:
             self._discard_run, active.run_id, active.adapter_id, str(active.run_dir)
         )
         if self._active is active:
-            self._active = None
-            self._gpu_held = False
+            self._drop_lock()
         logger.info("writer training run %d cancelled", active.run_id)
         self._emit(
             "run_cancelled", {"run_id": active.run_id, "adapter_id": active.adapter_id}
@@ -1019,6 +1152,12 @@ class TrainingManager:
     async def recover(self) -> List[int]:
         """Startup: runs a stopped server left ``running`` become
         ``paused`` (resumable from their last checkpoint)."""
+        running = await asyncio.to_thread(self.db.list_training_runs, [RUN_RUNNING])
+        for run in running:
+            # A server that died hard may have left its worker training on
+            # the GPU: stop it (only when provably ours), then pause.
+            if run.get("run_dir"):
+                await asyncio.to_thread(stop_orphan_worker, Path(run["run_dir"]))
         ids: List[int] = await asyncio.to_thread(self.db.mark_interrupted_training_runs)
         if ids:
             logger.info("writer training runs marked paused at startup: %s", ids)
@@ -1067,6 +1206,24 @@ class TrainingManager:
             self._broadcast(event, payload)
         except Exception:
             logger.exception("training broadcast failed")
+
+
+def discard_open_runs(db: Any, adapter_id: int) -> List[int]:
+    """Deleting a paused / failed adapter discards its open runs: run rows
+    ``cancelled``, their files removed (a still-live recorded worker is
+    stopped first). Returns the run ids. Synchronous."""
+    out: List[int] = []
+    for run in db.list_training_runs(RESUMABLE_RUN_STATUSES):
+        if int(run["adapter_id"]) != int(adapter_id):
+            continue
+        run_dir = run.get("run_dir")
+        if run_dir:
+            stop_orphan_worker(Path(run_dir))
+        db.update_training_run(int(run["id"]), status=RUN_CANCELLED)
+        if run_dir:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        out.append(int(run["id"]))
+    return out
 
 
 # ---- singleton (installed by the lifespan) ------------------------------------

@@ -7,6 +7,7 @@ data dir; the dataset builder is replaced by canned examples."""
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -914,11 +915,413 @@ def test_feature_gates_include_writer_training_without_probing(monkeypatch):
     assert any("CUDA" in r for r in gates["writer_training"].reasons)
 
 
-def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python():
+def _stub_python(tmp_path: Path, name: str, body: str) -> str:
+    """A fake interpreter: a shell script that ignores ``-c <code>``."""
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python(tmp_path):
     from metascan.core.hardware import probe_training_deps
 
-    reason = probe_training_deps(sys.executable)
-    # This venv has no training deps installed (they are optional).
-    assert reason.startswith("training dependencies not installed")
-    assert "requirements-train.txt" in reason
-    assert "could not run" in probe_training_deps(str(Path("/nonexistent/python")))
+    missing = _stub_python(
+        tmp_path, "missing", """echo '{"missing": ["peft", "trl"]}'"""
+    )
+    reason = probe_training_deps(missing)
+    assert reason == (
+        "training dependencies not installed: peft, trl "
+        "(pip install -r requirements-train.txt)"
+    )
+    broken = _stub_python(
+        tmp_path, "broken", """echo '{"missing": [], "broken": ["torch (OSError)"]}'"""
+    )
+    assert probe_training_deps(broken) == (
+        "training dependencies fail to import: torch (OSError)"
+    )
+    ok = _stub_python(tmp_path, "ok", """echo '{"missing": [], "broken": []}'""")
+    assert probe_training_deps(ok) == ""
+    crash = _stub_python(tmp_path, "crash", "exit 3")
+    assert probe_training_deps(crash) == (
+        "the training dependency probe failed (exit 3)"
+    )
+    slow = _stub_python(tmp_path, "slow", "sleep 5")
+    assert probe_training_deps(slow, timeout=0.3).startswith("could not run")
+    assert "could not run" in probe_training_deps(str(tmp_path / "nonexistent"))
+
+
+def test_probe_failures_are_never_cached_and_recheck_reprobes(tmp_path):
+    from metascan.core import hardware
+
+    clear_writer_training_probe_cache()
+    paths = WriterTrainingPaths(
+        python=str(tmp_path / "py"),
+        base_dir=tmp_path / "base",
+        converter_script=tmp_path / "conv.py",
+    )
+    calls: List[str] = []
+
+    def failing(python):
+        calls.append("deps")
+        return "could not run the training dependency probe: timed out"
+
+    writer_training_reasons(_report(48.0), paths, deps_probe=failing)
+    writer_training_reasons(_report(48.0), paths, deps_probe=failing)
+    assert calls == ["deps", "deps"]  # a failed probe is retried
+    assert paths.python not in hardware._training_probe_cache
+
+    def definitive(python):
+        calls.append("deps2")
+        return "training dependencies not installed: peft"
+
+    writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
+    writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
+    assert calls.count("deps2") == 1  # a definitive answer is cached
+
+    rec = Recorder()
+    gates: List[Any] = []
+
+    def gate(p):
+        gates.append(hardware._training_probe_cache.get(p.python))
+        return Gate(True, True, "", [])
+
+    hardware._training_probe_cache[sys.executable] = ("x", "")
+    m = TrainingManager(
+        None,
+        tmp_path,
+        dataset_inputs=lambda: (None, "", None),
+        gpu_busy=lambda: [],
+        release_gpu=_anoop,
+        refresh_adapters=_anoop,
+        broadcast=lambda e, d: rec.log.append((e, d)),
+        paths=lambda: _paths(tmp_path),
+        gate=gate,
+    )
+    m.gate()
+    m.gate(recheck=True)
+    assert gates == [("x", ""), None]  # recheck dropped the cached result
+    clear_writer_training_probe_cache()
+
+
+async def _anoop() -> None:
+    return None
+
+
+def test_gpu_reserved_fails_closed():
+    def broken() -> bool:
+        raise RuntimeError("probe broke")
+
+    gpu_guard.set_gpu_reservation(broken)
+    assert gpu_guard.gpu_reserved() is True
+    gpu_guard.set_gpu_reservation(None)
+    assert gpu_guard.gpu_reserved() is False
+
+
+def test_upscale_queue_holds_pending_tasks_while_locked(tmp_path, monkeypatch):
+    from metascan.core.upscale_queue_process import ProcessUpscaleQueue
+
+    q = ProcessUpscaleQueue(tmp_path / "queue")
+    started: List[str] = []
+    monkeypatch.setattr(q, "_start_task_process", lambda t: started.append(t.id))
+    assert not q.has_active_tasks()
+    task_id = q.add_task(str(tmp_path / "a.png"), "image")
+    assert q.has_active_tasks()  # pending counts
+
+    gpu_guard.set_gpu_reservation(lambda: True)
+    q.start_processing()
+    assert started == [] and q.get_task(task_id).status.value == "pending"
+
+    gpu_guard.set_gpu_reservation(None)
+    q.start_processing()
+    assert started == [task_id]
+
+
+# ---- fix round 1 ------------------------------------------------------------------
+
+
+async def test_the_second_busy_check_refuses_and_releases(db, tmp_path, dataset):
+    rec = Recorder()
+    answers = [[], ["t2i_batch"]]
+    released: List[int] = []
+    m = _manager(db, tmp_path, rec, on_gpu_released=lambda: released.append(1))
+    m._gpu_busy = lambda: answers.pop(0)
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert e.value.code == "gpu_busy" and e.value.extra["reasons"] == ["t2i_batch"]
+    assert ("release_gpu", None) in rec.log  # the GPU had been freed first
+    assert not m.gpu_locked() and released == [1]
+    assert db.list_writer_adapters() == [] and db.list_training_runs() == []
+
+
+async def test_lifespan_busy_reasons_cover_storyboard_index_and_upscale(
+    db, tmp_path, monkeypatch
+):
+    from backend.api import similarity, storyboard, upscale
+    from backend.main import _build_training_manager
+
+    m = _build_training_manager(
+        db=db,
+        data_dir=tmp_path,
+        comfy_client=_FakeComfy(),
+        t2i_runner=_FakeT2i(),
+        inference_client=_FakeUnloadable(),
+        vlm_roles=_FakeUnloadable(),
+    )
+    assert m._gpu_busy() == []
+
+    class _Pending:
+        def done(self) -> bool:
+            return False
+
+    monkeypatch.setattr(storyboard, "_background_tasks", {_Pending()})
+    monkeypatch.setattr(similarity, "is_indexing", lambda: True)
+    monkeypatch.setattr(upscale, "upscale_active", lambda: True)
+    assert m._gpu_busy() == ["storyboard", "index_build", "upscale_active"]
+
+
+class _FakeBriefs:
+    def __init__(self) -> None:
+        self.running = True
+        self.cancelled = 0
+        self.started = 0
+
+    def cancel(self) -> bool:
+        was = self.running
+        self.cancelled += 1
+        self.running = False
+        return was
+
+    async def wait(self) -> None:
+        return None
+
+    def start(self) -> None:
+        self.started += 1
+        self.running = True
+
+
+async def test_training_cancels_the_briefs_job_and_restarts_it_after(
+    db, tmp_path, dataset
+):
+    from backend.main import _build_training_manager
+    from backend.services import hindsight_briefs
+
+    briefs = _FakeBriefs()
+    hindsight_briefs.set_briefs_job(briefs)  # type: ignore[arg-type]
+    try:
+        m = _build_training_manager(
+            db=db,
+            data_dir=tmp_path / "data",
+            comfy_client=_FakeComfy(),
+            t2i_runner=_FakeT2i(),
+            inference_client=_FakeUnloadable(),
+            vlm_roles=_FakeUnloadable(),
+        )
+        m._dataset_inputs = lambda: (object(), "uncensored", None)
+        m._paths = lambda: _paths(tmp_path)
+        m._gate = lambda p: Gate(True, True, "", [])
+        m._broadcast = lambda e, d: None
+        m._refresh_adapters = _anoop
+        m.backend, m.fake, m.poll_s = "fake", {"sft_steps": 2, "dpo_steps": 2}, 0.02
+        await m.start("all", "quick")
+        assert briefs.cancelled == 1 and briefs.started == 0
+        await _idle(m)
+        await _until(lambda: briefs.started == 1)
+        # Nothing was interrupted the second time: no restart.
+        briefs.running = False
+        await m.start("all", "quick")
+        await _idle(m)
+        await asyncio.sleep(0.05)
+        assert briefs.started == 1
+    finally:
+        hindsight_briefs.set_briefs_job(None)
+
+
+async def test_lifespan_installs_the_lock_and_recovers(db, tmp_path, dataset):
+    import inspect
+
+    from backend import main
+    from backend.services import hindsight_briefs
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    aid = db.create_writer_adapter("x", "all", "t2i", "qwen3vl-8b", status="training")
+    run_id = db.create_training_run(aid, status="running")
+    briefs = _FakeBriefs()
+    hindsight_briefs.set_briefs_job(briefs)  # type: ignore[arg-type]
+    try:
+        await main._install_training(m)
+        assert tm.get_training_manager() is m
+        assert db.get_training_run(run_id)["status"] == "paused"  # recovered
+        assert briefs.blocked == m.gpu_locked  # type: ignore[attr-defined]
+        m._gpu_held = True
+        assert gpu_guard.gpu_reserved()
+        m._gpu_held = False
+        assert not gpu_guard.gpu_reserved()
+        await main._uninstall_training(m)
+        assert tm.get_training_manager() is None
+        gpu_guard.set_gpu_reservation(lambda: True)
+        gpu_guard.set_gpu_reservation(None)
+    finally:
+        hindsight_briefs.set_briefs_job(None)
+    src = inspect.getsource(main.lifespan)
+    assert "await _install_training(training_manager)" in src
+    assert "await _uninstall_training(training_manager)" in src
+
+
+async def test_dataset_summary_is_cached_per_scope_and_invalidated(
+    db, tmp_path, dataset
+):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    await m.dataset_summary("all")
+    await m.dataset_summary("all")
+    assert len(dataset["calls"]) == 1
+    await m.start("all", "quick")  # builds once more and invalidates
+    n = len(dataset["calls"])
+    await m.dataset_summary("all")
+    assert len(dataset["calls"]) == n + 1
+    await _idle(m)
+    await m.dataset_summary("all")  # completion invalidated it too
+    assert len(dataset["calls"]) == n + 2
+
+
+# ---- orphaned workers ----------------------------------------------------------------
+
+
+def _dummy_worker(marker: bool = True) -> "subprocess.Popen[bytes]":
+
+    args = [sys.executable, "-c", "import time; time.sleep(120)"]
+    if marker:
+        args.append("metascan.workers.writer_train_worker")
+    return subprocess.Popen(args)
+
+
+def _paused_run(db, tmp_path, status="running", name="x") -> Tuple[int, Path]:
+    aid = db.create_writer_adapter(
+        f"{name}{status}", "all", "t2i", "qwen3vl-8b", status="training"
+    )
+    run_dir = tmp_path / "runs" / str(aid)
+    run_dir.mkdir(parents=True)
+    run_id = db.create_training_run(aid, status=status, run_dir=str(run_dir))
+    return run_id, run_dir
+
+
+async def test_recover_stops_an_orphaned_worker_then_pauses(db, tmp_path):
+    proc = _dummy_worker()
+    try:
+        run_id, run_dir = _paused_run(db, tmp_path)
+        tm.write_worker_pid(run_dir, proc.pid)
+        assert tm.recorded_worker(run_dir) is not None
+        m = _manager(db, tmp_path, Recorder())
+        assert await m.recover() == [run_id]
+        assert proc.wait(timeout=15) is not None  # it was stopped
+        assert db.get_training_run(run_id)["status"] == "paused"
+        assert not (run_dir / tm.WORKER_PID_NAME).exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+async def test_recover_never_kills_a_process_that_is_not_ours(db, tmp_path):
+    import json
+
+    stranger = _dummy_worker(marker=False)
+    ours = _dummy_worker()
+    try:
+        run_id, run_dir = _paused_run(db, tmp_path)
+        tm.write_worker_pid(run_dir, stranger.pid)  # no writer_train_worker
+        run2, dir2 = _paused_run(db, tmp_path, status="running", name="y")
+        tm.write_worker_pid(dir2, ours.pid)
+        rec = json.loads((dir2 / tm.WORKER_PID_NAME).read_text())
+        rec["create_time"] -= 100  # a reused PID: different start time
+        (dir2 / tm.WORKER_PID_NAME).write_text(json.dumps(rec))
+        m = _manager(db, tmp_path, Recorder())
+        assert sorted(await m.recover()) == sorted([run_id, run2])
+        await asyncio.sleep(0.3)
+        assert stranger.poll() is None and ours.poll() is None
+    finally:
+        stranger.kill()
+        ours.kill()
+
+
+async def test_resume_refuses_while_the_recorded_worker_lives(db, tmp_path, dataset):
+    proc = _dummy_worker()
+    try:
+        run_id, run_dir = _paused_run(db, tmp_path, status="paused")
+        (run_dir / "task.json").write_text("{}")
+        tm.write_worker_pid(run_dir, proc.pid)
+        m = _manager(db, tmp_path, Recorder())
+        with pytest.raises(TrainingError) as e:
+            await m.resume(run_id)
+        assert (e.value.status, e.value.code) == (409, "worker_alive")
+        assert not m.gpu_locked()
+    finally:
+        proc.kill()
+
+
+async def test_deleting_a_paused_adapter_discards_its_run(
+    db, tmp_path, dataset, monkeypatch
+):
+    from backend.api import writers
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 1
+    )
+    await m.pause()
+    await _idle(m)
+    run = db.get_training_run(run_id)
+    assert Path(run["run_dir"]).exists()
+
+    sent: List[Any] = []
+    monkeypatch.setattr(writers, "get_db", lambda: db)
+    monkeypatch.setattr(writers, "get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(writers.ws_manager, "broadcast_sync", lambda *a: sent.append(a))
+    app = FastAPI()
+    app.include_router(writers.router)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.delete(f"/api/writers/adapters/{run['adapter_id']}")
+    assert r.json() == {"status": "deleted"}
+    assert db.get_training_run(run_id)["status"] == "cancelled"
+    assert not Path(run["run_dir"]).exists()
+    assert m.resumable_runs() == []
+    assert (
+        "training",
+        "run_cancelled",
+        {"run_id": run_id, "adapter_id": run["adapter_id"]},
+    ) in sent
+
+
+async def test_index_build_rechecks_the_lock_right_before_spawning(monkeypatch):
+    from fastapi import HTTPException
+
+    from backend.api import similarity
+
+    locked = {"on": False}
+    started: List[Any] = []
+
+    class _Db:
+        def get_unembedded_file_paths(self):
+            locked["on"] = True  # training takes the GPU meanwhile
+            return ["/x/a.png"]
+
+    class _Eq:
+        def is_indexing(self):
+            return False
+
+        def start_indexing(self, *a):
+            started.append(a)
+            return True
+
+    monkeypatch.setattr(similarity, "get_db", lambda: _Db())
+    monkeypatch.setattr(similarity, "load_app_config", lambda: {})
+    monkeypatch.setattr(similarity, "_get_embedding_queue", lambda: _Eq())
+    gpu_guard.set_gpu_reservation(lambda: locked["on"])
+    with pytest.raises(HTTPException) as e:
+        await similarity._start_index_build(rebuild=False, allow_vlm_tagging=False)
+    assert e.value.detail["code"] == "gpu_busy_training"
+    assert started == []

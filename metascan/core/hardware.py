@@ -513,8 +513,25 @@ def set_writer_training_paths(paths: Optional[WriterTrainingPaths]) -> None:
     _training_paths = paths
 
 
-def clear_writer_training_probe_cache() -> None:
-    _training_probe_cache.clear()
+def clear_writer_training_probe_cache(python: Optional[str] = None) -> None:
+    """Forget the probe results (of one interpreter, or all)."""
+    if python is None:
+        _training_probe_cache.clear()
+    else:
+        _training_probe_cache.pop(python, None)
+
+
+# A probe that could not run (timeout, missing interpreter, crash) says
+# nothing definitive: it is reported but never cached.
+_PROBE_FAILURE_PREFIXES = (
+    "could not run",
+    "the training dependency probe failed",
+    "the TRL probe failed",
+)
+
+
+def _probe_failed(reason: str) -> bool:
+    return reason.startswith(_PROBE_FAILURE_PREFIXES)
 
 
 def default_writer_training_paths() -> WriterTrainingPaths:
@@ -610,7 +627,8 @@ def writer_training_reasons(
         deps = (deps_probe or probe_training_deps)(paths.python)
         trl = "" if deps else (trl_probe or _probe_trl)(paths.python)
         cached = (deps, trl)
-        _training_probe_cache[paths.python] = cached
+        if not (_probe_failed(deps) or _probe_failed(trl)):
+            _training_probe_cache[paths.python] = cached
     if cached is None:
         reasons.append("Training dependencies not checked yet.")
     else:

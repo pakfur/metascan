@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.ws.manager import ws_manager
+from backend.services.gpu_lock import GPU_FREE
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +35,13 @@ def _get_queue():
         _upscale_queue = ProcessUpscaleQueue(queue_dir)
         _attach_callbacks(_upscale_queue)
     return _upscale_queue
+
+
+def upscale_active() -> bool:
+    """True while an upscale task is pending or running (writer training
+    refuses to take the GPU). Never creates the queue."""
+    queue = _upscale_queue
+    return bool(queue is not None and queue.has_active_tasks())
 
 
 def _task_payload(task: Any) -> Dict[str, Any]:

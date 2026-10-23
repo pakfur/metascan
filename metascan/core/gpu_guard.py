@@ -40,13 +40,13 @@ def set_gpu_reservation(probe: Optional[Callable[[], bool]]) -> None:
 
 
 def gpu_reserved() -> bool:
-    """True while training holds the GPU. A probe that cannot answer counts
-    as NOT reserved (the routes and the manager's own state still guard)."""
+    """True while training holds the GPU. Fails CLOSED: a probe that cannot
+    answer counts as reserved (nothing loads on a GPU in an unknown state)."""
     probe = _probe
     if probe is None:
         return False
     try:
         return bool(probe())
     except Exception:
-        logger.debug("GPU reservation probe failed", exc_info=True)
-        return False
+        logger.warning("GPU reservation probe failed; treating the GPU as busy")
+        return True
