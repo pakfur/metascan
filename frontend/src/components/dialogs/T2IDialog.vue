@@ -587,8 +587,10 @@ function stopEditing() {
 }
 
 async function onFavorite(item: ThumbItem) {
+  // The score the tile is showing right now, as displayed (two decimals).
+  const scoreShown = item.score == null ? undefined : Number(item.score.toFixed(2))
   try {
-    await store.toggleFavorite(Number(item.id))
+    await store.toggleFavorite(Number(item.id), scoreShown)
   } catch (e) {
     toast.show(errMsg(e), 'warn')
   }
