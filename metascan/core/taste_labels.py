@@ -263,14 +263,34 @@ def _pooled_t2i_rates(windows: List[Dict[str, Any]]) -> List[Optional[float]]:
 
 
 def collapse_warning(
-    diversity: List[Dict[str, Any]], windows: List[Dict[str, Any]]
+    diversity: List[Dict[str, Any]],
+    windows: List[Dict[str, Any]],
+    window_days: int = WRITER_WINDOW_DAYS,
 ) -> bool:
     """Taste collapse: the latest window's favorite diversity is below
     ``COLLAPSE_RATIO`` x the median of the previous up-to-5 windows (those
     with a value) **and** the latest pooled T2I favorite rate is above the
-    previous window's. False whenever either side lacks the data."""
+    previous window's. Diversity is stored per training run with that run's
+    window starts while rates slide with today: unless the latest diversity
+    window starts within ``window_days`` of the latest rate window they
+    describe different periods, so no flag. False whenever either side
+    lacks the data."""
     div = sorted(diversity, key=lambda d: str(d["window_start"]))
     if not div or div[-1].get("mean_distance") is None:
+        return False
+    rate_starts = sorted(
+        {str(w["window_start"]) for w in windows if (w.get("kind") or "t2i") == "t2i"}
+    )
+    if not rate_starts:
+        return False
+    try:
+        gap = (
+            date.fromisoformat(str(div[-1]["window_start"]))
+            - date.fromisoformat(rate_starts[-1])
+        ).days
+    except ValueError:
+        return False
+    if abs(gap) >= window_days:
         return False
     latest = float(div[-1]["mean_distance"])
     prev = [

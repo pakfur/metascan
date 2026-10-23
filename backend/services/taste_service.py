@@ -252,10 +252,13 @@ class TasteService:
         )
         diversity = await asyncio.to_thread(self.db.latest_taste_diversity)
         return {
+            "window_days": WRITER_WINDOW_DAYS,
             "window_starts": window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS),
             "windows": windows,
             "diversity": diversity,
-            "collapse_warning": collapse_warning(diversity, windows),
+            "collapse_warning": collapse_warning(
+                diversity, windows, WRITER_WINDOW_DAYS
+            ),
         }
 
     # ------------------------------------------------------------------

@@ -60,9 +60,11 @@ export interface DiversityWindow {
   window_start: string
   n: number
   mean_distance: number | null
+  computed_at: string // when the training run that stored it ran
 }
 
 export interface WriterStats {
+  window_days: number
   window_starts: string[]
   windows: WriterWindowStat[]
   diversity: DiversityWindow[]
