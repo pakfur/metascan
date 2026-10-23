@@ -18,11 +18,13 @@ import json
 import logging
 import socket
 import subprocess
+import time
 from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
     Awaitable,
+    TypeVar,
     Callable,
     Dict,
     List,
@@ -49,6 +51,12 @@ STATE_STOPPED = "stopped"
 
 
 _RESPAWN_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
+
+# A request whose client was evicted (swapped out for the other role)
+# while it ran is retried this many times after re-ensuring residency.
+_EVICTION_RETRIES = 2
+
+_T = TypeVar("_T")
 
 
 StatusCb = Callable[[str, Dict[str, Any]], None]
@@ -92,6 +100,13 @@ class VlmClient:
         self._in_flight = 0
         self._idle_event = asyncio.Event()
         self._idle_event.set()
+        self._last_request_end = float("-inf")
+        # True after VlmRoles evicted this client to make room for the
+        # other role's model: the next request re-ensures residency instead
+        # of failing "not ready". Cleared by an explicit shutdown (unload
+        # for ComfyUI, /unload) and by a new spawn.
+        self.swapped_out = False
+        self._evictions = 0
 
         self._proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._stderr_task: Optional[asyncio.Task[None]] = None
@@ -215,6 +230,7 @@ class VlmClient:
 
         self._spec = get_spec(model_id)
         self._model_id = model_id
+        self.swapped_out = False
         self._last_error = None
         self._last_progress = {}
         self._ready_event.clear()
@@ -343,7 +359,15 @@ class VlmClient:
         await self.shutdown()
         await self.start(new_model_id, wait_ready=True, ready_timeout=ready_timeout)
 
+    async def evict(self) -> None:
+        """Shut down to make room for the other role's model, remembering
+        that the next request should bring this model back."""
+        self._evictions += 1
+        await self.shutdown()
+        self.swapped_out = True
+
     async def shutdown(self) -> None:
+        self.swapped_out = False
         self._stopping = True
         proc = self._proc
         if proc is not None and proc.poll() is None:
@@ -459,17 +483,56 @@ class VlmClient:
 
     def _end_request(self) -> None:
         self._in_flight = max(0, self._in_flight - 1)
+        self._last_request_end = time.monotonic()
         if self._in_flight == 0:
             self._idle_event.set()
 
-    async def wait_idle(self, timeout: float) -> bool:
-        """Wait up to ``timeout`` s for in-flight requests to finish.
-        True when idle, False on timeout."""
-        try:
-            await asyncio.wait_for(self._idle_event.wait(), timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            return False
+    async def wait_idle(self, timeout: float, grace: float = 0.0) -> bool:
+        """Wait up to ``timeout`` s until no request is in flight, the
+        server is not spawning / loading (someone is about to use it), and
+        the last request ended at least ``grace`` s ago (a batch between two
+        items is not idle). True when idle, False on timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            now = time.monotonic()
+            if (
+                self._in_flight == 0
+                and self._state not in (STATE_SPAWNING, STATE_LOADING)
+                and now - self._last_request_end >= grace
+            ):
+                return True
+            if now >= deadline:
+                return False
+            await asyncio.sleep(min(0.02, max(0.0, deadline - now)))
+
+    async def _resident_request(self, call: Callable[[], Awaitable[_T]]) -> _T:
+        """Run one request, bringing the model back first when VlmRoles
+        swapped this client out for the other role -- and again if it was
+        swapped out while the request ran (a forced swap after the bounded
+        in-flight wait)."""
+        attempt = 0
+        while True:
+            if (
+                self.swapped_out
+                and self._state != STATE_READY
+                and self.preferred_model_id
+            ):
+                await self.ensure_started(self.preferred_model_id)
+            epoch = self._evictions
+            self._begin_request()
+            try:
+                result = await call()
+            except Exception:
+                if self._evictions != epoch and attempt < _EVICTION_RETRIES:
+                    attempt += 1
+                    continue
+                raise
+            finally:
+                self._end_request()
+            if not result and self._evictions != epoch and attempt < _EVICTION_RETRIES:
+                attempt += 1
+                continue
+            return result
 
     # ---- Inference methods -------------------------------------------
 
@@ -480,11 +543,9 @@ class VlmClient:
         timeout: float = 60.0,
     ) -> list[str]:
         """Tag a single image (see ``_generate_tags_impl``)."""
-        self._begin_request()
-        try:
-            return await self._generate_tags_impl(image_path, timeout=timeout)
-        finally:
-            self._end_request()
+        return await self._resident_request(
+            lambda: self._generate_tags_impl(image_path, timeout=timeout)
+        )
 
     async def generate_text(
         self,
@@ -499,9 +560,8 @@ class VlmClient:
         grammar: Optional[str] = None,
     ) -> str:
         """Free-form text generation (see ``_generate_text_impl``)."""
-        self._begin_request()
-        try:
-            return await self._generate_text_impl(
+        return await self._resident_request(
+            lambda: self._generate_text_impl(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 image_path=image_path,
@@ -511,8 +571,7 @@ class VlmClient:
                 timeout=timeout,
                 grammar=grammar,
             )
-        finally:
-            self._end_request()
+        )
 
     async def chat_stream(
         self,
@@ -523,7 +582,10 @@ class VlmClient:
         max_tokens: int = 1024,
         timeout: float = 300.0,
     ) -> AsyncIterator[Tuple[str, str]]:
-        """Stream a chat completion (see ``_chat_stream_impl``)."""
+        """Stream a chat completion (see ``_chat_stream_impl``). Brings a
+        swapped-out model back first; a stream is not retried once begun."""
+        if self.swapped_out and self._state != STATE_READY and self.preferred_model_id:
+            await self.ensure_started(self.preferred_model_id)
         self._begin_request()
         try:
             async for item in self._chat_stream_impl(
