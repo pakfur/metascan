@@ -22,6 +22,19 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return out
 
 
+def _balanced(sw: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """``sw`` rescaled so both classes sum to half the total weight; a
+    single-class (or weightless) input is returned unchanged."""
+    pos = y > 0.5
+    pos_total = float(sw[pos].sum())
+    neg_total = float(sw[~pos].sum())
+    if pos_total <= 0 or neg_total <= 0:
+        return sw
+    half = (pos_total + neg_total) / 2.0
+    out: np.ndarray = np.where(pos, sw * (half / pos_total), sw * (half / neg_total))
+    return out
+
+
 @dataclass
 class TasteModelParams:
     w: np.ndarray
@@ -84,17 +97,25 @@ def fit(
     steps: int = 400,
     lr: float = 0.05,
     seed: int = 0,
+    balance: bool = True,
 ) -> Tuple[np.ndarray, float]:
     """Full-batch Adam on weighted logistic + weighted pairwise logistic loss.
 
     Each loss term is divided by its own total weight, so ``pair_weight`` is
     independent of how many pairs there are. Initialisation is zero; ``seed``
     is accepted for interface stability (the optimiser has no randomness).
+
+    ``balance`` rescales the sample weights so each class carries the same
+    total weight (relative weights within a class are kept): a library with
+    thousands of migrated favorites and a few dozen negatives would
+    otherwise learn "everything is a favorite" and score near 1.
     """
     del seed
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     sw = np.asarray(weights, dtype=np.float64)
+    if balance:
+        sw = _balanced(sw, y)
     n, d = X.shape
     sw_total = float(sw.sum())
 

@@ -301,3 +301,80 @@ async def test_well_vectored_model_is_not_due_after_an_embedding_run(
     await service.wait_idle()
     assert await service.maybe_retrain(now=after(500)) is False
     assert fake_runner.train_calls == []
+
+
+# ---- stale scores, first model, score-write failure ----------------------
+
+
+async def test_stale_model_broadcasts_scores_updated_once(
+    service, db, fake_runner, recorder
+):
+    mid = db.record_taste_model(model_row())
+    await service.check_stale()
+    assert "scores_updated" not in recorder.names()
+    fake_runner.stale = True
+    await service.check_stale()
+    await service.check_stale()
+    ups = [d for c, e, d in recorder.events if e == "scores_updated"]
+    assert ups == [{"model_id": None}]
+    # Switched back to the model's CLIP: its scores are served again.
+    fake_runner.stale = False
+    await service.check_stale()
+    ups = [d for c, e, d in recorder.events if e == "scores_updated"]
+    assert ups == [{"model_id": None}, {"model_id": mid}]
+
+
+async def test_rescore_of_a_stale_model_broadcasts(service, db, fake_runner, recorder):
+    db.record_taste_model(model_row())
+    fake_runner.stale = True
+    fake_runner.rescore_result = None
+    assert await service.rescore() is None
+    assert [d for c, e, d in recorder.events if e == "scores_updated"] == [
+        {"model_id": None}
+    ]
+
+
+async def test_retrain_loop_tick_checks_stale(
+    service, db, fake_runner, recorder, monkeypatch
+):
+    import backend.services.taste_service as ts
+
+    monkeypatch.setattr(ts, "RETRAIN_CHECK_S", 0.01)
+    db.record_taste_model(model_row())
+    fake_runner.stale = True
+    service.start_retrain_loop()
+    for _ in range(100):
+        if "scores_updated" in recorder.names():
+            break
+        await asyncio.sleep(0.01)
+    await service.aclose()
+    assert "scores_updated" in recorder.names()
+
+
+async def test_first_model_trains_without_25_events(service, db, fake_runner):
+    # 20 favorites (20 events) + 20 seen-only negatives (no training events).
+    seed_labels(db, n_fav=20, n_pass=0)
+    for i in range(20):
+        p = f"/lib/s{i:02d}.png"
+        db.save_media(media(p))
+        db.mark_seen(p, now=after(0))
+    assert (await service.status())["missing"] is None
+    assert await service.maybe_retrain(now=after(10)) is False  # not idle yet
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    assert len(fake_runner.train_calls) == 1
+
+
+async def test_status_new_events_is_null_without_a_model(service, db):
+    seed_labels(db)
+    assert (await service.status())["new_events"] is None
+    db.record_taste_model(model_row(labels_as_of=after(1).isoformat()))
+    assert (await service.status())["new_events"] == 0
+
+
+async def test_score_write_failure_schedules_a_rescore(service, db, fake_runner):
+    seed_labels(db)
+    fake_runner.result = {"status": "ok", "rescore_needed": True}
+    await service.start_training()
+    await service.wait_idle()
+    assert fake_runner.rescore_calls == 1

@@ -5573,6 +5573,27 @@ class DatabaseManager:
                 tombstones.append(d)
         return {"media": media, "tombstones": tombstones}
 
+    def taste_scoring_raw(self) -> Dict[str, Any]:
+        """Every live image with its category names -- what a rescore
+        needs, in the ``{"media": [...]}`` shape of ``taste_training_raw``
+        (no judgments, score_shown subqueries or tombstones)."""
+        with self.lock, self._get_connection() as conn:
+            cats: Dict[str, List[str]] = {}
+            for r in conn.execute(
+                "SELECT mc.file_path AS p, c.name AS n FROM media_categories mc "
+                "JOIN categories c ON c.id = mc.category_id ORDER BY c.name"
+            ):
+                cats.setdefault(r["p"], []).append(r["n"])
+            media = [
+                {
+                    "file_path": r["file_path"],
+                    "categories": cats.get(r["file_path"], []),
+                }
+                for r in conn.execute("SELECT file_path FROM media")
+                if self._is_image_path(r["file_path"])
+            ]
+        return {"media": media}
+
     def taste_label_counts_raw(self) -> Dict[str, Any]:
         """The slim shape of ``taste_training_raw`` that
         ``taste_labels.count_labels`` needs: labeled live images only (an

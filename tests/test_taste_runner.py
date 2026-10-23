@@ -345,3 +345,60 @@ def test_n_no_vector_column_added_to_an_existing_table(tmp_path):
         assert active["n_pos"] == 20
     finally:
         db.close()
+
+
+async def test_result_read_install_and_prune_off_loop(setup, monkeypatch):
+    runner, *_ = setup
+    calls = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        calls.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    assert (await runner.train(180))["status"] == "ok"
+    for name in ("_read_result", "_install_params", "_prune_params"):
+        assert name in calls, (name, calls)
+
+
+async def test_rescore_uses_the_slim_query(setup, monkeypatch):
+    runner, db, *_ = setup
+    assert (await runner.train(180))["status"] == "ok"
+
+    def boom():
+        raise AssertionError("rescore must not read the full training snapshot")
+
+    monkeypatch.setattr(db, "taste_training_raw", boom)
+    assert await runner.rescore() == 60
+
+
+def test_scoring_raw_has_images_and_categories_only(setup):
+    _, db, *_ = setup
+    cid = db.create_category("Anime").id
+    db.add_media_categories(["/l/f00.png"], cid, "viewer")
+    raw = db.taste_scoring_raw()
+    paths = {m["file_path"] for m in raw["media"]}
+    assert "/l/vid.mp4" not in paths and "/l/f00.png" in paths
+    cats = {m["file_path"]: m["categories"] for m in raw["media"]}
+    assert cats["/l/f00.png"] == ["Anime"] and cats["/l/p00.png"] == []
+
+
+async def test_score_write_failure_keeps_model_and_asks_for_rescore(setup, monkeypatch):
+    runner, db, *_ = setup
+
+    def boom(model_id, scores):
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(db, "replace_taste_scores", boom)
+    r = await runner.train(180)
+    assert r["status"] == "ok" and r["rescore_needed"] is True
+    assert db.get_active_taste_model()["id"] == r["model_id"]
+
+
+async def test_missing_index_error_says_how_to_fix_it(setup):
+    runner, db, index_dir, _, _ = setup
+    (index_dir / "index_meta.json").unlink()
+    r = await runner.train(180)
+    assert r["status"] == "error"
+    assert "Build the similarity index first" in r["error"]

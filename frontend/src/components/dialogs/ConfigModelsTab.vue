@@ -50,7 +50,7 @@ async function onTasteRetrain() {
       if (detail?.code === 'not_enough_data') {
         const m = detail.missing
         tasteTrainError.value = m
-          ? `Not enough ratings: need ${plural(m.positives, 'more favorite', 'more favorites')} / ${plural(m.negatives, 'more pass', 'more passes')}.`
+          ? `Not enough ratings: need ${plural(m.positives, 'more favorite', 'more favorites')} / ${plural(m.negatives, 'more negative', 'more negatives')} (a negative is a pass, or an image seen in the viewer and not favorited).`
           : 'Not enough ratings to train yet.'
       } else if (detail?.code !== 'already_training') {
         tasteTrainError.value = e.message
@@ -538,7 +538,8 @@ async function onRetagLibrary() {
       <div v-if="tasteStatus?.active_model" class="taste-model">
         Active model trained {{ tasteTrainedAt }} on
         <b>{{ tasteStatus.active_model.n_pos }}</b> favorites /
-        <b>{{ tasteStatus.active_model.n_neg }}</b> passes, holdout AUC
+        <b>{{ tasteStatus.active_model.n_neg }}</b> negatives
+        <span class="taste-hint">(passes, or seen without a favorite)</span>, holdout AUC
         <b>{{ tasteAuc }}</b>.
         <span v-if="tasteStatus.stale" class="err-text">
           Retrain needed (the CLIP model changed).
@@ -547,15 +548,16 @@ async function onRetagLibrary() {
       <div v-else-if="tasteStatus" class="taste-model">No taste model yet.</div>
       <div v-if="tasteMissing" class="taste-missing">
         Need {{ plural(tasteMissing.positives, 'more favorite', 'more favorites') }} /
-        {{ plural(tasteMissing.negatives, 'more pass', 'more passes') }}
+        {{ plural(tasteMissing.negatives, 'more negative', 'more negatives') }}
+        <span class="taste-hint">(a pass, or an image seen in the viewer and not favorited)</span>
         <template v-if="tasteStatus?.missing_reason === 'vectors'">
           with a CLIP vector to train: build the similarity index
           (Similarity Settings &rarr; Build Index) and let it finish.
         </template>
         <template v-else>to train.</template>
       </div>
-      <div v-if="tasteStatus && tasteStatus.new_events > 0" class="taste-new">
-        {{ plural(tasteStatus.new_events, 'new rating', 'new ratings') }} since last training.
+      <div v-if="tasteStatus && (tasteStatus.new_events ?? 0) > 0" class="taste-new">
+        {{ plural(tasteStatus.new_events ?? 0, 'new rating', 'new ratings') }} since last training.
       </div>
       <div class="taste-actions">
         <button
@@ -762,6 +764,7 @@ section { margin-bottom: 14px; }
 .taste-block { display: flex; flex-direction: column; gap: 6px; }
 .taste-actions { display: flex; align-items: center; gap: 10px; }
 .taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
+.taste-hint { color: var(--text-color-secondary); font-size: 12px; }
 .vlm-current { font-size: 14px; }
 .vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>

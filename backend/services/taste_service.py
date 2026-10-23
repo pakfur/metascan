@@ -82,6 +82,9 @@ class TasteService:
         self._vector_missing: Optional[Dict[str, int]] = None
         # An embedding run finished since the last training run started.
         self._embedding_ran = False
+        # Active model id last announced stale (scores_updated with
+        # model_id None), so the browser drops its now-unserved map once.
+        self._stale_announced: Optional[int] = None
         self._last_error: Optional[str] = None
         self._train_task: Optional[asyncio.Task] = None
         self._rescore_tasks: Set[asyncio.Task] = set()
@@ -182,7 +185,10 @@ class TasteService:
         stale = False
         if model is not None:
             stale = bool(await asyncio.to_thread(self.runner.is_stale, model))
-        new_events, _ = await asyncio.to_thread(self._events_since, model)
+        # "New since the last training" means nothing before the first one.
+        new_events: Optional[int] = None
+        if model is not None:
+            new_events, _ = await asyncio.to_thread(self._events_since, model)
         missing = await asyncio.to_thread(self._missing)
         missing_reason: Optional[str] = "labels" if missing is not None else None
         if missing is None and self._vector_missing is not None:
@@ -271,6 +277,11 @@ class TasteService:
             result = {"status": "error", "error": str(e) or repr(e)}
         status = result.get("status")
         if status == "ok":
+            if result.get("rescore_needed"):
+                # The model is active but its scores failed to land: write
+                # them with a rescore once this run is over.
+                self._rescore_pending = True
+            self._stale_announced = None
             self._last_error = None
             self._failed_auto_inputs = None
             self._vector_missing = None
@@ -317,7 +328,10 @@ class TasteService:
         )
         under_vectored = self._embedding_ran and self._under_vectored(model)
         count, newest = await asyncio.to_thread(self._events_since, model)
-        if not stale and not under_vectored and count < RETRAIN_MIN_EVENTS:
+        # No model yet: train as soon as the labels suffice (checked below),
+        # without waiting for RETRAIN_MIN_EVENTS verdict events.
+        due = model is None or stale or under_vectored
+        if not due and count < RETRAIN_MIN_EVENTS:
             return False
         if newest is not None:
             newest_dt = _parse_ts(newest)
@@ -353,6 +367,12 @@ class TasteService:
         while True:
             await asyncio.sleep(RETRAIN_CHECK_S)
             try:
+                await self.check_stale()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("taste stale check failed")
+            try:
                 await self.maybe_retrain()
             except asyncio.CancelledError:
                 raise
@@ -362,6 +382,23 @@ class TasteService:
     def start_retrain_loop(self) -> None:
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = asyncio.create_task(self.retrain_loop())
+
+    async def check_stale(self) -> None:
+        """Broadcast ``scores_updated`` when the active model turns stale
+        (its scores stop being served, so the browser must drop its map)
+        and again if it turns fresh (switched back to its CLIP model).
+        Each transition is announced once."""
+        model = await asyncio.to_thread(self.db.get_active_taste_model)
+        if model is None:
+            return
+        stale = bool(await asyncio.to_thread(self.runner.is_stale, model))
+        mid = int(model["id"])
+        if stale and self._stale_announced != mid:
+            self._stale_announced = mid
+            self._emit("scores_updated", {"model_id": None})
+        elif not stale and self._stale_announced == mid:
+            self._stale_announced = None
+            self._emit("scores_updated", {"model_id": mid})
 
     # ------------------------------------------------------------------
     # rescore
@@ -387,6 +424,13 @@ class TasteService:
             self._rescoring = False
             self._run_pending_rescore()
         if n is None:
+            # Possibly because the model just went stale (new index).
+            try:
+                await self.check_stale()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("taste stale check failed")
             return None
         try:
             model = await asyncio.to_thread(self.db.get_active_taste_model)

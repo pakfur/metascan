@@ -52,8 +52,10 @@ def test_weights_matter():
     v = _unit(rng)
     X = features(np.vstack([v, v]), [[], []], [])
     y = np.array([1.0, 0.0])
-    w1, b1 = fit(X, y, np.array([5.0, 1.0]), [])
-    w2, b2 = fit(X, y, np.array([1.0, 5.0]), [])
+    # Cross-class weights only matter without class balancing (with it,
+    # each class's total weight is equalised -- see the test below).
+    w1, b1 = fit(X, y, np.array([5.0, 1.0]), [], balance=False)
+    w2, b2 = fit(X, y, np.array([1.0, 5.0]), [], balance=False)
     p1 = predict(TasteModelParams(w1, b1, [], 32, "m"), X[:1])[0]
     p2 = predict(TasteModelParams(w2, b2, [], 32, "m"), X[:1])[0]
     assert p1 > 0.5 > p2
@@ -138,3 +140,35 @@ def test_train_pairs_drops_holdout_and_remaps():
     tr = np.array([0, 2, 3, 5])
     out = train_pairs([(0, 2, 1.0), (2, 4, 0.5), (3, 5, 0.25)], tr)
     assert out == [(0, 1, 1.0), (2, 3, 0.25)]
+
+
+def test_within_class_weights_still_matter_when_balanced():
+    rng = np.random.default_rng(4)
+    u, v, n = _unit(rng), _unit(rng), _unit(rng)
+    X = features(np.vstack([u, v, n]), [[]] * 3, [])
+    y = np.array([1.0, 1.0, 0.0])
+    w1, b1 = fit(X, y, np.array([5.0, 1.0, 1.0]), [])
+    w2, b2 = fit(X, y, np.array([1.0, 5.0, 1.0]), [])
+    p1 = predict(TasteModelParams(w1, b1, [], 32, "m"), X[:2])
+    p2 = predict(TasteModelParams(w2, b2, [], 32, "m"), X[:2])
+    assert p1[0] - p1[1] > p2[0] - p2[1]
+
+
+def test_class_balance_centres_a_50_to_1_library():
+    """Thousands of migrated favorites vs a few dozen negatives: scores
+    must still centre around 0.5, not pile up near 1."""
+    rng = np.random.default_rng(3)
+    d = _unit(rng)
+    n_pos, n_neg = 1000, 20
+    P = rng.normal(size=(n_pos, 32)) + 1.5 * d
+    N = rng.normal(size=(n_neg, 32)) - 1.5 * d
+    X = features(np.vstack([P, N]), [[]] * (n_pos + n_neg), [])
+    y = np.r_[np.ones(n_pos), np.zeros(n_neg)]
+    w = np.ones(n_pos + n_neg)
+    tr, ho = split_holdout(len(y))
+    wt, bt = fit(X[tr], y[tr], w[tr], [])
+    holdout = auc(y[ho], predict(TasteModelParams(wt, bt, [], 32, "m"), X[ho]))
+    assert holdout is not None and holdout > 0.9
+    wa, ba = fit(X, y, w, [])
+    p = predict(TasteModelParams(wa, ba, [], 32, "m"), X)
+    assert np.median(p[n_pos:]) < 0.5 < np.median(p[:n_pos])
