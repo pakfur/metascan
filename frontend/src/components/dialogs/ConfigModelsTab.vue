@@ -6,6 +6,8 @@ import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
 import { startRetag } from '../../api/vlm'
 import { useTasteStore } from '../../stores/taste'
 import { ApiError } from '../../api/client'
+import { useWebSocket } from '../../composables/useWebSocket'
+import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
 
 const taste = useTasteStore()
 const tasteStatus = computed(() => taste.status)
@@ -61,6 +63,103 @@ async function onTasteRetrain() {
   }
 }
 
+// ---- Writers: favorite rate per writer per 14-day window + diversity ----
+// The spec's success baseline: the 8B writer with variants, no guidance.
+// Rows are per (writer, model): a base draft from another model is not it.
+const BASELINE_WRITER = 'base'
+const BASELINE_MODEL = 'qwen3vl-8b'
+const WRITER_ORDER = ['base', 'base+taste', 'fallback', 'manual']
+
+const writerStats = computed(() => taste.writerStats)
+const writerStatsError = ref<string | null>(null)
+async function loadWriterStats() {
+  try {
+    await taste.loadWriterStats()
+    writerStatsError.value = null
+  } catch (e) {
+    console.error('Failed to load writer stats', e)
+    writerStatsError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+// Diversity is computed by training runs: refresh when one ends.
+useWebSocket('taste', (event) => {
+  if (
+    event === ('training_complete' satisfies TasteWsEvent) ||
+    event === ('training_failed' satisfies TasteWsEvent)
+  ) {
+    void loadWriterStats()
+  }
+})
+
+function windowLabel(start: string): string {
+  const d = new Date(`${start}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return start
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+}
+
+function writerRank(id: string): number {
+  const i = WRITER_ORDER.indexOf(id)
+  if (i >= 0) return i
+  return id === 'unknown' ? WRITER_ORDER.length + 1 : WRITER_ORDER.length
+}
+
+interface WriterRow {
+  key: string
+  kind: 't2i' | 'i2v'
+  writer: string
+  model: string | null
+  baseline: boolean
+  cells: Record<string, WriterWindowStat>
+}
+
+const writerRows = computed<WriterRow[]>(() => {
+  const byKey = new Map<string, WriterRow>()
+  for (const w of writerStats.value?.windows ?? []) {
+    const model = w.writer_model ?? null
+    const key = `${w.kind}:${w.writer_id}:${model ?? ''}`
+    let row = byKey.get(key)
+    if (!row) {
+      row = {
+        key,
+        kind: w.kind,
+        writer: w.writer_id,
+        model,
+        baseline: w.kind === 't2i' && w.writer_id === BASELINE_WRITER && model === BASELINE_MODEL,
+        cells: {},
+      }
+      byKey.set(key, row)
+    }
+    row.cells[w.window_start] = w
+  }
+  return [...byKey.values()].sort(
+    (a, b) =>
+      (a.kind === b.kind ? 0 : a.kind === 't2i' ? -1 : 1) ||
+      writerRank(a.writer) - writerRank(b.writer) ||
+      a.writer.localeCompare(b.writer) ||
+      (a.model === BASELINE_MODEL ? -1 : b.model === BASELINE_MODEL ? 1 : 0) ||
+      (a.model ?? '\uffff').localeCompare(b.model ?? '\uffff'),
+  )
+})
+
+// Diversity is stored by training runs, with that run's window starts.
+const diversityAsOf = computed(() => {
+  const raw = writerStats.value?.diversity[0]?.computed_at
+  if (!raw) return 'the last training run'
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleDateString()
+})
+
+function rateText(cell: WriterWindowStat | undefined): string {
+  if (!cell || cell.rate === null) return '—'
+  return `${Math.round(cell.rate * 100)}%`
+}
+
+function rateTitle(cell: WriterWindowStat | undefined): string {
+  if (!cell || cell.n_seen === 0) return 'No seen generations in this window'
+  return `${cell.n_fav} favorited of ${cell.n_seen} seen`
+}
+
 const models = useModelsStore()
 
 const hfTokenInput = ref('')
@@ -71,7 +170,7 @@ const loading = ref(true)
 
 onMounted(async () => {
   try {
-    await Promise.all([models.loadStatus(), loadTasteStatus()])
+    await Promise.all([models.loadStatus(), loadTasteStatus(), loadWriterStats()])
   } finally {
     loading.value = false
   }
@@ -263,6 +362,55 @@ async function onUnload(row: ModelRow) {
     return
   }
   await models.unloadVlmModel(row.id)
+}
+
+type RoleKey = 'writer' | 'general'
+
+const vlmRoles = computed(() => models.vlmRoles)
+const vlmRows = computed(() => grouped.value['Tagging (VLM)'] ?? [])
+const installedVlms = computed(() => vlmRows.value.filter((r) => r.status === 'available'))
+// The backend rejects qwen38-27b as writer (422); don't offer it.
+const writerChoices = computed(() => installedVlms.value.filter((r) => r.writer_allowed !== false))
+const generalChoices = computed(() => installedVlms.value)
+
+function roleChoices(role: RoleKey): ModelRow[] {
+  return role === 'writer' ? writerChoices.value : generalChoices.value
+}
+
+// A configured model that is not installed (or not offered) still needs an
+// option, otherwise the select would render blank and hide the real value.
+function roleOptions(role: RoleKey): { id: string; label: string }[] {
+  const out = roleChoices(role).map((r) => ({ id: r.id, label: r.name }))
+  const cur = vlmRoles.value?.[role].model_id ?? null
+  if (cur && !out.some((o) => o.id === cur)) {
+    const row = vlmRows.value.find((r) => r.id === cur)
+    out.unshift({ id: cur, label: `${row?.name ?? cur} (not installed)` })
+  }
+  return out
+}
+
+function roleValue(role: RoleKey): string {
+  return vlmRoles.value?.[role].model_id ?? ''
+}
+
+function roleStateLabel(role: RoleKey): string {
+  const r = vlmRoles.value?.[role]
+  if (!r || !r.model_id) return 'none'
+  switch (r.state) {
+    case 'ready': return 'ready'
+    case 'spawning':
+    case 'loading': return 'loading'
+    case 'error': return 'error'
+    default: return 'stopped'
+  }
+}
+
+async function onRoleChange(role: RoleKey, ev: Event) {
+  const id = (ev.target as HTMLSelectElement).value
+  if (!id) return
+  const ok = await models.setVlmRoleModel(role, id)
+  // Failure: snap the select back to the server's value.
+  if (!ok) (ev.target as HTMLSelectElement).value = roleValue(role)
 }
 
 function isVlmLoaded(row: ModelRow): boolean {
@@ -506,6 +654,38 @@ async function onRetagLibrary() {
     </section>
 
     <section class="preload-hint vlm-status-block">
+      <div class="vlm-roles">
+        <label class="role-row">
+          <span class="role-label">Prompt writer</span>
+          <select
+            class="role-select"
+            data-testid="role-writer"
+            :value="roleValue('writer')"
+            @change="onRoleChange('writer', $event)"
+          >
+            <option v-for="o in roleOptions('writer')" :key="o.id" :value="o.id">{{ o.label }}</option>
+            <option v-if="roleOptions('writer').length === 0" value="" disabled>No installed model</option>
+          </select>
+          <span class="role-state" :class="`role-state-${roleStateLabel('writer')}`" data-testid="role-writer-state">{{ roleStateLabel('writer') }}</span>
+        </label>
+        <div class="muted role-hint">Fine-tunes build on this model.</div>
+        <label class="role-row">
+          <span class="role-label">Tagging &amp; chat</span>
+          <select
+            class="role-select"
+            data-testid="role-general"
+            :value="roleValue('general')"
+            @change="onRoleChange('general', $event)"
+          >
+            <option v-if="!roleValue('general')" value="" disabled>None</option>
+            <option v-for="o in roleOptions('general')" :key="o.id" :value="o.id">{{ o.label }}</option>
+          </select>
+          <span class="role-state" :class="`role-state-${roleStateLabel('general')}`" data-testid="role-general-state">{{ roleStateLabel('general') }}</span>
+        </label>
+        <div v-if="vlmRoles?.shared" class="muted role-hint">Sharing one model</div>
+        <div v-for="n in vlmRoles?.notes ?? []" :key="n" class="muted role-hint" data-testid="role-note">{{ n }}</div>
+        <div v-if="models.vlmRolesError" class="err-text" data-testid="role-error">{{ models.vlmRolesError }}</div>
+      </div>
       <div v-if="models.vlmState !== 'idle'" class="vlm-current">
         <b>VLM tagger:</b>
         <span v-if="models.vlmState === 'ready'">
@@ -579,6 +759,95 @@ async function onRetagLibrary() {
       <div v-if="tasteStatus?.last_error" class="err-text">
         Last error: {{ tasteStatus.last_error }}
       </div>
+    </section>
+
+    <section class="preload-hint writers-block">
+      <div class="section-heading">
+        Writers
+        <button class="btn-small writers-refresh" @click="loadWriterStats">Refresh</button>
+      </div>
+      <div class="taste-hint">
+        Favorite rate among generations you have seen (viewed, favorited or passed), by the
+        writer that drafted the prompt, per 14-day window of generation date.
+      </div>
+      <div v-if="writerStats?.collapse_warning" class="warn-banner writers-warning">
+        Favorites are getting less diverse (latest window more than 25% below the recent median)
+        while the favorite rate rises: the writer may be narrowing toward a few looks.
+      </div>
+      <div v-if="writerStatsError" class="err-text">
+        Could not load writer stats: {{ writerStatsError }}
+      </div>
+      <template v-if="writerStats">
+        <div v-if="writerRows.length === 0" class="taste-hint">
+          No generations in the last
+          {{ writerStats.window_starts.length * writerStats.window_days }} days.
+        </div>
+        <div v-else class="writers-scroll">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Writer</th>
+                <th v-for="s in writerStats.window_starts" :key="s">{{ windowLabel(s) }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in writerRows" :key="row.key" :class="{ baseline: row.baseline }">
+                <th class="writer-col" scope="row">
+                  {{ row.writer }}
+                  <span
+                    v-if="row.model || row.writer === 'base' || row.writer === 'base+taste'"
+                    class="writer-model"
+                    :title="row.model ? `drafted by ${row.model}` : 'model not recorded'"
+                    >{{ row.model ?? 'model unknown' }}</span
+                  >
+                  <span v-if="row.kind === 'i2v'" class="writer-tag">I2V</span>
+                  <span v-if="row.baseline" class="writer-tag writer-tag-baseline">baseline</span>
+                </th>
+                <td
+                  v-for="s in writerStats.window_starts"
+                  :key="s"
+                  :title="rateTitle(row.cells[s])"
+                >
+                  <span class="rate">{{ rateText(row.cells[s]) }}</span>
+                  <span class="n-seen">n={{ row.cells[s]?.n_seen ?? 0 }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="writerStats.diversity.length" class="writers-scroll">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Favorite diversity</th>
+                <th v-for="d in writerStats.diversity" :key="d.window_start">
+                  {{ windowLabel(d.window_start) }}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th class="writer-col" scope="row">
+                  <span class="taste-hint">as of {{ diversityAsOf }}</span>
+                </th>
+                <td
+                  v-for="d in writerStats.diversity"
+                  :key="d.window_start"
+                  :title="`Mean pairwise CLIP distance between ${d.n} favorited T2I images`"
+                >
+                  <span class="rate">
+                    {{ d.mean_distance === null ? '—' : d.mean_distance.toFixed(2) }}
+                  </span>
+                  <span class="n-seen">n={{ d.n }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="taste-hint">
+          Favorite diversity appears after the next taste training run.
+        </div>
+      </template>
     </section>
   </template>
 </template>
@@ -765,6 +1034,57 @@ section { margin-bottom: 14px; }
 .taste-actions { display: flex; align-items: center; gap: 10px; }
 .taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
 .taste-hint { color: var(--text-color-secondary); font-size: 12px; }
+.writers-block { display: flex; flex-direction: column; gap: 6px; }
+.writers-refresh { margin-left: auto; }
+.writers-warning { font-size: 12px; }
+.writers-scroll { overflow-x: auto; }
+.writers-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-color);
+}
+.writers-table th,
+.writers-table td {
+  padding: 3px 10px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--surface-border);
+}
+.writers-table thead th { font-weight: 600; color: var(--text-color-secondary); }
+.writers-table .writer-col { text-align: left; font-weight: 600; }
+.writers-table tr.baseline { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+.writers-table .rate { display: inline-block; min-width: 3.2em; }
+.writers-table .n-seen { color: var(--text-color-secondary); font-size: 11px; margin-left: 4px; }
+.writer-model {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-color-secondary);
+}
+.writer-tag {
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--surface-border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-color-secondary);
+}
+.writer-tag-baseline { border-color: var(--primary-color); color: var(--primary-color); }
+.vlm-roles { display: flex; flex-direction: column; gap: 6px; }
+.role-row { display: flex; align-items: center; gap: 10px; }
+.role-label { width: 110px; font-weight: 600; }
+.role-select {
+  min-width: 220px; padding: 4px 8px; border-radius: 4px;
+  background: var(--surface-ground, transparent); color: inherit;
+  border: 1px solid var(--surface-border, #444);
+}
+.role-state { font-size: 12px; color: var(--text-color-secondary); }
+.role-state-ready { color: #22c55e; }
+.role-state-loading { color: #eab308; }
+.role-state-error { color: var(--danger-color); }
+.role-hint { font-size: 12px; }
 .vlm-current { font-size: 14px; }
 .vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>

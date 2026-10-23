@@ -602,10 +602,17 @@ class TestPrompt(T2iApiCase):
                 "warnings": ["a warning"],
                 "direction": None,
                 "direction_parts": [],
+                "drafts": [],
             },
         )
         self.assertEqual(
-            self.runner.calls, [("generate_prompt", {**self.BODY, "directions": None})]
+            self.runner.calls,
+            [
+                (
+                    "generate_prompt",
+                    {**self.BODY, "directions": None, "variants": 1, "writer": "base"},
+                )
+            ],
         )
 
     def test_the_directions_flag_reaches_the_runner(self) -> None:
@@ -615,7 +622,12 @@ class TestPrompt(T2iApiCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(
             self.runner.calls,
-            [("generate_prompt", {**self.BODY, "directions": False})],
+            [
+                (
+                    "generate_prompt",
+                    {**self.BODY, "directions": False, "variants": 1, "writer": "base"},
+                )
+            ],
         )
 
     def test_error_mapping(self) -> None:
@@ -961,6 +973,9 @@ class TestImages(T2iApiCase):
                     "writer_id",
                     "variant_group",
                     "variant_index",
+                    "draft_prompt",
+                    "edited",
+                    "writer_model",
                 ]
             ),
         )
@@ -1277,7 +1292,7 @@ class TestAppWiring(unittest.TestCase):
             "get_config=lambda: get_t2i_config(load_app_config())",
             'unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"]',
             "comfy=comfy_client",
-            "get_vlm=get_vlm_client",
+            "get_vlm=get_writer_vlm",
             "vlm_installed=vlm_model_installed",
         ):
             self.assertIn(wanted, built)

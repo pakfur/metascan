@@ -1,4 +1,4 @@
-import type { TasteScoresResponse, TasteStatus } from '../types/taste'
+import type { TasteScoresResponse, TasteStatus, WriterStats } from '../types/taste'
 import { get, post } from './client'
 
 export function fetchTasteStatus(): Promise<TasteStatus> {
@@ -21,4 +21,8 @@ export function fetchTasteScoresFor(filePaths: string[]): Promise<TasteScoresRes
 export async function fetchReviewQueue(limit = 200): Promise<string[]> {
   const res = await get<{ paths: string[] }>(`/taste/review-queue?limit=${limit}`)
   return res.paths
+}
+
+export function fetchWriterStats(): Promise<WriterStats> {
+  return get<WriterStats>('/taste/writer-stats')
 }

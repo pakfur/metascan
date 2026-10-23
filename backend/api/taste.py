@@ -74,3 +74,10 @@ async def taste_review_queue(
     service: TasteService = Depends(_get_service),
 ) -> Dict[str, Any]:
     return {"paths": await service.review_queue(limit)}
+
+
+@router.get("/taste/writer-stats")
+async def taste_writer_stats(
+    service: TasteService = Depends(_get_service),
+) -> Dict[str, Any]:
+    return await service.writer_stats()

@@ -142,10 +142,14 @@ class StoryboardRunner:
         get_vlm: Callable[[], Optional[Any]],
         output_root: Path,
         unload_vlm_during_generation: bool = True,
+        get_all_vlms: Optional[Callable[[], List[Any]]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
+        # The general-role client; ``get_all_vlms`` lists every distinct
+        # VLM client (writer and general) so unloading frees them all.
         self.get_vlm = get_vlm
+        self.get_all_vlms = get_all_vlms
         self.output_root = Path(output_root)
         self.unload_vlm_during_generation = unload_vlm_during_generation
         self._listeners: List[EventCb] = []
@@ -183,6 +187,18 @@ class StoryboardRunner:
                 logger.debug("storyboard event listener raised", exc_info=True)
 
     # ---- VLM model selection -----------------------------------------
+
+    async def _unload_vlms(self) -> None:
+        """Shut down each distinct VLM client with a model loaded, once."""
+        clients: List[Any] = (
+            list(self.get_all_vlms()) if self.get_all_vlms is not None else []
+        )
+        vlm = self.get_vlm()
+        if vlm is not None and not any(c is vlm for c in clients):
+            clients.insert(0, vlm)
+        for c in clients:
+            if c is not None and c.model_id:
+                await c.shutdown()
 
     def _pick_vlm_model(self, vlm: Any) -> str:
         """Pick a model id to pass to ``vlm.ensure_started``.
@@ -1547,9 +1563,7 @@ class StoryboardRunner:
             # synthesize() acquires the same lock for its whole run, so
             # this simply waits for it to finish rather than racing.
             async with self._synth_lock:
-                vlm = self.get_vlm()
-                if vlm is not None and vlm.model_id:
-                    await vlm.shutdown()
+                await self._unload_vlms()
 
         width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
         slug = storyboard_slug(storyboard_id, tree["name"])
@@ -1867,9 +1881,7 @@ class StoryboardRunner:
             # See generate()'s identical block: hold the synth lock only
             # around the unload check+call, never across the submit loop.
             async with self._synth_lock:
-                vlm = self.get_vlm()
-                if vlm is not None and vlm.model_id:
-                    await vlm.shutdown()
+                await self._unload_vlms()
 
         width, height = bucket_dims(tree["aspect_ratio"], tree["target_model"])
         slug = storyboard_slug(storyboard_id, tree["name"])

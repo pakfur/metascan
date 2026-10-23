@@ -17,7 +17,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from metascan.core.taste_labels import LabelSet, build_label_set, missing_for_training
+from metascan.core.taste_labels import (
+    WRITER_WINDOW_DAYS,
+    WRITER_WINDOWS,
+    LabelSet,
+    build_label_set,
+    missing_for_training,
+    window_for,
+    window_starts,
+)
 from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,30 @@ def _write_json(path: Path, doc: Dict[str, Any]) -> None:
     with open(tmp, "w") as f:
         json.dump(doc, f)
     os.replace(tmp, path)
+
+
+def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
+    """The worker's ``diversity`` input: every favorited T2I generation
+    in the last ``WRITER_WINDOWS`` windows with its window (tombstoned ones
+    carry their stored vector). Blocking."""
+    starts = window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS)
+    items: List[Dict[str, Any]] = []
+    for g in db.generation_outcomes(since=starts[0], include_embeddings=True):
+        if g["kind"] != "t2i" or not g["favorite"]:
+            continue
+        start = window_for(g["created_at"], starts, WRITER_WINDOW_DAYS)
+        if start is None:
+            continue
+        emb = g.get("embedding")
+        items.append(
+            {
+                "file_path": g["file_path"],
+                "window_start": start,
+                "embedding": base64.b64encode(emb).decode("ascii") if emb else None,
+                "embedding_model": g.get("embedding_model"),
+            }
+        )
+    return {"window_starts": starts, "items": items}
 
 
 class TasteRunner:
@@ -272,6 +304,14 @@ class TasteRunner:
                 )
                 labels_path = run_dir / "labels.json"
                 await asyncio.to_thread(_write_json, labels_path, _labels_doc(ls))
+                diversity: Optional[Dict[str, Any]] = None
+                try:
+                    diversity = await asyncio.to_thread(_diversity_task, self.db, now)
+                except Exception:
+                    # A dashboard metric: never worth failing training over.
+                    logger.warning(
+                        "collecting favorite diversity inputs failed", exc_info=True
+                    )
                 result = await self._run_worker(
                     {
                         "mode": "train",
@@ -281,11 +321,13 @@ class TasteRunner:
                         "out_dir": str(run_dir),
                         "image_paths": image_paths,
                         "image_categories": image_cats,
+                        "diversity": diversity,
                     }
                 )
             except Exception as e:
                 logger.exception("taste training failed")
                 result = {"status": "error", "error": str(e) or repr(e)}
+            await self._record_diversity(result)
             if result.get("status") == "not_enough_data":
                 # Enough labels, too few with a vector (a partial index):
                 # not a failure -- no failed row, nothing activated.
@@ -299,6 +341,21 @@ class TasteRunner:
             return await self._record_success(ls, half_life_days, result)
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
+
+    async def _record_diversity(self, result: Dict[str, Any]) -> None:
+        """Store the worker's per-window favorite diversity, whatever the
+        training outcome (it only needs the index). Never raises."""
+        rows = result.get("diversity")
+        if not isinstance(rows, list):
+            return
+        try:
+            await asyncio.to_thread(
+                self.db.record_taste_diversity,
+                rows,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            logger.warning("recording favorite diversity failed", exc_info=True)
 
     async def _record_failure(
         self, ls: LabelSet, half_life_days: float, result: Dict[str, Any]

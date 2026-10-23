@@ -15,7 +15,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+from metascan.core.vlm_client import VlmError, background_vlm_work
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,13 @@ class VlmTagPump:
         *,
         model_id: str,
         concurrency: int = 2,
+        unless_stopped_since: Optional[int] = None,
     ) -> None:
+        """``unless_stopped_since``: the client's ``_explicit_stops`` when
+        the work was requested (scan start). A drain is a background
+        re-ensure: if an explicit unload (ComfyUI render, /unload) landed
+        since, it must not bring the VLM back -- the batch stays queued."""
+        self._unless_stopped_since = unless_stopped_since
         self._queue_dir = queue_dir
         self._client = client
         self._db = db
@@ -78,7 +86,15 @@ class VlmTagPump:
         self.pending_file.write_text(rest, encoding="utf-8")
 
     async def drain_once(self) -> int:
-        """Process every line currently in vlm_pending.jsonl. Returns count."""
+        """Process every line currently in vlm_pending.jsonl. Returns count.
+
+        Background VLM work: when the roles take turns it never evicts the
+        prompt writer while the writer is busy (it waits for it), and an
+        interactive request may preempt it (items are retried)."""
+        with background_vlm_work():
+            return await self._drain_once()
+
+    async def _drain_once(self) -> int:
         if not self.pending_file.exists():
             return 0
         # Snapshot now, but only consume (remove) the snapshot once the VLM
@@ -97,7 +113,23 @@ class VlmTagPump:
             self._consume_snapshot(text)
             return 0
 
-        await self._client.ensure_started(self._model_id)
+        since = self._unless_stopped_since
+        if since is None:
+            await self._client.ensure_started(self._model_id)
+        else:
+            try:
+                await self._client.ensure_started(
+                    self._model_id, unless_stopped_since=since
+                )
+            except VlmError:
+                if getattr(self._client, "_explicit_stops", since) == since:
+                    raise
+                logger.info(
+                    "VLM tagging deferred: the VLM was unloaded since the scan "
+                    "started; %d image(s) stay queued for the next drain",
+                    len(paths),
+                )
+                return 0
         self._consume_snapshot(text)
 
         total = len(paths)

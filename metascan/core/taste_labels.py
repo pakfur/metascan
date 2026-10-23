@@ -4,8 +4,9 @@ scorer. Pure: ``DatabaseManager.taste_training_raw`` reads the rows,
 videos before they get here."""
 
 import logging
+import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_HALF_LIFE_DAYS: float = 180.0
@@ -196,3 +197,116 @@ def missing_for_training(n_pos: int, n_neg: int) -> Optional[Dict[str, int]]:
     if need_pos == 0 and need_neg == 0:
         return None
     return {"positives": need_pos, "negatives": need_neg}
+
+
+# ----------------------------------------------------------------------
+# Writer stats / diversity windows
+# ----------------------------------------------------------------------
+
+WRITER_WINDOW_DAYS: int = 14
+WRITER_WINDOWS: int = 6
+# Taste collapse: the newest favorite diversity falls below this share of
+# the median of the previous COLLAPSE_PREV_WINDOWS windows while the
+# favorite rate rises.
+COLLAPSE_RATIO: float = 0.75
+COLLAPSE_PREV_WINDOWS: int = 5
+# The latest window needs at least this many favorites with a vector: a
+# mean distance over two or three is noise, not a collapse.
+COLLAPSE_MIN_FAVORITES: int = 5
+
+
+def window_starts(
+    now: datetime,
+    window_days: int = WRITER_WINDOW_DAYS,
+    windows: int = WRITER_WINDOWS,
+) -> List[str]:
+    """ISO dates (UTC) of the last ``windows`` ``window_days``-day windows,
+    oldest first. The newest window ends today (inclusive)."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    today = now.astimezone(timezone.utc).date()
+    latest = today - timedelta(days=window_days - 1)
+    return [
+        (latest - timedelta(days=window_days * k)).isoformat()
+        for k in reversed(range(windows))
+    ]
+
+
+def window_for(
+    created_at: Optional[str], starts: List[str], window_days: int
+) -> Optional[str]:
+    """The entry of ``starts`` whose window holds ``created_at`` (UTC; a
+    naive timestamp is UTC, as SQLite's ``datetime('now')`` writes it), or
+    None when it is outside every window or unparseable."""
+    if not created_at or not starts:
+        return None
+    try:
+        day = _parse(str(created_at).strip()).astimezone(timezone.utc).date()
+    except ValueError:
+        return None
+    first = date.fromisoformat(starts[0])
+    offset = (day - first).days
+    if offset < 0:
+        return None
+    idx = offset // window_days
+    return starts[idx] if idx < len(starts) else None
+
+
+def _pooled_t2i_rates(windows: List[Dict[str, Any]]) -> List[Optional[float]]:
+    """Favorite rate per window over every T2I writer, oldest first."""
+    seen: Dict[str, int] = {}
+    fav: Dict[str, int] = {}
+    for w in windows:
+        if (w.get("kind") or "t2i") != "t2i":
+            continue
+        start = str(w["window_start"])
+        seen[start] = seen.get(start, 0) + int(w.get("n_seen") or 0)
+        fav[start] = fav.get(start, 0) + int(w.get("n_fav") or 0)
+    return [fav[s] / seen[s] if seen[s] else None for s in sorted(seen)]
+
+
+def collapse_warning(
+    diversity: List[Dict[str, Any]],
+    windows: List[Dict[str, Any]],
+    window_days: int = WRITER_WINDOW_DAYS,
+) -> bool:
+    """Taste collapse: the latest window's favorite diversity is below
+    ``COLLAPSE_RATIO`` x the median of the previous up-to-5 windows (those
+    with a value) **and** the latest pooled T2I favorite rate is above the
+    previous window's, and the latest window holds at least
+    ``COLLAPSE_MIN_FAVORITES`` favorites with a vector. Diversity is stored per training run with that run's
+    window starts while rates slide with today: unless the latest diversity
+    window starts within ``window_days`` of the latest rate window they
+    describe different periods, so no flag. False whenever either side
+    lacks the data."""
+    div = sorted(diversity, key=lambda d: str(d["window_start"]))
+    if not div or div[-1].get("mean_distance") is None:
+        return False
+    if int(div[-1].get("n") or 0) < COLLAPSE_MIN_FAVORITES:
+        return False
+    rate_starts = sorted(
+        {str(w["window_start"]) for w in windows if (w.get("kind") or "t2i") == "t2i"}
+    )
+    if not rate_starts:
+        return False
+    try:
+        gap = (
+            date.fromisoformat(str(div[-1]["window_start"]))
+            - date.fromisoformat(rate_starts[-1])
+        ).days
+    except ValueError:
+        return False
+    if abs(gap) >= window_days:
+        return False
+    latest = float(div[-1]["mean_distance"])
+    prev = [
+        float(d["mean_distance"])
+        for d in div[-1 - COLLAPSE_PREV_WINDOWS : -1]
+        if d.get("mean_distance") is not None
+    ]
+    if not prev or not latest < COLLAPSE_RATIO * statistics.median(prev):
+        return False
+    rates = _pooled_t2i_rates(windows)
+    if len(rates) < 2 or rates[-1] is None or rates[-2] is None:
+        return False
+    return rates[-1] > rates[-2]

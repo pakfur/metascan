@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Media } from '../types/media'
-import type { I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVideo } from '../types/i2v'
+import type { I2vDraft, I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVideo } from '../types/i2v'
 import { fetchI2vConfig, listI2vTemplates, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { updateMedia } from '../api/media'
@@ -20,8 +20,17 @@ export const useI2vStore = defineStore('i2v', () => {
   // empty and the dialog offers only Single take.
   const templates = ref<I2vTemplate[]>([])
 
+  // The writer's draft behind the Prompt box, or null (a prompt typed from
+  // scratch). Held here, never written into the form by a watcher.
+  const draft = ref<I2vDraft | null>(null)
+
+  function setDraft(d: I2vDraft | null): void {
+    draft.value = d
+  }
+
   async function open(media: Media): Promise<void> {
     source.value = media
+    draft.value = null
     jobs.value = new Map()
     videos.value = []
     config.value = await fetchI2vConfig()
@@ -35,6 +44,7 @@ export const useI2vStore = defineStore('i2v', () => {
 
   function close(): void {
     source.value = null
+    draft.value = null
     videos.value = []
     jobs.value = new Map()
   }
@@ -183,6 +193,8 @@ export const useI2vStore = defineStore('i2v', () => {
     jobs,
     config,
     templates,
+    draft,
+    setDraft,
     open,
     close,
     refreshVideos,

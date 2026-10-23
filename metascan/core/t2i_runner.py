@@ -23,6 +23,8 @@ steps, and jobs ComfyClient re-enqueues still ingest, without a form state.
 from __future__ import annotations
 
 import asyncio
+import bisect
+import contextlib
 import copy
 import dataclasses
 import json
@@ -36,9 +38,18 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
-from metascan.core.judgments import WRITER_BASE, WRITER_FALLBACK
+from metascan.core.judgments import (
+    DRAFT_WRITERS,
+    WRITER_BASE,
+    WRITER_BASE_TASTE,
+    WRITER_FALLBACK,
+    WRITER_MANUAL,
+    WriterModelError,
+    check_writer_model,
+    normalize_prompt,
+)
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
 from metascan.core.generation_categories import tag_generated_media
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
@@ -69,23 +80,45 @@ from metascan.core.t2i_models import (
     effective_identity,
     get_profile,
 )
+from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_prompt import (
-    compose_t2i_prompts,
+    ComposedPrompts,
+    compose_guided_t2i_prompts,
     fallback_prompt,
     parse_t2i_output,
 )
+from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
+from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 EventCb = Callable[[str, str, Dict[str, Any]], None]
+# (resolved caption, target model id) -> (examples, warning); never raises
+# for an expected degrade (TasteExamplesService.examples_for).
+TasteExamplesFn = Callable[[str, str], Awaitable[Tuple[List[str], Optional[str]]]]
 
 # Warning texts the dialog shows verbatim.
 WARN_VLM_UNAVAILABLE = "VLM unavailable - used the resolved caption"
 WARN_NEGATIVE_IGNORED = "negative prompt ignored: the workflow has no MS_NEGATIVE node"
+WARN_TASTE_PREFIX = "taste guidance unavailable: "
+WARN_TASTE_UNCONFIGURED = WARN_TASTE_PREFIX + "no taste service is running"
+WARN_TASTE_NO_PREAMBLE = (
+    WARN_TASTE_PREFIX + "T2I_EXAMPLES_PREAMBLE is missing from meta_prompt.yml"
+)
+WARN_TYPED_PROMPT_ONCE = (
+    "variants apply to written prompts: the typed prompt renders once"
+)
+
+# Prompt variants per caption, and the writers a request may ask for.
+MAX_VARIANTS = 4
+REQUEST_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
 
 _VLM_TEMPERATURE = 0.6
 _VLM_TIMEOUT_S = 240.0
@@ -138,6 +171,16 @@ class BatchRequest:
     # Categories every image of the batch is tagged with at ingest. The
     # route has already checked they exist; one deleted mid-batch is skipped.
     category_ids: List[int] = field(default_factory=list)
+    # Prompt variants per caption (1..MAX_VARIANTS): each is its own step
+    # sharing the caption's seeds. ``writer`` drafts the written ones.
+    variants: int = 1
+    writer: str = WRITER_BASE
+    # Manual, or a Random batch's first caption: one supplied prompt per
+    # variant, ``{prompt, negative, draft, writer_id, writer_model,
+    # variant_index}``. None
+    # means ``prompt``/``negative`` are the single supplied prompt (typed:
+    # writer ``manual``, no draft).
+    prompts: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass
@@ -148,13 +191,27 @@ class BatchStarted:
 
 
 @dataclass
-class PromptResult:
+class PromptDraft:
+    """One variant's draft from POST /api/t2i/prompt."""
+
     prompt: str
+    negative: Optional[str]
+    writer_id: str
+    variant_index: int
+    angle: Optional[str] = None
+    # The VLM model that wrote it; None for a fallback draft.
+    writer_model: Optional[str] = None
+
+
+@dataclass
+class PromptResult:
+    prompt: str  # drafts[0]'s, kept for older clients
     negative: Optional[str]
     resolved_caption: str
     warnings: List[str]
     direction: Optional[str] = None
     direction_parts: List[str] = field(default_factory=list)
+    drafts: List[PromptDraft] = field(default_factory=list)
 
 
 @dataclass
@@ -166,8 +223,16 @@ class _Batch:
     profile: T2iModelProfile
     bindings: Bindings
     loras: List[Dict[str, Any]]
-    seeds: List[int]  # one per image, in render order
-    per_step: int  # images per step
+    seeds: List[int]  # one per image, in render order (variants repeat theirs)
+    # The planned seeds of each caption; every variant step of a caption
+    # renders the same list, so siblings differ by prompt, not by seed.
+    caption_seeds: List[List[int]]
+    # One entry per step, in order: (caption index, variant index). A
+    # caption's variant steps are consecutive.
+    plan: List[Tuple[int, int]]
+    # Images rendered once each step is done (cumulative, one per step).
+    step_ends: List[int]
+    variant_groups: List[str]  # one id per caption
     total_steps: int
     next_seed: Optional[int]  # the first unused seed after the run, if there is one
     root: str  # output root directory (absolute)
@@ -214,16 +279,21 @@ class _Batch:
         return len(self.seeds)
 
     def step_seeds(self, index: int) -> List[int]:
-        """The seeds of step ``index`` (0-based); the first is the step's
-        prompt seed."""
-        return self.seeds[index * self.per_step : (index + 1) * self.per_step]
+        """The seeds of step ``index`` (0-based): its caption's, shared by
+        every variant of that caption. The first is the prompt seed."""
+        return list(self.caption_seeds[self.plan[index][0]])
+
+    def variants_of(self, caption: int) -> int:
+        return sum(1 for c, _ in self.plan if c == caption)
 
     @property
     def rendering_step(self) -> int:
         """Index (0-based) of the step being rendered: the first one whose
         images are not all accounted for. Renders run in submission order, so
-        this is the step of the image ComfyUI is working on."""
-        return min(self.resolved // self.per_step, self.total_steps - 1)
+        this is the step of the image ComfyUI is working on. Steps can differ
+        in size (a shortened last caption), hence the cumulative ends."""
+        index = bisect.bisect_right(self.step_ends, self.resolved)
+        return min(index, self.total_steps - 1)
 
     @property
     def current_seed(self) -> Optional[int]:
@@ -251,14 +321,43 @@ class _Step:
     height: int
     direction: Optional[str] = None
     direction_parts: List[str] = field(default_factory=list)
-    # Who wrote the prompt (judgments.WRITER_*); None for a supplied step.
+    # Who wrote the prompt (judgments.WRITER_*): ``manual`` for a typed one.
     writer_id: Optional[str] = None
+    # The VLM model id behind a base / base+taste draft (None otherwise).
+    writer_model: Optional[str] = None
+    variant_group: Optional[str] = None  # one id per caption
+    variant_index: int = 0
+    variants: int = 1  # steps the caption has
+    # The writer's draft (None: typed from scratch). Rendered ``prompt`` may
+    # be the owner's edit of it; the ingest records whether it differs.
+    draft: Optional[str] = None
+    # Manual only: the Negative box as typed (kept even if the workflow
+    # cannot take it), for the image's form state.
+    form_negative: Optional[str] = None
 
     @property
     def prompt_seed(self) -> int:
         """The seed the step's plain wildcards were drawn with: its first
         image's. The characters do not use it; they follow the caption."""
         return self.seeds[0]
+
+
+@dataclass
+class _CaptionContext:
+    """What every variant of one written caption shares, worked out once:
+    the caption (drawn or named), its ratio and size, the resolved text,
+    the direction and the taste examples."""
+
+    index: int  # caption index in the batch
+    caption: str
+    aspect_ratio: str
+    width: int
+    height: int
+    seeds: List[int]
+    resolved_text: str
+    direction: Optional[Direction]
+    examples: List[str]
+    warnings: List[str]
 
 
 def default_output_root(comfy_output_root: Any) -> Path:
@@ -314,15 +413,114 @@ def _check_aspect(aspect: Any) -> None:
 
 
 def _supplies_first_step(req: BatchRequest) -> bool:
-    """A Random request that carries a prompt renders it as its first step
-    (the dialog's Generate Prompt, then Generate): nothing is drawn and no
-    prompt is written for that step, the rest are drawn as usual. A blank
-    prompt supplies nothing, and neither does a caption or ratio without one."""
-    return (
-        req.mode == "random"
-        and isinstance(req.prompt, str)
-        and req.prompt.strip() != ""
-    )
+    """A Random request that carries a prompt (or one per variant in
+    ``prompts``) renders it as its first caption (the dialog's Generate
+    Prompt, then Generate): nothing is drawn and no prompt is written for
+    it, the rest are drawn as usual. A blank prompt supplies nothing, and
+    neither does a caption or ratio without one."""
+    if req.mode != "random":
+        return False
+    if req.prompts:
+        return True
+    return isinstance(req.prompt, str) and req.prompt.strip() != ""
+
+
+def _check_writer(writer: Any) -> str:
+    if writer not in REQUEST_WRITERS:
+        raise T2iRequestError(
+            f"Unknown writer {writer!r}; use one of {', '.join(REQUEST_WRITERS)}"
+        )
+    return str(writer)
+
+
+def _optional_text(value: Any, label: str) -> Optional[str]:
+    if value is None or isinstance(value, str):
+        return value
+    raise T2iRequestError(f"{label} must be text")
+
+
+def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, Any]]]:
+    """The supplied per-variant prompts, normalised and ordered by
+    ``variant_index``; None when the request has none. A prompt without a
+    draft was typed from scratch, so its writer is ``manual`` whatever the
+    entry says; one with a draft must name the writer that drafted it.
+
+    There may be fewer entries than ``variants`` (1..variants): the
+    supplied caption then renders just those, and every later caption of a
+    Random batch still gets ``variants``. The dialog sends the one draft on
+    show when the drafts it holds no longer match the Variants picker, so a
+    writer's draft is never recorded as a typed prompt."""
+    if req.prompts is None:
+        return None
+    if (
+        not isinstance(req.prompts, list)
+        or not req.prompts
+        or len(req.prompts) > variants
+    ):
+        got = len(req.prompts) if isinstance(req.prompts, list) else "none"
+        raise T2iRequestError(
+            f"prompts must hold 1 to {variants} entries, one per variant "
+            f"(variants={variants}, got {got})"
+        )
+    entries: List[Dict[str, Any]] = []
+    for raw in req.prompts:
+        if not isinstance(raw, dict):
+            raise T2iRequestError("each prompts entry must be an object")
+        index = raw.get("variant_index")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise T2iRequestError("variant_index must be a whole number")
+        prompt = raw.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise T2iRequestError(f"Variant {index + 1}'s prompt is empty")
+        negative = _optional_text(raw.get("negative"), "negative")
+        draft = _optional_text(raw.get("draft"), "draft")
+        writer_id = raw.get("writer_id")
+        if draft is None:
+            writer_id = WRITER_MANUAL
+        elif writer_id not in DRAFT_WRITERS:
+            raise T2iRequestError(
+                f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
+                f"that drafts prompts ({', '.join(DRAFT_WRITERS)})"
+            )
+        try:
+            writer_model = check_writer_model(writer_id, raw.get("writer_model"))
+        except WriterModelError as exc:
+            raise T2iRequestError(f"Variant {index + 1}: {exc}") from exc
+        entries.append(
+            {
+                "prompt": prompt,
+                "negative": negative,
+                "draft": draft,
+                "writer_id": writer_id,
+                "writer_model": writer_model,
+                "variant_index": index,
+            }
+        )
+    entries.sort(key=lambda e: e["variant_index"])
+    if [e["variant_index"] for e in entries] != list(range(len(entries))):
+        raise T2iRequestError(
+            f"variant_index values must be 0 to {len(entries) - 1}, each once"
+        )
+    return entries
+
+
+async def _gather_or_cancel(coros: List[Awaitable[_T]]) -> List[_T]:
+    """Run ``coros`` concurrently and return their results in order. The
+    first failure cancels the rest and is raised as itself (not as an
+    ExceptionGroup), so callers map it like a sequential failure."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in done:
+            if not t.cancelled() and t.exception() is not None:
+                raise t.exception()  # type: ignore[misc]
+        return [t.result() for t in tasks]
+    finally:
+        rest = [t for t in tasks if not t.done()]
+        for t in rest:
+            t.cancel()
+        if rest:
+            await asyncio.gather(*rest, return_exceptions=True)
 
 
 def _names_first_caption(req: BatchRequest) -> bool:
@@ -361,10 +559,16 @@ class T2iRunner:
         unload_vlm_during_generation: bool = True,
         vlm_installed: Optional[Callable[[str], bool]] = None,
         directions: Optional[SnippetCache] = None,
+        get_all_vlms: Optional[Callable[[], List[Any]]] = None,
+        taste_examples: Optional[TasteExamplesFn] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
+        # The prompt-writer client; ``get_all_vlms`` lists every distinct
+        # VLM client (writer and general roles) -- unloading for ComfyUI
+        # frees them all. Without it only the writer is unloaded.
         self.get_vlm = get_vlm
+        self.get_all_vlms = get_all_vlms
         # Says whether a model's files are on disk (None: trust the picker).
         # A model that is not installed is "no VLM" -- the resolved caption
         # is the prompt -- not a failure to retry.
@@ -373,6 +577,9 @@ class T2iRunner:
         # Snippet lists for caption directions; None turns directions off.
         self.directions = directions
         self.library = library
+        # Favorite prompts for the "base+taste" writer; None means guidance
+        # is unavailable (a step warning says so and the writer is "base").
+        self.taste_examples = taste_examples
         self.output_root = Path(output_root)
         self.unload_vlm_during_generation = unload_vlm_during_generation
         # Called afresh for every prompt and every batch, so an edit to the
@@ -427,17 +634,19 @@ class T2iRunner:
         _check_seed(seed)
         return await self._resolve(profile, caption, seed, self._get_config())
 
-    async def _usable_model(self, vlm: Any) -> Optional[str]:
-        """The model to ask, or None when there is none: the picker found no
-        loadable model, or the one it found is not installed."""
+    async def _usable_model(self, vlm: Any) -> Tuple[Optional[str], str]:
+        """The model to ask and, when there is none, the warning to show:
+        the picker found no loadable model (``WARN_VLM_UNAVAILABLE``), or
+        the prompt-writer model it found is not installed (says which, and
+        to download it in Models)."""
         try:
-            model_id = pick_vlm_model(vlm)
+            model_id = pick_vlm_model(vlm, role="writer")
         except VlmSelectError:
-            return None
+            return None, WARN_VLM_UNAVAILABLE
         check = self.vlm_installed
         if check is not None and not await asyncio.to_thread(check, model_id):
-            return None
-        return model_id
+            return None, f"{writer_missing_hint(model_id)} - used the resolved caption"
+        return model_id, WARN_VLM_UNAVAILABLE
 
     async def _vlm_prompt(
         self,
@@ -506,6 +715,42 @@ class T2iRunner:
         logger.info("t2i direction for row %d: %s", row.id, ", ".join(direction.parts))
         return direction
 
+    @staticmethod
+    def _angle(variant: int) -> Optional[str]:
+        """Variant 0 has no angle; variant k leads with angle k-1 of
+        ``T2I_VARIANT_ANGLES`` (hot-reloaded; a shorter list wraps round, an
+        empty one means no angles)."""
+        if variant <= 0:
+            return None
+        angles = variant_angles(get_prompt_store())
+        if not angles:
+            return None
+        return angles[(variant - 1) % len(angles)]
+
+    async def _examples_for(
+        self, writer: str, resolved_text: str, model: str
+    ) -> Tuple[List[str], Optional[str]]:
+        """Taste examples for one caption, or ``([], warning)``. Only the
+        ``base+taste`` writer asks; anything going wrong degrades to the
+        unguided writer, never fails the write."""
+        if writer != WRITER_BASE_TASTE:
+            return [], None
+        fetch = self.taste_examples
+        if fetch is None:
+            return [], WARN_TASTE_UNCONFIGURED
+        try:
+            examples, warning = await fetch(resolved_text, model)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # the service never raises; belt and braces
+            logger.warning("t2i taste examples failed: %s", type(exc).__name__)
+            return [], WARN_TASTE_PREFIX + "internal error"
+        return list(examples), warning
+
+    @staticmethod
+    def _guided_writer(composed: ComposedPrompts) -> str:
+        return WRITER_BASE_TASTE if composed.examples_used else WRITER_BASE
+
     async def generate_prompt(
         self,
         *,
@@ -513,9 +758,14 @@ class T2iRunner:
         seed: int,
         model: str,
         directions: Optional[bool] = None,
+        variants: int = 1,
+        writer: str = WRITER_BASE,
     ) -> PromptResult:
         """Resolve ``caption`` and have the VLM write ``model``'s prompt for
-        it. Writes nothing.
+        it, once per variant (variant k > 0 with its angle). Writes nothing.
+        ``writer = base+taste`` adds the owner's favorite prompts as examples
+        (fetched once for all variants); when none can be had the drafts are
+        ``base`` and a warning says why.
 
         No VLM, or none loadable on this hardware, is not an error: the
         resolved caption is the prompt (see ``fallback_prompt``) and a
@@ -525,6 +775,8 @@ class T2iRunner:
         bad call."""
         profile = _profile(model)
         _check_seed(seed)
+        variants = _check_count(variants, "Variants", MAX_VARIANTS)
+        writer = _check_writer(writer)
         if not isinstance(caption, str) or not caption.strip():
             raise T2iRequestError("Caption is empty")
         cfg = self._get_config()
@@ -551,19 +803,61 @@ class T2iRunner:
         parts = list(direction.parts) if direction else []
 
         vlm = self.get_vlm()
-        model_id = await self._usable_model(vlm) if vlm is not None else None
+        model_id, unavailable = (
+            await self._usable_model(vlm)
+            if vlm is not None
+            else (None, WARN_VLM_UNAVAILABLE)
+        )
+        drafts: List[PromptDraft] = []
         if vlm is None or model_id is None:
             prompt, negative = fallback_prompt(profile, resolved.text, text)
-            warnings.append(WARN_VLM_UNAVAILABLE)
-            return PromptResult(prompt, negative, resolved.text, warnings, text, parts)
+            warnings.append(unavailable)
+            drafts = [
+                PromptDraft(prompt, negative, WRITER_FALLBACK, k, None)
+                for k in range(variants)
+            ]
+        else:
+            examples, taste_warning = await self._examples_for(
+                writer, resolved.text, profile.id
+            )
+            if taste_warning:
+                warnings.append(taste_warning)
+            # The variants are independent: write them concurrently, as many
+            # at once as the writer's llama-server has slots.
+            spec = VLM_REGISTRY.get(model_id)
+            slots = asyncio.Semaphore(max(1, spec.parallel_slots if spec else 1))
 
-        system_prompt, user_prompt = compose_t2i_prompts(
-            profile, resolved.text, cfg["content_mode"], text
+            async def write(k: int) -> PromptDraft:
+                angle = self._angle(k)
+                composed = compose_guided_t2i_prompts(
+                    profile, resolved.text, cfg["content_mode"], text, angle, examples
+                )
+                async with slots:
+                    prompt, negative = await self._vlm_prompt(
+                        vlm, model_id, profile, composed.system, composed.user
+                    )
+                return PromptDraft(
+                    prompt,
+                    negative,
+                    self._guided_writer(composed),
+                    k,
+                    angle,
+                    model_id,
+                )
+
+            drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
+                warnings.append(WARN_TASTE_NO_PREAMBLE)
+        first = drafts[0]
+        return PromptResult(
+            first.prompt,
+            first.negative,
+            resolved.text,
+            warnings,
+            text,
+            parts,
+            drafts,
         )
-        prompt, negative = await self._vlm_prompt(
-            vlm, model_id, profile, system_prompt, user_prompt
-        )
-        return PromptResult(prompt, negative, resolved.text, warnings, text, parts)
 
     # ---- batch planning ----------------------------------------------------
 
@@ -635,6 +929,9 @@ class T2iRunner:
                 f"{per_step} times per step: count per batch must be 1 "
                 "(pick Increment, Decrement or Randomize for more)"
             )
+        variants = _check_count(req.variants, "Variants", MAX_VARIANTS)
+        writer = _check_writer(req.writer)
+        prompts = _check_prompts(req, variants)
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
@@ -658,7 +955,9 @@ class T2iRunner:
         picker: Optional[CaptionPicker] = None
         supplied = _supplies_first_step(req)
         if req.mode == "manual":
-            if not isinstance(req.prompt, str) or not req.prompt.strip():
+            if prompts is None and (
+                not isinstance(req.prompt, str) or not req.prompt.strip()
+            ):
                 raise T2iRequestError("Prompt is empty")
             _check_aspect(req.aspect_ratio)
         else:
@@ -676,24 +975,57 @@ class T2iRunner:
 
         root, prefix = await self._placement(cfg)
 
-        requested = per_step if req.mode == "manual" else batch_size * per_step
-        seeds = plan_seeds(req.seed_policy, seed, requested, random.Random())
+        # One seed list per caption; each caption expands to its variant
+        # steps, which all render that same list (images differ by prompt).
+        # A supplied caption has one step per supplied prompt: one typed
+        # prompt renders once, whatever ``variants`` says.
+        captions = 1 if req.mode == "manual" else batch_size
+        first_supplied = req.mode == "manual" or supplied
+        first_variants = len(prompts) if prompts is not None else 1
         warnings: List[str] = []
-        if len(seeds) < requested:
+        if first_supplied and prompts is None and variants > 1:
+            warnings.append(WARN_TYPED_PROMPT_ONCE)
+
+        def variants_for(caption: int) -> int:
+            return first_variants if caption == 0 and first_supplied else variants
+
+        requested = captions * per_step
+        planned = plan_seeds(req.seed_policy, seed, requested, random.Random())
+        caption_seeds = [
+            planned[start : start + per_step]
+            for start in range(0, len(planned), per_step)
+        ]
+        plan: List[Tuple[int, int]] = []
+        step_ends: List[int] = []
+        seeds: List[int] = []
+        for caption, own in enumerate(caption_seeds):
+            for variant in range(variants_for(caption)):
+                plan.append((caption, variant))
+                seeds.extend(own)
+                step_ends.append(len(seeds))
+        if len(planned) < requested:
+            wanted = sum(variants_for(c) * per_step for c in range(captions))
             warnings.append(
                 f"seed range exhausted: {req.seed_policy} from {seed} allows only "
                 f"{len(seeds)} image(s), so the run was shortened from "
-                f"{requested} to {len(seeds)}"
+                f"{wanted} to {len(seeds)}"
             )
         # The seed the dialog shows once the run is over: increment/decrement
         # step past the last image, fixed repeats its own, and random plans one
         # more draw so the seed box still moves on. None means "the range ran
         # out": no unused seed remains.
-        following = next_seed(req.seed_policy, seeds[-1], random.Random())
+        following = next_seed(req.seed_policy, planned[-1], random.Random())
         # A negative the workflow has no node for is dropped, once, loudly:
         # the user typed one (Manual, or a Random first step) or the model
         # writes one (each step a Random batch draws).
-        typed_negative = isinstance(req.negative, str) and req.negative.strip() != ""
+        if prompts is not None:
+            typed_negative = any(
+                e["negative"] is not None and e["negative"].strip() for e in prompts
+            )
+        else:
+            typed_negative = (
+                isinstance(req.negative, str) and req.negative.strip() != ""
+            )
         if req.mode == "manual":
             has_negative = typed_negative
         else:
@@ -706,13 +1038,18 @@ class T2iRunner:
 
         return _Batch(
             id=uuid.uuid4().hex,
-            req=dataclasses.replace(req, loras=loras),
+            req=dataclasses.replace(
+                req, loras=loras, variants=variants, writer=writer, prompts=prompts
+            ),
             profile=profile,
             bindings=bindings,
             loras=loras,
             seeds=seeds,
-            per_step=per_step,
-            total_steps=-(-len(seeds) // per_step) if req.mode == "random" else 1,
+            caption_seeds=caption_seeds,
+            plan=plan,
+            step_ends=step_ends,
+            variant_groups=[uuid.uuid4().hex for _ in caption_seeds],
+            total_steps=len(plan),
             next_seed=following,
             root=root,
             prefix=prefix,
@@ -816,37 +1153,57 @@ class T2iRunner:
         return " ".join(str(exc).split())[:160] or type(exc).__name__
 
     async def _write_prompt(
-        self, batch: _Batch, resolved_text: str, direction: Optional[str] = None
-    ) -> Tuple[str, Optional[str], List[str], str]:
-        """``(prompt, negative, warnings, writer_id)`` for one step of a running batch.
+        self,
+        batch: _Batch,
+        resolved_text: str,
+        direction: Optional[str] = None,
+        angle: Optional[str] = None,
+        examples: Tuple[str, ...] = (),
+    ) -> Tuple[str, Optional[str], List[str], str, Optional[str]]:
+        """``(prompt, negative, warnings, writer_id, writer_model)`` for one
+        step of a running batch (``writer_model``: the VLM model asked, None
+        for a fallback).
 
         An unattended run never dies on one bad VLM call: a call that fails
         is tried once more (starting the model again first), then the
         resolved caption is used and a warning says so. Cancellation is
         never swallowed, and neither is anything that is not a VLM failure.
+        The writer is ``base+taste`` only when the examples actually went
+        into the prompt (a hot reload can drop the preamble they need).
         """
         profile = batch.profile
 
-        def fall_back(warning: str) -> Tuple[str, Optional[str], List[str], str]:
+        def fall_back(
+            warning: str,
+        ) -> Tuple[str, Optional[str], List[str], str, Optional[str]]:
             prompt, negative = fallback_prompt(profile, resolved_text, direction)
-            return prompt, negative, [warning], WRITER_FALLBACK
+            return prompt, negative, [warning], WRITER_FALLBACK, None
 
         vlm = self.get_vlm()
         if vlm is None:
             return fall_back(WARN_VLM_UNAVAILABLE)
-        model_id = await self._usable_model(vlm)
+        model_id, unavailable = await self._usable_model(vlm)
         if model_id is None:
-            return fall_back(WARN_VLM_UNAVAILABLE)
-        system_prompt, user_prompt = compose_t2i_prompts(
-            profile, resolved_text, batch.content_mode, direction
+            return fall_back(unavailable)
+        composed = compose_guided_t2i_prompts(
+            profile, resolved_text, batch.content_mode, direction, angle, examples
+        )
+        notes = (
+            [WARN_TASTE_NO_PREAMBLE] if examples and not composed.examples_used else []
         )
         failure: BaseException = VlmError("no attempt was made")
         for attempt in (1, 2):
             try:
                 prompt, negative = await self._vlm_prompt(
-                    vlm, model_id, profile, system_prompt, user_prompt
+                    vlm, model_id, profile, composed.system, composed.user
                 )
-                return prompt, negative, [], WRITER_BASE
+                return (
+                    prompt,
+                    negative,
+                    notes,
+                    self._guided_writer(composed),
+                    model_id,
+                )
             except asyncio.CancelledError:
                 raise
             except (VlmError, TimeoutError, RuntimeError) as exc:
@@ -858,30 +1215,51 @@ class T2iRunner:
             f"VLM failed ({self._reason(failure)}) - used the resolved caption"
         )
 
-    def _supplied_step(self, batch: _Batch) -> _Step:
-        """The step the request itself carries -- a Manual batch's only step,
-        or a Random batch's first: its prompt, ratio, caption and negative
-        exactly as given. Nothing is drawn and the model is not asked."""
+    def _supplied_step(self, batch: _Batch, index: int, variant: int = 0) -> _Step:
+        """A step the request itself carries -- a Manual batch's, or a
+        Random batch's first caption's: its prompt, ratio, caption and
+        negative exactly as given (one per variant from ``prompts``, else the
+        single typed ``prompt``). Nothing is drawn and the model is not
+        asked; a typed prompt is the ``manual`` writer with no draft."""
         req = batch.req
         aspect = str(req.aspect_ratio)
         width, height = t2i_dims(aspect, req.megapixels, batch.profile.dim_multiple)
-        blank = not isinstance(req.negative, str) or not req.negative.strip()
+        caption, _ = batch.plan[index]
+        if req.prompts is not None:
+            entry = req.prompts[variant]
+            prompt, raw_negative = str(entry["prompt"]), entry["negative"]
+            draft, writer_id = entry["draft"], entry["writer_id"]
+            writer_model = entry.get("writer_model")
+        else:
+            prompt, raw_negative = str(req.prompt), req.negative
+            draft, writer_id, writer_model = None, WRITER_MANUAL, None
+        blank = not isinstance(raw_negative, str) or not raw_negative.strip()
         return _Step(
-            index=0,
+            index=index,
             caption=req.caption or "",
             aspect_ratio=aspect,
-            seeds=batch.step_seeds(0),
-            prompt=str(req.prompt),
-            negative=None if blank else req.negative,
+            seeds=batch.step_seeds(index),
+            prompt=prompt,
+            negative=None if blank else raw_negative,
             warnings=[],
             width=width,
             height=height,
+            writer_id=writer_id,
+            writer_model=writer_model,
+            variant_group=batch.variant_groups[caption],
+            variant_index=variant,
+            variants=batch.variants_of(caption),
+            draft=draft,
+            form_negative=raw_negative,
         )
 
-    async def _random_step(self, batch: _Batch, index: int) -> _Step:
+    async def _caption_context(self, batch: _Batch, index: int) -> _CaptionContext:
+        """Draw (or take the named) caption for the caption of step
+        ``index`` and work out everything its variants share."""
+        caption_index, _ = batch.plan[index]
         warnings: List[str] = []
         row: Optional[CaptionRow] = None
-        if index == 0 and _names_first_caption(batch.req):
+        if caption_index == 0 and _names_first_caption(batch.req):
             # The caption the user named: nothing is drawn for this step. Its
             # ratio was checked when the batch was planned.
             caption, aspect = str(batch.req.caption), str(batch.req.aspect_ratio)
@@ -916,23 +1294,58 @@ class T2iRunner:
             batch.directions,
             warnings,
         )
-        prompt, negative, notes, writer_id = await self._write_prompt(
-            batch, resolved.text, direction.text if direction else None
-        )
-        warnings.extend(notes)
-        return _Step(
-            index=index,
+        examples: List[str] = []
+        if self.get_vlm() is not None:  # no VLM: nothing to guide
+            examples, taste_warning = await self._examples_for(
+                batch.req.writer, resolved.text, batch.profile.id
+            )
+            if taste_warning:
+                warnings.append(taste_warning)
+        return _CaptionContext(
+            index=caption_index,
             caption=caption,
             aspect_ratio=aspect,
-            seeds=seeds,
-            prompt=prompt,
-            negative=negative,
-            warnings=warnings,
             width=width,
             height=height,
+            seeds=seeds,
+            resolved_text=resolved.text,
+            direction=direction,
+            examples=examples,
+            warnings=warnings,
+        )
+
+    async def _random_step(
+        self, batch: _Batch, context: _CaptionContext, index: int, variant: int
+    ) -> _Step:
+        """Write one variant of a caption: variant 0 plainly, variant k with
+        its angle; every variant gets the caption's examples."""
+        direction = context.direction
+        prompt, negative, notes, writer_id, writer_model = await self._write_prompt(
+            batch,
+            context.resolved_text,
+            direction.text if direction else None,
+            self._angle(variant),
+            tuple(context.examples),
+        )
+        return _Step(
+            index=index,
+            caption=context.caption,
+            aspect_ratio=context.aspect_ratio,
+            seeds=list(context.seeds),
+            prompt=prompt,
+            negative=negative,
+            warnings=list(context.warnings) + notes,
+            width=context.width,
+            height=context.height,
             direction=direction.text if direction else None,
             direction_parts=list(direction.parts) if direction else [],
             writer_id=writer_id,
+            writer_model=writer_model,
+            variant_group=batch.variant_groups[context.index],
+            variant_index=variant,
+            variants=batch.variants_of(context.index),
+            # What the writer produced is the draft; nobody edits it here.
+            draft=prompt,
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -949,6 +1362,16 @@ class T2iRunner:
                 "warnings": list(step.warnings),
                 "direction": step.direction,
                 "direction_parts": list(step.direction_parts),
+                "variant_index": step.variant_index,
+                "variants": step.variants,
+                # Which caption of how many (the dialog's "Batch k/N"), and
+                # the step's lineage: the hand-back keeps it so the next
+                # Generate records the writer's draft, not a typed prompt.
+                "caption_index": batch.plan[step.index][0],
+                "captions": len(batch.caption_seeds),
+                "writer_id": step.writer_id,
+                "writer_model": step.writer_model,
+                "draft": step.draft,
             }
         )
         self._show_step(batch)
@@ -976,35 +1399,59 @@ class T2iRunner:
     async def _produce(self, batch: _Batch, queue: "asyncio.Queue[_Step]") -> None:
         """Write the prompts, one step at a time, and hand each to the
         consumer. A Manual batch has one step and never asks the VLM; neither
-        does the first step of a Random batch whose request supplies it."""
+        does the first step of a Random batch whose request supplies it.
+
+        While a Random batch writes, it holds the writer client
+        (``VlmClient.hold``): background VLM work (the tag drain) does not
+        evict the writer between two prompts, it waits for the batch."""
+        vlm = self.get_vlm() if batch.mode == "random" else None
+        hold = getattr(vlm, "hold", None)
+        with hold() if callable(hold) else contextlib.nullcontext():
+            await self._produce_steps(batch, queue)
+
+    async def _produce_steps(
+        self, batch: _Batch, queue: "asyncio.Queue[_Step]"
+    ) -> None:
         try:
-            for index in range(batch.total_steps):
+            context: Optional[_CaptionContext] = None
+            for index, (caption, variant) in enumerate(batch.plan):
                 if batch.mode == "manual" or (
-                    index == 0 and _supplies_first_step(batch.req)
+                    caption == 0 and _supplies_first_step(batch.req)
                 ):
-                    step = self._supplied_step(batch)
+                    step = self._supplied_step(batch, index, variant)
                 else:
-                    step = await self._random_step(batch, index)
+                    if context is None or context.index != caption:
+                        context = await self._caption_context(batch, index)
+                    step = await self._random_step(batch, context, index, variant)
                 self._announce_step(batch, step)
                 await queue.put(step)
         finally:
             batch.prompting = False
 
     async def _unload_vlm(self, batch: _Batch) -> None:
-        """Free the GPU for ComfyUI: shut the VLM down if a model is loaded
-        -- unless another Random batch is still writing prompts with it.
-        Only called when unloading is on. Failing to unload never stops the
-        run."""
-        vlm = self.get_vlm()
-        if vlm is None or not vlm.model_id:
-            return
-        for other in self._batches.values():
-            if other is not batch and other.mode == "random" and other.prompting:
-                return
-        try:
-            await vlm.shutdown()
-        except Exception as exc:
-            logger.warning("could not unload the VLM before rendering: %s", exc)
+        """Free the GPU for ComfyUI: shut down each distinct VLM client
+        that has a model loaded, once -- except the prompt writer while
+        another Random batch is still writing prompts with it. Only called
+        when unloading is on. Failing to unload never stops the run."""
+        writer = self.get_vlm()
+        clients: List[Any] = (
+            list(self.get_all_vlms()) if self.get_all_vlms is not None else []
+        )
+        if writer is not None and not any(c is writer for c in clients):
+            clients.insert(0, writer)
+        writer_busy = any(
+            other is not batch and other.mode == "random" and other.prompting
+            for other in self._batches.values()
+        )
+        for vlm in clients:
+            if vlm is None or not vlm.model_id:
+                continue
+            if vlm is writer and writer_busy:
+                continue
+            try:
+                await vlm.shutdown()
+            except Exception as exc:
+                logger.warning("could not unload the VLM before rendering: %s", exc)
 
     def _negative_for(self, batch: _Batch, step: _Step) -> Optional[str]:
         """The negative to send: only a workflow that binds MS_NEGATIVE can
@@ -1033,9 +1480,13 @@ class T2iRunner:
             "loras": [dict(entry) for entry in batch.loras],
             "prompt": step.prompt,
             "writer_id": step.writer_id,
+            "writer_model": step.writer_model,
+            "variant_group": step.variant_group,
+            "variant_index": step.variant_index,
+            "draft": step.draft,
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
-            "negative": batch.req.negative if manual else step.negative,
+            "negative": step.form_negative if manual else step.negative,
             "category_ids": list(batch.req.category_ids),
         }
         while len(self._job_meta) > _JOB_META_LIMIT:
@@ -1394,6 +1845,17 @@ class T2iRunner:
             params = {}
         known = meta if meta is not None else {}
         form = self._form_state(job, meta, params)
+        draft = known.get("draft")
+        rendered = params.get("positive")
+        # Unknown after a restart (no snapshot); else 1 when the rendered
+        # prompt is not the writer's draft once whitespace is normalized.
+        edited: Optional[int] = None
+        if meta is not None:
+            edited = int(
+                draft is not None
+                and normalize_prompt(str(draft))
+                != normalize_prompt(str(rendered or ""))
+            )
         render_s = render_seconds(job.get("started_at"), job.get("finished_at"))
         inserted: List[str] = []
         for entry in files:
@@ -1421,6 +1883,11 @@ class T2iRunner:
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                     form_state=form,
                     writer_id=known.get("writer_id"),
+                    writer_model=known.get("writer_model"),
+                    variant_group=known.get("variant_group"),
+                    variant_index=known.get("variant_index"),
+                    draft_prompt=draft,
+                    edited=edited,
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)

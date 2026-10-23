@@ -37,6 +37,7 @@ def _seed_media(db: DatabaseManager, paths) -> None:
 class FakeRunner:
     def __init__(self):
         self.prompt_result = ("For the target video, ...", ["w1"])
+        self.writer_model = "qwen3vl-8b"
         self.prompt_error = None
         self.generate_result = 42
         self.generate_error = None
@@ -59,6 +60,12 @@ class FakeRunner:
         if self.prompt_error:
             raise self.prompt_error
         return self.prompt_result
+
+    async def write_prompt(self, source_path, idea, duration_s, template_id=None):
+        text, warnings = await self.generate_prompt(
+            source_path, idea, duration_s, template_id=template_id
+        )
+        return text, warnings, self.writer_model
 
     async def generate(self, **kwargs):
         self.calls.append(("generate", kwargs))
@@ -128,6 +135,68 @@ class _I2vApiBase(unittest.TestCase):
 
 class TestI2vApi(_I2vApiBase):
     # ---- /prompt ----------------------------------------------------
+
+    def test_i2v_prompt_returns_writer_id(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={"source_path": "/lib/a.png", "idea": "x", "duration_s": 6},
+        )
+        self.assertEqual(resp.json()["writer_id"], "base")
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 6,
+                "writer": "base",
+            },
+        )
+        self.assertEqual(resp.json()["writer_id"], "base")
+
+    def test_i2v_prompt_returns_the_writer_model(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={"source_path": "/lib/a.png", "idea": "x", "duration_s": 6},
+        )
+        self.assertEqual(resp.json()["writer_model"], "qwen3vl-8b")
+
+    def test_i2v_generate_passes_the_writer_model(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json=self._generate_body(
+                writer_id="base", draft_prompt="a draft", writer_model="qwen3vl-8b"
+            ),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.runner.generate_calls[0]["writer_model"], "qwen3vl-8b")
+
+    def test_i2v_prompt_rejects_an_unoffered_writer(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 6,
+                "writer": "base+taste",
+            },
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_i2v_generate_passes_lineage_to_the_runner(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json=self._generate_body(writer_id="base", draft_prompt="a draft"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.runner.generate_calls[0]
+        self.assertEqual(kwargs["writer_id"], "base")
+        self.assertEqual(kwargs["draft_prompt"], "a draft")
+
+    def test_i2v_generate_lineage_defaults_to_none(self):
+        self.client.post("/api/i2v/generate", json=self._generate_body())
+        kwargs = self.runner.generate_calls[0]
+        self.assertIsNone(kwargs["writer_id"])
+        self.assertIsNone(kwargs["draft_prompt"])
 
     def test_prompt_happy_path(self):
         resp = self.client.post(

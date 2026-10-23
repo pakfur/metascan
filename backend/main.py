@@ -6,7 +6,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Dict, Any
+from typing import Any, AsyncIterator, Dict, List
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,13 +47,21 @@ from backend.api import (
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
+from backend.services.taste_examples_service import TasteExamplesService
 from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import apply_pending_taste_snapshot
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmClient
-from backend.api.vlm import set_vlm_client, get_vlm_client
+from backend.api.vlm import (
+    get_all_vlm_clients,
+    get_vlm_client,
+    get_vlm_roles,
+    get_writer_vlm,
+    set_vlm_roles,
+)
+from backend.services.vlm_roles import VlmRoles
 from backend.api.comfy import set_comfy_client
 from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
@@ -93,16 +101,34 @@ def _inject_huggingface_token(token: str) -> None:
 
 
 def _wire_vlm_client_status(client: VlmClient) -> None:
-    """Bridge VlmClient state transitions onto the ``models`` WS channel."""
+    """Bridge VlmClient state transitions onto the ``models`` WS channel.
+
+    Each payload carries ``roles``: the roles (``writer`` / ``general``)
+    this client serves right now, so the UI can tell two clients apart."""
+
+    def _roles() -> List[str]:
+        roles = get_vlm_roles()
+        return list(roles.roles_of(client)) if roles is not None else []
 
     def on_status(_state: str, payload: Dict[str, Any]) -> None:
-        ws_manager.broadcast_sync("models", "vlm_status", payload)
+        ws_manager.broadcast_sync(
+            "models", "vlm_status", {**payload, "roles": _roles()}
+        )
 
     def on_progress(payload: Dict[str, Any]) -> None:
-        ws_manager.broadcast_sync("models", "vlm_progress", payload)
+        ws_manager.broadcast_sync(
+            "models", "vlm_progress", {**payload, "roles": _roles()}
+        )
 
     client.on_status(on_status)
     client.on_progress(on_progress)
+
+
+def _new_vlm_client() -> VlmClient:
+    """One llama-server supervisor per distinct role model."""
+    client = VlmClient()
+    _wire_vlm_client_status(client)
+    return client
 
 
 def _wire_inference_client_status(client: InferenceClient) -> None:
@@ -228,9 +254,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _wire_inference_client_status(client)
     similarity.set_inference_client(client)
 
-    vlm_client = VlmClient()
-    _wire_vlm_client_status(vlm_client)
-    set_vlm_client(vlm_client)
+    # Writer (T2I / I2V prompts) and general (tagging, chat, storyboard)
+    # roles; one client when both name the same model. Resolving defaults
+    # probes the hardware and the installed weights, so off the loop.
+    vlm_roles = await asyncio.to_thread(
+        VlmRoles.from_config, app_config, client_factory=_new_vlm_client
+    )
+    set_vlm_roles(vlm_roles)
 
     comfy_cfg = get_comfy_config(app_config)
     comfy_client = ComfyClient(
@@ -254,6 +284,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         db=get_db(),
         comfy=comfy_client,
         get_vlm=get_vlm_client,
+        get_all_vlms=get_all_vlm_clients,
         output_root=Path(comfy_cfg["output_root"]),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
     )
@@ -266,8 +297,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     i2v_runner = I2vRunner(
         db=get_db(),
         comfy=comfy_client,
-        get_vlm=get_vlm_client,
+        get_vlm=get_writer_vlm,
         output_root=Path(comfy_cfg["output_root"]),
+        vlm_installed=vlm_model_installed,
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -282,7 +314,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     t2i_runner = T2iRunner(
         db=get_db(),
         comfy=comfy_client,
-        get_vlm=get_vlm_client,
+        get_vlm=get_writer_vlm,
+        get_all_vlms=get_all_vlm_clients,
         vlm_installed=vlm_model_installed,
         captions=CaptionStore(t2i_dir / "t2i_captions.csv"),
         library=LibraryCache(t2i_dir),
@@ -290,6 +323,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_root=Path(comfy_cfg["output_root"]),
         get_config=lambda: get_t2i_config(load_app_config()),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        # "base+taste": favorite prompts as examples, CLIP only when ready.
+        taste_examples=TasteExamplesService(get_db()).examples_for,
     )
     t2i_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -336,20 +371,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_faiss())
 
-    from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
+    # Preload each distinct role client whose model is in the preload list
+    # (a listed VLM no role uses is not loaded: nothing would talk to it).
+    for vlm_client in vlm_roles.distinct_clients():
+        preload_id = vlm_client.preferred_model_id
+        if preload_id is None or preload_id not in preload_list:
+            continue
+        logger.info(
+            "Preloading VLM at startup: %s (%s)",
+            preload_id,
+            "+".join(vlm_roles.roles_of(vlm_client)),
+        )
 
-    for preload_id in preload_list:
-        if preload_id in _VLM_REGISTRY:
-            logger.info("Preloading VLM at startup: %s", preload_id)
+        async def _preload_vlm(
+            c: VlmClient = vlm_client, mid: str = preload_id
+        ) -> None:
+            try:
+                await c.start(mid, wait_ready=False)
+            except Exception:
+                logger.exception("VLM preload failed")
 
-            async def _preload_vlm(mid: str = preload_id) -> None:
-                try:
-                    await vlm_client.start(mid, wait_ready=False)
-                except Exception:
-                    logger.exception("VLM preload failed")
-
-            asyncio.create_task(_preload_vlm())
-            break  # only one VLM at a time
+        asyncio.create_task(_preload_vlm())
 
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
@@ -382,6 +424,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         is_busy=lambda: generation_busy(t2i_runner, comfy_client),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
+    # The post-embedding VLM tag drain waits for the same "no generation in
+    # flight" so a 27B never loads into a render.
+    similarity.set_generation_busy_probe(
+        lambda: generation_busy(t2i_runner, comfy_client)
+    )
 
     try:
         yield
@@ -401,6 +448,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # before closing the taste service that consumes it.
         await similarity.shutdown_embedding_queue()  # cancels any VLM drain
         similarity.set_embedding_complete_hook(None)
+        similarity.set_generation_busy_probe(None)
         similarity.set_server_loop(None)
         try:
             await taste_service.aclose()
@@ -411,10 +459,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await client.shutdown()
         except Exception:
             logger.exception("Inference client shutdown raised")
-        try:
-            await vlm_client.shutdown()
-        except Exception:
-            logger.exception("VLM client shutdown raised")
+        # Every distinct role client (shutdown_all logs its own failures).
+        await vlm_roles.shutdown_all()
         # Shut down the event *source* (ComfyClient) before the runner that
         # consumes its events. storyboard_runner.handle_job_event schedules
         # a fire-and-forget ingest task for every job_outputs event; if the
