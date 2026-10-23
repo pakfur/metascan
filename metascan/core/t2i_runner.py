@@ -48,6 +48,7 @@ from metascan.core.judgments import (
     WRITER_MANUAL,
     WriterModelError,
     check_writer_model,
+    writer_id_allowed,
     normalize_prompt,
 )
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
@@ -439,7 +440,9 @@ def _optional_text(value: Any, label: str) -> Optional[str]:
     raise T2iRequestError(f"{label} must be text")
 
 
-def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, Any]]]:
+def _check_prompts(
+    req: BatchRequest, variants: int, db: Any = None
+) -> Optional[List[Dict[str, Any]]]:
     """The supplied per-variant prompts, normalised and ordered by
     ``variant_index``; None when the request has none. A prompt without a
     draft was typed from scratch, so its writer is ``manual`` whatever the
@@ -477,13 +480,13 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
         writer_id = raw.get("writer_id")
         if draft is None:
             writer_id = WRITER_MANUAL
-        elif writer_id not in DRAFT_WRITERS:
+        elif not writer_id_allowed(writer_id, db):
             raise T2iRequestError(
                 f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
-                f"that drafts prompts ({', '.join(DRAFT_WRITERS)})"
+                f"that drafts prompts ({', '.join(DRAFT_WRITERS)} or a ready adapter)"
             )
         try:
-            writer_model = check_writer_model(writer_id, raw.get("writer_model"))
+            writer_model = check_writer_model(writer_id, raw.get("writer_model"), db)
         except WriterModelError as exc:
             raise T2iRequestError(f"Variant {index + 1}: {exc}") from exc
         entries.append(
@@ -931,7 +934,7 @@ class T2iRunner:
             )
         variants = _check_count(req.variants, "Variants", MAX_VARIANTS)
         writer = _check_writer(req.writer)
-        prompts = _check_prompts(req, variants)
+        prompts = await asyncio.to_thread(_check_prompts, req, variants, self.db)
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
