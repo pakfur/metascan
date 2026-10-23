@@ -97,7 +97,10 @@ the root CLAUDE.md still applies.
   load that reached READY (`_ready_seen`) and was evicted before its
   loader's `_wait_ready` resumed counts as loaded (`ensure_started`
   returns; the next request re-ensures) — only a client evicted before
-  READY raises "ended in state stopped".
+  READY raises "ended in state stopped". `_resident_request` checks
+  `_is_resident()` after its own `_ensure_resident` returns and re-ensures
+  again (bounded by `_EVICTION_RETRIES`) instead of running the request
+  against the stopped server.
   The post-scan tag drain (`similarity._schedule_vlm_drain_after_complete`,
   run on the captured server loop, coalesced) is a background re-ensure
   too: `_start_index_build` snapshots the general client's
