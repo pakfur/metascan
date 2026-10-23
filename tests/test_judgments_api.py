@@ -150,3 +150,25 @@ def test_faiss_embedding_lookup_failure_logs_warning(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert faiss_embedding_lookup("/p/a.png") is None
     assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_seen_records_the_score_shown(client, seeded):
+    from backend.dependencies import get_db
+
+    r = client.post(
+        "/api/judgments/seen", json={"file_path": "/p/a.png", "score_shown": 0.42}
+    )
+    assert r.status_code == 200 and r.json()["seen_at"]
+    events = get_db().list_judgment_events("/p/a.png")
+    seen = [e for e in events if e["event"] == "seen"]
+    assert len(seen) == 1 and seen[0]["score_shown"] == 0.42
+
+
+def test_seen_without_score_stores_null(client, seeded):
+    from backend.dependencies import get_db
+
+    client.post("/api/judgments/seen", json={"file_path": "/p/a.png"})
+    seen = [
+        e for e in get_db().list_judgment_events("/p/a.png") if e["event"] == "seen"
+    ]
+    assert len(seen) == 1 and seen[0]["score_shown"] is None

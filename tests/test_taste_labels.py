@@ -315,3 +315,32 @@ def test_no_warning_when_nothing_skipped(caplog):
     with caplog.at_level("WARNING", logger="metascan.core.taste_labels"):
         build_label_set({"media": [_live()], "tombstones": []}, T0, 180)
     assert caplog.text == ""
+
+
+def test_seen_with_score_shown_halves_a_seen_only_row(db):
+    for p in ("/l/a.png", "/l/b.png"):
+        db.save_media(_media(p))
+    db.mark_seen("/l/a.png", now=T0, score_shown=0.31)
+    db.mark_seen("/l/b.png", now=T0)
+    rows = {r.file_path: r for r in _labels(db).rows}
+    assert rows["/l/a.png"].label == 0 and rows["/l/b.png"].label == 0
+    assert rows["/l/a.png"].weight == pytest.approx(0.5)
+    assert rows["/l/b.png"].weight == pytest.approx(1.0)
+
+
+def test_seen_score_does_not_touch_a_verdict_row(db):
+    db.save_media(_media("/l/a.png"))
+    db.mark_seen("/l/a.png", now=T0, score_shown=0.9)
+    db.set_verdict("/l/a.png", "favorite", now=T0)  # no score on the verdict
+    (row,) = _labels(db).rows
+    assert row.label == 1 and row.weight == pytest.approx(1.0)
+
+
+def test_seen_score_on_a_tombstoned_seen_only_row(db):
+    db.save_media(_media("/l/a.png"))
+    db.mark_seen("/l/a.png", now=T0, score_shown=0.2)
+    db.delete_media(Path("/l/a.png"))
+    raw = db.taste_training_raw()
+    assert raw["tombstones"][0]["seen_score_shown"] == 0.2
+    (row,) = build_label_set(raw, T0, 180).rows
+    assert row.label == 0 and row.weight == pytest.approx(0.5)
