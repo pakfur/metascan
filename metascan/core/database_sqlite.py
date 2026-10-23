@@ -6169,7 +6169,11 @@ class DatabaseManager:
             for (name,) in conn.execute("SELECT name FROM writer_adapters"):
                 lowered = str(name).lower()
                 tail = lowered[len(prefix) :]
-                if lowered.startswith(prefix.lower()) and tail.isdigit():
+                if (
+                    lowered.startswith(prefix.lower())
+                    and tail.isascii()
+                    and tail.isdigit()
+                ):
                     top = max(top, int(tail))
         return f"{prefix}{top + 1}"
 

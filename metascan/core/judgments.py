@@ -38,17 +38,22 @@ class WriterModelError(ValueError):
     """A supplied ``writer_model`` names no model the writer role can use."""
 
 
-def writer_id_allowed(writer_id: Any, db: Any = None) -> bool:
+def writer_id_allowed(
+    writer_id: Any, db: Any = None, kind: Optional[str] = None
+) -> bool:
     """True when ``writer_id`` may be named by a supplied draft: a
     ``DRAFT_WRITERS`` id, or ``adapter:<id>`` of a registry adapter that is
-    ``ready`` / ``untested`` (``db`` is needed to look it up). A training,
+    ``ready`` / ``untested`` (``db`` is needed to look it up) whose ``kind``
+    matches the surface asking (``t2i`` / ``i2v``) when ``kind`` is given. A training,
     failed or deleted adapter is refused for new drafts."""
     if isinstance(writer_id, str) and writer_id in DRAFT_WRITERS:
         return True
-    return _servable_adapter(writer_id, db) is not None
+    return _servable_adapter(writer_id, db, kind) is not None
 
 
-def _servable_adapter(writer_id: Any, db: Any) -> Optional[Dict[str, Any]]:
+def _servable_adapter(
+    writer_id: Any, db: Any, kind: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     from metascan.core.writer_adapters import (
         SERVABLE_STATUSES,
         parse_adapter_writer_id,
@@ -60,11 +65,16 @@ def _servable_adapter(writer_id: Any, db: Any) -> Optional[Dict[str, Any]]:
     row: Optional[Dict[str, Any]] = db.get_writer_adapter(adapter_id)
     if row is None or row["status"] not in SERVABLE_STATUSES:
         return None
+    if kind is not None and row["kind"] != kind:
+        return None
     return row
 
 
 def check_writer_model(
-    writer_id: Optional[str], writer_model: Any, db: Any = None
+    writer_id: Optional[str],
+    writer_model: Any,
+    db: Any = None,
+    kind: Optional[str] = None,
 ) -> Optional[str]:
     """The ``writer_model`` to record for a supplied prompt. Only a VLM
     writer (``base`` / ``base+taste``) has one: ``manual`` and ``fallback``
@@ -76,7 +86,7 @@ def check_writer_model(
 
     if parse_adapter_writer_id(writer_id) is not None:
         # An adapter drafts on its base model only; the lineage must say so.
-        adapter = _servable_adapter(writer_id, db)
+        adapter = _servable_adapter(writer_id, db, kind)
         if adapter is None:
             raise WriterModelError(f"writer {writer_id!r} is not a usable adapter")
         if writer_model != adapter["base_model"]:

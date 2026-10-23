@@ -1,6 +1,7 @@
 """REST endpoints for prompt-writer adapters (taste-learning fine-tunes)."""
 
 import asyncio
+import logging
 import shutil
 from typing import Any, Dict, List
 
@@ -15,6 +16,8 @@ from metascan.core.writer_adapters import (
     adapter_writer_id,
 )
 from metascan.utils.app_paths import get_data_dir
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/writers", tags=["writers"])
 
@@ -71,7 +74,16 @@ def _delete(adapter_id: int) -> None:
     row = _live(adapter_id)
     if row["status"] == STATUS_TRAINING:
         raise HTTPException(status_code=409, detail={"code": "adapter_training"})
-    shutil.rmtree(adapter_dir(get_data_dir(), adapter_id), ignore_errors=True)
+    folder = adapter_dir(get_data_dir(), adapter_id)
+    try:
+        if folder.exists():
+            shutil.rmtree(folder)
+    except OSError as exc:
+        # Keep the row and its file_path so the delete can be retried.
+        logger.warning("could not remove adapter %s files: %s", adapter_id, exc)
+        raise HTTPException(
+            status_code=409, detail={"code": "adapter_files_busy"}
+        ) from exc
     get_db().soft_delete_writer_adapter(adapter_id)
 
 
