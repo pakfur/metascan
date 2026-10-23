@@ -1,6 +1,7 @@
 """Similarity search and embedding-index endpoints (subprocess pattern)."""
 
 import asyncio
+import concurrent.futures
 import logging
 import threading
 from pathlib import Path
@@ -45,6 +46,20 @@ _current_scan_tag_with_vlm: bool = False
 _server_loop: Optional[asyncio.AbstractEventLoop] = None
 # Touched only on the loop thread (inside _drain), so no lock is needed.
 _vlm_drain_running: bool = False
+# A request that arrived mid-drain: drain_once snapshots the pending file at
+# its start, so lines appended meanwhile need one more pass.
+_vlm_drain_rerun: bool = False
+# The in-flight scheduled drain, cancelled on shutdown.
+_vlm_drain_future: Optional["concurrent.futures.Future[None]"] = None
+
+
+def cancel_vlm_drain() -> None:
+    """Shutdown hook: cancel an in-flight post-embedding drain."""
+    global _vlm_drain_future
+    fut = _vlm_drain_future
+    _vlm_drain_future = None
+    if fut is not None and not fut.done():
+        fut.cancel()
 
 
 def set_server_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
@@ -213,9 +228,10 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
     """
 
     async def _drain() -> None:
-        global _vlm_drain_running
+        global _vlm_drain_running, _vlm_drain_rerun
         if _vlm_drain_running:
-            logger.info("VLM drain after scan skipped: a drain is already running")
+            _vlm_drain_rerun = True
+            logger.info("VLM drain after scan: one already running, will rerun after")
             return
         _vlm_drain_running = True
         try:
@@ -236,13 +252,19 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
                 db=get_db(),
                 model_id=mid,
             )
-            drained = await pump.drain_once()
-            logger.info(f"VLM drain after scan: tagged {drained} file(s)")
+            while True:
+                _vlm_drain_rerun = False
+                drained = await pump.drain_once()
+                logger.info(f"VLM drain after scan: tagged {drained} file(s)")
+                if not _vlm_drain_rerun:
+                    break
         except Exception:
             logger.exception("VLM drain after scan failed")
         finally:
             _vlm_drain_running = False
+            _vlm_drain_rerun = False
 
+    global _vlm_drain_future
     loop = _server_loop
     if loop is None or loop.is_closed():
         logger.warning(
@@ -252,7 +274,10 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
         return
     coro = _drain()
     try:
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        # A coalesced request returns at once; keep tracking the real drain.
+        if _vlm_drain_future is None or _vlm_drain_future.done():
+            _vlm_drain_future = fut
     except RuntimeError:
         coro.close()
         logger.warning(
@@ -288,6 +313,7 @@ def init_embedding_queue() -> None:
 async def shutdown_embedding_queue() -> None:
     """Shutdown hook: cancel poller and any running worker."""
     global _embed_poll_task
+    cancel_vlm_drain()
     if _embed_poll_task is not None:
         _embed_poll_task.cancel()
         try:

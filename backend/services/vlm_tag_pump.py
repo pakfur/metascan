@@ -54,14 +54,31 @@ class VlmTagPump:
     def cancel(self) -> None:
         self._cancelled = True
 
+    def _consume_snapshot(self, snapshot: str) -> None:
+        """Remove the snapshot's lines from the file, keeping lines appended
+        since it was read (the embedding worker appends concurrently)."""
+        try:
+            current = self.pending_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        if current.startswith(snapshot):
+            rest = current[len(snapshot) :]
+        else:
+            taken = set(snapshot.splitlines())
+            rest = "".join(
+                ln
+                for ln in current.splitlines(keepends=True)
+                if ln.rstrip("\r\n") not in taken
+            )
+        self.pending_file.write_text(rest, encoding="utf-8")
+
     async def drain_once(self) -> int:
         """Process every line currently in vlm_pending.jsonl. Returns count."""
         if not self.pending_file.exists():
             return 0
-        # Snapshot + truncate atomically — any new lines after this point go
-        # to a freshly-empty file and are picked up by the next drain.
+        # Snapshot now, but only consume (remove) the snapshot once the VLM
+        # is up: a failed start must leave the batch queued for the next drain.
         text = self.pending_file.read_text(encoding="utf-8")
-        self.pending_file.write_text("", encoding="utf-8")
         paths: list[str] = []
         for raw in text.splitlines():
             line = raw.strip()
@@ -72,9 +89,11 @@ class VlmTagPump:
             except (json.JSONDecodeError, KeyError):
                 logger.warning("dropping malformed line: %s", line[:200])
         if not paths:
+            self._consume_snapshot(text)
             return 0
 
         await self._client.ensure_started(self._model_id)
+        self._consume_snapshot(text)
 
         total = len(paths)
         ok = 0

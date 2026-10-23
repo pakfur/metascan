@@ -42,3 +42,40 @@ async def test_pump_handles_missing_file_gracefully():
         pump = VlmTagPump(queue_dir, client, db, model_id="qwen3vl-4b")
         await pump.drain_once()
         client.generate_tags.assert_not_called()
+
+
+async def test_failed_start_keeps_batch_queued(tmp_path):
+    pending = tmp_path / "vlm_pending.jsonl"
+    body = json.dumps({"path": str(tmp_path / "a.jpg")}) + "\n"
+    pending.write_text(body)
+    client = MagicMock()
+    client.ensure_started = AsyncMock(side_effect=RuntimeError("no llama-server"))
+    client.generate_tags = AsyncMock()
+    pump = VlmTagPump(tmp_path, client, MagicMock(), model_id="m")
+
+    try:
+        await pump.drain_once()
+    except RuntimeError:
+        pass
+    assert pending.read_text() == body
+    client.generate_tags.assert_not_awaited()
+
+
+async def test_lines_appended_during_drain_survive(tmp_path):
+    a = tmp_path / "a.jpg"
+    pending = tmp_path / "vlm_pending.jsonl"
+    pending.write_text(json.dumps({"path": str(a)}) + "\n")
+    late = json.dumps({"path": str(tmp_path / "late.jpg")}) + "\n"
+
+    async def start(_mid):
+        with pending.open("a", encoding="utf-8") as f:  # worker appends mid-start
+            f.write(late)
+
+    client = MagicMock()
+    client.ensure_started = AsyncMock(side_effect=start)
+    client.generate_tags = AsyncMock(return_value=["x"])
+    pump = VlmTagPump(tmp_path, client, MagicMock(), model_id="m")
+    await pump.drain_once()
+
+    assert client.generate_tags.await_count == 1
+    assert pending.read_text() == late
