@@ -243,3 +243,21 @@ export function i2vVideoDetails(v: I2vVideo): {
     v.render_s != null ? `${length} · rendered in ${formatRenderTime(v.render_s)}` : length
   return { quality, timing, generated: formatI2vTimestamp(v.created_at) }
 }
+
+/** Who writes an I2V prompt. Base only for now; taste guidance and adapters are T2I-first. */
+export type I2vWriter = 'base'
+
+export const I2V_WRITERS: { id: I2vWriter; label: string }[] = [{ id: 'base', label: 'Base' }]
+
+/**
+ * What Generate prompt wrote, kept until it no longer describes the form. It is
+ * never written into the form: the Prompt box owns the text, this only lets
+ * Generate say which writer drafted it and what the draft was.
+ */
+export interface I2vDraft {
+  text: string
+  writer_id: string
+  /** What the draft was written for; a different one means a different prompt. */
+  idea: string
+  templateId: string
+}

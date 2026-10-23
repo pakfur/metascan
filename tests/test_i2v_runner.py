@@ -816,3 +816,57 @@ class TestGenerateRecordsTemplateId(TestFormStateAtIngest):
         self._ingest(job_id)
         row = self.db.list_i2v_videos(str(self.src))[0]
         self.assertEqual(row["form_state"]["template_id"], "gone_20")
+
+    # ---- writer lineage: who wrote the prompt, its draft, edited or not ----
+
+    def _row(self, job_id):
+        self._ingest(job_id)
+        rows = self.db.list_i2v_videos(str(self.src))
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_i2v_records_writer_and_edit(self):
+        job_id = self._generate(
+            prompt="[Shot 1] the cat stretches slowly",
+            writer_id="base",
+            draft_prompt="[Shot 1] the cat stretches",
+        )
+        row = self._row(job_id)
+        self.assertEqual(row["writer_id"], "base")
+        self.assertEqual(row["draft_prompt"], "[Shot 1] the cat stretches")
+        self.assertEqual(row["edited"], 1)
+        self.assertEqual(row["prompt_used"], "[Shot 1] the cat stretches slowly")
+
+    def test_whitespace_only_difference_is_not_an_edit(self):
+        job_id = self._generate(
+            prompt="[Shot 1]  the cat\nstretches",
+            writer_id="base",
+            draft_prompt="[Shot 1] the cat stretches",
+        )
+        self.assertEqual(self._row(job_id)["edited"], 0)
+
+    def test_i2v_typed_prompt_is_manual(self):
+        job_id = self._generate()
+        row = self._row(job_id)
+        self.assertEqual(row["writer_id"], "manual")
+        self.assertIsNone(row["draft_prompt"])
+        self.assertEqual(row["edited"], 0)
+
+    def test_a_draft_must_name_a_drafting_writer(self):
+        with self.assertRaises(I2vRequestError):
+            self._generate(writer_id="manual", draft_prompt="a draft")
+        with self.assertRaises(I2vRequestError):
+            self._generate(writer_id=None, draft_prompt="a draft")
+        self.assertEqual(self.comfy.submits, [])
+
+    def test_writer_id_without_a_draft_is_recorded_manual(self):
+        job_id = self._generate(writer_id="base")
+        self.assertEqual(self._row(job_id)["writer_id"], "manual")
+
+    def test_a_restart_between_submit_and_ingest_leaves_lineage_null(self):
+        job_id = self._generate(writer_id="base", draft_prompt="a draft")
+        self.runner._job_meta.clear()
+        row = self._row(job_id)
+        self.assertIsNone(row["writer_id"])
+        self.assertIsNone(row["draft_prompt"])
+        self.assertIsNone(row["edited"])

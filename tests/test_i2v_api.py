@@ -129,6 +129,51 @@ class _I2vApiBase(unittest.TestCase):
 class TestI2vApi(_I2vApiBase):
     # ---- /prompt ----------------------------------------------------
 
+    def test_i2v_prompt_returns_writer_id(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={"source_path": "/lib/a.png", "idea": "x", "duration_s": 6},
+        )
+        self.assertEqual(resp.json()["writer_id"], "base")
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 6,
+                "writer": "base",
+            },
+        )
+        self.assertEqual(resp.json()["writer_id"], "base")
+
+    def test_i2v_prompt_rejects_an_unoffered_writer(self):
+        resp = self.client.post(
+            "/api/i2v/prompt",
+            json={
+                "source_path": "/lib/a.png",
+                "idea": "x",
+                "duration_s": 6,
+                "writer": "base+taste",
+            },
+        )
+        self.assertEqual(resp.status_code, 422)
+
+    def test_i2v_generate_passes_lineage_to_the_runner(self):
+        resp = self.client.post(
+            "/api/i2v/generate",
+            json=self._generate_body(writer_id="base", draft_prompt="a draft"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.runner.generate_calls[0]
+        self.assertEqual(kwargs["writer_id"], "base")
+        self.assertEqual(kwargs["draft_prompt"], "a draft")
+
+    def test_i2v_generate_lineage_defaults_to_none(self):
+        self.client.post("/api/i2v/generate", json=self._generate_body())
+        kwargs = self.runner.generate_calls[0]
+        self.assertIsNone(kwargs["writer_id"])
+        self.assertIsNone(kwargs["draft_prompt"])
+
     def test_prompt_happy_path(self):
         resp = self.client.post(
             "/api/i2v/prompt",
