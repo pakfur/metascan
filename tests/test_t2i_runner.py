@@ -732,7 +732,11 @@ class TestGeneratePrompt(RunnerCase):
             caption=CAPTION, seed=101, model="krea2"
         )
         self.assertEqual(
-            result.warnings, ["VLM unavailable - used the resolved caption"]
+            result.warnings,
+            [
+                "prompt writer qwen3vl-8b not installed — download it in Models"
+                " - used the resolved caption"
+            ],
         )
         self.assertEqual(asked, ["qwen3vl-8b"])
         self.assertEqual(self.vlm.ensure_calls, [])  # never started
@@ -2704,7 +2708,11 @@ class TestPromptRetryAndFallback(BatchCase):
         await self.run_to_end(self.one_step())
         (step,) = self.frames("batch_step")
         self.assertEqual(
-            step["warnings"], ["VLM unavailable - used the resolved caption"]
+            step["warnings"],
+            [
+                "prompt writer qwen3vl-8b not installed — download it in Models"
+                " - used the resolved caption"
+            ],
         )
         self.assertEqual(self.vlm.ensure_calls, [])
         self.assertEqual(len(self.comfy.submits), 1)

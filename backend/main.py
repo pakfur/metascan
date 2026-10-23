@@ -297,6 +297,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         comfy=comfy_client,
         get_vlm=get_writer_vlm,
         output_root=Path(comfy_cfg["output_root"]),
+        vlm_installed=vlm_model_installed,
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
