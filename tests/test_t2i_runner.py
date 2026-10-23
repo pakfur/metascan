@@ -1797,6 +1797,8 @@ class TestManualBatchRun(BatchCase):
                     "warnings": [],
                     "direction": None,
                     "direction_parts": [],
+                    "variant_index": 0,
+                    "variants": 1,
                 }
             ],
         )
@@ -2322,6 +2324,8 @@ class TestRandomBatchRun(BatchCase):
                 "seed",
                 "step",
                 "total_steps",
+                "variant_index",
+                "variants",
                 "warnings",
             ],
         )
@@ -3626,7 +3630,7 @@ class TestWriterLineage(AccountingCase):
         await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
         self.assertEqual(await self.writer_ids(), ["fallback"])
 
-    async def test_a_supplied_first_step_has_no_writer(self) -> None:
+    async def test_a_supplied_first_step_is_the_manual_writer(self) -> None:
         self.roomy()
         await self.run_to_end(
             self.random_mode(
@@ -3637,11 +3641,11 @@ class TestWriterLineage(AccountingCase):
                 aspect_ratio="2:3",
             )
         )
-        self.assertEqual(await self.writer_ids(), [None])
+        self.assertEqual(await self.writer_ids(), ["manual"])
 
-    async def test_a_manual_batch_has_no_writer(self) -> None:
+    async def test_a_manual_batch_is_the_manual_writer(self) -> None:
         await self.manual_batch(count=1)
-        self.assertEqual(await self.writer_ids(), [None])
+        self.assertEqual(await self.writer_ids(), ["manual"])
 
 
 class TestCategoryTagging(AccountingCase):

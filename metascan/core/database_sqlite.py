@@ -1370,6 +1370,10 @@ class DatabaseManager:
                     ("writer_id", "TEXT"),
                     ("variant_group", "TEXT"),
                     ("variant_index", "INTEGER"),
+                    # The writer's draft and whether the rendered prompt
+                    # differs from it (whitespace-normalized); write-once.
+                    ("draft_prompt", "TEXT"),
+                    ("edited", "INTEGER"),
                 ):
                     _idempotent_add_column(
                         conn,
@@ -3992,6 +3996,8 @@ class DatabaseManager:
         writer_id: Optional[str] = None,
         variant_group: Optional[str] = None,
         variant_index: Optional[int] = None,
+        draft_prompt: Optional[str] = None,
+        edited: Optional[int] = None,
     ) -> int:
         import json as _json
 
@@ -4000,8 +4006,9 @@ class DatabaseManager:
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
                 "idea, seed, duration_s, quality, width, height, steps, "
                 "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
-                "form_state, writer_id, variant_group, variant_index) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "form_state, writer_id, variant_group, variant_index, "
+                "draft_prompt, edited) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -4022,6 +4029,8 @@ class DatabaseManager:
                     writer_id,
                     variant_group,
                     variant_index,
+                    draft_prompt,
+                    edited,
                 ),
             )
             conn.commit()
@@ -4157,6 +4166,8 @@ class DatabaseManager:
         writer_id: Optional[str] = None,
         variant_group: Optional[str] = None,
         variant_index: Optional[int] = None,
+        draft_prompt: Optional[str] = None,
+        edited: Optional[int] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4169,8 +4180,9 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "variant_index, draft_prompt, edited) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4192,6 +4204,8 @@ class DatabaseManager:
                     writer_id,
                     variant_group,
                     variant_index,
+                    draft_prompt,
+                    edited,
                 ),
             )
             conn.commit()

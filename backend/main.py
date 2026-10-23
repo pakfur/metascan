@@ -47,6 +47,7 @@ from backend.api import (
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
+from backend.services.taste_examples_service import TasteExamplesService
 from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import apply_pending_taste_snapshot
 from backend.ws.manager import ws_manager
@@ -321,6 +322,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_root=Path(comfy_cfg["output_root"]),
         get_config=lambda: get_t2i_config(load_app_config()),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        # "base+taste": favorite prompts as examples, CLIP only when ready.
+        taste_examples=TasteExamplesService(get_db()).examples_for,
     )
     t2i_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)

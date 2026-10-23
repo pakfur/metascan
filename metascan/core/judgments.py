@@ -26,6 +26,16 @@ WRITER_BASE = "base"
 WRITER_BASE_TASTE = "base+taste"
 WRITER_FALLBACK = "fallback"
 WRITER_MANUAL = "manual"
+# Writers a supplied draft may name (a typed-from-scratch prompt is MANUAL).
+DRAFT_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE, WRITER_FALLBACK)
+
+
+def normalize_prompt(text: str) -> str:
+    """``text`` with every run of whitespace collapsed to one space and the
+    ends trimmed: a draft and a rendered prompt that differ only in spacing
+    or line breaks are not an edit."""
+    return " ".join(text.split())
+
 
 CATEGORY_SOURCES: Tuple[str, ...] = ("viewer", "sticky", "generation", "bulk")
 CATEGORY_NAME_MAX = 40
