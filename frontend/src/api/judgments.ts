@@ -11,8 +11,11 @@ export function fetchJudgment(filePath: string): Promise<JudgmentState> {
   return get<JudgmentState>(judgmentPath(filePath))
 }
 
-export function markSeen(filePath: string): Promise<JudgmentState> {
-  return post<JudgmentState>('/judgments/seen', { file_path: filePath })
+// `scoreShown`: the taste score on screen at dwell time (two decimals).
+export function markSeen(filePath: string, scoreShown?: number): Promise<JudgmentState> {
+  const body: Record<string, unknown> = { file_path: filePath }
+  if (scoreShown !== undefined) body.score_shown = scoreShown
+  return post<JudgmentState>('/judgments/seen', body)
 }
 
 export function setVerdict(

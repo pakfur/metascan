@@ -6,6 +6,7 @@ import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../a
 import { applyFilters } from '../api/filters'
 import { useFoldersStore } from './folders'
 import { useSearchStore } from './search'
+import { useTasteStore } from './taste'
 
 export const useMediaStore = defineStore('media', () => {
   // Summary records only. Heavy AI-generation fields are absent from these
@@ -68,6 +69,19 @@ export const useMediaStore = defineStore('media', () => {
       )
     }
 
+    if (sortOrder.value === 'taste') {
+      // Highest taste score first; unscored items last. Array.sort is stable,
+      // so ties and the unscored tail keep the server's date-added order.
+      const taste = useTasteStore()
+      items = [...items].sort((a, b) => {
+        const sa = taste.scoreOf(a.file_path)
+        const sb = taste.scoreOf(b.file_path)
+        if (sa === null) return sb === null ? 0 : 1
+        if (sb === null) return -1
+        return sb - sa
+      })
+    }
+
     return items
   })
 
@@ -80,6 +94,12 @@ export const useMediaStore = defineStore('media', () => {
     return folders.scopeMedia(displayedMedia.value)
   })
 
+  // Relevance and Taste sort client-side; the server fetch stays in
+  // date-added order, which is also the Taste sort's order for unscored items.
+  function serverSort(order: string): string {
+    return order === 'relevance' || order === 'taste' ? 'date_added' : order
+  }
+
   // `silent` is for background refreshes that must not raise `loading`, the
   // flag behind the dimmed "Loading media..." overlay (the T2I image bridge
   // reloads every few seconds while a batch runs). Only a literal `true` is
@@ -89,7 +109,7 @@ export const useMediaStore = defineStore('media', () => {
     const silent = options?.silent === true
     if (!silent) loading.value = true
     try {
-      const data = await fetchAllMedia(sortOrder.value, false, true)
+      const data = await fetchAllMedia(serverSort(sortOrder.value), false, true)
       allMedia.value = data
       favoritePaths.value = new Set(
         data.filter((m) => m.is_favorite).map((m) => m.file_path),
@@ -202,10 +222,12 @@ export const useMediaStore = defineStore('media', () => {
 
   function setSortOrder(order: string) {
     if (order === sortOrder.value) return
+    const prev = sortOrder.value
     sortOrder.value = order
-    // Relevance sorts client-side from the search score map; every other
-    // order defers to the server and refetches.
-    if (order === 'relevance') return
+    // Relevance and Taste sort client-side; the server fetch is identical to
+    // date-added for them, so a switch between orders that map to the same
+    // server sort needs no refetch.
+    if (serverSort(prev) === serverSort(order)) return
     loadAllMedia()
   }
 

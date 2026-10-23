@@ -45,4 +45,6 @@ export interface ThumbItem {
   is_favorite: boolean
   title: string
   label: string
+  // Learned taste score (0..1); absent/null = unscored (and always for videos).
+  score?: number | null
 }
