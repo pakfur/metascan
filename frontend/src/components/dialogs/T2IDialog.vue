@@ -155,6 +155,9 @@ async function retryLoad() {
 // form is loaded, and silently swap the workflow it was rendered with.
 function onModelChange(id: string) {
   form.model = id
+  // Drafts are written in the model's prompt style: another model's are
+  // let go (the box keeps its text, which then goes out as typed).
+  store.discardDrafts()
   const preset = defaultPresetFor(store.config, id, presets.value.map((p) => p.id))
   if (preset !== null) form.presetId = preset
 }
@@ -592,7 +595,7 @@ async function onGenerate() {
   const req = buildBatchRequest(form, batchContext.value)
   req.directions = useDirections.value
   req.category_ids = [...categoryIds.value]
-  const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
+  const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value, req.prompts ?? null) : null
   if (
     signature !== null &&
     signature === lastSubmitted &&
