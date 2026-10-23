@@ -223,8 +223,9 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
     would always raise here.  The coroutine is handed to the loop captured at
     startup via ``run_coroutine_threadsafe``.  With no usable loop we warn and
     leave ``vlm_pending.jsonl`` untouched for the next drain.  Drains never
-    overlap: a second request while one runs is skipped (the running drain's
-    successor, or the next scan, picks up whatever it left).
+    overlap: a request arriving mid-drain sets a rerun flag and the running
+    drain makes one more pass (coalesced), so lines appended meanwhile are
+    not stranded.
     """
 
     async def _drain() -> None:
