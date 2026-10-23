@@ -21,7 +21,13 @@ peft>=0.17.0
 # SFTConfig(completion_only_loss), conversational prompt/completion and
 # preference data, processing_class=, and DPOConfig(model_adapter_name,
 # ref_adapter_name) so the SFT adapter (loaded twice) is the DPO reference.
-trl>=0.25.0
+# Capped below 0.26: only the 0.25 docs confirm those two DPOConfig fields
+# (TRL 1.0 rewrote DPOTrainer). Before widening the cap, install the new
+# version and check it still has them -- this must print True:
+#   python -c "import dataclasses,trl;print({f.name for f in dataclasses.fields(trl.DPOConfig)}>={'model_adapter_name','ref_adapter_name'})"
+# (metascan.workers.writer_train_probe.probe_trl_reference_support runs the
+# same check for the writer_training gate.)
+trl>=0.25.0,<0.26
 accelerate>=1.4.0
 datasets>=3.0.0
 safetensors>=0.4.3

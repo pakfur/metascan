@@ -287,7 +287,8 @@ class TestFakeEndToEnd:
         code = (
             "import sys, metascan.workers.writer_train_worker, "
             "metascan.workers.writer_train_backend, "
-            "metascan.workers.writer_train_fake\n"
+            "metascan.workers.writer_train_fake, "
+            "metascan.workers.writer_train_probe\n"
             "bad = [m for m in ('torch', 'transformers', 'peft', 'trl', "
             "'datasets') if m in sys.modules]\n"
             "print(','.join(bad))"
@@ -1023,6 +1024,123 @@ class TestGuardsAndErrors:
             assert json.loads((tmp_path / w.PROGRESS_NAME).read_text())["eta_s"] == 16.0
             ctx.begin("dpo", 0)  # a new stage restarts the clock
             assert json.loads((tmp_path / w.PROGRESS_NAME).read_text())["eta_s"] is None
+
+
+# ---- fix round 2: TRL probe, empty-pairs messages, leftover checkpoints ---
+
+from metascan.workers import writer_train_probe as probe  # noqa: E402
+
+
+def _cp(stdout: str, rc: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess([], rc, stdout, "")
+
+
+class TestTrlProbe:
+    def test_ok(self) -> None:
+        out = json.dumps({"installed": True, "version": "0.25.1", "missing": []})
+        with mock.patch.object(probe.subprocess, "run", return_value=_cp(out)) as run:
+            assert probe.probe_trl_reference_support("/py") == (True, "")
+        assert run.call_args.args[0][0] == "/py"
+
+    def test_missing_fields(self) -> None:
+        out = json.dumps(
+            {"installed": True, "version": "1.16.0", "missing": ["ref_adapter_name"]}
+        )
+        with mock.patch.object(probe.subprocess, "run", return_value=_cp(out)):
+            ok, reason = probe.probe_trl_reference_support()
+        assert not ok
+        assert "trl 1.16.0 lacks DPOConfig.ref_adapter_name" in reason
+        assert "requirements-train.txt" in reason
+
+    def test_not_installed_or_broken(self) -> None:
+        out = json.dumps({"installed": False, "error": "ModuleNotFoundError"})
+        with mock.patch.object(probe.subprocess, "run", return_value=_cp(out)):
+            assert probe.probe_trl_reference_support()[1].startswith(
+                "trl is not installed"
+            )
+        with mock.patch.object(probe.subprocess, "run", return_value=_cp("junk", 1)):
+            assert probe.probe_trl_reference_support() == (
+                False,
+                "the TRL probe failed (exit 1)",
+            )
+        with mock.patch.object(probe.subprocess, "run", side_effect=OSError("nope")):
+            assert not probe.probe_trl_reference_support()[0]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX wrapper script")
+    def test_real_subprocess_with_a_stand_in_trl(self, tmp_path: Path) -> None:
+        pkg = tmp_path / "site" / "trl"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text(
+            "import dataclasses\n__version__ = '0.25.0'\n"
+            "@dataclasses.dataclass\nclass DPOConfig:\n"
+            "    beta: float = 0.1\n    model_adapter_name: str = ''\n"
+            "    ref_adapter_name: str = ''\n"
+        )
+        wrapper = tmp_path / "py"
+        wrapper.write_text(
+            f'#!/bin/sh\nPYTHONPATH="{tmp_path / "site"}" exec "{sys.executable}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        assert probe.probe_trl_reference_support(str(wrapper)) == (True, "")
+        (pkg / "__init__.py").write_text(
+            "import dataclasses\n__version__ = '1.0.0'\n"
+            "@dataclasses.dataclass\nclass DPOConfig:\n    beta: float = 0.1\n"
+        )
+        ok, reason = probe.probe_trl_reference_support(str(wrapper))
+        assert not ok and "model_adapter_name" in reason
+
+
+class TestRound2:
+    def test_nothing_at_all(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, n_sft=0, n_pref=0)
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        err = _result(task)["error"]
+        assert "no training examples" in err and "longer" not in err
+
+    def _patched_data(self, task: Dict[str, Any], sft: List[Dict[str, Any]]) -> Any:
+        data = w.TrainData(sft=sft, prefs=[], holdout=[])
+        return mock.patch.object(w, "load_data", return_value=data)
+
+    def test_no_pairs_with_usable_sft_keeps_the_sft_adapter(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        task = _make_task(tmp_path)
+        with self._patched_data(task, [_sft(i) for i in range(3)]):
+            assert _run(task, tmp_path) == w.EXIT_OK
+        assert "no preference pairs; DPO skipped" in caplog.text
+        assert "longer than" not in caplog.text
+
+    def test_no_pairs_and_all_sft_too_long(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, hyperparams={"max_seq_len": 64})
+        with self._patched_data(task, [dict(_sft(0), chosen=LONG)]):
+            assert _run(task, tmp_path) == w.EXIT_ERROR
+        err = _result(task)["error"]
+        assert err.startswith("no preference pairs and no usable SFT example")
+
+    def test_refused_final_wipe_keeps_the_run_ok(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        original = w.safe_rmtree
+        gguf = Path(task["out_dir"]) / w.GGUF_NAME
+
+        def refuse_late(path: Path, root: Path, allowed: Any) -> None:
+            if Path(path) == Path(task["checkpoint_dir"]) and gguf.exists():
+                raise w.TrainWorkerError(
+                    f"refusing to delete {path}: unexpected entries"
+                )
+            original(path, root, allowed)
+
+        with mock.patch.object(w, "safe_rmtree", side_effect=refuse_late):
+            assert _run(task, tmp_path) == w.EXIT_OK
+        res = _result(task)
+        assert res["status"] == "ok" and res["error"] is None
+        assert res["leftover_checkpoint_dir"] == task["checkpoint_dir"]
+        assert Path(task["checkpoint_dir"]).is_dir()
+        assert (Path(task["out_dir"]) / w.META_NAME).exists()
+
+    def test_clean_run_has_no_leftover(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert _result(task)["leftover_checkpoint_dir"] is None
 
 
 def _cuda_and_deps() -> bool:
