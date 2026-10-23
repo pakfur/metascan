@@ -96,7 +96,12 @@ def _label_row(
         weight = decay_weight(rated_at, now, half_life_days)
     except ValueError:
         return None, True
-    if row.get("last_verdict_score_shown") is not None:
+    shown = row.get("last_verdict_score_shown")
+    if shown is None and not row.get("is_favorite") and not row.get("passed"):
+        # Seen-only negative: the score on screen at dwell time anchors it
+        # just as it would a verdict.
+        shown = row.get("seen_score_shown")
+    if shown is not None:
         weight *= SCORE_SHOWN_WEIGHT
     return (
         LabelRow(

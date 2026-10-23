@@ -26,8 +26,10 @@ class JudgmentsService:
         pos = await asyncio.to_thread(self.db.get_t2i_batch_position, path)
         return {"index": pos[0], "size": pos[1]} if pos is not None else None
 
-    async def mark_seen(self, path: str) -> Optional[JudgmentState]:
-        return await asyncio.to_thread(self.db.mark_seen, path)
+    async def mark_seen(
+        self, path: str, score_shown: Optional[float] = None
+    ) -> Optional[JudgmentState]:
+        return await asyncio.to_thread(self.db.mark_seen, path, None, score_shown)
 
     async def set_verdict(
         self,

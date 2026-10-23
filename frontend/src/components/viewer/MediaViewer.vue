@@ -232,12 +232,16 @@ watch(
     }
     if (!ratingEnabled.value || !path) return
     enqueue(path, () => fetchJudgment(path))
-    if (!current.value?.is_video) {
+    // Review mode records only explicit F / X / reasons / categories:
+    // arrowing past an item there is not a "seen and not favorited" vote.
+    if (!current.value?.is_video && !review.value) {
       seenTimer = setTimeout(() => {
         seenTimer = null
-        if (path !== currentPath.value) return
+        if (path !== currentPath.value || review.value) return
         seenSentForVisit = true
-        enqueue(path, () => markSeen(path))
+        // The score on screen when the dwell completed.
+        const scoreShown = shownScore()
+        enqueue(path, () => markSeen(path, scoreShown))
       }, SEEN_DWELL_MS)
     }
   },
@@ -246,6 +250,7 @@ watch(
 
 function onVideoPlay(path: string): void {
   if (!ratingEnabled.value || path !== currentPath.value || seenSentForVisit) return
+  if (review.value) return // review mode: explicit verdicts only
   seenSentForVisit = true
   enqueue(path, () => markSeen(path))
 }

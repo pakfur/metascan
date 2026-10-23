@@ -5426,8 +5426,14 @@ class DatabaseManager:
             return self._read_judgment(conn, posix_path)
 
     def mark_seen(
-        self, file_path: str, now: Optional[datetime] = None
+        self,
+        file_path: str,
+        now: Optional[datetime] = None,
+        score_shown: Optional[float] = None,
     ) -> Optional[JudgmentState]:
+        """Record that the item was seen. ``score_shown`` is the taste score
+        on screen at dwell time; it goes on the ``seen`` (or ``reconfirm``)
+        event so a seen-only negative can be down-weighted like a verdict."""
         posix_path = to_posix_path(file_path)
         with self.lock, self._get_connection() as conn:
             state = self._read_judgment(conn, posix_path)
@@ -5440,7 +5446,7 @@ class DatabaseManager:
                     "UPDATE media_judgments SET seen_at = ? WHERE file_path = ?",
                     (ts, posix_path),
                 )
-                self._log_judgment_event(conn, posix_path, "seen", ts)
+                self._log_judgment_event(conn, posix_path, "seen", ts, score_shown)
             elif state.verdict is not None and self._reconfirm_due(
                 state.confirmed_at, now
             ):
@@ -5448,7 +5454,7 @@ class DatabaseManager:
                     "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
                     (ts, posix_path),
                 )
-                self._log_judgment_event(conn, posix_path, "reconfirm", ts)
+                self._log_judgment_event(conn, posix_path, "reconfirm", ts, score_shown)
             else:
                 return state
             conn.commit()
@@ -5504,6 +5510,13 @@ class DatabaseManager:
             f"WHERE e.file_path = {{col}} AND e.event IN ({marks}) "
             "ORDER BY e.id DESC LIMIT 1)"
         )
+        # The score on screen when the item first counted as seen (labels
+        # down-weight a seen-only negative that carried one).
+        seen_sql = (
+            "(SELECT e.score_shown FROM judgment_events e "
+            "WHERE e.file_path = {col} AND e.event = 'seen' "
+            "ORDER BY e.id DESC LIMIT 1)"
+        )
         with self.lock, self._get_connection() as conn:
             cats: Dict[str, List[str]] = {}
             for r in conn.execute(
@@ -5516,7 +5529,9 @@ class DatabaseManager:
                 "SELECT m.file_path, m.is_favorite, j.passed, j.seen_at, "
                 "j.judged_at, j.confirmed_at, "
                 + score_sql.format(col="m.file_path")
-                + " AS last_verdict_score_shown, t.batch_id AS t2i_batch_id "
+                + " AS last_verdict_score_shown, "
+                + seen_sql.format(col="m.file_path")
+                + " AS seen_score_shown, t.batch_id AS t2i_batch_id "
                 "FROM media m "
                 "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
                 "LEFT JOIN t2i_images t ON t.file_path = m.file_path",
@@ -5538,7 +5553,13 @@ class DatabaseManager:
                     "AND e.created_at <= media_tombstones.deleted_at "
                     "ORDER BY e.id DESC",
                 )
-                + " AS last_verdict_score_shown FROM media_tombstones ORDER BY id",
+                + " AS last_verdict_score_shown, "
+                + seen_sql.format(col="media_tombstones.file_path").replace(
+                    "ORDER BY e.id DESC",
+                    "AND e.created_at <= media_tombstones.deleted_at "
+                    "ORDER BY e.id DESC",
+                )
+                + " AS seen_score_shown FROM media_tombstones ORDER BY id",
                 verdict_kinds,
             ):
                 if not self._is_image_path(r["file_path"]):
