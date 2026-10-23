@@ -38,7 +38,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 from metascan.core.judgments import (
     DRAFT_WRITERS,
@@ -90,11 +90,14 @@ from metascan.core.t2i_prompt import (
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
 from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 EventCb = Callable[[str, str, Dict[str, Any]], None]
 # (resolved caption, target model id) -> (examples, warning); never raises
@@ -501,6 +504,25 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
     return entries
 
 
+async def _gather_or_cancel(coros: List[Awaitable[_T]]) -> List[_T]:
+    """Run ``coros`` concurrently and return their results in order. The
+    first failure cancels the rest and is raised as itself (not as an
+    ExceptionGroup), so callers map it like a sequential failure."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for t in done:
+            if not t.cancelled() and t.exception() is not None:
+                raise t.exception()  # type: ignore[misc]
+        return [t.result() for t in tasks]
+    finally:
+        rest = [t for t in tasks if not t.done()]
+        for t in rest:
+            t.cancel()
+        if rest:
+            await asyncio.gather(*rest, return_exceptions=True)
+
+
 def _names_first_caption(req: BatchRequest) -> bool:
     """A Random request that names a caption but carries no prompt (the
     dialog's Prompt box is empty, its Caption box is not): step 1 has a prompt
@@ -800,24 +822,30 @@ class T2iRunner:
             )
             if taste_warning:
                 warnings.append(taste_warning)
-            for k in range(variants):
+            # The variants are independent: write them concurrently, as many
+            # at once as the writer's llama-server has slots.
+            spec = VLM_REGISTRY.get(model_id)
+            slots = asyncio.Semaphore(max(1, spec.parallel_slots if spec else 1))
+
+            async def write(k: int) -> PromptDraft:
                 angle = self._angle(k)
                 composed = compose_guided_t2i_prompts(
                     profile, resolved.text, cfg["content_mode"], text, angle, examples
                 )
-                prompt, negative = await self._vlm_prompt(
-                    vlm, model_id, profile, composed.system, composed.user
-                )
-                drafts.append(
-                    PromptDraft(
-                        prompt,
-                        negative,
-                        self._guided_writer(composed),
-                        k,
-                        angle,
-                        model_id,
+                async with slots:
+                    prompt, negative = await self._vlm_prompt(
+                        vlm, model_id, profile, composed.system, composed.user
                     )
+                return PromptDraft(
+                    prompt,
+                    negative,
+                    self._guided_writer(composed),
+                    k,
+                    angle,
+                    model_id,
                 )
+
+            drafts = await _gather_or_cancel([write(k) for k in range(variants)])
             if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
                 warnings.append(WARN_TASTE_NO_PREAMBLE)
         first = drafts[0]
