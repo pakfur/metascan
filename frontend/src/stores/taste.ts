@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef, computed } from 'vue'
-import type { TasteStatus } from '../types/taste'
+import type { TasteStatus, WriterStats } from '../types/taste'
 import {
   fetchTasteStatus,
   startTasteTraining,
   fetchTasteScores,
   fetchReviewQueue,
+  fetchWriterStats,
 } from '../api/taste'
 
 // Learned taste scores (0..1) per image path. The map holds one entry per
@@ -44,6 +45,15 @@ export const useTasteStore = defineStore('taste', () => {
     if (status.value) status.value = { ...status.value, training: true }
   }
 
+  const writerStats = ref<WriterStats | null>(null)
+  let writerStatsToken = 0
+  async function loadWriterStats(): Promise<void> {
+    const token = ++writerStatsToken
+    const data = await fetchWriterStats()
+    if (token !== writerStatsToken) return
+    writerStats.value = data
+  }
+
   function scoreOf(path: string): number | null {
     return scores.value.get(path) ?? null
   }
@@ -52,5 +62,17 @@ export const useTasteStore = defineStore('taste', () => {
     return fetchReviewQueue(limit)
   }
 
-  return { scores, modelId, status, hasScores, load, loadStatus, train, scoreOf, reviewQueue }
+  return {
+    scores,
+    modelId,
+    status,
+    hasScores,
+    writerStats,
+    load,
+    loadStatus,
+    loadWriterStats,
+    train,
+    scoreOf,
+    reviewQueue,
+  }
 })

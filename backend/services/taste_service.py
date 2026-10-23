@@ -17,8 +17,12 @@ from metascan.core.taste_labels import (
     RETRAIN_CHECK_S,
     RETRAIN_IDLE_S,
     RETRAIN_MIN_EVENTS,
+    WRITER_WINDOW_DAYS,
+    WRITER_WINDOWS,
+    collapse_warning,
     count_labels,
     missing_for_training,
+    window_starts,
 )
 from metascan.utils.path_utils import to_native_path
 
@@ -36,6 +40,10 @@ _MODEL_FIELDS = (
     "embedding_model",
     "half_life_days",
 )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class TrainConflict(Exception):
@@ -234,6 +242,21 @@ class TasteService:
             return []
         paths = await asyncio.to_thread(self.db.taste_review_queue, limit)
         return [to_native_path(p) for p in paths]
+
+    async def writer_stats(self) -> Dict[str, Any]:
+        """Favorite rate per writer per 14-day window, the latest stored
+        favorite diversity, and the taste-collapse flag."""
+        now = _utcnow()
+        windows = await asyncio.to_thread(
+            self.db.writer_window_stats, WRITER_WINDOW_DAYS, WRITER_WINDOWS, now
+        )
+        diversity = await asyncio.to_thread(self.db.latest_taste_diversity)
+        return {
+            "window_starts": window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS),
+            "windows": windows,
+            "diversity": diversity,
+            "collapse_warning": collapse_warning(diversity, windows),
+        }
 
     # ------------------------------------------------------------------
     # training

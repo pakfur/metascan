@@ -6,6 +6,8 @@ import { TIER_COLOR, TIER_LABEL } from '../../types/hardware'
 import { startRetag } from '../../api/vlm'
 import { useTasteStore } from '../../stores/taste'
 import { ApiError } from '../../api/client'
+import { useWebSocket } from '../../composables/useWebSocket'
+import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
 
 const taste = useTasteStore()
 const tasteStatus = computed(() => taste.status)
@@ -61,6 +63,88 @@ async function onTasteRetrain() {
   }
 }
 
+// ---- Writers: favorite rate per writer per 14-day window + diversity ----
+// The spec's success baseline: the 8B writer with variants, no guidance.
+const BASELINE_WRITER = 'base'
+const WRITER_ORDER = ['base', 'base+taste', 'fallback', 'manual']
+
+const writerStats = computed(() => taste.writerStats)
+const writerStatsError = ref<string | null>(null)
+async function loadWriterStats() {
+  try {
+    await taste.loadWriterStats()
+    writerStatsError.value = null
+  } catch (e) {
+    console.error('Failed to load writer stats', e)
+    writerStatsError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+// Diversity is computed by training runs: refresh when one ends.
+useWebSocket('taste', (event) => {
+  if (
+    event === ('training_complete' satisfies TasteWsEvent) ||
+    event === ('training_failed' satisfies TasteWsEvent)
+  ) {
+    void loadWriterStats()
+  }
+})
+
+function windowLabel(start: string): string {
+  const d = new Date(`${start}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return start
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+}
+
+function writerRank(id: string): number {
+  const i = WRITER_ORDER.indexOf(id)
+  if (i >= 0) return i
+  return id === 'unknown' ? WRITER_ORDER.length + 1 : WRITER_ORDER.length
+}
+
+interface WriterRow {
+  key: string
+  kind: 't2i' | 'i2v'
+  writer: string
+  baseline: boolean
+  cells: Record<string, WriterWindowStat>
+}
+
+const writerRows = computed<WriterRow[]>(() => {
+  const byKey = new Map<string, WriterRow>()
+  for (const w of writerStats.value?.windows ?? []) {
+    const key = `${w.kind}:${w.writer_id}`
+    let row = byKey.get(key)
+    if (!row) {
+      row = {
+        key,
+        kind: w.kind,
+        writer: w.writer_id,
+        baseline: w.kind === 't2i' && w.writer_id === BASELINE_WRITER,
+        cells: {},
+      }
+      byKey.set(key, row)
+    }
+    row.cells[w.window_start] = w
+  }
+  return [...byKey.values()].sort(
+    (a, b) =>
+      (a.kind === b.kind ? 0 : a.kind === 't2i' ? -1 : 1) ||
+      writerRank(a.writer) - writerRank(b.writer) ||
+      a.writer.localeCompare(b.writer),
+  )
+})
+
+function rateText(cell: WriterWindowStat | undefined): string {
+  if (!cell || cell.rate === null) return '—'
+  return `${Math.round(cell.rate * 100)}%`
+}
+
+function rateTitle(cell: WriterWindowStat | undefined): string {
+  if (!cell || cell.n_seen === 0) return 'No seen generations in this window'
+  return `${cell.n_fav} favorited of ${cell.n_seen} seen`
+}
+
 const models = useModelsStore()
 
 const hfTokenInput = ref('')
@@ -71,7 +155,7 @@ const loading = ref(true)
 
 onMounted(async () => {
   try {
-    await Promise.all([models.loadStatus(), loadTasteStatus()])
+    await Promise.all([models.loadStatus(), loadTasteStatus(), loadWriterStats()])
   } finally {
     loading.value = false
   }
@@ -661,6 +745,88 @@ async function onRetagLibrary() {
         Last error: {{ tasteStatus.last_error }}
       </div>
     </section>
+
+    <section class="preload-hint writers-block">
+      <div class="section-heading">
+        Writers
+        <button class="btn-small writers-refresh" @click="loadWriterStats">Refresh</button>
+      </div>
+      <div class="taste-hint">
+        Favorite rate among generations you have seen (viewed, favorited or passed), by the
+        writer that drafted the prompt, per 14-day window of generation date.
+      </div>
+      <div v-if="writerStats?.collapse_warning" class="warn-banner writers-warning">
+        Favorites are getting less diverse (latest window more than 25% below the recent median)
+        while the favorite rate rises: the writer may be narrowing toward a few looks.
+      </div>
+      <div v-if="writerStatsError" class="err-text">
+        Could not load writer stats: {{ writerStatsError }}
+      </div>
+      <template v-if="writerStats">
+        <div v-if="writerRows.length === 0" class="taste-hint">
+          No generations in the last {{ writerStats.window_starts.length * 2 }} weeks.
+        </div>
+        <div v-else class="writers-scroll">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Writer</th>
+                <th v-for="s in writerStats.window_starts" :key="s">{{ windowLabel(s) }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in writerRows" :key="row.key" :class="{ baseline: row.baseline }">
+                <th class="writer-col" scope="row">
+                  {{ row.writer }}
+                  <span v-if="row.kind === 'i2v'" class="writer-tag">I2V</span>
+                  <span v-if="row.baseline" class="writer-tag writer-tag-baseline">baseline</span>
+                </th>
+                <td
+                  v-for="s in writerStats.window_starts"
+                  :key="s"
+                  :title="rateTitle(row.cells[s])"
+                >
+                  <span class="rate">{{ rateText(row.cells[s]) }}</span>
+                  <span class="n-seen">n={{ row.cells[s]?.n_seen ?? 0 }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="writerStats.diversity.length" class="writers-scroll">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Favorite diversity</th>
+                <th v-for="d in writerStats.diversity" :key="d.window_start">
+                  {{ windowLabel(d.window_start) }}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th class="writer-col" scope="row">
+                  <span class="taste-hint">from the last training run</span>
+                </th>
+                <td
+                  v-for="d in writerStats.diversity"
+                  :key="d.window_start"
+                  :title="`Mean pairwise CLIP distance between ${d.n} favorited T2I images`"
+                >
+                  <span class="rate">
+                    {{ d.mean_distance === null ? '—' : d.mean_distance.toFixed(2) }}
+                  </span>
+                  <span class="n-seen">n={{ d.n }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="taste-hint">
+          Favorite diversity appears after the next taste training run.
+        </div>
+      </template>
+    </section>
   </template>
 </template>
 
@@ -846,6 +1012,38 @@ section { margin-bottom: 14px; }
 .taste-actions { display: flex; align-items: center; gap: 10px; }
 .taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
 .taste-hint { color: var(--text-color-secondary); font-size: 12px; }
+.writers-block { display: flex; flex-direction: column; gap: 6px; }
+.writers-refresh { margin-left: auto; }
+.writers-warning { font-size: 12px; }
+.writers-scroll { overflow-x: auto; }
+.writers-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-color);
+}
+.writers-table th,
+.writers-table td {
+  padding: 3px 10px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--surface-border);
+}
+.writers-table thead th { font-weight: 600; color: var(--text-color-secondary); }
+.writers-table .writer-col { text-align: left; font-weight: 600; }
+.writers-table tr.baseline { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+.writers-table .rate { display: inline-block; min-width: 3.2em; }
+.writers-table .n-seen { color: var(--text-color-secondary); font-size: 11px; margin-left: 4px; }
+.writer-tag {
+  margin-left: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--surface-border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-color-secondary);
+}
+.writer-tag-baseline { border-color: var(--primary-color); color: var(--primary-color); }
 .vlm-roles { display: flex; flex-direction: column; gap: 6px; }
 .role-row { display: flex; align-items: center; gap: 10px; }
 .role-label { width: 110px; font-weight: 600; }
