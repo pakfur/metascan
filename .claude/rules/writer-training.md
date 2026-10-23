@@ -139,5 +139,13 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   sparkline; everything else refetches. Map every refusal code through
   `trainingErrorText`, and GPU-busy 409s through `utils/gpuBusy.ts` (`GPU_BUSY_TEXT`).
   The window is a non-modal floating panel (z-index above the Config overlay); closing
-  it never stops a run. After a WS reconnect the app does one light status fetch
+  it never stops a run. It steps aside (`v-show`) while any media viewer is mounted
+  (`composables/useViewerPresence.ts`: MediaViewer, MobileMediaViewer and
+  SlideshowViewer call `useRegisterViewer()`) — the T2I / I2V viewers sit inside a
+  z-index 900 overlay, below the window — and its Escape handler acts only with no
+  viewer open and focus inside the window (or on body), so Esc and the rating keys
+  belong to the viewer. Writer menu rates (T2I / I2V dialogs) are the blind scorecard
+  rates from `GET /api/writers/scorecards` (`training.scorecards`), never writer-stats:
+  `types/writers.ts::favText` / `judgedPairs` format them for both the menu and the
+  window. After a WS reconnect the app does one light status fetch
   (`onWsConnect`).

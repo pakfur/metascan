@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import Galleria from 'primevue/galleria'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
+import { useRegisterViewer } from '../../composables/useViewerPresence'
 import { updateMedia, deleteMedia } from '../../api/media'
 import { thumbnailUrl } from '../../api/client'
 import { fileName } from '../../utils/path'
@@ -64,6 +65,8 @@ const emit = defineEmits<{
 }>()
 
 const mediaStore = useMediaStore()
+// The writer training window steps aside while a viewer is open.
+useRegisterViewer()
 const currentIndex = ref(props.initialIndex)
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const showHelp = ref(false)
@@ -185,12 +188,18 @@ function isBlind(state: JudgmentState | null): boolean {
 }
 const scorecardBlind = computed(() => isBlind(judgment.value))
 
-// The library details panel fetched the blind record: once the verdict
-// lifts the blind, fetch it again so the prompt shows.
+// The library details panel shows the record as fetched: once a verdict
+// lifts the blind, fetch it again so the prompt shows; once clearing the
+// verdict puts the image back to blind, fetch it again so the prompt hides.
 function refreshBlindDetails(path: string, state: JudgmentState): void {
   if (!props.allowDestructive || unmounted) return
   const selected = mediaStore.selectedMedia
-  if (!selected?.scorecard_blind || selected.file_path !== path || isBlind(state)) return
+  if (!selected || selected.file_path !== path) return
+  const blindNow = isBlind(state)
+  const revealed = !!selected.scorecard_blind && !blindNow
+  // `scorecard_id` is set only on a fetched detail of a scorecard image.
+  const reblinded = !!selected.scorecard_id && !selected.scorecard_blind && blindNow
+  if (!revealed && !reblinded) return
   const media = current.value
   if (media && media.file_path === path) void mediaStore.selectMedia(media)
 }

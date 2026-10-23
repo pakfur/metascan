@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
+import { useRegisterViewer } from '../../composables/useViewerPresence'
 import { streamUrl } from '../../api/client'
 import VideoPlayer from './VideoPlayer.vue'
 import { fileName } from '../../utils/path'
@@ -19,6 +20,8 @@ const emit = defineEmits<{
 }>()
 
 const mediaStore = useMediaStore()
+// The writer training window steps aside while a viewer is open.
+useRegisterViewer()
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const overlayRef = ref<HTMLElement | null>(null)
 

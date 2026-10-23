@@ -1,8 +1,6 @@
 // Prompt-writer adapters (taste-learning LoRA fine-tunes of the writer model)
 // and the Writer menus of the T2I / I2V dialogs.
 
-import type { WriterStats } from './taste'
-
 export type WriterAdapterStatus = 'training' | 'paused' | 'untested' | 'ready' | 'failed' | 'deleted'
 
 /** An `adapter:<id>` writer id (the lineage id of registry adapter <id>). */
@@ -47,7 +45,6 @@ export function servableAdapterIds(adapters: WriterAdapter[], kind: 't2i' | 'i2v
   return adapters.filter((a) => a.kind === kind && SERVABLE_STATUSES.includes(a.status)).map((a) => a.writer_id)
 }
 
-/** The 409 detail code of an adapter refusal, or null. */
 /** The adapter (`adapter:<id>`) a 409 adapter refusal names, or null. */
 export function adapterErrorWriter(e: unknown): string | null {
   const err = e as { detail?: unknown } | null
@@ -55,6 +52,7 @@ export function adapterErrorWriter(e: unknown): string | null {
   return isAdapterWriterId(id) ? id : null
 }
 
+/** The 409 detail code of an adapter refusal, or null. */
 export function adapterErrorCode(e: unknown): string | null {
   const err = e as { status?: unknown; detail?: unknown } | null
   if (!err || err.status !== 409) return null
@@ -64,18 +62,6 @@ export function adapterErrorCode(e: unknown): string | null {
 
 export function isAdapterWriterId(id: unknown): id is AdapterWriterId {
   return typeof id === 'string' && /^adapter:[1-9]\d*$/.test(id)
-}
-
-/** Favorite rate of `writerId` over every window of the writer stats (seen generations), or null. */
-export function writerFavRate(stats: WriterStats | null, kind: 't2i' | 'i2v', writerId: string): number | null {
-  let seen = 0
-  let fav = 0
-  for (const w of stats?.windows ?? []) {
-    if (w.kind !== kind || w.writer_id !== writerId) continue
-    seen += w.n_seen
-    fav += w.n_fav
-  }
-  return seen > 0 ? fav / seen : null
 }
 
 /** One entry of a Writer menu. */
@@ -94,15 +80,31 @@ export interface AdapterMenuContext {
   categoryIds: number[]
   /** The selected T2I model (per-target-model example counts); null for I2V. */
   targetModel: string | null
-  stats: WriterStats | null
+  /** The blind scorecard results (GET /api/writers/scorecards), or null before they load. */
+  scorecards: ScorecardSummary | null
 }
 
-/** `name · date · fav %`, plus `· untested` for an adapter not yet judged by a scorecard. */
-export function adapterLabel(a: WriterAdapter, rate: number | null): string {
+/**
+ * `name · date · 31% fav` — the favorite rate on the adapter's blind
+ * scorecard, left out while nothing is judged — plus `· untested · 12/30`
+ * (judged pairs) for an adapter not yet promoted by its scorecard.
+ */
+export function adapterLabel(a: WriterAdapter, result: ScorecardResult | null | undefined, readyPairs: number): string {
   const date = (a.created_at || '').slice(0, 10)
-  const fav = rate === null ? '— fav' : `${Math.round(rate * 100)}% fav`
-  const parts = [a.name, date, fav].filter((p) => p)
-  return parts.join(' · ') + (a.status === 'untested' ? ' · untested' : '')
+  const rate = result?.fav_rate_adapter ?? null
+  const parts = [a.name, date, rate === null ? '' : favText(rate)].filter((p) => p)
+  if (a.status === 'untested') parts.push('untested', judgedPairs(result?.n_judged ?? 0, readyPairs))
+  return parts.join(' · ')
+}
+
+/**
+ * The menu label of a built-in writer: Base carries `· baseline · 19% fav`,
+ * the base writer's favorite rate over every judged scorecard pair, once
+ * there is one (the scorecard compares adapters against plain Base).
+ */
+export function builtinWriterLabel(id: string, label: string, scorecards: ScorecardSummary | null): string {
+  const rate = id === 'base' ? (scorecards?.base.fav_rate ?? null) : null
+  return rate === null ? label : `${label} · baseline · ${favText(rate)}`
 }
 
 /**
@@ -113,6 +115,8 @@ export function adapterLabel(a: WriterAdapter, rate: number | null): string {
  */
 export function adapterMenuOptions(adapters: WriterAdapter[], ctx: AdapterMenuContext): WriterOption[] {
   const scopes = new Set(ctx.categoryIds.map(String))
+  const results = new Map((ctx.scorecards?.adapters ?? []).map((r) => [r.adapter_id, r]))
+  const readyPairs = ctx.scorecards?.ready_pairs ?? SCORECARD_READY_PAIRS
   const out: WriterOption[] = []
   for (const a of adapters) {
     if (a.kind !== ctx.kind || !SERVABLE_STATUSES.includes(a.status)) continue
@@ -122,7 +126,7 @@ export function adapterMenuOptions(adapters: WriterAdapter[], ctx: AdapterMenuCo
     const disabled = n !== null && n < MIN_TARGET_MODEL_EXAMPLES
     out.push({
       id: a.writer_id,
-      label: adapterLabel(a, writerFavRate(ctx.stats, ctx.kind, a.writer_id)),
+      label: adapterLabel(a, results.get(a.id), readyPairs),
       disabled,
       title: disabled
         ? `Trained on only ${n} example${n === 1 ? '' : 's'} for ${ctx.targetModel} (needs ${MIN_TARGET_MODEL_EXAMPLES})`
@@ -161,7 +165,7 @@ export interface ScorecardResult {
   name?: string
   status?: WriterAdapterStatus
   n_pairs: number
-  /** Pairs whose two images are both judged (favorite, pass, or seen). */
+  /** Pairs whose two images both have an explicit verdict (favorite or pass; seen alone does not count). */
   n_judged: number
   fav_rate_base: number | null
   fav_rate_adapter: number | null
@@ -190,4 +194,14 @@ export interface ScorecardSummary {
 /** "31%" / "—". */
 export function ratePct(rate: number | null | undefined): string {
   return rate === null || rate === undefined ? '—' : `${Math.round(rate * 100)}%`
+}
+
+/** "31% fav" / "— fav": a scorecard favorite rate, as the Writer menu and the training window show it. */
+export function favText(rate: number | null | undefined): string {
+  return `${ratePct(rate)} fav`
+}
+
+/** "12/30": judged scorecard pairs toward promotion (capped at `readyPairs`). */
+export function judgedPairs(nJudged: number, readyPairs: number): string {
+  return `${Math.min(nJudged, readyPairs)}/${readyPairs}`
 }
