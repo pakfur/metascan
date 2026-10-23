@@ -233,11 +233,65 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
     eq.on_error = on_error
 
 
+# Serialises installs of a rebuilt FAISS manager; ``_faiss_reload_seq``
+# numbers the reloads so a slow older reload never replaces a newer one.
+_faiss_swap_lock = threading.Lock()
+_faiss_reload_seq = 0
+_faiss_installed_seq = 0
+
+
+def _rebuild_faiss_manager(seq: int) -> None:
+    """Load a fresh FaissIndexManager from disk and swap it in. Blocking:
+    runs in a worker thread, never under the DB lock. The old manager
+    stays installed (and searchable) until the new one is loaded."""
+    global _faiss_manager, _faiss_installed_seq
+    fm = FaissIndexManager(_get_embedding_queue().index_dir)
+    fm.load()  # No-op if no on-disk index exists
+    with _faiss_swap_lock:
+        if seq <= _faiss_installed_seq:
+            return  # a newer reload already installed its manager
+        _faiss_installed_seq = seq
+        _faiss_manager = fm
+    if fm.is_loaded:
+        _start_tombstone_backfill(fm)
+
+
 def _reload_faiss_after_index_build() -> None:
-    """Reset the cached FAISS manager so the next search call reloads
-    fresh data from disk."""
-    global _faiss_manager
-    _faiss_manager = None
+    """Refresh the in-memory FAISS index after an embedding run.
+
+    Called from ``on_complete`` (the embedding poller's worker thread).
+    When a manager is in memory it is rebuilt off the loop and swapped in
+    atomically -- readers that never load from disk (taste examples, the
+    tombstone path) keep seeing the old index meanwhile instead of None,
+    which used to silently downgrade every later guided write to ``base``.
+    With no manager in memory nothing loads: search stays lazy."""
+    global _faiss_reload_seq
+    if _faiss_manager is None:
+        return
+    with _faiss_swap_lock:
+        _faiss_reload_seq += 1
+        seq = _faiss_reload_seq
+    loop = _server_loop
+    if loop is not None and not loop.is_closed():
+        coro = asyncio.to_thread(_rebuild_faiss_manager, seq)
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop).add_done_callback(
+                _log_faiss_reload_failure
+            )
+            return
+        except RuntimeError:
+            coro.close()
+    # No usable server loop (tests, shutdown): we are on a worker thread
+    # already, so load here.
+    _rebuild_faiss_manager(seq)
+
+
+def _log_faiss_reload_failure(fut: "concurrent.futures.Future[None]") -> None:
+    if fut.cancelled():
+        return
+    exc = fut.exception()
+    if exc is not None:
+        logger.error("Failed to reload FAISS after index build", exc_info=exc)
 
 
 def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
