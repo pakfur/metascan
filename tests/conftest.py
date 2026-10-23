@@ -77,6 +77,35 @@ def _guard_real_data_dir():
     )
 
 
+_TRACKED_META_PROMPT = _REAL_BASE / "data" / "meta_prompt.yml"
+
+
+def _reset_prompt_state(base: Path) -> None:
+    """Make prompt-store state per-test and deterministic.
+
+    ``get_prompt_store()`` lazily builds a module singleton from
+    ``get_data_dir()/meta_prompt.yml``; without this, whether a test sees a
+    store (and which one) depended on which test ran first. Seed the temp data
+    dir with the repo's *tracked* ``data/meta_prompt.yml`` (a source file, not
+    user data), drop the singleton and every cache derived from it.
+    """
+    import shutil
+
+    data = base / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_TRACKED_META_PROMPT, data / "meta_prompt.yml")
+    # Import after seeding: meta_prompt_templates builds the store at import.
+    from metascan.core import i2v_templates, meta_prompt_templates, prompt_store
+    from metascan.core import shot_templates
+
+    prompt_store.reset_singleton_for_tests()
+    # The elements cache is cleared by an on_reload listener registered on the
+    # *first* singleton at import; a fresh singleton has no such listener.
+    meta_prompt_templates._ELEMENTS_CACHE.clear()
+    i2v_templates.reload_i2v_templates()
+    shot_templates._cache.clear()
+
+
 @pytest.fixture(autouse=True)
 def isolated_app_paths(tmp_path, monkeypatch):
     """Autouse: redirect the app's base path (data dir, config.json, thumbnails, models,
@@ -95,7 +124,11 @@ def isolated_app_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "_db_singleton", None)
     monkeypatch.setattr(deps, "_thumbnail_cache_singleton", None)
+    _reset_prompt_state(base)
     before = _snapshot_real_state()
     yield base
+    prompt_store_mod = sys.modules.get("metascan.core.prompt_store")
+    if prompt_store_mod is not None:
+        prompt_store_mod.reset_singleton_for_tests()
     changed = _changed(before, _snapshot_real_state())
     assert not changed, f"this test touched the real DB/config/logs: {changed}"
