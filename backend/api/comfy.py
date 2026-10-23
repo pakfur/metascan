@@ -13,12 +13,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
 from backend.services.comfy_service import ComfyService, PresetInUseError
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.workflow_validation import (

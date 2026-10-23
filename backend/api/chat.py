@@ -29,12 +29,11 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.api import vlm as vlm_api
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.vlm_client import STATE_READY, VlmClient, VlmError
 
 logger = logging.getLogger(__name__)

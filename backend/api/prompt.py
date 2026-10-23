@@ -19,13 +19,12 @@ from pathlib import Path
 from typing import Any, Dict, Final, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
 
 from backend.api import vlm as vlm_api
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.meta_prompt_templates import (
     Architecture,
     ExtraOption,

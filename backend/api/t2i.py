@@ -18,14 +18,13 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.t2i_service import T2iService
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.i2v_output import (

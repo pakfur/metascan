@@ -20,8 +20,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.config import load_app_config
@@ -33,6 +31,7 @@ from backend.services.storyboard_service import (
     ParentNotFoundError,
     StoryboardService,
 )
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core import ref_describe as rd
 from metascan.core.comfy_client import ComfyError
 from metascan.core.database_sqlite import DatabaseManager

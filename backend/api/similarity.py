@@ -8,17 +8,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
-from metascan.core.gpu_guard import gpu_reserved
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
 from backend.dependencies import get_db
 from backend.services.scan_dispatch import preferred_vlm_model_id, should_tag_with_vlm
 from backend.ws.manager import ws_manager
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.embedding_queue import EmbeddingQueue
+from metascan.core.gpu_guard import gpu_reserved
 from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
@@ -723,6 +722,10 @@ async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str
     _current_scan_tag_with_vlm = tag_with_vlm
     _vlm_scan_stops = _capture_vlm_scan_stops() if tag_with_vlm else None
 
+    # Re-checked with no await before the worker spawns: the lock may have
+    # been taken while the unembedded paths were read.
+    if gpu_reserved():
+        raise gpu_busy_http_error()
     started = await asyncio.to_thread(
         eq.start_indexing,
         paths,

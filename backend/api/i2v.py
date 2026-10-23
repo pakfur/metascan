@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-
-from backend.services.gpu_lock import GPU_FREE
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.i2v_service import I2vService
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, PresetNotFoundError
 from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt

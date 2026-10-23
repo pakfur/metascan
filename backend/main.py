@@ -214,6 +214,28 @@ def _build_training_manager(
     from backend.api.vlm import cancel_retag_jobs, refresh_writer_adapters
     from backend.services import hindsight_briefs
 
+    interrupted: Dict[str, bool] = {"briefs": False}
+    restarts: "set[asyncio.Task[None]]" = set()
+
+    async def restart_briefs() -> None:
+        job = hindsight_briefs.get_briefs_job()
+        try:
+            await job.wait()  # the cancelled run winds down first
+            job.start()  # resumable: already-briefed images are skipped
+            logger.info("Hindsight briefs restarted after writer training")
+        except hindsight_briefs.BriefsJobError as exc:
+            logger.info("Hindsight briefs not restarted: %s", exc.code)
+        except Exception:
+            logger.exception("Restarting the hindsight briefs failed")
+
+    def on_gpu_released() -> None:
+        if not interrupted["briefs"]:
+            return
+        interrupted["briefs"] = False
+        task = asyncio.get_running_loop().create_task(restart_briefs())
+        restarts.add(task)
+        task.add_done_callback(restarts.discard)
+
     def dataset_inputs() -> Any:
         cfg = get_t2i_config(load_app_config())
         library, _ = t2i_runner.library.get()
@@ -233,6 +255,8 @@ def _build_training_manager(
             reasons.append("storyboard")
         if similarity.is_indexing():
             reasons.append("index_build")
+        if upscale.upscale_active():
+            reasons.append("upscale_active")
         return reasons
 
     async def release_gpu() -> None:
@@ -242,8 +266,8 @@ def _build_training_manager(
         # files stay queued); one still waiting waits out the lock.
         cancel_retag_jobs()
         job = hindsight_briefs.peek_briefs_job()
-        if job is not None:
-            job.cancel()
+        if job is not None and job.cancel():
+            interrupted["briefs"] = True  # restarted when the GPU is free
         await vlm_roles.shutdown_all()
         try:
             await inference_client.shutdown()
@@ -261,7 +285,31 @@ def _build_training_manager(
             "training", event, data
         ),
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
+        on_gpu_released=on_gpu_released,
     )
+
+
+async def _install_training(manager: TrainingManager) -> None:
+    """Lifespan startup: install the manager and the GPU reservation,
+    recover runs a stopped server left running (stopping an orphaned
+    worker), and make the hindsight briefs wait out the lock."""
+    from backend.services.hindsight_briefs import get_briefs_job
+
+    set_training_manager(manager)
+    set_gpu_reservation(manager.gpu_locked)
+    await manager.recover()
+    get_briefs_job().blocked = manager.gpu_locked
+
+
+async def _uninstall_training(manager: TrainingManager) -> None:
+    """Lifespan shutdown (first: completing a run refreshes the writer, so
+    the VLMs must still be alive): pause the worker, then clear."""
+    try:
+        await manager.aclose()
+    except Exception:
+        logger.exception("Training manager shutdown raised")
+    set_training_manager(None)
+    set_gpu_reservation(None)
 
 
 @asynccontextmanager
@@ -524,13 +572,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         inference_client=client,
         vlm_roles=vlm_roles,
     )
-    set_training_manager(training_manager)
-    set_gpu_reservation(training_manager.gpu_locked)
-    await training_manager.recover()
-    # Hindsight briefs pause (and refuse to start) while training runs.
-    from backend.services.hindsight_briefs import get_briefs_job
-
-    get_briefs_job().blocked = training_manager.gpu_locked
+    await _install_training(training_manager)
 
     try:
         yield
@@ -540,14 +582,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
-        # Pause the training worker first (its checkpoint resumes later);
-        # completing a run refreshes the writer, so the VLMs must be alive.
-        try:
-            await training_manager.aclose()
-        except Exception:
-            logger.exception("Training manager shutdown raised")
-        set_training_manager(None)
-        set_gpu_reservation(None)
+        # Pause the training worker first (its checkpoint resumes later).
+        await _uninstall_training(training_manager)
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:
