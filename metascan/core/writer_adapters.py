@@ -72,7 +72,19 @@ ADAPTER_PEFT_DIRNAME = "peft"
 # HF-format training weights (the source of the installed GGUF);
 # ``models.writer_train_repo`` overrides the repo.
 ADAPTER_BASE_MODEL = "qwen3vl-8b"
-DEFAULT_WRITER_TRAIN_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+
+
+def _default_train_repo() -> str:
+    from metascan.core.vlm_models import REGISTRY
+
+    repo = REGISTRY[ADAPTER_BASE_MODEL].hf_train_repo
+    if not repo:
+        raise RuntimeError(f"{ADAPTER_BASE_MODEL} has no hf_train_repo")
+    return repo
+
+
+# Single source of truth: the base model's VlmModelSpec.hf_train_repo.
+DEFAULT_WRITER_TRAIN_REPO = _default_train_repo()
 CONVERTER_SCRIPT = "convert_lora_to_gguf.py"
 
 
