@@ -345,18 +345,62 @@ async def test_a_new_adapter_under_another_callers_hold_is_refused_until_it_ends
     client.lora_wait_s = 0.2
     await client.ensure_started(BASE)
     source.files.append(AdapterFile(2, "t2i", BASE, b))
-    with client.hold():
-        await roles.refresh_adapters()
-        assert roles.restart_pending
-        with pytest.raises(AdapterLoadingError):
-            await _ask(client, lora_path=b)
-        assert client.state == "ready"
-        assert roles.restart_pending
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def other_batch() -> None:  # its own task: its hold is not ours
+        with client.hold():
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(other_batch())
+    await held.wait()
+    await roles.refresh_adapters()
+    assert roles.restart_pending
+    with pytest.raises(AdapterLoadingError):
+        await _ask(client, lora_path=b)
+    assert client.state == "ready"
+    assert roles.restart_pending
+    release.set()
+    await holder
     await _until(lambda: not roles.restart_pending, "the restart after the hold")
     assert client.state == "stopped"
     await _ask(client, lora_path=b)
     assert [_loras_of(s) for s in rec.spawns()] == [[str(a)], [str(a), str(b)]]
     assert rec.bodies()[-1]["lora"] == [{"id": 1, "scale": 1.0}]
+
+
+async def test_the_callers_own_hold_does_not_block_its_adapter(setup: Any) -> None:
+    # A Random batch holds the writer and asks for its own (new) adapter:
+    # its hold is not someone else's work, so the writer restarts at once.
+    build, source, rec, a, b = setup
+    source.files = source.files[:1]
+    roles = build()
+    await roles.refresh_adapters()
+    client = roles.client("writer")
+    client.lora_wait_s = 5.0
+    await client.ensure_started(BASE)
+    client.lora_paths = (a, b)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with client.hold():
+        await _ask(client, lora_path=b)
+    assert loop.time() - began < 3.0
+    assert rec.bodies()[-1]["lora"] == [{"id": 1, "scale": 1.0}]
+
+
+async def test_parallel_requests_for_a_new_adapter_restart_once(setup: Any) -> None:
+    build, source, rec, a, b = setup
+    roles = build()
+    await roles.refresh_adapters()
+    client = roles.client("writer")
+    client.lora_wait_s = 5.0
+    await client.ensure_started(BASE)
+    c = _gguf(rec.path.parent, 3)
+    client.lora_paths = (a, b, c)
+    replies = await asyncio.gather(*(_ask(client, lora_path=c) for _ in range(3)))
+    assert replies == ["SYNTH prompt"] * 3
+    assert len(rec.spawns()) == 2  # one restart, not one per caller
+    assert [body["lora"] for body in rec.bodies()] == [[{"id": 2, "scale": 1.0}]] * 3
 
 
 async def test_a_new_adapter_asked_for_while_idle_restarts_then_serves(
@@ -635,7 +679,7 @@ class TestT2iAdapterServing(AdapterCase):
         assert self.vlm is not None
         order: List[Any] = []
 
-        async def prepare_lora(path: Path) -> None:
+        async def prepare_lora(path: Path, wait_s: Optional[float] = None) -> None:
             order.append(("prepare", path))
 
         @contextlib.contextmanager
@@ -653,6 +697,27 @@ class TestT2iAdapterServing(AdapterCase):
         self.assertEqual(order[:2], [("prepare", self.gguf), ("hold",)])
         batch = self.runner._batches[started.batch_id]
         self.assertEqual(batch.adapter_base, BASE)
+
+    async def test_a_random_batch_whose_adapter_cannot_load_is_refused(self) -> None:
+        # Nothing has rendered yet: the batch is refused up front (409
+        # adapter_loading), never started to wait out every step.
+        assert self.vlm is not None
+
+        async def prepare_lora(path: Path, wait_s: Optional[float] = None) -> None:
+            raise AdapterLoadingError("busy")
+
+        self.vlm.prepare_lora = prepare_lora  # type: ignore[attr-defined]
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        with self.assertRaises(WriterAdapterUnavailable) as caught:
+            await self.start(
+                self.random_mode(batch_size=2, count_per_batch=1, writer=self.wid)
+            )
+        self.assertLess(loop.time() - began, 1.0)
+        self.assertEqual(caught.exception.code, "adapter_loading")
+        self.assertEqual(self.runner._batches, {})
+        self.assertEqual(self.comfy.submits, [])
+        self.assertEqual(self.vlm.calls, [])
 
 
 # ---- I2V lineage --------------------------------------------------------------
@@ -766,6 +831,8 @@ class TestT2iRoutes(t2i_api_tests.T2iApiCase):
         )
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["detail"]["code"], "adapter_loading")
+        # The client needs to know WHICH adapter (the pick or a held draft).
+        self.assertEqual(resp.json()["detail"]["writer_id"], "adapter:3")
 
 
 def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:

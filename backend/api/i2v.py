@@ -77,7 +77,12 @@ def _service() -> I2vService:
 
 def _adapter_409(exc: WriterAdapterUnavailable) -> HTTPException:
     return HTTPException(
-        status_code=409, detail={"code": exc.code, "message": str(exc)}
+        status_code=409,
+        detail={
+            "code": exc.code,
+            "message": str(exc),
+            "writer_id": exc.writer_id,
+        },
     )
 
 

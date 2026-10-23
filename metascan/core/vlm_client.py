@@ -84,6 +84,14 @@ def is_background_vlm_work() -> bool:
     return _BACKGROUND_WORK.get()
 
 
+# The clients (by id) the current task -- and tasks it created -- holds
+# (``VlmClient.hold``): a caller's own hold is not someone else's work, so
+# it never makes that caller wait for itself.
+_OWN_HOLDS: contextvars.ContextVar[Tuple[int, ...]] = contextvars.ContextVar(
+    "vlm_own_holds", default=()
+)
+
+
 _T = TypeVar("_T")
 
 
@@ -139,6 +147,7 @@ class VlmClient:
         self.lora_paths: Tuple[Path, ...] = tuple(Path(p) for p in lora_paths)
         self._loaded_lora_paths: Tuple[Path, ...] = ()
         self.lora_wait_s = LORA_IDLE_WAIT_S
+        self._lora_restart_lock = asyncio.Lock()
         # The model the role(s) this client serves are configured for
         # (set by backend.services.vlm_roles.VlmRoles); pick_vlm_model
         # starts it when nothing is loaded. None: no role preference.
@@ -466,20 +475,27 @@ class VlmClient:
         return True
 
     def _busy_for_restart(self) -> bool:
-        """Requests in flight or waiting for residency, a hold, or a load."""
+        """Requests in flight or waiting for residency, a hold taken by
+        someone else (the caller's own hold does not count), or a load."""
+        others_holds = self._holds - _OWN_HOLDS.get().count(id(self))
         return (
             self._in_flight > 0
             or self._residency_waiters > 0
-            or self._holds > 0
+            or others_holds > 0
             or self._is_loading()
         )
 
-    async def prepare_lora(self, path: Path) -> None:
+    async def prepare_lora(self, path: Path, wait_s: Optional[float] = None) -> None:
         """Make sure the server that will answer loads ``path`` (see
-        ``_ensure_lora``); a T2I Random batch calls it before it holds."""
-        await self._ensure_lora(path)
+        ``_ensure_lora``), waiting at most ``wait_s`` (default
+        ``lora_wait_s``) for it to be idle; a T2I Random batch calls it
+        before it starts."""
+        await self._ensure_lora(path, wait_s)
 
-    async def _ensure_lora(self, path: Path) -> None:
+    def _lora_ready(self, path: Path) -> bool:
+        return path in self._loaded_lora_paths and not self.loras_stale
+
+    async def _ensure_lora(self, path: Path, wait_s: Optional[float] = None) -> None:
         """Make sure the server that will answer loads ``path``.
 
         An adapter registered after the server spawned restarts it with the
@@ -497,18 +513,25 @@ class VlmClient:
             return  # still loaded; the pending restart waits for idle
         if path not in self.lora_paths:
             raise AdapterNotLoadedError(f"adapter {path.parent.name} is not loaded")
-        if self._state not in (STATE_SPAWNING, STATE_LOADING, STATE_READY):
-            return  # the next spawn loads the current list
-        deadline = time.monotonic() + self.lora_wait_s
-        while self._busy_for_restart():
+        deadline = time.monotonic() + (self.lora_wait_s if wait_s is None else wait_s)
+        while True:
+            if self._state not in (STATE_SPAWNING, STATE_LOADING, STATE_READY):
+                return  # the next spawn loads the current list
+            if self._lora_ready(path):
+                return  # another caller's restart already loaded it
+            if not self._busy_for_restart():
+                break
             if time.monotonic() >= deadline:
                 raise AdapterLoadingError(
                     f"adapter {path.parent.name} is not loaded yet: the writer "
                     "is busy"
                 )
             await asyncio.sleep(0.02)
-        if path not in self._loaded_lora_paths:
-            await self.restart_for_loras()
+        # Single flight: two callers that saw the writer idle in the same
+        # tick restart it once (the second finds it stopped, or reloaded).
+        async with self._lora_restart_lock:
+            if path not in self._loaded_lora_paths:
+                await self.restart_for_loras()
 
     async def _wait_ready(self, timeout: float) -> None:
         try:
@@ -780,9 +803,11 @@ class VlmClient:
         waits for the hold to end instead of evicting between items.
         Interactive swaps still evict after their bounded wait."""
         self._holds += 1
+        token = _OWN_HOLDS.set(_OWN_HOLDS.get() + (id(self),))
         try:
             yield
         finally:
+            _OWN_HOLDS.reset(token)
             self._holds -= 1
             self._last_request_end = time.monotonic()
 

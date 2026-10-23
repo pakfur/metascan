@@ -147,8 +147,15 @@ the root CLAUDE.md still applies.
   NO `hold()`, not loading — never evicting work or breaking a T2I Random
   batch's prompting hold; still busy after `lora_wait_s` (60 s) →
   `AdapterLoadingError` (409 `adapter_loading`, "try again when the current
-  batch finishes") and the pending restart runs at the next idle. A Random
-  batch calls `prepare_lora` BEFORE taking its hold. One withdrawn and no
+  batch finishes") and the pending restart runs at the next idle. The
+  caller's OWN hold never counts (`_OWN_HOLDS` contextvar, set by `hold()`),
+  the wait returns as soon as another caller's restart loaded the adapter,
+  and the restart is single-flight (`_lora_restart_lock`). POST
+  /api/t2i/batches calls `prepare_lora(wait_s=15)` before registering a
+  Random batch and refuses it with 409 `adapter_loading` when the writer
+  stays busy; a step whose adapter is not loaded falls back at once (no
+  retry). Adapter 409s carry `writer_id` so the dialog falls back the Writer
+  pick only when it is the refused adapter, else drops the held draft. One withdrawn and no
   longer loaded raises `AdapterNotLoadedError` (409 `adapter_unavailable`).
   `refresh_adapters()` restarts a stale client only when idle
   (`busy_for_background(swap_grace)` false: nothing in flight or waiting,
