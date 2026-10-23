@@ -6370,7 +6370,7 @@ class DatabaseManager:
             return None
         return [str(v) for v in value]
 
-    def writer_dataset_raw(self) -> Dict[str, Any]:
+    def writer_dataset_raw(self, candidates: bool = False) -> Dict[str, Any]:
         """Raw rows for ``writer_dataset.build_examples`` (no filtering
         beyond shape; the rules live there):
 
@@ -6388,7 +6388,9 @@ class DatabaseManager:
           Malformed tombstones are skipped with one WARNING (count only).
         * ``briefs``: ``{path: {brief, model, created_at}}``.
         * ``library``: favorited images that have a brief but no live T2I
-          row: ``{path: {prompt, model_names, judged_at, seen_at,
+          row (with ``candidates=True``: every favorited image without a
+          live T2I row, briefed or not -- what the hindsight-briefs job
+          selects from): ``{path: {prompt, model_names, judged_at, seen_at,
           category_ids, category_names, generation_categories}}`` (prompt
           from the metadata blob).
         """
@@ -6481,7 +6483,16 @@ class DatabaseManager:
                 )
             }
             library: Dict[str, Dict[str, Any]] = {}
-            others = [p for p in briefs if p not in live]
+            if candidates:
+                others = [
+                    r["file_path"]
+                    for r in conn.execute(
+                        "SELECT file_path FROM media WHERE is_favorite = 1"
+                    )
+                    if r["file_path"] not in live
+                ]
+            else:
+                others = [p for p in briefs if p not in live]
             for start in range(0, len(others), 500):
                 part = others[start : start + 500]
                 marks = ",".join("?" * len(part))

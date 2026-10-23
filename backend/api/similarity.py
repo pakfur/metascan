@@ -117,6 +117,12 @@ def _generation_in_flight() -> bool:
         return True
 
 
+def generation_in_flight() -> bool:
+    """Public form of the generation-busy probe (other background VLM jobs
+    wait on the same signal)."""
+    return _generation_in_flight()
+
+
 async def _wait_for_generation_to_settle() -> bool:
     """Wait (on the loop) while generation work is in flight. True when it
     had to wait."""
