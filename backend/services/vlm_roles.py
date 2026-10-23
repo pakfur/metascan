@@ -57,6 +57,9 @@ ROLES: Tuple[Role, Role] = ("writer", "general")
 VRAM_HEADROOM_GB = 2.0
 # How long a swap waits for the outgoing client's in-flight requests.
 IDLE_TIMEOUT_S = 30.0
+# A client whose last request ended less than this ago counts as busy (a
+# tagging batch between two items), so the roles do not swap per item.
+SWAP_GRACE_S = 0.5
 
 NOTE_TAKE_TURNS = (
     "writer and tagging models take turns — they don't fit in VRAM together"
@@ -188,12 +191,14 @@ class VlmRoles:
         installed: Optional[Callable[[str], bool]] = None,
         vram_gb: Optional[float] = None,
         idle_timeout_s: float = IDLE_TIMEOUT_S,
+        swap_grace_s: float = SWAP_GRACE_S,
     ) -> None:
         self._factory = client_factory
         self._save = save_model
         self._installed: Callable[[str], bool] = installed or (lambda _mid: True)
         self._vram_gb = vram_gb
         self._idle_timeout_s = idle_timeout_s
+        self._swap_grace_s = swap_grace_s
         self._writer_cfg: Optional[str] = writer
         self._models: Dict[Role, Optional[str]] = {"writer": None, "general": general}
         self._models["writer"] = self._effective_writer()
@@ -366,7 +371,9 @@ class VlmRoles:
                     continue
                 if getattr(other, "state", None) not in _RESIDENT_STATES:
                     continue
-                if not await other.wait_idle(self._idle_timeout_s):
+                if not await other.wait_idle(
+                    self._idle_timeout_s, grace=self._swap_grace_s
+                ):
                     logger.warning(
                         "VLM %s still busy after %.0fs; shutting it down to "
                         "make room for %s",
@@ -379,7 +386,8 @@ class VlmRoles:
                     other.model_id,
                     client.preferred_model_id,
                 )
-                await other.shutdown()
+                # evict(): its next request brings the model back.
+                await other.evict()
 
     # ---- changes -------------------------------------------------------
 

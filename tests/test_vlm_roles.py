@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 import time
 import json
 from pathlib import Path
@@ -45,6 +46,7 @@ class _FakeVlm:
         self.shutdowns = 0
         self.starts = 0
         self.retired = False
+        self.swapped_out = False
         self.before_spawn: Any = None
         self.in_flight = 0
         self._idle = asyncio.Event()
@@ -73,7 +75,7 @@ class _FakeVlm:
         if self.in_flight == 0:
             self._idle.set()
 
-    async def wait_idle(self, timeout: float) -> bool:
+    async def wait_idle(self, timeout: float, grace: float = 0.0) -> bool:
         try:
             await asyncio.wait_for(self._idle.wait(), timeout)
             return True
@@ -84,6 +86,11 @@ class _FakeVlm:
         self.shutdowns += 1
         self.model_id = None
         self.state = "stopped"
+        self.swapped_out = False
+
+    async def evict(self) -> None:
+        await self.shutdown()
+        self.swapped_out = True
 
     def snapshot(self) -> Dict[str, Any]:
         return {"state": self.state, "model_id": self.model_id}
@@ -736,3 +743,147 @@ async def test_activate_persists_only_after_the_swap_succeeds() -> None:
     await roles.activate("general", "qwen3vl-4b", ok)
     assert saved == [("general", "qwen3vl-4b")]
     assert roles.client("general").model_id == "qwen3vl-4b"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: general requests survive the writer taking over
+# ---------------------------------------------------------------------------
+
+
+class _BlockingDb:
+    """Records tag writes; the first write blocks (in its worker thread)
+    until the test lets it go, so the writer can take over mid-batch."""
+
+    def __init__(self) -> None:
+        self.tagged: List[tuple] = []
+        self.first = threading.Event()
+        self.resume = threading.Event()
+
+    def add_tag_indices(self, path: Any, tags: List[str], source: str) -> None:
+        self.tagged.append((str(path), list(tags)))
+        if len(self.tagged) == 1:
+            self.first.set()
+            self.resume.wait(10)
+
+
+async def test_writer_taking_over_mid_tag_batch_loses_no_items(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    from backend.services.vlm_tag_pump import VlmTagPump
+
+    images = []
+    for i in range(4):
+        p = tmp_path / f"img{i}.png"
+        Image.new("RGB", (8, 8), (i * 40, 0, 0)).save(p)
+        images.append(p)
+    (tmp_path / "vlm_pending.jsonl").write_text(
+        "".join(json.dumps({"path": str(p)}) + "\n" for p in images)
+    )
+    tags = '["red car", "blue sky"]'
+    async with FakeLlamaServer(canned_response=tags) as w, FakeLlamaServer(
+        canned_response=tags
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=lambda: VlmClient(spawn_override=lambda mid: urls[mid]),
+            vram_gb=24.0,  # 9.5 + 22 does not fit: the roles take turns
+            swap_grace_s=0.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        db = _BlockingDb()
+        pump = VlmTagPump(
+            queue_dir=tmp_path,
+            client=general,
+            db=db,
+            model_id="qwen38-27b",
+            concurrency=1,
+        )
+        try:
+            task = asyncio.create_task(pump.drain_once())
+            loop = asyncio.get_running_loop()
+            assert await loop.run_in_executor(None, db.first.wait, 10)
+            # The writer takes the GPU while the batch is between items.
+            await writer.ensure_started("qwen3vl-8b")
+            assert general.state == "stopped" and general.swapped_out is True
+            await writer.generate_text(system_prompt="s", user_prompt="u")
+            db.resume.set()
+            await asyncio.wait_for(task, 30)
+            assert len(db.tagged) == 4
+            assert all(t for _, t in db.tagged), db.tagged  # none failed / empty
+            # The general model swapped back in, so the writer went out.
+            assert general.state == "ready"
+            assert writer.state == "stopped" and writer.swapped_out is True
+        finally:
+            db.resume.set()
+            await roles.shutdown_all()
+
+
+async def test_a_client_stopped_by_hand_is_not_restarted_by_a_request(
+    tmp_path: Path,
+) -> None:
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    with pytest.raises(RuntimeError, match="not ready"):
+        await client.generate_tags(tmp_path / "x.png")
+
+
+async def test_an_eviction_during_a_request_is_retried() -> None:
+    from metascan.core.vlm_client import STATE_READY
+
+    client = VlmClient()
+    client.preferred_model_id = "qwen3vl-8b"
+    client._state = STATE_READY
+    started: List[str] = []
+
+    async def ensure(mid: str) -> None:
+        started.append(mid)
+        client._state = STATE_READY
+
+    calls: List[int] = []
+
+    async def impl(path: Any, *, timeout: float = 60.0) -> List[str]:
+        calls.append(1)
+        if len(calls) == 1:
+            await client.evict()  # forced swap while the request ran
+            return []
+        return ["tag"]
+
+    client.ensure_started = ensure  # type: ignore[method-assign]
+    client._generate_tags_impl = impl  # type: ignore[method-assign]
+    assert await client.generate_tags(Path("x.png")) == ["tag"]
+    assert started == ["qwen3vl-8b"]
+    assert len(calls) == 2
+
+
+async def test_wait_idle_waits_out_loading_and_the_grace() -> None:
+    from metascan.core.vlm_client import STATE_LOADING, STATE_READY
+
+    client = VlmClient()
+    client._state = STATE_LOADING
+    assert await client.wait_idle(0.05) is False
+    client._state = STATE_READY
+    client._begin_request()
+    client._end_request()
+    assert await client.wait_idle(0.01, grace=0.3) is False
+    assert await client.wait_idle(1.0, grace=0.05) is True
+
+
+@pytest.mark.parametrize("module", ["chat", "prompt"])
+def test_chat_and_playground_accept_a_swapped_out_client(module: str) -> None:
+    import importlib
+
+    from fastapi import HTTPException
+
+    mod = importlib.import_module(f"backend.api.{module}")
+    vlm_api.set_vlm_client(SimpleNamespace(state="stopped", swapped_out=True))
+    try:
+        assert mod._require_ready_client() is not None
+        vlm_api.set_vlm_client(SimpleNamespace(state="stopped", swapped_out=False))
+        with pytest.raises(HTTPException):
+            mod._require_ready_client()
+    finally:
+        vlm_api.set_vlm_client(None)

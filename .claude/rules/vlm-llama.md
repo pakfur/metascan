@@ -63,6 +63,15 @@ the root CLAUDE.md still applies.
   `writer_missing_hint`, I2V raises `I2vUnavailableError` with it.
   `refresh()` (GET /roles, after a VLM download) re-applies the
   unset-writer rule without a restart.
+  A client swapped out for the other role is `evict()`ed
+  (`swapped_out=True`): its next `generate_tags` / `generate_text` /
+  `chat_stream` re-ensures residency first (`_resident_request`), and a
+  request whose client was force-evicted mid-call is retried, so a tag
+  batch survives the writer taking over. A client is busy for swapping
+  while requests are in flight, while it is spawning/loading, and for
+  `SWAP_GRACE_S` after its last request (no per-item swaps). An explicit
+  `shutdown()` (ComfyUI unload, /unload) clears `swapped_out`: nothing
+  auto-restarts it. Chat / playground accept a swapped-out client as ready.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job

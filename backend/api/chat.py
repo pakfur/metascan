@@ -58,7 +58,10 @@ class ChatRequest(BaseModel):
 
 def _require_ready_client() -> Any:
     client = vlm_api.get_vlm_client()
-    if client is None or client.state != STATE_READY:
+    # A client swapped out for the prompt writer counts as ready: its next
+    # request brings the model back (VlmClient._resident_request).
+    swapped_out = getattr(client, "swapped_out", False) is True
+    if client is None or (client.state != STATE_READY and not swapped_out):
         raise HTTPException(
             status_code=503,
             detail="VLM not ready — activate a Qwen VLM first",
