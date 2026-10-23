@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from backend.services.vlm_tag_pump import VlmTagPump
 
 
@@ -53,10 +55,8 @@ async def test_failed_start_keeps_batch_queued(tmp_path):
     client.generate_tags = AsyncMock()
     pump = VlmTagPump(tmp_path, client, MagicMock(), model_id="m")
 
-    try:
+    with pytest.raises(RuntimeError):
         await pump.drain_once()
-    except RuntimeError:
-        pass
     assert pending.read_text() == body
     client.generate_tags.assert_not_awaited()
 

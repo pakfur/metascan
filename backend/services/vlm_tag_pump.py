@@ -56,7 +56,12 @@ class VlmTagPump:
 
     def _consume_snapshot(self, snapshot: str) -> None:
         """Remove the snapshot's lines from the file, keeping lines appended
-        since it was read (the embedding worker appends concurrently)."""
+        since it was read (the embedding worker appends concurrently).
+
+        Residual race: the worker opens the file per append, so a line landing
+        between this read and write is lost; the window is microseconds and
+        only exists during a concurrent new scan.
+        """
         try:
             current = self.pending_file.read_text(encoding="utf-8")
         except FileNotFoundError:
