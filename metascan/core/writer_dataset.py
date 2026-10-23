@@ -364,6 +364,61 @@ def parse_scope(scope: Union[str, int], categories: Dict[int, str]) -> Optional[
     return cid
 
 
+def _hindsight_target(
+    raw: Mapping[str, Any],
+    by_path: Mapping[str, Dict[str, Any]],
+    path: str,
+    describe: Optional["_Describer"] = None,
+) -> Optional[Tuple[T2iModelProfile, Any, Dict[str, Any], List[Any], Optional[str]]]:
+    """Whether ``path`` may be a hindsight target, and its parts:
+    ``(profile, prompt, source row, timestamp stamps, group description)``.
+    The ONE place the rule lives -- the dataset builder and the briefs job
+    (which decides what to write a brief for) both call it. Favorited,
+    live, image, not manual / fallback / scorecard, a known prompt and
+    exactly one target-model family."""
+    if not is_image_path(path):
+        return None
+    gen = by_path.get(path)
+    group_text: Optional[str] = None
+    if gen is not None:
+        if (
+            not gen.get("live")
+            or not gen.get("is_favorite")
+            or not _usable(gen)
+            or gen.get("writer_id") == WRITER_FALLBACK
+        ):
+            return None
+        profile = _profile(gen.get("model"))
+        prompt = gen.get("prompt_used")
+        group_text = describe(gen) if describe is not None else None
+        source_row: Dict[str, Any] = gen
+        stamps: List[Any] = _row_stamps(gen)
+    else:
+        lib = (raw.get("library") or {}).get(path)
+        if lib is None:
+            return None
+        families = [
+            pid
+            for pid in MODEL_PROFILES
+            if matches_model_family(lib.get("model_names") or [], pid)
+        ]
+        profile = MODEL_PROFILES[families[0]] if len(families) == 1 else None
+        prompt = lib.get("prompt")
+        source_row = lib
+        stamps = [lib.get("judged_at"), lib.get("seen_at")]
+    if profile is None or _blank(prompt):
+        return None
+    return profile, prompt, source_row, stamps, group_text
+
+
+def hindsight_candidates(raw: Mapping[str, Any]) -> List[str]:
+    """Sorted paths a hindsight brief may be written for, from
+    ``DatabaseManager.writer_dataset_raw(candidates=True)``."""
+    by_path = {g["file_path"]: g for g in raw.get("generations") or []}
+    paths = set(by_path) | set(raw.get("library") or {})
+    return sorted(p for p in paths if _hindsight_target(raw, by_path, p) is not None)
+
+
 class _Describer:
     """The DESCRIPTION of a T2I row (see the module docstring), cached."""
 
@@ -582,40 +637,13 @@ def examples_from_raw(
     n_hindsight = 0
     for path in sorted(briefs):
         brief = briefs[path].get("brief")
-        if _blank(brief) or not is_image_path(path):
+        if _blank(brief):
             continue
         brief = str(brief)
-        gen = by_path.get(path)
-        stamps: List[Any] = []
-        group_text: Optional[str] = None
-        if gen is not None:
-            if (
-                not gen.get("live")
-                or not gen.get("is_favorite")
-                or not _usable(gen)
-                or gen.get("writer_id") == WRITER_FALLBACK
-            ):
-                continue
-            profile = _profile(gen.get("model"))
-            prompt = gen.get("prompt_used")
-            group_text = describe(gen)
-            source_row: Dict[str, Any] = gen
-            stamps += _row_stamps(gen)
-        else:
-            lib = (raw.get("library") or {}).get(path)
-            if lib is None:
-                continue
-            families = [
-                pid
-                for pid in MODEL_PROFILES
-                if matches_model_family(lib.get("model_names") or [], pid)
-            ]
-            profile = MODEL_PROFILES[families[0]] if len(families) == 1 else None
-            prompt = lib.get("prompt")
-            source_row = lib
-            stamps += [lib.get("judged_at"), lib.get("seen_at")]
-        if profile is None or _blank(prompt):
+        target = _hindsight_target(raw, by_path, path, describe)
+        if target is None:
             continue
+        profile, prompt, source_row, stamps, group_text = target
         as_of = _newest(stamps)
         if not in_scope([source_row]) or not in_time(as_of):
             continue

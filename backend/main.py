@@ -458,6 +458,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
         await similarity.shutdown_embedding_queue()  # cancels any VLM drain
+        try:
+            from backend.services import hindsight_briefs
+
+            job = hindsight_briefs._job
+            if job is not None:
+                await job.aclose()
+        except Exception:
+            logger.exception("Hindsight briefs shutdown raised")
         similarity.set_embedding_complete_hook(None)
         similarity.set_generation_busy_probe(None)
         similarity.set_server_loop(None)

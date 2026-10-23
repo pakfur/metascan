@@ -114,3 +114,34 @@ async def delete_adapter(adapter_id: int) -> Dict[str, str]:
     await asyncio.to_thread(_delete, adapter_id)
     await _changed()
     return {"status": "deleted"}
+
+
+# ---- hindsight briefs (training data) ----------------------------------------
+
+
+@router.post("/briefs/run", status_code=202)
+async def run_briefs() -> Dict[str, Any]:
+    """Write a hindsight brief for every favorited generated image that has
+    none yet (resumable). 202; progress arrives on WS ``training``."""
+    from backend.services.hindsight_briefs import BriefsJobError, get_briefs_job
+
+    job = get_briefs_job()
+    try:
+        job.start()
+    except BriefsJobError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code}) from exc
+    return {"status": "started"}
+
+
+@router.get("/briefs/status")
+async def briefs_status() -> Dict[str, Any]:
+    from backend.services.hindsight_briefs import get_briefs_job
+
+    return get_briefs_job().status()
+
+
+@router.post("/briefs/cancel")
+async def cancel_briefs() -> Dict[str, Any]:
+    from backend.services.hindsight_briefs import get_briefs_job
+
+    return {"status": "cancelling" if get_briefs_job().cancel() else "idle"}
