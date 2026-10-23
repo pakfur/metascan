@@ -1799,6 +1799,10 @@ class TestManualBatchRun(BatchCase):
                     "direction_parts": [],
                     "variant_index": 0,
                     "variants": 1,
+                    "caption_index": 0,
+                    "captions": 1,
+                    "writer_id": "manual",
+                    "draft": None,
                 }
             ],
         )
@@ -2317,8 +2321,11 @@ class TestRandomBatchRun(BatchCase):
             [
                 "aspect_ratio",
                 "caption",
+                "caption_index",
+                "captions",
                 "direction",
                 "direction_parts",
+                "draft",
                 "negative",
                 "prompt",
                 "seed",
@@ -2327,6 +2334,7 @@ class TestRandomBatchRun(BatchCase):
                 "variant_index",
                 "variants",
                 "warnings",
+                "writer_id",
             ],
         )
         self.assertEqual((step["step"], step["total_steps"], step["seed"]), (1, 3, 10))

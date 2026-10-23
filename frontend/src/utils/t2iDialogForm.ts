@@ -12,6 +12,11 @@ import {
   type CaptionFilter,
   type SeedPolicy,
   type T2iBatchRequest,
+  type T2iBatchStep,
+  type T2iDraftSet,
+  type T2iPromptDraft,
+  type T2iVariantPrompt,
+  type T2iWriter,
   type T2iConfig,
   type T2iFinishedBatch,
   type T2iFormState,
@@ -162,6 +167,116 @@ export interface BatchContext {
   hasNegative: boolean
   maxBatchSize: number
   maxCount: number
+  /** The Variants picker (prompt variants per caption). Default 1. */
+  variants?: number
+  /** The Writer picker. Default `base`. */
+  writer?: T2iWriter
+  /** The drafts the store holds behind the Prompt box, if any. */
+  drafts?: T2iDraftSet | null
+}
+
+// ---- drafts -----------------------------------------------------------------------
+
+/**
+ * The drafts a Generate Prompt returned, as the store holds them: each
+ * variant's text starts as its draft. The box shows variant 0.
+ */
+export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T2iDraftSet | null {
+  if (drafts.length === 0) return null
+  return {
+    caption,
+    entries: [...drafts]
+      .sort((a, b) => a.variant_index - b.variant_index)
+      .map((d) => ({
+        variant_index: d.variant_index,
+        writer_id: d.writer_id,
+        draft: d.prompt,
+        text: d.prompt,
+        negative: d.negative ?? '',
+      })),
+    current: 0,
+  }
+}
+
+/**
+ * What a Random run hands back: the variants of its last caption that were on
+ * show (`steps`), with the box on `shown` (the last step's variant). Steps
+ * without a draft (typed) or of another caption are left out; null when the
+ * shown step itself has no draft, since the box would then hold a prompt no
+ * writer drafted.
+ */
+export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T2iDraftSet | null {
+  if (shown.draft == null || !shown.writer_id) return null
+  const byVariant = new Map<number, T2iBatchStep>()
+  for (const s of steps) {
+    if (s.caption_index !== shown.caption_index || s.draft == null || !s.writer_id) continue
+    byVariant.set(s.variant_index, s)
+  }
+  byVariant.set(shown.variant_index, shown)
+  const ordered = [...byVariant.values()].sort((a, b) => a.variant_index - b.variant_index)
+  return {
+    caption: shown.caption,
+    entries: ordered.map((s) => ({
+      variant_index: s.variant_index,
+      writer_id: s.writer_id as string,
+      draft: s.draft as string,
+      text: s.prompt,
+      negative: s.negative ?? '',
+    })),
+    current: ordered.findIndex((s) => s.variant_index === shown.variant_index),
+  }
+}
+
+/**
+ * Every held variant as Generate sends it, the shown one with the boxes' live
+ * text (an edit applies to the variant on show). Null when the drafts do not
+ * belong to what the boxes hold: none held, written for another caption, or
+ * an empty Prompt box (which means "write me one", never "render a draft").
+ * Only a complete set (variant indexes 0..N-1) goes out.
+ */
+export function heldPrompts(f: T2iFields, set: T2iDraftSet | null | undefined, hasNegative: boolean): T2iVariantPrompt[] | null {
+  if (!set || set.caption !== f.caption || !f.prompt.trim()) return null
+  if (!set.entries.every((e, i) => e.variant_index === i)) return null
+  return set.entries.map((e, i) => {
+    const shown = i === set.current
+    const text = shown ? f.prompt : e.text
+    const negative = shown ? f.negative : e.negative
+    return {
+      prompt: text,
+      negative: hasNegative && negative.trim() ? negative : null,
+      draft: e.draft,
+      writer_id: e.writer_id,
+      variant_index: e.variant_index,
+    }
+  })
+}
+
+/**
+ * The prompts of batch 1 a Generate will send with its drafts, or null when
+ * it sends the box as a typed prompt. Manual renders every held variant;
+ * Random only when the set has as many variants as the picker asks for (the
+ * server wants one per variant), else the box renders once, as typed.
+ */
+export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt[] | null {
+  if (f.mode === 'random' && firstBatchSource(f) !== 'prompt') return null
+  const held = heldPrompts(f, ctx.drafts, ctx.hasNegative)
+  if (!held) return null
+  if (f.mode === 'random' && held.length !== (ctx.variants ?? 1)) return null
+  return held
+}
+
+/**
+ * How many steps (prompts) a Generate renders, each Count per Batch images:
+ * batch 1 has one per held draft, one for a typed prompt, else one per
+ * variant; the batches after it one per variant.
+ */
+export function plannedSteps(f: T2iFields, ctx: BatchContext): number {
+  const variants = ctx.variants ?? 1
+  const held = usablePrompts(f, ctx)
+  const typed = f.mode === 'manual' || firstBatchSource(f) === 'prompt'
+  const first = held ? held.length : typed ? 1 : variants
+  const captions = effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize)
+  return first + (captions - 1) * variants
 }
 
 /**
@@ -187,12 +302,24 @@ export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequ
     batch_size: effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize),
     count_per_batch: effectiveCount(f.seedPolicy, f.countPerBatch, ctx.maxCount),
     loras: f.loras.map((l) => ({ name: l.name, strength: l.strength })),
+    variants: ctx.variants ?? 1,
+    writer: ctx.writer ?? 'base',
   }
-  if (f.mode === 'manual' || firstBatchSource(f) === 'prompt') {
+  const held = usablePrompts(f, ctx)
+  if (held) {
+    // The drafts go out with their texts: every image records its writer,
+    // its draft and whether the text was edited.
+    req.prompts = held
+    req.aspect_ratio = f.aspect
+    if (f.caption.trim()) req.caption = f.caption
+    if (f.mode === 'manual') req.variants = held.length
+  } else if (f.mode === 'manual' || firstBatchSource(f) === 'prompt') {
     req.prompt = f.prompt
     req.aspect_ratio = f.aspect
     if (f.caption.trim()) req.caption = f.caption
     if (ctx.hasNegative && f.negative.trim()) req.negative = f.negative
+    // A typed Manual prompt renders once, whatever the picker says.
+    if (f.mode === 'manual') req.variants = 1
   }
   if (f.mode === 'random') {
     req.filter = cleanFilter(f.filter)

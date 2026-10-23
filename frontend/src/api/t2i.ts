@@ -13,6 +13,7 @@ import type {
   T2iOutputPreview,
   T2iPromptResult,
   T2iResolveResult,
+  T2iWriter,
 } from '../types/t2i'
 
 export function fetchT2iConfig(): Promise<T2iConfig> {
@@ -46,11 +47,15 @@ export function resolveCaption(body: {
 // Rewrites the caption into the model's prompt style with the local VLM (or
 // the fallback prompt, with a warning, when no VLM is available). Review
 // only; nothing is written.
+// `variants` drafts come back (variant k > 0 written from another angle), by
+// `writer`.
 export function generateT2iPrompt(body: {
   caption: string
   seed: number
   model: string
   directions?: boolean
+  variants?: number
+  writer?: T2iWriter
 }): Promise<T2iPromptResult> {
   return post('/t2i/prompt', body)
 }

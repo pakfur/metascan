@@ -24,7 +24,9 @@ import {
   type T2iBatchOutcome,
   type T2iBatchRequest,
   type T2iBatchStepEvent,
+  type T2iBatchStep,
   type T2iConfig,
+  type T2iDraftSet,
   type T2iFinishedBatch,
   type T2iFormState,
   type T2iImage,
@@ -32,6 +34,7 @@ import {
   type T2iPromptResult,
   type T2iResolveResult,
   type T2iStartResult,
+  type T2iWriter,
 } from '../types/t2i'
 
 const IMAGE_PAGE_SIZE = 60
@@ -108,6 +111,16 @@ export const useT2iStore = defineStore('t2i', () => {
   // Random batch its `step` fills Caption / Prompt / Aspect and `next_seed`
   // the Seed box. Reset to null when the next batch begins.
   const lastFinished = ref<T2iFinishedBatch | null>(null)
+  // Per running batch: the steps of the caption on show, by variant index,
+  // so a run that ends hands back its last caption's drafts (finishBatch).
+  const captionSteps = new Map<string, Map<number, T2iBatchStep>>()
+
+  // The drafts behind the Prompt box: what Generate Prompt (or a finished
+  // Random run) produced for the caption in the Caption box. Never part of
+  // the form, never written from a watcher: the dialog installs, switches and
+  // discards them from user actions (and the hand-back), and Generate sends
+  // them with the boxes' text (see t2iDialogForm.usablePrompts).
+  const drafts = ref<T2iDraftSet | null>(null)
 
   const randomBatch = computed(() => activeBatches.value.find((b) => b.mode === 'random') ?? null)
   // The seed of the image the running Random batch is rendering: what the
@@ -239,6 +252,7 @@ export const useT2iStore = defineStore('t2i', () => {
     currentStep.value = null
     lastFinished.value = null
     finishedIds.clear()
+    captionSteps.clear()
     tracker.reset()
     const loaded = await loadConfig()
     await Promise.all([
@@ -261,6 +275,8 @@ export const useT2iStore = defineStore('t2i', () => {
     seed: number
     model: string
     directions?: boolean
+    variants?: number
+    writer?: T2iWriter
   }): Promise<T2iPromptResult> {
     return t2iApi.generateT2iPrompt(body)
   }
@@ -330,6 +346,15 @@ export const useT2iStore = defineStore('t2i', () => {
     if (!batch) return null
     activeBatches.value = activeBatches.value.filter((b) => b.batch_id !== id)
     rememberFinished(id)
+    const held = captionSteps.get(id)
+    captionSteps.delete(id)
+    const lastCaption = batch.step?.caption_index ?? null
+    const shownVariants = held
+      ? [...held.values()]
+          .filter((s) => s.caption_index === lastCaption)
+          .sort((a, b) => a.variant_index - b.variant_index)
+          .map((s) => cloneJson(s))
+      : []
     const finished: T2iFinishedBatch = {
       batch_id: id,
       mode: batch.mode,
@@ -338,6 +363,7 @@ export const useT2iStore = defineStore('t2i', () => {
       images_failed: over.images_failed ?? batch.images_failed,
       next_seed: batch.next_seed,
       step: batch.step ? cloneJson(batch.step) : null,
+      drafts: shownVariants,
       error: over.error ?? null,
     }
     lastFinished.value = finished
@@ -365,6 +391,17 @@ export const useT2iStore = defineStore('t2i', () => {
     tracker.refresh().catch((e) => console.warn('T2I: could not refresh the job chips', e))
   }
 
+  // Keeps the steps of the caption on show; a step of a new caption starts over.
+  function rememberStep(id: string, step: T2iBatchStep): void {
+    let held = captionSteps.get(id)
+    const first = held?.values().next().value
+    if (!held || (first && first.caption_index !== step.caption_index)) {
+      held = new Map()
+      captionSteps.set(id, held)
+    }
+    held.set(step.variant_index, step)
+  }
+
   function applyBatchSnapshot(row: T2iBatchInfo): void {
     if (finishedIds.has(row.batch_id)) return
     const existing = findBatch(row.batch_id)
@@ -372,7 +409,10 @@ export const useT2iStore = defineStore('t2i', () => {
       existing.mode = row.mode
       existing.state = row.state
       existing.total_steps = row.total_steps
-      if (row.step) existing.step = row.step
+      if (row.step) {
+        existing.step = row.step
+        rememberStep(row.batch_id, row.step)
+      }
       existing.images_total = row.images_total
       // The snapshot may be older than a frame already handled: counters only grow.
       // The seed moves with the image count, so it is taken only from a snapshot
@@ -386,6 +426,7 @@ export const useT2iStore = defineStore('t2i', () => {
       existing.started_at = row.started_at
     } else {
       activeBatches.value.push({ ...row, last_error: null })
+      if (row.step) rememberStep(row.batch_id, row.step)
     }
     const cur = currentStep.value
     if (
@@ -551,8 +592,15 @@ export const useT2iStore = defineStore('t2i', () => {
       warnings: Array.isArray(d.warnings) ? d.warnings.map(String) : [],
       direction: d.direction == null ? null : asStr(d.direction),
       direction_parts: Array.isArray(d.direction_parts) ? d.direction_parts.map(String) : [],
+      variant_index: asNum(d.variant_index, 0),
+      variants: asNum(d.variants, 1),
+      caption_index: asNumOrNull(d.caption_index),
+      captions: asNumOrNull(d.captions),
+      writer_id: typeof d.writer_id === 'string' ? d.writer_id : null,
+      draft: typeof d.draft === 'string' ? d.draft : null,
     }
     batch.step = step
+    rememberStep(batch.batch_id, step)
     batch.total_steps = step.total_steps
     // Only a Random batch drives the live boxes; a Manual step just echoes the form.
     if (batch.mode === 'random') currentStep.value = step
@@ -627,6 +675,9 @@ export const useT2iStore = defineStore('t2i', () => {
     const image = images.value.find((i) => i.id === id)
     if (!image) return null
     selectedId.value = id
+    // The image's form replaces the boxes: drafts of another prompt must not
+    // ride along with the next Generate.
+    drafts.value = null
     return cloneJson(image.form_state)
   }
 
@@ -717,6 +768,34 @@ export const useT2iStore = defineStore('t2i', () => {
     void refreshImages()
   }
 
+  // ---- prompt drafts (writer variants) ----------------------------------------------------
+
+  /** Holds a new set (Generate Prompt, the hand-back), replacing any other. */
+  function setDrafts(set: T2iDraftSet | null): void {
+    drafts.value = set
+  }
+
+  /** The caption changed (typed, rolled) or a tile was loaded: the drafts no longer apply. */
+  function discardDrafts(): void {
+    drafts.value = null
+  }
+
+  /**
+   * The user's ◀ ▶: keeps what the boxes hold as the shown variant's text and
+   * returns the text of variant `to` (an index into the entries) for the
+   * dialog to put in the boxes. Null when there is no such variant.
+   */
+  function switchDraft(to: number, boxPrompt: string, boxNegative: string): { prompt: string; negative: string } | null {
+    const set = drafts.value
+    if (!set || to < 0 || to >= set.entries.length || to === set.current) return null
+    const leaving = set.entries[set.current]
+    leaving.text = boxPrompt
+    leaving.negative = boxNegative
+    set.current = to
+    const target = set.entries[to]
+    return { prompt: target.text, negative: target.negative }
+  }
+
   // ---- scratch-form draft -------------------------------------------------------------
 
   // A per-viewer convenience: every access is guarded, and the dialog works
@@ -770,6 +849,7 @@ export const useT2iStore = defineStore('t2i', () => {
     liveSeed,
     currentStep,
     lastFinished,
+    drafts,
     isBusy,
     statusText,
     jobs: tracker.jobs,
@@ -792,6 +872,9 @@ export const useT2iStore = defineStore('t2i', () => {
     rollCaption,
     countCaptions,
     resolveCaption,
+    setDrafts,
+    discardDrafts,
+    switchDraft,
     // batches
     startBatch,
     cancelAll,

@@ -619,6 +619,15 @@ class TestBatchShowWithVariants(VariantCase):
         steps = self.frames("batch_step")
         self.assertEqual([s["variant_index"] for s in steps], [0, 1, 0, 1])
         self.assertEqual([s["seed"] for s in steps], [10, 10, 12, 12])
+        # Which caption of how many, and each step's lineage (a written
+        # step's draft is its prompt), so the dialog can label it and keep
+        # the handed-back prompt as the writer's draft.
+        self.assertEqual(
+            [(s["caption_index"], s["captions"]) for s in steps],
+            [(0, 2), (0, 2), (1, 2), (1, 2)],
+        )
+        self.assertEqual([s["draft"] for s in steps], [s["prompt"] for s in steps])
+        self.assertEqual({s["writer_id"] for s in steps}, {"base"})
         self.assertEqual(self.terminal_frames(), ["batch_complete"])
         (done,) = self.frames("batch_complete")
         self.assertEqual(done["images_done"], 8)

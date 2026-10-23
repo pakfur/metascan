@@ -247,6 +247,74 @@ export interface T2iImage {
   created_at: string
   is_favorite: boolean
   form_state: T2iFormState
+  // Lineage (write-once facts; null on rows from before variants, or after a
+  // restart lost the batch's snapshot). variant_index is 0-based.
+  writer_id?: string | null
+  variant_group?: string | null
+  variant_index?: number | null
+  draft_prompt?: string | null
+  edited?: number | null
+}
+
+// ---- writers, variants, drafts ------------------------------------------------
+
+/** Who drafts the prompts a Generate Prompt (or a Random batch) writes. */
+export type T2iWriter = 'base' | 'base+taste'
+
+export const T2I_WRITERS: { id: T2iWriter; label: string }[] = [
+  { id: 'base', label: 'Base' },
+  { id: 'base+taste', label: 'Base + taste' },
+]
+
+/** Prompt variants per caption: each one renders the caption's same seeds. */
+export const MAX_VARIANTS = 4
+
+// Session-local choices (per browser, never part of an image's form_state).
+export const WRITER_STORAGE_KEY = 'metascan.t2i.writer.v1'
+export const VARIANTS_STORAGE_KEY = 'metascan.t2i.variants.v1'
+
+/** One draft of POST /api/t2i/prompt: what the writer produced for one variant. */
+export interface T2iPromptDraft {
+  prompt: string
+  negative: string | null
+  /** base / base+taste / fallback: the writer that really wrote it. */
+  writer_id: string
+  variant_index: number
+  angle: string | null
+}
+
+/** One variant's prompt as Generate sends it (BatchBody.prompts). */
+export interface T2iVariantPrompt {
+  prompt: string
+  negative: string | null
+  /** What the writer produced; null means typed from scratch (writer `manual`). */
+  draft: string | null
+  writer_id: string | null
+  variant_index: number
+}
+
+/**
+ * One variant the store holds for the Prompt box: the writer's draft (never
+ * changed) and the text the user has made of it so far.
+ */
+export interface T2iHeldDraft {
+  variant_index: number
+  writer_id: string
+  draft: string
+  text: string
+  negative: string
+}
+
+/**
+ * The drafts behind the Prompt box, keyed by the caption they were written
+ * for. `current` is the index (into `entries`) of the variant the box shows:
+ * its live text is the box itself, its `text` here is only updated when the
+ * user switches away from it.
+ */
+export interface T2iDraftSet {
+  caption: string
+  entries: T2iHeldDraft[]
+  current: number
 }
 
 /** POST /api/t2i/prompt. Review-only: nothing is written. */
@@ -258,6 +326,8 @@ export interface T2iPromptResult {
   /** The caption direction the prompt was written with, if any. */
   direction: string | null
   direction_parts: string[]
+  /** One per variant; drafts[0] is `prompt` / `negative`. */
+  drafts: T2iPromptDraft[]
 }
 
 /** POST /api/t2i/captions/resolve. */
@@ -292,6 +362,12 @@ export interface T2iBatchRequest {
   directions?: boolean | null
   /** Categories every image is tagged with at ingest; an unknown id is a 404. */
   category_ids?: number[]
+  /** Prompt variants per caption (1..MAX_VARIANTS), sharing the caption's seeds. */
+  variants?: number
+  /** Who writes the prompts the server writes. */
+  writer?: T2iWriter
+  /** Manual / a Random first batch: one prompt per variant, with its draft. */
+  prompts?: T2iVariantPrompt[]
 }
 
 /** POST /api/t2i/batches response. */
@@ -318,6 +394,15 @@ export interface T2iBatchStep {
   warnings: string[]
   direction: string | null
   direction_parts: string[]
+  /** 0-based variant of its caption, of `variants`. */
+  variant_index: number
+  variants: number
+  /** 0-based caption of `captions` (what the UI calls batch k of N). */
+  caption_index: number | null
+  captions: number | null
+  /** Who wrote the prompt, and the draft it came from (null: typed). */
+  writer_id: string | null
+  draft: string | null
 }
 
 /** One entry of GET /api/t2i/batches. */
@@ -356,6 +441,9 @@ export interface T2iFinishedBatch {
   next_seed: number | null
   // The last step's values; for a Random batch these fill Caption / Prompt / Aspect.
   step: T2iBatchStep | null
+  // Every variant of the last step's caption that was on show, by variant
+  // index, so the handed-back prompt keeps its draft (and its siblings).
+  drafts: T2iBatchStep[]
   error: string | null
 }
 
@@ -489,9 +577,21 @@ export function t2iImageDetails(img: Pick<T2iImage, 'seed' | 'width' | 'height'>
 
 const TITLE_PROMPT_CHARS = 160
 
-/** A tile's tooltip: the model, then the start of the prompt collapsed onto one line. */
-export function t2iImageTitle(img: Pick<T2iImage, 'model' | 'prompt_used'>): string {
-  const lines = [img.model ?? 'unknown model']
+/** "writer base+taste · edited": who wrote the prompt, and whether it was changed. */
+export function t2iLineage(img: Pick<T2iImage, 'writer_id' | 'edited'>): string | null {
+  if (!img.writer_id) return null
+  return img.edited ? `writer ${img.writer_id} · edited` : `writer ${img.writer_id}`
+}
+
+/**
+ * A tile's tooltip: the model (and who wrote the prompt), then the start of
+ * the prompt collapsed onto one line.
+ */
+export function t2iImageTitle(
+  img: Pick<T2iImage, 'model' | 'prompt_used'> & Partial<Pick<T2iImage, 'writer_id' | 'edited'>>,
+): string {
+  const lineage = t2iLineage({ writer_id: img.writer_id ?? null, edited: img.edited ?? null })
+  const lines = [lineage ? `${img.model ?? 'unknown model'} · ${lineage}` : (img.model ?? 'unknown model')]
   const prompt = (img.prompt_used ?? '').replace(/\s+/g, ' ').trim()
   if (prompt) {
     lines.push(
@@ -501,13 +601,36 @@ export function t2iImageTitle(img: Pick<T2iImage, 'model' | 'prompt_used'>): str
   return lines.join('\n')
 }
 
-export function toThumbItem(img: T2iImage): ThumbItem {
+/**
+ * The caption groups among `images` that rendered more than one prompt
+ * variant. A tile names its variant ("v2") only inside such a group: with one
+ * variant every image is v1, which says nothing.
+ */
+export function multiVariantGroups(images: Pick<T2iImage, 'variant_group' | 'variant_index'>[]): Set<string> {
+  const out = new Set<string>()
+  for (const img of images) {
+    if (img.variant_group && (img.variant_index ?? 0) > 0) out.add(img.variant_group)
+  }
+  return out
+}
+
+/** The 1-based variant a tile shows, or null when it has none worth showing. */
+export function tileVariant(
+  img: Pick<T2iImage, 'variant_group' | 'variant_index'>,
+  multi: Set<string>,
+): number | null {
+  if (img.variant_index == null || !img.variant_group) return null
+  return img.variant_index > 0 || multi.has(img.variant_group) ? img.variant_index + 1 : null
+}
+
+export function toThumbItem(img: T2iImage, multi?: Set<string>): ThumbItem {
   return {
     id: img.id,
     file_path: img.file_path,
     is_favorite: img.is_favorite,
     title: t2iImageTitle(img),
     label: t2iImageDetails(img),
+    variant: multi ? tileVariant(img, multi) : null,
   }
 }
 
@@ -605,6 +728,22 @@ export function imageWindow(held: number, pages: number, pageSize: number, serve
 // ---- status line -------------------------------------------------------------
 
 /**
+ * "Batch 3/10 · variant 2/4": which caption is on show (the UI calls each
+ * caption a batch) and which of its prompt variants. The variant part only
+ * when there is more than one; null for a single step (Manual, one variant).
+ * Frames from a server without caption_index fall back to counting steps.
+ */
+export function stepLabel(s: T2iBatchStep): string | null {
+  const variants = s.variants > 1 ? ` · variant ${s.variant_index + 1}/${s.variants}` : ''
+  if (s.caption_index != null && s.captions != null) {
+    const batch = s.captions > 1 ? `Batch ${s.caption_index + 1}/${s.captions}` : ''
+    const text = [batch, variants.replace(/^ · /, '')].filter(Boolean).join(' · ')
+    return text || null
+  }
+  return s.total_steps > 1 ? `Batch ${s.step}/${s.total_steps}` : null
+}
+
+/**
  * "Batch 12/40 · 37/160 images · 2 failed · rendering". The batch part is
  * dropped for a single-step (Manual) batch; images appear once one finished.
  * The batch part is the one being rendered (the server puts it on show), even
@@ -612,7 +751,8 @@ export function imageWindow(held: number, pages: number, pageSize: number, serve
  */
 export function batchStatusLine(b: T2iActiveBatch): string {
   const parts: string[] = []
-  if (b.step && b.total_steps > 1) parts.push(`Batch ${b.step.step}/${b.total_steps}`)
+  const label = b.step ? stepLabel(b.step) : null
+  if (label) parts.push(label)
   const finished = b.images_done + b.images_failed
   if (finished > 0 && b.images_total > 0) parts.push(`${finished}/${b.images_total} images`)
   if (b.images_failed > 0) parts.push(`${b.images_failed} failed`)
