@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 import hashlib
 
+from metascan.utils.app_paths import get_data_dir
 from metascan.utils.log_files import (
     close_file_loggers,
     get_file_logger,
@@ -29,11 +30,13 @@ class MetadataParsingLogger:
         Initialize the metadata parsing logger.
 
         Args:
-            log_dir: Directory for log files. Defaults to project root/logs
+            log_dir: Directory for log files. Defaults to ``<data dir>/../logs``
+                (the same place the server log goes; project root/logs in dev).
         """
         if log_dir is None:
-            # Default to logs directory in project root
-            log_dir = Path(__file__).parent.parent.parent / "logs"
+            # Resolve through app_paths (not __file__) so tests that redirect
+            # the base path never write to the real logs/ directory.
+            log_dir = get_data_dir().parent / "logs"
 
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)

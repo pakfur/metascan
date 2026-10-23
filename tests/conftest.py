@@ -26,16 +26,23 @@ _GUARDED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
 
 
 def _snapshot_real_state() -> dict:
-    """stat() (never open) the real DB / config files; {} entries if absent."""
+    """stat() (never open) the real DB / config / log files.
+
+    Non-recursive: data/*.db*, config.json and the files directly in logs/.
+    Absent files map to None so creation is detected too.
+    """
     snap: dict = {}
-    data = _REAL_BASE / "data"
     candidates = [_REAL_BASE / n for n in _GUARDED_NAMES]
+    data = _REAL_BASE / "data"
     if data.is_dir():
         candidates += [
             p
             for p in data.iterdir()
             if p.is_file() and p.name.endswith(_GUARDED_SUFFIXES)
         ]
+    logs = _REAL_BASE / "logs"
+    if logs.is_dir():
+        candidates += [p for p in logs.iterdir() if p.is_file()]
     for p in candidates:
         try:
             st = p.stat()
@@ -45,20 +52,27 @@ def _snapshot_real_state() -> dict:
     return snap
 
 
+def _changed(before: dict, after: dict) -> list:
+    return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _guard_real_data_dir():
-    """Fail the run if any test modified the real data/ DB or config.json.
+    """Session-level tripwire: fail if the real DB/config/log files changed.
 
-    Tests that start the app lifespan must use ``isolated_app_paths``.
+    The per-test check in ``isolated_app_paths`` names the culprit test; this
+    one also catches changes made outside any test body (fixtures, import-time
+    code, subprocesses).
+
+    Caveat: a dev server (or any other process) running against the same
+    checkout legitimately writes data/metascan.db and logs/server.log while the
+    suite runs, which trips both checks. Stop it before running the tests.
     """
     before = _snapshot_real_state()
     yield
-    after = _snapshot_real_state()
-    changed = sorted(
-        k for k in set(before) | set(after) if before.get(k) != after.get(k)
-    )
+    changed = _changed(before, _snapshot_real_state())
     assert not changed, (
-        "Test suite touched the real data dir / config (use the "
+        "Test suite touched the real data dir / config / logs (use the "
         f"isolated_app_paths fixture): {changed}"
     )
 
@@ -81,4 +95,7 @@ def isolated_app_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "_db_singleton", None)
     monkeypatch.setattr(deps, "_thumbnail_cache_singleton", None)
+    before = _snapshot_real_state()
     yield base
+    changed = _changed(before, _snapshot_real_state())
+    assert not changed, f"this test touched the real DB/config/logs: {changed}"
