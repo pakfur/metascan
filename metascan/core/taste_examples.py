@@ -11,7 +11,9 @@ Model-family rule (used by ``DatabaseManager.favorite_prompt_candidates``):
 an item rendered by the T2I dialog (a ``t2i_images`` row with a ``model``)
 matches only when that column equals the profile id. Any other item matches
 when one of its metadata model names (lower-cased) contains one of the
-profile's family tokens below. An item whose family is unknown (no model
+profile's family tokens below and none of its excluded tokens (Pony,
+Illustrious, NoobAI and Animagine are SDXL-based but use booru tags, so they
+never count as ``sd``). An item whose family is unknown (no model
 names, or none matching a token) is left out: prompt dialects differ too much
 between families (SDXL tag lists against Krea 2 prose) to risk a wrong one.
 """
@@ -30,11 +32,20 @@ VARIANT_ANGLES_KEY = "T2I_VARIANT_ANGLES"
 EXAMPLES_PREAMBLE_KEY = "T2I_EXAMPLES_PREAMBLE"
 
 # MODEL_PROFILES id -> substrings of a checkpoint/model name in that family.
+# ``krea`` also matches Flux-Krea-dev checkpoints: accepted, the prose dialect
+# is close to Krea 2's.
 MODEL_FAMILY_TOKENS: Dict[str, Tuple[str, ...]] = {
     "krea2": ("krea",),
     "qwen": ("qwen",),
     "sd": ("sdxl", "sd_xl", "sd-xl", "xl"),
     "zimage": ("z_image", "z-image", "zimage"),
+}
+
+
+# SDXL derivatives prompted in a booru-tag dialect, not SDXL prose/keywords:
+# a name containing one of these never counts as the ``sd`` family.
+MODEL_FAMILY_EXCLUDES: Dict[str, Tuple[str, ...]] = {
+    "sd": ("pony", "illustrious", "noob", "animagine"),
 }
 
 
@@ -65,8 +76,11 @@ def matches_model_family(model_names: Iterable[str], model_id: str) -> bool:
     tokens = MODEL_FAMILY_TOKENS.get(model_id)
     if not tokens:
         return False
+    excludes = MODEL_FAMILY_EXCLUDES.get(model_id, ())
     for name in model_names:
         lowered = (name or "").lower()
+        if any(bad in lowered for bad in excludes):
+            continue
         if any(token in lowered for token in tokens):
             return True
     return False

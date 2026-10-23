@@ -5496,9 +5496,9 @@ class DatabaseManager:
 
     @staticmethod
     def _is_image_path(path: str) -> bool:
-        from metascan.core.duplicate_detection import VIDEO_EXTENSIONS
+        from metascan.core.taste_examples import is_image_path
 
-        return Path(path).suffix.lower() not in VIDEO_EXTENSIONS
+        return is_image_path(path)
 
     def favorite_prompt_candidates(
         self, paths: List[str], model_id: Optional[str] = None
@@ -5513,10 +5513,12 @@ class DatabaseManager:
         the covering summary index (the ``data`` blob sits before it in the
         row), and ``data`` is opened only for favorited library items that
         have no T2I prompt. Callers pass a bounded list (a FAISS top-k)."""
-        from metascan.core.taste_examples import is_image_path, matches_model_family
+        from metascan.core.taste_examples import matches_model_family
 
         wanted = list(
-            dict.fromkeys(to_posix_path(p) for p in paths if is_image_path(str(p)))
+            dict.fromkeys(
+                to_posix_path(p) for p in paths if self._is_image_path(str(p))
+            )
         )
         if not wanted:
             return {}

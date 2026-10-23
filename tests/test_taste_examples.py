@@ -80,11 +80,28 @@ class FakeIndex:
 
 
 class FakeClient:
-    def __init__(self, delay: float = 0.0, dim: int = DIM, fail: bool = False):
+    def __init__(
+        self,
+        delay: float = 0.0,
+        dim: int = DIM,
+        fail: bool = False,
+        state: str = "ready",
+    ):
         self.delay = delay
         self.dim = dim
         self.fail = fail
+        self.state = state
         self.texts: List[str] = []
+        self.started: List[Any] = []
+
+    async def ensure_started(self, *args: Any, **kwargs: Any) -> None:
+        self.started.append((args, kwargs))
+
+    async def start(self, *args: Any, **kwargs: Any) -> None:
+        self.started.append((args, kwargs))
+
+    async def reload(self, *args: Any, **kwargs: Any) -> None:
+        self.started.append((args, kwargs))
 
     async def encode_text(self, text: str, timeout: float = 60.0) -> np.ndarray:
         self.texts.append(text)
@@ -94,10 +111,6 @@ class FakeClient:
             raise RuntimeError("worker crashed")
         vec = np.ones(self.dim, dtype=np.float32)
         return vec / np.linalg.norm(vec)
-
-
-async def _ready(client: Any) -> None:
-    return None
 
 
 def _svc(
@@ -110,7 +123,6 @@ def _svc(
         db,
         get_client=lambda: client,
         get_index=lambda: index,
-        ensure_ready=_ready,
         timeout_s=timeout_s,
     )
 
@@ -197,6 +209,15 @@ def test_model_family_matching() -> None:
     assert matches_model_family(["krea2_dev.safetensors"], "krea2")
     assert matches_model_family(["qwen_image_fp8.safetensors"], "qwen")
     assert matches_model_family(["juggernautXL_v9.safetensors"], "sd")
+    assert matches_model_family(["sd_xl_base_1.0.safetensors"], "sd")
+    for tag_dialect in (
+        "ponyDiffusionV6XL.safetensors",
+        "illustriousXL_v01.safetensors",
+        "noobaiXLNAIXL_vPred10.safetensors",
+        "animagine-xl-3.1.safetensors",
+        "waiNSFWIllustrious_v14.safetensors",
+    ):
+        assert not matches_model_family([tag_dialect], "sd"), tag_dialect
     assert matches_model_family(["z_image_turbo_bf16.safetensors"], "zimage")
     assert not matches_model_family(["flux1-dev.safetensors"], "krea2")
     assert not matches_model_family([], "krea2")
@@ -314,7 +335,7 @@ async def test_default_index_never_loads_from_disk(
 
     monkeypatch.setattr(similarity, "_faiss_manager", None)
     monkeypatch.setattr(similarity, "_get_faiss_manager", _boom)
-    svc = TasteExamplesService(db, get_client=lambda: FakeClient(), ensure_ready=_ready)
+    svc = TasteExamplesService(db, get_client=lambda: FakeClient())
     examples, warning = await svc.examples_for(CAPTION, "krea2")
     assert examples == []
     assert warning is not None and "index" in warning
@@ -331,19 +352,66 @@ async def test_clip_timeout_degrades(db: DatabaseManager) -> None:
     assert warning is not None and "timed out" in warning
 
 
-async def test_slow_ensure_ready_is_bounded_too(db: DatabaseManager) -> None:
-    async def _slow(client: Any) -> None:
-        await asyncio.sleep(30)
+async def test_clip_not_ready_is_never_started(db: DatabaseManager) -> None:
+    _add(db, "/lib/a.png", prompt="SYNTH-A", model=["krea2_dev"])
+    for state in ("idle", "spawning", "loading", "error", "stopped"):
+        client = FakeClient(state=state)
+        svc = _svc(db, FakeIndex(["/lib/a.png"]), client)
+        examples, warning = await svc.examples_for(CAPTION, "krea2")
+        assert examples == [], state
+        assert warning == "taste guidance unavailable: CLIP is not loaded", state
+        assert client.started == [], state
+        assert client.texts == [], state
 
-    svc = TasteExamplesService(
-        db,
-        get_client=lambda: FakeClient(),
-        get_index=lambda: FakeIndex(["/lib/a.png"]),
-        ensure_ready=_slow,
-        timeout_s=0.2,
+
+async def test_ready_clip_is_used_without_starting(db: DatabaseManager) -> None:
+    _add(db, "/lib/a.png", prompt="SYNTH-A", model=["krea2_dev"])
+    client = FakeClient(state="ready")
+    examples, warning = await _svc(db, FakeIndex(["/lib/a.png"]), client).examples_for(
+        CAPTION, "krea2"
     )
-    examples, warning = await svc.examples_for(CAPTION, "krea2")
-    assert examples == [] and warning is not None and "timed out" in warning
+    assert (examples, warning) == (["SYNTH-A"], None)
+    assert client.started == []
+    assert client.texts == [CAPTION]
+
+
+async def test_unexpected_error_degrades_without_prompt_text(
+    db: DatabaseManager,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(db, "favorite_prompt_candidates", _boom)
+    caplog.set_level(logging.DEBUG)
+    examples, warning = await _svc(
+        db, FakeIndex(["/lib/a.png"]), FakeClient()
+    ).examples_for(CAPTION, "krea2")
+    assert examples == [] and warning is not None
+    assert warning.startswith("taste guidance unavailable: ")
+    warned = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name.endswith("taste_examples_service")
+    ]
+    assert warned and warned[0].exc_info
+    assert warned[0].exc_info[0] is RuntimeError
+    for record in caplog.records:
+        assert "SYNTH-" not in record.getMessage()
+        assert "SYNTH-" not in caplog.text
+
+
+async def test_degrade_reasons_are_debug_only(
+    db: DatabaseManager, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    await _svc(db, None, FakeClient()).examples_for(CAPTION, "krea2")
+    await _svc(db, FakeIndex([]), FakeClient(state="loading")).examples_for(
+        CAPTION, "krea2"
+    )
+    mine = [r for r in caplog.records if r.name.endswith("taste_examples_service")]
+    assert mine and all(r.levelno == logging.DEBUG for r in mine)
 
 
 async def test_no_prompt_text_logged(
