@@ -2,7 +2,7 @@
 ``/api/taste/writer-stats`` route (synthetic data, isolated temp DB)."""
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -201,8 +201,8 @@ def test_collapse_flag_condition():
     # Only the previous up-to-5 windows count toward the median: with the
     # oldest 0.1 included it would be 0.3 and 0.36 would not flag.
     seven = [
-        {"window_start": f"2026-0{m}-01", "n": 5, "mean_distance": v}
-        for m, v in zip(range(3, 10), (0.1, 0.1, 0.1, 0.5, 0.5, 0.5, 0.36))
+        {"window_start": w, "n": 5, "mean_distance": v}
+        for w, v in zip(window_starts(NOW, 14, 7), (0.1, 0.1, 0.1, 0.5, 0.5, 0.5, 0.36))
     ]
     assert collapse_warning(seven, rising) is True
     # Not enough history, or no latest value -> no flag.
@@ -213,6 +213,30 @@ def test_collapse_flag_condition():
     assert collapse_warning(_div(0.5, 0.5, 0.2), _rates((10, 3))) is False
     # Windows with no value (n < 2) are skipped in the median.
     assert collapse_warning(_div(0.5, None, 0.5, 0.2), rising) is True
+
+
+def _shift(div: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
+    """``div`` as a training run ``days`` days ago would have stored it."""
+    out = []
+    for d in div:
+        start = datetime.fromisoformat(d["window_start"]) - timedelta(days=days)
+        out.append({**d, "window_start": start.date().isoformat()})
+    return out
+
+
+def test_collapse_needs_aligned_windows():
+    rising = _rates((10, 3), (10, 5))
+    collapsed = _div(0.5, 0.5, 0.6, 0.4, 0.5, 0.30)
+    # Diversity from a run a few days ago still covers the latest window.
+    assert collapse_warning(_shift(collapsed, 3), rising) is True
+    assert collapse_warning(_shift(collapsed, 13), rising) is True
+    # Training idle for a whole window or more: the latest diversity is
+    # about a different period than the latest rate -> never flag.
+    assert collapse_warning(_shift(collapsed, 14), rising) is False
+    assert collapse_warning(_shift(collapsed, 30), rising) is False
+    # Diversity newer than the rates is just as unaligned.
+    assert collapse_warning(_shift(collapsed, -14), rising) is False
+    assert collapse_warning(_shift(collapsed, 20), rising, window_days=28) is True
 
 
 def test_collapse_rate_pools_t2i_writers_only():
@@ -227,8 +251,8 @@ def test_collapse_rate_pools_t2i_writers_only():
 
 
 @pytest.fixture
-def client(db, tmp_path):
-    os.environ.setdefault("METASCAN_API_KEY", "")
+def client(db, tmp_path, monkeypatch):
+    monkeypatch.setenv("METASCAN_API_KEY", "")
     from backend.api import taste
     from backend.services.taste_service import TasteService
 
@@ -254,11 +278,21 @@ def test_writer_stats_route(client, db):
     db.record_taste_diversity(rows, "2026-10-23T12:00:00+00:00")
     with patch("backend.services.taste_service._utcnow", return_value=NOW):
         body = client.get("/api/taste/writer-stats").json()
-    assert set(body) == {"window_starts", "windows", "diversity", "collapse_warning"}
+    assert set(body) == {
+        "window_days",
+        "window_starts",
+        "windows",
+        "diversity",
+        "collapse_warning",
+    }
+    assert body["window_days"] == 14
     assert body["window_starts"] == STARTS
     base = _by(body["windows"], "t2i", "base")
     assert _cell(base["2026-10-10"]) == (1, 1, 1.0)
     assert [d["mean_distance"] for d in body["diversity"]] == [0.5] * 5 + [0.2]
+    assert {d["computed_at"] for d in body["diversity"]} == {
+        "2026-10-23T12:00:00+00:00"
+    }
     # Diversity collapsed, but there is no earlier rate to compare with.
     assert body["collapse_warning"] is False
 
@@ -268,8 +302,14 @@ def test_latest_diversity_is_the_newest_run(db):
         [{"window_start": "2026-09-01", "n": 4, "mean_distance": 0.4}],
         "2026-09-14T00:00:00+00:00",
     )
+    first = "2026-09-14T00:00:00+00:00"
     assert db.latest_taste_diversity() == [
-        {"window_start": "2026-09-01", "n": 4, "mean_distance": 0.4}
+        {
+            "window_start": "2026-09-01",
+            "n": 4,
+            "mean_distance": 0.4,
+            "computed_at": first,
+        }
     ]
     db.record_taste_diversity(
         [
@@ -278,7 +318,69 @@ def test_latest_diversity_is_the_newest_run(db):
         ],
         "2026-09-29T00:00:00+00:00",
     )
+    second = "2026-09-29T00:00:00+00:00"
     assert db.latest_taste_diversity() == [
-        {"window_start": "2026-09-02", "n": 1, "mean_distance": None},
-        {"window_start": "2026-09-16", "n": 3, "mean_distance": 0.3},
+        {
+            "window_start": "2026-09-02",
+            "n": 1,
+            "mean_distance": None,
+            "computed_at": second,
+        },
+        {
+            "window_start": "2026-09-16",
+            "n": 3,
+            "mean_distance": 0.3,
+            "computed_at": second,
+        },
     ]
+
+
+def test_readded_path_counted_once(db):
+    # Judged, deleted (tombstone), then the file came back: the live row
+    # wins and the generation counts once, with its new judgment.
+    _gen(db, "/g/r1.png", "base", LATEST, "favorite")
+    db.delete_media(Path("/g/r1.png"))
+    db.save_media(_media("/g/r1.png"))
+    db.mark_seen("/g/r1.png", NOW)
+    rows = db.writer_window_stats(14, 6, now=NOW)
+    assert _cell(_by(rows, "t2i", "base")["2026-10-10"]) == (1, 0, 0.0)
+
+
+def _raw_tombstone(db: DatabaseManager, path: str, lineage: str) -> None:
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
+            "passed, reasons, seen_at, lineage) VALUES (?, ?, 1, 0, '[]', ?, ?)",
+            (path, NOW.isoformat(), NOW.isoformat(), lineage),
+        )
+        conn.commit()
+
+
+def test_malformed_lineage_is_skipped(db, caplog):
+    _gen(db, "/g/ok.png", "base", LATEST, "seen")
+    _raw_tombstone(db, "/g/bad1.png", "not json")
+    _raw_tombstone(db, "/g/bad2.png", "[1, 2]")
+    _raw_tombstone(db, "/g/bad3.png", '{"t2i": "nope"}')
+    _raw_tombstone(db, "/g/bad4.png", '{"t2i": {"writer_id": "base"}}')
+    _raw_tombstone(
+        db,
+        "/g/good.png",
+        '{"t2i": {"writer_id": "base", "created_at": "%s"}}' % LATEST,
+    )
+    rows = db.writer_window_stats(14, 6, now=NOW)
+    assert _cell(_by(rows, "t2i", "base")["2026-10-10"]) == (2, 1, 0.5)
+    with caplog.at_level("DEBUG", logger="metascan.core.database_sqlite"):
+        every = db.generation_outcomes()
+    assert sorted(g["file_path"] for g in every) == ["/g/good.png", "/g/ok.png"]
+    assert "malformed tombstone lineage" in caplog.text
+
+
+def test_tombstones_filtered_by_since_in_sql(db):
+    _raw_tombstone(
+        db, "/g/old.png", '{"t2i": {"writer_id": "base", "created_at": "2026-01-01"}}'
+    )
+    _raw_tombstone(
+        db, "/g/new.png", '{"i2v": {"writer_id": "base", "created_at": "%s"}}' % LATEST
+    )
+    paths = [g["file_path"] for g in db.generation_outcomes(since="2026-08-01")]
+    assert paths == ["/g/new.png"]

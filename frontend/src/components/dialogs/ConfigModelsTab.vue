@@ -135,6 +135,14 @@ const writerRows = computed<WriterRow[]>(() => {
   )
 })
 
+// Diversity is stored by training runs, with that run's window starts.
+const diversityAsOf = computed(() => {
+  const raw = writerStats.value?.diversity[0]?.computed_at
+  if (!raw) return 'the last training run'
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleDateString()
+})
+
 function rateText(cell: WriterWindowStat | undefined): string {
   if (!cell || cell.rate === null) return '—'
   return `${Math.round(cell.rate * 100)}%`
@@ -764,7 +772,8 @@ async function onRetagLibrary() {
       </div>
       <template v-if="writerStats">
         <div v-if="writerRows.length === 0" class="taste-hint">
-          No generations in the last {{ writerStats.window_starts.length * 2 }} weeks.
+          No generations in the last
+          {{ writerStats.window_starts.length * writerStats.window_days }} days.
         </div>
         <div v-else class="writers-scroll">
           <table class="writers-table">
@@ -806,7 +815,7 @@ async function onRetagLibrary() {
             <tbody>
               <tr>
                 <th class="writer-col" scope="row">
-                  <span class="taste-hint">from the last training run</span>
+                  <span class="taste-hint">as of {{ diversityAsOf }}</span>
                 </th>
                 <td
                   v-for="d in writerStats.diversity"

@@ -5925,24 +5925,43 @@ class DatabaseManager:
             cols = "id, file_path, is_favorite, passed, seen_at, lineage"
             if include_embeddings:
                 cols += ", embedding, embedding_model"
-            for r in conn.execute(
-                f"SELECT {cols} FROM media_tombstones "
-                "WHERE lineage IS NOT NULL ORDER BY id"
-            ):
+            sql = f"SELECT {cols} FROM media_tombstones WHERE lineage IS NOT NULL"
+            params = []
+            if since is not None:
+                # Filter in SQL: most tombstones are library deletes or old
+                # generations, not worth parsing under the lock.
+                sql += (
+                    " AND json_valid(lineage) AND ("
+                    "json_extract(lineage, '$.t2i.created_at') >= ? "
+                    "OR json_extract(lineage, '$.i2v.created_at') >= ?)"
+                )
+                params = [since, since]
+            for r in conn.execute(sql + " ORDER BY id", params):
                 try:
-                    lineage = json.loads(r["lineage"]) or {}
+                    lineage = json.loads(r["lineage"])
                 except ValueError:
+                    lineage = None
+                if not isinstance(lineage, dict):
+                    logger.debug(
+                        "skipping malformed tombstone lineage (id %s)", r["id"]
+                    )
                     continue
                 for kind, _ in self._GENERATION_TABLES:
                     gen = lineage.get(kind)
-                    if not isinstance(gen, dict):
+                    if gen is None:
+                        continue
+                    created_at = (
+                        gen.get("created_at") if isinstance(gen, dict) else None
+                    )
+                    if not created_at:
+                        logger.debug(
+                            "skipping malformed tombstone lineage (id %s)", r["id"]
+                        )
                         continue
                     key = (kind, r["file_path"])
-                    created_at = gen.get("created_at")
-                    if key in live or not created_at:
+                    if key in live:
                         continue
                     if since is not None and str(created_at) < since:
-                        out.pop(key, None)
                         continue
                     favorite = bool(r["is_favorite"])
                     # Ascending id: a newer tombstone replaces an older one.
@@ -6032,7 +6051,8 @@ class DatabaseManager:
         computed)."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT window_start, n, mean_distance FROM taste_diversity "
+                "SELECT window_start, n, mean_distance, computed_at "
+                "FROM taste_diversity "
                 "WHERE computed_at = (SELECT MAX(computed_at) FROM taste_diversity) "
                 "ORDER BY window_start"
             ).fetchall()
@@ -6041,6 +6061,7 @@ class DatabaseManager:
                 "window_start": r["window_start"],
                 "n": int(r["n"] or 0),
                 "mean_distance": r["mean_distance"],
+                "computed_at": r["computed_at"],
             }
             for r in rows
         ]

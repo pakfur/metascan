@@ -471,7 +471,8 @@ async def test_diversity_computed_on_train(setup):
     )
     assert div["2026-10-10"]["n"] == 6
     assert div["2026-10-10"]["mean_distance"] == pytest.approx(expected, abs=1e-5)
-    assert div["2026-09-26"] == {
+    assert div["2026-09-26"]["computed_at"]
+    assert {k: v for k, v in div["2026-09-26"].items() if k != "computed_at"} == {
         "window_start": "2026-09-26",
         "n": 1,
         "mean_distance": None,
@@ -486,6 +487,32 @@ async def test_diversity_failure_does_not_fail_training(setup, monkeypatch):
         raise RuntimeError("diversity query failed")
 
     monkeypatch.setattr(db, "generation_outcomes", boom)
+    r = await runner.train(180)
+    assert r["status"] == "ok", r
+    assert db.latest_taste_diversity() == []
+
+
+async def test_worker_diversity_failure_does_not_fail_training(setup, monkeypatch):
+    runner, db, _, _, _ = setup
+    import metascan.core.taste_runner as tr
+
+    # A spec the worker cannot decode (bad base64 for a matching model):
+    # _diversity raises inside the subprocess.
+    monkeypatch.setattr(
+        tr,
+        "_diversity_task",
+        lambda db, now: {
+            "window_starts": ["2026-10-10"],
+            "items": [
+                {
+                    "file_path": "/l/f00.png",
+                    "window_start": "2026-10-10",
+                    "embedding": "!!!notbase64",
+                    "embedding_model": MODEL_KEY,
+                }
+            ],
+        },
+    )
     r = await runner.train(180)
     assert r["status"] == "ok", r
     assert db.latest_taste_diversity() == []
