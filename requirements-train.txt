@@ -19,14 +19,18 @@ transformers>=4.57.0
 # Regex target_modules + disable_adapter() for the DPO reference.
 peft>=0.17.0
 # SFTConfig(completion_only_loss), conversational prompt/completion and
-# preference data, processing_class=, DPOTrainer(ref_model=None) with PEFT.
+# preference data, processing_class=, and DPOConfig(model_adapter_name,
+# ref_adapter_name) so the SFT adapter (loaded twice) is the DPO reference.
 trl>=0.25.0
 accelerate>=1.4.0
 datasets>=3.0.0
 safetensors>=0.4.3
 # The llama.cpp converter (convert_lora_to_gguf.py, run with this same
-# interpreter) imports torch, transformers, numpy, sentencepiece and the
-# gguf package -- it uses llama.cpp's bundled gguf-py when run from a
-# llama.cpp checkout.
+# interpreter) imports torch, transformers, numpy, sentencepiece and gguf.
+# Prefer llama.cpp's own pins for it:
+#   pip install -r <llama.cpp>/requirements/requirements-convert_lora_to_gguf.txt
+# The worker also reads the converted adapter with the gguf package
+# (GGUFReader) to verify its LoRA tensors; it ships with llama.cpp
+# (gguf-py) -- the PyPI release below is the fallback.
 sentencepiece>=0.2.0
 gguf>=0.17.0

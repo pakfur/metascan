@@ -70,7 +70,7 @@ def _make_task(
     hyperparams: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     data = tmp_path / "data"
-    data.mkdir(exist_ok=True)
+    data.mkdir(parents=True, exist_ok=True)
     _write_jsonl(data / "sft.jsonl", [_sft(i) for i in range(n_sft)])
     _write_jsonl(data / "prefs.jsonl", [_pref(i, f"p{i}") for i in range(n_pref)])
     _write_jsonl(data / "holdout.jsonl", [_pref(i, "h") for i in range(n_hold)])
@@ -79,6 +79,7 @@ def _make_task(
     return {
         "backend": "fake",
         "base_dir": str(tmp_path / "base"),
+        "data_root": str(tmp_path),
         "sft_path": str(data / "sft.jsonl"),
         "pref_path": str(data / "prefs.jsonl"),
         "holdout_path": str(data / "holdout.jsonl"),
@@ -124,16 +125,19 @@ def _trace(task: Dict[str, Any]) -> List[str]:
 class TestHyperparams:
     def test_presets_match_the_spec(self) -> None:
         assert w.EFFORT_PRESETS == {
-            "quick": {"rank": 8, "lr": 1e-4, "epochs": 1},
-            "standard": {"rank": 16, "lr": 1e-4, "epochs": 2},
-            "thorough": {"rank": 32, "lr": 5e-5, "epochs": 3},
+            "quick": {"rank": 8, "lr": 1e-4, "epochs": 1, "dpo_lr": 1e-5},
+            "standard": {"rank": 16, "lr": 1e-4, "epochs": 2, "dpo_lr": 1e-5},
+            "thorough": {"rank": 32, "lr": 5e-5, "epochs": 3, "dpo_lr": 1e-5},
         }
+        for preset in w.EFFORT_PRESETS.values():
+            assert w.validate_hyperparams(preset)["dpo_lr"] == 1e-5
 
     def test_defaults_filled(self) -> None:
         hp = w.validate_hyperparams({"rank": 16, "lr": 1e-4, "epochs": 2})
         assert hp["lora_alpha"] == 32
         assert hp["beta"] == 0.1
-        assert hp["max_seq_len"] == 1024
+        assert hp["max_seq_len"] == 2048
+        assert hp["dpo_lr"] == 1e-5
         assert hp["checkpoint_every"] == 50
         assert hp["seed"] == 0
 
@@ -149,6 +153,9 @@ class TestHyperparams:
             {"rank": 8, "lr": 1e-4},
             {"rank": 8.5, "lr": 1e-4, "epochs": 1},
             {"rank": 8, "lr": 1e-4, "epochs": 1, "max_seq_len": 4096},
+            {"rank": 8, "lr": 1e-4, "epochs": 1, "max_seq_len": 2049},
+            {"rank": 8, "lr": 1e-4, "epochs": 1, "dpo_lr": 1e-3},
+            {"rank": 8, "lr": 1e-4, "epochs": 1, "dpo_lr": 1e-7},
             {"rank": 8, "lr": 1e-4, "epochs": 1, "bogus": 1},
             {"rank": True, "lr": 1e-4, "epochs": 1},
         ],
@@ -631,7 +638,8 @@ class TestRealHelpers:
         assert kw["bf16"] is True and kw.get("fp16") is not True
         assert kw["save_strategy"] == "steps" and kw["save_steps"] == 50
         assert kw["seed"] == 0 and kw["data_seed"] == 0
-        assert kw["max_length"] == 1024
+        # Never truncate: over-long examples are dropped beforehand.
+        assert kw["max_length"] is None
         assert kw["report_to"] == "none"
         assert kw["warmup_steps"] == 3
 
@@ -647,6 +655,374 @@ class TestRealHelpers:
         ):
             with pytest.raises(w.TrainWorkerError, match="requirements-train.txt"):
                 real.import_deps()
+
+
+# ---- fix round 1: length cap, GGUF verification, DPO reference ------------
+
+LONG = " ".join(["word"] * 100)  # > max_seq_len 64 in the fake's word count
+
+
+def _meta(task: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = json.loads((Path(task["out_dir"]) / w.META_NAME).read_text())
+    return out
+
+
+class TestLengthDrops:
+    def _task(self, tmp_path: Path, **kw: Any) -> Dict[str, Any]:
+        return _make_task(tmp_path, hyperparams={"max_seq_len": 64}, **kw)
+
+    def test_drops_are_counted_in_result_and_meta(self, tmp_path: Path) -> None:
+        task = self._task(tmp_path)
+        rows = [_sft(i) for i in range(4)]
+        rows[0]["chosen"] = LONG
+        _write_jsonl(Path(task["sft_path"]), rows)
+        prefs = [_pref(i, f"p{i}") for i in range(6)]
+        prefs[1]["rejected"] = LONG
+        prefs[2]["user"] = LONG
+        _write_jsonl(Path(task["pref_path"]), prefs)
+        hold = [_pref(i, "h") for i in range(2)]
+        hold[0]["system"] = LONG
+        _write_jsonl(Path(task["holdout_path"]), hold)
+        assert _run(task, tmp_path) == w.EXIT_OK
+        want = {"sft": 1, "dpo": 2, "holdout": 1}
+        assert _result(task)["dropped_too_long"] == want
+        assert _meta(task)["dropped_too_long"] == want
+
+    def test_all_sft_too_long_skips_sft(self, tmp_path: Path) -> None:
+        task = self._task(tmp_path)
+        _write_jsonl(
+            Path(task["sft_path"]), [dict(_sft(i), chosen=LONG) for i in range(3)]
+        )
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert not any(t.startswith("sft:") for t in _trace(task))
+        assert _result(task)["dropped_too_long"]["sft"] == 3
+        assert _meta(task)["dpo_reference"] == "base"
+        assert _progress(task)["total_steps"] == 10
+
+    def test_all_prefs_too_long_keeps_the_sft_adapter(self, tmp_path: Path) -> None:
+        task = self._task(tmp_path)
+        _write_jsonl(
+            Path(task["pref_path"]),
+            [dict(_pref(i, f"p{i}"), chosen=LONG) for i in range(6)],
+        )
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert not any(t.startswith("dpo:") for t in _trace(task))
+        res = _result(task)
+        assert (Path(res["adapter_dir"]) / "adapter_config.json").exists()
+        assert res["dropped_too_long"]["dpo"] == 6
+        assert _meta(task)["dpo_reference"] is None
+
+    def test_nothing_fits_is_an_error(self, tmp_path: Path) -> None:
+        task = self._task(tmp_path)
+        _write_jsonl(Path(task["sft_path"]), [dict(_sft(0), chosen=LONG)])
+        _write_jsonl(
+            Path(task["pref_path"]),
+            [dict(_pref(i, f"p{i}"), chosen=LONG) for i in range(2)],
+        )
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert "longer than 64 tokens" in res["error"]
+        assert res["dropped_too_long"] == {"sft": 1, "dpo": 2, "holdout": 0}
+
+
+class TestGgufVerification:
+    def test_meta_records_count_and_path(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, fake={"converter_path": "remapped"})
+        assert _run(task, tmp_path) == w.EXIT_OK
+        meta = _meta(task)
+        assert meta["gguf_lora_tensors"] == 36 * 7 * 2
+        assert meta["converter_path"] == "remapped"
+
+    def test_too_few_lora_tensors_fails_and_keeps_peft(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, fake={"gguf_layers": 35})
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert "490 LoRA tensor(s), expected 504" in res["error"]
+        assert res["stage"] == "convert"
+        assert (Path(task["out_dir"]) / w.PEFT_DIRNAME / "adapter_config.json").exists()
+        # Resumable: the checkpoint state still says convert.
+        state = json.loads((Path(task["checkpoint_dir"]) / w.STATE_NAME).read_text())
+        assert state["stage"] == "convert"
+
+    def test_vision_tensors_fail(self, tmp_path: Path) -> None:
+        task = _make_task(
+            tmp_path, fake={"gguf_extra_names": ["v.blk.0.attn_q.weight.lora_a"]}
+        )
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        assert "vision tensor" in _result(task)["error"]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "v.blk.0.ffn_up.weight.lora_b",
+            "mm.0.weight.lora_a",
+            "mmproj.x",
+            "blk.0.visual.lora_a",
+        ],
+    )
+    def test_verify_rejects_vision_names(self, name: str) -> None:
+        with pytest.raises(w.TrainWorkerError, match="vision"):
+            w.verify_gguf_names(["blk.0.attn_q.weight.lora_a", name], 1)
+
+    def test_verify_counts(self) -> None:
+        names = [
+            "blk.0.attn_q.weight.lora_a",
+            "blk.0.attn_q.weight.lora_b",
+            "token_embd",
+        ]
+        assert w.verify_gguf_names(names, 2) == 2
+        with pytest.raises(w.TrainWorkerError, match="expected 3"):
+            w.verify_gguf_names(names, 3)
+
+    def test_expected_from_text_config(self, tmp_path: Path) -> None:
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen3_vl",
+                    "text_config": {"num_hidden_layers": 36},
+                    "vision_config": {"depth": 27},
+                }
+            )
+        )
+        assert w.expected_lora_tensors(str(tmp_path)) == 504
+        (tmp_path / "config.json").write_text(json.dumps({"num_hidden_layers": 2}))
+        assert w.expected_lora_tensors(str(tmp_path)) == 28
+        (tmp_path / "config.json").write_text("{}")
+        with pytest.raises(w.TrainWorkerError):
+            w.expected_lora_tensors(str(tmp_path))
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("gguf") is not None, reason="gguf installed"
+    )
+    def test_missing_gguf_package_is_an_error(self, tmp_path: Path) -> None:
+        with pytest.raises(w.TrainWorkerError, match="gguf package"):
+            w.read_gguf_tensor_names(tmp_path / "x.gguf")
+
+
+class TestConverterFallback:
+    MAP_ERR = (
+        "converter failed (exit 1): ValueError: Can not map tensor "
+        "'model.language_model.layers.0.self_attn.q_proj.weight'"
+    )
+
+    def test_key_remap(self) -> None:
+        keys = {
+            "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": 1,
+            "base_model.model.model.language_model.layers.3.mlp.down_proj.lora_B.weight": 2,
+            "base_model.model.lm_head.weight": 3,
+        }
+        assert {w.remap_language_model_key(k): v for k, v in keys.items()} == {
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": 1,
+            "base_model.model.model.layers.3.mlp.down_proj.lora_B.weight": 2,
+            "base_model.model.lm_head.weight": 3,
+        }
+
+    def test_detects_the_mapping_error(self) -> None:
+        assert w.is_unmapped_language_model_error(self.MAP_ERR)
+        assert not w.is_unmapped_language_model_error("converter failed: out of memory")
+
+    def _peft(self, tmp_path: Path) -> Path:
+        np = pytest.importorskip("numpy")
+        st = pytest.importorskip("safetensors.numpy")
+        peft = tmp_path / "out" / "peft"
+        peft.mkdir(parents=True)
+        st.save_file(
+            {
+                "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight": np.ones(
+                    (4, 8), dtype=np.float32
+                ),
+                "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_B.weight": np.zeros(
+                    (8, 4), dtype=np.float32
+                ),
+            },
+            str(peft / "adapter_model.safetensors"),
+            metadata={"format": "pt"},
+        )
+        (peft / "adapter_config.json").write_text(
+            json.dumps(
+                {"r": 4, "lora_alpha": 8, "target_modules": real.VL_TARGET_REGEX}
+            )
+        )
+        return peft
+
+    def test_retries_once_on_a_remapped_copy(self, tmp_path: Path) -> None:
+        peft = self._peft(tmp_path)
+        before = (peft / "adapter_model.safetensors").read_bytes()
+        scratch = tmp_path / "ckpt"
+        scratch.mkdir()
+        calls: List[str] = []
+
+        def fake_run(converter: Any, base: str, peft_dir: str, gguf: str) -> None:
+            calls.append(peft_dir)
+            if len(calls) == 1:
+                raise w.TrainWorkerError(self.MAP_ERR)
+
+        with mock.patch.object(w, "run_converter", side_effect=fake_run):
+            path = w.convert_with_fallback(
+                {"python": "p", "script": "s"},
+                "/base",
+                peft,
+                tmp_path / "a.gguf",
+                scratch,
+            )
+        assert path == "remapped"
+        remapped = scratch / w.REMAP_DIRNAME
+        assert calls == [str(peft), str(remapped)]
+        from safetensors.numpy import load_file
+
+        keys = sorted(load_file(str(remapped / "adapter_model.safetensors")))
+        assert keys == [
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight",
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight",
+        ]
+        cfg = json.loads((remapped / "adapter_config.json").read_text())
+        assert cfg["target_modules"] == list(w.LORA_TARGETS)
+        assert cfg["r"] == 4
+        # The original PEFT dir ("Continue" uses it) is untouched.
+        assert (peft / "adapter_model.safetensors").read_bytes() == before
+        assert json.loads((peft / "adapter_config.json").read_text())[
+            "target_modules"
+        ] == (real.VL_TARGET_REGEX)
+
+    def test_direct_success_does_not_retry(self, tmp_path: Path) -> None:
+        with mock.patch.object(w, "run_converter") as run:
+            path = w.convert_with_fallback(
+                {"python": "p", "script": "s"},
+                "/b",
+                tmp_path,
+                tmp_path / "a.gguf",
+                tmp_path,
+            )
+        assert path == "direct" and run.call_count == 1
+
+    def test_other_errors_are_not_retried(self, tmp_path: Path) -> None:
+        err = w.TrainWorkerError("converter failed (exit 1): MemoryError")
+        with mock.patch.object(w, "run_converter", side_effect=err) as run:
+            with pytest.raises(w.TrainWorkerError, match="MemoryError"):
+                w.convert_with_fallback(
+                    {"python": "p", "script": "s"},
+                    "/b",
+                    tmp_path,
+                    tmp_path / "a.gguf",
+                    tmp_path,
+                )
+        assert run.call_count == 1
+
+
+class TestDpoReference:
+    FIELDS = ["beta", "learning_rate", "model_adapter_name", "ref_adapter_name"]
+
+    def test_mode(self) -> None:
+        assert real.dpo_reference_mode(None, self.FIELDS) == "disabled"
+        assert real.dpo_reference_mode("/sft", self.FIELDS) == "adapter"
+        assert real.dpo_reference_mode("/sft", ["beta"]) == "copy"
+
+    def test_dpo_args(self, tmp_path: Path) -> None:
+        hp = w.validate_hyperparams(
+            {"rank": 8, "lr": 1e-4, "epochs": 1, "dpo_lr": 2e-5}
+        )
+        kw = real.dpo_args_kwargs(hp, tmp_path, 10, "adapter")
+        assert kw["learning_rate"] == 2e-5
+        assert kw["beta"] == 0.1
+        assert kw["model_adapter_name"] == "default"
+        assert kw["ref_adapter_name"] == "reference"
+        assert kw["max_length"] is None
+        plain = real.dpo_args_kwargs(hp, tmp_path, 10, "disabled")
+        assert "ref_adapter_name" not in plain and "model_adapter_name" not in plain
+
+    def test_reference_recorded(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert _meta(task)["dpo_reference"] == "sft_adapter"
+
+    def test_reference_without_sft(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, n_sft=0)
+        task["fake"].pop("sft_steps")
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert _meta(task)["dpo_reference"] == "base"
+
+    def test_continue_adapter_records_its_lora(self, tmp_path: Path) -> None:
+        init = tmp_path / "adapters" / "1"
+        init.mkdir(parents=True)
+        (init / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 4}))
+        task = _make_task(tmp_path, n_sft=0)
+        task["fake"].pop("sft_steps")
+        task["init_adapter_dir"] = str(init)
+        assert _run(task, tmp_path) == w.EXIT_OK
+        meta = _meta(task)
+        assert meta["dpo_reference"] == "init_adapter"
+        assert meta["init_adapter_lora"] == {"r": 4, "lora_alpha": 4}
+        assert meta["adapter_lora"] == {"r": 4, "lora_alpha": 4}
+        assert meta["hyperparams"]["rank"] == 8
+
+    def test_fresh_adapter_lora_in_meta(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert _meta(task)["adapter_lora"] == {"r": 8, "lora_alpha": 16}
+        assert _meta(task)["init_adapter_lora"] is None
+
+    def test_adapter_keys_check(self) -> None:
+        ok = [
+            "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight"
+        ]
+        assert real.check_adapter_keys(ok) == 1
+        with pytest.raises(w.TrainWorkerError, match="vision"):
+            real.check_adapter_keys(
+                ok + ["base_model.model.model.visual.blocks.0.attn.qkv.lora_A.weight"]
+            )
+        with pytest.raises(w.TrainWorkerError, match="no LoRA"):
+            real.check_adapter_keys(["base_model.model.lm_head.weight"])
+
+
+class TestGuardsAndErrors:
+    def test_dirs_must_be_inside_data_root(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path / "root")
+        task["checkpoint_dir"] = str(tmp_path / "elsewhere")
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        assert "data_root" in _result(task)["error"]
+        task2 = _make_task(tmp_path / "root2")
+        task2["out_dir"] = task2["data_root"]
+        assert _run(task2, tmp_path, "t2.json") == w.EXIT_ERROR
+
+    def test_refuses_to_wipe_unexpected_checkpoint_dir(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        ck = Path(task["checkpoint_dir"])
+        ck.mkdir()
+        (ck / "precious.txt").write_text("keep me")
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        assert "refusing to delete" in _result(task)["error"]
+        assert (ck / "precious.txt").read_text() == "keep me"
+
+    def test_cancel_refuses_unexpected_peft_dir(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        peft = Path(task["out_dir"]) / w.PEFT_DIRNAME
+        peft.mkdir(parents=True)
+        (peft / "notes").mkdir()
+        Path(task["control_dir"]).mkdir()
+        (Path(task["control_dir"]) / w.CANCEL_SIGNAL).write_text("")
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        assert (peft / "notes").is_dir()
+
+    def test_error_result_carries_stage_step_and_counts(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path, fake={"fail_at": {"stage": "dpo", "step": 7}})
+        assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert res["stage"] == "dpo" and res["step"] == 6
+        assert (res["n_sft"], res["n_pref"], res["n_holdout"]) == (4, 6, 2)
+
+    def test_eta_clock_starts_at_the_first_step(self, tmp_path: Path) -> None:
+        ctx = w.StageContext(tmp_path, w.Control(tmp_path), {"sft": 10, "dpo": 0}, 1)
+        clock = [100.0]
+        with mock.patch.object(w.time, "monotonic", side_effect=lambda: clock[0]):
+            ctx.begin("sft", 10)
+            clock[0] = 400.0  # model load: must not count
+            ctx.report("sft", 1)
+            assert json.loads((tmp_path / w.PROGRESS_NAME).read_text())["eta_s"] is None
+            clock[0] = 402.0
+            ctx.report("sft", 2)
+            assert json.loads((tmp_path / w.PROGRESS_NAME).read_text())["eta_s"] == 16.0
+            ctx.begin("dpo", 0)  # a new stage restarts the clock
+            assert json.loads((tmp_path / w.PROGRESS_NAME).read_text())["eta_s"] is None
 
 
 def _cuda_and_deps() -> bool:
@@ -684,9 +1060,19 @@ def test_real_backend_smoke(tmp_path: Path) -> None:  # pragma: no cover - CUDA 
     def fake_convert(converter: Any, base_dir: str, peft: str, gguf: str) -> None:
         Path(gguf).write_bytes(b"GGUF")
 
-    with mock.patch.object(w, "run_converter", side_effect=fake_convert):
+    names = [
+        f"blk.{i}.t{k}.weight.lora_{ab}"
+        for i in range(2)
+        for k in range(7)
+        for ab in "ab"
+    ]
+    with mock.patch.object(
+        w, "run_converter", side_effect=fake_convert
+    ), mock.patch.object(w, "read_gguf_tensor_names", return_value=names):
         assert _run(task, tmp_path) == w.EXIT_OK
     res = _result(task)
     assert res["status"] == "ok"
     assert (Path(res["adapter_dir"]) / "adapter_config.json").exists()
     assert res["holdout_agreement"] is not None
+    assert _meta(task)["dpo_reference"] == "sft_adapter"
+    assert _meta(task)["gguf_lora_tensors"] == 28
