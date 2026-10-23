@@ -132,6 +132,9 @@ MAX_VARIANTS = 4
 REQUEST_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
 
 _VLM_TEMPERATURE = 0.6
+# How long POST /batches waits for a busy writer to load a new adapter
+# before refusing the Random batch (409 adapter_loading).
+_ADAPTER_PREPARE_WAIT_S = 15.0
 _VLM_TIMEOUT_S = 240.0
 _TERMINAL_JOB_STATES = ("done", "failed", "cancelled")
 # Finished batches remembered (so a cancel of one is "already over", not
@@ -1167,6 +1170,10 @@ class T2iRunner:
         """
         cfg = self._get_config()
         batch = await self._plan_batch(req, cfg)
+        if batch.mode == "random" and not any(
+            other.mode == "random" for other in self._batches.values()
+        ):
+            await self._prepare_adapter(batch)
         # No await between this check and the registration below, so two
         # concurrent Random requests cannot both pass it.
         if batch.mode == "random":
@@ -1196,6 +1203,31 @@ class T2iRunner:
             total_images=batch.total_images,
             warnings=list(batch.warnings),
         )
+
+    async def _prepare_adapter(self, batch: _Batch) -> None:
+        """Load a Random batch's adapter before the batch exists: one
+        registered since the writer spawned restarts it once the writer is
+        idle -- before the batch takes its own hold. Still busy (or gone):
+        the batch is refused with 409 ``adapter_loading`` /
+        ``adapter_unavailable``; nothing has rendered, the user retries."""
+        if batch.lora_path is None:
+            return
+        vlm = self.get_vlm()
+        prepare = getattr(vlm, "prepare_lora", None)
+        if not callable(prepare):
+            return
+        writer = batch.req.writer
+        try:
+            await prepare(batch.lora_path, wait_s=_ADAPTER_PREPARE_WAIT_S)
+        except AdapterLoadingError as exc:
+            raise WriterAdapterUnavailable(
+                writer, str(exc), code=ADAPTER_LOADING
+            ) from exc
+        except AdapterNotLoadedError as exc:
+            raise WriterAdapterUnavailable(writer, str(exc)) from exc
+        except (VlmError, OSError) as exc:
+            # Any other VLM trouble is the steps' to retry and fall back.
+            logger.warning("t2i batch: adapter not prepared: %s", exc)
 
     # ---- batch state as data ----------------------------------------------
 
@@ -1307,6 +1339,12 @@ class T2iRunner:
                 )
             except asyncio.CancelledError:
                 raise
+            except AdapterNotLoadedError as exc:
+                # Retrying cannot load it (and would wait again): fall back.
+                return fall_back(
+                    f"writer {batch.req.writer} unavailable "
+                    f"({self._reason(exc)}) - used the resolved caption"
+                )
             except (VlmError, TimeoutError, RuntimeError) as exc:
                 failure = exc
                 logger.warning(
@@ -1506,16 +1544,6 @@ class T2iRunner:
         (``VlmClient.hold``): background VLM work (the tag drain) does not
         evict the writer between two prompts, it waits for the batch."""
         vlm = self.get_vlm() if batch.mode == "random" else None
-        prepare = getattr(vlm, "prepare_lora", None)
-        if batch.lora_path is not None and callable(prepare):
-            # Before the hold: an adapter registered since the writer spawned
-            # is loaded now (the writer restarts only once idle), never under
-            # the batch's own hold. A failure leaves the steps to retry and
-            # fall back like any VLM failure.
-            try:
-                await prepare(batch.lora_path)
-            except VlmError as exc:
-                logger.warning("t2i batch %s: adapter not ready: %s", batch.id, exc)
         hold = getattr(vlm, "hold", None)
         with hold() if callable(hold) else contextlib.nullcontext():
             await self._produce_steps(batch, queue)

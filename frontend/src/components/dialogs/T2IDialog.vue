@@ -28,6 +28,7 @@ import {
   ADAPTER_LOADING_TEXT,
   ADAPTER_UNAVAILABLE,
   adapterErrorCode,
+  adapterErrorWriter,
   adapterMenuOptions,
   isAdapterWriterId,
   servableAdapterIds,
@@ -368,17 +369,22 @@ function handledAdapterError(e: unknown): boolean {
     return true
   }
   if (code === ADAPTER_UNAVAILABLE) {
-    if (isAdapterWriterId(writer.value)) fallBackToBase('is no longer available')
-    else toast.show('The trained writer of this prompt is no longer available. Generate again to send it as typed.', 'warn', 6000)
-    void store.loadAdapters().then(() => {
-      // Drafts by an adapter that can no longer serve go: the box keeps its
-      // text, which the next Generate sends as typed.
-      const ok = servableAdapterIds(store.adapters, 't2i')
-      const gone = store.drafts?.entries.some(
-        (d) => isAdapterWriterId(d.writer_id) && !ok.includes(d.writer_id),
+    // The 409 names the adapter: the Writer pick falls back only when it is
+    // the one refused; a held draft by it is dropped instead (the box keeps
+    // its text, which the next Generate sends as typed).
+    const refused = adapterErrorWriter(e) ?? writer.value
+    if (refused === writer.value && isAdapterWriterId(refused)) {
+      fallBackToBase('is no longer available')
+    } else if (store.drafts?.entries.some((d) => d.writer_id === refused)) {
+      store.discardDrafts()
+      const name = knownNames.get(refused) ?? writerName(store.adapters, refused)
+      toast.show(
+        `The prompt's writer ${name} is no longer available; Generate again to send it as typed.`,
+        'warn',
+        6000,
       )
-      if (gone) store.discardDrafts()
-    })
+    }
+    void store.loadAdapters()
     return true
   }
   return false

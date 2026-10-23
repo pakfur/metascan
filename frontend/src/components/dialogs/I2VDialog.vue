@@ -22,6 +22,7 @@ import {
   ADAPTER_LOADING_TEXT,
   ADAPTER_UNAVAILABLE,
   adapterErrorCode,
+  adapterErrorWriter,
   adapterMenuOptions,
   isAdapterWriterId,
   writerName,
@@ -283,7 +284,12 @@ function handledAdapterError(e: unknown): boolean {
     return true
   }
   if (code === ADAPTER_UNAVAILABLE) {
-    if (isAdapterWriterId(writer.value)) fallBackToBase('is no longer available')
+    const refused = adapterErrorWriter(e) ?? writer.value
+    if (refused === writer.value && isAdapterWriterId(refused)) {
+      fallBackToBase('is no longer available')
+    } else if (store.draft?.writer_id === refused) {
+      store.setDraft(null) // the prompt goes out typed next time
+    }
     void store.loadAdapters()
     return true
   }

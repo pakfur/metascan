@@ -48,6 +48,13 @@ export function servableAdapterIds(adapters: WriterAdapter[], kind: 't2i' | 'i2v
 }
 
 /** The 409 detail code of an adapter refusal, or null. */
+/** The adapter (`adapter:<id>`) a 409 adapter refusal names, or null. */
+export function adapterErrorWriter(e: unknown): string | null {
+  const err = e as { detail?: unknown } | null
+  const id = (err?.detail as { writer_id?: unknown } | null)?.writer_id
+  return isAdapterWriterId(id) ? id : null
+}
+
 export function adapterErrorCode(e: unknown): string | null {
   const err = e as { status?: unknown; detail?: unknown } | null
   if (!err || err.status !== 409) return null
