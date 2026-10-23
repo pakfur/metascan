@@ -13,6 +13,7 @@ FLAKE8 := $(VENV_DIR)/bin/flake8
 
 # Metascan supports Python 3.11.x only (see install.sh, setup.py, CI).
 PY_SERIES := 3.11
+PY_CHECK := import sys; sys.exit(0 if sys.version_info[:2] == tuple(map(int, "$(PY_SERIES)".split("."))) else 1)
 # Interpreter used ONLY to create a missing venv; never touches an existing one.
 PYTHON_BOOTSTRAP ?= $(shell command -v python$(PY_SERIES) || command -v python3 || command -v python)
 
@@ -36,15 +37,15 @@ install: venv deps nltk-setup frontend-deps dev-install  ## Complete first-time 
 # re-run against (and never rewrites pyvenv.cfg of) an existing environment.
 $(PYTHON):
 	@test -n "$(PYTHON_BOOTSTRAP)" || { echo "Error: no Python found. Metascan requires Python $(PY_SERIES).x (install it, or set PYTHON_BOOTSTRAP=/path/to/python$(PY_SERIES))." >&2; exit 1; }
-	@"$(PYTHON_BOOTSTRAP)" -c 'import sys; sys.exit(0 if sys.version_info[:2] == tuple(map(int, "$(PY_SERIES)".split("."))) else 1)' || { echo "Error: $(PYTHON_BOOTSTRAP) is Python $$("$(PYTHON_BOOTSTRAP)" -c 'import platform; print(platform.python_version())'); Metascan requires Python $(PY_SERIES).x. Install it (macOS: brew install python@$(PY_SERIES)) and re-run with PYTHON_BOOTSTRAP=python$(PY_SERIES)." >&2; exit 1; }
-	"$(PYTHON_BOOTSTRAP)" -m venv $(VENV_DIR)
+	@"$(PYTHON_BOOTSTRAP)" -c '$(PY_CHECK)' || { echo "Error: $(PYTHON_BOOTSTRAP) is Python $$("$(PYTHON_BOOTSTRAP)" -c 'import platform; print(platform.python_version())'); Metascan requires Python $(PY_SERIES).x. Install it (macOS: brew install python@$(PY_SERIES)) and re-run with PYTHON_BOOTSTRAP=python$(PY_SERIES)." >&2; exit 1; }
+	"$(PYTHON_BOOTSTRAP)" -m venv $(VENV_DIR) || { rm -rf $(VENV_DIR); exit 1; }
 	@echo "Virtual environment created in $(VENV_DIR)"
 
 # Ensure the venv exists (creating it only if missing) and is Python 3.11.x.
 # Fails loudly rather than recreating an existing venv with the wrong Python.
 .PHONY: check-venv
 check-venv: $(PYTHON)
-	@$(PYTHON) -c 'import sys; sys.exit(0 if sys.version_info[:2] == tuple(map(int, "$(PY_SERIES)".split("."))) else 1)' || { echo "Error: $(VENV_DIR) uses Python $$($(PYTHON) -c 'import platform; print(platform.python_version())'), not $(PY_SERIES).x. Rebuild it explicitly: rm -rf $(VENV_DIR) && make PYTHON_BOOTSTRAP=python$(PY_SERIES) venv (or ./install.sh --recreate-venv)." >&2; exit 1; }
+	@$(PYTHON) -c '$(PY_CHECK)' || { echo "Error: $(VENV_DIR) uses Python $$($(PYTHON) -c 'import platform; print(platform.python_version())'), but this project pins Python $(PY_SERIES).x, so the venv must be rebuilt. Either: rm -rf $(VENV_DIR) && make deps   (removes the venv's installed packages; 'make venv' alone suffices if python$(PY_SERIES) is on PATH), or keep it and use a separate 3.11 venv: make VENV_DIR=venv-311 deps   (or ./install.sh --recreate-venv)." >&2; exit 1; }
 
 .PHONY: venv
 venv: check-venv  ## Create virtual environment if missing (never recreates)
