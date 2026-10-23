@@ -26,7 +26,7 @@ import re
 from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 from metascan.core.meta_prompt_templates import split_negative_block
-from metascan.core.prompt_store import get_prompt_store
+from metascan.core.prompt_store import PromptStore, get_prompt_store
 from metascan.core.t2i_models import T2iModelProfile
 
 logger = logging.getLogger(__name__)
@@ -70,10 +70,11 @@ def compose_t2i_prompts(
     direction: Optional[str] = None,
     angle: Optional[str] = None,
     examples: Sequence[str] = (),
+    store: Optional[PromptStore] = None,
 ) -> Tuple[str, str]:
     """``(system_prompt, user_prompt)``; see :func:`compose_guided_t2i_prompts`."""
     composed = compose_guided_t2i_prompts(
-        profile, resolved_caption, content_mode, direction, angle, examples
+        profile, resolved_caption, content_mode, direction, angle, examples, store
     )
     return composed.system, composed.user
 
@@ -85,6 +86,7 @@ def compose_guided_t2i_prompts(
     direction: Optional[str] = None,
     angle: Optional[str] = None,
     examples: Sequence[str] = (),
+    store: Optional[PromptStore] = None,
 ) -> ComposedPrompts:
     """Return ``(system_prompt, user_prompt)`` for ``VlmClient.generate_text``.
 
@@ -102,13 +104,17 @@ def compose_guided_t2i_prompts(
     what they were before these arguments existed. ``examples_used`` says
     whether the block went in: a hot reload that removed the preamble drops
     it, and a writer must then not be recorded as taste-guided.
+
+    ``store`` defaults to the process-wide prompt store; the writer
+    training dataset passes its own so it composes exactly these prompts.
     """
     if content_mode not in CONTENT_MODES:
         raise ValueError(
             f"unknown content mode {content_mode!r}; expected one of: "
             + ", ".join(CONTENT_MODES)
         )
-    store = get_prompt_store()
+    if store is None:
+        store = get_prompt_store()
     system = store.get("T2I_CAPTION_PREAMBLE").rstrip() + "\n\n"
     system += store.get(profile.meta_key)
     shown = [" ".join(e.split()) for e in examples if e and e.strip()]
@@ -143,6 +149,16 @@ def compose_guided_t2i_prompts(
             user[: -len(_CLOSING)] + f"ANGLE: lead with {angle.strip()}\n\n" + _CLOSING
         )
     return ComposedPrompts(system, user, examples_used)
+
+
+def add_categories_line(user: str, names: Sequence[str]) -> str:
+    """Splice a ``CATEGORIES: a, b`` line in front of the closing line of a
+    composed user turn (an ``all``-scope writer adapter is trained with the
+    image's category names there). No non-blank names: unchanged."""
+    shown = [" ".join(n.split()) for n in names if n and n.strip()]
+    if not shown or not user.endswith(_CLOSING):
+        return user
+    return user[: -len(_CLOSING)] + f"CATEGORIES: {', '.join(shown)}\n\n" + _CLOSING
 
 
 def strip_parentheses(text: str) -> str:

@@ -1438,6 +1438,28 @@ class DatabaseManager:
                         f"ALTER TABLE {_lineage_table} ADD COLUMN "
                         f"{_lineage_col} {_lineage_type}",
                     )
+            # The scorecard run a T2I image was rendered for (NULL for every
+            # ordinary generation). Scorecard images are never training data.
+            _idempotent_add_column(
+                conn,
+                "t2i_images",
+                "scorecard_id",
+                "ALTER TABLE t2i_images ADD COLUMN scorecard_id TEXT",
+            )
+            # The general VLM's short brief of a favorited image: the user
+            # turn of a writer-training "hindsight" example. Cascades with
+            # its media row (a deleted image yields no hindsight example).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hindsight_briefs (
+                    file_path TEXT PRIMARY KEY
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    brief TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -4228,6 +4250,7 @@ class DatabaseManager:
         draft_prompt: Optional[str] = None,
         edited: Optional[int] = None,
         writer_model: Optional[str] = None,
+        scorecard_id: Optional[str] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4240,9 +4263,9 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index, draft_prompt, edited, writer_model) "
+                "variant_index, draft_prompt, edited, writer_model, scorecard_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?)",
+                "?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4267,6 +4290,7 @@ class DatabaseManager:
                     draft_prompt,
                     edited,
                     writer_model,
+                    scorecard_id,
                 ),
             )
             conn.commit()
@@ -6229,6 +6253,205 @@ class DatabaseManager:
                     row["name"] = names.get(adapter_id)
                 rows.append(row)
         return rows
+
+    # ---- prompt-writer training data (taste learning project 4) ----------
+
+    def set_hindsight_brief(
+        self,
+        file_path: str,
+        brief: str,
+        model: str,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Store (or replace) the hindsight brief of one image. False when
+        the path has no media row (the FK would refuse it)."""
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM media WHERE file_path = ?", (posix_path,)
+                ).fetchone()
+                is None
+            ):
+                return False
+            conn.execute(
+                "INSERT INTO hindsight_briefs (file_path, brief, model, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+                "brief = excluded.brief, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (posix_path, brief, model, self._iso(now)),
+            )
+            conn.commit()
+            return True
+
+    def get_hindsight_briefs(
+        self, paths: Optional[List[str]] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """``{posix_path: {brief, model, created_at}}`` for ``paths`` (every
+        brief when None)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        sql = "SELECT file_path, brief, model, created_at FROM hindsight_briefs"
+        with self.lock, self._get_connection() as conn:
+            if paths is None:
+                rows = list(conn.execute(sql))
+            else:
+                wanted = list(dict.fromkeys(to_posix_path(p) for p in paths))
+                rows = []
+                for start in range(0, len(wanted), 500):
+                    part = wanted[start : start + 500]
+                    marks = ",".join("?" * len(part))
+                    rows.extend(
+                        conn.execute(f"{sql} WHERE file_path IN ({marks})", part)
+                    )
+        for r in rows:
+            out[r["file_path"]] = {
+                "brief": r["brief"],
+                "model": r["model"],
+                "created_at": r["created_at"],
+            }
+        return out
+
+    _DATASET_LINEAGE_COLS: ClassVar[Tuple[str, ...]] = (
+        "model",
+        "caption",
+        "prompt_used",
+        "draft_prompt",
+        "edited",
+        "writer_id",
+        "writer_model",
+        "variant_group",
+        "variant_index",
+        "batch_id",
+        "scorecard_id",
+        "created_at",
+    )
+
+    def writer_dataset_raw(self) -> Dict[str, Any]:
+        """Raw rows for ``writer_dataset.build_examples`` (no filtering
+        beyond shape; the rules live there):
+
+        * ``categories``: ``{id: name}``.
+        * ``generations``: one dict per T2I image -- live rows (JOINed to
+          media) and, for paths no longer live, the newest tombstone whose
+          lineage carries a ``t2i`` row. Keys: ``file_path``, ``live``, the
+          lineage columns (``_DATASET_LINEAGE_COLS``), ``is_favorite``,
+          ``passed``, ``seen_at``, ``judged_at`` (a tombstone's
+          ``confirmed_at``), ``category_ids`` and ``category_names``.
+        * ``briefs``: ``{path: {brief, model, created_at}}``.
+        * ``library``: favorited images that have a brief but no live T2I
+          row: ``{path: {prompt, model_names, judged_at, seen_at,
+          category_ids, category_names}}`` (prompt from the metadata blob).
+        """
+        cols = self._DATASET_LINEAGE_COLS
+        with self.lock, self._get_connection() as conn:
+            categories = {
+                int(r["id"]): str(r["name"])
+                for r in conn.execute("SELECT id, name FROM categories")
+            }
+            by_name = {name.lower(): cid for cid, name in categories.items()}
+            links: Dict[str, List[int]] = {}
+            for r in conn.execute(
+                "SELECT file_path, category_id FROM media_categories "
+                "ORDER BY category_id"
+            ):
+                links.setdefault(r["file_path"], []).append(int(r["category_id"]))
+
+            generations: Dict[str, Dict[str, Any]] = {}
+            select = ", ".join(f"g.{c}" for c in cols)
+            for r in conn.execute(
+                f"SELECT g.file_path, {select}, m.is_favorite, j.passed, "
+                "j.seen_at, j.judged_at FROM t2i_images g "
+                "JOIN media m ON m.file_path = g.file_path "
+                "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
+            ):
+                d = dict(r)
+                d["live"] = True
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                ids = links.get(d["file_path"], [])
+                d["category_ids"] = list(ids)
+                d["category_names"] = [categories[i] for i in ids if i in categories]
+                generations[d["file_path"]] = d
+            live = set(generations)
+            for r in conn.execute(
+                "SELECT id, file_path, is_favorite, passed, seen_at, "
+                "confirmed_at, categories, lineage FROM media_tombstones "
+                "WHERE lineage IS NOT NULL AND json_valid(lineage) "
+                "AND json_type(lineage, '$.t2i') = 'object' ORDER BY id"
+            ):
+                if r["file_path"] in live:
+                    continue
+                try:
+                    gen = json.loads(r["lineage"])["t2i"]
+                    names = json.loads(r["categories"] or "[]")
+                except (ValueError, KeyError, TypeError):
+                    logger.debug("skipping malformed tombstone (id %s)", r["id"])
+                    continue
+                if not isinstance(names, list):
+                    names = []
+                d = {"file_path": r["file_path"], "live": False}
+                for c in cols:
+                    d[c] = gen.get(c)
+                d["is_favorite"] = bool(r["is_favorite"])
+                d["passed"] = bool(r["passed"])
+                d["seen_at"] = r["seen_at"]
+                d["judged_at"] = r["confirmed_at"]
+                d["category_names"] = [str(n) for n in names]
+                d["category_ids"] = [
+                    by_name[str(n).lower()] for n in names if str(n).lower() in by_name
+                ]
+                # Newest tombstone wins (ORDER BY id).
+                generations[r["file_path"]] = d
+
+            briefs: Dict[str, Dict[str, Any]] = {
+                r["file_path"]: {
+                    "brief": r["brief"],
+                    "model": r["model"],
+                    "created_at": r["created_at"],
+                }
+                for r in conn.execute(
+                    "SELECT file_path, brief, model, created_at FROM hindsight_briefs"
+                )
+            }
+            library: Dict[str, Dict[str, Any]] = {}
+            others = [p for p in briefs if p not in live]
+            for start in range(0, len(others), 500):
+                part = others[start : start + 500]
+                marks = ",".join("?" * len(part))
+                for r in conn.execute(
+                    "SELECT m.file_path, json_extract(m.data, '$.prompt') AS prompt, "
+                    "j.seen_at, j.judged_at FROM media m "
+                    "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
+                    f"WHERE m.is_favorite = 1 AND m.file_path IN ({marks})",
+                    part,
+                ):
+                    ids = links.get(r["file_path"], [])
+                    library[r["file_path"]] = {
+                        "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
+                        "model_names": [],
+                        "seen_at": r["seen_at"],
+                        "judged_at": r["judged_at"],
+                        "category_ids": list(ids),
+                        "category_names": [
+                            categories[i] for i in ids if i in categories
+                        ],
+                    }
+            found = list(library)
+            for start in range(0, len(found), 500):
+                part = found[start : start + 500]
+                marks = ",".join("?" * len(part))
+                for r in conn.execute(
+                    "SELECT file_path, index_key FROM indices "
+                    f"WHERE index_type = 'model' AND file_path IN ({marks})",
+                    part,
+                ):
+                    library[r["file_path"]]["model_names"].append(r["index_key"])
+        return {
+            "categories": categories,
+            "generations": list(generations.values()),
+            "briefs": briefs,
+            "library": library,
+        }
 
     def record_taste_diversity(
         self, rows: List[Dict[str, Any]], computed_at: str

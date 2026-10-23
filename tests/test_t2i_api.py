@@ -976,6 +976,7 @@ class TestImages(T2iApiCase):
                     "draft_prompt",
                     "edited",
                     "writer_model",
+                    "scorecard_id",
                 ]
             ),
         )
