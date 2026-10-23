@@ -51,13 +51,22 @@ def probe_trl_reference_support(
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, f"could not run the TRL probe: {e}"
-    lines = (proc.stdout or "").strip().splitlines()
+    return parse_trl_probe(proc.returncode, proc.stdout)
+
+
+# The check's source, for callers that run it themselves (asyncio).
+TRL_CHECK = _CHECK
+
+
+def parse_trl_probe(returncode: Optional[int], stdout: str) -> Tuple[bool, str]:
+    """``(ok, reason)`` from the check's exit code and stdout."""
+    lines = (stdout or "").strip().splitlines()
     try:
         info = json.loads(lines[-1]) if lines else None
     except ValueError:
         info = None
-    if proc.returncode != 0 or not isinstance(info, dict):
-        return False, f"the TRL probe failed (exit {proc.returncode})"
+    if returncode != 0 or not isinstance(info, dict):
+        return False, f"the TRL probe failed (exit {returncode})"
     if not info.get("installed"):
         return False, f"trl is not installed ({_PIN_HINT})"
     missing = info.get("missing") or []

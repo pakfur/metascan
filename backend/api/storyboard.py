@@ -31,9 +31,9 @@ from backend.services.storyboard_service import (
     ParentNotFoundError,
     StoryboardService,
 )
-from backend.services.gpu_lock import GPU_FREE
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core import ref_describe as rd
-from metascan.core.comfy_client import ComfyError
+from metascan.core.comfy_client import ComfyError, GpuBusyError
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
@@ -652,6 +652,8 @@ async def generate_storyboard(
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:  # training took the GPU mid-submit
+        raise gpu_busy_http_error() from exc
     return {"jobs": job_ids}
 
 
@@ -673,6 +675,8 @@ async def generate_storyboard_video(
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:
+        raise gpu_busy_http_error() from exc
     except ComfyError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return result

@@ -228,6 +228,15 @@ def _build_training_manager(
         except Exception:
             logger.exception("Restarting the hindsight briefs failed")
 
+    async def on_close() -> None:
+        # Shutdown: nothing restarts the briefs any more; a scheduled
+        # restart is cancelled and awaited.
+        interrupted["briefs"] = False
+        for task in list(restarts):
+            task.cancel()
+        if restarts:
+            await asyncio.gather(*restarts, return_exceptions=True)
+
     def on_gpu_released() -> None:
         if not interrupted["briefs"]:
             return
@@ -274,7 +283,7 @@ def _build_training_manager(
         except Exception:
             logger.exception("Unloading the CLIP worker for training raised")
 
-    return TrainingManager(
+    manager = TrainingManager(
         db,
         data_dir,
         dataset_inputs=dataset_inputs,
@@ -287,6 +296,8 @@ def _build_training_manager(
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
         on_gpu_released=on_gpu_released,
     )
+    manager.add_close_hook(on_close)
+    return manager
 
 
 async def _install_training(manager: TrainingManager) -> None:

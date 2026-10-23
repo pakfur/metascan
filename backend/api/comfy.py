@@ -17,9 +17,9 @@ from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
 from backend.services.comfy_service import ComfyService, PresetInUseError
-from backend.services.gpu_lock import GPU_FREE
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError, GenerationParams
-from metascan.core.comfy_client import ComfyError, PresetNotFoundError
+from metascan.core.comfy_client import ComfyError, GpuBusyError, PresetNotFoundError
 from metascan.core.workflow_validation import (
     VIDEO_MODES,
     VIDEO_TARGETS,
@@ -272,6 +272,8 @@ async def submit(body: SubmitRequest) -> Dict[str, int]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except BindingError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:
+        raise gpu_busy_http_error() from exc
     except ComfyError as exc:
         # 503, not 502: spec §9 wants "ComfyUI unreachable" to read as a
         # service-availability problem, and ComfyError's message already
