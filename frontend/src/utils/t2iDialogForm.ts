@@ -20,6 +20,7 @@ import {
   type T2iConfig,
   type T2iFinishedBatch,
   type T2iFormState,
+  type T2iImage,
   type T2iLora,
   type T2iMode,
 } from '../types/t2i'
@@ -228,6 +229,39 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
       negative: s.negative ?? '',
     })),
     current: ordered.findIndex((s) => s.variant_index === shown.variant_index),
+  }
+}
+
+/** Writers whose drafts a supplied prompt may name (judgments.DRAFT_WRITERS). */
+const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
+
+/**
+ * A selected tile's lineage as a one-entry draft set, so re-rendering a
+ * writer's prompt keeps its writer, model and draft instead of going out as a
+ * typed (`manual`) prompt; an edit of the loaded text is still `edited`. Null
+ * for a typed image (no draft) or one from before lineage existed. `f` is the
+ * form as just loaded from the tile.
+ */
+export function draftSetFromImage(
+  img: Pick<T2iImage, 'writer_id' | 'writer_model' | 'draft_prompt'>,
+  f: Pick<T2iFields, 'caption' | 'prompt' | 'negative'>,
+): T2iDraftSet | null {
+  const writerId = img.writer_id
+  if (img.draft_prompt == null || !writerId || !DRAFT_WRITERS.includes(writerId)) return null
+  return {
+    caption: f.caption,
+    variants: 1,
+    entries: [
+      {
+        variant_index: 0,
+        writer_id: writerId,
+        writer_model: img.writer_model ?? null,
+        draft: img.draft_prompt,
+        text: f.prompt,
+        negative: f.negative,
+      },
+    ],
+    current: 0,
   }
 }
 
