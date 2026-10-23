@@ -10,6 +10,9 @@ const props = defineProps<{
   judgment: JudgmentState | null
   hint: string | null
   sticky: CategoryRef | null
+  // Learned taste score for the current image, null when there is none
+  // (no model, stale model, unscored item, or a video).
+  score: number | null
 }>()
 
 const verdict = computed(() => props.judgment?.verdict ?? null)
@@ -34,6 +37,13 @@ function isOn(reason: Reason): boolean {
     <span v-if="verdict === 'favorite'" class="verdict fav">★ Favorite</span>
     <span v-else-if="verdict === 'pass'" class="verdict pass">✕ Pass</span>
     <span v-else class="verdict none">No verdict</span>
+
+    <div v-if="score !== null" class="taste-score" title="Learned taste score (0–1)">
+      taste {{ score.toFixed(2) }}
+    </div>
+    <div v-if="judgment?.batch" class="batch-pos" title="Position in its T2I generation batch">
+      batch {{ judgment.batch.index }} of {{ judgment.batch.size }}
+    </div>
 
     <div class="reasons-header">{{ reasonsHeader }}</div>
     <span
@@ -107,6 +117,13 @@ function isOn(reason: Reason): boolean {
   border: 1px dashed #555;
   color: #888;
   font-weight: 400;
+}
+
+.taste-score,
+.batch-pos {
+  color: #aab;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .reasons-header {
