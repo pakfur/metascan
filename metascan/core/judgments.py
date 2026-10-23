@@ -51,8 +51,7 @@ def check_writer_model(writer_id: Optional[str], writer_model: Any) -> Optional[
 
     if not isinstance(writer_model, str) or not writer_allowed(writer_model):
         raise WriterModelError(
-            f"writer_model {writer_model!r} is not a model the prompt writer "
-            "can use"
+            f"writer_model {writer_model!r} is not a model the prompt writer " "can use"
         )
     return writer_model
 

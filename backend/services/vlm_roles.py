@@ -409,9 +409,7 @@ class VlmRoles:
         doing is background work (preempted: retried after the eviction)."""
         preemptible = getattr(other, "background_only", None)
         if preemptible is None:  # a duck-typed client
-            idle = await other.wait_idle(
-                self._idle_timeout_s, grace=self._swap_grace_s
-            )
+            idle = await other.wait_idle(self._idle_timeout_s, grace=self._swap_grace_s)
         else:
             idle = False
             loop = asyncio.get_running_loop()
@@ -419,8 +417,7 @@ class VlmRoles:
             while True:
                 if preemptible():
                     logger.info(
-                        "VLM %s is only doing background work; preempting it "
-                        "for %s",
+                        "VLM %s is only doing background work; preempting it " "for %s",
                         other.model_id,
                         client.preferred_model_id,
                     )
