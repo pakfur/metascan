@@ -107,6 +107,14 @@ class ResolvedCaption:
 # ``(?<!_)`` keeps a long run of underscores linear: a token can only start
 # at the beginning of a run, never inside one.
 _TOKEN_RE = re.compile(r"(?<!_)_{2,}([A-Z][A-Z0-9]*)_{2,}")
+
+
+def has_tokens(caption: str) -> bool:
+    """Whether ``caption`` holds any ``__TOKEN__`` that resolving expands
+    (one without tokens resolves to itself)."""
+    return _TOKEN_RE.search(caption) is not None
+
+
 _POSSESSIVE_RE = re.compile(r"['\u2019\u02bc][sS]\b")
 
 # After a first mention, details stay inline ("... woman with olive skin")

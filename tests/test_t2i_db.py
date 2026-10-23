@@ -96,6 +96,8 @@ class TestT2iImagesDb(unittest.TestCase):
                 "edited",
                 "writer_model",
                 "scorecard_id",
+                "resolved_caption",
+                "direction",
             ],
         )
         self.assertEqual(foreign, [])

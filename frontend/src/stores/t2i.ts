@@ -301,6 +301,7 @@ export const useT2iStore = defineStore('t2i', () => {
     directions?: boolean
     variants?: number
     writer?: T2iWriter
+    category_ids?: number[]
   }): Promise<T2iPromptResult> {
     return t2iApi.generateT2iPrompt(body)
   }

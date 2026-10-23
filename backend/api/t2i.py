@@ -158,6 +158,9 @@ class PromptRequest(CaptionRequest):
     # One draft per variant; variant k > 0 is written with angle k-1.
     variants: int = Field(default=1, ge=1, le=MAX_VARIANTS)
     writer: WriterChoice = "base"
+    # The dialog's generation categories: an ``all``-scope adapter writes
+    # with them as a CATEGORIES line (the user turn it was trained on).
+    category_ids: List[int] = Field(default_factory=list)
 
 
 class VariantPrompt(BaseModel):
@@ -319,6 +322,7 @@ async def resolve_caption(body: CaptionRequest) -> Dict[str, Any]:
 @router.post("/prompt")
 async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     runner = _require_runner()
+    category_ids = await checked_category_ids(body.category_ids)
     try:
         result = await runner.generate_prompt(
             caption=body.caption,
@@ -327,6 +331,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
             directions=body.directions,
             variants=body.variants,
             writer=body.writer,
+            category_ids=category_ids,
         )
     except Exception as exc:
         mapped = _http_error(exc)
