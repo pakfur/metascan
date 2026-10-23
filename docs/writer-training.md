@@ -2,7 +2,7 @@
 
 # Prompt-writer training (taste learning)
 
-Metascan can fine-tune a **LoRA adapter** for the prompt-writing model (the 8B Qwen3-VL "writer" that turns a T2I caption or an I2V image into a prompt) from your own ratings and edits. The adapter is served by the same `llama-server` as the base writer, appears in the T2I and I2V **Writer** menus as `adapter:<id>`, and is judged against the base writer by a blind **scorecard** before you trust it.
+Metascan can fine-tune a **LoRA adapter** for the prompt-writing model (the 8B Qwen3-VL "writer" that turns a T2I caption or an I2V image into a prompt) from your own ratings and edits. The adapter is served by the same `llama-server` as the base writer, appears by its name in the **Writer** menu of the T2I dialog (training makes T2I adapters only; the I2V menu offers Base), and is judged against the base writer by a blind **scorecard** before you trust it.
 
 This is optional. Nothing here runs unless you open the training window and press **Start**, and Metascan runs without the training dependencies. Training needs an NVIDIA GPU, so the feature stays gated (with the reasons listed) on a Mac or a small card.
 
@@ -20,7 +20,7 @@ Three kinds of example, all from images only (I2V clips are never read):
 
 Scorecard images, `manual` prompts and the stock `fallback` text are never training targets. Deleted images still count (from their tombstone). About 10% of the preference groups are held out and never trained on; they give the **holdout agreement** (the share of held-out pairs where the adapter prefers your chosen prompt), shown next to the base model's number.
 
-**Readiness** is per scope (`All`, or one category): trainable at 100 or more preference and edit pairs, "enough new data" at 200 or more pairs since the newest adapter of that scope. The window shows both, and **Write briefs** fills in the hindsight briefs (a resumable background job that pauses while training holds the GPU).
+**Readiness** is per scope (`All`, or one category): trainable at 100 or more preference and edit pairs, "enough new data" at 200 or more pairs since the newest adapter of that scope. The window shows both, and **Write briefs** fills in the hindsight briefs (a resumable background job: starting a training run cancels it, and it restarts by itself when the GPU is free).
 
 ## What you need
 
@@ -31,7 +31,7 @@ Scorecard images, `manual` prompts and the stock `fallback` text are never train
 | Training packages | `requirements-train.txt` (torch with CUDA, transformers, peft, trl, accelerate, datasets, safetensors, sentencepiece, gguf) |
 | Base weights | The full-precision Hugging Face weights of the writer, about 17.5 GB (16.3 GiB) |
 | Converter | llama.cpp's `convert_lora_to_gguf.py` (turns the trained adapter into a GGUF `llama-server` can load) |
-| TRL version | `trl>=0.25.0,<0.26`. The DPO step uses the SFT adapter as its reference model through `DPOConfig(model_adapter_name, ref_adapter_name)`, which only the TRL 0.25 line is confirmed to have; the cap is checked by the gate |
+| TRL version | `trl>=0.25.0,<0.26`, pinned by `requirements-train.txt` (only the TRL 0.25 line is confirmed to work). The DPO step uses the SFT adapter as its reference model through `DPOConfig(model_adapter_name, ref_adapter_name)`; the gate probes the installed TRL for exactly those two `DPOConfig` fields, not for the version number |
 
 The **Writer training** rows in the Models tab and the training window's gate block list whatever is missing, one reason per piece.
 
@@ -109,10 +109,11 @@ Real training has not yet been timed on the target hardware, so treat this as a 
 
 ## Using an adapter
 
-A finished adapter shows up in the **Writer** menu of the T2I and I2V dialogs as `name · date · NN% fav` (plus `· untested` until the scorecard promotes it). Details:
+A finished adapter shows up in the **Writer** menu of the T2I dialog as `name · date · NN% fav`, where the rate is its favorite rate on its blind scorecard (left out until a scorecard image of it is judged), plus `· untested · n/30` (judged pairs) until the scorecard promotes it. **Base** shows `baseline · NN% fav`, the base writer's rate on the same scorecards. Training creates T2I adapters only, so the I2V dialog's Writer menu offers Base. Details:
 
 - A scope-`all` adapter is always offered; a one-category adapter is offered when that category is among the ones you selected. An adapter with fewer than 50 training examples for the chosen target model is shown disabled.
-- Adapters are served with `llama-server --lora` per adapter, loaded unapplied and switched on per request, so one writer process serves the base and every adapter. Adding, deleting or withdrawing an adapter restarts the writer once it is idle (the next request starts it again); a request that needs a just-added adapter while the writer is busy gets `409 adapter_loading` ("try again"), and one for an adapter that is gone, failed, of the other surface or built on another base model gets `409 adapter_unavailable` and the dialog falls back to **Base** with a note.
+- Your pick is remembered. When the picked adapter is not offered for the moment (its category deselected, a target model it has too few examples for, not servable, refused by the writer), the dialog uses **Base** and says so, and switches back by itself when the adapter is offered again. Only deleting the adapter resets the pick to Base.
+- Adapters are served with `llama-server --lora` per adapter, loaded unapplied and switched on per request, so one writer process serves the base and every adapter. Adding, deleting or withdrawing an adapter restarts the writer once it is idle (the next request starts it again); a request that needs a just-added adapter while the writer is busy gets `409 adapter_loading` ("try again"), and one for an adapter that is gone, failed, of the other surface or built on another base model gets `409 adapter_unavailable` and the dialog uses **Base** with a note (until the adapter list changes).
 - Adapter writers get no variant "angle" hint and no taste examples (they were trained without them); their variants differ by sampling. For a scope-`all` adapter the request's category names are added to the request, exactly as in training.
 - Every image records which writer made its prompt (`adapter:<id>`), so the **Writers** dashboard (Models tab) can compare favorite rates per writer.
 
@@ -123,7 +124,7 @@ The scorecard answers "is this adapter actually better than the base writer for 
 - **40 fixed briefs** (`data/taste/scorecard_briefs.txt`, written for this and committed). For each brief, the base writer and the adapter each write a prompt with the **same seed**, and both are rendered with the same ComfyUI workflow (default target model `krea2`, using its `t2i.model_workflows` preset; without one you get `no_workflow`). That is 80 images.
 - Render it from the training window (**render scorecard**; **resume** continues a partial one at the same seeds; **re-render** adds a fresh set). It needs the GPU free of training.
 - **Blind**: the scorecard images look like any other image in the grid and viewer, with no prompt, tags, writer or variant shown (the server strips them, not just the UI), until you give an explicit **favorite or pass**. Looking at an image without deciding does not reveal it. Clearing a verdict hides it again.
-- **Judged** means both images of a pair have a favorite or pass verdict. At **30 judged pairs** the adapter moves from **untested** to **ready** and stays ready. The window shows `n/30 judged`, and the Models tab Writers table shows the favorite rate of the base and of each adapter, the mean taste score, and judged pairs.
+- **Judged** means both images of a pair have an explicit verdict, favorite or pass; an image you only looked at (seen, no verdict) does not count, even though it is a negative label for the taste scorer. At **30 judged pairs** the adapter moves from **untested** to **ready** and stays ready. The window shows `n/30 judged`, and the Models tab Writers table shows the favorite rate of the base and of each adapter, the mean taste score, and judged pairs.
 - Scorecard images are real judgments for the taste scorer, but are never writer training data.
 
 A "ready" adapter that scores no better than the base is your call: delete it, or train again with more data.

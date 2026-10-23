@@ -25,10 +25,10 @@ import {
   adapterErrorWriter,
   adapterMenuOptions,
   isAdapterWriterId,
-  writerName,
 } from '../../types/writers'
-import { useTasteStore } from '../../stores/taste'
 import { useWebSocket } from '../../composables/useWebSocket'
+import { useWriterPick } from '../../composables/useWriterPick'
+import { useTrainingStore } from '../../stores/training'
 import { useToast } from '../../composables/useToast'
 import { errorText } from '../../utils/gpuBusy'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
@@ -52,7 +52,7 @@ const store = useI2vStore()
 const mediaStore = useMediaStore()
 const foldersStore = useFoldersStore()
 const toast = useToast()
-const taste = useTasteStore()
+const training = useTrainingStore()
 
 const idea = ref('')
 const prompt = ref('')
@@ -115,31 +115,8 @@ function onCadenceChange(id: string) {
 const expanding = ref(false)
 
 // Writer: per browser like the seed policy, never per clip (form_state does
-// not carry it), so loading a clip never changes it.
+// not carry it), so loading a clip never changes it. See the Writer pick below.
 const WRITER_STORAGE_KEY = 'metascan.i2v.writer.v1'
-function storedWriter(): I2vWriter {
-  try {
-    const v = localStorage.getItem(WRITER_STORAGE_KEY)
-    // An adapter is kept until the adapter list says it is gone (see below).
-    return I2V_WRITERS.some((w) => w.id === v) || isAdapterWriterId(v) ? (v as I2vWriter) : 'base'
-  } catch {
-    return 'base'
-  }
-}
-const writer = ref<I2vWriter>(storedWriter())
-function storeWriter(v: string) {
-  try {
-    localStorage.setItem(WRITER_STORAGE_KEY, v)
-  } catch {
-    /* private mode: the choice lasts for this session */
-  }
-}
-function setWriter(v: string) {
-  const adapter = adapterOptions.value.find((o) => o.id === v)
-  if (!I2V_WRITERS.some((w) => w.id === v) && !(adapter && !adapter.disabled)) return
-  writer.value = v as I2vWriter
-  storeWriter(v)
-}
 
 // The held draft stops describing the prompt when the idea or cadence it was
 // written for changes (the source image and a selected clip clear it in the
@@ -246,37 +223,35 @@ const { selected: categoryIds, refresh: refreshCategories } = useGenerationCateg
 )
 
 // Prompt-writer adapters after Base: the I2V ones scoped to `all` or to a
-// selected category, labelled with their favorite rate.
+// selected category, labelled with their scorecard favorite rate. (Training
+// creates T2I adapters only, so this list is empty today; the scorecard
+// compares T2I writers, so I2V's Base carries no baseline rate.)
 const adapterOptions = computed(() =>
   adapterMenuOptions(store.adapters, {
     kind: 'i2v',
     categoryIds: categoryIds.value,
     targetModel: null,
-    stats: taste.writerStats,
+    scorecards: training.scorecards,
   }),
 )
 useWebSocket('training', (event) => {
-  if (event === 'adapters_changed') void store.loadAdapters()
+  if (event === 'adapters_changed') {
+    writerPick.clearRefusal()
+    void store.loadAdapters()
+  }
 })
-onMounted(() => {
-  if (!taste.writerStats) taste.loadWriterStats().catch(() => {}) // labels only
+// The Writer pick (see useWriterPick): the user's choice survives a transient
+// fallback to Base and comes back when its adapter is offered again; only a
+// deleted adapter drops it. Never part of a clip's form.
+const writerPick = useWriterPick<I2vWriter>({
+  storageKey: WRITER_STORAGE_KEY,
+  builtinIds: I2V_WRITERS.map((w) => w.id),
+  adapters: () => store.adapters,
+  adaptersLoaded: () => store.adaptersLoaded,
+  options: () => adapterOptions.value,
 })
-// Session-local, never part of a clip's form: switching back to Base when the
-// selected adapter has gone touches no clip.
-// Names of every adapter the menu has seen, so the toast can still name one
-// that has just left the list.
-const knownNames = new Map<string, string>()
-watch(
-  () => store.adapters,
-  (rows) => rows.forEach((a) => knownNames.set(a.writer_id, a.name)),
-  { immediate: true },
-)
-function fallBackToBase(reason: string) {
-  const name = knownNames.get(writer.value) ?? writerName(store.adapters, writer.value)
-  writer.value = 'base'
-  storeWriter('base')
-  toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
-}
+const writer = writerPick.writer
+const setWriter = writerPick.setWriter
 // True when `e` was an adapter refusal, after dealing with it (see T2IDialog).
 function handledAdapterError(e: unknown): boolean {
   const code = adapterErrorCode(e)
@@ -287,7 +262,7 @@ function handledAdapterError(e: unknown): boolean {
   if (code === ADAPTER_UNAVAILABLE) {
     const refused = adapterErrorWriter(e) ?? writer.value
     if (refused === writer.value && isAdapterWriterId(refused)) {
-      fallBackToBase('is no longer available')
+      writerPick.refuse(refused)
     } else if (store.draft?.writer_id === refused) {
       store.setDraft(null) // the prompt goes out typed next time
     }
@@ -296,11 +271,6 @@ function handledAdapterError(e: unknown): boolean {
   }
   return false
 }
-watch([adapterOptions, () => store.adaptersLoaded], () => {
-  if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
-  const option = adapterOptions.value.find((o) => o.id === writer.value)
-  if (!option || option.disabled) fallBackToBase('is no longer offered here')
-})
 const batchProgress = ref('')
 
 // A Fixed seed would render the same video N times, so the count is ignored

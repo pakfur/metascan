@@ -3,9 +3,10 @@
 // chip). Non-modal: the run lives on the server, so closing this window (or
 // the browser) never stops it. Example text is shown ONLY in the Preview
 // panel below — never logged, never rendered anywhere else.
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch, watchEffect } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, watchEffect } from 'vue'
 import { useTrainingStore, trainingErrorText } from '../../stores/training'
 import { useCategoriesStore } from '../../stores/categories'
+import { anyViewerOpen } from '../../composables/useViewerPresence'
 import { fetchDatasetPreview } from '../../api/training'
 import {
   DEFAULT_CLAMPS,
@@ -23,6 +24,8 @@ import {
 import {
   SCORECARD_READY_PAIRS,
   SERVABLE_STATUSES,
+  favText,
+  judgedPairs,
   ratePct,
   type ScorecardResult,
   type WriterAdapter,
@@ -75,8 +78,26 @@ onBeforeUnmount(() => {
   if (pollTimer !== null) clearInterval(pollTimer)
 })
 
+// A media viewer (library, T2I, I2V, slideshow) takes the screen: the window
+// steps aside (v-show, so its state survives; the header chip still shows a
+// run) and comes back when the last viewer closes. Escape closes the window
+// only when nothing else owns the keyboard: no viewer open, and focus inside
+// the window or nowhere in particular (body). Rating keys never reach it.
+const rootEl = ref<HTMLElement | null>(null)
+const hidden = computed(() => anyViewerOpen.value)
+function focusWindow(): void {
+  void nextTick(() => rootEl.value?.focus({ preventScroll: true }))
+}
+watch(hidden, (h) => {
+  if (!h) focusWindow()
+})
+onMounted(focusWindow)
+
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape' && !renamingId.value) training.closeWindow()
+  if (e.key !== 'Escape' || renamingId.value || hidden.value) return
+  const active = document.activeElement
+  if (active && active !== document.body && !rootEl.value?.contains(active)) return
+  training.closeWindow()
 }
 window.addEventListener('keydown', onKey)
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
@@ -387,12 +408,12 @@ const scorecardByAdapter = computed(() => {
 })
 const readyPairs = computed(() => training.scorecards?.ready_pairs ?? SCORECARD_READY_PAIRS)
 
-/** The adapter's favorite rate on its blind scorecard ("31%"), or "—". */
+/** The adapter's favorite rate on its blind scorecard ("31% fav"), or "— fav". */
 function scorecardFav(a: WriterAdapter): string {
-  return ratePct(scorecardByAdapter.value.get(a.id)?.fav_rate_adapter)
+  return favText(scorecardByAdapter.value.get(a.id)?.fav_rate_adapter)
 }
 
-const baseFav = computed(() => ratePct(training.scorecards?.base.fav_rate))
+const baseFav = computed(() => favText(training.scorecards?.base.fav_rate))
 
 function scorecardTitle(a: WriterAdapter): string {
   const r = scorecardByAdapter.value.get(a.id)
@@ -411,8 +432,7 @@ function scorecardTitle(a: WriterAdapter): string {
 /** "12/30 judged" while untested (ready at `readyPairs` judged pairs). */
 function judgedText(a: WriterAdapter): string {
   if (a.status !== 'untested' || a.kind !== 't2i') return ''
-  const n = scorecardByAdapter.value.get(a.id)?.n_judged ?? 0
-  return `${Math.min(n, readyPairs.value)}/${readyPairs.value} judged`
+  return `${judgedPairs(scorecardByAdapter.value.get(a.id)?.n_judged ?? 0, readyPairs.value)} judged`
 }
 
 const scorecardRun = computed(() => training.scorecardRun)
@@ -499,7 +519,15 @@ function onRecheck() {
 
 <template>
   <Teleport to="body">
-    <div class="tw" role="dialog" aria-label="Train prompt writer" data-testid="writer-training-window">
+    <div
+      v-show="!hidden"
+      ref="rootEl"
+      class="tw"
+      role="dialog"
+      aria-label="Train prompt writer"
+      tabindex="-1"
+      data-testid="writer-training-window"
+    >
       <div class="tw-hd">
         <b>Train prompt writer</b>
         <button class="tw-close" title="Close — training continues on the server" @click="training.closeWindow()">
@@ -719,7 +747,7 @@ function onRecheck() {
                 <td>{{ BASE_LABEL }}</td>
                 <td><span class="st st-ok">ready</span></td>
                 <td class="dim">—</td>
-                <td class="dim nowrap" :title="`Base writer on every judged scorecard pair (${training.scorecards?.base.n_judged ?? 0})`">{{ baseFav }} fav</td>
+                <td class="dim nowrap" :title="`Base writer on every judged scorecard pair (${training.scorecards?.base.n_judged ?? 0})`">{{ baseFav }}</td>
                 <td></td>
               </tr>
               <tr v-for="a in adapterRows" :key="a.id" :data-testid="`adapter-row-${a.id}`">
@@ -741,7 +769,7 @@ function onRecheck() {
                 <td><span class="st" :class="STATUS_CLASS[a.status] ?? ''">{{ a.status }}</span></td>
                 <td class="dim small note" :title="a.error ?? ''">{{ adapterNote(a) }}</td>
                 <td class="dim nowrap" :title="scorecardTitle(a)" :data-testid="`adapter-fav-${a.id}`">
-                  {{ scorecardFav(a) }} fav
+                  {{ scorecardFav(a) }}
                   <div v-if="judgedText(a)" class="small">{{ judgedText(a) }}</div>
                 </td>
                 <td class="acts">
@@ -816,6 +844,9 @@ function onRecheck() {
   border-radius: 10px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   font-size: 12.5px;
+}
+.tw:focus {
+  outline: none;
 }
 .tw-hd {
   position: sticky;

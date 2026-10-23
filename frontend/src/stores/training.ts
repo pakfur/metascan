@@ -303,7 +303,8 @@ export const useTrainingStore = defineStore('training', () => {
     }, 300)
   }
 
-  // A rating burst: one results fetch per quiet half second.
+  // A rating burst: one results fetch per quiet half second. Also called by
+  // the T2I / I2V dialogs, whose Writer menus show the scorecard rates.
   let scorecardTimer: ReturnType<typeof setTimeout> | null = null
   function scheduleScorecards(): void {
     if (scorecardTimer !== null) clearTimeout(scorecardTimer)
@@ -523,6 +524,7 @@ export const useTrainingStore = defineStore('training', () => {
     loadAdapters,
     loadBriefs,
     loadScorecards,
+    scheduleScorecards,
     renderScorecard,
     cancelScorecard,
     refreshAll,

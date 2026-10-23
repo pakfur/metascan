@@ -31,6 +31,7 @@ import {
   adapterErrorCode,
   adapterErrorWriter,
   adapterMenuOptions,
+  builtinWriterLabel,
   isAdapterWriterId,
   servableAdapterIds,
   writerName,
@@ -42,10 +43,12 @@ import { listPresets } from '../../api/comfy'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
 import { useTasteStore } from '../../stores/taste'
+import { useTrainingStore } from '../../stores/training'
 import { useFormAutosave } from '../../composables/useFormAutosave'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
 import { useWebSocket } from '../../composables/useWebSocket'
+import { useWriterPick } from '../../composables/useWriterPick'
 import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import {
   buildBatchRequest,
@@ -79,6 +82,7 @@ const emit = defineEmits<{ close: [] }>()
 
 const store = useT2iStore()
 const taste = useTasteStore()
+const training = useTrainingStore()
 const foldersStore = useFoldersStore()
 const toast = useToast()
 
@@ -289,24 +293,12 @@ function writePref(key: string, value: string) {
     /* private mode: the choice lasts for this session */
   }
 }
-function storedWriter(): T2iWriter {
-  const v = readPref(WRITER_STORAGE_KEY)
-  // An adapter is kept until the adapter list says it is gone (see below).
-  return T2I_WRITERS.some((w) => w.id === v) || isAdapterWriterId(v) ? (v as T2iWriter) : 'base'
-}
 function storedVariants(): number {
   const n = Number(readPref(VARIANTS_STORAGE_KEY))
   return Number.isInteger(n) && n >= 1 && n <= MAX_VARIANTS ? n : 1
 }
-const writer = ref<T2iWriter>(storedWriter())
 const variants = ref<number>(storedVariants())
 const variantChoices = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1)
-function setWriter(v: string) {
-  const adapter = adapterOptions.value.find((o) => o.id === v)
-  if (!T2I_WRITERS.some((w) => w.id === v) && !(adapter && !adapter.disabled)) return
-  writer.value = v as T2iWriter
-  writePref(WRITER_STORAGE_KEY, v)
-}
 function setVariants(v: string) {
   const n = Number(v)
   if (!Number.isInteger(n) || n < 1 || n > MAX_VARIANTS) return
@@ -322,48 +314,51 @@ const { selected: categoryIds, refresh: refreshCategories } = useGenerationCateg
 )
 
 // Prompt-writer adapters after Base / Base + taste: the T2I ones scoped to
-// `all` or to a selected category, labelled with their favorite rate; one
-// with too few examples for the selected model is listed disabled.
+// `all` or to a selected category, labelled with their favorite rate on the
+// blind scorecard (Base with its baseline rate); one with too few examples
+// for the selected model is listed disabled.
 const adapterOptions = computed(() =>
   adapterMenuOptions(store.adapters, {
     kind: 't2i',
     categoryIds: categoryIds.value,
     targetModel: form.model || null,
-    stats: taste.writerStats,
+    scorecards: training.scorecards,
   }),
 )
+const builtinOptions = computed(() =>
+  T2I_WRITERS.map((w) => ({ id: w.id, label: builtinWriterLabel(w.id, w.label, training.scorecards) })),
+)
 useWebSocket('training', (event) => {
-  if (event === 'adapters_changed') void store.loadAdapters()
+  if (event === 'adapters_changed') {
+    writerPick.clearRefusal()
+    void store.loadAdapters()
+    training.scheduleScorecards()
+  } else if (event === 'scorecard_judged' || event === 'scorecard_complete') {
+    training.scheduleScorecards()
+  }
 })
 onMounted(() => {
-  if (!taste.writerStats) taste.loadWriterStats().catch(() => {}) // labels only
+  training.loadScorecards().catch(() => {}) // labels only
 })
 
-// The writer is session-local and never part of the form: switching it back
-// to Base when the selected adapter has gone (deleted, failed, out of the
-// selected categories, too few examples for the model) touches no image.
-// Names of every adapter the menu has seen, so the toast can still name one
-// that has just left the list.
-const knownNames = new Map<string, string>()
-watch(
-  () => store.adapters,
-  (rows) => rows.forEach((a) => knownNames.set(a.writer_id, a.name)),
-  { immediate: true },
-)
-function fallBackToBase(reason: string) {
-  const name = knownNames.get(writer.value) ?? writerName(store.adapters, writer.value)
-  writer.value = 'base'
-  writePref(WRITER_STORAGE_KEY, 'base')
-  toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
-}
-watch([adapterOptions, () => store.adaptersLoaded], () => {
-  if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
-  const option = adapterOptions.value.find((o) => o.id === writer.value)
-  if (!option || option.disabled) fallBackToBase('is no longer offered here')
+// The Writer pick (see useWriterPick): the user's choice survives a transient
+// fallback to Base and comes back when its adapter is offered again; only a
+// deleted adapter drops it. Session-local, never part of the form, so a
+// fallback touches no image.
+const writerPick = useWriterPick<T2iWriter>({
+  storageKey: WRITER_STORAGE_KEY,
+  builtinIds: T2I_WRITERS.map((w) => w.id),
+  adapters: () => store.adapters,
+  adaptersLoaded: () => store.adaptersLoaded,
+  options: () => adapterOptions.value,
 })
-// True when `e` was an adapter refusal, after dealing with it: a gone
-// adapter falls back to Base; a new one the busy writer has not loaded yet
-// keeps the choice and says to try again.
+const writer = writerPick.writer
+const setWriter = writerPick.setWriter
+
+// True when `e` was an adapter refusal, after dealing with it: a refused
+// adapter falls back to Base (the pick is kept for when it returns); a new
+// one the busy writer has not loaded yet keeps the choice and says to try
+// again.
 function handledAdapterError(e: unknown): boolean {
   const code = adapterErrorCode(e)
   if (code === ADAPTER_LOADING) {
@@ -376,10 +371,10 @@ function handledAdapterError(e: unknown): boolean {
     // its text, which the next Generate sends as typed).
     const refused = adapterErrorWriter(e) ?? writer.value
     if (refused === writer.value && isAdapterWriterId(refused)) {
-      fallBackToBase('is no longer available')
+      writerPick.refuse(refused)
     } else if (store.drafts?.entries.some((d) => d.writer_id === refused)) {
       store.discardDrafts()
-      const name = knownNames.get(refused) ?? writerName(store.adapters, refused)
+      const name = writerPick.nameOf(refused)
       toast.show(
         `The prompt's writer ${name} is no longer available; Generate again to send it as typed.`,
         'warn',
@@ -1023,7 +1018,7 @@ onBeforeUnmount(() => {
                       :disabled="randomLocked"
                       @change="setWriter(($event.target as HTMLSelectElement).value)"
                     >
-                      <option v-for="w in T2I_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+                      <option v-for="w in builtinOptions" :key="w.id" :value="w.id">{{ w.label }}</option>
                       <option
                         v-for="a in adapterOptions"
                         :key="a.id"
