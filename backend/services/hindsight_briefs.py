@@ -21,6 +21,12 @@ Rules
 * Progress on WS ``training``: ``briefs_progress {done, total}``, then one of
   ``briefs_done`` / ``briefs_cancelled`` / ``briefs_error {code}``.
 * Brief and prompt text are NEVER logged (counts only).
+
+For Task 6 (training GPU lock): ``job.blocked`` (a callable) PAUSES a running
+job between images and REFUSES new starts (409 ``gpu_busy_training``). A job
+that is "running" while blocked is merely paused, so training must not be
+refused just because ``status()["running"]`` is true: set ``blocked`` and/or
+call ``cancel()`` instead.
 """
 
 from __future__ import annotations
@@ -43,6 +49,86 @@ POLL_S = 5.0
 MAX_CONSECUTIVE_FAILURES = 5
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_ABBREVIATIONS = frozenset(
+    "mr mrs ms dr st mt jr sr vs etc prof sgt capt gen col lt no fig".split()
+)
+_PREAMBLE = re.compile(
+    r"^(here(?: is|'s| are)|sure(?=[,!.])|certainly(?=[,!.])|of course|below is|"
+    r"the request|a possible request|possible request)\b",
+    re.IGNORECASE,
+)
+_LEAD_INS = (
+    re.compile(
+        r"^(?:this|the)\s+(?:image|picture|photo|photograph|illustration|"
+        r"artwork|render)\s+(?:shows|depicts|features|portrays|displays|"
+        r"contains|captures)\s*(?:that\s+)?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:an?|the)\s+(?:image|picture|photo|photograph|illustration|"
+        r"artwork|render)\s+(?:of|showing|depicting)\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(?:request|prompt|brief|caption|description)\s*:\s*", re.IGNORECASE),
+)
+_WRAP_QUOTES = {'"': '"', "`": "`", "\u201c": "\u201d", "'": "'", "\u2018": "\u2019"}
+
+
+def _unwrap(text: str) -> str:
+    """Drop quotes wrapping the whole text (apostrophes inside words stay)."""
+    text = text.strip()
+    while len(text) >= 2 and _WRAP_QUOTES.get(text[0]) == text[-1]:
+        text = text[1:-1].strip()
+    return text.strip('"`\u201c\u201d')
+
+
+def _first_sentence(text: str) -> str:
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        before = text[start : m.start()]
+        last = before.split()[-1].rstrip(".!?").lower() if before.split() else ""
+        if text[m.start() - 1] == "." and last in _ABBREVIATIONS:
+            continue
+        return text[: m.start()].strip()
+    return text.strip()
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", text.lower()).split())
+
+
+def clean_brief(
+    text: Any, limit: int = BRIEF_MAX_CHARS, reject: Optional[str] = None
+) -> str:
+    """One sentence, whitespace-collapsed, unquoted, at most ``limit`` chars
+    (cut on a word boundary), with preamble lines and "This image shows"
+    lead-ins removed. Empty when nothing usable, or when it is ``reject``
+    (the system prompt's own example sentence echoed back)."""
+    if not isinstance(text, str):
+        return ""
+    one = ""
+    for raw in text.splitlines():
+        line = " ".join(raw.split())
+        if not line or line.endswith(":") or _PREAMBLE.match(_unwrap(line)):
+            continue
+        one = line
+        break
+    one = _unwrap(one)
+    changed = True
+    while changed:
+        changed = False
+        for pat in _LEAD_INS:
+            new = pat.sub("", one, count=1)
+            if new != one:
+                one, changed = _unwrap(new), True
+    one = _unwrap(_first_sentence(one)).rstrip(".!? ")
+    if len(one) > limit:
+        cut = one[:limit]
+        space = cut.rfind(" ")
+        one = (cut[:space] if space > limit // 2 else cut).rstrip(" ,;:-")
+    if reject and _norm(one) == _norm(reject):
+        return ""
+    return one
 
 
 class BriefsJobError(Exception):
@@ -52,24 +138,6 @@ class BriefsJobError(Exception):
         super().__init__(code)
         self.code = code
         self.status = status
-
-
-def clean_brief(text: Any, limit: int = BRIEF_MAX_CHARS) -> str:
-    """One sentence, whitespace-collapsed, unquoted, at most ``limit`` chars
-    (cut on a word boundary). Empty when nothing usable."""
-    if not isinstance(text, str):
-        return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return ""
-    one = " ".join(lines[0].split())
-    one = _SENTENCE_END.split(one, maxsplit=1)[0].strip()
-    one = one.strip("\"'`“”‘’ ").strip()
-    if len(one) > limit:
-        cut = one[:limit]
-        space = cut.rfind(" ")
-        one = (cut[:space] if space > limit // 2 else cut).rstrip(" ,;:-")
-    return one
 
 
 class HindsightBriefsJob:
@@ -143,15 +211,22 @@ class HindsightBriefsJob:
             await asyncio.shield(task)
 
     async def aclose(self) -> None:
-        """Shutdown hook: stop the job and wait for it."""
+        """Shutdown hook: stop the job and wait for it. Only the job
+        task's own cancellation is absorbed; if the caller is cancelled
+        meanwhile that propagates."""
         self._cancelled = True
         task = self._task
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception:
+            pass
 
     # -- internals --
 
@@ -202,14 +277,14 @@ class HindsightBriefsJob:
             with background_vlm_work():
                 result = await self._run()
         except asyncio.CancelledError:
-            result = "cancelled"
+            self._state["result"] = "cancelled"
+            self._state["running"] = False
             raise
         except Exception:
             logger.exception("hindsight briefs job crashed")
             result = "error"
             self._emit("briefs_error", {"code": "internal_error"})
-        finally:
-            self._state["running"] = False
+        self._state["running"] = False
         self._state["result"] = result
 
     def _finish(self, result: str, code: Optional[str] = None) -> str:
@@ -254,6 +329,8 @@ class HindsightBriefsJob:
         if not isinstance(model_id, str) or not model_id:
             return self._finish("error", "vlm_unavailable")
         system_prompt = self._get_store().get(PROMPT_KEY)
+        quoted = re.search(r'"([^"]+)"', system_prompt)
+        example = quoted.group(1) if quoted else None
 
         stops: Optional[int] = None
         failures = 0
@@ -289,7 +366,7 @@ class HindsightBriefsJob:
                         temperature=0.3,
                         max_tokens=100,
                     )
-                    brief = clean_brief(text)
+                    brief = clean_brief(text, reject=example)
             except Exception as exc:
                 if self._cancelled:
                     return self._finish("cancelled")
@@ -339,6 +416,11 @@ def get_briefs_job() -> HindsightBriefsJob:
             broadcast=ws_manager.broadcast_sync,
             generation_busy=similarity.generation_in_flight,
         )
+    return _job
+
+
+def peek_briefs_job() -> Optional[HindsightBriefsJob]:
+    """The job if one was ever created (shutdown must not build one)."""
     return _job
 
 
