@@ -361,10 +361,15 @@ class T2iRunner:
         unload_vlm_during_generation: bool = True,
         vlm_installed: Optional[Callable[[str], bool]] = None,
         directions: Optional[SnippetCache] = None,
+        get_all_vlms: Optional[Callable[[], List[Any]]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
+        # The prompt-writer client; ``get_all_vlms`` lists every distinct
+        # VLM client (writer and general roles) -- unloading for ComfyUI
+        # frees them all. Without it only the writer is unloaded.
         self.get_vlm = get_vlm
+        self.get_all_vlms = get_all_vlms
         # Says whether a model's files are on disk (None: trust the picker).
         # A model that is not installed is "no VLM" -- the resolved caption
         # is the prompt -- not a failure to retry.
@@ -431,7 +436,7 @@ class T2iRunner:
         """The model to ask, or None when there is none: the picker found no
         loadable model, or the one it found is not installed."""
         try:
-            model_id = pick_vlm_model(vlm)
+            model_id = pick_vlm_model(vlm, role="writer")
         except VlmSelectError:
             return None
         check = self.vlm_installed
@@ -991,20 +996,29 @@ class T2iRunner:
             batch.prompting = False
 
     async def _unload_vlm(self, batch: _Batch) -> None:
-        """Free the GPU for ComfyUI: shut the VLM down if a model is loaded
-        -- unless another Random batch is still writing prompts with it.
-        Only called when unloading is on. Failing to unload never stops the
-        run."""
-        vlm = self.get_vlm()
-        if vlm is None or not vlm.model_id:
-            return
-        for other in self._batches.values():
-            if other is not batch and other.mode == "random" and other.prompting:
-                return
-        try:
-            await vlm.shutdown()
-        except Exception as exc:
-            logger.warning("could not unload the VLM before rendering: %s", exc)
+        """Free the GPU for ComfyUI: shut down each distinct VLM client
+        that has a model loaded, once -- except the prompt writer while
+        another Random batch is still writing prompts with it. Only called
+        when unloading is on. Failing to unload never stops the run."""
+        writer = self.get_vlm()
+        clients: List[Any] = (
+            list(self.get_all_vlms()) if self.get_all_vlms is not None else []
+        )
+        if writer is not None and not any(c is writer for c in clients):
+            clients.insert(0, writer)
+        writer_busy = any(
+            other is not batch and other.mode == "random" and other.prompting
+            for other in self._batches.values()
+        )
+        for vlm in clients:
+            if vlm is None or not vlm.model_id:
+                continue
+            if vlm is writer and writer_busy:
+                continue
+            try:
+                await vlm.shutdown()
+            except Exception as exc:
+                logger.warning("could not unload the VLM before rendering: %s", exc)
 
     def _negative_for(self, batch: _Batch, step: _Step) -> Optional[str]:
         """The negative to send: only a workflow that binds MS_NEGATIVE can

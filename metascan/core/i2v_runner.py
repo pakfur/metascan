@@ -96,7 +96,7 @@ class I2vRunner:
     ) -> None:
         self.db = db
         self.comfy = comfy
-        self.get_vlm = get_vlm
+        self.get_vlm = get_vlm  # the prompt-writer client
         self.output_root = Path(output_root)
         self._on_event: List[EventCb] = []
         self._ingest_tasks: Set["asyncio.Task[None]"] = set()
@@ -150,7 +150,7 @@ class I2vRunner:
             raise I2vRequestError(f"Not an image: {source_path}")
         if not path.exists():
             raise I2vRequestError(f"File not found: {source_path}")
-        model_id = pick_vlm_model(vlm)
+        model_id = pick_vlm_model(vlm, role="writer")
         await vlm.ensure_started(model_id)
 
         if template is None:

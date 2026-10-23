@@ -1,8 +1,11 @@
-"""REST endpoints for Qwen3-VL tagging.
+"""REST endpoints for Qwen3-VL tagging and the VLM model roles.
 
-The VlmClient singleton is installed by the FastAPI lifespan via
-``set_vlm_client(...)``. Endpoints fail fast with 503 if it's missing
-(misconfigured deployment).
+The lifespan installs a ``VlmRoles`` via ``set_vlm_roles(...)``: the
+``writer`` role (T2I / I2V prompt writing) and the ``general`` role
+(tagging, retag, chat, prompt playground, storyboard), sharing one client
+when both name the same model. ``set_vlm_client(...)`` installs a single
+client for both roles (tests). Endpoints fail fast with 503 if neither is
+installed (misconfigured deployment).
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
+from backend.services.vlm_roles import Role, VlmRoles, WriterModelNotAllowed
+from metascan.core.vlm_select import vlm_model_installed
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +30,50 @@ router = APIRouter(prefix="/api/vlm", tags=["vlm"])
 
 
 _vlm_client: Optional[Any] = None
+_vlm_roles: Optional[VlmRoles] = None
 
 
 def set_vlm_client(client: Any) -> None:
-    """Install the VlmClient singleton. Called from the FastAPI lifespan.
+    """Install one client that serves both roles (clears any roles).
 
     Pass ``None`` to clear (used by tests)."""
-    global _vlm_client
+    global _vlm_client, _vlm_roles
     _vlm_client = client
+    _vlm_roles = None
 
 
-def get_vlm_client() -> Any:
+def set_vlm_roles(roles: Optional[VlmRoles]) -> None:
+    """Install the role map. Called from the FastAPI lifespan."""
+    global _vlm_client, _vlm_roles
+    _vlm_roles = roles
+    _vlm_client = None
+
+
+def get_vlm_roles() -> Optional[VlmRoles]:
+    return _vlm_roles
+
+
+def get_vlm_client(role: Role = "general") -> Any:
+    """The client serving ``role`` (default: general), or None."""
+    if _vlm_roles is not None:
+        return _vlm_roles.client(role)
     return _vlm_client
+
+
+def get_writer_vlm() -> Any:
+    """The prompt-writer client (T2I / I2V)."""
+    return get_vlm_client("writer")
+
+
+def get_all_vlm_clients() -> List[Any]:
+    """Every distinct client once -- what unloading for ComfyUI shuts down."""
+    if _vlm_roles is not None:
+        return _vlm_roles.distinct_clients()
+    return [_vlm_client] if _vlm_client is not None else []
+
+
+def _error(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
 class TagRequest(BaseModel):
@@ -45,8 +82,8 @@ class TagRequest(BaseModel):
 
 @router.get("/status")
 async def status() -> Dict[str, Any]:
-    """Return the current VlmClient state snapshot."""
-    client = _vlm_client
+    """Return the general role's VlmClient state snapshot."""
+    client = get_vlm_client()
     if client is None:
         return {
             "state": "idle",
@@ -65,7 +102,7 @@ async def tag_one(body: TagRequest) -> Dict[str, List[str]]:
     Raises 503 if the VlmClient is not initialized, 404 if the file does
     not exist on disk.
     """
-    client = _vlm_client
+    client = get_vlm_client()
     if client is None:
         raise HTTPException(status_code=503, detail="vlm client not initialized")
 
@@ -73,7 +110,10 @@ async def tag_one(body: TagRequest) -> Dict[str, List[str]]:
     if not p.is_file():
         raise HTTPException(status_code=404, detail=f"file not found: {body.path}")
 
-    if client.model_id is None:
+    preferred = getattr(client, "preferred_model_id", None)
+    if client.model_id is None and isinstance(preferred, str) and preferred:
+        await client.ensure_started(preferred)
+    elif client.model_id is None:
         from metascan.core.hardware import detect_hardware, feature_gates
         from metascan.core.vlm_models import REGISTRY
 
@@ -132,7 +172,7 @@ async def _run_retag_job(job: "_RetagJob") -> None:
     from metascan.core.vlm_models import REGISTRY
     from backend.services.scan_dispatch import preferred_vlm_model_id
 
-    client = _vlm_client
+    client = get_vlm_client()
     db = get_db()
     if client is None:
         return
@@ -151,8 +191,12 @@ async def _run_retag_job(job: "_RetagJob") -> None:
     job.paths = filtered
     job.total = len(filtered)
 
+    preferred = getattr(client, "preferred_model_id", None)
     model_id = (
-        client.model_id or preferred_vlm_model_id(detect_hardware()) or "qwen3vl-4b"
+        client.model_id
+        or (preferred if isinstance(preferred, str) else None)
+        or preferred_vlm_model_id(detect_hardware())
+        or "qwen3vl-4b"
     )
     # ensure_started once up front; the per-request path no longer needs to
     # re-acquire the start lock for every image.
@@ -285,7 +329,7 @@ def _format_eta(seconds: float) -> str:
 
 @router.post("/retag", status_code=202)
 async def retag(body: RetagRequest) -> Dict[str, Any]:
-    if _vlm_client is None:
+    if get_vlm_client() is None:
         raise HTTPException(status_code=503, detail="vlm client not initialized")
     if body.scope == "paths":
         if not body.paths:
@@ -316,21 +360,95 @@ async def cancel_retag(job_id: str) -> Dict[str, str]:
 
 class ActiveBody(BaseModel):
     model_id: str
+    role: Role = "general"
+
+
+def _cancel_retag_jobs() -> None:
+    for job in _jobs.values():
+        job.cancelled = True
+
+
+async def _point_role(roles: VlmRoles, role: Role, model_id: str) -> None:
+    """Re-point ``role``; retag jobs run on the general client, so stop
+    them when that client changes."""
+    general_before = roles.client("general")
+    await roles.set_model(role, model_id)
+    if roles.client("general") is not general_before:
+        _cancel_retag_jobs()
 
 
 @router.post("/active")
 async def set_active(body: ActiveBody) -> Dict[str, Any]:
-    from metascan.core.vlm_models import REGISTRY
+    """Load ``model_id`` for ``role`` (default general, the pre-roles
+    meaning) and make it that role's model."""
+    from metascan.core.vlm_models import REGISTRY, writer_allowed
 
-    client = _vlm_client
-    if client is None:
+    if get_vlm_client(body.role) is None:
         raise HTTPException(status_code=503, detail="vlm client not initialized")
     if body.model_id not in REGISTRY:
         raise HTTPException(status_code=400, detail=f"unknown model: {body.model_id}")
-    for job in _jobs.values():
-        job.cancelled = True
+    if body.role == "writer" and not writer_allowed(body.model_id):
+        raise _error(
+            422,
+            "writer_model_not_allowed",
+            f"{body.model_id} cannot be the prompt writer",
+        )
+    roles = _vlm_roles
+    if roles is not None:
+        await _point_role(roles, body.role, body.model_id)
+    if body.role == "general":
+        _cancel_retag_jobs()
+    client = get_vlm_client(body.role)
     await client.swap_model(body.model_id)
-    return client.snapshot()
+    return dict(client.snapshot())
+
+
+class RoleBody(BaseModel):
+    role: Role
+    model_id: str
+
+
+def _require_roles() -> VlmRoles:
+    if _vlm_roles is None:
+        raise HTTPException(status_code=503, detail="vlm roles not initialized")
+    return _vlm_roles
+
+
+@router.get("/roles")
+async def get_roles() -> Dict[str, Any]:
+    """Which model each role uses and its client's state."""
+    return _require_roles().snapshot()
+
+
+@router.post("/roles")
+async def set_role(body: RoleBody) -> Dict[str, Any]:
+    """Point a role at a model and persist it. Does not load the model:
+    the next request in that role starts it."""
+    from metascan.core.vlm_models import REGISTRY
+
+    roles = _require_roles()
+    if body.model_id not in REGISTRY:
+        raise _error(404, "unknown_model", f"unknown model: {body.model_id}")
+    if body.role == "writer":
+        from metascan.core.vlm_models import writer_allowed
+
+        if not writer_allowed(body.model_id):
+            raise _error(
+                422,
+                "writer_model_not_allowed",
+                f"{body.model_id} cannot be the prompt writer",
+            )
+    if not await asyncio.to_thread(vlm_model_installed, body.model_id):
+        raise _error(409, "model_not_installed", f"{body.model_id} is not installed")
+    try:
+        await _point_role(roles, body.role, body.model_id)
+    except WriterModelNotAllowed:  # pragma: no cover - checked above
+        raise _error(
+            422,
+            "writer_model_not_allowed",
+            f"{body.model_id} cannot be the prompt writer",
+        )
+    return roles.snapshot()
 
 
 @router.post("/unload")
@@ -342,15 +460,20 @@ async def unload(body: ActiveBody) -> Dict[str, Any]:
     tab swapped models in between). If ``model_id`` doesn't match the
     currently-loaded model, the request is a no-op.
     """
-    client = _vlm_client
-    if client is None:
+    general = get_vlm_client()
+    if general is None:
         raise HTTPException(status_code=503, detail="vlm client not initialized")
-    if client.model_id != body.model_id:
-        return client.snapshot()
-    for job in _jobs.values():
-        job.cancelled = True
+    # Whichever role's client holds the model: the general one first.
+    client = next(
+        (c for c in [general, *get_all_vlm_clients()] if c.model_id == body.model_id),
+        None,
+    )
+    if client is None:
+        return dict(general.snapshot())
+    if client is general:
+        _cancel_retag_jobs()
     await client.shutdown()
-    return client.snapshot()
+    return dict(client.snapshot())
 
 
 def _list_paths_for_retag(db: Any, *, force: bool) -> List[str]:

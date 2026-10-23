@@ -33,6 +33,22 @@ the root CLAUDE.md still applies.
   `qwen38-27b` (Qwen3.8 27B Abliterated, dense hybrid Gated DeltaNet) —
   and `qwen38-27b` is the `cuda_workstation` ≥22 GB VRAM recommendation
   (`qwen3vl-8b` remains the pick below that floor).
+- **Two VLM roles: `writer` and `general`.** `backend/services/vlm_roles.py`
+  `VlmRoles` maps the `writer` role (T2I / I2V prompt writing — runners get
+  `get_writer_vlm`) and the `general` role (tagging, retag, chat, prompt
+  playground, storyboard — `get_vlm_client()` with no argument) to clients.
+  Config `models.writer_vlm` / `models.general_vlm`; unset writer defaults to
+  `WRITER_DEFAULT_MODEL` (`qwen3vl-8b`) when installed, else the general
+  model; unset general is the first VLM in `preload_at_startup`, else
+  today's hardware pick. Equal ids share ONE
+  client (one llama-server); `set_model` rebuilds and shuts down a client
+  no role uses. A spec with `writer_allowed=False` (`qwen38-27b`) is never
+  the writer (422 `writer_model_not_allowed`). Unloading for ComfyUI shuts
+  down every distinct client once (`get_all_vlm_clients`), sparing only
+  the writer while another T2I Random batch is still prompting.
+  `pick_vlm_model` prefers the loaded model, then the client's
+  `preferred_model_id` (stamped by `VlmRoles`). `POST /api/vlm/active`
+  without `role` still targets general (and now persists it).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
