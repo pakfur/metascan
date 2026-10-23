@@ -11,6 +11,7 @@ import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
 import { useTrainingStore, trainingErrorText } from '../../stores/training'
 import { useCategoriesStore } from '../../stores/categories'
 import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
+import { ratePct } from '../../types/writers'
 
 const taste = useTasteStore()
 const tasteStatus = computed(() => taste.status)
@@ -152,6 +153,12 @@ const diversityAsOf = computed(() => {
   const d = new Date(raw)
   return Number.isNaN(d.getTime()) ? raw : d.toLocaleDateString()
 })
+
+// Scorecard rows: each adapter vs the base writer on its blind scorecard.
+const scorecardRows = computed(() => writerStats.value?.scorecards ?? [])
+function scoreText(v: number | null): string {
+  return v === null ? '—' : v.toFixed(2)
+}
 
 function rateText(cell: WriterWindowStat | undefined): string {
   if (!cell || cell.rate === null) return '—'
@@ -924,6 +931,36 @@ async function onRetagLibrary() {
         </div>
         <div v-else class="taste-hint">
           Favorite diversity appears after the next taste training run.
+        </div>
+        <div v-if="scorecardRows.length" class="writers-scroll" data-testid="writer-scorecards">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Scorecard (blind, same seeds)</th>
+                <th title="Favorite rate of the base writer's images over judged pairs">Base fav</th>
+                <th title="Favorite rate of the adapter's images over judged pairs">Adapter fav</th>
+                <th title="Mean taste score: base vs adapter">Mean score</th>
+                <th title="Pairs whose two images are both judged (favorite, pass or seen)">Judged</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in scorecardRows" :key="r.adapter_id">
+                <th class="writer-col" scope="row">
+                  {{ r.name ?? `adapter:${r.adapter_id}` }}
+                  <span v-if="r.status" class="writer-tag">{{ r.status }}</span>
+                </th>
+                <td><span class="rate">{{ ratePct(r.fav_rate_base) }}</span></td>
+                <td><span class="rate">{{ ratePct(r.fav_rate_adapter) }}</span></td>
+                <td>
+                  <span class="rate">{{ scoreText(r.mean_score_base) }} / {{ scoreText(r.mean_score_adapter) }}</span>
+                </td>
+                <td>
+                  <span class="rate">{{ r.n_judged }}</span>
+                  <span class="n-seen">of {{ r.n_pairs }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </template>
     </section>

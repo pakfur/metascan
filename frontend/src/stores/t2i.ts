@@ -757,6 +757,19 @@ export const useT2iStore = defineStore('t2i', () => {
    * viewer's F / X / ☆), so the strip's tile star matches. The library copy
    * is already handled by the viewer itself.
    */
+  /**
+   * Follow every judgment the result viewer gets back: the favorite AND the
+   * pass flag, so a scorecard tile leaves "judge to reveal" on either verdict.
+   */
+  function applyJudgment(path: string, state: { is_favorite: boolean; verdict: string | null }): void {
+    for (const image of images.value) {
+      if (!samePath(image.file_path, path)) continue
+      if (image.is_favorite !== state.is_favorite) image.is_favorite = state.is_favorite
+      const passed = state.verdict === 'pass'
+      if (image.passed !== passed) image.passed = passed
+    }
+  }
+
   function applyFavoriteFlag(path: string, favorite: boolean): void {
     for (const image of images.value) {
       if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
@@ -783,6 +796,7 @@ export const useT2iStore = defineStore('t2i', () => {
         scoreShown === undefined ? {} : { scoreShown },
       )
       image.is_favorite = state.is_favorite
+      image.passed = state.verdict === 'pass'
       mirrorFavoriteToLibrary(image.file_path, state.is_favorite)
     } catch (e) {
       image.is_favorite = !next
@@ -937,6 +951,7 @@ export const useT2iStore = defineStore('t2i', () => {
     saveFormState,
     toggleFavorite,
     applyFavoriteFlag,
+    applyJudgment,
     deleteImage,
     // draft
     loadDraft,

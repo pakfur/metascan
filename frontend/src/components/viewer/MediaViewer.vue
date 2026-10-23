@@ -50,8 +50,11 @@ const props = withDefaults(
     allowDestructive?: boolean
     allowRating?: boolean
     favoriteMirror?: (filePath: string, isFavorite: boolean) => void
+    // Every judgment state the server returns (a T2I mount follows the
+    // pass flag too: it un-blinds scorecard tiles).
+    judgmentMirror?: (filePath: string, state: JudgmentState) => void
   }>(),
-  { allowDestructive: true, allowRating: false, favoriteMirror: undefined },
+  { allowDestructive: true, allowRating: false, favoriteMirror: undefined, judgmentMirror: undefined },
 )
 
 const ratingEnabled = computed(() => props.allowRating || props.allowDestructive)
@@ -157,16 +160,39 @@ function receive(path: string, incoming: JudgmentState): void {
   // Only GET carries `batch`; a PATCH / seen response omits the key, so
   // keep the position already known instead of wiping it.
   const prev = lastKnown.get(path)
-  const state =
+  let state =
     incoming.batch === undefined && prev?.batch !== undefined
       ? { ...incoming, batch: prev.batch }
       : incoming
+  // `scorecard` too is GET-only.
+  if (state.scorecard === undefined && prev?.scorecard !== undefined) {
+    state = { ...state, scorecard: prev.scorecard }
+  }
   lastKnown.set(path, state)
+  refreshBlindDetails(path, state)
   // The server's flag is the truth whether or not this item is still on
   // screen, so the grid star follows even for a stale response.
   mediaStore.applyFavoriteFlag(path, state.is_favorite)
   props.favoriteMirror?.(path, state.is_favorite)
+  props.judgmentMirror?.(path, state)
   if (!unmounted && path === currentPath.value) judgment.value = state
+}
+
+// A scorecard image is judged blind: no writer, prompt or variant until it
+// has an explicit verdict (favorite or pass).
+function isBlind(state: JudgmentState | null): boolean {
+  return !!state?.scorecard && state.verdict === null && !state.is_favorite
+}
+const scorecardBlind = computed(() => isBlind(judgment.value))
+
+// The library details panel fetched the blind record: once the verdict
+// lifts the blind, fetch it again so the prompt shows.
+function refreshBlindDetails(path: string, state: JudgmentState): void {
+  if (!props.allowDestructive || unmounted) return
+  const selected = mediaStore.selectedMedia
+  if (!selected?.scorecard_blind || selected.file_path !== path || isBlind(state)) return
+  const media = current.value
+  if (media && media.file_path === path) void mediaStore.selectMedia(media)
 }
 
 function showHint(path: string, message: string): void {
@@ -618,6 +644,9 @@ function formatSize(bytes: number): string {
             {{ starOn ? '★' : '☆' }}
           </button>
           <span class="position-label">{{ positionLabel }}</span>
+          <span v-if="scorecardBlind" class="blind-chip" data-testid="scorecard-blind">
+            Scorecard image — judge to reveal (F or X)
+          </span>
           <span v-if="undoData" class="undo-link" @click="undoData = null">
             File deleted.
           </span>
@@ -779,6 +808,14 @@ function formatSize(bytes: number): string {
 
 .fav-btn.active {
   color: #fbbf24;
+}
+
+.blind-chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(201, 162, 39, 0.85);
+  color: #111;
+  font-size: 12px;
 }
 
 .position-label {

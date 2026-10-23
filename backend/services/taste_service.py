@@ -251,6 +251,16 @@ class TasteService:
             self.db.writer_window_stats, WRITER_WINDOW_DAYS, WRITER_WINDOWS, now
         )
         diversity = await asyncio.to_thread(self.db.latest_taste_diversity)
+        from backend.services.scorecard import scorecard_summary
+
+        try:
+            summary = await asyncio.to_thread(
+                scorecard_summary, self.db, with_empty=False
+            )
+            scorecards = summary["adapters"]
+        except Exception:
+            logger.exception("Scorecard rows for the writer stats failed")
+            scorecards = []
         return {
             "window_days": WRITER_WINDOW_DAYS,
             "window_starts": window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS),
@@ -259,6 +269,9 @@ class TasteService:
             "collapse_warning": collapse_warning(
                 diversity, windows, WRITER_WINDOW_DAYS
             ),
+            # Per adapter with a scorecard pair: base vs adapter favorite
+            # rate over judged pairs, mean taste score, n_judged.
+            "scorecards": scorecards,
         }
 
     # ------------------------------------------------------------------

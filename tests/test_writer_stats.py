@@ -300,6 +300,7 @@ def test_writer_stats_route(client, db):
         "windows",
         "diversity",
         "collapse_warning",
+        "scorecards",
     }
     assert body["window_days"] == 14
     assert body["window_starts"] == STARTS
@@ -311,6 +312,7 @@ def test_writer_stats_route(client, db):
     }
     # Diversity collapsed, but there is no earlier rate to compare with.
     assert body["collapse_warning"] is False
+    assert body["scorecards"] == []
 
 
 def test_latest_diversity_is_the_newest_run(db):

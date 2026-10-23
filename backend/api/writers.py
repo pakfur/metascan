@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
+from backend.services.gpu_lock import GPU_FREE
 from backend.ws.manager import ws_manager
 from metascan.core.writer_adapters import (
     STATUS_TRAINING,
@@ -292,4 +293,95 @@ async def dataset_preview(scope: str = "all") -> Dict[str, Any]:
     hindsight (``examples[].kind``), for the owner's training window only
     (never logged)."""
     result: Dict[str, Any] = await _training_call(_manager().dataset_preview(scope))
+    return result
+
+
+# ---- scorecard (base vs adapter, judged blind) ---------------------------------
+
+
+class ScorecardRequest(BaseModel):
+    # A T2I model profile id (default krea2) and its workflow preset (default:
+    # the config's t2i.model_workflows entry for it).
+    target_model: Optional[str] = None
+    preset_id: Optional[int] = None
+    # True: a new scorecard even when the latest one still lacks pairs.
+    fresh: bool = False
+
+
+def _training_broadcast(event: str, data: Dict[str, Any]) -> None:
+    ws_manager.broadcast_sync("training", event, data)
+
+
+def _scorecard_service() -> Any:
+    from backend.services.scorecard import get_scorecard_service
+
+    service = get_scorecard_service()
+    if service is None:
+        raise HTTPException(status_code=503, detail={"code": "scorecard_unavailable"})
+    return service
+
+
+@router.post("/adapters/{adapter_id}/scorecard", status_code=202, dependencies=GPU_FREE)
+async def render_scorecard(
+    adapter_id: int, body: Optional[ScorecardRequest] = None
+) -> Dict[str, Any]:
+    """Render (or resume) the adapter's scorecard in the background: every
+    brief with the base writer and with the adapter, same seed. 202;
+    progress arrives on WS ``training`` (``scorecard_*``)."""
+    from backend.services.scorecard import ScorecardError
+
+    req = body or ScorecardRequest()
+    try:
+        result: Dict[str, Any] = await _scorecard_service().start(
+            adapter_id,
+            target_model=req.target_model,
+            preset_id=req.preset_id,
+            fresh=req.fresh,
+        )
+    except ScorecardError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    return result
+
+
+@router.post("/scorecard/cancel")
+async def cancel_scorecard() -> Dict[str, str]:
+    cancelled = await _scorecard_service().cancel()
+    return {"status": "cancelling" if cancelled else "idle"}
+
+
+@router.get("/adapters/{adapter_id}/scorecard")
+async def adapter_scorecard_results(adapter_id: int) -> Dict[str, Any]:
+    """``{adapter_id, n_pairs, n_judged, fav_rate_base, fav_rate_adapter,
+    mean_score_base, mean_score_adapter, ready_pairs, latest, running}``.
+    Also promotes an untested adapter whose judged pairs suffice."""
+    from backend.services.scorecard import adapter_scorecard, evaluate_adapter
+
+    await asyncio.to_thread(_live, adapter_id)
+    await evaluate_adapter(get_db(), adapter_id, _training_broadcast)
+    result: Dict[str, Any] = await asyncio.to_thread(
+        adapter_scorecard, get_db(), adapter_id
+    )
+    return result
+
+
+@router.get("/scorecards")
+async def scorecards() -> Dict[str, Any]:
+    """Every T2I adapter's scorecard result, the base writer's pooled rate,
+    the brief count and the running scorecard (the training window)."""
+    from backend.services.scorecard import (
+        READY_PAIRS,
+        evaluate_adapter,
+        scorecard_summary,
+    )
+
+    result: Dict[str, Any] = await asyncio.to_thread(scorecard_summary, get_db())
+    due = [
+        r["adapter_id"]
+        for r in result["adapters"]
+        if r.get("status") == "untested" and r["n_judged"] >= READY_PAIRS
+    ]
+    for adapter_id in due:
+        await evaluate_adapter(get_db(), adapter_id, _training_broadcast)
+    if due:
+        result = await asyncio.to_thread(scorecard_summary, get_db())
     return result

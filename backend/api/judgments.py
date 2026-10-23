@@ -34,6 +34,17 @@ def _not_found() -> HTTPException:
     return HTTPException(status_code=404, detail="Media not found")
 
 
+async def _scorecard_check(file_path: str) -> None:
+    """A judgment of a scorecard image may make its adapter ready."""
+    from backend.services.scorecard import note_scorecard_judgment
+
+    await note_scorecard_judgment(
+        get_db(),
+        file_path,
+        lambda event, data: ws_manager.broadcast_sync("training", event, data),
+    )
+
+
 @router.post("/judgments/seen")
 async def mark_seen(
     body: SeenRequest, service: JudgmentsService = Depends(_get_service)
@@ -41,6 +52,7 @@ async def mark_seen(
     state = await service.mark_seen(body.file_path, body.score_shown)
     if state is None:
         raise _not_found()
+    await _scorecard_check(body.file_path)
     return state.to_dict()
 
 
@@ -53,6 +65,9 @@ async def get_judgment(
         raise _not_found()
     out = state.to_dict()
     out["batch"] = await service.batch_position(file_path)
+    # A scorecard image: the viewer hides it as "judge to reveal" while
+    # ``blind`` (no favorite / pass yet). None for any other item.
+    out["scorecard"] = await service.scorecard(file_path)
     return out
 
 
@@ -103,4 +118,6 @@ async def patch_judgment(
         raise HTTPException(status_code=status[code], detail={"code": code})
     if state is None:
         raise _not_found()
+    if has_verdict:
+        await _scorecard_check(file_path)
     return state.to_dict()
