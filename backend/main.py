@@ -461,7 +461,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             from backend.services import hindsight_briefs
 
-            job = hindsight_briefs._job
+            job = hindsight_briefs.peek_briefs_job()
             if job is not None:
                 await job.aclose()
         except Exception:

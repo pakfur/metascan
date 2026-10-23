@@ -76,6 +76,7 @@ class FakeClient:
         self.replies = replies or (lambda i, path: f"a scene number {i}.")
         self.background_seen: List[bool] = []
         self.on_call = None
+        self.delay = 0.0
 
     async def ensure_started(self, model_id, *, unless_stopped_since=None):
         if (
@@ -86,6 +87,8 @@ class FakeClient:
         self.started.append(model_id)
 
     async def generate_text(self, **kw):
+        if self.delay:
+            await asyncio.sleep(self.delay)
         self.background_seen.append(is_background_vlm_work())
         self.calls.append(kw)
         if self.on_call:
@@ -114,7 +117,7 @@ async def _run(job):
 
 def test_clean_brief():
     assert (
-        clean_brief('  "A fox in snow. It is cute."\n second line') == "A fox in snow."
+        clean_brief('  "A fox in snow. It is cute."\n second line') == "A fox in snow"
     )
     assert clean_brief("") == ""
     assert clean_brief(None) == ""
@@ -228,28 +231,38 @@ def test_no_vlm_call_while_blocked_and_start_refused(db, store, tmp_path):
     client, events = FakeClient(), []
     gate = {"blocked": True}
     job = _job(db, store, client, events, blocked=lambda: gate["blocked"])
-    with pytest.raises(Exception) as ei:
-        asyncio.run(_run(job))
-    assert ei.value.code == "gpu_busy_training"
 
-    # Blocked after the start: the job pauses, then continues.
+    async def refused():
+        with pytest.raises(Exception) as ei:
+            job.start()
+        return ei.value.code
+
+    assert asyncio.run(refused()) == "gpu_busy_training"
+    assert client.calls == []
+
     gate["blocked"] = False
-    for n in "bc":
+    for n in "bcde":
         _fav(db, tmp_path, f"{n}.png")
+    client.replies = lambda i, p: "a scene."
+    client.delay = 0.03
 
     async def go():
         job.start()
-        await asyncio.sleep(0.05)
-        calls_before = len(client.calls)
+        while len(client.calls) < 1:
+            await asyncio.sleep(0.005)
         gate["blocked"] = True
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)  # let any in-flight image finish
         frozen = len(client.calls)
+        await asyncio.sleep(0.15)
+        assert len(client.calls) == frozen  # paused: no call while blocked
+        assert frozen < 5 and job.status()["running"]
         gate["blocked"] = False
         await job.wait()
-        return calls_before, frozen
+        return frozen
 
-    asyncio.run(go())
-    assert len(db.get_hindsight_briefs()) == 3
+    frozen = asyncio.run(go())
+    assert len(client.calls) == 5 > frozen  # resumed after it cleared
+    assert len(db.get_hindsight_briefs()) == 5
 
 
 def test_explicit_unload_mid_run_ends_job_without_restart(db, store, tmp_path):
@@ -403,3 +416,80 @@ def test_route_refuses_while_blocked(api):
     resp = c.post("/api/writers/briefs/run")
     assert resp.status_code == 409
     assert resp.json()["detail"]["code"] == "gpu_busy_training"
+
+
+# ---- clean_brief hardening ---------------------------------------------------
+
+
+def test_clean_brief_skips_preamble_lines():
+    assert clean_brief("Here is the request:\na fox in the snow") == "a fox in the snow"
+    assert clean_brief("Sure! Here's one.\nA cat on a sofa.") == "A cat on a sofa"
+    assert clean_brief("Here is the request:") == ""
+
+
+@pytest.mark.parametrize(
+    "raw,want",
+    [
+        ("This image shows a fox in the snow.", "a fox in the snow"),
+        ("The image depicts a red barn at dawn", "a red barn at dawn"),
+        ("An image of a lighthouse.", "a lighthouse"),
+        ("A photo of two dogs on a beach.", "two dogs on a beach"),
+        ("Request: a girl reading in a cafe", "a girl reading in a cafe"),
+        ("THIS IMAGE SHOWS a boat", "a boat"),
+    ],
+)
+def test_clean_brief_strips_lead_ins(raw, want):
+    assert clean_brief(raw) == want
+
+
+def test_clean_brief_keeps_abbreviations_and_apostrophes():
+    assert (
+        clean_brief("Dr. Smith walking down St. Mark's Street. Nice.")
+        == "Dr. Smith walking down St. Mark's Street"
+    )
+    assert clean_brief("the dogs' toys and a don't-walk sign") == (
+        "the dogs' toys and a don't-walk sign"
+    )
+    assert clean_brief("'a quoted brief.'") == "a quoted brief"
+
+
+def test_clean_brief_rejects_the_prompt_example():
+    ex = "a fox standing in a snowy forest at dusk"
+    assert clean_brief("A fox standing in a snowy forest at dusk.", reject=ex) == ""
+    assert clean_brief("a fox in a snowy forest", reject=ex) != ""
+
+
+def test_junk_and_echoed_example_are_not_stored(db, store, tmp_path):
+    store._prompts["HINDSIGHT_BRIEF_SYSTEM"] = 'e.g. "a fox in snow".'
+    _fav(db, tmp_path, "a.png")
+    _fav(db, tmp_path, "b.png")
+    client, events = FakeClient(), []
+    client.replies = lambda i, p: "A fox in snow." if i == 1 else "Here is it:"
+    asyncio.run(_run(_job(db, store, client, events)))
+    assert db.get_hindsight_briefs() == {}
+    assert events[-1][2]["failed"] == 2
+
+
+def test_aclose_records_result_and_propagates_outer_cancel(db, store, tmp_path):
+    _fav(db, tmp_path, "a.png")
+    client, events = FakeClient(), []
+    job = _job(db, store, client, events, generation_busy=lambda: True)
+
+    async def go():
+        job.start()
+        await asyncio.sleep(0.05)
+        await job.aclose()
+        assert job.status()["running"] is False
+        assert job.status()["result"] == "cancelled"
+
+        job2 = _job(db, store, client, events, generation_busy=lambda: True)
+        job2.start()
+        await asyncio.sleep(0.02)
+        outer = asyncio.get_running_loop().create_task(job2.aclose())
+        await asyncio.sleep(0)
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        await job2.aclose()
+
+    asyncio.run(go())
