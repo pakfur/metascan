@@ -940,7 +940,7 @@ async function onRetagLibrary() {
                 <th title="Favorite rate of the base writer's images over judged pairs">Base fav</th>
                 <th title="Favorite rate of the adapter's images over judged pairs">Adapter fav</th>
                 <th title="Mean taste score: base vs adapter">Mean score</th>
-                <th title="Pairs whose two images are both judged (favorite, pass or seen)">Judged</th>
+                <th title="Pairs whose two images both have a verdict (favorite or pass; seen alone does not count)">Judged</th>
               </tr>
             </thead>
             <tbody>

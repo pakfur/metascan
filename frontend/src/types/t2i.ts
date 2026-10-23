@@ -478,6 +478,9 @@ export interface T2iBatchInfo {
   // The first unused seed after the whole run; null when the range ran out.
   next_seed: number | null
   started_at: string
+  // Set on a writer-adapter scorecard batch: the training window owns it, so
+  // the T2I dialog never adopts (or cancels) it. Its step is blind.
+  scorecard_id?: string | null
 }
 
 /** A batch the store is tracking: the server's snapshot plus the last per-image error. */
@@ -511,6 +514,7 @@ export interface T2iBatchStartedEvent {
   mode: T2iMode
   total_steps: number
   total_images: number
+  scorecard_id?: string | null
 }
 
 export interface T2iBatchStepEvent extends T2iBatchStep {

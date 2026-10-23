@@ -17,6 +17,7 @@ import {
   mergeImagePage,
   mergeOlderPage,
   sanitizeDraft,
+  t2iBlind,
   type CaptionCount,
   type CaptionFilter,
   type CaptionMeta,
@@ -71,8 +72,23 @@ export const useT2iStore = defineStore('t2i', () => {
   const toast = useToast()
   const media = useMediaStore()
   const folders = useFoldersStore()
-  // Job chips: any ComfyUI job that carries a t2i_batch_id.
-  const tracker = useJobTracker({ match: (job) => !!job.t2i_batch_id })
+  // Writer-adapter scorecard batches (the server marks them with
+  // `scorecard_id`): the training window owns them, so this store never
+  // adopts them, never shows their jobs as chips and Cancel all never
+  // reaches them.
+  const scorecardBatchIds = new Set<string>()
+  function noteScorecardBatch(id: string): void {
+    scorecardBatchIds.add(id)
+    if (scorecardBatchIds.size > FINISHED_IDS_CAP) {
+      const oldest = scorecardBatchIds.values().next().value
+      if (oldest !== undefined) scorecardBatchIds.delete(oldest)
+    }
+  }
+  // Job chips: any ComfyUI job that carries a t2i_batch_id, except a
+  // scorecard batch's.
+  const tracker = useJobTracker({
+    match: (job) => !!job.t2i_batch_id && !scorecardBatchIds.has(job.t2i_batch_id),
+  })
 
   // ---- state ---------------------------------------------------------------
 
@@ -435,6 +451,10 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   function applyBatchSnapshot(row: T2iBatchInfo): void {
+    if (row.scorecard_id) {
+      noteScorecardBatch(row.batch_id)
+      return
+    }
     if (finishedIds.has(row.batch_id)) return
     const existing = findBatch(row.batch_id)
     if (existing) {
@@ -493,11 +513,13 @@ export const useT2iStore = defineStore('t2i', () => {
    * chips, the image list).
    */
   async function reattach(): Promise<void> {
-    await Promise.all([
-      refreshBatches().catch((e) => console.warn('T2I: could not reload the running batches', e)),
-      tracker.refresh().catch((e) => console.warn('T2I: could not reload the running jobs', e)),
-      refreshImages(),
-    ])
+    // The batches first: they name the scorecard batches whose jobs the
+    // tracker must not adopt.
+    const batchesThenJobs = async (): Promise<void> => {
+      await refreshBatches().catch((e) => console.warn('T2I: could not reload the running batches', e))
+      await tracker.refresh().catch((e) => console.warn('T2I: could not reload the running jobs', e))
+    }
+    await Promise.all([batchesThenJobs(), refreshImages()])
   }
 
   // The next unused seed the server reported for a batch, asking once if no
@@ -584,6 +606,11 @@ export const useT2iStore = defineStore('t2i', () => {
   function onBatchStarted(d: Record<string, unknown>): void {
     const id = asStr(d.batch_id)
     if (!id || finishedIds.has(id)) return
+    if (d.scorecard_id) {
+      // Never adopted: its later frames find no batch here and are ignored.
+      noteScorecardBatch(id)
+      return
+    }
     const totalSteps = asNum(d.total_steps, 1)
     const totalImages = asNum(d.total_images, 0)
     const existing = findBatch(id)
@@ -764,10 +791,18 @@ export const useT2iStore = defineStore('t2i', () => {
   function applyJudgment(path: string, state: { is_favorite: boolean; verdict: string | null }): void {
     for (const image of images.value) {
       if (!samePath(image.file_path, path)) continue
+      const wasBlind = t2iBlind(image)
       if (image.is_favorite !== state.is_favorite) image.is_favorite = state.is_favorite
       const passed = state.verdict === 'pass'
       if (image.passed !== passed) image.passed = passed
+      refetchIfRevealed(image, wasBlind)
     }
+  }
+
+  // A blind scorecard row came without its prompt and writer (the server
+  // strips them): once a verdict lifts the blind, fetch the full rows.
+  function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
+    if (wasBlind && !t2iBlind(image)) void refreshImages()
   }
 
   function applyFavoriteFlag(path: string, favorite: boolean): void {
@@ -788,6 +823,7 @@ export const useT2iStore = defineStore('t2i', () => {
     const image = images.value.find((i) => i.id === id)
     if (!image) return
     const next = !image.is_favorite
+    const wasBlind = t2iBlind(image)
     image.is_favorite = next
     try {
       const state = await setVerdict(
@@ -798,6 +834,7 @@ export const useT2iStore = defineStore('t2i', () => {
       image.is_favorite = state.is_favorite
       image.passed = state.verdict === 'pass'
       mirrorFavoriteToLibrary(image.file_path, state.is_favorite)
+      refetchIfRevealed(image, wasBlind)
     } catch (e) {
       image.is_favorite = !next
       throw e

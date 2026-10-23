@@ -787,7 +787,8 @@ function onRecheck() {
           <div class="dim small foot">
             "% fav" = your favorite rate on its blind scorecard ({{ training.scorecards?.briefs ?? 40 }} briefs,
             base vs adapter, same seeds). Scorecard images hide their writer until you favorite or pass them;
-            an untested adapter becomes ready at {{ readyPairs }} judged pairs.
+            an untested adapter becomes ready at {{ readyPairs }} judged pairs (both images favorited or
+            passed; seen alone does not count).
           </div>
         </section>
       </div>

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from backend.dependencies import get_db
 from backend.services.judgments_service import JudgmentsService
+from backend.services.scorecard import notify_scorecard_judgment
 from backend.ws.manager import ws_manager
 
 router = APIRouter(prefix="/api", tags=["judgments"])
@@ -34,17 +35,6 @@ def _not_found() -> HTTPException:
     return HTTPException(status_code=404, detail="Media not found")
 
 
-async def _scorecard_check(file_path: str) -> None:
-    """A judgment of a scorecard image may make its adapter ready."""
-    from backend.services.scorecard import note_scorecard_judgment
-
-    await note_scorecard_judgment(
-        get_db(),
-        file_path,
-        lambda event, data: ws_manager.broadcast_sync("training", event, data),
-    )
-
-
 @router.post("/judgments/seen")
 async def mark_seen(
     body: SeenRequest, service: JudgmentsService = Depends(_get_service)
@@ -52,7 +42,7 @@ async def mark_seen(
     state = await service.mark_seen(body.file_path, body.score_shown)
     if state is None:
         raise _not_found()
-    await _scorecard_check(body.file_path)
+    # Seen without a verdict never judges a scorecard image: no check here.
     return state.to_dict()
 
 
@@ -119,5 +109,5 @@ async def patch_judgment(
     if state is None:
         raise _not_found()
     if has_verdict:
-        await _scorecard_check(file_path)
+        await notify_scorecard_judgment(get_db(), file_path)
     return state.to_dict()

@@ -11,6 +11,7 @@ the committed briefs file.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -29,13 +30,14 @@ from metascan.core.gpu_guard import set_gpu_reservation
 from metascan.core.media import Media
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_characters import has_tokens
+from metascan.core.t2i_runner import T2iRequestError
 from metascan.core.t2i_wildcards import caption_reject_reason
 from metascan.core.writer_adapters import adapter_writer_id
 from metascan.core.writer_dataset import build_examples
 from tests.test_writer_adapter_serving import BASE, AdapterCase
 
 
-def _media(path: str) -> Media:
+def _media(path: str, prompt: Optional[str] = None) -> Media:
     return Media(
         file_path=Path(path),
         file_size=1,
@@ -44,6 +46,8 @@ def _media(path: str) -> Media:
         format="png",
         created_at=datetime.now(),
         modified_at=datetime.now(),
+        prompt=prompt,
+        negative_prompt="SYNTH negative" if prompt else None,
     )
 
 
@@ -128,12 +132,15 @@ def test_results_math() -> None:
         # pair 1: both judged, adapter favorited
         _row("b1", "base", passed=True, score=0.2),
         _row("b1", a, fav=True, score=0.8),
-        # pair 2: both judged (seen without a verdict counts), base favorited
+        # pair 2: both judged, base favorited
         _row("b2", "base", fav=True, score=0.6),
-        _row("b2", a, seen=True, score=0.4),
-        # pair 3: adapter not judged yet -> not a judged pair
+        _row("b2", a, passed=True, score=0.4),
+        # pair 3: adapter only seen (no verdict) -> not a judged pair
         _row("b3", "base", fav=True),
-        _row("b3", a),
+        _row("b3", a, seen=True),
+        # pair 5: neither has an explicit verdict
+        _row("b5", "base", seen=True),
+        _row("b5", a, seen=True),
         # an unpaired image (its partner never rendered)
         _row("b4", a, fav=True, score=1.0),
         # another adapter's image never counts
@@ -141,7 +148,7 @@ def test_results_math() -> None:
     ]
     out = sc.compute_results(rows, 7)
     assert out["adapter_id"] == 7
-    assert out["n_pairs"] == 3
+    assert out["n_pairs"] == 4
     assert out["n_judged"] == 2
     assert out["fav_rate_base"] == pytest.approx(0.5)
     assert out["fav_rate_adapter"] == pytest.approx(0.5)
@@ -181,16 +188,24 @@ class _Lib:
     def image(self, writer: str, batch: str, scorecard: Optional[str]) -> str:
         self.n += 1
         path = str(self.root / f"img{self.n}.png")
-        self.db.save_media(_media(path))
+        self.db.save_media(_media(path, prompt="SYNTH prompt"))
         self.db.create_t2i_image(
             file_path=path,
             batch_id=batch,
             model="krea2",
             caption="A quiet harbour at dawn",
             prompt_used="SYNTH prompt",
+            negative_used="SYNTH negative",
             seed=5,
             writer_id=writer,
             writer_model=BASE,
+            variant_group="group-1",
+            variant_index=self.n % 2,
+            draft_prompt="SYNTH draft",
+            edited=0,
+            resolved_caption="A quiet harbour at dawn",
+            direction="SYNTH direction",
+            prompt_categories=["SYNTH category"],
             scorecard_id=scorecard,
         )
         return path
@@ -219,7 +234,7 @@ def test_blind_flag_on_t2i_rows_until_an_explicit_verdict(lib: Any) -> None:
     assert rows[os.path.normpath(adapter)]["scorecard_blind"] is True
     assert rows[os.path.normpath(plain)]["scorecard_blind"] is False
     assert rows[os.path.normpath(base)]["scorecard_id"] == lib.card
-    # Seen only: counts as judged for the results, but stays blind.
+    # Seen only: neither judged nor un-blinded.
     lib.db.mark_seen(base)
     lib.db.set_verdict(adapter, "pass")
     rows = {r["file_path"]: r for r in lib.db.list_t2i_images()}
@@ -251,14 +266,17 @@ async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
     lib.db.set_verdict(base, "favorite")
     await sc.note_scorecard_judgment(lib.db, base, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
-    lib.db.mark_seen(adapter)  # seen without a verdict: pair 30 is judged
+    lib.db.mark_seen(adapter)  # seen without a verdict: NOT judged
+    await sc.note_scorecard_judgment(lib.db, adapter, lambda e, d: sent.append((e, d)))
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+    lib.db.set_verdict(adapter, "pass")  # the explicit verdict: pair 30 is judged
     await sc.note_scorecard_judgment(lib.db, adapter, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     changed = [s for s in sent if s[0] == "adapters_changed"]
     assert changed == [("adapters_changed", {})]
     # Every scorecard judgment is announced (the window refetches results).
     assert ("scorecard_judged", {"adapter_id": lib.adapter}) in sent
-    assert len([s for s in sent if s[0] == "scorecard_judged"]) == 31
+    assert len([s for s in sent if s[0] == "scorecard_judged"]) == 32
     # Ready stays ready (and is not re-announced) even when verdicts go.
     lib.db.set_verdict(base, None)
     await sc.note_scorecard_judgment(lib.db, base, lambda e, d: sent.append((e, d)))
@@ -274,6 +292,50 @@ async def test_a_non_scorecard_judgment_is_ignored(lib: Any) -> None:
     with mock.patch.object(sc, "evaluate_adapter") as evaluate:
         await sc.note_scorecard_judgment(lib.db, plain, lambda e, d: None)
     evaluate.assert_not_called()
+
+
+async def test_seen_only_pairs_never_count_as_judged(lib: Any) -> None:
+    """Ruling: a scorecard image is judged only by an explicit verdict
+    (favorite or pass), like the blind lift; seen-only stays a taste label
+    elsewhere but never counts toward n_judged or promotion."""
+    sent: List[Tuple[str, Dict[str, Any]]] = []
+    pairs = [lib.pair(i) for i in range(30)]
+    for base, adapter in pairs:
+        lib.db.mark_seen(base)
+        lib.db.mark_seen(adapter)
+        await sc.note_scorecard_judgment(
+            lib.db, adapter, lambda e, d: sent.append((e, d))
+        )
+    result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
+    assert (result["n_pairs"], result["n_judged"]) == (30, 0)
+    assert result["fav_rate_base"] is None and result["fav_rate_adapter"] is None
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+    assert [s for s in sent if s[0] == "adapters_changed"] == []
+    for base, adapter in pairs:
+        lib.db.set_verdict(base, "pass")
+        lib.db.set_verdict(adapter, "favorite")
+        await sc.note_scorecard_judgment(
+            lib.db, adapter, lambda e, d: sent.append((e, d))
+        )
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
+    result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
+    assert result["n_judged"] == 30
+    assert (result["fav_rate_base"], result["fav_rate_adapter"]) == (0.0, 1.0)
+
+
+def test_summary_takes_the_running_state_from_its_caller(lib: Any) -> None:
+    """scorecard_summary / adapter_scorecard run in a worker thread: they
+    never read the asyncio task state themselves."""
+    running = {"adapter_id": lib.adapter, "scorecard_id": "x"}
+    with mock.patch.object(
+        sc, "get_scorecard_service", side_effect=AssertionError("off the loop")
+    ):
+        assert sc.scorecard_summary(lib.db, running=running)["running"] == running
+        assert sc.scorecard_summary(lib.db)["running"] is None
+        one = sc.adapter_scorecard(lib.db, lib.adapter, running=running)
+        assert one["running"] == running
+        other = sc.adapter_scorecard(lib.db, lib.adapter + 1, running=running)
+        assert other["running"] is None
 
 
 def test_scorecard_images_never_become_training_data(lib: Any) -> None:
@@ -536,7 +598,62 @@ class TestScorecardRun(ScorecardCase):
             self.db.save_media(_media(self.image(job_id)))
             await self.job_done(job_id)
         await self.service.wait()
-        self.assertEqual({r["scorecard_id"] for r in _rows(self.db)}, {card})
+        rows = _rows(self.db)
+        self.assertEqual({r["scorecard_id"] for r in rows}, {card})
+        # The writer lineage came back from the persisted per-job record.
+        self.assertEqual(
+            sorted(r["writer_id"] for r in rows), sorted(["base", self.wid])
+        )
+        self.assertEqual({r["writer_model"] for r in rows}, {BASE})
+        adapter_row = next(r for r in rows if r["writer_id"] == self.wid)
+        base_row = next(r for r in rows if r["writer_id"] == "base")
+        first = 0 if sc.adapter_first(card, 0) else 1
+        self.assertEqual(adapter_row["variant_index"], first)
+        self.assertEqual(base_row["variant_index"], 1 - first)
+        # ... so the brief pairs and counts in the results.
+        self.assertEqual(self.db.get_scorecard(card)["done"], 1)
+        for r in rows:
+            self.db.set_verdict(r["file_path"], "pass")
+        result = await sc.evaluate_adapter(self.db, self.adapter, lambda e, d: None)
+        self.assertEqual((result["n_pairs"], result["n_judged"]), (1, 1))
+
+    async def test_a_scorecard_batch_needs_its_brief(self) -> None:
+        with self.assertRaises(T2iRequestError):
+            await self.runner.start_batch(
+                self.manual(scorecard_id="card-x", scorecard_brief=None)
+            )
+        self.assertIsNone(self.db.scorecard_id_for_batch("card-x"))
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.comfy.submits, [])
+
+    async def test_scorecard_batch_frames_and_listing_are_blind(self) -> None:
+        assert self.vlm is not None
+        self.vlm.default_reply = "SECRET written prompt"
+        self.service = self.make_service(self.briefs_file("A quiet harbour"))
+        card = (await self.service.start(self.adapter))["scorecard_id"]
+        await self.until(lambda: len(self.comfy.job_ids) == 2, "both jobs")
+        (listed,) = self.runner.active_batches()
+        self.assertEqual(listed["scorecard_id"], card)
+        (started,) = self.frames("batch_started")
+        self.assertEqual(started["scorecard_id"], card)
+        steps = self.frames("batch_step")
+        self.assertTrue(steps)
+        for blob in [listed["step"], *steps]:
+            text = json.dumps(blob)
+            self.assertNotIn("SECRET", text)
+            self.assertNotIn(self.wid, text)
+            self.assertNotIn(BASE, text)
+            for key in ("prompt", "negative", "draft", "writer_id", "writer_model"):
+                self.assertIsNone(blob.get(key), key)
+            self.assertIsNone(blob.get("variant_index"))
+            self.assertIsNone(blob.get("lineage"))
+        # Nothing on the t2i channel names the writer or carries the prompt.
+        for _, data in self.events:
+            text = json.dumps(data)
+            self.assertNotIn("SECRET", text)
+            self.assertNotIn(self.wid, text)
+        self.autorender()
+        await self.service.wait()
 
     async def test_briefs_and_prompts_are_not_logged_at_info(self) -> None:
         path = self.briefs_file("A SECRET harbour brief")
@@ -624,10 +741,10 @@ def api(tmp_path: Path) -> Any:
     deps._db_singleton = lib.db  # type: ignore[attr-defined]
     stub = _StubService()
     sc.set_scorecard_service(stub)  # type: ignore[arg-type]
-    from backend.api import judgments, media, writers
+    from backend.api import judgments, media, t2i, writers
 
     app = FastAPI()
-    for r in (media.router, judgments.router, writers.router):
+    for r in (media.router, judgments.router, writers.router, t2i.router):
         app.include_router(r)
     with mock.patch("backend.dependencies.get_data_dir", return_value=tmp_path):
         yield TestClient(app), lib, stub
@@ -679,6 +796,10 @@ def test_results_routes_and_blind_payloads(api: Any) -> None:
     assert client.get(f"/api/judgments/{base}").json()["scorecard"]["blind"] is False
     assert client.get(f"/api/media/{base}").json()["scorecard_blind"] is False
     client.post("/api/judgments/seen", json={"file_path": adapter})
+    # Seen only: the pair is not judged yet.
+    one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
+    assert one["n_pairs"] == 1 and one["n_judged"] == 0
+    client.patch(f"/api/judgments/{adapter}", json={"verdict": "pass"})
 
     one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
     assert one["n_pairs"] == 1 and one["n_judged"] == 1
@@ -711,9 +832,93 @@ def test_a_verdict_through_the_routes_promotes_the_adapter(api: Any) -> None:
         base, adapter = pairs[29]
         client.patch(f"/api/judgments/{base}", json={"verdict": "pass"})
         assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+        # Seen without a verdict never judges a scorecard image.
+        client.post("/api/judgments/seen", json={"file_path": adapter})
+        assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+        assert [s for s in sent if s[1] == "adapters_changed"] == []
         client.patch(f"/api/media/{adapter}", json={"is_favorite": True})
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     assert ("training", "adapters_changed", {}) in sent
+
+
+_REVEALING = ("SYNTH", "adapter:", BASE)
+
+
+def _assert_blind(blob: Any) -> None:
+    text = json.dumps(blob)
+    for needle in _REVEALING:
+        assert needle not in text, needle
+
+
+def test_media_detail_is_blind_until_a_verdict(api: Any) -> None:
+    client, lib, _ = api
+    base, _adapter = lib.pair(0)
+    lib.db.add_tag_indices(base, ["harbour"], source="clip")
+    detail = client.get(f"/api/media/{base}").json()
+    assert detail["scorecard_blind"] is True
+    assert detail["scorecard_id"] == lib.card
+    assert detail["prompt"] is None and detail["negative_prompt"] is None
+    assert detail["tags"] == []
+    # What the viewer needs to render it stays.
+    assert (detail["width"], detail["height"], detail["format"]) == (8, 8, "png")
+    assert detail["file_path"]
+    _assert_blind(detail)
+    client.patch(f"/api/judgments/{base}", json={"verdict": "pass"})
+    detail = client.get(f"/api/media/{base}").json()
+    assert detail["scorecard_blind"] is False
+    assert detail["prompt"] == "SYNTH prompt"
+    assert [t["name"] for t in detail["tags"]] == ["harbour"]
+
+
+def test_t2i_image_rows_are_blind_until_a_verdict(api: Any) -> None:
+    client, lib, _ = api
+    base, adapter = lib.pair(0)
+    plain = lib.image("base", "other", None)
+    rows = {
+        os.path.normpath(r["file_path"]): r
+        for r in client.get("/api/t2i/images").json()
+    }
+    for path in (base, adapter):
+        row = rows[os.path.normpath(path)]
+        assert row["scorecard_blind"] is True
+        assert row["scorecard_id"] == lib.card
+        for key in (
+            "prompt_used",
+            "negative_used",
+            "writer_id",
+            "writer_model",
+            "variant_index",
+            "variant_group",
+            "draft_prompt",
+            "edited",
+            "resolved_caption",
+            "direction",
+            "prompt_categories",
+        ):
+            assert row[key] is None, key
+        # Still a complete form shape, without the prompt.
+        assert row["form_state"]["prompt"] in ("", None)
+        assert row["seed"] == 5 and row["file_name"]
+        _assert_blind(row)
+    assert rows[os.path.normpath(plain)]["prompt_used"] == "SYNTH prompt"
+    assert rows[os.path.normpath(plain)]["writer_id"] == "base"
+    # The PATCH answer of a blind image is blind too.
+    image_id = rows[os.path.normpath(base)]["id"]
+    patched = client.patch(f"/api/t2i/images/{image_id}", json={"seed": 9})
+    assert patched.status_code == 200
+    _assert_blind(patched.json())
+    # After a verdict the next fetch is full.
+    client.patch(f"/api/judgments/{base}", json={"verdict": "favorite"})
+    rows = {
+        os.path.normpath(r["file_path"]): r
+        for r in client.get("/api/t2i/images").json()
+    }
+    row = rows[os.path.normpath(base)]
+    assert row["scorecard_blind"] is False
+    assert row["prompt_used"] == "SYNTH prompt"
+    assert row["writer_id"] == "base" and row["writer_model"] == BASE
+    assert row["draft_prompt"] == "SYNTH draft"
+    assert rows[os.path.normpath(adapter)]["writer_id"] is None
 
 
 def test_writer_stats_carry_scorecard_rows(lib: Any) -> None:
