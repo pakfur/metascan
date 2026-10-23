@@ -313,6 +313,8 @@ export interface T2iHeldDraft {
  */
 export interface T2iDraftSet {
   caption: string
+  /** How many variants the writer was asked for (entries may be fewer). */
+  variants: number
   entries: T2iHeldDraft[]
   current: number
 }
@@ -550,20 +552,6 @@ export function effectiveBatchSize(
 ): number {
   if (mode === 'manual') return 1
   return clampInt(size, 1, max)
-}
-
-/** Images one Generate produces: the "Generate ×N" number. */
-export function plannedImages(
-  mode: T2iMode,
-  policy: SeedPolicy,
-  batchSize: number,
-  count: number,
-  limits: { maxBatchSize?: number; maxCount?: number } = {},
-): number {
-  return (
-    effectiveBatchSize(mode, batchSize, limits.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE) *
-    effectiveCount(policy, count, limits.maxCount ?? DEFAULT_MAX_COUNT_PER_BATCH)
-  )
 }
 
 // ---- image labels ------------------------------------------------------------

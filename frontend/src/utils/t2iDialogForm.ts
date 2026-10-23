@@ -185,6 +185,7 @@ export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T
   if (drafts.length === 0) return null
   return {
     caption,
+    variants: drafts.length,
     entries: [...drafts]
       .sort((a, b) => a.variant_index - b.variant_index)
       .map((d) => ({
@@ -216,6 +217,7 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
   const ordered = [...byVariant.values()].sort((a, b) => a.variant_index - b.variant_index)
   return {
     caption: shown.caption,
+    variants: shown.variants,
     entries: ordered.map((s) => ({
       variant_index: s.variant_index,
       writer_id: s.writer_id as string,
@@ -228,41 +230,37 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
 }
 
 /**
- * Every held variant as Generate sends it, the shown one with the boxes' live
- * text (an edit applies to the variant on show). Null when the drafts do not
- * belong to what the boxes hold: none held, written for another caption, or
- * an empty Prompt box (which means "write me one", never "render a draft").
- * Only a complete set (variant indexes 0..N-1) goes out.
+ * The prompts of batch 1 a Generate sends with their drafts, or null when the
+ * box goes out as a typed (`manual`) prompt. That is only when no held draft
+ * belongs to the boxes: none held, written for another caption, or an empty
+ * Prompt box (which means "write me one", never "render a draft"). A box
+ * whose text came from a draft is never sent as typed:
+ *  - the drafts were written for as many variants as the picker asks for:
+ *    every variant held goes out (all of them, or the ones a cut-short run
+ *    handed back), the shown one with the boxes' live text;
+ *  - the picker has changed since: the variant on show goes out alone.
+ * Entries are numbered 0..k-1 in the request (the server renders k variants
+ * of this caption; drawn captions after it still get the picker's number).
  */
-export function heldPrompts(f: T2iFields, set: T2iDraftSet | null | undefined, hasNegative: boolean): T2iVariantPrompt[] | null {
-  if (!set || set.caption !== f.caption || !f.prompt.trim()) return null
-  if (!set.entries.every((e, i) => e.variant_index === i)) return null
-  return set.entries.map((e, i) => {
-    const shown = i === set.current
+export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt[] | null {
+  if (f.mode === 'random' && firstBatchSource(f) !== 'prompt') return null
+  const set = ctx.drafts
+  if (!set || set.caption !== f.caption || !f.prompt.trim() || set.entries.length === 0) return null
+  const shownEntry = set.entries[set.current]
+  if (!shownEntry) return null
+  const picked = set.variants === (ctx.variants ?? 1) ? set.entries : [shownEntry]
+  return picked.map((e, i) => {
+    const shown = e === shownEntry
     const text = shown ? f.prompt : e.text
     const negative = shown ? f.negative : e.negative
     return {
       prompt: text,
-      negative: hasNegative && negative.trim() ? negative : null,
+      negative: ctx.hasNegative && negative.trim() ? negative : null,
       draft: e.draft,
       writer_id: e.writer_id,
-      variant_index: e.variant_index,
+      variant_index: i,
     }
   })
-}
-
-/**
- * The prompts of batch 1 a Generate will send with its drafts, or null when
- * it sends the box as a typed prompt. Manual renders every held variant;
- * Random only when the set has as many variants as the picker asks for (the
- * server wants one per variant), else the box renders once, as typed.
- */
-export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt[] | null {
-  if (f.mode === 'random' && firstBatchSource(f) !== 'prompt') return null
-  const held = heldPrompts(f, ctx.drafts, ctx.hasNegative)
-  if (!held) return null
-  if (f.mode === 'random' && held.length !== (ctx.variants ?? 1)) return null
-  return held
 }
 
 /**
@@ -356,9 +354,16 @@ export function firstBatchSource(f: T2iFields): FirstBatchSource {
  * receive. The seed policy and the effective count are in it, so switching
  * from one image to a run of several is not mistaken for a repeat.
  */
-export function requestSignature(f: T2iFields, hasNegative: boolean): string {
+export function requestSignature(
+  f: T2iFields,
+  hasNegative: boolean,
+  prompts: T2iVariantPrompt[] | null = null,
+): string {
   return JSON.stringify({
     prompt: f.prompt,
+    // Every variant a Generate would send, so an edit to one that is not on
+    // show still counts as a change.
+    variants: prompts?.map((p) => [p.prompt, hasNegative ? p.negative : null]) ?? null,
     negative: hasNegative ? f.negative : null,
     seed: f.seed,
     model: f.model,

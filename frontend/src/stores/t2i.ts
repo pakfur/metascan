@@ -114,6 +114,7 @@ export const useT2iStore = defineStore('t2i', () => {
   // Per running batch: the steps of the caption on show, by variant index,
   // so a run that ends hands back its last caption's drafts (finishBatch).
   const captionSteps = new Map<string, Map<number, T2iBatchStep>>()
+  const lastStepSeen = new Map<string, number>()
 
   // The drafts behind the Prompt box: what Generate Prompt (or a finished
   // Random run) produced for the caption in the Caption box. Never part of
@@ -253,6 +254,7 @@ export const useT2iStore = defineStore('t2i', () => {
     lastFinished.value = null
     finishedIds.clear()
     captionSteps.clear()
+    lastStepSeen.clear()
     tracker.reset()
     const loaded = await loadConfig()
     await Promise.all([
@@ -348,6 +350,7 @@ export const useT2iStore = defineStore('t2i', () => {
     rememberFinished(id)
     const held = captionSteps.get(id)
     captionSteps.delete(id)
+    lastStepSeen.delete(id)
     const lastCaption = batch.step?.caption_index ?? null
     const shownVariants = held
       ? [...held.values()]
@@ -393,6 +396,11 @@ export const useT2iStore = defineStore('t2i', () => {
 
   // Keeps the steps of the caption on show; a step of a new caption starts over.
   function rememberStep(id: string, step: T2iBatchStep): void {
+    // An older snapshot (GET /batches answered after newer frames) must not
+    // start the held caption over.
+    const latest = lastStepSeen.get(id) ?? 0
+    if (step.step < latest) return
+    lastStepSeen.set(id, step.step)
     let held = captionSteps.get(id)
     const first = held?.values().next().value
     if (!held || (first && first.caption_index !== step.caption_index)) {

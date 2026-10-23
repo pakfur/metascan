@@ -432,14 +432,24 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
     """The supplied per-variant prompts, normalised and ordered by
     ``variant_index``; None when the request has none. A prompt without a
     draft was typed from scratch, so its writer is ``manual`` whatever the
-    entry says; one with a draft must name the writer that drafted it."""
+    entry says; one with a draft must name the writer that drafted it.
+
+    There may be fewer entries than ``variants`` (1..variants): the
+    supplied caption then renders just those, and every later caption of a
+    Random batch still gets ``variants``. The dialog sends the one draft on
+    show when the drafts it holds no longer match the Variants picker, so a
+    writer's draft is never recorded as a typed prompt."""
     if req.prompts is None:
         return None
-    if not isinstance(req.prompts, list) or len(req.prompts) != variants:
+    if (
+        not isinstance(req.prompts, list)
+        or not req.prompts
+        or len(req.prompts) > variants
+    ):
         got = len(req.prompts) if isinstance(req.prompts, list) else "none"
         raise T2iRequestError(
-            f"prompts must hold one entry per variant (variants={variants}, "
-            f"got {got})"
+            f"prompts must hold 1 to {variants} entries, one per variant "
+            f"(variants={variants}, got {got})"
         )
     entries: List[Dict[str, Any]] = []
     for raw in req.prompts:
@@ -471,9 +481,9 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
             }
         )
     entries.sort(key=lambda e: e["variant_index"])
-    if [e["variant_index"] for e in entries] != list(range(variants)):
+    if [e["variant_index"] for e in entries] != list(range(len(entries))):
         raise T2iRequestError(
-            f"variant_index values must be 0 to {variants - 1}, each once"
+            f"variant_index values must be 0 to {len(entries) - 1}, each once"
         )
     return entries
 

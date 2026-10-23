@@ -475,6 +475,50 @@ class TestSuppliedPrompts(VariantCase):
         self.assertEqual([r["edited"] for r in rows], [1, 0, 0, 0])
         self.assertEqual([r["draft_prompt"] for r in rows[:2]], ["SYNTH a", "SYNTH b"])
 
+    async def test_a_random_first_batch_may_supply_fewer_variants(self) -> None:
+        # The dialog's drafts no longer match the picker: it sends the one
+        # on show. Batch 1 renders it once, as the writer's draft; the drawn
+        # captions after it still get every variant.
+        self.roomy()
+        batch_id = await self.run_to_end(
+            self.random_mode(
+                seed=10,
+                batch_size=2,
+                count_per_batch=1,
+                variants=2,
+                caption="SYNTH caption",
+                aspect_ratio="2:3",
+                prompts=self.drafts(("SYNTH b", "SYNTH b")),
+            )
+        )
+        written = self.written(batch_id)
+        self.assertEqual([s["variants"] for s in written], [1, 2, 2])
+        self.assertEqual([p.seed for p in self.params()], [10, 11, 11])
+        await self.finish_all()
+        rows = _rows(self.db)
+        self.assertEqual(rows[0]["writer_id"], "base")
+        self.assertEqual(rows[0]["draft_prompt"], "SYNTH b")
+
+    async def test_a_supplied_step_frame_carries_its_draft(self) -> None:
+        # The frame names the writer's draft, not the edited text, so the
+        # hand-back keeps the original draft for the next Generate.
+        batch_id = await self.manual_batch(
+            count=1,
+            prompt=None,
+            variants=2,
+            prompts=self.drafts(("SYNTH a", "SYNTH a"), ("SYNTH b", "SYNTH b edited")),
+        )
+        await self.finish_all()
+        # Each step goes on show (batch_step) as its image renders.
+        steps = self.frames("batch_step")
+        self.assertEqual(
+            steps, [{"batch_id": batch_id, **w} for w in self.written(batch_id)]
+        )
+        self.assertEqual(
+            [(s["prompt"], s["draft"], s["writer_id"]) for s in steps],
+            [("SYNTH a", "SYNTH a", "base"), ("SYNTH b edited", "SYNTH b", "base")],
+        )
+
     async def test_a_legacy_random_first_prompt_is_manual_and_single(self) -> None:
         self.roomy()
         started = await self.start(
@@ -533,11 +577,20 @@ class TestSuppliedPromptValidation(RunnerCase):
     async def test_unknown_writer(self) -> None:
         await self.rejects("writer", self.random_mode(writer="adapter:x"))
 
-    async def test_prompts_must_match_the_variants(self) -> None:
+    async def test_prompts_cannot_outnumber_the_variants(self) -> None:
         await self.rejects(
             "prompts",
-            self.manual(prompt=None, variants=2, prompts=[self.entry(0)]),
+            self.manual(
+                prompt=None, variants=1, prompts=[self.entry(0), self.entry(1)]
+            ),
         )
+        await self.rejects("prompts", self.manual(prompt=None, prompts=[]))
+
+    async def test_fewer_prompts_than_variants_is_valid(self) -> None:
+        started = await self.runner.start_batch(
+            self.manual(prompt=None, variants=3, prompts=[self.entry(0)])
+        )
+        self.assertEqual(started.total_images, 3)
 
     async def test_variant_indexes_must_be_zero_to_n(self) -> None:
         await self.rejects(
