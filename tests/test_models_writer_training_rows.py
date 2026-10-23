@@ -51,9 +51,11 @@ def events(monkeypatch) -> List[Tuple[str, str, Dict[str, Any]]]:
 def _no_manager():
     tm.set_training_manager(None)
     models_api._writer_downloads.clear()
+    models_api._writer_deletes.clear()
     yield
     tm.set_training_manager(None)
     models_api._writer_downloads.clear()
+    models_api._writer_deletes.clear()
 
 
 def _base_dir() -> Path:
@@ -99,6 +101,13 @@ def _tarball(entries: Dict[str, Any]) -> bytes:
             if isinstance(value, tuple) and value[0] == "symlink":
                 info.type = tarfile.SYMTYPE
                 info.linkname = value[1]
+                tf.addfile(info)
+            elif isinstance(value, tuple) and value[0] == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = value[1]
+                tf.addfile(info)
+            elif isinstance(value, tuple) and value[0] == "chr":
+                info.type = tarfile.CHRTYPE
                 tf.addfile(info)
             elif isinstance(value, tuple) and value[0] == "dir":
                 info.type = tarfile.DIRTYPE
@@ -417,6 +426,8 @@ def test_converter_fetch_extracts_only_the_allowed_paths(monkeypatch, events):
         {"/abs/evil.py": b"x"},
         {f"{PREFIX}/gguf-py/../../evil.py": b"x"},
         {f"{PREFIX}/gguf-py/link": ("symlink", "/etc/passwd")},
+        {f"{PREFIX}/gguf-py/hard": ("hardlink", f"{PREFIX}/LICENSE")},
+        {f"{PREFIX}/conversion/dev": ("chr",)},
     ],
 )
 def test_converter_extraction_rejects_unsafe_members(tmp_path, bad):
@@ -428,6 +439,7 @@ def test_converter_extraction_rejects_unsafe_members(tmp_path, bad):
     with pytest.raises(wta.AssetError):
         wta.extract_converter(tar, dest, LLAMA_CPP_RELEASE)
     assert not (tmp_path / "evil.py").exists()
+    assert not dest.exists()
 
 
 def test_converter_fetch_with_a_bad_archive_installs_nothing(monkeypatch, events):
@@ -662,3 +674,118 @@ def test_base_delete_with_the_real_manager(client, tmp_path):
         assert not base.exists()
     finally:
         db.close()
+
+
+# ---- fix round 1 -------------------------------------------------------------
+
+
+def _managed_converter() -> Path:
+    lc = wta.asset_paths().llama_cpp_dir
+    lc.mkdir(parents=True)
+    (lc / "convert_lora_to_gguf.py").write_text("#")
+    (lc / wta.RELEASE_MARKER).write_text(LLAMA_CPP_RELEASE)
+    return lc
+
+
+def test_converter_refetch_refused_while_training(client, monkeypatch):
+    _managed_converter()
+    started: List[str] = []
+
+    async def fake(mid: str) -> None:
+        started.append(mid)
+
+    monkeypatch.setattr(models_api, "_download_writer_asset", fake)
+    tm.set_training_manager(_StubManager([], active=True))  # type: ignore[arg-type]
+    r = client.post("/api/models/download", json={"id": wta.CONVERTER_ID})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "gpu_busy_training"
+    assert started == []
+    assert wta.CONVERTER_ID not in models_api._writer_downloads
+
+
+def test_download_refused_while_its_delete_runs(client, monkeypatch):
+    started: List[str] = []
+
+    async def fake(mid: str) -> None:
+        started.append(mid)
+
+    monkeypatch.setattr(models_api, "_download_writer_asset", fake)
+    models_api._writer_deletes.add(wta.BASE_ID)
+    r = client.post("/api/models/download", json={"id": wta.BASE_ID})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "delete_running"
+    assert started == []
+
+
+def test_delete_registers_itself_while_running(client, monkeypatch):
+    _write_base(_base_dir())
+    seen: List[bool] = []
+
+    def spy(paths):
+        seen.append(wta.BASE_ID in models_api._writer_deletes)
+
+    monkeypatch.setattr(wta, "delete_base", spy)
+    assert client.delete(f"/api/models/{wta.BASE_ID}").status_code == 200
+    assert seen == [True]
+    assert wta.BASE_ID not in models_api._writer_deletes
+
+
+def test_delete_refused_while_a_download_runs(client):
+    _write_base(_base_dir())
+    models_api._writer_downloads.add(wta.BASE_ID)
+    r = client.delete(f"/api/models/{wta.BASE_ID}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "download_running"
+    assert hardware.base_weights_present(_base_dir())
+
+
+@pytest.mark.parametrize("mid", [wta.BASE_ID, wta.CONVERTER_ID])
+def test_delete_oserror_is_a_500_and_still_broadcasts(client, monkeypatch, events, mid):
+    _write_base(_base_dir())
+    _managed_converter()
+
+    def boom(paths):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(
+        wta, "delete_base" if mid == wta.BASE_ID else "delete_converter", boom
+    )
+    r = client.delete(f"/api/models/{mid}")
+    assert r.status_code == 500
+    assert "device busy" in str(r.json()["detail"])
+    assert ("training", "gate_changed", {}) in events
+    assert mid not in models_api._writer_deletes
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "..",
+        ".",
+        "a/..",
+        "../x",
+        "/abs/x",
+        "a/b/c",
+        "org",
+        "org/",
+        "/name",
+        "org/na me",
+        "org/.",
+        "./name",
+        "org/na\\me",
+        "o rg/name",
+    ],
+)
+def test_invalid_train_repo_falls_back_to_the_default(bad, caplog):
+    with caplog.at_level("WARNING"):
+        paths = wta.asset_paths({"models": {"writer_train_repo": bad}}, get_data_dir())
+    assert paths.repo == DEFAULT_WRITER_TRAIN_REPO
+    assert paths.base_dir == _base_dir()
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_valid_train_repo_is_kept():
+    paths = wta.asset_paths(
+        {"models": {"writer_train_repo": "Org-1/Model_x.8B"}}, get_data_dir()
+    )
+    assert paths.repo == "Org-1/Model_x.8B"

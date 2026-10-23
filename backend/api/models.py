@@ -552,18 +552,48 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
         return {"status": "started", "id": mid}
 
     if mid in wta.IDS:
-        if mid == wta.CONVERTER_ID:
-            paths = await asyncio.to_thread(wta.asset_paths)
-            try:
-                wta.require_managed(paths)
-            except wta.AssetError as exc:
-                raise HTTPException(exc.status, detail=exc.detail()) from None
-        # Single flight per id: a second click while one runs is a no-op.
-        if mid in _writer_downloads:
-            return {"status": "already_running", "id": mid}
-        _writer_downloads.add(mid)
-        asyncio.create_task(_download_writer_asset(mid))
-        return {"status": "started", "id": mid}
+        from backend.services.training_manager import get_training_manager
+
+        manager = get_training_manager()
+
+        async def _start() -> Dict[str, Any]:
+            if mid == wta.CONVERTER_ID:
+                paths = await asyncio.to_thread(wta.asset_paths)
+                try:
+                    wta.require_managed(paths)
+                except wta.AssetError as exc:
+                    raise HTTPException(exc.status, detail=exc.detail()) from None
+                # A run's final convert step may execute from this dir.
+                if (
+                    manager is not None
+                    and manager.status().get("state", "idle") != "idle"
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": GPU_BUSY_TRAINING,
+                            "message": GPU_BUSY_MESSAGE,
+                        },
+                    )
+            if mid in _writer_deletes:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "delete_running",
+                        "message": "A delete is running.",
+                    },
+                )
+            # Single flight per id: a second click while one runs is a no-op.
+            if mid in _writer_downloads:
+                return {"status": "already_running", "id": mid}
+            _writer_downloads.add(mid)
+            asyncio.create_task(_download_writer_asset(mid))
+            return {"status": "started", "id": mid}
+
+        if manager is not None:
+            async with manager.op_lock:
+                return await _start()
+        return await _start()
 
     raise HTTPException(status_code=404, detail=f"unknown model id: {mid}")
 
@@ -736,6 +766,8 @@ async def _download_vlm(mid: str) -> None:
 
 # Ids with a download in flight (single flight per id).
 _writer_downloads: "set[str]" = set()
+# Ids with a delete in flight (a download of the same row is refused).
+_writer_deletes: "set[str]" = set()
 
 
 def _broadcast_gate_changed() -> None:
@@ -824,12 +856,25 @@ async def _delete_writer_asset(mid: str) -> Dict[str, Any]:
         except wta.AssetError as exc:
             raise HTTPException(exc.status, detail=exc.detail()) from None
 
-    if manager is not None:
-        # Serialised with training start / resume (no run can begin
-        # reading the weights between the check and the removal).
-        async with manager.op_lock:
+    _writer_deletes.add(mid)
+    try:
+        if manager is not None:
+            # Serialised with training start / resume (no run can begin
+            # reading the weights between the check and the removal).
+            async with manager.op_lock:
+                await _do()
+        else:
             await _do()
-    else:
-        await _do()
-    _broadcast_gate_changed()
+    except OSError as exc:
+        logger.exception("Writer training delete of %s failed", mid)
+        raise HTTPException(
+            500,
+            detail={
+                "code": "delete_failed",
+                "message": f"Could not remove the files: {exc}",
+            },
+        ) from None
+    finally:
+        _writer_deletes.discard(mid)
+        _broadcast_gate_changed()
     return {"ok": True}

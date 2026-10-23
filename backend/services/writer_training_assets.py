@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -109,6 +110,18 @@ class TrainingAssetPaths:
         )
 
 
+_REPO_PART = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def valid_repo_id(repo: str) -> bool:
+    """Exactly ``org/name``, each part ``[A-Za-z0-9._-]+`` and not ``.`` /
+    ``..`` (the repo names a directory that delete_base removes)."""
+    parts = repo.split("/")
+    return len(parts) == 2 and all(
+        _REPO_PART.fullmatch(p) and p not in (".", "..") for p in parts
+    )
+
+
 def asset_paths(
     config: Optional[Dict[str, Any]] = None, data_dir: Optional[Path] = None
 ) -> TrainingAssetPaths:
@@ -131,6 +144,13 @@ def asset_paths(
         return value.strip() if isinstance(value, str) else ""
 
     repo = _str("writer_train_repo") or DEFAULT_WRITER_TRAIN_REPO
+    if not valid_repo_id(repo):
+        logger.warning(
+            "models.writer_train_repo %r is not an 'org/name' repo id; " "using %s",
+            repo,
+            DEFAULT_WRITER_TRAIN_REPO,
+        )
+        repo = DEFAULT_WRITER_TRAIN_REPO
     llama_dir = _str("llama_cpp_dir")
     return TrainingAssetPaths(
         repo=repo,
