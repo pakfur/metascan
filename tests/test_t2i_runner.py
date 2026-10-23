@@ -368,7 +368,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         # picker would probe this machine's GPU once the fake has no id.
         patcher = mock.patch(
             "metascan.core.t2i_runner.pick_vlm_model",
-            side_effect=lambda vlm: vlm.model_id or "qwen3vl-8b",
+            side_effect=lambda vlm, **_: vlm.model_id or "qwen3vl-8b",
         )
         patcher.start()
         self.addCleanup(patcher.stop)

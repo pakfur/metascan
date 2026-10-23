@@ -66,7 +66,8 @@ def _free_port() -> int:
 
 
 class VlmClient:
-    """Supervises one llama-server subprocess. Singleton per FastAPI process."""
+    """Supervises one llama-server subprocess. One per distinct model the
+    writer / general roles name (``backend.services.vlm_roles.VlmRoles``)."""
 
     def __init__(
         self,
@@ -74,6 +75,10 @@ class VlmClient:
         spawn_override: Optional[Callable[[str], str]] = None,
     ) -> None:
         self._spawn_override = spawn_override
+        # The model the role(s) this client serves are configured for
+        # (set by backend.services.vlm_roles.VlmRoles); pick_vlm_model
+        # starts it when nothing is loaded. None: no role preference.
+        self.preferred_model_id: Optional[str] = None
 
         self._proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._stderr_task: Optional[asyncio.Task[None]] = None

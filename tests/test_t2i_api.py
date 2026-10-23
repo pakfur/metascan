@@ -1277,7 +1277,7 @@ class TestAppWiring(unittest.TestCase):
             "get_config=lambda: get_t2i_config(load_app_config())",
             'unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"]',
             "comfy=comfy_client",
-            "get_vlm=get_vlm_client",
+            "get_vlm=get_writer_vlm",
             "vlm_installed=vlm_model_installed",
         ):
             self.assertIn(wanted, built)

@@ -20,18 +20,29 @@ def _recommended_vlm_gate() -> Optional[str]:
     return None
 
 
-def pick_vlm_model(vlm: Any) -> str:
+def pick_vlm_model(vlm: Any, role: Optional[str] = None) -> str:
     """Pick a model id for ``vlm.ensure_started``.
 
     Prefers whatever the client already has loaded (idempotent restart of
-    the same model); otherwise the first hardware-recommended registered
-    VLM gate.
+    the same model); then the model its role is configured for (the
+    ``preferred_model_id`` that ``backend.services.vlm_roles.VlmRoles``
+    stamps on each client); otherwise the first hardware-recommended
+    registered VLM gate. With ``role="writer"`` a recommendation the writer
+    may not use (``VlmModelSpec.writer_allowed``) becomes the writer
+    default instead.
     """
+    from metascan.core.vlm_models import WRITER_DEFAULT_MODEL, writer_allowed
+
     model_id = getattr(vlm, "model_id", None)
     if model_id:
         return str(model_id)
+    preferred = getattr(vlm, "preferred_model_id", None)
+    if isinstance(preferred, str) and preferred:
+        return preferred
     mid = _recommended_vlm_gate()
     if mid is not None:
+        if role == "writer" and not writer_allowed(mid):
+            return WRITER_DEFAULT_MODEL
         return mid
     raise VlmSelectError("no VLM model available on this hardware")
 

@@ -15,7 +15,7 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -219,16 +219,39 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _vlm_roles_payload() -> Optional[Dict[str, Any]]:
+    """The writer / general role snapshot for the Models tab, with a
+    ``note`` when the writer falls back to the general model. None before
+    the lifespan installs the roles."""
+    from backend.api.vlm import get_vlm_roles
+
+    roles = get_vlm_roles()
+    if roles is None:
+        return None
+    snap = roles.snapshot()
+    snap["note"] = "writer falls back to general" if roles.writer_falls_back else None
+    return snap
+
+
 def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
     """Status rows for the registered VLM variants.
 
     A row is ``available`` only when GGUF, mmproj, AND the shared
     llama-server binary all exist — without the binary the weights can't
     be served, so the Download button must remain enabled to retry the
-    binary fetch (``_ensure_target`` skips files already on disk)."""
+    binary fetch (``_ensure_target`` skips files already on disk).
+
+    ``roles`` lists the roles (``writer`` / ``general``) using the model;
+    ``writer_allowed`` says whether the writer role may pick it."""
+    from backend.api.vlm import get_vlm_roles
+    from backend.services.vlm_roles import ROLES
     from metascan.core.vlm_models import REGISTRY
     from metascan.utils.llama_server import binary_path
 
+    vlm_roles = get_vlm_roles()
+    role_models: Dict[str, Optional[str]] = (
+        {r: vlm_roles.model_id(r) for r in ROLES} if vlm_roles is not None else {}
+    )
     rows: List[Dict[str, Any]] = []
     vlm_dir = get_data_dir() / "models" / "vlm"
     binary_present = binary_path().exists()
@@ -252,6 +275,8 @@ def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
                 "required_vram_mb": int(spec.min_vram_gb * 1024),
                 "preload_at_startup": mid in preload,
                 "is_vlm": True,
+                "roles": [r for r, m in role_models.items() if m == mid],
+                "writer_allowed": spec.writer_allowed,
             }
         )
     return rows
@@ -384,6 +409,7 @@ def _build_status_payload() -> Dict[str, Any]:
         "current_clip_model": current_clip,
         "current_clip_dim": current_dim,
         "tier": classify_tier(report).value,
+        "vlm_roles": _vlm_roles_payload(),
         "gates": {
             k: {
                 "available": g.available,

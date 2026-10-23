@@ -95,6 +95,29 @@ def get_models_config(config: dict) -> dict:
     }
 
 
+def get_vlm_roles_config(config: dict) -> dict:
+    """Return the configured VLM role models, ``None`` where unset.
+
+    Shape:
+        {
+            "writer_vlm": "qwen3vl-8b" | None,   # T2I / I2V prompt writing
+            "general_vlm": "qwen38-27b" | None,  # tagging, chat, storyboard
+        }
+
+    Defaults for unset keys need the hardware report and the installed
+    weights, so they are resolved in ``backend.services.vlm_roles``.
+    """
+    raw = config.get("models", {}) or {}
+
+    def _id(value: object) -> Optional[str]:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    return {
+        "writer_vlm": _id(raw.get("writer_vlm")),
+        "general_vlm": _id(raw.get("general_vlm")),
+    }
+
+
 def get_taste_config(config: dict) -> dict:
     """Return the ``taste`` section with defaults filled in.
 

@@ -198,20 +198,28 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
     async def _drain() -> None:
         from backend.api.vlm import get_vlm_client
         from backend.services.vlm_tag_pump import VlmTagPump
+        from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
+        from metascan.core.vlm_select import vlm_model_installed
 
         client = get_vlm_client()
         if client is None:
             logger.debug("VLM drain skipped: no VlmClient installed")
             return
-        mid = preferred_vlm_model_id(detect_hardware())
+        # The general role's model when it is installed, else the
+        # installed hardware pick (tagging never waits on a download).
+        mid = client.model_id or getattr(client, "preferred_model_id", None)
+        if not mid or not await asyncio.to_thread(vlm_model_installed, mid):
+            mid = preferred_vlm_model_id(detect_hardware())
         if not mid:
             logger.debug("VLM drain skipped: no preferred VLM model for this host")
             return
+        spec = VLM_REGISTRY.get(mid)
         pump = VlmTagPump(
             queue_dir=eq.index_dir,
             client=client,
             db=get_db(),
             model_id=mid,
+            concurrency=spec.parallel_slots if spec is not None else 2,
         )
         try:
             drained = await pump.drain_once()
