@@ -16,6 +16,10 @@ MIN_NEGATIVES: int = 20
 RETRAIN_MIN_EVENTS: int = 25
 RETRAIN_IDLE_S: int = 120
 RETRAIN_CHECK_S: int = 30
+# A model trained while more than this share of its labeled rows had no
+# CLIP vector (a partial index) is due for retrain after the next
+# embedding run.
+MAX_NO_VECTOR_SHARE: float = 0.10
 
 TRAINING_EVENT_KINDS: Tuple[str, ...] = (
     "favorite",

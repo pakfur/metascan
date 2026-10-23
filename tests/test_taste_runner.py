@@ -35,7 +35,7 @@ def _vec(rng: np.random.Generator, direction: np.ndarray, sign: float) -> np.nda
     return (v / np.linalg.norm(v)).astype(np.float32)
 
 
-def _build(tmp_path: Path, n_fav: int, n_pass: int):
+def _build(tmp_path: Path, n_fav: int, n_pass: int, indexed=None):
     rng = np.random.default_rng(7)
     direction = rng.normal(size=DIM)
     direction /= np.linalg.norm(direction)
@@ -60,7 +60,9 @@ def _build(tmp_path: Path, n_fav: int, n_pass: int):
 
     fm = FaissIndexManager(index_dir)
     fm.create(DIM, MODEL_KEY)
-    paths = list(vectors)
+    # ``indexed`` simulates a partial index (a CLIP switch mid-rebuild):
+    # only those paths have a vector yet.
+    paths = [p for p in vectors if indexed is None or p in indexed]
     fm.add_batch(paths, np.stack([vectors[p][0] for p in paths]))
     assert fm.save()
     return db, index_dir, rng, direction
@@ -270,3 +272,76 @@ def test_index_fingerprint_tracks_meta(setup):
     assert runner.index_fingerprint() != fp
     meta_path.unlink()
     assert runner.index_fingerprint() is None
+
+
+# ---- a partial index (CLIP switch mid-rebuild) ---------------------------
+
+
+def _partial(n_fav_indexed: int, n_pass_indexed: int = 30) -> set:
+    return {f"/l/f{i:02d}.png" for i in range(n_fav_indexed)} | {
+        f"/l/p{i:02d}.png" for i in range(n_pass_indexed)
+    }
+
+
+async def test_partial_index_is_not_enough_vectors(tmp_path):
+    # 30 favorites rated, but only 10 have a vector yet (+ the tombstone's
+    # own stored vector = 11 positives with vectors).
+    db, index_dir, _, _ = _build(tmp_path, 30, 30, indexed=_partial(10))
+    runner = TasteRunner(db, index_dir, tmp_path / "taste")
+    try:
+        r = await runner.train(180)
+        assert r["status"] == "not_enough_data", r
+        assert r["reason"] == "vectors"
+        assert r["missing"] == {"positives": 9, "negatives": 0}
+        # Not a failure: no failed row spam, and no model activated.
+        assert db.list_taste_models() == []
+        assert db.get_active_taste_model() is None
+        assert not runner.training
+    finally:
+        db.close()
+
+
+async def test_model_records_labels_without_vectors(tmp_path):
+    db, index_dir, _, _ = _build(tmp_path, 30, 30, indexed=_partial(25))
+    runner = TasteRunner(db, index_dir, tmp_path / "taste")
+    try:
+        r = await runner.train(180)
+        assert r["status"] == "ok", r
+        assert (r["n_pos"], r["n_neg"]) == (26, 30)
+        assert r["n_no_vector"] == 5
+        assert db.get_active_taste_model()["n_no_vector"] == 5
+    finally:
+        db.close()
+
+
+def test_n_no_vector_column_added_to_an_existing_table(tmp_path):
+    """A DB created before the column existed keeps its model rows."""
+    import sqlite3
+
+    db = DatabaseManager(tmp_path / "db")
+    db.close()
+    conn = sqlite3.connect(tmp_path / "db" / "metascan.db")
+    conn.execute("DROP TABLE taste_models")
+    conn.execute(
+        "CREATE TABLE taste_models (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT NOT NULL, labels_as_of TEXT NOT NULL, status TEXT NOT NULL "
+        "CHECK (status IN ('active','retired','failed')), embedding_model TEXT "
+        "NOT NULL, dim INTEGER NOT NULL, categories TEXT NOT NULL, n_pos INTEGER "
+        "NOT NULL, n_neg INTEGER NOT NULL, n_pairs INTEGER NOT NULL, holdout_auc "
+        "REAL, half_life_days REAL NOT NULL, params_path TEXT NOT NULL, error TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO taste_models (created_at, labels_as_of, status, "
+        "embedding_model, dim, categories, n_pos, n_neg, n_pairs, holdout_auc, "
+        "half_life_days, params_path) VALUES ('t', 't', 'active', 'small', 32, "
+        "'[]', 20, 20, 0, 0.8, 180, '/x.npz')"
+    )
+    conn.commit()
+    conn.close()
+    db = DatabaseManager(tmp_path / "db")
+    try:
+        active = db.get_active_taste_model()
+        assert active is not None and active["n_no_vector"] == 0
+        assert active["n_pos"] == 20
+    finally:
+        db.close()

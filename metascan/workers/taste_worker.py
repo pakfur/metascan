@@ -38,6 +38,7 @@ from metascan.core.taste_model import (
     split_holdout,
     train_pairs,
 )
+from metascan.core.taste_labels import missing_for_training
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 LABELS_VERSION = 1
@@ -97,14 +98,17 @@ class _Index:
         return out
 
 
-def _training_matrix(
-    labels: Dict[str, Any], index: _Index
-) -> Tuple[
-    np.ndarray, np.ndarray, np.ndarray, List[List[str]], List[Tuple[int, int, float]]
+def _training_matrix(labels: Dict[str, Any], index: _Index) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    List[List[str]],
+    List[Tuple[int, int, float]],
+    int,
 ]:
     """Resolve each label row to a vector (tombstone embedding when its model
-    matches, else the index); rows with no vector are dropped and the pairs
-    remapped to the surviving rows."""
+    matches, else the index); rows with no vector are dropped (their count
+    is the last element) and the pairs remapped to the surviving rows."""
     rows = labels["rows"]
     vecs: List[Optional[np.ndarray]] = [None] * len(rows)
     need: List[Tuple[int, int]] = []
@@ -137,7 +141,7 @@ def _training_matrix(
     y = np.array([float(rows[i]["label"]) for i in keep], dtype=np.float64)
     w = np.array([float(rows[i]["weight"]) for i in keep], dtype=np.float64)
     cats = [list(rows[i].get("categories") or []) for i in keep]
-    return emb, y, w, cats, pairs
+    return emb, y, w, cats, pairs, skipped
 
 
 def _score(
@@ -161,13 +165,22 @@ def _train(task: Dict[str, Any], index: _Index, out_dir: Path) -> Dict[str, Any]
     labels = json.loads(Path(task["labels_path"]).read_text())
     if labels.get("version") != LABELS_VERSION:
         raise TasteWorkerError(f"unsupported labels version {labels.get('version')}")
-    emb, y, w, row_cats, pairs = _training_matrix(labels, index)
+    emb, y, w, row_cats, pairs, n_no_vector = _training_matrix(labels, index)
     n_pos = int((y > 0.5).sum())
     n_neg = int(y.size - n_pos)
-    if n_pos == 0 or n_neg == 0:
-        raise TasteWorkerError(
-            f"need both classes with vectors (positives={n_pos}, negatives={n_neg})"
-        )
+    # The minimum applies to rows that actually have a vector: right after
+    # a CLIP switch the new index holds only what has been re-embedded so
+    # far, and a model trained on that handful must never go active.
+    missing = missing_for_training(n_pos, n_neg)
+    if missing is not None:
+        return {
+            "status": "not_enough_data",
+            "reason": "vectors",
+            "missing": missing,
+            "n_pos": n_pos,
+            "n_neg": n_neg,
+            "n_no_vector": n_no_vector,
+        }
     categories = sorted({c for cs in row_cats for c in cs})
     X = features(emb, row_cats, categories)
 
@@ -198,6 +211,7 @@ def _train(task: Dict[str, Any], index: _Index, out_dir: Path) -> Dict[str, Any]
         "n_pos": n_pos,
         "n_neg": n_neg,
         "n_pairs": len(pairs),
+        "n_no_vector": n_no_vector,
         "dim": index.dim,
         "embedding_model": index.model_key,
         "categories": categories,

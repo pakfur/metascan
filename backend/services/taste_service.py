@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from metascan.core.taste_labels import (
     DEFAULT_HALF_LIFE_DAYS,
+    MAX_NO_VECTOR_SHARE,
     RETRAIN_CHECK_S,
     RETRAIN_IDLE_S,
     RETRAIN_MIN_EVENTS,
@@ -62,6 +63,7 @@ class TasteService:
         runner: Any,
         get_config: Callable[[], Dict[str, Any]],
         broadcast: Optional[Broadcast] = None,
+        is_indexing: Optional[Callable[[], bool]] = None,
     ) -> None:
         if broadcast is None:
             from backend.ws.manager import ws_manager
@@ -71,6 +73,15 @@ class TasteService:
         self.runner = runner
         self._get_config = get_config
         self._broadcast = broadcast
+        # The embedding queue's is_indexing: no auto-retrain while the
+        # index is being (re)written underneath the worker.
+        self._is_indexing = is_indexing
+        # What the last run said was missing when the labels were enough
+        # but too few had a CLIP vector (status reason "vectors"). Cleared
+        # by a successful run or a finished embedding run.
+        self._vector_missing: Optional[Dict[str, int]] = None
+        # An embedding run finished since the last training run started.
+        self._embedding_ran = False
         self._last_error: Optional[str] = None
         self._train_task: Optional[asyncio.Task] = None
         self._rescore_tasks: Set[asyncio.Task] = set()
@@ -110,6 +121,27 @@ class TasteService:
             self._broadcast("taste", event, data)
         except Exception:
             logger.exception("taste broadcast %s failed", event)
+
+    def _indexing(self) -> bool:
+        if self._is_indexing is None:
+            return False
+        try:
+            return bool(self._is_indexing())
+        except Exception:
+            # The worker handle can vanish mid-poll: treat as indexing and
+            # look again next tick.
+            logger.debug("is_indexing probe failed", exc_info=True)
+            return True
+
+    @staticmethod
+    def _under_vectored(model: Optional[Dict[str, Any]]) -> bool:
+        """True when ``model`` was trained while more than
+        ``MAX_NO_VECTOR_SHARE`` of its labeled rows had no vector."""
+        if model is None:
+            return False
+        missing = int(model.get("n_no_vector") or 0)
+        total = int(model.get("n_pos") or 0) + int(model.get("n_neg") or 0) + missing
+        return total > 0 and missing / total > MAX_NO_VECTOR_SHARE
 
     @property
     def is_training(self) -> bool:
@@ -152,6 +184,10 @@ class TasteService:
             stale = bool(await asyncio.to_thread(self.runner.is_stale, model))
         new_events, _ = await asyncio.to_thread(self._events_since, model)
         missing = await asyncio.to_thread(self._missing)
+        missing_reason: Optional[str] = "labels" if missing is not None else None
+        if missing is None and self._vector_missing is not None:
+            missing = dict(self._vector_missing)
+            missing_reason = "vectors"
         last_error = self._last_error
         if last_error is None:
             latest = await asyncio.to_thread(self.db.list_taste_models, 1)
@@ -165,6 +201,7 @@ class TasteService:
             "training": self.is_training,
             "new_events": new_events,
             "missing": missing,
+            "missing_reason": missing_reason,
             "auto_retrain": await self._auto_retrain(),
             "last_error": last_error,
         }
@@ -213,6 +250,8 @@ class TasteService:
             raise TrainConflict("already_training")
         if self._closed:
             raise TrainConflict("already_training")
+        # This run sees every vector there is now.
+        self._embedding_ran = False
         self._train_task = asyncio.create_task(self._run_training(auto_inputs))
 
     async def _run_training(self, auto_inputs: Optional[Tuple[Any, ...]]) -> None:
@@ -234,6 +273,7 @@ class TasteService:
         if status == "ok":
             self._last_error = None
             self._failed_auto_inputs = None
+            self._vector_missing = None
             model_id = result.get("model_id")
             self._emit(
                 "training_complete",
@@ -251,7 +291,11 @@ class TasteService:
             # Labels dropped between the check and the snapshot; status
             # already reports what is missing, so this is not an error --
             # and whatever failed before is no longer the latest news.
+            # Reason "vectors": the labels are enough but too few have a
+            # CLIP vector yet (partial index); status reports that shortfall.
             self._last_error = None
+            if result.get("reason") == "vectors" and result.get("missing"):
+                self._vector_missing = dict(result["missing"])
             self._emit("training_failed", {"error": "not_enough_data"})
             return
         error = str(result.get("error") or "taste training failed")
@@ -262,13 +306,18 @@ class TasteService:
         """One auto-retrain check; True when a training run was started."""
         if self.is_training or self._closed or not await self._auto_retrain():
             return False
+        # The index is being written (every 100 files on a rebuild): its
+        # fingerprint keeps changing and it holds a fraction of the vectors.
+        if self._indexing():
+            return False
         now = now or datetime.now(timezone.utc)
         model = await asyncio.to_thread(self.db.get_active_taste_model)
         stale = model is not None and bool(
             await asyncio.to_thread(self.runner.is_stale, model)
         )
+        under_vectored = self._embedding_ran and self._under_vectored(model)
         count, newest = await asyncio.to_thread(self._events_since, model)
-        if not stale and count < RETRAIN_MIN_EVENTS:
+        if not stale and not under_vectored and count < RETRAIN_MIN_EVENTS:
             return False
         if newest is not None:
             newest_dt = _parse_ts(newest)
@@ -290,9 +339,11 @@ class TasteService:
         except TrainConflict:
             return False
         logger.info(
-            "Auto-retraining the taste scorer (%d new events, stale=%s)",
+            "Auto-retraining the taste scorer (%d new events, stale=%s, "
+            "under_vectored=%s)",
             count,
             stale,
+            under_vectored,
         )
         return True
 
@@ -361,6 +412,8 @@ class TasteService:
         # New vectors (possibly a whole new index): a failed auto-retrain
         # may succeed now, so let the loop try again.
         self._failed_auto_inputs = None
+        self._vector_missing = None
+        self._embedding_ran = True
         self._spawn_rescore()
 
     def _spawn_rescore(self) -> None:

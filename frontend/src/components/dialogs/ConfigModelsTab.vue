@@ -547,7 +547,12 @@ async function onRetagLibrary() {
       <div v-else-if="tasteStatus" class="taste-model">No taste model yet.</div>
       <div v-if="tasteMissing" class="taste-missing">
         Need {{ plural(tasteMissing.positives, 'more favorite', 'more favorites') }} /
-        {{ plural(tasteMissing.negatives, 'more pass', 'more passes') }} to train.
+        {{ plural(tasteMissing.negatives, 'more pass', 'more passes') }}
+        <template v-if="tasteStatus?.missing_reason === 'vectors'">
+          with a CLIP vector to train: build the similarity index
+          (Similarity Settings &rarr; Build Index) and let it finish.
+        </template>
+        <template v-else>to train.</template>
       </div>
       <div v-if="tasteStatus && tasteStatus.new_events > 0" class="taste-new">
         {{ plural(tasteStatus.new_events, 'new rating', 'new ratings') }} since last training.

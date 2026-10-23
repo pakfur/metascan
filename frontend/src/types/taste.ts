@@ -20,6 +20,9 @@ export interface TasteStatus {
   training: boolean
   new_events: number
   missing: TasteMissing | null
+  // 'labels': too few ratings; 'vectors': enough ratings, but too few of
+  // them have a CLIP vector yet (index missing or mid-rebuild).
+  missing_reason: 'labels' | 'vectors' | null
   auto_retrain: boolean
   last_error: string | null
 }
