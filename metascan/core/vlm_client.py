@@ -14,6 +14,8 @@ is replaced by per-request HTTP calls and a periodic /health probe.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import socket
@@ -24,6 +26,7 @@ from typing import (
     Any,
     AsyncIterator,
     Awaitable,
+    Iterator,
     TypeVar,
     Callable,
     Dict,
@@ -55,6 +58,30 @@ _RESPAWN_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
 # A request whose client was evicted (swapped out for the other role)
 # while it ran is retried this many times after re-ensuring residency.
 _EVICTION_RETRIES = 5
+
+# True inside background VLM work (the post-embedding tag drain, the retag
+# job): when the roles take turns, such work never force-evicts the other
+# role -- it waits for it to go idle (VlmRoles._make_room) -- and it is
+# itself preempted by interactive requests (it is retried after an
+# eviction). Set with ``background_vlm_work()``; tasks inherit it.
+_BACKGROUND_WORK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vlm_background_work", default=False
+)
+
+
+@contextlib.contextmanager
+def background_vlm_work() -> Iterator[None]:
+    """Mark the VLM calls made inside (and in tasks created inside) as
+    background work."""
+    token = _BACKGROUND_WORK.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_WORK.reset(token)
+
+
+def is_background_vlm_work() -> bool:
+    return _BACKGROUND_WORK.get()
 
 _T = TypeVar("_T")
 
@@ -98,6 +125,16 @@ class VlmClient:
         # Requests in flight (generate_tags / generate_text / chat_stream),
         # so a swap can wait for them before shutting this client down.
         self._in_flight = 0
+        # Of those, the ones made as background work (see
+        # ``background_vlm_work``): an interactive swap preempts them.
+        self._background_in_flight = 0
+        # Callers waiting for this client to become resident (ensure_started
+        # / a re-ensure), and how many of them are interactive.
+        self._residency_waiters = 0
+        self._interactive_waiters = 0
+        # Holds (``hold()``): a run of requests (a T2I Random batch writing
+        # its prompts) that background work must not evict between items.
+        self._holds = 0
         self._idle_event = asyncio.Event()
         self._idle_event.set()
         self._last_request_end = float("-inf")
@@ -217,6 +254,12 @@ class VlmClient:
         """
         if self.retired:
             raise VlmError("client retired")
+        with self._waiting_for_residency():
+            await self._ensure_started(model_id, unless_stopped_since)
+
+    async def _ensure_started(
+        self, model_id: str, unless_stopped_since: Optional[int]
+    ) -> None:
         await self._quiesced.wait()
         async with self._start_lock:
             if (
@@ -593,12 +636,74 @@ class VlmClient:
     def in_flight(self) -> int:
         return self._in_flight
 
+    @property
+    def interactive_in_flight(self) -> int:
+        return max(0, self._in_flight - self._background_in_flight)
+
+    @property
+    def interactive_waiters(self) -> int:
+        """Interactive callers waiting for this client to be resident."""
+        return self._interactive_waiters
+
+    @contextlib.contextmanager
+    def _waiting_for_residency(self) -> Iterator[None]:
+        interactive = not is_background_vlm_work()
+        self._residency_waiters += 1
+        self._interactive_waiters += int(interactive)
+        try:
+            yield
+        finally:
+            self._residency_waiters -= 1
+            self._interactive_waiters -= int(interactive)
+
+    @contextlib.contextmanager
+    def hold(self) -> Iterator[None]:
+        """Keep this client busy for background swaps across a run of
+        requests (a T2I Random batch writing prompts): background work
+        waits for the hold to end instead of evicting between items.
+        Interactive swaps still evict after their bounded wait."""
+        self._holds += 1
+        try:
+            yield
+        finally:
+            self._holds -= 1
+            self._last_request_end = time.monotonic()
+
+    def busy_for_background(self, grace: float) -> bool:
+        """True while background work must not evict this client: requests
+        in flight or waiting for it, a hold, a spawn / load, or its last
+        request ended less than ``grace`` s ago."""
+        return (
+            self._in_flight > 0
+            or self._residency_waiters > 0
+            or self._holds > 0
+            or self._is_loading()
+            or time.monotonic() - self._last_request_end < grace
+        )
+
+    def background_only(self) -> bool:
+        """True when this client is serving background work and nothing
+        else (it may be preempted: such requests are retried after an
+        eviction). False while it is idle, loading, held, or serving / awaited
+        by an interactive caller."""
+        return (
+            self._background_in_flight > 0
+            and self._holds == 0
+            and self._interactive_waiters == 0
+            and self.interactive_in_flight == 0
+            and not self._is_loading()
+        )
+
     def _begin_request(self) -> None:
         self._in_flight += 1
+        if is_background_vlm_work():
+            self._background_in_flight += 1
         self._idle_event.clear()
 
     def _end_request(self) -> None:
         self._in_flight = max(0, self._in_flight - 1)
+        if is_background_vlm_work():
+            self._background_in_flight = max(0, self._background_in_flight - 1)
         self._last_request_end = time.monotonic()
         if self._in_flight == 0:
             self._idle_event.set()
@@ -641,6 +746,10 @@ class VlmClient:
         inside its backoff: the request fails fast rather than evicting
         the other role again for every attempt."""
         stops = self._explicit_stops if since is None else since
+        with self._waiting_for_residency():
+            await self._ensure_resident_locked(stops)
+
+    async def _ensure_resident_locked(self, stops: int) -> None:
         await self._quiesced.wait()
         if self.retired:
             raise VlmError("client retired")

@@ -165,6 +165,15 @@ class RetagRequest(BaseModel):
 
 
 async def _run_retag_job(job: "_RetagJob") -> None:
+    """Background VLM work: when the roles take turns it waits for a busy
+    prompt writer instead of evicting it, and yields to interactive work."""
+    from metascan.core.vlm_client import background_vlm_work
+
+    with background_vlm_work():
+        await _retag(job)
+
+
+async def _retag(job: "_RetagJob") -> None:
     import time
 
     from metascan.core.hardware import detect_hardware

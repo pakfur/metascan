@@ -55,9 +55,24 @@ the root CLAUDE.md still applies.
   respawning an untracked llama-server. Two distinct role models stay
   co-resident only when their `approx_vram_gb` sum fits the detected VRAM
   (CUDA VRAM, MPS unified RAM; unknown = no) minus 2 GB; otherwise they
-  **take turns** via `VlmClient.before_spawn` (`VlmRoles._make_room`):
-  the other client is shut down after a bounded (30 s) wait for its
-  in-flight requests (`VlmClient.wait_idle`). An unset writer whose
+  **take turns** via `VlmClient.before_spawn` (`VlmRoles._make_room`).
+  The mode is per request, from the `background_vlm_work()` contextvar
+  (set by `VlmTagPump.drain_once` and `_run_retag_job`; tasks inherit it).
+  An **interactive** spawn (writer prompting, chat, playground,
+  storyboard) waits at most `IDLE_TIMEOUT_S` (30 s) for the other client's
+  in-flight requests (`VlmClient.wait_idle`), then evicts it — at once
+  when all it is doing is background work (`background_only()`:
+  background requests in flight, no interactive request / waiter, no
+  hold; those requests are retried after the eviction). A **background**
+  spawn never force-evicts: it waits with no cap until the other client
+  is not `busy_for_background(BACKGROUND_GRACE_S)` (nothing in flight or
+  waiting for residency, no `hold()`, not loading, idle for 30 s); an
+  interactive caller that starts waiting for the same client meanwhile
+  bounds that wait from then on. A T2I Random batch holds the writer
+  (`VlmClient.hold()` in `T2iRunner._produce`) for its whole prompting
+  phase, so the tag drain never evicts the writer between two prompts:
+  a writer run overlapping a tag batch costs at most 2 swaps
+  (`test_a_writer_run_overlapping_a_tag_batch_swaps_at_most_twice`). An unset writer whose
   default is not installed and whose general model is not writer-eligible
   stays `qwen3vl-8b` (missing): T2I falls back with
   `writer_missing_hint`, I2V raises `I2vUnavailableError` with it.

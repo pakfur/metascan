@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_client import VlmError, background_vlm_work
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,15 @@ class VlmTagPump:
         self.pending_file.write_text(rest, encoding="utf-8")
 
     async def drain_once(self) -> int:
-        """Process every line currently in vlm_pending.jsonl. Returns count."""
+        """Process every line currently in vlm_pending.jsonl. Returns count.
+
+        Background VLM work: when the roles take turns it never evicts the
+        prompt writer while the writer is busy (it waits for it), and an
+        interactive request may preempt it (items are retried)."""
+        with background_vlm_work():
+            return await self._drain_once()
+
+    async def _drain_once(self) -> int:
         if not self.pending_file.exists():
             return 0
         # Snapshot now, but only consume (remove) the snapshot once the VLM

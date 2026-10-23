@@ -41,6 +41,7 @@ from typing import (
     Tuple,
 )
 
+from metascan.core.vlm_client import is_background_vlm_work
 from metascan.core.vlm_models import (
     REGISTRY,
     WRITER_DEFAULT_MODEL,
@@ -63,6 +64,12 @@ SWAP_GRACE_S = 0.5
 # How long a swap waits for the other client's model load to finish
 # (matches VlmClient.ensure_started's wait for a load in progress).
 LOAD_TIMEOUT_S = 600.0
+# Background work (tag drain, retag) only takes the GPU back from the other
+# role once that role has been idle this long: a writer between two
+# Generate Prompt clicks, or between captions, is not evicted.
+BACKGROUND_GRACE_S = 30.0
+# Poll interval of a background swap's wait.
+_BACKGROUND_POLL_S = 0.05
 
 NOTE_TAKE_TURNS = (
     "writer and tagging models take turns — they don't fit in VRAM together"
@@ -196,6 +203,7 @@ class VlmRoles:
         idle_timeout_s: float = IDLE_TIMEOUT_S,
         swap_grace_s: float = SWAP_GRACE_S,
         load_timeout_s: float = LOAD_TIMEOUT_S,
+        background_grace_s: float = BACKGROUND_GRACE_S,
     ) -> None:
         self._factory = client_factory
         self._save = save_model
@@ -204,6 +212,7 @@ class VlmRoles:
         self._idle_timeout_s = idle_timeout_s
         self._swap_grace_s = swap_grace_s
         self._load_timeout_s = load_timeout_s
+        self._background_grace_s = background_grace_s
         self._writer_cfg: Optional[str] = writer
         self._models: Dict[Role, Optional[str]] = {"writer": None, "general": general}
         self._models["writer"] = self._effective_writer()
@@ -364,12 +373,87 @@ class VlmRoles:
 
     # ---- residency -----------------------------------------------------
 
+    async def _wait_for_background_turn(self, other: Any, client: Any) -> None:
+        """A background spawn's wait: until ``other`` is idle for
+        background work (``VlmClient.busy_for_background``: nothing in
+        flight or waiting, no hold, idle for the background grace) or no
+        longer resident -- no time cap, so background work never
+        force-evicts the other role. If an interactive caller starts
+        waiting for ``client`` meanwhile, the wait becomes the bounded
+        interactive one from that moment."""
+        busy = getattr(other, "busy_for_background", None)
+        if busy is None:  # a duck-typed client: wait for in-flight work
+            await other.wait_idle(self._idle_timeout_s, grace=self._swap_grace_s)
+            return
+        deadline: Optional[float] = None
+        loop = asyncio.get_running_loop()
+        while getattr(other, "state", None) in _RESIDENT_STATES and busy(
+            self._background_grace_s
+        ):
+            if deadline is None and getattr(client, "interactive_waiters", 0) > 0:
+                deadline = loop.time() + self._idle_timeout_s
+            if deadline is not None and loop.time() >= deadline:
+                logger.warning(
+                    "VLM %s still busy after %.0fs; shutting it down to make "
+                    "room for %s",
+                    other.model_id,
+                    self._idle_timeout_s,
+                    client.preferred_model_id,
+                )
+                return
+            await asyncio.sleep(_BACKGROUND_POLL_S)
+
+    async def _wait_for_interactive_turn(self, other: Any, client: Any) -> None:
+        """An interactive spawn's wait: bounded (``idle_timeout_s``) for
+        ``other``'s requests to end, cut short as soon as all ``other`` is
+        doing is background work (preempted: retried after the eviction)."""
+        preemptible = getattr(other, "background_only", None)
+        if preemptible is None:  # a duck-typed client
+            idle = await other.wait_idle(
+                self._idle_timeout_s, grace=self._swap_grace_s
+            )
+        else:
+            idle = False
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._idle_timeout_s
+            while True:
+                if preemptible():
+                    logger.info(
+                        "VLM %s is only doing background work; preempting it "
+                        "for %s",
+                        other.model_id,
+                        client.preferred_model_id,
+                    )
+                    return
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                slice_s = min(_BACKGROUND_POLL_S, remaining)
+                if await other.wait_idle(slice_s, grace=self._swap_grace_s):
+                    idle = True
+                    break
+        if not idle:
+            logger.warning(
+                "VLM %s still busy after %.0fs; shutting it down to make room "
+                "for %s",
+                other.model_id,
+                self._idle_timeout_s,
+                client.preferred_model_id,
+            )
+
     async def _make_room(self, client: Any) -> None:
         """``before_spawn`` hook: when the two role models do not fit
-        together, shut the other client down before ``client`` spawns --
-        after waiting (bounded) for its in-flight requests."""
+        together, shut the other client down before ``client`` spawns.
+
+        An interactive spawn (prompt writing, chat, playground, storyboard)
+        waits (bounded) for the other client's in-flight requests, then
+        evicts it -- at once when all it is doing is background work, which
+        is retried after an eviction. A background spawn (``background_vlm_
+        work``: the tag drain, retag) never force-evicts: it waits, with no
+        time cap, until the other client is idle for background work."""
         if self.co_resident:
             return
+        background = is_background_vlm_work()
         async with self._residency_lock:
             for other in self.distinct_clients():
                 if other is client:
@@ -389,16 +473,10 @@ class VlmRoles:
                             other.model_id,
                             self._load_timeout_s,
                         )
-                if not await other.wait_idle(
-                    self._idle_timeout_s, grace=self._swap_grace_s
-                ):
-                    logger.warning(
-                        "VLM %s still busy after %.0fs; shutting it down to "
-                        "make room for %s",
-                        other.model_id,
-                        self._idle_timeout_s,
-                        client.preferred_model_id,
-                    )
+                if background:
+                    await self._wait_for_background_turn(other, client)
+                else:
+                    await self._wait_for_interactive_turn(other, client)
                 if getattr(other, "state", None) not in _RESIDENT_STATES:
                     # Stopped (or failed) meanwhile -- nothing to evict, and
                     # evict() must not mark it swapped_out behind an

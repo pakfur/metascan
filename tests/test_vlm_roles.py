@@ -795,6 +795,8 @@ async def test_writer_taking_over_mid_tag_batch_loses_no_items(
             client_factory=lambda: VlmClient(spawn_override=lambda mid: urls[mid]),
             vram_gb=24.0,  # 9.5 + 22 does not fit: the roles take turns
             swap_grace_s=0.0,
+            # The batch takes the GPU back as soon as the writer is idle.
+            background_grace_s=0.0,
         )
         writer, general = roles.client("writer"), roles.client("general")
         db = _BlockingDb()
@@ -1431,3 +1433,208 @@ async def test_a_request_whose_re_ensure_was_evicted_after_ready_retries() -> No
     assert res == ["ok"]
     assert len(starts) == 2
     assert calls == ["ready"]
+
+
+# ---------------------------------------------------------------------------
+# Final review item 3: background work never force-evicts a busy writer
+# ---------------------------------------------------------------------------
+
+
+class _SlowDb:
+    """Records tag writes; each takes a moment (in its worker thread) so a
+    tag batch spans the writer's run."""
+
+    def __init__(self, delay_s: float = 0.05) -> None:
+        self.tagged: List[tuple] = []
+        self.delay_s = delay_s
+
+    def add_tag_indices(self, path: Any, tags: List[str], source: str) -> None:
+        time.sleep(self.delay_s)
+        self.tagged.append((str(path), list(tags)))
+
+
+def _pending_images(tmp_path: Path, n: int) -> List[Path]:
+    from PIL import Image
+
+    images = []
+    for i in range(n):
+        p = tmp_path / f"img{i}.png"
+        Image.new("RGB", (8, 8), (i * 20 % 255, 0, 0)).save(p)
+        images.append(p)
+    (tmp_path / "vlm_pending.jsonl").write_text(
+        "".join(json.dumps({"path": str(p)}) + "\n" for p in images)
+    )
+    return images
+
+
+async def test_a_writer_run_overlapping_a_tag_batch_swaps_at_most_twice(
+    tmp_path: Path,
+) -> None:
+    """The writer writes N prompts (a Random batch: one hold) while a tag
+    batch drains on the general model. The writer preempts the background
+    batch at once (no 30 s wait), is never evicted while it writes, and the
+    batch takes the GPU back only after the writer is done: 2 swaps, no
+    tag lost."""
+    from backend.services.vlm_tag_pump import VlmTagPump
+
+    images = _pending_images(tmp_path, 12)
+    tags = '["red car", "blue sky"]'
+    spawned: List[str] = []
+    async with FakeLlamaServer(canned_response=tags) as w, FakeLlamaServer(
+        canned_response=tags
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=_spawn_counting_factory(urls, spawned),
+            vram_gb=24.0,  # 9.5 + 22 does not fit: the roles take turns
+            swap_grace_s=0.0,
+            background_grace_s=0.3,
+            # A force-evict after this long would show up as extra swaps.
+            idle_timeout_s=0.2,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        db = _SlowDb()
+        pump = VlmTagPump(
+            queue_dir=tmp_path,
+            client=general,
+            db=db,
+            model_id="qwen38-27b",
+            concurrency=2,
+        )
+        try:
+            task = asyncio.create_task(pump.drain_once())
+            while len(db.tagged) < 2:
+                await asyncio.sleep(0.01)
+            assert general.state == "ready"
+
+            t0 = time.monotonic()
+            writer_states: List[str] = []
+            with writer.hold():  # a Random batch writing its prompts
+                for _ in range(5):
+                    await writer.ensure_started("qwen3vl-8b")
+                    out = await writer.generate_text(
+                        system_prompt="s", user_prompt="u"
+                    )
+                    assert out
+                    writer_states.append(writer.state)
+                    # Gaps between prompts longer than the swap grace and
+                    # the interactive idle timeout.
+                    await asyncio.sleep(0.25)
+            writer_elapsed = time.monotonic() - t0
+
+            await asyncio.wait_for(task, 30)
+            assert sorted(p for p, _ in db.tagged) == sorted(str(p) for p in images)
+            assert all(t for _, t in db.tagged), db.tagged  # none failed / empty
+            assert writer_states == ["ready"] * 5
+            # Not slowed: no 30 s (or even idle_timeout) wait per eviction.
+            assert writer_elapsed < 5.0
+            # general (initial), writer (swap 1), general back (swap 2).
+            assert spawned == ["qwen38-27b", "qwen3vl-8b", "qwen38-27b"], spawned
+            assert general._evictions == 1 and writer._evictions == 1
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_background_work_waits_for_a_busy_writer_without_a_cap() -> None:
+    """A background re-ensure of the general model never force-evicts the
+    writer while it has a hold, however long that is."""
+    from metascan.core.vlm_client import background_vlm_work
+
+    spawned: List[str] = []
+    async with FakeLlamaServer() as w, FakeLlamaServer() as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=_spawn_counting_factory(urls, spawned),
+            vram_gb=24.0,
+            swap_grace_s=0.0,
+            background_grace_s=0.1,
+            idle_timeout_s=0.1,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await writer.ensure_started("qwen3vl-8b")
+
+            async def background() -> None:
+                with background_vlm_work():
+                    await general.ensure_started("qwen38-27b")
+
+            with writer.hold():
+                task = asyncio.create_task(background())
+                await asyncio.sleep(0.6)  # several idle timeouts
+                assert writer.state == "ready" and writer._evictions == 0
+                assert not task.done()
+            await asyncio.wait_for(task, 5)
+            assert general.state == "ready"
+            assert writer._evictions == 1
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_an_interactive_caller_bounds_a_background_wait() -> None:
+    """A chat request arriving for the general model while a background
+    spawn waits for the writer turns the wait into the bounded interactive
+    one."""
+    from metascan.core.vlm_client import background_vlm_work
+
+    async with FakeLlamaServer() as w, FakeLlamaServer() as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=lambda: VlmClient(spawn_override=lambda mid: urls[mid]),
+            vram_gb=24.0,
+            swap_grace_s=0.0,
+            background_grace_s=0.1,
+            idle_timeout_s=0.2,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await writer.ensure_started("qwen3vl-8b")
+
+            async def background() -> None:
+                with background_vlm_work():
+                    await general.ensure_started("qwen38-27b")
+
+            with writer.hold():
+                bg = asyncio.create_task(background())
+                await asyncio.sleep(0.3)
+                assert not bg.done()
+                t0 = time.monotonic()
+                await asyncio.wait_for(general.ensure_started("qwen38-27b"), 5)
+                assert time.monotonic() - t0 < 2.0
+                await asyncio.wait_for(bg, 5)
+                assert general.state == "ready" and writer._evictions == 1
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_an_interactive_request_is_not_preempted() -> None:
+    """Preemption is only for background work: a writer swap still waits
+    (bounded) for the general model's interactive request."""
+    async with FakeLlamaServer() as w, FakeLlamaServer() as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=lambda: VlmClient(spawn_override=lambda mid: urls[mid]),
+            vram_gb=24.0,
+            swap_grace_s=0.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await general.ensure_started("qwen38-27b")
+            general._begin_request()  # an interactive chat in flight
+
+            async def finish() -> None:
+                await asyncio.sleep(0.2)
+                assert general._evictions == 0  # not preempted mid-chat
+                general._end_request()
+
+            await asyncio.gather(writer.ensure_started("qwen3vl-8b"), finish())
+            assert general._evictions == 1
+        finally:
+            await roles.shutdown_all()

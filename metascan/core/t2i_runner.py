@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import contextlib
 import copy
 import dataclasses
 import json
@@ -1370,7 +1371,19 @@ class T2iRunner:
     async def _produce(self, batch: _Batch, queue: "asyncio.Queue[_Step]") -> None:
         """Write the prompts, one step at a time, and hand each to the
         consumer. A Manual batch has one step and never asks the VLM; neither
-        does the first step of a Random batch whose request supplies it."""
+        does the first step of a Random batch whose request supplies it.
+
+        While a Random batch writes, it holds the writer client
+        (``VlmClient.hold``): background VLM work (the tag drain) does not
+        evict the writer between two prompts, it waits for the batch."""
+        vlm = self.get_vlm() if batch.mode == "random" else None
+        hold = getattr(vlm, "hold", None)
+        with hold() if callable(hold) else contextlib.nullcontext():
+            await self._produce_steps(batch, queue)
+
+    async def _produce_steps(
+        self, batch: _Batch, queue: "asyncio.Queue[_Step]"
+    ) -> None:
         try:
             context: Optional[_CaptionContext] = None
             for index, (caption, variant) in enumerate(batch.plan):
