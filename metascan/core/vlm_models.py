@@ -42,6 +42,9 @@ class VlmModelSpec:
         (KV-cache quant, reasoning control, …).
       - ``cuda_gate_vram_gb``: CUDA availability floor for feature_gates;
         None means "use min_vram_gb".
+      - ``writer_allowed``: False keeps the model out of the prompt-writer
+        role (T2I / I2V prompt writing). Fine-tune adapters build on the
+        writer model, so it must be one they can target.
     """
 
     model_id: str
@@ -57,6 +60,12 @@ class VlmModelSpec:
     extra_args: tuple[str, ...] = ()
     cuda_gate_vram_gb: Optional[float] = None
     mmproj_repo_filename: str = "mmproj-F16.gguf"
+    writer_allowed: bool = True
+
+
+# The prompt-writer role's default model (taste learning: adapters are
+# trained on it, so the base writer baseline must be measured with it).
+WRITER_DEFAULT_MODEL = "qwen3vl-8b"
 
 
 # Source weights for the qwen3vl-* entries live under the ``huihui-ai``
@@ -137,6 +146,8 @@ REGISTRY: dict[str, VlmModelSpec] = {
         extra_args=("--reasoning", "off"),
         cuda_gate_vram_gb=22.0,
         mmproj_repo_filename="AUX/mmproj-Qwen3.8-27B-Uncensored-OrcaRouter-F16.gguf",
+        # Tagging / chat only: never the prompt writer.
+        writer_allowed=False,
     ),
 }
 
@@ -146,6 +157,17 @@ def get_spec(model_id: str) -> VlmModelSpec:
     return REGISTRY[model_id]
 
 
+def writer_allowed(model_id: str) -> bool:
+    """True when ``model_id`` is registered and may serve the writer role."""
+    spec = REGISTRY.get(model_id)
+    return spec is not None and spec.writer_allowed
+
+
+def writer_missing_hint(model_id: str) -> str:
+    """What to tell the user when the prompt-writer model is not installed."""
+    return f"prompt writer {model_id} not installed — download it in Models"
+
+
 def resolve_repo(model_id: str, override: dict[str, str] | None = None) -> str:
     """Apply optional config override on top of the registry's default repo."""
     if override and model_id in override:
@@ -153,4 +175,12 @@ def resolve_repo(model_id: str, override: dict[str, str] | None = None) -> str:
     return REGISTRY[model_id].hf_repo
 
 
-__all__ = ["VlmModelSpec", "REGISTRY", "get_spec", "resolve_repo"]
+__all__ = [
+    "VlmModelSpec",
+    "REGISTRY",
+    "WRITER_DEFAULT_MODEL",
+    "get_spec",
+    "resolve_repo",
+    "writer_allowed",
+    "writer_missing_hint",
+]

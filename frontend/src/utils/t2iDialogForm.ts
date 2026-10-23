@@ -12,9 +12,15 @@ import {
   type CaptionFilter,
   type SeedPolicy,
   type T2iBatchRequest,
+  type T2iBatchStep,
+  type T2iDraftSet,
+  type T2iPromptDraft,
+  type T2iVariantPrompt,
+  type T2iWriter,
   type T2iConfig,
   type T2iFinishedBatch,
   type T2iFormState,
+  type T2iImage,
   type T2iLora,
   type T2iMode,
 } from '../types/t2i'
@@ -162,6 +168,150 @@ export interface BatchContext {
   hasNegative: boolean
   maxBatchSize: number
   maxCount: number
+  /** The Variants picker (prompt variants per caption). Default 1. */
+  variants?: number
+  /** The Writer picker. Default `base`. */
+  writer?: T2iWriter
+  /** The drafts the store holds behind the Prompt box, if any. */
+  drafts?: T2iDraftSet | null
+}
+
+// ---- drafts -----------------------------------------------------------------------
+
+/**
+ * The drafts a Generate Prompt returned, as the store holds them: each
+ * variant's text starts as its draft. The box shows variant 0.
+ */
+export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T2iDraftSet | null {
+  if (drafts.length === 0) return null
+  return {
+    caption,
+    variants: drafts.length,
+    entries: [...drafts]
+      .sort((a, b) => a.variant_index - b.variant_index)
+      .map((d) => ({
+        variant_index: d.variant_index,
+        writer_id: d.writer_id,
+        writer_model: d.writer_model ?? null,
+        draft: d.prompt,
+        text: d.prompt,
+        negative: d.negative ?? '',
+      })),
+    current: 0,
+  }
+}
+
+/**
+ * What a Random run hands back: the variants of its last caption that were on
+ * show (`steps`), with the box on `shown` (the last step's variant). Steps
+ * without a draft (typed) or of another caption are left out; null when the
+ * shown step itself has no draft, since the box would then hold a prompt no
+ * writer drafted.
+ */
+export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T2iDraftSet | null {
+  if (shown.draft == null || !shown.writer_id) return null
+  const byVariant = new Map<number, T2iBatchStep>()
+  for (const s of steps) {
+    if (s.caption_index !== shown.caption_index || s.draft == null || !s.writer_id) continue
+    byVariant.set(s.variant_index, s)
+  }
+  byVariant.set(shown.variant_index, shown)
+  const ordered = [...byVariant.values()].sort((a, b) => a.variant_index - b.variant_index)
+  return {
+    caption: shown.caption,
+    variants: shown.variants,
+    entries: ordered.map((s) => ({
+      variant_index: s.variant_index,
+      writer_id: s.writer_id as string,
+      writer_model: s.writer_model ?? null,
+      draft: s.draft as string,
+      text: s.prompt,
+      negative: s.negative ?? '',
+    })),
+    current: ordered.findIndex((s) => s.variant_index === shown.variant_index),
+  }
+}
+
+/** Writers whose drafts a supplied prompt may name (judgments.DRAFT_WRITERS). */
+const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
+
+/**
+ * A selected tile's lineage as a one-entry draft set, so re-rendering a
+ * writer's prompt keeps its writer, model and draft instead of going out as a
+ * typed (`manual`) prompt; an edit of the loaded text is still `edited`. Null
+ * for a typed image (no draft) or one from before lineage existed. `f` is the
+ * form as just loaded from the tile.
+ */
+export function draftSetFromImage(
+  img: Pick<T2iImage, 'writer_id' | 'writer_model' | 'draft_prompt'>,
+  f: Pick<T2iFields, 'caption' | 'prompt' | 'negative'>,
+): T2iDraftSet | null {
+  const writerId = img.writer_id
+  if (img.draft_prompt == null || !writerId || !DRAFT_WRITERS.includes(writerId)) return null
+  return {
+    caption: f.caption,
+    variants: 1,
+    entries: [
+      {
+        variant_index: 0,
+        writer_id: writerId,
+        writer_model: img.writer_model ?? null,
+        draft: img.draft_prompt,
+        text: f.prompt,
+        negative: f.negative,
+      },
+    ],
+    current: 0,
+  }
+}
+
+/**
+ * The prompts of batch 1 a Generate sends with their drafts, or null when the
+ * box goes out as a typed (`manual`) prompt. That is only when no held draft
+ * belongs to the boxes: none held, written for another caption, or an empty
+ * Prompt box (which means "write me one", never "render a draft"). A box
+ * whose text came from a draft is never sent as typed:
+ *  - the drafts were written for as many variants as the picker asks for:
+ *    every variant held goes out (all of them, or the ones a cut-short run
+ *    handed back), the shown one with the boxes' live text;
+ *  - the picker has changed since: the variant on show goes out alone.
+ * Entries are numbered 0..k-1 in the request (the server renders k variants
+ * of this caption; drawn captions after it still get the picker's number).
+ */
+export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt[] | null {
+  if (f.mode === 'random' && firstBatchSource(f) !== 'prompt') return null
+  const set = ctx.drafts
+  if (!set || set.caption !== f.caption || !f.prompt.trim() || set.entries.length === 0) return null
+  const shownEntry = set.entries[set.current]
+  if (!shownEntry) return null
+  const picked = set.variants === (ctx.variants ?? 1) ? set.entries : [shownEntry]
+  return picked.map((e, i) => {
+    const shown = e === shownEntry
+    const text = shown ? f.prompt : e.text
+    const negative = shown ? f.negative : e.negative
+    return {
+      prompt: text,
+      negative: ctx.hasNegative && negative.trim() ? negative : null,
+      draft: e.draft,
+      writer_id: e.writer_id,
+      writer_model: e.writer_model,
+      variant_index: i,
+    }
+  })
+}
+
+/**
+ * How many steps (prompts) a Generate renders, each Count per Batch images:
+ * batch 1 has one per held draft, one for a typed prompt, else one per
+ * variant; the batches after it one per variant.
+ */
+export function plannedSteps(f: T2iFields, ctx: BatchContext): number {
+  const variants = ctx.variants ?? 1
+  const held = usablePrompts(f, ctx)
+  const typed = f.mode === 'manual' || firstBatchSource(f) === 'prompt'
+  const first = held ? held.length : typed ? 1 : variants
+  const captions = effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize)
+  return first + (captions - 1) * variants
 }
 
 /**
@@ -187,12 +337,24 @@ export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequ
     batch_size: effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize),
     count_per_batch: effectiveCount(f.seedPolicy, f.countPerBatch, ctx.maxCount),
     loras: f.loras.map((l) => ({ name: l.name, strength: l.strength })),
+    variants: ctx.variants ?? 1,
+    writer: ctx.writer ?? 'base',
   }
-  if (f.mode === 'manual' || firstBatchSource(f) === 'prompt') {
+  const held = usablePrompts(f, ctx)
+  if (held) {
+    // The drafts go out with their texts: every image records its writer,
+    // its draft and whether the text was edited.
+    req.prompts = held
+    req.aspect_ratio = f.aspect
+    if (f.caption.trim()) req.caption = f.caption
+    if (f.mode === 'manual') req.variants = held.length
+  } else if (f.mode === 'manual' || firstBatchSource(f) === 'prompt') {
     req.prompt = f.prompt
     req.aspect_ratio = f.aspect
     if (f.caption.trim()) req.caption = f.caption
     if (ctx.hasNegative && f.negative.trim()) req.negative = f.negative
+    // A typed Manual prompt renders once, whatever the picker says.
+    if (f.mode === 'manual') req.variants = 1
   }
   if (f.mode === 'random') {
     req.filter = cleanFilter(f.filter)
@@ -229,9 +391,16 @@ export function firstBatchSource(f: T2iFields): FirstBatchSource {
  * receive. The seed policy and the effective count are in it, so switching
  * from one image to a run of several is not mistaken for a repeat.
  */
-export function requestSignature(f: T2iFields, hasNegative: boolean): string {
+export function requestSignature(
+  f: T2iFields,
+  hasNegative: boolean,
+  prompts: T2iVariantPrompt[] | null = null,
+): string {
   return JSON.stringify({
     prompt: f.prompt,
+    // Every variant a Generate would send, so an edit to one that is not on
+    // show still counts as a change.
+    variants: prompts?.map((p) => [p.prompt, hasNegative ? p.negative : null]) ?? null,
     negative: hasNegative ? f.negative : null,
     seed: f.seed,
     model: f.model,

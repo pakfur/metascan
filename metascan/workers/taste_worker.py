@@ -7,7 +7,10 @@ Task (written by ``metascan.core.taste_runner.TasteRunner``)::
 
     {"mode": "train" | "score", "index_dir": str, "labels_path": str | null,
      "model_path": str | null, "out_dir": str, "image_paths": [str],
-     "image_categories": {path: [name, ...]}}   # optional
+     "image_categories": {path: [name, ...]},   # optional
+     "diversity": {"window_starts": [iso date], "items": [{file_path,
+                   window_start, embedding: b64 | null, embedding_model}]}}
+                   # optional, train mode: favorite diversity per window
 
 Writes ``<out_dir>/taste_result.json`` and exits 0, or writes
 ``{"status": "error", "error": str}`` and exits 1.
@@ -236,6 +239,49 @@ def _rescore(task: Dict[str, Any], index: _Index) -> Dict[str, Any]:
     return {"status": "ok", "scores": scores}
 
 
+def _diversity(spec: Dict[str, Any], index: _Index) -> List[Dict[str, Any]]:
+    """Mean pairwise cosine distance between the favorited images of each
+    window: ``[{window_start, n, mean_distance}]`` in ``window_starts``
+    order. ``n`` counts items with a vector (stored embedding when its
+    model matches the index, else the index); ``mean_distance`` is None
+    when ``n < 2``."""
+    by_window: Dict[str, List[np.ndarray]] = {
+        str(s): [] for s in spec.get("window_starts") or []
+    }
+    need: List[Tuple[str, int]] = []
+    for item in spec.get("items") or []:
+        start = str(item.get("window_start"))
+        if start not in by_window:
+            continue
+        emb = item.get("embedding")
+        if emb and item.get("embedding_model") == index.model_key:
+            v = np.frombuffer(base64.b64decode(emb), dtype=np.float32)
+            if v.size == index.dim:
+                by_window[start].append(v)
+                continue
+        idx = index.id_for(str(item.get("file_path")))
+        if idx is not None:
+            need.append((start, idx))
+    if need:
+        for (start, _), v in zip(need, index.vectors([i for _, i in need])):
+            by_window[start].append(v)
+    out: List[Dict[str, Any]] = []
+    for start, vecs in by_window.items():
+        mat = np.asarray(vecs, dtype=np.float64).reshape(len(vecs), index.dim)
+        norms = np.linalg.norm(mat, axis=1)
+        mat = mat[norms > 0] / norms[norms > 0, None]
+        n = int(mat.shape[0])
+        mean_distance: Optional[float] = None
+        if n >= 2:
+            # sum over i != j of v_i . v_j = |sum v|^2 - n (unit vectors):
+            # O(n d), no n x n matrix.
+            total = mat.sum(axis=0)
+            mean_sim = (float(total @ total) - n) / (n * (n - 1))
+            mean_distance = float(1.0 - mean_sim)
+        out.append({"window_start": start, "n": n, "mean_distance": mean_distance})
+    return out
+
+
 def run(task: Dict[str, Any]) -> Dict[str, Any]:
     out_dir = Path(task["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -244,7 +290,14 @@ def run(task: Dict[str, Any]) -> Dict[str, Any]:
         raise TasteWorkerError(f"unknown mode {mode!r}")
     index = _Index(Path(task["index_dir"]))
     if mode == "train":
-        return _train(task, index, out_dir)
+        result = _train(task, index, out_dir)
+        if task.get("diversity"):
+            try:
+                result["diversity"] = _diversity(task["diversity"], index)
+            except Exception:
+                # A dashboard metric: never worth failing training over.
+                logger.warning("favorite diversity failed", exc_info=True)
+        return result
     return _rescore(task, index)
 
 

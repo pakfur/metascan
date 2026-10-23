@@ -21,12 +21,15 @@ are never touched.
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 from metascan.core.meta_prompt_templates import split_negative_block
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_models import T2iModelProfile
+
+logger = logging.getLogger(__name__)
 
 CONTENT_MODES: Tuple[str, ...] = ("uncensored", "sfw", "default")
 
@@ -44,10 +47,20 @@ _FALLBACK_NEGATIVE_KEYS: Dict[str, str] = {
     "qwen": "T2I_FALLBACK_NEGATIVE_QWEN",
 }
 
-_USER_TEMPLATE = "DESCRIPTION:\n{description}\n\nWrite the prompt now."
+_CLOSING = "Write the prompt now."
+_USER_TEMPLATE = "DESCRIPTION:\n{description}\n\n" + _CLOSING
 _USER_TEMPLATE_DIRECTED = (
-    "DESCRIPTION:\n{description}\n\nDIRECTION:\n{direction}\n\nWrite the prompt now."
+    "DESCRIPTION:\n{description}\n\nDIRECTION:\n{direction}\n\n" + _CLOSING
 )
+
+
+class ComposedPrompts(NamedTuple):
+    """What :func:`compose_guided_t2i_prompts` built, and whether the
+    EXAMPLES block is in it (examples were given AND the preamble exists)."""
+
+    system: str
+    user: str
+    examples_used: bool
 
 
 def compose_t2i_prompts(
@@ -55,7 +68,24 @@ def compose_t2i_prompts(
     resolved_caption: str,
     content_mode: str,
     direction: Optional[str] = None,
+    angle: Optional[str] = None,
+    examples: Sequence[str] = (),
 ) -> Tuple[str, str]:
+    """``(system_prompt, user_prompt)``; see :func:`compose_guided_t2i_prompts`."""
+    composed = compose_guided_t2i_prompts(
+        profile, resolved_caption, content_mode, direction, angle, examples
+    )
+    return composed.system, composed.user
+
+
+def compose_guided_t2i_prompts(
+    profile: T2iModelProfile,
+    resolved_caption: str,
+    content_mode: str,
+    direction: Optional[str] = None,
+    angle: Optional[str] = None,
+    examples: Sequence[str] = (),
+) -> ComposedPrompts:
     """Return ``(system_prompt, user_prompt)`` for ``VlmClient.generate_text``.
 
     ``content_mode`` is one of :data:`CONTENT_MODES`: ``uncensored`` and
@@ -63,6 +93,15 @@ def compose_t2i_prompts(
     ``default`` adds nothing. The caption goes into the user turn verbatim.
     A non-blank ``direction`` (caption directions, ``t2i_directions``) adds a
     DIRECTION block after it; without one the user turn is unchanged.
+
+    A non-blank ``angle`` (a variant's ``T2I_VARIANT_ANGLES`` entry) adds an
+    ``ANGLE: lead with <angle>`` line before the closing line. Non-blank
+    ``examples`` (taste guidance) add an ``EXAMPLES:`` block, the
+    ``T2I_EXAMPLES_PREAMBLE`` and the numbered examples, after the style
+    guide and before the directive. With neither, both prompts are exactly
+    what they were before these arguments existed. ``examples_used`` says
+    whether the block went in: a hot reload that removed the preamble drops
+    it, and a writer must then not be recorded as taste-guided.
     """
     if content_mode not in CONTENT_MODES:
         raise ValueError(
@@ -72,14 +111,38 @@ def compose_t2i_prompts(
     store = get_prompt_store()
     system = store.get("T2I_CAPTION_PREAMBLE").rstrip() + "\n\n"
     system += store.get(profile.meta_key)
+    shown = [" ".join(e.split()) for e in examples if e and e.strip()]
+    preamble: Optional[str] = None
+    if shown:
+        try:
+            preamble = store.get("T2I_EXAMPLES_PREAMBLE").strip()
+        except KeyError:
+            # Removed by a hot reload: write unguided rather than fail.
+            logger.warning(
+                "T2I_EXAMPLES_PREAMBLE missing from the prompt store; "
+                "writing without taste examples"
+            )
+    examples_used = False
+    if shown and preamble is not None:
+        examples_used = True
+        numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(shown, 1))
+        system = system.rstrip() + "\n\nEXAMPLES:\n" + preamble + "\n\n" + numbered
     directive_key = _DIRECTIVE_KEYS.get(content_mode)
     if directive_key is not None:
         system += store.get(directive_key)
     if direction is not None and direction.strip():
-        return system, _USER_TEMPLATE_DIRECTED.format(
+        user = _USER_TEMPLATE_DIRECTED.format(
             description=resolved_caption, direction=direction.strip()
         )
-    return system, _USER_TEMPLATE.format(description=resolved_caption)
+    else:
+        user = _USER_TEMPLATE.format(description=resolved_caption)
+    if angle is not None and angle.strip():
+        # The closing line ends every template; splice in front of it (a
+        # caption may itself contain the closing words).
+        user = (
+            user[: -len(_CLOSING)] + f"ANGLE: lead with {angle.strip()}\n\n" + _CLOSING
+        )
+    return ComposedPrompts(system, user, examples_used)
 
 
 def strip_parentheses(text: str) -> str:

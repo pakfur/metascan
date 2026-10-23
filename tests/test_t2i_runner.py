@@ -368,7 +368,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         # picker would probe this machine's GPU once the fake has no id.
         patcher = mock.patch(
             "metascan.core.t2i_runner.pick_vlm_model",
-            side_effect=lambda vlm: vlm.model_id or "qwen3vl-8b",
+            side_effect=lambda vlm, **_: vlm.model_id or "qwen3vl-8b",
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -732,7 +732,11 @@ class TestGeneratePrompt(RunnerCase):
             caption=CAPTION, seed=101, model="krea2"
         )
         self.assertEqual(
-            result.warnings, ["VLM unavailable - used the resolved caption"]
+            result.warnings,
+            [
+                "prompt writer qwen3vl-8b not installed — download it in Models"
+                " - used the resolved caption"
+            ],
         )
         self.assertEqual(asked, ["qwen3vl-8b"])
         self.assertEqual(self.vlm.ensure_calls, [])  # never started
@@ -1793,6 +1797,13 @@ class TestManualBatchRun(BatchCase):
                     "warnings": [],
                     "direction": None,
                     "direction_parts": [],
+                    "variant_index": 0,
+                    "variants": 1,
+                    "caption_index": 0,
+                    "captions": 1,
+                    "writer_id": "manual",
+                    "writer_model": None,
+                    "draft": None,
                 }
             ],
         )
@@ -2311,14 +2322,21 @@ class TestRandomBatchRun(BatchCase):
             [
                 "aspect_ratio",
                 "caption",
+                "caption_index",
+                "captions",
                 "direction",
                 "direction_parts",
+                "draft",
                 "negative",
                 "prompt",
                 "seed",
                 "step",
                 "total_steps",
+                "variant_index",
+                "variants",
                 "warnings",
+                "writer_id",
+                "writer_model",
             ],
         )
         self.assertEqual((step["step"], step["total_steps"], step["seed"]), (1, 3, 10))
@@ -2704,7 +2722,11 @@ class TestPromptRetryAndFallback(BatchCase):
         await self.run_to_end(self.one_step())
         (step,) = self.frames("batch_step")
         self.assertEqual(
-            step["warnings"], ["VLM unavailable - used the resolved caption"]
+            step["warnings"],
+            [
+                "prompt writer qwen3vl-8b not installed — download it in Models"
+                " - used the resolved caption"
+            ],
         )
         self.assertEqual(self.vlm.ensure_calls, [])
         self.assertEqual(len(self.comfy.submits), 1)
@@ -3618,7 +3640,7 @@ class TestWriterLineage(AccountingCase):
         await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
         self.assertEqual(await self.writer_ids(), ["fallback"])
 
-    async def test_a_supplied_first_step_has_no_writer(self) -> None:
+    async def test_a_supplied_first_step_is_the_manual_writer(self) -> None:
         self.roomy()
         await self.run_to_end(
             self.random_mode(
@@ -3629,11 +3651,11 @@ class TestWriterLineage(AccountingCase):
                 aspect_ratio="2:3",
             )
         )
-        self.assertEqual(await self.writer_ids(), [None])
+        self.assertEqual(await self.writer_ids(), ["manual"])
 
-    async def test_a_manual_batch_has_no_writer(self) -> None:
+    async def test_a_manual_batch_is_the_manual_writer(self) -> None:
         await self.manual_batch(count=1)
-        self.assertEqual(await self.writer_ids(), [None])
+        self.assertEqual(await self.writer_ids(), ["manual"])
 
 
 class TestCategoryTagging(AccountingCase):

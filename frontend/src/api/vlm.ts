@@ -9,6 +9,27 @@ export interface VlmStatus {
   base_url: string | null
   progress: Record<string, unknown>
   error: string | null
+  /** Roles the emitting client serves (WS payloads only). */
+  roles?: VlmRole[]
+}
+
+export type VlmRole = 'writer' | 'general'
+
+export interface VlmRoleRow {
+  /** Configured model for the role; null for general on CPU-only machines. */
+  model_id: string | null
+  state: VlmState | null
+  loaded_model_id: string | null
+}
+
+export interface VlmRolesSnapshot {
+  writer: VlmRoleRow
+  general: VlmRoleRow
+  shared: boolean
+  co_resident: boolean
+  writer_falls_back: boolean
+  writer_missing: boolean
+  notes: string[]
 }
 
 export interface VlmRetagJob {
@@ -44,4 +65,12 @@ export function setActiveVlm(modelId: string): Promise<VlmStatus> {
 
 export function unloadVlm(modelId: string): Promise<VlmStatus> {
   return post<VlmStatus>('/vlm/unload', { model_id: modelId })
+}
+
+export function fetchVlmRoles(): Promise<VlmRolesSnapshot> {
+  return get<VlmRolesSnapshot>('/vlm/roles')
+}
+
+export function setVlmRole(role: VlmRole, modelId: string): Promise<VlmRolesSnapshot> {
+  return post<VlmRolesSnapshot>('/vlm/roles', { role, model_id: modelId })
 }

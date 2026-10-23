@@ -1363,6 +1363,18 @@ class DatabaseManager:
                 )
                 """
             )
+            # Favorite diversity per 14-day window (mean pairwise CLIP
+            # cosine distance), written by each taste training run.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS taste_diversity (
+                    window_start TEXT PRIMARY KEY,
+                    n INTEGER,
+                    mean_distance REAL,
+                    computed_at TEXT
+                )
+                """
+            )
             # Generation lineage on both generated-media tables; nullable,
             # existing rows stay NULL.
             for _lineage_table in ("t2i_images", "i2v_videos"):
@@ -1370,6 +1382,13 @@ class DatabaseManager:
                     ("writer_id", "TEXT"),
                     ("variant_group", "TEXT"),
                     ("variant_index", "INTEGER"),
+                    # The writer's draft and whether the rendered prompt
+                    # differs from it (whitespace-normalized); write-once.
+                    ("draft_prompt", "TEXT"),
+                    ("edited", "INTEGER"),
+                    # The VLM model id that wrote the draft (NULL for a
+                    # typed prompt, a fallback, or an older row).
+                    ("writer_model", "TEXT"),
                 ):
                     _idempotent_add_column(
                         conn,
@@ -3992,6 +4011,9 @@ class DatabaseManager:
         writer_id: Optional[str] = None,
         variant_group: Optional[str] = None,
         variant_index: Optional[int] = None,
+        draft_prompt: Optional[str] = None,
+        edited: Optional[int] = None,
+        writer_model: Optional[str] = None,
     ) -> int:
         import json as _json
 
@@ -4000,8 +4022,10 @@ class DatabaseManager:
                 "INSERT INTO i2v_videos (source_path, file_path, prompt_used, "
                 "idea, seed, duration_s, quality, width, height, steps, "
                 "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
-                "form_state, writer_id, variant_group, variant_index) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "form_state, writer_id, variant_group, variant_index, "
+                "draft_prompt, edited, writer_model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -4022,6 +4046,9 @@ class DatabaseManager:
                     writer_id,
                     variant_group,
                     variant_index,
+                    draft_prompt,
+                    edited,
+                    writer_model,
                 ),
             )
             conn.commit()
@@ -4157,6 +4184,9 @@ class DatabaseManager:
         writer_id: Optional[str] = None,
         variant_group: Optional[str] = None,
         variant_index: Optional[int] = None,
+        draft_prompt: Optional[str] = None,
+        edited: Optional[int] = None,
+        writer_model: Optional[str] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4169,8 +4199,9 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "variant_index, draft_prompt, edited, writer_model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4192,6 +4223,9 @@ class DatabaseManager:
                     writer_id,
                     variant_group,
                     variant_index,
+                    draft_prompt,
+                    edited,
+                    writer_model,
                 ),
             )
             conn.commit()
@@ -5496,9 +5530,99 @@ class DatabaseManager:
 
     @staticmethod
     def _is_image_path(path: str) -> bool:
-        from metascan.core.duplicate_detection import VIDEO_EXTENSIONS
+        from metascan.core.taste_examples import is_image_path
 
-        return Path(path).suffix.lower() not in VIDEO_EXTENSIONS
+        return is_image_path(path)
+
+    def favorite_prompt_candidates(
+        self, paths: List[str], model_id: Optional[str] = None
+    ) -> Dict[str, str]:
+        """``{posix_path: prompt}`` for the favorited images among ``paths``
+        whose prompt is known: ``t2i_images.prompt_used`` first, else the
+        library metadata prompt. Videos and blank prompts are left out.
+
+        With ``model_id`` (a ``MODEL_PROFILES`` id) only items of that model
+        family are kept; the rule is ``taste_examples.matches_model_family``'s
+        module docstring. Cheap by construction: ``is_favorite`` is read from
+        the covering summary index (the ``data`` blob sits before it in the
+        row), and ``data`` is opened only for favorited library items that
+        have no T2I prompt. Callers pass a bounded list (a FAISS top-k)."""
+        from metascan.core.taste_examples import matches_model_family
+
+        wanted = list(
+            dict.fromkeys(
+                to_posix_path(p) for p in paths if self._is_image_path(str(p))
+            )
+        )
+        if not wanted:
+            return {}
+        out: Dict[str, str] = {}
+        chunk = 500
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(wanted), chunk):
+                part = wanted[start : start + chunk]
+                marks = ",".join("?" * len(part))
+                favorites = [
+                    r["file_path"]
+                    for r in conn.execute(
+                        "SELECT file_path FROM media "
+                        "INDEXED BY idx_media_summary_added "
+                        f"WHERE is_favorite = 1 AND file_path IN ({marks})",
+                        part,
+                    )
+                ]
+                if not favorites:
+                    continue
+                fmarks = ",".join("?" * len(favorites))
+                t2i: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+                    r["file_path"]: (r["model"], r["prompt_used"])
+                    for r in conn.execute(
+                        "SELECT file_path, model, prompt_used FROM t2i_images "
+                        f"WHERE file_path IN ({fmarks})",
+                        favorites,
+                    )
+                }
+                # Metadata model names, only where no T2I row names the model.
+                models: Dict[str, List[str]] = {}
+                unnamed = [p for p in favorites if not t2i.get(p, (None, None))[0]]
+                if model_id is not None and unnamed:
+                    umarks = ",".join("?" * len(unnamed))
+                    for r in conn.execute(
+                        "SELECT file_path, index_key FROM indices "
+                        f"WHERE index_type = 'model' AND file_path IN ({umarks})",
+                        unnamed,
+                    ):
+                        models.setdefault(r["file_path"], []).append(r["index_key"])
+
+                def family_ok(path: str) -> bool:
+                    if model_id is None:
+                        return True
+                    t2i_model = t2i.get(path, (None, None))[0]
+                    if t2i_model:
+                        return t2i_model == model_id
+                    return matches_model_family(models.get(path, []), model_id)
+
+                kept = [p for p in favorites if family_ok(p)]
+                need = [
+                    p for p in kept if not (t2i.get(p, (None, None))[1] or "").strip()
+                ]
+                metadata: Dict[str, str] = {}
+                if need:
+                    nmarks = ",".join("?" * len(need))
+                    for r in conn.execute(
+                        "SELECT file_path, json_extract(data, '$.prompt') AS prompt "
+                        f"FROM media WHERE file_path IN ({nmarks})",
+                        need,
+                    ):
+                        if isinstance(r["prompt"], str) and r["prompt"].strip():
+                            metadata[r["file_path"]] = r["prompt"]
+                for p in kept:
+                    used = t2i.get(p, (None, None))[1]
+                    if used and used.strip():
+                        out[p] = used
+                    elif p in metadata:
+                        out[p] = metadata[p]
+        return out
 
     def taste_training_raw(self) -> Dict[str, Any]:
         """Raw rows for ``taste_labels.build_label_set``: live images and
@@ -5763,6 +5887,200 @@ class DatabaseManager:
                 (int(limit),),
             ).fetchall()
         return [r["file_path"] for r in rows]
+
+    _GENERATION_TABLES = (("t2i", "t2i_images"), ("i2v", "i2v_videos"))
+
+    def generation_outcomes(
+        self, since: Optional[str] = None, include_embeddings: bool = False
+    ) -> List[Dict[str, Any]]:
+        """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
+        writer_model, created_at, seen, favorite, embedding, embedding_model}``. ``seen``
+        is a ``seen_at`` or a verdict. Live generations come from the
+        lineage tables JOINed to media; deleted ones from the newest
+        tombstone whose lineage carries the generation row (so deleting
+        passes does not inflate a rate), unless the path is live again.
+        ``since`` (an ISO date) drops older generations. ``embedding`` is
+        the tombstone's vector bytes (live rows: None) when
+        ``include_embeddings``."""
+        out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        with self.lock, self._get_connection() as conn:
+            for kind, table in self._GENERATION_TABLES:
+                sql = (
+                    f"SELECT g.file_path, g.writer_id, g.writer_model, g.created_at, "
+                    "m.is_favorite, j.passed, j.seen_at "
+                    f"FROM {table} g JOIN media m ON m.file_path = g.file_path "
+                    "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
+                )
+                params: List[Any] = []
+                if since is not None:
+                    sql += " WHERE g.created_at >= ?"
+                    params.append(since)
+                for r in conn.execute(sql, params):
+                    favorite = bool(r["is_favorite"])
+                    out[(kind, r["file_path"])] = {
+                        "kind": kind,
+                        "file_path": r["file_path"],
+                        "writer_id": r["writer_id"],
+                        "writer_model": r["writer_model"],
+                        "created_at": r["created_at"],
+                        "favorite": favorite,
+                        "seen": favorite
+                        or bool(r["passed"])
+                        or r["seen_at"] is not None,
+                        "embedding": None,
+                        "embedding_model": None,
+                    }
+            live = set(out)
+            cols = "id, file_path, is_favorite, passed, seen_at, lineage"
+            if include_embeddings:
+                cols += ", embedding, embedding_model"
+            sql = f"SELECT {cols} FROM media_tombstones WHERE lineage IS NOT NULL"
+            params = []
+            if since is not None:
+                # Filter in SQL: most tombstones are library deletes or old
+                # generations, not worth parsing under the lock.
+                sql += (
+                    " AND json_valid(lineage) AND ("
+                    "json_extract(lineage, '$.t2i.created_at') >= ? "
+                    "OR json_extract(lineage, '$.i2v.created_at') >= ?)"
+                )
+                params = [since, since]
+            for r in conn.execute(sql + " ORDER BY id", params):
+                try:
+                    lineage = json.loads(r["lineage"])
+                except ValueError:
+                    lineage = None
+                if not isinstance(lineage, dict):
+                    logger.debug(
+                        "skipping malformed tombstone lineage (id %s)", r["id"]
+                    )
+                    continue
+                for kind, _ in self._GENERATION_TABLES:
+                    gen = lineage.get(kind)
+                    if gen is None:
+                        continue
+                    created_at = (
+                        gen.get("created_at") if isinstance(gen, dict) else None
+                    )
+                    if not created_at:
+                        logger.debug(
+                            "skipping malformed tombstone lineage (id %s)", r["id"]
+                        )
+                        continue
+                    key = (kind, r["file_path"])
+                    if key in live:
+                        continue
+                    if since is not None and str(created_at) < since:
+                        continue
+                    favorite = bool(r["is_favorite"])
+                    # Ascending id: a newer tombstone replaces an older one.
+                    out[key] = {
+                        "kind": kind,
+                        "file_path": r["file_path"],
+                        "writer_id": gen.get("writer_id"),
+                        "writer_model": gen.get("writer_model"),
+                        "created_at": str(created_at),
+                        "favorite": favorite,
+                        "seen": favorite
+                        or bool(r["passed"])
+                        or r["seen_at"] is not None,
+                        "embedding": (r["embedding"] if include_embeddings else None),
+                        "embedding_model": (
+                            r["embedding_model"] if include_embeddings else None
+                        ),
+                    }
+        return list(out.values())
+
+    def writer_window_stats(
+        self,
+        window_days: int = 14,
+        windows: int = 6,
+        now: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Favorite rate among SEEN generations per writer (and the model
+        that wrote its drafts) per window: ``[{kind, writer_id,
+        writer_model, window_start, n_seen, n_fav, rate}]``. Every
+        ``(kind, writer, writer_model)`` with a generation in the last
+        ``windows`` windows gets all of them (``rate`` None when ``n_seen``
+        is 0). A NULL writer is ``"unknown"``; a NULL ``writer_model``
+        (typed, fallback, or a row older than the column) stays None. Windows by the generation's
+        ``created_at`` (UTC), counting back from today."""
+        from metascan.core.taste_labels import window_for, window_starts
+
+        starts = window_starts(now or datetime.now(timezone.utc), window_days, windows)
+        counts: Dict[Tuple[str, str, Optional[str]], Dict[str, List[int]]] = {}
+        for g in self.generation_outcomes(since=starts[0]):
+            start = window_for(g["created_at"], starts, window_days)
+            if start is None:
+                continue
+            writer = g["writer_id"] or "unknown"
+            model = g.get("writer_model") or None
+            per = counts.setdefault((g["kind"], writer, model), {})
+            cell = per.setdefault(start, [0, 0])
+            if g["seen"]:
+                cell[0] += 1
+                cell[1] += int(g["favorite"])
+        rows: List[Dict[str, Any]] = []
+        for (kind, writer, model), per in sorted(
+            counts.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")
+        ):
+            for start in starts:
+                n_seen, n_fav = per.get(start, [0, 0])
+                rows.append(
+                    {
+                        "kind": kind,
+                        "writer_id": writer,
+                        "writer_model": model,
+                        "window_start": start,
+                        "n_seen": n_seen,
+                        "n_fav": n_fav,
+                        "rate": n_fav / n_seen if n_seen else None,
+                    }
+                )
+        return rows
+
+    def record_taste_diversity(
+        self, rows: List[Dict[str, Any]], computed_at: str
+    ) -> None:
+        """Upsert one training run's per-window favorite diversity."""
+        with self.lock, self._get_connection() as conn:
+            for r in rows:
+                md = r.get("mean_distance")
+                conn.execute(
+                    "INSERT INTO taste_diversity (window_start, n, mean_distance, "
+                    "computed_at) VALUES (?, ?, ?, ?) ON CONFLICT(window_start) "
+                    "DO UPDATE SET n = excluded.n, "
+                    "mean_distance = excluded.mean_distance, "
+                    "computed_at = excluded.computed_at",
+                    (
+                        str(r["window_start"]),
+                        int(r.get("n") or 0),
+                        None if md is None else float(md),
+                        computed_at,
+                    ),
+                )
+            conn.commit()
+
+    def latest_taste_diversity(self) -> List[Dict[str, Any]]:
+        """The newest training run's diversity rows, oldest window first
+        (possibly older than the active model: it is whatever was last
+        computed)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT window_start, n, mean_distance, computed_at "
+                "FROM taste_diversity "
+                "WHERE computed_at = (SELECT MAX(computed_at) FROM taste_diversity) "
+                "ORDER BY window_start"
+            ).fetchall()
+        return [
+            {
+                "window_start": r["window_start"],
+                "n": int(r["n"] or 0),
+                "mean_distance": r["mean_distance"],
+                "computed_at": r["computed_at"],
+            }
+            for r in rows
+        ]
 
     def get_t2i_batch_position(self, file_path: str) -> Optional[Tuple[int, int]]:
         """``(1-based index, size)`` of a T2I image within its ``batch_id``,

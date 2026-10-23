@@ -402,3 +402,117 @@ async def test_missing_index_error_says_how_to_fix_it(setup):
     r = await runner.train(180)
     assert r["status"] == "error"
     assert "Build the similarity index first" in r["error"]
+
+
+def _set_created(db, image_id: int, created_at: str) -> None:
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "UPDATE t2i_images SET created_at = ? WHERE id = ?", (created_at, image_id)
+        )
+        conn.commit()
+
+
+def _index_vectors(index_dir: Path, paths) -> np.ndarray:
+    import faiss
+
+    ids = json.loads((index_dir / "id_mapping.json").read_text())
+    index = faiss.read_index(str(index_dir / "faiss_index.bin"))
+    return np.stack([index.reconstruct(ids.index(p)) for p in paths])
+
+
+def _mean_pairwise_distance(vecs: np.ndarray) -> float:
+    v = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
+    n = len(v)
+    sims = v @ v.T
+    return float(1.0 - (sims.sum() - np.trace(sims)) / (n * (n - 1)))
+
+
+async def test_diversity_computed_on_train(setup):
+    from datetime import timezone
+
+    runner, db, index_dir, rng, direction = setup
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    latest = [f"/l/f{i:02d}.png" for i in range(5)]
+    for p in latest:
+        _set_created(
+            db,
+            db.create_t2i_image(file_path=p, writer_id="base"),
+            "2026-10-15 10:00:00",
+        )
+    # One favorite in the previous window: n = 1, no distance.
+    _set_created(db, db.create_t2i_image(file_path="/l/f05.png"), "2026-10-01 10:00:00")
+    # Outside the six windows, and a pass in the latest one: neither counts.
+    _set_created(db, db.create_t2i_image(file_path="/l/f06.png"), "2026-06-01 10:00:00")
+    _set_created(db, db.create_t2i_image(file_path="/l/p00.png"), "2026-10-15 10:00:00")
+    # A deleted favorite generation: its vector lives only on the tombstone.
+    gone_vec = _vec(rng, direction, 1.0)
+    db.save_media(_media("/l/gen_gone.png"))
+    _set_created(
+        db, db.create_t2i_image(file_path="/l/gen_gone.png"), "2026-10-16 10:00:00"
+    )
+    db.set_verdict("/l/gen_gone.png", "favorite")
+    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
+    db.delete_media(Path("/l/gen_gone.png"))
+    db.set_embedding_lookup(None)
+
+    r = await runner.train(180, now=now)
+    assert r["status"] == "ok", r
+    div = {d["window_start"]: d for d in db.latest_taste_diversity()}
+    assert sorted(div) == [
+        "2026-08-01",
+        "2026-08-15",
+        "2026-08-29",
+        "2026-09-12",
+        "2026-09-26",
+        "2026-10-10",
+    ]
+    expected = _mean_pairwise_distance(
+        np.vstack([_index_vectors(index_dir, latest), gone_vec[None, :]])
+    )
+    assert div["2026-10-10"]["n"] == 6
+    assert div["2026-10-10"]["mean_distance"] == pytest.approx(expected, abs=1e-5)
+    assert div["2026-09-26"]["computed_at"]
+    assert {k: v for k, v in div["2026-09-26"].items() if k != "computed_at"} == {
+        "window_start": "2026-09-26",
+        "n": 1,
+        "mean_distance": None,
+    }
+    assert div["2026-08-01"]["n"] == 0 and div["2026-08-01"]["mean_distance"] is None
+
+
+async def test_diversity_failure_does_not_fail_training(setup, monkeypatch):
+    runner, db, _, _, _ = setup
+
+    def boom(*a, **k):
+        raise RuntimeError("diversity query failed")
+
+    monkeypatch.setattr(db, "generation_outcomes", boom)
+    r = await runner.train(180)
+    assert r["status"] == "ok", r
+    assert db.latest_taste_diversity() == []
+
+
+async def test_worker_diversity_failure_does_not_fail_training(setup, monkeypatch):
+    runner, db, _, _, _ = setup
+    import metascan.core.taste_runner as tr
+
+    # A spec the worker cannot decode (bad base64 for a matching model):
+    # _diversity raises inside the subprocess.
+    monkeypatch.setattr(
+        tr,
+        "_diversity_task",
+        lambda db, now: {
+            "window_starts": ["2026-10-10"],
+            "items": [
+                {
+                    "file_path": "/l/f00.png",
+                    "window_start": "2026-10-10",
+                    "embedding": "!!!notbase64",
+                    "embedding_model": MODEL_KEY,
+                }
+            ],
+        },
+    )
+    r = await runner.train(180)
+    assert r["status"] == "ok", r
+    assert db.latest_taste_diversity() == []

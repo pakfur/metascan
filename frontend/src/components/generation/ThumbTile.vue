@@ -1,10 +1,26 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import type { ThumbItem } from '../../types/jobs'
 
 // One image tile: thumbnail, hover overlays (favourite, delete) and a label
 // underneath. It only reports what the user did; ThumbGrid adds the item.
-defineProps<{ item: ThumbItem; selected?: boolean; top?: boolean }>()
+const props = defineProps<{ item: ThumbItem; selected?: boolean; top?: boolean }>()
+
+// "v2 · 0.82": the prompt variant the image came from, then the taste score;
+// either part alone when only it is known.
+const badge = computed(() => {
+  const parts: string[] = []
+  if (props.item.variant != null) parts.push(`v${props.item.variant}`)
+  if (props.item.score != null) parts.push(props.item.score.toFixed(2))
+  return parts.join(' · ')
+})
+const badgeTitle = computed(() => {
+  const parts: string[] = []
+  if (props.item.variant != null) parts.push(`prompt variant ${props.item.variant}`)
+  if (props.item.score != null) parts.push(`taste score ${props.item.score.toFixed(2)}`)
+  return parts.join(' · ')
+})
 const emit = defineEmits<{
   select: [evt: MouseEvent]
   open: []
@@ -37,7 +53,7 @@ function onImgError(e: Event) {
       @dblclick="emit('open')"
     >
       <img :src="thumbnailUrl(item.file_path)" alt="" loading="lazy" decoding="async" @error="onImgError" />
-      <span v-if="item.score != null" class="score-badge" title="Taste score">{{ item.score.toFixed(2) }}</span>
+      <span v-if="badge" class="score-badge" :title="badgeTitle">{{ badge }}</span>
       <button
         type="button"
         class="overlay star"
@@ -112,7 +128,8 @@ function onImgError(e: Event) {
   color: #fff;
   font-size: 10px;
   line-height: 1.5;
-  pointer-events: none;
+  /* Hoverable for its tooltip; a click still reaches the tile under it. */
+  cursor: pointer;
 }
 
 .overlay {

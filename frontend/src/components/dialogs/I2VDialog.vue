@@ -8,7 +8,9 @@ import {
   i2vVideoDetails,
   withCurrentOption,
   type I2vFix,
+  I2V_WRITERS,
   type I2vFormState,
+  type I2vWriter,
   type I2vTemplate,
   type I2vVideo,
 } from '../../types/i2v'
@@ -98,6 +100,33 @@ function onCadenceChange(id: string) {
 }
 
 const expanding = ref(false)
+
+// Writer: per browser like the seed policy, never per clip (form_state does
+// not carry it), so loading a clip never changes it.
+const WRITER_STORAGE_KEY = 'metascan.i2v.writer.v1'
+function storedWriter(): I2vWriter {
+  try {
+    const v = localStorage.getItem(WRITER_STORAGE_KEY)
+    return I2V_WRITERS.some((w) => w.id === v) ? (v as I2vWriter) : 'base'
+  } catch {
+    return 'base'
+  }
+}
+const writer = ref<I2vWriter>(storedWriter())
+function setWriter(v: string) {
+  if (!I2V_WRITERS.some((w) => w.id === v)) return
+  writer.value = v as I2vWriter
+  try {
+    localStorage.setItem(WRITER_STORAGE_KEY, v)
+  } catch {
+    /* private mode: the choice lasts for this session */
+  }
+}
+
+// The held draft stops describing the prompt when the idea or cadence it was
+// written for changes (the source image and a selected clip clear it in the
+// store / loadClip). Typing in the Prompt box does not: that is an edit.
+watch([idea, templateId], () => store.setDraft(null))
 const submitting = ref(false)
 const viewerIndex = ref<number | null>(null)
 
@@ -299,15 +328,27 @@ function onApplyFixes() {
 
 async function onExpandPrompt() {
   expanding.value = true
+  // What the draft is written for, read before the await: the user may keep
+  // typing while the writer works.
+  const forIdea = idea.value
+  const forTemplate = templateId.value
   try {
     const res = await generatePrompt({
       source_path: props.media.file_path,
-      idea: idea.value,
+      idea: forIdea,
       duration_s: durationS.value,
       template_id: templateId.value || null,
+      writer: writer.value,
     })
     prompt.value = res.prompt
     warnings.value = res.warnings
+    store.setDraft({
+      text: res.prompt,
+      writer_id: res.writer_id,
+      writer_model: res.writer_model ?? null,
+      idea: forIdea,
+      templateId: forTemplate,
+    })
   } catch (e) {
     toast.show(e instanceof Error ? e.message : String(e), 'warn')
   } finally {
@@ -422,6 +463,8 @@ watch(
 
 function loadClip(v: I2vVideo) {
   flushFormState() // pending edits belong to the clip being left
+  // A clip's prompt is not the writer's draft.
+  store.setDraft(null)
   const f = v.form_state
   idea.value = f.idea ?? ''
   prompt.value = f.prompt ?? ''
@@ -495,6 +538,9 @@ async function onGenerate() {
   ) {
     return
   }
+  const d = store.draft
+  const heldDraft =
+    d && d.idea === idea.value && d.templateId === templateId.value ? d : null
   submitting.value = true
   let queued = 0
   let stopped: string | null = null
@@ -513,6 +559,15 @@ async function onGenerate() {
           idea: idea.value,
           template_id: templateId.value || null,
           category_ids: [...categoryIds.value],
+          // Lineage: only a live draft for this idea and cadence counts; a
+          // prompt without one is typed from scratch (recorded `manual`).
+          ...(heldDraft
+            ? {
+                writer_id: heldDraft.writer_id,
+                draft_prompt: heldDraft.text,
+                writer_model: heldDraft.writer_model,
+              }
+            : {}),
           ...(stepsEnabled.value ? { steps: steps.value } : {}),
         })
         warnings.value = res.warnings
@@ -681,9 +736,20 @@ function jobLabel(chip: {
               placeholder="Short idea for the video (optional)"
             />
           </label>
-          <button class="btn" :disabled="expanding" @click="onExpandPrompt">
-            {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
-          </button>
+          <div class="writer-row">
+            <label class="inline-pick" title="Who writes the prompt (Base: the unguided prompt-writer model)">
+              <span>Writer</span>
+              <select
+                :value="writer"
+                @change="setWriter(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="w in I2V_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+              </select>
+            </label>
+            <button class="btn" :disabled="expanding" @click="onExpandPrompt">
+              {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
+            </button>
+          </div>
           <div class="params">
             <label
               class="fld"
@@ -951,6 +1017,33 @@ function jobLabel(chip: {
 </template>
 
 <style scoped>
+/* The Writer pick sits beside Generate prompt, the button it shapes. */
+.writer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 10px;
+}
+
+.inline-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.inline-pick select {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-color);
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
 /* .dialog-overlay is scoped per dialog (see ConfigDialog.vue) — rules
    copied from there to match the sibling dialogs' overlay/card idiom.
    Strip CSS adapts ShotHeader.vue's .sh-takes-row / .sh-tile (fixed

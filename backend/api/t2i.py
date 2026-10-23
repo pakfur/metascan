@@ -15,7 +15,7 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -42,6 +42,7 @@ from metascan.core.t2i_form import (
 )
 from metascan.core.t2i_models import MODEL_PROFILES, effective_identity
 from metascan.core.t2i_runner import (
+    MAX_VARIANTS,
     BatchRequest,
     T2iConflictError,
     T2iNotFoundError,
@@ -120,12 +121,36 @@ class CaptionFilterBody(BaseModel):
     filter: Optional[Dict[str, Any]] = None
 
 
+# The writers a request may ask for (adapters arrive later).
+WriterChoice = Literal["base", "base+taste"]
+
+
 class CaptionRequest(BaseModel):
     caption: str
     seed: int
     model: str
     # Caption directions for /prompt; None means the config's default.
     directions: Optional[bool] = None
+
+
+class PromptRequest(CaptionRequest):
+    # One draft per variant; variant k > 0 is written with angle k-1.
+    variants: int = Field(default=1, ge=1, le=MAX_VARIANTS)
+    writer: WriterChoice = "base"
+
+
+class VariantPrompt(BaseModel):
+    """One variant's prompt as Generate sends it. ``draft`` is what the
+    writer produced (None: typed from scratch, writer ``manual``)."""
+
+    prompt: str
+    negative: Optional[str] = None
+    draft: Optional[str] = None
+    writer_id: Optional[str] = None
+    # The VLM model that wrote ``draft`` (the /prompt draft's
+    # ``writer_model``); checked against the writer-eligible models.
+    writer_model: Optional[str] = None
+    variant_index: int
 
 
 class BatchBody(BaseModel):
@@ -150,6 +175,12 @@ class BatchBody(BaseModel):
     # Categories every image is tagged with at ingest; unknown ids are a 404
     # before the batch starts.
     category_ids: List[int] = Field(default_factory=list)
+    # Prompt variants per caption, sharing its seeds, and who drafts them.
+    variants: int = Field(default=1, ge=1, le=MAX_VARIANTS)
+    writer: WriterChoice = "base"
+    # Manual / a Random first batch: one prompt per variant (with drafts).
+    # Absent: ``prompt``/``negative`` are the single typed prompt.
+    prompts: Optional[List[VariantPrompt]] = None
 
 
 def _list_slots(library: Library) -> List[str]:
@@ -265,7 +296,7 @@ async def resolve_caption(body: CaptionRequest) -> Dict[str, Any]:
 
 
 @router.post("/prompt")
-async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
+async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     runner = _require_runner()
     try:
         result = await runner.generate_prompt(
@@ -273,6 +304,8 @@ async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
             seed=body.seed,
             model=body.model,
             directions=body.directions,
+            variants=body.variants,
+            writer=body.writer,
         )
     except Exception as exc:
         mapped = _http_error(exc)
@@ -286,6 +319,18 @@ async def generate_prompt(body: CaptionRequest) -> Dict[str, Any]:
         "warnings": result.warnings,
         "direction": result.direction,
         "direction_parts": result.direction_parts,
+        # drafts[0] is the top-level prompt/negative.
+        "drafts": [
+            {
+                "prompt": d.prompt,
+                "negative": d.negative,
+                "writer_id": d.writer_id,
+                "writer_model": d.writer_model,
+                "variant_index": d.variant_index,
+                "angle": d.angle,
+            }
+            for d in result.drafts
+        ],
     }
 
 
@@ -310,6 +355,13 @@ async def start_batch(body: BatchBody) -> Dict[str, Any]:
         filter=body.filter,
         directions=body.directions,
         category_ids=category_ids,
+        variants=body.variants,
+        writer=body.writer,
+        prompts=(
+            [entry.model_dump() for entry in body.prompts]
+            if body.prompts is not None
+            else None
+        ),
     )
     try:
         started = await runner.start_batch(request)

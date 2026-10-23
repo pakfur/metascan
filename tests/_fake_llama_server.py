@@ -31,6 +31,8 @@ _FAKE_SCRIPT = textwrap.dedent(
     ap.add_argument("--canned-response", type=str, default='["a","b","c"]')
     ap.add_argument("--crash-after-n", type=int, default=0)
     ap.add_argument("--health-fails-forever", action="store_true")
+    ap.add_argument("--reply-delay-ms", type=int, default=0)
+    ap.add_argument("--term-delay-ms", type=int, default=0)
     args = ap.parse_args()
 
     state = {"ready": False, "served": 0}
@@ -42,6 +44,8 @@ _FAKE_SCRIPT = textwrap.dedent(
 
     async def chat(request):
         await request.json()
+        if args.reply_delay_ms:
+            await asyncio.sleep(args.reply_delay_ms / 1000.0)
         state["served"] += 1
         resp = {
             "choices": [{
@@ -70,6 +74,26 @@ _FAKE_SCRIPT = textwrap.dedent(
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", args.port)
         await site.start()
+        if args.term_delay_ms:
+            # A slow shutdown like a real llama-server freeing VRAM: on
+            # SIGTERM stop listening and drop every open connection at
+            # once, but only exit after the delay.
+            import os, signal
+
+            async def term():
+                if state.get("terming"):
+                    return
+                state["terming"] = True
+                await site.stop()
+                for conn in list(runner.server.connections):
+                    if conn.transport is not None:
+                        conn.transport.abort()
+                await asyncio.sleep(args.term_delay_ms / 1000.0)
+                os._exit(0)
+
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGTERM, lambda: asyncio.ensure_future(term())
+            )
         while True:
             await asyncio.sleep(3600)
 
@@ -209,3 +233,41 @@ class FakeLlamaServer:
                 self._script_path.unlink()
             except FileNotFoundError:
                 pass
+
+
+_SCRIPT_FILE: Optional[Path] = None
+
+
+def fake_llama_command(
+    port: int,
+    *,
+    canned_response: str = '["a", "b", "c"]',
+    reply_delay_ms: int = 0,
+    term_delay_ms: int = 0,
+    load_ms: int = 0,
+) -> list:
+    """argv that runs the fake llama-server on ``port`` -- for a real
+    ``VlmClient`` to Popen (override its ``_build_command``), so terminate,
+    proc.wait and a slow shutdown are real."""
+    global _SCRIPT_FILE
+    if _SCRIPT_FILE is None or not _SCRIPT_FILE.exists():
+        fd = tempfile.NamedTemporaryFile(
+            prefix="fake_llama_", suffix=".py", delete=False, mode="w"
+        )
+        fd.write(_FAKE_SCRIPT)
+        fd.close()
+        _SCRIPT_FILE = Path(fd.name)
+    return [
+        sys.executable,
+        str(_SCRIPT_FILE),
+        "--port",
+        str(port),
+        "--load-ms",
+        str(load_ms),
+        "--canned-response",
+        canned_response,
+        "--reply-delay-ms",
+        str(reply_delay_ms),
+        "--term-delay-ms",
+        str(term_delay_ms),
+    ]

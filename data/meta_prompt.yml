@@ -606,3 +606,19 @@ T2I_FALLBACK_NEGATIVE_SD: |-
 
 T2I_FALLBACK_NEGATIVE_QWEN: |-
   low quality, blurry, deformed, plastic skin, oversaturated, watermark, text artifacts
+
+# --- T2I variants and taste guidance (metascan/core/taste_examples.py) -----
+# T2I_VARIANT_ANGLES: one angle per line. Variant 0 of a caption gets no
+# angle; variant k gets line k, as "ANGLE: lead with <angle>" in the user
+# turn. T2I_EXAMPLES_PREAMBLE opens the EXAMPLES block that follows the style
+# guide when the owner's favorite prompts guide the writer. Hot-reloaded; no
+# parentheses here either.
+
+T2I_VARIANT_ANGLES: |-
+  composition
+  light
+  emotion
+  realism
+
+T2I_EXAMPLES_PREAMBLE: |-
+  The numbered prompts below were written for pictures the owner marked as favorites, chosen because those pictures are close to this DESCRIPTION. Use them as a guide to the owner's taste: the wording, the level of detail, and how they handle light, composition and mood. Never copy their people, names, objects or settings into your prompt; the DESCRIPTION alone decides what is in the picture. Where an example breaks the guideline's format or rules, follow the guideline.

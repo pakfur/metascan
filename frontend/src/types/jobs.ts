@@ -47,4 +47,6 @@ export interface ThumbItem {
   label: string
   // Learned taste score (0..1); absent/null = unscored (and always for videos).
   score?: number | null
+  // 1-based prompt variant the image was rendered from ("v2"); absent/null = none shown.
+  variant?: number | null
 }

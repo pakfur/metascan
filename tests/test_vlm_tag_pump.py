@@ -79,3 +79,52 @@ async def test_lines_appended_during_drain_survive(tmp_path):
 
     assert client.generate_tags.await_count == 1
     assert pending.read_text() == late
+
+
+async def test_drain_does_not_restart_a_vlm_unloaded_since_the_scan(tmp_path):
+    """A background drain must not bring back a VLM explicitly unloaded
+    (ComfyUI render, /unload) after the scan began; the batch stays queued."""
+    from metascan.core.vlm_client import VlmClient
+
+    spawned: list = []
+
+    def spawn(mid):
+        spawned.append(mid)
+        return "http://127.0.0.1:1"
+
+    client = VlmClient(spawn_override=spawn)
+    since = client._explicit_stops
+    await client.shutdown()
+    a = tmp_path / "a.jpg"
+    a.write_bytes(b"\xff\xd8\xff\xd9")
+    pending = tmp_path / "vlm_pending.jsonl"
+    line = json.dumps({"path": str(a)}) + "\n"
+    pending.write_text(line)
+
+    pump = VlmTagPump(
+        tmp_path,
+        client,
+        MagicMock(),
+        model_id="qwen3vl-4b",
+        unless_stopped_since=since,
+    )
+    assert await pump.drain_once() == 0
+    assert spawned == []
+    assert pending.read_text() == line
+
+
+async def test_drain_with_since_starts_when_no_unload_landed(tmp_path):
+    a = tmp_path / "a.jpg"
+    a.write_bytes(b"\xff\xd8\xff\xd9")
+    pending = tmp_path / "vlm_pending.jsonl"
+    pending.write_text(json.dumps({"path": str(a)}) + "\n")
+    client = MagicMock()
+    client._explicit_stops = 3
+    client.ensure_started = AsyncMock()
+    client.generate_tags = AsyncMock(return_value=["x"])
+    pump = VlmTagPump(
+        tmp_path, client, MagicMock(), model_id="m", unless_stopped_since=3
+    )
+    assert await pump.drain_once() == 1
+    client.ensure_started.assert_awaited_once_with("m", unless_stopped_since=3)
+    assert pending.read_text() == ""

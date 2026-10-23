@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -77,6 +77,9 @@ class PromptRequest(BaseModel):
     duration_s: float
     # Découpage cadence; null = single take (the pre-template behaviour).
     template_id: Optional[str] = None
+    # The I2V writer is the unguided base writer for now (taste guidance and
+    # adapters are T2I-only); the field exists so the picker can grow.
+    writer: Literal["base"] = "base"
 
 
 class LintRequest(BaseModel):
@@ -107,6 +110,12 @@ class GenerateRequest(BaseModel):
     # Categories the clip is tagged with at ingest; unknown ids are a 404
     # before anything is uploaded or queued.
     category_ids: List[int] = Field(default_factory=list)
+    # Lineage: the writer that drafted `prompt` and its draft, as returned by
+    # /prompt. Neither (a prompt typed from scratch) is recorded as `manual`.
+    writer_id: Optional[str] = None
+    draft_prompt: Optional[str] = None
+    # The VLM model that wrote the draft (/prompt's ``writer_model``).
+    writer_model: Optional[str] = None
 
 
 @router.post("/prompt")
@@ -115,7 +124,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     if body.duration_s <= 0:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
     try:
-        prompt, warnings = await runner.generate_prompt(
+        prompt, warnings, writer_model = await runner.write_prompt(
             body.source_path, body.idea, body.duration_s, template_id=body.template_id
         )
     except I2vUnavailableError as exc:
@@ -135,7 +144,13 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"prompt": prompt, "warnings": warnings}
+    # No deterministic fallback exists for I2V: a success is always the writer.
+    return {
+        "prompt": prompt,
+        "warnings": warnings,
+        "writer_id": body.writer,
+        "writer_model": writer_model,
+    }
 
 
 @router.post("/lint")
@@ -223,6 +238,9 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             output_prefix=cfg["output_prefix"],
             template_id=body.template_id,
             category_ids=category_ids,
+            writer_id=body.writer_id,
+            draft_prompt=body.draft_prompt,
+            writer_model=body.writer_model,
         )
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

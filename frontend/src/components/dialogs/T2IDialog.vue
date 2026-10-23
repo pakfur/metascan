@@ -4,18 +4,23 @@ import { useDebounceFn, useEventListener } from '@vueuse/core'
 import {
   DEFAULT_MAX_BATCH_SIZE,
   DEFAULT_MAX_COUNT_PER_BATCH,
+  MAX_VARIANTS,
   SEED_MAX,
+  T2I_WRITERS,
+  VARIANTS_STORAGE_KEY,
+  WRITER_STORAGE_KEY,
   activeFilterCount,
   effectiveBatchSize,
   effectiveCount,
   formatT2iTimestamp,
   isCountEffective,
-  plannedImages,
+  multiVariantGroups,
   randomSeed,
   t2iImageToMedia,
   toThumbItem,
   withCurrentOption,
   type T2iFormState,
+  type T2iWriter,
 } from '../../types/t2i'
 import type { ThumbItem } from '../../types/jobs'
 import type { Media } from '../../types/media'
@@ -32,15 +37,21 @@ import { useWebSocket } from '../../composables/useWebSocket'
 import {
   buildBatchRequest,
   defaultPresetFor,
+  draftSetFromImage,
+  draftSetFromResult,
+  draftSetFromSteps,
   firstBatchSource,
   generateBlocker,
   initialFields,
   mergeFormState,
+  plannedSteps,
   requestSignature,
   savableForm,
   toFormState,
   unlockPatch,
   usableDraft,
+  usablePrompts,
+  type BatchContext,
   type T2iFields,
 } from '../../utils/t2iDialogForm'
 import CaptionFilterPopover from '../t2i/CaptionFilterPopover.vue'
@@ -145,6 +156,9 @@ async function retryLoad() {
 // form is loaded, and silently swap the workflow it was rendered with.
 function onModelChange(id: string) {
   form.model = id
+  // Drafts are written in the model's prompt style: another model's are
+  // let go (the box keeps its text, which then goes out as typed).
+  store.discardDrafts()
   const preset = defaultPresetFor(store.config, id, presets.value.map((p) => p.id))
   if (preset !== null) form.presetId = preset
 }
@@ -205,6 +219,13 @@ watch(
     // An image being edited owns the form: its values are never overwritten.
     const patch = store.selectedId === null ? unlockPatch(finished, hasNegative.value) : null
     if (patch) Object.assign(form, mergeFormState(form, patch))
+    // The handed-back prompt is the writer's draft (one of its caption's
+    // variants): kept with it, so the next Generate records that writer and
+    // whether the text was edited, and ◀ ▶ reaches its siblings. Captured
+    // here, with the patch that fills the box, and nowhere else.
+    if (patch && patch.prompt !== undefined && finished.step) {
+      store.setDrafts(draftSetFromSteps(finished.drafts, finished.step))
+    }
     if (finished.outcome === 'complete') {
       const failed = finished.images_failed > 0 ? `, ${finished.images_failed} failed` : ''
       const n = finished.images_done
@@ -239,6 +260,45 @@ function setDirections(on: boolean) {
     /* private mode: the choice lasts for this session */
   }
 }
+// Writer and Variants: also per browser, never per image (form_state does not
+// carry them), so loading an image never changes them.
+function readPref(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+function writePref(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* private mode: the choice lasts for this session */
+  }
+}
+function storedWriter(): T2iWriter {
+  const v = readPref(WRITER_STORAGE_KEY)
+  return T2I_WRITERS.some((w) => w.id === v) ? (v as T2iWriter) : 'base'
+}
+function storedVariants(): number {
+  const n = Number(readPref(VARIANTS_STORAGE_KEY))
+  return Number.isInteger(n) && n >= 1 && n <= MAX_VARIANTS ? n : 1
+}
+const writer = ref<T2iWriter>(storedWriter())
+const variants = ref<number>(storedVariants())
+const variantChoices = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1)
+function setWriter(v: string) {
+  if (!T2I_WRITERS.some((w) => w.id === v)) return
+  writer.value = v as T2iWriter
+  writePref(WRITER_STORAGE_KEY, v)
+}
+function setVariants(v: string) {
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 1 || n > MAX_VARIANTS) return
+  variants.value = n
+  writePref(VARIANTS_STORAGE_KEY, String(n))
+}
+
 // Categories every image of the next batch is tagged with. Session-local, like
 // the directions switch: not part of form_state, so selecting a tile never
 // changes it, and no watcher here touches the form.
@@ -295,19 +355,35 @@ function toggleResolved() {
 // failed (or timed out): the caption is fine and a retry usually works.
 async function onGeneratePrompt() {
   if (!form.caption.trim() || !form.model || generating.value) return
-  const body = { caption: form.caption, seed: form.seed, model: form.model, directions: useDirections.value }
+  const body = {
+    caption: form.caption,
+    seed: form.seed,
+    model: form.model,
+    directions: useDirections.value,
+    variants: variants.value,
+    writer: writer.value,
+  }
   const target = store.selectedId
   generating.value = true
   try {
     const r = await store.generatePrompt(body)
-    if (store.selectedId !== target) {
-      // The user loaded another image while the prompt was being written:
-      // filling its box would edit (and autosave into) an image they did not ask about.
-      toast.show('The prompt was ready, but you switched images meanwhile, so it was not used.', 'info', 4000)
+    // The drafts are for this caption and model only. Another image loaded
+    // meanwhile would get them autosaved into it; an edited caption would
+    // drop them on the next Generate and send the box as a typed prompt; a
+    // different model would install drafts written in another model's style.
+    if (store.selectedId !== target || form.caption !== body.caption || form.model !== body.model) {
+      toast.show(
+        'The prompt was ready, but the image, caption or model changed meanwhile, so it was not used.',
+        'info',
+        4000,
+      )
       return
     }
     form.prompt = r.prompt // a Random Generate renders it as its first batch
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
+    // Every draft is held in the store for the caption it was written for;
+    // the box shows variant 1.
+    store.setDrafts(draftSetFromResult(body.caption, r.drafts ?? []))
     promptWarnings.value = r.warnings
     promptDirection.value = r.direction ? { text: r.direction, parts: r.direction_parts } : null
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
@@ -339,6 +415,7 @@ async function onRoll() {
     form.caption = row.caption
     form.prompt = ''
     form.negative = ''
+    store.discardDrafts()
     promptWarnings.value = []
     promptDirection.value = null
     if (store.config?.aspect_ratios.includes(row.aspect_ratio)) form.aspect = row.aspect_ratio
@@ -352,6 +429,38 @@ async function onRoll() {
   } finally {
     rolling.value = false
   }
+}
+
+// Typing in the Caption box: drafts belong to the caption they were written
+// for, so any change lets them go (the Prompt box keeps its text, which a
+// Generate then sends as typed).
+function onCaptionInput(text: string) {
+  form.caption = text
+  if (store.drafts) store.discardDrafts()
+}
+
+// ---- the draft switcher ------------------------------------------------------------------------------
+// "variant k of N ◀ ▶" over the drafts the store holds for the caption in the
+// box. Shown only while they still belong to it and nothing has the boxes.
+const draftSet = computed(() => {
+  const set = store.drafts
+  return set && !randomLocked.value && set.caption === form.caption && set.entries.length > 1 ? set : null
+})
+const draftLabel = computed(() => {
+  const set = draftSet.value
+  if (!set) return ''
+  const entry = set.entries[set.current]
+  return `variant ${set.current + 1} of ${set.entries.length} · ${entry.writer_id}`
+})
+// An explicit user action: what the boxes hold stays with the variant being
+// left, and the other variant's text (as last left) goes in.
+function switchVariant(delta: number) {
+  const set = draftSet.value
+  if (!set) return
+  const next = store.switchDraft(set.current + delta, form.prompt, form.negative)
+  if (!next) return
+  form.prompt = next.prompt
+  if (hasNegative.value) form.negative = next.negative
 }
 
 // ---- the caption filter ----------------------------------------------------------------------------
@@ -406,11 +515,17 @@ watch(filterOpen, (open) => {
 // ---- batch numbers ------------------------------------------------------------------------------------
 const shownBatchSize = computed(() => effectiveBatchSize(form.mode, form.batchSize, maxBatchSize.value))
 const countIgnored = computed(() => !isCountEffective(form.seedPolicy, form.countPerBatch))
-const planned = computed(() =>
-  plannedImages(form.mode, form.seedPolicy, form.batchSize, form.countPerBatch, {
-    maxBatchSize: maxBatchSize.value,
-    maxCount: maxCount.value,
-  }),
+// What a Generate sends besides the form: limits, the pickers and the drafts.
+const batchContext = computed<BatchContext>(() => ({
+  hasNegative: hasNegative.value,
+  maxBatchSize: maxBatchSize.value,
+  maxCount: maxCount.value,
+  variants: variants.value,
+  writer: writer.value,
+  drafts: store.drafts,
+}))
+const planned = computed(
+  () => plannedSteps(form, batchContext.value) * effectiveCount(form.seedPolicy, form.countPerBatch, maxCount.value),
 )
 const generateLabel = computed(() => (planned.value > 1 ? `Generate ×${planned.value}` : 'Generate'))
 
@@ -441,6 +556,11 @@ const firstBatchHint = computed(() => {
   const more = shownBatchSize.value > 1
   switch (firstBatch.value) {
     case 'prompt':
+      if ((usablePrompts(form, batchContext.value)?.length ?? 0) > 1) {
+        return more
+          ? 'Batch 1 renders the prompt variants above; the others roll new captions and write their prompts'
+          : 'Renders the prompt variants above'
+      }
       return more
         ? 'Batch 1 renders the prompt above; the others roll new captions and write their prompts'
         : 'Renders the prompt above'
@@ -479,14 +599,10 @@ async function onGenerate() {
   if (blocker.value !== null) return
   // The server owns the run: one snapshot of the form goes out, and nothing
   // typed afterwards can reach a batch that is already running.
-  const req = buildBatchRequest(form, {
-    hasNegative: hasNegative.value,
-    maxBatchSize: maxBatchSize.value,
-    maxCount: maxCount.value,
-  })
+  const req = buildBatchRequest(form, batchContext.value)
   req.directions = useDirections.value
   req.category_ids = [...categoryIds.value]
-  const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value) : null
+  const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value, req.prompts ?? null) : null
   if (
     signature !== null &&
     signature === lastSubmitted &&
@@ -499,7 +615,7 @@ async function onGenerate() {
     return
   }
   // Set before the request goes out: the batch's WebSocket frames can beat the response.
-  supplyingFirstStep.value = req.mode === 'random' && (!!req.prompt || !!req.caption)
+  supplyingFirstStep.value = req.mode === 'random' && (!!req.prompt || !!req.prompts || !!req.caption)
   submitting.value = true
   try {
     const r = await store.startBatch(req)
@@ -552,8 +668,9 @@ async function onCancel() {
 // makes the list recompute on every rescore.
 const gridItems = computed(() => {
   const scores = taste.scores
+  const multi = multiVariantGroups(store.images)
   return store.shownImages.map((img) => {
-    const item = toThumbItem(img)
+    const item = toThumbItem(img, multi)
     return { ...item, score: scores.get(item.file_path) ?? null }
   })
 })
@@ -574,10 +691,14 @@ function onSelectTile(item: ThumbItem) {
   const stored = store.selectImage(id)
   if (!stored) return
   Object.assign(form, mergeFormState(form, stored))
+  // Re-rendering a writer's prompt keeps its lineage (writer, model, draft):
+  // the tile's draft rides along as a one-entry set, never as a typed prompt.
+  const image = store.images.find((i) => i.id === id)
+  store.setDrafts(image ? draftSetFromImage(image, form) : null)
   // The form now equals what the server holds, so loading must not echo back
   // as a save. An untouched Generate would render the same image again.
   autosave.markLoaded()
-  lastSubmitted = requestSignature(form, hasNegative.value)
+  lastSubmitted = requestSignature(form, hasNegative.value, usablePrompts(form, batchContext.value))
 }
 
 // The form keeps its values and goes back to being a scratch area.
@@ -770,7 +891,7 @@ onBeforeUnmount(() => {
                 :value="shownCaption"
                 :readonly="randomLocked"
                 :placeholder="randomLocked ? 'A caption is drawn from the caption file for each batch…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
-                @input="form.caption = ($event.target as HTMLTextAreaElement).value"
+                @input="onCaptionInput(($event.target as HTMLTextAreaElement).value)"
               />
               <div class="sec-foot">
                 <button
@@ -780,12 +901,34 @@ onBeforeUnmount(() => {
                   :disabled="randomLocked"
                   @click="toggleResolved"
                 >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
-                <button
-                  type="button"
-                  class="btn"
-                  :disabled="generating || randomLocked || !form.caption.trim() || !form.model"
-                  @click="onGeneratePrompt"
-                >{{ generating ? 'Writing prompt…' : 'Generate Prompt' }}</button>
+                <div class="writer-row">
+                  <label class="inline-pick" title="Who writes the prompts: base Qwen, or base Qwen shown your favorite prompts as examples">
+                    <span>Writer</span>
+                    <select
+                      :value="writer"
+                      :disabled="randomLocked"
+                      @change="setWriter(($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="w in T2I_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+                    </select>
+                  </label>
+                  <label class="inline-pick" title="How many different prompts are written for one caption; each renders the caption's same seeds">
+                    <span>Variants</span>
+                    <select
+                      :value="variants"
+                      :disabled="randomLocked"
+                      @change="setVariants(($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="n in variantChoices" :key="n" :value="n">{{ n }}</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    class="btn"
+                    :disabled="generating || randomLocked || !form.caption.trim() || !form.model"
+                    @click="onGeneratePrompt"
+                  >{{ generating ? (variants > 1 ? 'Writing prompts…' : 'Writing prompt…') : 'Generate Prompt' }}</button>
+                </div>
               </div>
               <div v-if="resolvedOpen && !randomLocked" class="resolved">
                 <p v-if="!form.caption.trim()" class="note">Nothing to resolve yet: write a caption first.</p>
@@ -809,7 +952,28 @@ onBeforeUnmount(() => {
 
             <section class="sec">
               <div class="sec-head">
-                <label class="sec-title" for="t2i-prompt">Prompt</label>
+                <div class="prompt-title">
+                  <label class="sec-title" for="t2i-prompt">Prompt</label>
+                  <span v-if="draftSet" class="variant-switch">
+                    <button
+                      type="button"
+                      class="icon-btn small"
+                      title="Previous variant (your edits to this one are kept)"
+                      aria-label="Previous prompt variant"
+                      :disabled="draftSet.current === 0"
+                      @click="switchVariant(-1)"
+                    >◀</button>
+                    <span class="variant-label">{{ draftLabel }}</span>
+                    <button
+                      type="button"
+                      class="icon-btn small"
+                      title="Next variant (your edits to this one are kept)"
+                      aria-label="Next prompt variant"
+                      :disabled="draftSet.current >= draftSet.entries.length - 1"
+                      @click="switchVariant(1)"
+                    >▶</button>
+                  </span>
+                </div>
                 <label class="check" title="Use the caption's classification to add a direction when the prompt is written">
                   <input
                     type="checkbox"
@@ -1158,6 +1322,65 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* Writer and Variants sit beside Generate Prompt, the button they shape. */
+.writer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 10px;
+}
+
+.inline-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.inline-pick select {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-color);
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+.inline-pick select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.inline-pick select:disabled {
+  opacity: 0.6;
+}
+
+.prompt-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.variant-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+.icon-btn.small {
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.variant-label {
+  white-space: nowrap;
 }
 
 .source {

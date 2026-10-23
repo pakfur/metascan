@@ -1,7 +1,7 @@
 """TestClient coverage of the /api/vlm endpoints."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,7 +123,10 @@ def test_retag_cancel_endpoint(app_with_stub_vlm, tmp_path: Path):
 async def test_active_endpoint_calls_swap(app_with_stub_vlm):
     c, stub = app_with_stub_vlm
     stub.swap_model = AsyncMock()
-    r = c.post("/api/vlm/active", json={"model_id": "qwen3vl-8b"})
+    # /active refuses a model that is not installed (409); this host may
+    # have no weights.
+    with patch.object(vlm_api, "vlm_model_installed", return_value=True):
+        r = c.post("/api/vlm/active", json={"model_id": "qwen3vl-8b"})
     assert r.status_code == 200
     stub.swap_model.assert_awaited_with("qwen3vl-8b")
 

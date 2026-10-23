@@ -42,6 +42,14 @@ from metascan.core.i2v_templates import (
     validate_i2v_template_fill,
 )
 from metascan.core.prompt_store import get_prompt_store
+from metascan.core.judgments import (
+    DRAFT_WRITERS,
+    WRITER_MANUAL,
+    WriterModelError,
+    check_writer_model,
+    normalize_prompt,
+)
+from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -93,10 +101,15 @@ class I2vRunner:
         comfy: Any,
         get_vlm: Callable[[], Any],
         output_root: Path,
+        vlm_installed: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
-        self.get_vlm = get_vlm
+        self.get_vlm = get_vlm  # the prompt-writer client
+        # Says whether a model's files are on disk (None: trust the picker).
+        # A missing writer model is refused with a "download it" hint rather
+        # than spawning a llama-server that cannot load it.
+        self.vlm_installed = vlm_installed
         self.output_root = Path(output_root)
         self._on_event: List[EventCb] = []
         self._ingest_tasks: Set["asyncio.Task[None]"] = set()
@@ -127,9 +140,24 @@ class I2vRunner:
         duration_s: float,
         template_id: Optional[str] = None,
     ) -> Tuple[str, List[str]]:
-        """Expand an idea into the H3 prompt. With ``template_id`` the
-        découpage template owns the shot structure and the VLM fills only
-        prose; without it, this is the single-take path, unchanged."""
+        """``(text, warnings)`` of :meth:`write_prompt`."""
+        text, warnings, _ = await self.write_prompt(
+            source_path, idea, duration_s, template_id
+        )
+        return text, warnings
+
+    async def write_prompt(
+        self,
+        source_path: str,
+        idea: str,
+        duration_s: float,
+        template_id: Optional[str] = None,
+    ) -> Tuple[str, List[str], str]:
+        """Expand an idea into the H3 prompt: ``(text, warnings,
+        writer_model)``, the last being the VLM model that wrote it (lineage).
+        With ``template_id`` the découpage template owns the shot structure
+        and the VLM fills only prose; without it, this is the single-take
+        path, unchanged."""
         template = None
         if template_id:
             try:
@@ -150,7 +178,10 @@ class I2vRunner:
             raise I2vRequestError(f"Not an image: {source_path}")
         if not path.exists():
             raise I2vRequestError(f"File not found: {source_path}")
-        model_id = pick_vlm_model(vlm)
+        model_id = pick_vlm_model(vlm, role="writer")
+        check = self.vlm_installed
+        if check is not None and not await asyncio.to_thread(check, model_id):
+            raise I2vUnavailableError(writer_missing_hint(model_id))
         await vlm.ensure_started(model_id)
 
         if template is None:
@@ -165,7 +196,7 @@ class I2vRunner:
             )
             result = validate_i2v_beats(raw)
             text = assemble_i2v_prompt(result)
-            return text, lint_i2v_prompt(text, duration_s)
+            return text, lint_i2v_prompt(text, duration_s), model_id
 
         raw = await vlm.generate_text(
             system_prompt=get_prompt_store().get("I2V_TEMPLATE_SYSTEM"),
@@ -178,7 +209,8 @@ class I2vRunner:
         )
         fill = validate_i2v_template_fill(raw, template)
         text, notes = assemble_i2v_template_prompt(template, fill)
-        return text, lint_i2v_prompt(text, duration_s, template=template) + notes
+        warnings = lint_i2v_prompt(text, duration_s, template=template) + notes
+        return text, warnings, model_id
 
     async def _source_dims(self, src: Path) -> Tuple[int, int]:
         """Source pixel dimensions: the media row first (already scanned,
@@ -253,7 +285,24 @@ class I2vRunner:
         output_root: Optional[str] = None,
         output_prefix: Optional[str] = None,
         category_ids: Optional[List[int]] = None,
+        writer_id: Optional[str] = None,
+        draft_prompt: Optional[str] = None,
+        writer_model: Optional[str] = None,
     ) -> int:
+        # Lineage: a prompt with a draft names the writer that drafted it; one
+        # typed from scratch is `manual` whatever the caller says. Only a VLM
+        # writer has a model, and it must be one the writer role can use.
+        if draft_prompt is None:
+            writer_id = WRITER_MANUAL
+        elif writer_id not in DRAFT_WRITERS:
+            raise I2vRequestError(
+                f"writer_id {writer_id!r} is not a writer that drafts prompts "
+                f"({', '.join(DRAFT_WRITERS)})"
+            )
+        try:
+            writer_model = check_writer_model(writer_id, writer_model)
+        except WriterModelError as exc:
+            raise I2vRequestError(str(exc)) from exc
         preset = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if preset is None:
             raise I2vRequestError(f"Preset {preset_id} does not exist")
@@ -339,6 +388,10 @@ class I2vRunner:
             # Tagged onto the clip at ingest; session-local in the dialog,
             # so not part of the form.
             "category_ids": list(category_ids or []),
+            # Prompt lineage; NULL on the row if a restart loses it first.
+            "writer_id": writer_id,
+            "writer_model": writer_model,
+            "draft_prompt": draft_prompt,
             "form": build_form_state(
                 idea=idea,
                 prompt=prompt,
@@ -380,6 +433,14 @@ class I2vRunner:
         except (TypeError, ValueError):
             params = {}
         meta = self._job_meta.pop(int(job_id), {})
+        draft = meta.get("draft_prompt")
+        edited: Optional[int] = None
+        if meta.get("writer_id") is not None:
+            edited = int(
+                draft is not None
+                and normalize_prompt(draft)
+                != normalize_prompt(params.get("positive") or "")
+            )
         inserted: List[str] = []
         for f in payload.get("files") or []:
             posix = to_posix_path(f)
@@ -404,6 +465,10 @@ class I2vRunner:
                     megapixels=meta.get("megapixels"),
                     loras=meta.get("loras"),
                     form_state=meta.get("form"),
+                    writer_id=meta.get("writer_id"),
+                    writer_model=meta.get("writer_model"),
+                    draft_prompt=draft,
+                    edited=edited,
                 )
                 inserted.append(posix)
             except Exception:
