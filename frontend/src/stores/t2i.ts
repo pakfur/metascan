@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as t2iApi from '../api/t2i'
-import { updateMedia } from '../api/media'
+import { setVerdict } from '../api/judgments'
 import { useJobTracker } from '../composables/useJobTracker'
 import { useToast } from '../composables/useToast'
 import { useFoldersStore } from './folders'
@@ -668,16 +668,25 @@ export const useT2iStore = defineStore('t2i', () => {
     }
   }
 
-  /** Optimistic; the library copy is updated too. Reverts and rethrows on failure. */
-  async function toggleFavorite(id: number): Promise<void> {
+  /**
+   * Optimistic; the library copy is updated too. Reverts and rethrows on failure.
+   * Goes through the judgments API like the viewer's F, so the rating log
+   * records `scoreShown` -- the taste score the tile displayed (two decimals),
+   * or nothing when the tile showed none. Unfavoriting clears the verdict.
+   */
+  async function toggleFavorite(id: number, scoreShown?: number): Promise<void> {
     const image = images.value.find((i) => i.id === id)
     if (!image) return
     const next = !image.is_favorite
     image.is_favorite = next
     try {
-      const updated = await updateMedia(image.file_path, { is_favorite: next })
-      image.is_favorite = updated.is_favorite
-      mirrorFavoriteToLibrary(image.file_path, updated.is_favorite)
+      const state = await setVerdict(
+        image.file_path,
+        next ? 'favorite' : null,
+        scoreShown === undefined ? {} : { scoreShown },
+      )
+      image.is_favorite = state.is_favorite
+      mirrorFavoriteToLibrary(image.file_path, state.is_favorite)
     } catch (e) {
       image.is_favorite = !next
       throw e

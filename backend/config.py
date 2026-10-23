@@ -95,6 +95,30 @@ def get_models_config(config: dict) -> dict:
     }
 
 
+def get_taste_config(config: dict) -> dict:
+    """Return the ``taste`` section with defaults filled in.
+
+    Shape:
+        {
+            "half_life_days": 180.0,  # label time-decay half-life
+            "auto_retrain": True,     # background retrain after new ratings
+        }
+    """
+    from metascan.core.taste_labels import DEFAULT_HALF_LIFE_DAYS
+
+    raw = config.get("taste", {}) or {}
+    try:
+        half_life = float(raw.get("half_life_days", DEFAULT_HALF_LIFE_DAYS))
+    except (TypeError, ValueError):
+        half_life = DEFAULT_HALF_LIFE_DAYS
+    if not half_life > 0:
+        half_life = DEFAULT_HALF_LIFE_DAYS
+    return {
+        "half_life_days": half_life,
+        "auto_retrain": bool(raw.get("auto_retrain", True)),
+    }
+
+
 def get_comfy_config(config: dict) -> dict:
     """Return the ``comfy`` section with defaults filled in.
 

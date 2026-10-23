@@ -18,6 +18,8 @@ def _get_service() -> JudgmentsService:
 
 class SeenRequest(BaseModel):
     file_path: str
+    # The taste score on screen at dwell time (two decimals), if any.
+    score_shown: Optional[float] = None
 
 
 class JudgmentPatch(BaseModel):
@@ -36,7 +38,7 @@ def _not_found() -> HTTPException:
 async def mark_seen(
     body: SeenRequest, service: JudgmentsService = Depends(_get_service)
 ) -> Dict[str, Any]:
-    state = await service.mark_seen(body.file_path)
+    state = await service.mark_seen(body.file_path, body.score_shown)
     if state is None:
         raise _not_found()
     return state.to_dict()
@@ -49,7 +51,9 @@ async def get_judgment(
     state = await service.get(file_path)
     if state is None:
         raise _not_found()
-    return state.to_dict()
+    out = state.to_dict()
+    out["batch"] = await service.batch_position(file_path)
+    return out
 
 
 @router.patch("/judgments/{file_path:path}")

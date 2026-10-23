@@ -1,0 +1,404 @@
+"""Taste worker subprocess + TasteRunner, end to end against a real small
+FAISS index on disk and an isolated temp DB (synthetic data only)."""
+
+import asyncio
+import json
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.embedding_manager import FaissIndexManager
+from metascan.core.media import Media
+from metascan.core.taste_runner import TasteRunner
+
+DIM = 32
+MODEL_KEY = "small"
+
+
+def _media(path: str) -> Media:
+    return Media(
+        file_path=Path(path),
+        file_size=1,
+        width=8,
+        height=8,
+        format="png",
+        created_at=datetime.now(),
+        modified_at=datetime.now(),
+    )
+
+
+def _vec(rng: np.random.Generator, direction: np.ndarray, sign: float) -> np.ndarray:
+    v = rng.normal(size=DIM) + 2.5 * sign * direction
+    return (v / np.linalg.norm(v)).astype(np.float32)
+
+
+def _build(tmp_path: Path, n_fav: int, n_pass: int, indexed=None):
+    rng = np.random.default_rng(7)
+    direction = rng.normal(size=DIM)
+    direction /= np.linalg.norm(direction)
+    db = DatabaseManager(tmp_path / "db")
+    index_dir = tmp_path / "similarity"
+    vectors = {}
+    for i in range(n_fav):
+        vectors[f"/l/f{i:02d}.png"] = (_vec(rng, direction, 1.0), "favorite")
+    for i in range(n_pass):
+        vectors[f"/l/p{i:02d}.png"] = (_vec(rng, direction, -1.0), "pass")
+    vectors["/l/vid.mp4"] = (_vec(rng, direction, 1.0), "favorite")
+    for path, (_, verdict) in vectors.items():
+        db.save_media(_media(path))
+        db.set_verdict(path, verdict)
+    # A tombstoned favorite: its vector survives only on the tombstone.
+    gone_vec = _vec(rng, direction, 1.0)
+    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
+    db.save_media(_media("/l/gone.png"))
+    db.set_verdict("/l/gone.png", "favorite")
+    db.delete_media(Path("/l/gone.png"))
+    db.set_embedding_lookup(None)
+
+    fm = FaissIndexManager(index_dir)
+    fm.create(DIM, MODEL_KEY)
+    # ``indexed`` simulates a partial index (a CLIP switch mid-rebuild):
+    # only those paths have a vector yet.
+    paths = [p for p in vectors if indexed is None or p in indexed]
+    fm.add_batch(paths, np.stack([vectors[p][0] for p in paths]))
+    assert fm.save()
+    return db, index_dir, rng, direction
+
+
+@pytest.fixture
+def setup(tmp_path):
+    db, index_dir, rng, direction = _build(tmp_path, 30, 30)
+    runner = TasteRunner(db, index_dir, tmp_path / "taste")
+    yield runner, db, index_dir, rng, direction
+    db.close()
+
+
+@pytest.fixture
+def runner(setup):
+    return setup[0]
+
+
+@pytest.fixture
+def db(setup):
+    return setup[1]
+
+
+@pytest.fixture
+def runner_few(tmp_path):
+    db, index_dir, _, _ = _build(tmp_path, 5, 30)
+    yield TasteRunner(db, index_dir, tmp_path / "taste")
+    db.close()
+
+
+async def test_train_end_to_end(runner, db):
+    r = await runner.train(180)
+    assert r["status"] == "ok", r
+    assert r["holdout_auc"] is not None and r["holdout_auc"] > 0.8
+    # 30 live favorites + the tombstoned one; the video is never a label.
+    assert (r["n_pos"], r["n_neg"]) == (31, 30)
+    model_id, scores = db.get_taste_scores()
+    assert model_id == r["model_id"]
+    assert "/l/vid.mp4" not in scores and len(scores) == 60
+    assert all(0.0 <= s <= 1.0 for s in scores.values())
+    favs = np.mean([s for p, s in scores.items() if "/f" in p])
+    passes = np.mean([s for p, s in scores.items() if "/p" in p])
+    assert favs > passes
+    active = db.get_active_taste_model()
+    assert active["id"] == r["model_id"]
+    assert active["embedding_model"] == MODEL_KEY and active["dim"] == DIM
+    assert Path(active["params_path"]).exists()
+    assert not runner.is_stale(active)
+    assert not runner.training
+
+
+async def test_labels_as_of_is_snapshot_time(runner, db):
+    from datetime import timezone
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    r = await runner.train(180, now=now)
+    assert r["status"] == "ok"
+    assert db.get_active_taste_model()["labels_as_of"] == now.isoformat()
+
+
+async def test_not_enough_data_spawns_nothing(runner_few, monkeypatch):
+    async def boom(*a, **k):
+        raise AssertionError("worker must not be spawned")
+
+    monkeypatch.setattr(runner_few, "_run_worker", boom)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+    r = await runner_few.train(180)
+    assert r["status"] == "not_enough_data"
+    # 5 live favorites + the tombstoned one.
+    assert r["missing"] == {"positives": 14, "negatives": 0}
+    assert runner_few.db.list_taste_models() == []
+    assert not runner_few.training
+
+
+async def test_worker_error_recorded(setup):
+    runner, db, index_dir, _, _ = setup
+    first = await runner.train(180)
+    assert first["status"] == "ok"
+    (index_dir / "faiss_index.bin").write_bytes(b"not a faiss index")
+    r = await runner.train(180)
+    assert r["status"] == "error" and r["error"]
+    latest = db.list_taste_models()[0]
+    assert latest["status"] == "failed" and latest["error"]
+    assert db.get_active_taste_model()["id"] == first["model_id"]
+    assert db.get_taste_scores()[0] == first["model_id"]
+    assert not runner.training
+
+
+async def test_stale_after_model_switch(setup):
+    runner, db, index_dir, _, _ = setup
+    assert (await runner.train(180))["status"] == "ok"
+    meta_path = index_dir / "index_meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["model_key"] = "large"
+    meta_path.write_text(json.dumps(meta))
+    assert runner.is_stale(db.get_active_taste_model())
+    assert await runner.rescore() is None
+
+
+def test_is_stale_on_dim_and_missing_meta(setup):
+    runner, _, index_dir, _, _ = setup
+    assert not runner.is_stale({"embedding_model": MODEL_KEY, "dim": DIM})
+    assert runner.is_stale({"embedding_model": MODEL_KEY, "dim": 64})
+    (index_dir / "index_meta.json").unlink()
+    assert runner.is_stale({"embedding_model": MODEL_KEY, "dim": DIM})
+
+
+async def test_rescore_without_model_is_noop(runner):
+    assert await runner.rescore() is None
+
+
+async def test_second_train_while_running_raises(runner):
+    first = asyncio.create_task(runner.train(180))
+    await asyncio.sleep(0)
+    assert runner.training
+    with pytest.raises(RuntimeError, match="already_training"):
+        await runner.train(180)
+    assert (await first)["status"] == "ok"
+    assert not runner.training
+
+
+async def test_rescore_scores_new_images(setup):
+    runner, db, index_dir, rng, direction = setup
+    r = await runner.train(180)
+    assert r["status"] == "ok"
+    new = [f"/l/new{i}.png" for i in range(5)]
+    for p in new:
+        db.save_media(_media(p))
+    fm = FaissIndexManager(index_dir)
+    assert fm.load()
+    fm.add_batch(new, np.stack([_vec(rng, direction, 1.0) for _ in new]))
+    assert fm.save()
+    assert await runner.rescore() == 65
+    model_id, scores = db.get_taste_scores()
+    assert model_id == r["model_id"] and all(p in scores for p in new)
+    assert "/l/vid.mp4" not in scores
+
+
+async def test_params_pruned_to_newest_five(runner, db):
+    for _ in range(7):
+        assert (await runner.train(180))["status"] == "ok"
+    kept = sorted(runner.models_dir.glob("*.npz"))
+    assert len(kept) == 5
+    assert Path(db.get_active_taste_model()["params_path"]) in kept
+
+
+def test_record_failed_model_keeps_active(tmp_path):
+    db = DatabaseManager(tmp_path / "db")
+    base = {
+        "created_at": "2026-10-22T00:00:00+00:00",
+        "labels_as_of": "2026-10-22T00:00:00+00:00",
+        "embedding_model": MODEL_KEY,
+        "dim": DIM,
+        "categories": [],
+        "n_pos": 20,
+        "n_neg": 20,
+        "n_pairs": 0,
+        "half_life_days": 180.0,
+        "params_path": "/x.npz",
+    }
+    active_id = db.record_taste_model(base)
+    failed_id = db.record_taste_model({**base, "status": "failed", "error": "boom"})
+    assert db.get_active_taste_model()["id"] == active_id
+    rows = {m["id"]: m for m in db.list_taste_models()}
+    assert rows[failed_id]["status"] == "failed" and rows[failed_id]["error"] == "boom"
+    with pytest.raises(ValueError):
+        db.record_taste_model({**base, "status": "retired"})
+    db.close()
+
+
+async def test_drain_survives_overlong_stderr_line(tmp_path, caplog):
+    import logging
+
+    runner = TasteRunner(None, tmp_path / "idx", tmp_path / "taste")
+    stream = asyncio.StreamReader(limit=1024)
+    stream.feed_data(b"x" * 5000 + b"\n" + b"after the long line\n")
+    stream.feed_eof()
+    with caplog.at_level(logging.INFO, logger="metascan.core.taste_runner"):
+        await asyncio.wait_for(runner._drain(stream), timeout=5)
+    assert "after the long line" in caplog.text
+
+
+async def test_scoring_targets_and_task_write_off_loop(setup, monkeypatch):
+    runner, *_ = setup
+    calls = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        calls.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    assert (await runner.train(180))["status"] == "ok"
+    assert "_scoring_targets" in calls
+    assert calls.count("_write_json") >= 2  # labels doc + task file
+
+
+def test_index_fingerprint_tracks_meta(setup):
+    import os
+
+    runner, _, index_dir, _, _ = setup
+    fp = runner.index_fingerprint()
+    assert fp is not None and fp[:2] == (MODEL_KEY, DIM)
+    meta_path = index_dir / "index_meta.json"
+    st = meta_path.stat()
+    os.utime(meta_path, (st.st_atime, st.st_mtime + 10))
+    assert runner.index_fingerprint() != fp
+    meta_path.unlink()
+    assert runner.index_fingerprint() is None
+
+
+# ---- a partial index (CLIP switch mid-rebuild) ---------------------------
+
+
+def _partial(n_fav_indexed: int, n_pass_indexed: int = 30) -> set:
+    return {f"/l/f{i:02d}.png" for i in range(n_fav_indexed)} | {
+        f"/l/p{i:02d}.png" for i in range(n_pass_indexed)
+    }
+
+
+async def test_partial_index_is_not_enough_vectors(tmp_path):
+    # 30 favorites rated, but only 10 have a vector yet (+ the tombstone's
+    # own stored vector = 11 positives with vectors).
+    db, index_dir, _, _ = _build(tmp_path, 30, 30, indexed=_partial(10))
+    runner = TasteRunner(db, index_dir, tmp_path / "taste")
+    try:
+        r = await runner.train(180)
+        assert r["status"] == "not_enough_data", r
+        assert r["reason"] == "vectors"
+        assert r["missing"] == {"positives": 9, "negatives": 0}
+        # Not a failure: no failed row spam, and no model activated.
+        assert db.list_taste_models() == []
+        assert db.get_active_taste_model() is None
+        assert not runner.training
+    finally:
+        db.close()
+
+
+async def test_model_records_labels_without_vectors(tmp_path):
+    db, index_dir, _, _ = _build(tmp_path, 30, 30, indexed=_partial(25))
+    runner = TasteRunner(db, index_dir, tmp_path / "taste")
+    try:
+        r = await runner.train(180)
+        assert r["status"] == "ok", r
+        assert (r["n_pos"], r["n_neg"]) == (26, 30)
+        assert r["n_no_vector"] == 5
+        assert db.get_active_taste_model()["n_no_vector"] == 5
+    finally:
+        db.close()
+
+
+def test_n_no_vector_column_added_to_an_existing_table(tmp_path):
+    """A DB created before the column existed keeps its model rows."""
+    import sqlite3
+
+    db = DatabaseManager(tmp_path / "db")
+    db.close()
+    conn = sqlite3.connect(tmp_path / "db" / "metascan.db")
+    conn.execute("DROP TABLE taste_models")
+    conn.execute(
+        "CREATE TABLE taste_models (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT NOT NULL, labels_as_of TEXT NOT NULL, status TEXT NOT NULL "
+        "CHECK (status IN ('active','retired','failed')), embedding_model TEXT "
+        "NOT NULL, dim INTEGER NOT NULL, categories TEXT NOT NULL, n_pos INTEGER "
+        "NOT NULL, n_neg INTEGER NOT NULL, n_pairs INTEGER NOT NULL, holdout_auc "
+        "REAL, half_life_days REAL NOT NULL, params_path TEXT NOT NULL, error TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO taste_models (created_at, labels_as_of, status, "
+        "embedding_model, dim, categories, n_pos, n_neg, n_pairs, holdout_auc, "
+        "half_life_days, params_path) VALUES ('t', 't', 'active', 'small', 32, "
+        "'[]', 20, 20, 0, 0.8, 180, '/x.npz')"
+    )
+    conn.commit()
+    conn.close()
+    db = DatabaseManager(tmp_path / "db")
+    try:
+        active = db.get_active_taste_model()
+        assert active is not None and active["n_no_vector"] == 0
+        assert active["n_pos"] == 20
+    finally:
+        db.close()
+
+
+async def test_result_read_install_and_prune_off_loop(setup, monkeypatch):
+    runner, *_ = setup
+    calls = []
+    real = asyncio.to_thread
+
+    async def spy(fn, *a, **k):
+        calls.append(getattr(fn, "__name__", repr(fn)))
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+    assert (await runner.train(180))["status"] == "ok"
+    for name in ("_read_result", "_install_params", "_prune_params"):
+        assert name in calls, (name, calls)
+
+
+async def test_rescore_uses_the_slim_query(setup, monkeypatch):
+    runner, db, *_ = setup
+    assert (await runner.train(180))["status"] == "ok"
+
+    def boom():
+        raise AssertionError("rescore must not read the full training snapshot")
+
+    monkeypatch.setattr(db, "taste_training_raw", boom)
+    assert await runner.rescore() == 60
+
+
+def test_scoring_raw_has_images_and_categories_only(setup):
+    _, db, *_ = setup
+    cid = db.create_category("Anime").id
+    db.add_media_categories(["/l/f00.png"], cid, "viewer")
+    raw = db.taste_scoring_raw()
+    paths = {m["file_path"] for m in raw["media"]}
+    assert "/l/vid.mp4" not in paths and "/l/f00.png" in paths
+    cats = {m["file_path"]: m["categories"] for m in raw["media"]}
+    assert cats["/l/f00.png"] == ["Anime"] and cats["/l/p00.png"] == []
+
+
+async def test_score_write_failure_keeps_model_and_asks_for_rescore(setup, monkeypatch):
+    runner, db, *_ = setup
+
+    def boom(model_id, scores):
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(db, "replace_taste_scores", boom)
+    r = await runner.train(180)
+    assert r["status"] == "ok" and r["rescore_needed"] is True
+    assert db.get_active_taste_model()["id"] == r["model_id"]
+
+
+async def test_missing_index_error_says_how_to_fix_it(setup):
+    runner, db, index_dir, _, _ = setup
+    (index_dir / "index_meta.json").unlink()
+    r = await runner.train(180)
+    assert r["status"] == "error"
+    assert "Build the similarity index first" in r["error"]

@@ -520,6 +520,11 @@ class ComfyClient:
     def queue_depth(self) -> int:
         return len(self._queue)
 
+    def has_pending_jobs(self) -> bool:
+        """True while any job is queued here, being submitted, or running
+        inside ComfyUI (every feature: T2I, I2V, storyboards)."""
+        return bool(self._queue) or bool(self._running) or self._submits_in_flight > 0
+
     async def submit(
         self,
         preset_id: int,

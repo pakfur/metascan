@@ -12,6 +12,7 @@ import LazyThumb from './LazyThumb.vue'
 import RatingRail from './RatingRail.vue'
 import CategoryPicker from './CategoryPicker.vue'
 import { useCategoriesStore } from '../../stores/categories'
+import { useTasteStore } from '../../stores/taste'
 import { useToast } from '../../composables/useToast'
 import { ApiError } from '../../api/client'
 import { fetchJudgment, markSeen, setVerdict, setReason } from '../../api/judgments'
@@ -65,11 +66,28 @@ const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const showHelp = ref(false)
 const undoData = ref<{ media: Media; index: number } | null>(null)
 
-const current = computed(() => props.mediaList[currentIndex.value] ?? null)
+// Review mode (R, rating only): navigation walks the scorer's
+// least-certain images instead of mediaList. The state is this viewer's
+// own; closing the viewer simply drops it. `returnPath` / `returnIndex`
+// remember where the original list was so leaving review puts the owner
+// back on the item they were rating.
+interface ReviewState {
+  list: Media[]
+  returnPath: string | null
+  returnIndex: number
+}
+const review = ref<ReviewState | null>(null)
+let reviewLoading = false
 
-const positionLabel = computed(() =>
-  `${currentIndex.value + 1} / ${props.mediaList.length}`
-)
+// The list the viewer is navigating right now.
+const activeList = computed<Media[]>(() => review.value?.list ?? props.mediaList)
+
+const current = computed(() => activeList.value[currentIndex.value] ?? null)
+
+const positionLabel = computed(() => {
+  const pos = `${currentIndex.value + 1} / ${activeList.value.length}`
+  return review.value ? `Review · ${pos}` : pos
+})
 
 watch(current, (media) => {
   if (media && props.allowDestructive) mediaStore.selectMedia(media)
@@ -78,9 +96,12 @@ watch(current, (media) => {
 // Navigation
 function navigate(direction: number) {
   const newIdx = currentIndex.value + direction
-  if (newIdx >= 0 && newIdx < props.mediaList.length) {
+  if (newIdx >= 0 && newIdx < activeList.value.length) {
     currentIndex.value = newIdx
     undoData.value = null
+  } else if (review.value && newIdx >= activeList.value.length) {
+    // Stepping past the last review item ends review.
+    exitReview()
   }
 }
 
@@ -132,7 +153,14 @@ function enqueue(path: string, op: JudgmentOp): void {
   })
 }
 
-function receive(path: string, state: JudgmentState): void {
+function receive(path: string, incoming: JudgmentState): void {
+  // Only GET carries `batch`; a PATCH / seen response omits the key, so
+  // keep the position already known instead of wiping it.
+  const prev = lastKnown.get(path)
+  const state =
+    incoming.batch === undefined && prev?.batch !== undefined
+      ? { ...incoming, batch: prev.batch }
+      : incoming
   lastKnown.set(path, state)
   // The server's flag is the truth whether or not this item is still on
   // screen, so the grid star follows even for a stale response.
@@ -204,12 +232,16 @@ watch(
     }
     if (!ratingEnabled.value || !path) return
     enqueue(path, () => fetchJudgment(path))
-    if (!current.value?.is_video) {
+    // Review mode records only explicit F / X / reasons / categories:
+    // arrowing past an item there is not a "seen and not favorited" vote.
+    if (!current.value?.is_video && !review.value) {
       seenTimer = setTimeout(() => {
         seenTimer = null
-        if (path !== currentPath.value) return
+        if (path !== currentPath.value || review.value) return
         seenSentForVisit = true
-        enqueue(path, () => markSeen(path))
+        // The score on screen when the dwell completed.
+        const scoreShown = shownScore()
+        enqueue(path, () => markSeen(path, scoreShown))
       }, SEEN_DWELL_MS)
     }
   },
@@ -218,8 +250,26 @@ watch(
 
 function onVideoPlay(path: string): void {
   if (!ratingEnabled.value || path !== currentPath.value || seenSentForVisit) return
+  if (review.value) return // review mode: explicit verdicts only
   seenSentForVisit = true
   enqueue(path, () => markSeen(path))
+}
+
+// The taste score the rail shows for the current item: images only, and
+// only while the rail is mounted.
+const tasteStore = useTasteStore()
+const railScore = computed<number | null>(() => {
+  const media = current.value
+  if (!ratingEnabled.value || !media || media.is_video) return null
+  return tasteStore.scoreOf(media.file_path)
+})
+
+// Captured when the key is pressed, not when the request goes out: a write
+// queued behind earlier ops must still report what the owner was looking
+// at. Sent as the two-decimal value the rail displayed.
+function shownScore(): number | undefined {
+  const score = railScore.value
+  return score === null ? undefined : Number(score.toFixed(2))
 }
 
 function verdictOpts(): { stickyCategoryId?: number } {
@@ -235,11 +285,15 @@ function toggleVerdict(target: Verdict): void {
   if (!ratingEnabled.value || !media) return
   const path = media.file_path
   const opts = verdictOpts()
+  const scoreShown = shownScore()
   enqueue(path, (state) => {
     const isTarget = state
       ? state.verdict === target
       : target === 'favorite' && media.is_favorite
-    return setVerdict(path, isTarget ? null : target, isTarget ? {} : opts)
+    return setVerdict(path, isTarget ? null : target, {
+      ...(isTarget ? {} : opts),
+      ...(scoreShown === undefined ? {} : { scoreShown }),
+    })
   })
 }
 
@@ -256,13 +310,64 @@ function toggleReason(index: number): void {
   const reason = REASONS[index]
   if (!ratingEnabled.value || !currentPath.value || !reason) return
   const path = currentPath.value
+  const scoreShown = shownScore()
   enqueue(path, async (state) => {
     if (!state?.verdict) {
       showHint(path, 'Press F or X first')
       return null
     }
-    return setReason(path, reason, !state.reasons.includes(reason))
+    return setReason(path, reason, !state.reasons.includes(reason), scoreShown)
   })
+}
+
+// Review mode
+async function toggleReview(): Promise<void> {
+  if (!ratingEnabled.value) return
+  if (review.value) {
+    exitReview()
+    return
+  }
+  if (reviewLoading) return
+  const startPath = currentPath.value
+  reviewLoading = true
+  let paths: string[]
+  try {
+    paths = await tasteStore.reviewQueue()
+  } catch (e) {
+    console.error('Failed to load review queue', e)
+    if (startPath) showHint(startPath, 'Review queue failed — see console')
+    return
+  } finally {
+    reviewLoading = false
+  }
+  // The owner may have moved on (or closed the viewer) while it loaded.
+  if (unmounted || review.value || currentPath.value !== startPath) return
+  const byPath = new Map(mediaStore.allMedia.map((m) => [m.file_path, m]))
+  const list = paths
+    .map((p) => byPath.get(p))
+    .filter((m): m is Media => m !== undefined)
+  if (!list.length) {
+    if (startPath) showHint(startPath, 'Nothing to review — rate more or retrain')
+    return
+  }
+  review.value = { list, returnPath: startPath, returnIndex: currentIndex.value }
+  currentIndex.value = 0
+  undoData.value = null
+}
+
+function exitReview(): void {
+  const state = review.value
+  if (!state) return
+  review.value = null
+  undoData.value = null
+  const list = props.mediaList
+  const found = state.returnPath
+    ? list.findIndex((m) => m.file_path === state.returnPath)
+    : -1
+  // The original item may have gone (deleted, list reloaded): fall back to
+  // the nearest index.
+  currentIndex.value =
+    found >= 0 ? found : Math.max(0, Math.min(state.returnIndex, list.length - 1))
 }
 
 // Category picker
@@ -358,13 +463,23 @@ async function deleteCurrent() {
 
   undoData.value = { media: deletedMedia, index: deletedIndex }
 
+  // The review list is the viewer's own copy, so drop the file from it too.
+  if (review.value) {
+    const list = review.value.list.filter((m) => m.file_path !== deletedMedia.file_path)
+    if (!list.length) {
+      exitReview()
+      return
+    }
+    review.value = { ...review.value, list }
+  }
+
   // Navigate after delete
-  if (props.mediaList.length === 0) {
+  if (activeList.value.length === 0) {
     emit('close')
     return
   }
-  if (currentIndex.value >= props.mediaList.length) {
-    currentIndex.value = props.mediaList.length - 1
+  if (currentIndex.value >= activeList.value.length) {
+    currentIndex.value = activeList.value.length - 1
   }
 }
 
@@ -392,7 +507,7 @@ function onKeyDown(e: KeyboardEvent) {
   if (ratingEnabled.value && !e.ctrlKey && !e.metaKey && !e.altKey) {
     // A held F / X / 1–6 / C must not toggle over and over (auto-repeat);
     // held arrows and volume keys still repeat below.
-    if (e.repeat && /^[fFxXcC1-6]$/.test(e.key)) return
+    if (e.repeat && /^[fFxXcCrR1-6]$/.test(e.key)) return
     if (e.key >= '1' && e.key <= '6' && e.key.length === 1) {
       toggleReason(Number(e.key) - 1)
       return
@@ -411,6 +526,10 @@ function onKeyDown(e: KeyboardEvent) {
         // Keep the "c" from landing in the picker input focused next.
         e.preventDefault()
         openPicker()
+        return
+      case 'r':
+      case 'R':
+        void toggleReview()
         return
     }
   }
@@ -525,7 +644,7 @@ function formatSize(bytes: number): string {
         <div class="media-galleria">
           <Galleria
             v-model:activeIndex="currentIndex"
-            :value="mediaList"
+            :value="activeList"
             :show-item-navigators="true"
             :show-thumbnails="true"
             :num-visible="7"
@@ -559,6 +678,7 @@ function formatSize(bytes: number): string {
           :judgment="railJudgment"
           :hint="hint"
           :sticky="stickyCategory"
+          :score="railScore"
         >
           <CategoryPicker
             v-if="pickerOpen"
@@ -597,6 +717,7 @@ function formatSize(bytes: number): string {
                 <td>Toggle reason (realism, composition, emotion, light, concept, motion)</td>
               </tr>
               <tr v-if="ratingEnabled"><td>C</td><td>Categories (Shift+Enter: sticky)</td></tr>
+              <tr v-if="ratingEnabled"><td>R</td><td>Review least-certain</td></tr>
               <tr v-if="allowDestructive"><td>Ctrl+D</td><td>Delete file</td></tr>
               <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
               <tr><td>M</td><td>Mute / Unmute (video)</td></tr>

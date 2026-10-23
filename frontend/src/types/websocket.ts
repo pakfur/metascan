@@ -14,3 +14,7 @@ export interface WsAction {
 // GET /api/categories.
 export type CategoriesWsEvent = 'categories_changed'
 export type CategoriesChangedPayload = Record<string, never>
+
+// `taste` channel: see TasteWsEvent in ./taste. `scores_updated` means the
+// score table changed (refetch GET /api/taste/scores); `training_*` mean the
+// status changed (refetch GET /api/taste/status).
