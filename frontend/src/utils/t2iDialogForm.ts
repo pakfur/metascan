@@ -191,6 +191,7 @@ export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T
       .map((d) => ({
         variant_index: d.variant_index,
         writer_id: d.writer_id,
+        writer_model: d.writer_model ?? null,
         draft: d.prompt,
         text: d.prompt,
         negative: d.negative ?? '',
@@ -221,6 +222,7 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
     entries: ordered.map((s) => ({
       variant_index: s.variant_index,
       writer_id: s.writer_id as string,
+      writer_model: s.writer_model ?? null,
       draft: s.draft as string,
       text: s.prompt,
       negative: s.negative ?? '',
@@ -258,6 +260,7 @@ export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt
       negative: ctx.hasNegative && negative.trim() ? negative : null,
       draft: e.draft,
       writer_id: e.writer_id,
+      writer_model: e.writer_model,
       variant_index: i,
     }
   })

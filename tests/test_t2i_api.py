@@ -975,6 +975,7 @@ class TestImages(T2iApiCase):
                     "variant_index",
                     "draft_prompt",
                     "edited",
+                    "writer_model",
                 ]
             ),
         )

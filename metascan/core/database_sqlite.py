@@ -1386,6 +1386,9 @@ class DatabaseManager:
                     # differs from it (whitespace-normalized); write-once.
                     ("draft_prompt", "TEXT"),
                     ("edited", "INTEGER"),
+                    # The VLM model id that wrote the draft (NULL for a
+                    # typed prompt, a fallback, or an older row).
+                    ("writer_model", "TEXT"),
                 ):
                     _idempotent_add_column(
                         conn,
@@ -4010,6 +4013,7 @@ class DatabaseManager:
         variant_index: Optional[int] = None,
         draft_prompt: Optional[str] = None,
         edited: Optional[int] = None,
+        writer_model: Optional[str] = None,
     ) -> int:
         import json as _json
 
@@ -4019,8 +4023,9 @@ class DatabaseManager:
                 "idea, seed, duration_s, quality, width, height, steps, "
                 "render_s, preset_id, comfy_prompt_id, megapixels, loras, "
                 "form_state, writer_id, variant_group, variant_index, "
-                "draft_prompt, edited) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "draft_prompt, edited, writer_model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?)",
                 (
                     to_posix_path(source_path),
                     to_posix_path(file_path),
@@ -4043,6 +4048,7 @@ class DatabaseManager:
                     variant_index,
                     draft_prompt,
                     edited,
+                    writer_model,
                 ),
             )
             conn.commit()
@@ -4180,6 +4186,7 @@ class DatabaseManager:
         variant_index: Optional[int] = None,
         draft_prompt: Optional[str] = None,
         edited: Optional[int] = None,
+        writer_model: Optional[str] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4192,9 +4199,9 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index, draft_prompt, edited) "
+                "variant_index, draft_prompt, edited, writer_model) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?)",
+                "?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4218,6 +4225,7 @@ class DatabaseManager:
                     variant_index,
                     draft_prompt,
                     edited,
+                    writer_model,
                 ),
             )
             conn.commit()
@@ -5886,7 +5894,7 @@ class DatabaseManager:
         self, since: Optional[str] = None, include_embeddings: bool = False
     ) -> List[Dict[str, Any]]:
         """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
-        created_at, seen, favorite, embedding, embedding_model}``. ``seen``
+        writer_model, created_at, seen, favorite, embedding, embedding_model}``. ``seen``
         is a ``seen_at`` or a verdict. Live generations come from the
         lineage tables JOINed to media; deleted ones from the newest
         tombstone whose lineage carries the generation row (so deleting
@@ -5898,7 +5906,7 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             for kind, table in self._GENERATION_TABLES:
                 sql = (
-                    f"SELECT g.file_path, g.writer_id, g.created_at, "
+                    f"SELECT g.file_path, g.writer_id, g.writer_model, g.created_at, "
                     "m.is_favorite, j.passed, j.seen_at "
                     f"FROM {table} g JOIN media m ON m.file_path = g.file_path "
                     "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
@@ -5913,6 +5921,7 @@ class DatabaseManager:
                         "kind": kind,
                         "file_path": r["file_path"],
                         "writer_id": r["writer_id"],
+                        "writer_model": r["writer_model"],
                         "created_at": r["created_at"],
                         "favorite": favorite,
                         "seen": favorite
@@ -5969,6 +5978,7 @@ class DatabaseManager:
                         "kind": kind,
                         "file_path": r["file_path"],
                         "writer_id": gen.get("writer_id"),
+                        "writer_model": gen.get("writer_model"),
                         "created_at": str(created_at),
                         "favorite": favorite,
                         "seen": favorite
@@ -5987,34 +5997,40 @@ class DatabaseManager:
         windows: int = 6,
         now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        """Favorite rate among SEEN generations per writer per window:
-        ``[{kind, writer_id, window_start, n_seen, n_fav, rate}]``. Every
-        ``(kind, writer)`` with a generation in the last ``windows``
-        windows gets all of them (``rate`` None when ``n_seen`` is 0). A
-        NULL writer is ``"unknown"``. Windows by the generation's
+        """Favorite rate among SEEN generations per writer (and the model
+        that wrote its drafts) per window: ``[{kind, writer_id,
+        writer_model, window_start, n_seen, n_fav, rate}]``. Every
+        ``(kind, writer, writer_model)`` with a generation in the last
+        ``windows`` windows gets all of them (``rate`` None when ``n_seen``
+        is 0). A NULL writer is ``"unknown"``; a NULL ``writer_model``
+        (typed, fallback, or a row older than the column) stays None. Windows by the generation's
         ``created_at`` (UTC), counting back from today."""
         from metascan.core.taste_labels import window_for, window_starts
 
         starts = window_starts(now or datetime.now(timezone.utc), window_days, windows)
-        counts: Dict[Tuple[str, str], Dict[str, List[int]]] = {}
+        counts: Dict[Tuple[str, str, Optional[str]], Dict[str, List[int]]] = {}
         for g in self.generation_outcomes(since=starts[0]):
             start = window_for(g["created_at"], starts, window_days)
             if start is None:
                 continue
             writer = g["writer_id"] or "unknown"
-            per = counts.setdefault((g["kind"], writer), {})
+            model = g.get("writer_model") or None
+            per = counts.setdefault((g["kind"], writer, model), {})
             cell = per.setdefault(start, [0, 0])
             if g["seen"]:
                 cell[0] += 1
                 cell[1] += int(g["favorite"])
         rows: List[Dict[str, Any]] = []
-        for (kind, writer), per in sorted(counts.items()):
+        for (kind, writer, model), per in sorted(
+            counts.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")
+        ):
             for start in starts:
                 n_seen, n_fav = per.get(start, [0, 0])
                 rows.append(
                     {
                         "kind": kind,
                         "writer_id": writer,
+                        "writer_model": model,
                         "window_start": start,
                         "n_seen": n_seen,
                         "n_fav": n_fav,

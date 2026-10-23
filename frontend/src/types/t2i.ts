@@ -250,6 +250,8 @@ export interface T2iImage {
   // Lineage (write-once facts; null on rows from before variants, or after a
   // restart lost the batch's snapshot). variant_index is 0-based.
   writer_id?: string | null
+  /** The VLM model that wrote the draft (null: typed, fallback, or older). */
+  writer_model?: string | null
   variant_group?: string | null
   variant_index?: number | null
   draft_prompt?: string | null
@@ -279,6 +281,8 @@ export interface T2iPromptDraft {
   negative: string | null
   /** base / base+taste / fallback: the writer that really wrote it. */
   writer_id: string
+  /** The VLM model that wrote it (null for a fallback). */
+  writer_model: string | null
   variant_index: number
   angle: string | null
 }
@@ -290,6 +294,7 @@ export interface T2iVariantPrompt {
   /** What the writer produced; null means typed from scratch (writer `manual`). */
   draft: string | null
   writer_id: string | null
+  writer_model: string | null
   variant_index: number
 }
 
@@ -300,6 +305,7 @@ export interface T2iVariantPrompt {
 export interface T2iHeldDraft {
   variant_index: number
   writer_id: string
+  writer_model: string | null
   draft: string
   text: string
   negative: string
@@ -402,8 +408,9 @@ export interface T2iBatchStep {
   /** 0-based caption of `captions` (what the UI calls batch k of N). */
   caption_index: number | null
   captions: number | null
-  /** Who wrote the prompt, and the draft it came from (null: typed). */
+  /** Who wrote the prompt (and with which model), and the draft it came from (null: typed). */
   writer_id: string | null
+  writer_model: string | null
   draft: string | null
 }
 

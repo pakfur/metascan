@@ -345,6 +345,7 @@ async function onExpandPrompt() {
     store.setDraft({
       text: res.prompt,
       writer_id: res.writer_id,
+      writer_model: res.writer_model ?? null,
       idea: forIdea,
       templateId: forTemplate,
     })
@@ -561,7 +562,11 @@ async function onGenerate() {
           // Lineage: only a live draft for this idea and cadence counts; a
           // prompt without one is typed from scratch (recorded `manual`).
           ...(heldDraft
-            ? { writer_id: heldDraft.writer_id, draft_prompt: heldDraft.text }
+            ? {
+                writer_id: heldDraft.writer_id,
+                draft_prompt: heldDraft.text,
+                writer_model: heldDraft.writer_model,
+              }
             : {}),
           ...(stepsEnabled.value ? { steps: steps.value } : {}),
         })

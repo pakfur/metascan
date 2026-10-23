@@ -65,7 +65,9 @@ async function onTasteRetrain() {
 
 // ---- Writers: favorite rate per writer per 14-day window + diversity ----
 // The spec's success baseline: the 8B writer with variants, no guidance.
+// Rows are per (writer, model): a base draft from another model is not it.
 const BASELINE_WRITER = 'base'
+const BASELINE_MODEL = 'qwen3vl-8b'
 const WRITER_ORDER = ['base', 'base+taste', 'fallback', 'manual']
 
 const writerStats = computed(() => taste.writerStats)
@@ -106,6 +108,7 @@ interface WriterRow {
   key: string
   kind: 't2i' | 'i2v'
   writer: string
+  model: string | null
   baseline: boolean
   cells: Record<string, WriterWindowStat>
 }
@@ -113,14 +116,16 @@ interface WriterRow {
 const writerRows = computed<WriterRow[]>(() => {
   const byKey = new Map<string, WriterRow>()
   for (const w of writerStats.value?.windows ?? []) {
-    const key = `${w.kind}:${w.writer_id}`
+    const model = w.writer_model ?? null
+    const key = `${w.kind}:${w.writer_id}:${model ?? ''}`
     let row = byKey.get(key)
     if (!row) {
       row = {
         key,
         kind: w.kind,
         writer: w.writer_id,
-        baseline: w.kind === 't2i' && w.writer_id === BASELINE_WRITER,
+        model,
+        baseline: w.kind === 't2i' && w.writer_id === BASELINE_WRITER && model === BASELINE_MODEL,
         cells: {},
       }
       byKey.set(key, row)
@@ -131,7 +136,9 @@ const writerRows = computed<WriterRow[]>(() => {
     (a, b) =>
       (a.kind === b.kind ? 0 : a.kind === 't2i' ? -1 : 1) ||
       writerRank(a.writer) - writerRank(b.writer) ||
-      a.writer.localeCompare(b.writer),
+      a.writer.localeCompare(b.writer) ||
+      (a.model === BASELINE_MODEL ? -1 : b.model === BASELINE_MODEL ? 1 : 0) ||
+      (a.model ?? '\uffff').localeCompare(b.model ?? '\uffff'),
   )
 })
 
@@ -787,6 +794,12 @@ async function onRetagLibrary() {
               <tr v-for="row in writerRows" :key="row.key" :class="{ baseline: row.baseline }">
                 <th class="writer-col" scope="row">
                   {{ row.writer }}
+                  <span
+                    v-if="row.model || row.writer === 'base' || row.writer === 'base+taste'"
+                    class="writer-model"
+                    :title="row.model ? `drafted by ${row.model}` : 'model not recorded'"
+                    >{{ row.model ?? 'model unknown' }}</span
+                  >
                   <span v-if="row.kind === 'i2v'" class="writer-tag">I2V</span>
                   <span v-if="row.baseline" class="writer-tag writer-tag-baseline">baseline</span>
                 </th>
@@ -1043,6 +1056,12 @@ section { margin-bottom: 14px; }
 .writers-table tr.baseline { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
 .writers-table .rate { display: inline-block; min-width: 3.2em; }
 .writers-table .n-seen { color: var(--text-color-secondary); font-size: 11px; margin-left: 4px; }
+.writer-model {
+  margin-left: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-color-secondary);
+}
 .writer-tag {
   margin-left: 4px;
   padding: 0 5px;

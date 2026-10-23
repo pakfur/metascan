@@ -1802,6 +1802,7 @@ class TestManualBatchRun(BatchCase):
                     "caption_index": 0,
                     "captions": 1,
                     "writer_id": "manual",
+                    "writer_model": None,
                     "draft": None,
                 }
             ],
@@ -2335,6 +2336,7 @@ class TestRandomBatchRun(BatchCase):
                 "variants",
                 "warnings",
                 "writer_id",
+                "writer_model",
             ],
         )
         self.assertEqual((step["step"], step["total_steps"], step["seed"]), (1, 3, 10))

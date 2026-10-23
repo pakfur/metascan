@@ -30,6 +30,33 @@ WRITER_MANUAL = "manual"
 DRAFT_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE, WRITER_FALLBACK)
 
 
+# Writers whose drafts come from a VLM, so the lineage names its model.
+MODEL_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
+
+
+class WriterModelError(ValueError):
+    """A supplied ``writer_model`` names no model the writer role can use."""
+
+
+def check_writer_model(writer_id: Optional[str], writer_model: Any) -> Optional[str]:
+    """The ``writer_model`` to record for a supplied prompt. Only a VLM
+    writer (``base`` / ``base+taste``) has one: ``manual`` and ``fallback``
+    record None whatever was sent. A VLM writer's model must be a
+    registered model the writer role may use; None (an older client, a
+    draft from before the column) is kept as unknown rather than guessed,
+    so it can never mix into a model's baseline."""
+    if writer_id not in MODEL_WRITERS or writer_model is None:
+        return None
+    from metascan.core.vlm_models import writer_allowed
+
+    if not isinstance(writer_model, str) or not writer_allowed(writer_model):
+        raise WriterModelError(
+            f"writer_model {writer_model!r} is not a model the prompt writer "
+            "can use"
+        )
+    return writer_model
+
+
 def normalize_prompt(text: str) -> str:
     """``text`` with every run of whitespace collapsed to one space and the
     ends trimmed: a draft and a rendered prompt that differ only in spacing

@@ -114,6 +114,8 @@ class GenerateRequest(BaseModel):
     # /prompt. Neither (a prompt typed from scratch) is recorded as `manual`.
     writer_id: Optional[str] = None
     draft_prompt: Optional[str] = None
+    # The VLM model that wrote the draft (/prompt's ``writer_model``).
+    writer_model: Optional[str] = None
 
 
 @router.post("/prompt")
@@ -122,7 +124,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     if body.duration_s <= 0:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
     try:
-        prompt, warnings = await runner.generate_prompt(
+        prompt, warnings, writer_model = await runner.write_prompt(
             body.source_path, body.idea, body.duration_s, template_id=body.template_id
         )
     except I2vUnavailableError as exc:
@@ -143,7 +145,12 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     except (I2vError, VlmError, TimeoutError, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     # No deterministic fallback exists for I2V: a success is always the writer.
-    return {"prompt": prompt, "warnings": warnings, "writer_id": body.writer}
+    return {
+        "prompt": prompt,
+        "warnings": warnings,
+        "writer_id": body.writer,
+        "writer_model": writer_model,
+    }
 
 
 @router.post("/lint")
@@ -233,6 +240,7 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             category_ids=category_ids,
             writer_id=body.writer_id,
             draft_prompt=body.draft_prompt,
+            writer_model=body.writer_model,
         )
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

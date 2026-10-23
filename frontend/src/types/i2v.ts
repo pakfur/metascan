@@ -257,6 +257,8 @@ export const I2V_WRITERS: { id: I2vWriter; label: string }[] = [{ id: 'base', la
 export interface I2vDraft {
   text: string
   writer_id: string
+  /** The VLM model that wrote it (lineage). */
+  writer_model: string | null
   /** What the draft was written for; a different one means a different prompt. */
   idea: string
   templateId: string
