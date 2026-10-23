@@ -27,6 +27,7 @@ from backend.api import (
     folders,
     judgments,
     categories,
+    writers,
     scan,
     similarity,
     duplicates,
@@ -551,6 +552,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(folders.router)
     app.include_router(judgments.router)
     app.include_router(categories.router)
+    app.include_router(writers.router)
     app.include_router(scan.router)
     app.include_router(similarity.router)
     app.include_router(duplicates.router)

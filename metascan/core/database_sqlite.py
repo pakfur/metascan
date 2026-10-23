@@ -13,6 +13,7 @@ import numpy as np
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.writer_adapters import parse_adapter_writer_id
 from metascan.core.judgments import (
     CATEGORY_NAME_MAX,
     CATEGORY_SOURCES,
@@ -1372,6 +1373,46 @@ class DatabaseManager:
                     n INTEGER,
                     mean_distance REAL,
                     computed_at TEXT
+                )
+                """
+            )
+            # Prompt-writer LoRA adapters (taste learning) and their training
+            # runs. A deleted adapter keeps its row (deleted_at) so history
+            # rows named ``adapter:<id>`` still show its name.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS writer_adapters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    scope TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('t2i','i2v')),
+                    base_model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    data_cutoff TEXT,
+                    hyperparams TEXT NOT NULL,
+                    counts TEXT NOT NULL,
+                    holdout_agreement REAL,
+                    base_agreement REAL,
+                    file_path TEXT,
+                    error TEXT,
+                    deleted_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS training_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    adapter_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    step INTEGER NOT NULL DEFAULT 0,
+                    total_steps INTEGER,
+                    checkpoint_dir TEXT,
+                    started_at TEXT,
+                    updated_at TEXT,
+                    log_path TEXT,
+                    error TEXT
                 )
                 """
             )
@@ -5991,6 +6032,147 @@ class DatabaseManager:
                     }
         return list(out.values())
 
+    # ---- prompt-writer adapters -------------------------------------
+
+    _ADAPTER_JSON = ("hyperparams", "counts")
+    _ADAPTER_FIELDS = (
+        "data_cutoff",
+        "hyperparams",
+        "counts",
+        "holdout_agreement",
+        "base_agreement",
+        "file_path",
+        "error",
+    )
+
+    def _adapter_row(self, r: sqlite3.Row) -> Dict[str, Any]:
+        out = dict(r)
+        for key in self._ADAPTER_JSON:
+            out[key] = json.loads(out[key]) if out[key] else {}
+        return out
+
+    @staticmethod
+    def _clean_adapter_name(name: str) -> str:
+        name = " ".join(str(name).split())
+        if not name or len(name) > 80:
+            raise ValueError("invalid_name")
+        return name
+
+    def create_writer_adapter(
+        self,
+        name: str,
+        scope: str,
+        kind: str,
+        base_model: str,
+        status: str = "training",
+        data_cutoff: Optional[str] = None,
+        hyperparams: Optional[Dict[str, Any]] = None,
+        counts: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Register an adapter; ValueError("duplicate_name") when the name
+        (case-insensitive, deleted adapters included) is taken."""
+        name = self._clean_adapter_name(name)
+        with self.lock, self._get_connection() as conn:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO writer_adapters (name, scope, kind, base_model, "
+                    "status, created_at, data_cutoff, hyperparams, counts) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        scope,
+                        kind,
+                        base_model,
+                        status,
+                        self._iso(None),
+                        data_cutoff,
+                        json.dumps(hyperparams or {}),
+                        json.dumps(counts or {}),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+    def get_writer_adapter(self, adapter_id: int) -> Optional[Dict[str, Any]]:
+        """One adapter row (deleted ones included), or None."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM writer_adapters WHERE id = ?", (adapter_id,)
+            ).fetchone()
+            return self._adapter_row(r) if r else None
+
+    def list_writer_adapters(
+        self, include_deleted: bool = False
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM writer_adapters"
+        if not include_deleted:
+            sql += " WHERE deleted_at IS NULL"
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql + " ORDER BY id").fetchall()
+            return [self._adapter_row(r) for r in rows]
+
+    def rename_writer_adapter(self, adapter_id: int, name: str) -> bool:
+        """False when no such adapter; ValueError for a blank/duplicate name."""
+        name = self._clean_adapter_name(name)
+        with self.lock, self._get_connection() as conn:
+            try:
+                cur = conn.execute(
+                    "UPDATE writer_adapters SET name = ? WHERE id = ?",
+                    (name, adapter_id),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    def set_writer_adapter_status(
+        self, adapter_id: int, status: str, **fields: Any
+    ) -> None:
+        """Set the status and any of data_cutoff / hyperparams / counts /
+        holdout_agreement / base_agreement / file_path / error."""
+        unknown = set(fields) - set(self._ADAPTER_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown adapter fields: {sorted(unknown)}")
+        sets = ["status = ?"]
+        args: List[Any] = [status]
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            args.append(json.dumps(value) if key in self._ADAPTER_JSON else value)
+        args.append(adapter_id)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE writer_adapters SET {', '.join(sets)} WHERE id = ?", args
+            )
+            conn.commit()
+
+    def soft_delete_writer_adapter(self, adapter_id: int) -> None:
+        """Mark deleted but keep the row: history rows named
+        ``adapter:<id>`` still resolve its name."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE writer_adapters SET status = 'deleted', deleted_at = ?, "
+                "file_path = NULL WHERE id = ?",
+                (self._iso(None), adapter_id),
+            )
+            conn.commit()
+
+    def next_adapter_name(self, scope_slug: str) -> str:
+        """``taste-<scope_slug>-v<N>`` with N one past the highest N any
+        adapter of that slug ever had (deleted ones included, so a number is
+        never reused)."""
+        prefix = f"taste-{scope_slug}-v"
+        top = 0
+        with self.lock, self._get_connection() as conn:
+            for (name,) in conn.execute("SELECT name FROM writer_adapters"):
+                lowered = str(name).lower()
+                tail = lowered[len(prefix) :]
+                if lowered.startswith(prefix.lower()) and tail.isdigit():
+                    top = max(top, int(tail))
+        return f"{prefix}{top + 1}"
+
     def writer_window_stats(
         self,
         window_days: int = 14,
@@ -6021,22 +6203,27 @@ class DatabaseManager:
                 cell[0] += 1
                 cell[1] += int(g["favorite"])
         rows: List[Dict[str, Any]] = []
+        names = {a["id"]: a["name"] for a in self.list_writer_adapters(True)}
         for (kind, writer, model), per in sorted(
             counts.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")
         ):
+            adapter_id = parse_adapter_writer_id(writer)
             for start in starts:
                 n_seen, n_fav = per.get(start, [0, 0])
-                rows.append(
-                    {
-                        "kind": kind,
-                        "writer_id": writer,
-                        "writer_model": model,
-                        "window_start": start,
-                        "n_seen": n_seen,
-                        "n_fav": n_fav,
-                        "rate": n_fav / n_seen if n_seen else None,
-                    }
-                )
+                row: Dict[str, Any] = {
+                    "kind": kind,
+                    "writer_id": writer,
+                    "writer_model": model,
+                    "window_start": start,
+                    "n_seen": n_seen,
+                    "n_fav": n_fav,
+                    "rate": n_fav / n_seen if n_seen else None,
+                }
+                if adapter_id is not None:
+                    # An adapter row carries its remembered name (the
+                    # registry keeps deleted adapters for exactly this).
+                    row["name"] = names.get(adapter_id)
+                rows.append(row)
         return rows
 
     def record_taste_diversity(

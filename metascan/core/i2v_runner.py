@@ -47,6 +47,7 @@ from metascan.core.judgments import (
     WRITER_MANUAL,
     WriterModelError,
     check_writer_model,
+    writer_id_allowed,
     normalize_prompt,
 )
 from metascan.core.vlm_models import writer_missing_hint
@@ -294,13 +295,15 @@ class I2vRunner:
         # writer has a model, and it must be one the writer role can use.
         if draft_prompt is None:
             writer_id = WRITER_MANUAL
-        elif writer_id not in DRAFT_WRITERS:
+        elif not await asyncio.to_thread(writer_id_allowed, writer_id, self.db):
             raise I2vRequestError(
                 f"writer_id {writer_id!r} is not a writer that drafts prompts "
-                f"({', '.join(DRAFT_WRITERS)})"
+                f"({', '.join(DRAFT_WRITERS)} or a ready adapter)"
             )
         try:
-            writer_model = check_writer_model(writer_id, writer_model)
+            writer_model = await asyncio.to_thread(
+                check_writer_model, writer_id, writer_model, self.db
+            )
         except WriterModelError as exc:
             raise I2vRequestError(str(exc)) from exc
         preset = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
