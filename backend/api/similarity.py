@@ -39,6 +39,19 @@ _on_embedding_complete: Optional[Callable[[], None]] = None
 # tagging enabled.  Set by build_index; read by the on_complete callback.
 _current_scan_tag_with_vlm: bool = False
 
+# The server's event loop, attached from the lifespan.  EmbeddingQueue
+# callbacks fire on a worker thread (the poller uses asyncio.to_thread), so
+# coroutines they need must be handed to this loop thread-safely.
+_server_loop: Optional[asyncio.AbstractEventLoop] = None
+# Touched only on the loop thread (inside _drain), so no lock is needed.
+_vlm_drain_running: bool = False
+
+
+def set_server_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    """Attach (or clear) the loop used to run the post-embedding VLM drain."""
+    global _server_loop
+    _server_loop = loop
+
 
 def set_embedding_complete_hook(hook: Optional[Callable[[], None]]) -> None:
     """Install (or clear, with None) the post-embedding-run hook. It runs
@@ -188,43 +201,64 @@ def _reload_faiss_after_index_build() -> None:
 
 
 def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
-    """Schedule a VlmTagPump.drain_once() coroutine on the running event loop.
+    """Run VlmTagPump.drain_once() on the server loop after an embedding build.
 
-    Called from the ``on_complete`` sync callback after a scan that was
-    started with ``tag_with_vlm=True``.  Uses ``get_running_loop`` so that
-    test code without an event loop silently skips rather than crashing.
+    Called from the ``on_complete`` sync callback, which runs on a worker
+    thread (the poller uses ``asyncio.to_thread``), so ``get_running_loop``
+    would always raise here.  The coroutine is handed to the loop captured at
+    startup via ``run_coroutine_threadsafe``.  With no usable loop we warn and
+    leave ``vlm_pending.jsonl`` untouched for the next drain.  Drains never
+    overlap: a second request while one runs is skipped (the running drain's
+    successor, or the next scan, picks up whatever it left).
     """
 
     async def _drain() -> None:
-        from backend.api.vlm import get_vlm_client
-        from backend.services.vlm_tag_pump import VlmTagPump
-
-        client = get_vlm_client()
-        if client is None:
-            logger.debug("VLM drain skipped: no VlmClient installed")
+        global _vlm_drain_running
+        if _vlm_drain_running:
+            logger.info("VLM drain after scan skipped: a drain is already running")
             return
-        mid = preferred_vlm_model_id(detect_hardware())
-        if not mid:
-            logger.debug("VLM drain skipped: no preferred VLM model for this host")
-            return
-        pump = VlmTagPump(
-            queue_dir=eq.index_dir,
-            client=client,
-            db=get_db(),
-            model_id=mid,
-        )
+        _vlm_drain_running = True
         try:
+            from backend.api.vlm import get_vlm_client
+            from backend.services.vlm_tag_pump import VlmTagPump
+
+            client = get_vlm_client()
+            if client is None:
+                logger.debug("VLM drain skipped: no VlmClient installed")
+                return
+            mid = preferred_vlm_model_id(detect_hardware())
+            if not mid:
+                logger.debug("VLM drain skipped: no preferred VLM model for this host")
+                return
+            pump = VlmTagPump(
+                queue_dir=eq.index_dir,
+                client=client,
+                db=get_db(),
+                model_id=mid,
+            )
             drained = await pump.drain_once()
             logger.info(f"VLM drain after scan: tagged {drained} file(s)")
         except Exception:
             logger.exception("VLM drain after scan failed")
+        finally:
+            _vlm_drain_running = False
 
+    loop = _server_loop
+    if loop is None or loop.is_closed():
+        logger.warning(
+            "VLM drain after scan not scheduled: server event loop unavailable; "
+            "pending tags stay queued for the next drain"
+        )
+        return
+    coro = _drain()
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_drain())
+        asyncio.run_coroutine_threadsafe(coro, loop)
     except RuntimeError:
-        # No running event loop — skip rather than block (hit by sync test paths).
-        logger.debug("VLM drain skipped: no running event loop")
+        coro.close()
+        logger.warning(
+            "VLM drain after scan not scheduled: server event loop closed; "
+            "pending tags stay queued for the next drain"
+        )
 
 
 async def _embed_poll_loop() -> None:
