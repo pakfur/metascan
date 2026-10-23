@@ -13,16 +13,21 @@ and every request body); all prompts are synthetic.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from unittest import mock
 
 import pytest
 
 from backend.services.vlm_roles import AdapterSlot, VlmRoles
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.vlm_client import AdapterNotLoadedError, VlmClient
+from metascan.core.vlm_client import (
+    AdapterLoadingError,
+    AdapterNotLoadedError,
+    VlmClient,
+)
 from metascan.core.vlm_models import get_spec
 from metascan.core.writer_adapters import (
     ADAPTER_GGUF,
@@ -326,26 +331,106 @@ async def test_a_hold_defers_the_restart_until_it_ends(setup: Any) -> None:
     assert rec.bodies()[-1]["lora"] == [{"id": 1, "scale": 1.0}]
 
 
-async def test_a_new_adapter_asked_for_during_a_hold_restarts_the_writer(
+async def test_a_new_adapter_under_another_callers_hold_is_refused_until_it_ends(
     setup: Any,
 ) -> None:
-    # A batch that holds the writer and asks for an adapter added since the
-    # spawn: the request itself brings the server back with it.
+    # Someone else holds the writer (a T2I Random batch prompting): a request
+    # for an adapter added since the spawn never restarts it under the hold.
+    # It is refused as "loading" and the restart waits for the hold to end.
     build, source, rec, a, b = setup
     source.files = source.files[:1]
     roles = build()
     await roles.refresh_adapters()
     client = roles.client("writer")
+    client.lora_wait_s = 0.2
     await client.ensure_started(BASE)
     source.files.append(AdapterFile(2, "t2i", BASE, b))
     with client.hold():
         await roles.refresh_adapters()
         assert roles.restart_pending
-        await _ask(client, lora_path=b)
+        with pytest.raises(AdapterLoadingError):
+            await _ask(client, lora_path=b)
+        assert client.state == "ready"
+        assert roles.restart_pending
+    await _until(lambda: not roles.restart_pending, "the restart after the hold")
+    assert client.state == "stopped"
+    await _ask(client, lora_path=b)
     assert [_loras_of(s) for s in rec.spawns()] == [[str(a)], [str(a), str(b)]]
     assert rec.bodies()[-1]["lora"] == [{"id": 1, "scale": 1.0}]
-    await _until(lambda: not roles.restart_pending, "the pending restart to clear")
-    assert client.state == "ready"  # already on the new list: no second restart
+
+
+async def test_a_new_adapter_asked_for_while_idle_restarts_then_serves(
+    setup: Any,
+) -> None:
+    build, source, rec, a, b = setup
+    roles = build()
+    await roles.refresh_adapters()
+    client = roles.client("writer")
+    await client.ensure_started(BASE)
+    c = _gguf(rec.path.parent, 3)
+    client.lora_paths = (a, b, c)  # registry applied, restart not yet done
+    await _ask(client, lora_path=c)
+    assert [_loras_of(s) for s in rec.spawns()] == [
+        [str(a), str(b)],
+        [str(a), str(b), str(c)],
+    ]
+    assert rec.bodies()[-1]["lora"] == [{"id": 2, "scale": 1.0}]
+
+
+async def test_an_in_flight_request_is_never_evicted_for_a_new_adapter(
+    setup: Any,
+) -> None:
+    build, source, rec, a, b = setup
+    roles = build(reply_delay_ms=800)
+    await roles.refresh_adapters()
+    client = roles.client("writer")
+    client.lora_wait_s = 0.2
+    await client.ensure_started(BASE)
+    slow = asyncio.create_task(_ask(client))
+    await _until(lambda: client.in_flight == 1, "the request to start")
+    c = _gguf(rec.path.parent, 3)
+    client.lora_paths = (a, b, c)
+    with pytest.raises(AdapterLoadingError):
+        await _ask(client, lora_path=c)
+    assert await slow == "SYNTH prompt"
+    assert len(rec.spawns()) == 1
+
+
+async def test_withdrawing_an_adapter_a_loading_writer_has_is_refused(
+    tmp_path: Path,
+) -> None:
+    a = _gguf(tmp_path, 1)
+    roles = VlmRoles(
+        writer=BASE,
+        general=BASE,
+        client_factory=VlmClient,
+        installed=lambda _mid: True,
+        adapter_source=Source([AdapterFile(1, "t2i", BASE, a)]),
+    )
+    await roles.refresh_adapters()
+    client = roles.client("writer")
+    # Spawned with the adapter, still loading: it maps the file.
+    client._state = "loading"
+    client._loaded_lora_paths = (a,)
+    try:
+        assert await roles.withdraw_adapter(1) is False
+        assert roles.restart_pending and client.lora_paths == ()
+    finally:
+        client._state = "stopped"
+        await roles.shutdown_all()
+
+
+async def test_withdrawn_ids_are_forgotten_once_the_registry_drops_them(
+    setup: Any,
+) -> None:
+    build, source, rec, a, b = setup
+    roles = build()
+    await roles.refresh_adapters()
+    await roles.withdraw_adapter(1)
+    assert roles.adapter_path(1) is None
+    source.files = source.files[1:]  # the delete went through
+    await roles.refresh_adapters()
+    assert roles._withdrawn == set()
 
 
 async def test_an_explicitly_unloaded_writer_just_gets_the_new_list(
@@ -524,6 +609,52 @@ class TestT2iAdapterLineage(AdapterCase):
         self.assertEqual(self.vlm.calls, [])
 
 
+class TestT2iAdapterServing(AdapterCase):
+    def prompts_from(self, writer_id: str) -> List[Dict[str, Any]]:
+        return [
+            {
+                "prompt": "SYNTH prompt edited",
+                "negative": None,
+                "draft": "SYNTH prompt",
+                "writer_id": writer_id,
+                "writer_model": BASE,
+                "variant_index": 0,
+            }
+        ]
+
+    async def test_a_draft_from_a_gone_adapter_is_adapter_unavailable(self) -> None:
+        # A stale client re-rendering a deleted adapter's draft gets the
+        # fallback path (409), not a 400.
+        self.db.soft_delete_writer_adapter(self.adapter)
+        with self.assertRaises(WriterAdapterUnavailable):
+            await self.start(
+                self.manual(count_per_batch=1, prompts=self.prompts_from(self.wid))
+            )
+
+    async def test_a_random_batch_prepares_its_adapter_before_holding(self) -> None:
+        assert self.vlm is not None
+        order: List[Any] = []
+
+        async def prepare_lora(path: Path) -> None:
+            order.append(("prepare", path))
+
+        @contextlib.contextmanager
+        def hold() -> Iterator[None]:
+            order.append(("hold",))
+            yield
+
+        self.vlm.prepare_lora = prepare_lora  # type: ignore[attr-defined]
+        self.vlm.hold = hold  # type: ignore[attr-defined]
+        self.roomy()
+        started = await self.start(
+            self.random_mode(batch_size=1, count_per_batch=1, writer=self.wid)
+        )
+        await self.wait(started.batch_id)
+        self.assertEqual(order[:2], [("prepare", self.gguf), ("hold",)])
+        batch = self.runner._batches[started.batch_id]
+        self.assertEqual(batch.adapter_base, BASE)
+
+
 # ---- I2V lineage --------------------------------------------------------------
 
 
@@ -576,6 +707,14 @@ class TestI2vAdapterLineage(_I2vBase):
         self.run_async(self.runner.write_prompt(str(self.src), "a cat", 6))
         self.assertNotIn("lora_path", self.vlm.calls[-1])
 
+    def test_generate_with_a_gone_adapters_draft_is_unavailable(self) -> None:
+        self.db.soft_delete_writer_adapter(self.adapter)
+        with self.assertRaises(WriterAdapterUnavailable):
+            self._generate(
+                writer_id=self.wid, draft_prompt="a draft", writer_model=BASE
+            )
+        self.assertEqual(self.comfy.submits, [])
+
     def test_a_t2i_adapter_is_unavailable_for_i2v(self) -> None:
         t2i = self.db.create_writer_adapter(
             name="t2i-v1", scope="all", kind="t2i", base_model=BASE, status="ready"
@@ -618,6 +757,16 @@ class TestT2iRoutes(t2i_api_tests.T2iApiCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["detail"]["code"], "adapter_unavailable")
 
+    def test_a_busy_writer_is_a_409_adapter_loading(self) -> None:
+        self.runner.errors["generate_prompt"] = WriterAdapterUnavailable(
+            "adapter:3", code="adapter_loading"
+        )
+        resp = self.client.post(
+            "/api/t2i/prompt", json={**self.BODY, "writer": "adapter:3"}
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["code"], "adapter_loading")
+
 
 def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:
     from fastapi import FastAPI
@@ -636,6 +785,9 @@ def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:
                 raise self.error
             return "prompt", [], BASE
 
+        async def generate(self, **kw: Any) -> int:
+            raise WriterAdapterUnavailable(str(kw["writer_id"]))
+
     runner = Runner()
     i2v_api.set_i2v_runner(runner)
     try:
@@ -653,22 +805,42 @@ def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:
         resp = client.post("/api/i2v/prompt", json=body)
         assert resp.status_code == 409
         assert resp.json()["detail"]["code"] == "adapter_unavailable"
+        # Generate with a gone adapter's draft: 409 too (the fallback path).
+        cfg = {"fast_preset_id": 1, "quality_preset_id": 2}
+        with mock.patch(
+            "backend.api.i2v.get_i2v_config",
+            return_value={**i2v_api.get_i2v_config({}), **cfg},
+        ), mock.patch("backend.api.i2v.load_app_config", return_value={}):
+            resp = client.post(
+                "/api/i2v/generate",
+                json={
+                    "source_path": "/x.png",
+                    "prompt": "p",
+                    "duration_s": 6,
+                    "quality": "fast",
+                    "seed": 1,
+                    "writer_id": "adapter:4",
+                    "draft_prompt": "d",
+                    "writer_model": BASE,
+                },
+            )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "adapter_unavailable"
     finally:
         i2v_api.set_i2v_runner(None)
 
 
+@pytest.mark.parametrize("released", [True, False])
 def test_delete_withdraws_the_adapter_before_removing_its_files(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: Any, released: bool
 ) -> None:
-    import os
-
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     import backend.dependencies as deps
     from backend.api import writers
 
-    os.environ.setdefault("METASCAN_API_KEY", "")
+    monkeypatch.setenv("METASCAN_API_KEY", "")
     db = DatabaseManager(tmp_path)
     old = deps._db_singleton
     deps._db_singleton = db  # type: ignore[attr-defined]
@@ -677,7 +849,7 @@ def test_delete_withdraws_the_adapter_before_removing_its_files(
 
     async def withdraw(adapter_id: int) -> bool:
         order.append(f"withdraw {adapter_id}")
-        return True
+        return released  # False: a running server still maps its GGUF
 
     async def refresh() -> None:
         order.append("refresh")
@@ -703,8 +875,16 @@ def test_delete_withdraws_the_adapter_before_removing_its_files(
             app = FastAPI()
             app.include_router(writers.router)
             resp = TestClient(app).delete(f"/api/writers/adapters/{a}")
-        assert resp.json() == {"status": "deleted"}
-        assert order == [f"withdraw {a}", "rmtree", "refresh"]
+        if released:
+            assert resp.json() == {"status": "deleted"}
+            assert order == [f"withdraw {a}", "rmtree", "refresh"]
+        else:
+            # Never rely on the file removal failing: answer busy at once.
+            assert resp.status_code == 409
+            assert resp.json()["detail"]["code"] == "adapter_files_busy"
+            assert order == [f"withdraw {a}"]
+            assert db.get_writer_adapter(a)["status"] == "ready"
+            assert (adapter_dir(tmp_path, a) / ADAPTER_GGUF).exists()
     finally:
         deps._db_singleton = old  # type: ignore[attr-defined]
         db.close()

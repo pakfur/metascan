@@ -75,6 +75,12 @@ def _service() -> I2vService:
     return I2vService(get_db())
 
 
+def _adapter_409(exc: WriterAdapterUnavailable) -> HTTPException:
+    return HTTPException(
+        status_code=409, detail={"code": exc.code, "message": str(exc)}
+    )
+
+
 def _writer_choice(value: str) -> str:
     if value == "base" or parse_adapter_writer_id(value) is not None:
         return value
@@ -143,10 +149,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         )
     except WriterAdapterUnavailable as exc:
         # The dialog falls back to Base on this code.
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "adapter_unavailable", "message": str(exc)},
-        ) from exc
+        raise _adapter_409(exc) from exc
     except I2vUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VlmSelectError as exc:
@@ -262,6 +265,9 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             draft_prompt=body.draft_prompt,
             writer_model=body.writer_model,
         )
+    except WriterAdapterUnavailable as exc:
+        # A draft from an adapter that has gone: the dialog falls back.
+        raise _adapter_409(exc) from exc
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (BindingError, PresetNotFoundError) as exc:

@@ -50,9 +50,10 @@ from metascan.core.judgments import (
     writer_id_allowed,
     normalize_prompt,
 )
-from metascan.core.vlm_client import AdapterNotLoadedError
+from metascan.core.vlm_client import AdapterLoadingError, AdapterNotLoadedError
 from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.writer_adapters import (
+    ADAPTER_LOADING,
     WriterAdapterUnavailable,
     parse_adapter_writer_id,
 )
@@ -213,6 +214,10 @@ class I2vRunner:
             return await self._write(
                 vlm, path, idea, duration_s, template, model_id, extra
             )
+        except AdapterLoadingError as exc:
+            raise WriterAdapterUnavailable(
+                writer, str(exc), code=ADAPTER_LOADING
+            ) from exc
         except AdapterNotLoadedError as exc:
             raise WriterAdapterUnavailable(writer, str(exc)) from exc
 
@@ -358,6 +363,12 @@ class I2vRunner:
         if draft_prompt is None:
             writer_id = WRITER_MANUAL
         elif not await asyncio.to_thread(writer_id_allowed, writer_id, self.db, "i2v"):
+            if parse_adapter_writer_id(writer_id) is not None:
+                # A draft by an adapter that has gone (deleted, failed, the
+                # other kind): 409, so a stale client falls back to Base.
+                raise WriterAdapterUnavailable(
+                    str(writer_id), "not a ready image-to-video adapter"
+                )
             raise I2vRequestError(
                 f"writer_id {writer_id!r} is not a writer that drafts prompts "
                 f"({', '.join(DRAFT_WRITERS)} or a ready adapter)"

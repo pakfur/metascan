@@ -90,10 +90,15 @@ from metascan.core.t2i_prompt import (
 )
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
-from metascan.core.vlm_client import AdapterNotLoadedError, VlmError
+from metascan.core.vlm_client import (
+    AdapterLoadingError,
+    AdapterNotLoadedError,
+    VlmError,
+)
 from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
 from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.writer_adapters import (
+    ADAPTER_LOADING,
     WriterAdapterUnavailable,
     parse_adapter_writer_id,
 )
@@ -256,6 +261,8 @@ class _Batch:
     # The adapter GGUF the writer applies (writer ``adapter:<id>``), resolved
     # when the batch was planned; None for the base writer.
     lora_path: Optional[Path] = None
+    # That adapter's base model, read from the registry at plan time.
+    adapter_base: Optional[str] = None
     step: Optional[Dict[str, Any]] = None  # snapshot of the step on show
     # Every step written so far, in order: a prompt can be written well ahead
     # of the render, and waits here until its images are the ones rendering.
@@ -490,6 +497,12 @@ def _check_prompts(
         if draft is None:
             writer_id = WRITER_MANUAL
         elif not writer_id_allowed(writer_id, db, "t2i"):
+            if parse_adapter_writer_id(writer_id) is not None:
+                # A draft by an adapter that has gone (deleted, failed, the
+                # other kind): 409, so a stale client falls back to Base.
+                raise WriterAdapterUnavailable(
+                    str(writer_id), "not a ready text-to-image adapter"
+                )
             raise T2iRequestError(
                 f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
                 f"that drafts prompts ({', '.join(DRAFT_WRITERS)} or a ready adapter)"
@@ -910,6 +923,10 @@ class T2iRunner:
 
             try:
                 drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            except AdapterLoadingError as exc:
+                raise WriterAdapterUnavailable(
+                    writer, str(exc), code=ADAPTER_LOADING
+                ) from exc
             except AdapterNotLoadedError as exc:
                 raise WriterAdapterUnavailable(writer, str(exc)) from exc
             if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
@@ -1001,6 +1018,7 @@ class T2iRunner:
         # Only a batch that writes prompts needs its adapter served; Manual
         # renders the prompts it was given (their lineage is checked above).
         lora_path = await self._adapter_lora(writer) if req.mode == "random" else None
+        adapter_base = await self._adapter_base(writer) if lora_path else None
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
@@ -1137,6 +1155,7 @@ class T2iRunner:
             phase="prompting" if req.mode == "random" else "rendering",
             prompting=req.mode == "random",
             lora_path=lora_path,
+            adapter_base=adapter_base,
         )
 
     async def start_batch(self, req: BatchRequest) -> BatchStarted:
@@ -1257,7 +1276,7 @@ class T2iRunner:
             return fall_back(unavailable)
         lora_path = batch.lora_path
         if lora_path is not None:
-            adapter_base = await self._adapter_base(batch.req.writer)
+            adapter_base = batch.adapter_base
             if adapter_base != model_id:
                 return fall_back(
                     f"writer {batch.req.writer} is built on {adapter_base}, the "
@@ -1487,6 +1506,16 @@ class T2iRunner:
         (``VlmClient.hold``): background VLM work (the tag drain) does not
         evict the writer between two prompts, it waits for the batch."""
         vlm = self.get_vlm() if batch.mode == "random" else None
+        prepare = getattr(vlm, "prepare_lora", None)
+        if batch.lora_path is not None and callable(prepare):
+            # Before the hold: an adapter registered since the writer spawned
+            # is loaded now (the writer restarts only once idle), never under
+            # the batch's own hold. A failure leaves the steps to retry and
+            # fall back like any VLM failure.
+            try:
+                await prepare(batch.lora_path)
+            except VlmError as exc:
+                logger.warning("t2i batch %s: adapter not ready: %s", batch.id, exc)
         hold = getattr(vlm, "hold", None)
         with hold() if callable(hold) else contextlib.nullcontext():
             await self._produce_steps(batch, queue)

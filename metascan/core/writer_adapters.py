@@ -65,13 +65,23 @@ def adapter_dir(data_dir: Path, adapter_id: int) -> Path:
 ADAPTER_GGUF = "adapter.gguf"
 
 
+# 409 detail codes: the adapter cannot be served (the dialog falls back to
+# Base), or it is registered but the busy writer has not loaded it yet.
+ADAPTER_UNAVAILABLE = "adapter_unavailable"
+ADAPTER_LOADING = "adapter_loading"
+
+
 class WriterAdapterUnavailable(RuntimeError):
     """A request named an adapter the writer cannot serve (deleted, failed,
     still training, another surface's, or not loaded for the writer's model)
-    -- the routes answer 409 ``adapter_unavailable``."""
+    -- the routes answer 409 with ``code`` (``adapter_unavailable``, or
+    ``adapter_loading`` while the busy writer has not loaded a new one)."""
 
-    def __init__(self, writer_id: str, reason: str = "") -> None:
+    def __init__(
+        self, writer_id: str, reason: str = "", code: str = ADAPTER_UNAVAILABLE
+    ) -> None:
         self.writer_id = writer_id
+        self.code = code
         super().__init__(
             f"writer {writer_id!r} is not available" + (f": {reason}" if reason else "")
         )

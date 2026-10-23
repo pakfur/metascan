@@ -103,8 +103,7 @@ def _http_error(exc: Exception) -> Optional[HTTPException]:
     if isinstance(exc, WriterAdapterUnavailable):
         # The dialog falls back to Base on this code.
         return HTTPException(
-            status_code=409,
-            detail={"code": "adapter_unavailable", "message": str(exc)},
+            status_code=409, detail={"code": exc.code, "message": str(exc)}
         )
     if isinstance(exc, _BAD_REQUEST):
         return HTTPException(status_code=400, detail=str(exc))
