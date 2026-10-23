@@ -94,14 +94,18 @@ export interface TrainingGate {
   checking: boolean
 }
 
-/** GET /api/writers/training */
+/**
+ * GET /api/writers/training. `dataset` / `next_name` come only with the full
+ * payload (the window); the light status (`dataset=0`, the always-on chip
+ * and GPU lock) leaves them out and never builds the dataset.
+ */
 export interface TrainingStatus {
   state: 'idle' | RunState
   gpu_locked: boolean
   run: ActiveRun | null
   runs: ResumableRun[]
-  dataset: DatasetSummary
-  next_name: string
+  dataset?: DatasetSummary
+  next_name?: string
   gate: TrainingGate
   presets: Record<TrainingEffort, Hyperparams>
   clamps: Record<OverrideKey, [number, number]>
@@ -124,8 +128,11 @@ export interface BriefsStatus {
   result: string | null
 }
 
+export type PreviewKind = 'preference' | 'edit' | 'hindsight'
+
 /** GET /api/writers/dataset/preview — owner-only, never logged. */
 export interface PreviewExample {
+  kind: PreviewKind
   system: string
   user: string
   chosen: string
@@ -136,10 +143,10 @@ export interface PreviewExample {
   group: string
 }
 
+/** Up to 10 examples balanced across preference / edit / hindsight. */
 export interface DatasetPreview {
   scope: string
-  prefs: PreviewExample[]
-  sft: PreviewExample[]
+  examples: PreviewExample[]
 }
 
 // `training` WS channel events.

@@ -213,27 +213,35 @@ def _gate_payload(gate: Any) -> Dict[str, Any]:
 
 
 @router.get("/training")
-async def training_status(scope: str = "all", recheck: bool = False) -> Dict[str, Any]:
+async def training_status(
+    scope: str = "all", recheck: bool = False, dataset: bool = True
+) -> Dict[str, Any]:
     """The training window's state: the active run (if any) and resumable
     runs, the dataset counts + readiness for ``scope`` (cached ~30 s), the
     name the next run of ``scope`` would get (``next_name``), the
     ``writer_training`` gate (each missing piece; ``recheck=1`` re-runs its
     subprocess probes, e.g. after installing the training deps) and every
-    effort preset resolved, with the Advanced clamps."""
+    effort preset resolved, with the Advanced clamps.
+
+    ``dataset=0`` is the light status (the always-on header chip and GPU
+    lock): no dataset build, no ``dataset`` / ``next_name``, and ``scope``
+    is ignored."""
     from backend.services.training_manager import OVERRIDE_CLAMPS, resolved_presets
 
     manager = _manager()
-    dataset = await _training_call(manager.dataset_summary(scope))
+    extra: Dict[str, Any] = {}
+    if dataset:
+        extra["dataset"] = await _training_call(manager.dataset_summary(scope))
+        extra["next_name"] = await _training_call(
+            asyncio.to_thread(manager.next_adapter_name, scope)
+        )
     # Never waits for the dependency probe: it runs in the background and
     # the gate says "checking" until it has finished.
     gate, checking = await manager.gate_status(recheck)
     return {
         **manager.status(),
         "runs": await asyncio.to_thread(manager.resumable_runs),
-        "dataset": dataset,
-        "next_name": await _training_call(
-            asyncio.to_thread(manager.next_adapter_name, scope)
-        ),
+        **extra,
         "gate": {**_gate_payload(gate), "checking": checking},
         "presets": resolved_presets(),
         "clamps": {k: list(v) for k, v in OVERRIDE_CLAMPS.items()},
@@ -280,7 +288,8 @@ async def cancel_training(body: Optional[TrainingRunRequest] = None) -> Dict[str
 
 @router.get("/dataset/preview")
 async def dataset_preview(scope: str = "all") -> Dict[str, Any]:
-    """Up to 10 preference pairs and 10 SFT examples of ``scope``, for the
-    owner's training window only (never logged)."""
+    """Up to 10 examples of ``scope`` balanced across preference / edit /
+    hindsight (``examples[].kind``), for the owner's training window only
+    (never logged)."""
     result: Dict[str, Any] = await _training_call(_manager().dataset_preview(scope))
     return result

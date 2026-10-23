@@ -3,7 +3,7 @@
 // chip). Non-modal: the run lives on the server, so closing this window (or
 // the browser) never stops it. Example text is shown ONLY in the Preview
 // panel below — never logged, never rendered anywhere else.
-import { computed, onBeforeUnmount, reactive, ref, watch, watchEffect } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch, watchEffect } from 'vue'
 import { useTrainingStore, trainingErrorText } from '../../stores/training'
 import { useCategoriesStore } from '../../stores/categories'
 import { fetchDatasetPreview } from '../../api/training'
@@ -39,6 +39,18 @@ const actionError = ref<string | null>(null)
 if (categories.categories.length === 0) {
   categories.load().catch((e) => console.warn('Training: could not load categories', e instanceof Error ? e.message : e))
 }
+// categories_changed reloads the list (App.vue): a deleted scope category
+// falls back to All.
+watch(
+  () => categories.categories,
+  (list) => training.checkScope(list.map((c) => c.id)),
+)
+watch(
+  () => training.scope,
+  () => {
+    preview.value = null
+  },
+)
 
 // ---- polling: only while open and a gate check or a run is in flight ----
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -118,7 +130,6 @@ function scopeLabel(scope: string): string {
 }
 
 function onScope(ev: Event) {
-  preview.value = null
   training.setScope((ev.target as HTMLSelectElement).value)
 }
 
@@ -161,12 +172,13 @@ async function onPreview() {
     previewLoading.value = false
   }
 }
-const previewItems = computed(() => {
-  const p = preview.value
-  if (!p) return []
-  // Ten examples: preference pairs first, then SFT targets.
-  return [...p.prefs, ...p.sft].slice(0, 10)
-})
+// Up to ten, balanced by the server across preference / edit / hindsight.
+const previewItems = computed(() => preview.value?.examples ?? [])
+const KIND_LABEL: Record<string, string> = {
+  preference: 'preference pair',
+  edit: 'your edit',
+  hindsight: 'hindsight',
+}
 
 // ---- run panel -----------------------------------------------------------
 const effort = ref<TrainingEffort>('standard')
@@ -204,8 +216,9 @@ const overridesDiffer = computed(() => {
   return OVERRIDE_KEYS.some((k) => o[k] !== undefined && o[k] !== p[k])
 })
 
+/** 2 significant digits: 1e-4, 1.5e-4, 2.5e-5. */
 function fmtLr(v: unknown): string {
-  return typeof v === 'number' ? v.toExponential(0) : '—'
+  return typeof v === 'number' && Number.isFinite(v) ? Number(v.toPrecision(2)).toExponential() : '—'
 }
 function fmtClamp(k: OverrideKey, v: number): string {
   return k === 'lr' || k === 'dpo_lr' ? fmtLr(v) : String(v)
@@ -382,9 +395,18 @@ function adapterNote(a: WriterAdapter): string {
 
 const renamingId = ref<number | null>(null)
 const renameValue = ref('')
-function beginRename(a: WriterAdapter) {
+// `autofocus` only fires on page load, not for an input inserted later.
+// (A function ref: a plain one inside v-for would collect an array.)
+let renameInput: HTMLInputElement | null = null
+function setRenameInput(el: unknown) {
+  renameInput = el instanceof HTMLInputElement ? el : null
+}
+async function beginRename(a: WriterAdapter) {
   renamingId.value = a.id
   renameValue.value = a.name
+  await nextTick()
+  renameInput?.focus()
+  renameInput?.select()
 }
 async function commitRename(a: WriterAdapter) {
   const name = renameValue.value.trim()
@@ -416,11 +438,15 @@ function onRecheck() {
         </button>
       </div>
 
-      <div v-if="!status" class="tw-loading dim">
+      <div v-if="!status?.dataset" class="tw-loading dim">
         {{ training.loadError ?? 'Loading training status…' }}
       </div>
 
-      <div v-else class="tw-bd">
+      <div v-else-if="training.loadError" class="err tw-load-err" data-testid="training-load-error">
+        Could not refresh the training status: {{ training.loadError }}
+      </div>
+
+      <div v-if="status?.dataset" class="tw-bd">
         <div class="col-left">
           <!-- Dataset -->
           <section class="pn" data-testid="training-dataset">
@@ -465,7 +491,7 @@ function onRecheck() {
               <div v-if="previewItems.length === 0" class="dim">No examples in this scope yet.</div>
               <details v-for="(ex, i) in previewItems" :key="i" class="ex">
                 <summary>
-                  <span class="tag">{{ ex.rejected !== undefined ? 'pair' : 'target' }} · {{ ex.source }}</span>
+                  <span class="tag">{{ KIND_LABEL[ex.kind] ?? ex.kind }}</span>
                   {{ ex.target_model }}<span v-if="ex.categories.length" class="dim"> · {{ ex.categories.join(', ') }}</span>
                 </summary>
                 <div class="ex-k">Request</div>
@@ -631,9 +657,9 @@ function onRecheck() {
                 <td>
                   <input
                     v-if="renamingId === a.id"
+                    :ref="setRenameInput"
                     v-model="renameValue"
                     class="rename"
-                    autofocus
                     @keydown.enter="commitRename(a)"
                     @keydown.esc="renamingId = null"
                     @blur="commitRename(a)"
@@ -713,6 +739,7 @@ function onRecheck() {
   font-size: 12px;
 }
 .tw-loading { padding: 24px; }
+.tw-load-err { padding: 6px 14px 0; }
 .tw-bd {
   display: grid;
   grid-template-columns: 1.1fr 1fr;

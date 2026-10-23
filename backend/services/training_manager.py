@@ -439,6 +439,9 @@ class TrainingManager:
         # GET /training's dataset summary per scope: (monotonic time, value).
         self.summary_ttl_s = float(summary_ttl_s)
         self._summary_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        # One build per scope at a time: concurrent cold callers share it.
+        self._summary_inflight: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        self._summary_generation = 0
 
     # ---- GPU lock -------------------------------------------------------
 
@@ -521,12 +524,37 @@ class TrainingManager:
         hit = self._summary_cache.get(key)
         if hit is not None and loop.time() - hit[0] < self.summary_ttl_s:
             return hit[1]
-        value = await self._dataset_summary(scope)
-        self._summary_cache[key] = (loop.time(), value)
-        return value
+        task = self._summary_inflight.get(key)
+        if task is None:
+            task = loop.create_task(
+                self._summary_build(key, scope, self._summary_generation),
+                name=f"writer-dataset-summary:{key}",
+            )
+            # Every waiter may have been cancelled: retrieve the outcome so
+            # an error is never reported as "never retrieved".
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._summary_inflight[key] = task
+        # A cancelled caller never cancels the build the others await.
+        return await asyncio.shield(task)
+
+    async def _summary_build(
+        self, key: str, scope: Any, generation: int
+    ) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        try:
+            value = await self._dataset_summary(scope)
+            # An invalidation during the build makes its result stale.
+            if generation == self._summary_generation:
+                self._summary_cache[key] = (loop.time(), value)
+            return value
+        finally:
+            if self._summary_inflight.get(key) is asyncio.current_task():
+                del self._summary_inflight[key]
 
     def invalidate_dataset_summary(self) -> None:
         self._summary_cache.clear()
+        self._summary_inflight.clear()
+        self._summary_generation += 1
 
     async def _dataset_summary(self, scope: Any) -> Dict[str, Any]:
         built = await asyncio.to_thread(self._build, scope)
@@ -549,8 +577,7 @@ class TrainingManager:
         built = await asyncio.to_thread(self._build, scope)
         return {
             "scope": built.scope,
-            "prefs": wd.preview(built.prefs),
-            "sft": wd.preview(built.sft),
+            "examples": wd.preview_mix(built.prefs, built.sft),
         }
 
     @property

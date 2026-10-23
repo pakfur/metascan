@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import ToastHost from './components/layout/ToastHost.vue'
-import { useWebSocket } from './composables/useWebSocket'
+import { onWsConnect, useWebSocket } from './composables/useWebSocket'
 import { useFoldersStore } from './stores/folders'
 import { useT2iStore } from './stores/t2i'
 import { useCategoriesStore } from './stores/categories'
@@ -68,10 +68,14 @@ useWebSocket('taste', (event) => {
 
 // Writer LoRA training: always on, so the header chip ("◐ Training …") and
 // the GPU-busy state follow a run whether or not the training window is
-// open. One status fetch at start; WS events keep it current after that.
-trainingStore.load().catch((e) => console.warn('Failed to load training status', e instanceof Error ? e.message : e))
+// open. The light status (no dataset build) is fetched on every WS
+// (re)connect — events missed during a gap or a server restart would leave
+// a stale "training" state — and WS events keep it current in between.
 trainingStore.loadAdapters().catch((e) => console.warn('Failed to load writer adapters', e instanceof Error ? e.message : e))
 useWebSocket('training', (event, data) => trainingStore.handleEvent(event, data))
+onWsConnect(() => {
+  trainingStore.load().catch((e) => console.warn('Failed to load training status', e instanceof Error ? e.message : e))
+})
 
 // New i2v clips change the "Has I2V video" smart-folder rule's membership.
 useWebSocket('i2v', (event) => {

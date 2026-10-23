@@ -11,10 +11,15 @@ import type {
 // gpu_busy / run_discarded / worker_unverifiable / worker_alive …, 422 for
 // bad input); see trainingErrorText in stores/training.ts.
 
-/** Status, dataset summary of `scope`, gate and presets. Never blocks on the gate probe. */
-export function fetchTrainingStatus(scope = 'all', recheck = false): Promise<TrainingStatus> {
+/**
+ * Status, gate and presets; with `full`, also the dataset summary of `scope`
+ * and `next_name` (a library-wide build, cached ~30 s server-side — only the
+ * training window asks for it). Never blocks on the gate probe.
+ */
+export function fetchTrainingStatus(scope = 'all', recheck = false, full = true): Promise<TrainingStatus> {
   const q = new URLSearchParams({ scope })
   if (recheck) q.set('recheck', '1')
+  if (!full) q.set('dataset', '0')
   return get<TrainingStatus>(`/writers/training?${q.toString()}`)
 }
 
@@ -37,7 +42,7 @@ export function cancelTraining(runId?: number): Promise<TrainingActionResult> {
   return post<TrainingActionResult>('/writers/training/cancel', runId === undefined ? {} : { run_id: runId })
 }
 
-/** Up to 10 preference pairs + 10 SFT examples (owner-only; never log them). */
+/** Up to 10 examples mixed across preference / edit / hindsight (owner-only; never log them). */
 export function fetchDatasetPreview(scope = 'all'): Promise<DatasetPreview> {
   return get<DatasetPreview>(`/writers/dataset/preview?scope=${encodeURIComponent(scope)}`)
 }

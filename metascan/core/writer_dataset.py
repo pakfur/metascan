@@ -800,6 +800,40 @@ def preview(examples: Sequence[Example], n: int = PREVIEW_N) -> List[Dict[str, A
     return [e.to_dict() for e in list(examples)[: max(0, n)]]
 
 
+PREVIEW_KINDS = ("preference", "edit", "hindsight")
+
+
+def preview_mix(
+    prefs: Sequence[PrefExample], sft: Sequence[SftExample], n: int = PREVIEW_N
+) -> List[Dict[str, Any]]:
+    """Up to ``n`` examples balanced across the three kinds (round robin:
+    variant ``preference`` pairs, ``edit`` pairs, ``hindsight`` targets),
+    each dict labelled with ``kind``. An edit is shown once, as its DPO
+    pair (draft = rejected) when it has one, else as its SFT target.
+    For the training window only; never logged."""
+    edits: List[Example] = [p for p in prefs if p.source == SOURCE_EDIT]
+    if not edits:
+        edits = [s for s in sft if s.source == SOURCE_EDIT]
+    buckets: Dict[str, List[Example]] = {
+        "preference": [p for p in prefs if p.source == SOURCE_VARIANT],
+        "edit": edits,
+        "hindsight": [s for s in sft if s.source == SOURCE_HINDSIGHT],
+    }
+    out: List[Dict[str, Any]] = []
+    i = 0
+    while len(out) < max(0, n):
+        added = False
+        for kind in PREVIEW_KINDS:
+            bucket = buckets[kind]
+            if i < len(bucket) and len(out) < n:
+                out.append({**bucket[i].to_dict(), "kind": kind})
+                added = True
+        if not added:
+            break
+        i += 1
+    return out
+
+
 def readiness(
     counts: DatasetCounts, last_adapter_cutoff: Optional[str]
 ) -> Dict[str, Any]:

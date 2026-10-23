@@ -123,6 +123,29 @@ def test_next_adapter_name_sequences(db):
     assert db.next_adapter_name("all") == "taste-all-v4"
 
 
+def test_next_adapter_name_ignores_renames_of_generated_names(db):
+    a = _make(db, name=db.next_adapter_name("all"))
+    assert db.get_writer_adapter(a)["generated_name"] == "taste-all-v1"
+    db.rename_writer_adapter(a, "my favourite")
+    # The renamed v1 still holds its number.
+    assert db.next_adapter_name("all") == "taste-all-v2"
+    b = _make(db, name=db.next_adapter_name("all"))
+    # A user rename to a far number does not move the sequence ...
+    db.rename_writer_adapter(b, "taste-all-v7")
+    assert db.next_adapter_name("all") == "taste-all-v3"
+    # ... but a taken name is skipped, never collided with.
+    c = _make(db, name="custom")
+    db.rename_writer_adapter(c, "taste-all-v3")
+    assert db.next_adapter_name("all") == "taste-all-v4"
+
+
+def test_next_adapter_name_counts_deleted_generated_names(db):
+    a = _make(db, name="taste-all-v1")
+    db.rename_writer_adapter(a, "gone")
+    db.soft_delete_writer_adapter(a)
+    assert db.next_adapter_name("all") == "taste-all-v2"
+
+
 def test_writer_id_validation(db):
     ok = _make(db, name="a", status="ready")
     untested = _make(db, name="b", status="untested")

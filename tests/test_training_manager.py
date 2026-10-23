@@ -797,7 +797,10 @@ async def test_training_routes(db, tmp_path, dataset, monkeypatch):
             assert body["next_name"] == "taste-all-v1"
 
             r = await c.get("/api/writers/dataset/preview", params={"scope": "all"})
-            assert len(r.json()["prefs"]) == 10 and len(r.json()["sft"]) == 10
+            examples = r.json()["examples"]
+            assert len(examples) == 10
+            # Preference pairs and the edit SFT targets, interleaved.
+            assert {e["kind"] for e in examples} == {"preference", "edit"}
 
             r = await c.post(
                 "/api/writers/training/start",
@@ -1170,6 +1173,73 @@ async def test_dataset_summary_is_cached_per_scope_and_invalidated(
     await _idle(m)
     await m.dataset_summary("all")  # completion invalidated it too
     assert len(dataset["calls"]) == n + 2
+
+
+async def test_dataset_summary_is_single_flight_per_scope(db, tmp_path, monkeypatch):
+    calls: List[str] = []
+
+    def build(db_, scope, store, now, *, content_mode, resolve=None):
+        calls.append(scope)
+        import time
+
+        time.sleep(0.2)  # a slow library-wide build
+        return _examples(120)
+
+    monkeypatch.setattr(wd, "build_examples", build)
+    m = _manager(db, tmp_path, Recorder())
+    out = await asyncio.gather(*(m.dataset_summary("all") for _ in range(5)))
+    assert calls == ["all"]  # concurrent cold callers awaited one build
+    assert all(o == out[0] for o in out)
+    await m.dataset_summary("all")  # cached
+    assert calls == ["all"]
+    # A cancelled waiter does not cancel the shared build for the others.
+    m.invalidate_dataset_summary()
+    first = asyncio.ensure_future(m.dataset_summary("all"))
+    second = asyncio.ensure_future(m.dataset_summary("all"))
+    await asyncio.sleep(0.05)
+    first.cancel()
+    assert (await second)["scope"] == "all"
+    assert calls == ["all", "all"]
+
+
+async def test_dataset_summary_errors_are_not_cached(db, tmp_path, dataset):
+    m = _manager(db, tmp_path, Recorder())
+    for _ in range(2):
+        with pytest.raises(TrainingError) as e:
+            await m.dataset_summary("999")
+        assert e.value.detail()["code"] == "unknown_scope"
+    assert m._summary_inflight == {}  # type: ignore[attr-defined]
+
+
+async def test_training_status_light_never_builds(db, tmp_path, dataset, monkeypatch):
+    from backend.api import writers
+
+    m = _manager(db, tmp_path, Recorder())
+    tm.set_training_manager(m)
+    monkeypatch.setattr(writers, "get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(writers.router)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get("/api/writers/training", params={"dataset": "0"})
+            assert r.status_code == 200
+            body = r.json()
+            assert dataset["calls"] == []
+            assert "dataset" not in body and "next_name" not in body
+            assert body["state"] == "idle" and body["gpu_locked"] is False
+            assert body["run"] is None and body["runs"] == []
+            assert body["gate"]["available"] is True
+            # A deleted category is never an error for the light status.
+            r = await c.get(
+                "/api/writers/training", params={"dataset": "0", "scope": "999"}
+            )
+            assert r.status_code == 200
+            r = await c.get("/api/writers/training")
+            assert r.json()["dataset"]["readiness"]["trainable"] is True
+            assert len(dataset["calls"]) == 1
+    finally:
+        tm.set_training_manager(None)
 
 
 # ---- orphaned workers ----------------------------------------------------------------

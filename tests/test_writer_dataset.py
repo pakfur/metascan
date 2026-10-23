@@ -22,6 +22,7 @@ from metascan.core.writer_dataset import (
     caption_resolver,
     holdout_key,
     preview,
+    preview_mix,
     readiness,
     sft_without_holdout,
     split_holdout,
@@ -506,6 +507,45 @@ def test_write_jsonl_and_preview(tmp_path):
     many = sft * 15
     assert len(preview(many)) == 10
     assert preview(many, 3)[0]["chosen"] == "C"
+
+
+def _pref(i, source):
+    return PrefExample("S", f"u{i}", f"c{i}", f"r{i}", "qwen", [], source, f"g{i}")
+
+
+def _sft(i, source):
+    return SftExample("S", f"s{i}", f"t{i}", "qwen", [], source, f"h{i}")
+
+
+def test_preview_mix_balances_kinds_and_labels_them():
+    prefs = [_pref(i, "variant") for i in range(20)] + [
+        _pref(100 + i, "edit") for i in range(3)
+    ]
+    sft = [_sft(100 + i, "edit") for i in range(3)] + [
+        _sft(i, "hindsight") for i in range(20)
+    ]
+    out = preview_mix(prefs, sft)
+    assert len(out) == 10
+    kinds = [e["kind"] for e in out]
+    # Round robin: every kind shows up; edits (only 3) are all shown.
+    assert kinds.count("edit") == 3
+    assert kinds.count("preference") == 4 and kinds.count("hindsight") == 3
+    assert kinds[:3] == ["preference", "edit", "hindsight"]
+    # An edit is shown as its DPO pair (draft = rejected), not twice.
+    edits = [e for e in out if e["kind"] == "edit"]
+    assert all("rejected" in e for e in edits)
+    assert len({e["user"] for e in edits}) == 3
+
+
+def test_preview_mix_fills_from_the_kinds_that_exist():
+    sft = [_sft(i, "hindsight") for i in range(4)] + [_sft(9, "edit")]
+    out = preview_mix([_pref(0, "variant")], sft, n=10)
+    assert [e["kind"] for e in out].count("hindsight") == 4
+    # An edit with only its SFT form still shows (no rejected side).
+    edit = [e for e in out if e["kind"] == "edit"]
+    assert len(edit) == 1 and "rejected" not in edit[0]
+    assert len(out) == 6
+    assert preview_mix([], []) == []
 
 
 def test_readiness():
