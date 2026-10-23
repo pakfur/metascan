@@ -72,7 +72,11 @@ Managed by the Models tab in the config dialog. Both fields are surfaced via the
 - **`huggingface_token`** — masked in the UI; injected as `HF_TOKEN` into subprocess env so embedding/inference workers can pull gated weights.
 - **`vlm_repos`** — `{"<model_id>": "<hf-repo>"}`, one entry per VLM registry id (`qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`) to override the default HuggingFace repo `setup_models.py` downloads from — e.g. to point at a different quant or remix. The GGUF/mmproj filenames still have to match what the registry expects. Defaults to `{}` (use the registry's built-in repo for every model). The legacy key `qwen3vl_repos` is still read for backward compatibility if `vlm_repos` is absent.
 
-Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`, `qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version. The VLM ids are also the valid keys for `vlm_repos` above.
+- **`writer_train_repo`** — optional Hugging Face repo for the full-precision writer weights used by prompt-writer training (default: the 8B writer's `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated`). See [Prompt-Writer Training](writer-training.md).
+- **`llama_cpp_dir`** — optional path to your own llama.cpp checkout, used for `convert_lora_to_gguf.py`. Unset: the Models tab downloads the converter into `data/llama.cpp`. A configured directory is never modified or deleted.
+- **`writer_train_python`** — optional Python interpreter for the training worker (default: the server's own). Use it when the training packages live in a separate virtualenv.
+
+Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`, `qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`, `writer-train-base`, `llama-cpp-converter`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version. The VLM ids are also the valid keys for `vlm_repos` above.
 
 ## `comfy`
 

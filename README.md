@@ -149,6 +149,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Text to Image](docs/t2i.md)** — the Text to Image dialog: caption sources, character and wildcard files, prompt styles per model, server-side batches, and workflow requirements
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
+- **[Prompt-Writer Training](docs/writer-training.md)** — train a LoRA adapter for the prompt writer from your ratings and edits: Windows/WSL2 setup, base weights, the GPU lock, serving, and the blind scorecard
 - **[Hardware Detection](docs/hardware-detection.md)** — what gets probed, tier classification, per-model gates, auto-warnings
 - **[Building llama-server](docs/build-llama-server.md)** — when and how to build llama.cpp from source for accelerators upstream doesn't ship (notably Linux + CUDA)
 - **[Developer Guidelines](docs/developer-guidelines.md)** — build commands, code style, testing, CI
