@@ -265,6 +265,55 @@ async function onUnload(row: ModelRow) {
   await models.unloadVlmModel(row.id)
 }
 
+type RoleKey = 'writer' | 'general'
+
+const vlmRoles = computed(() => models.vlmRoles)
+const vlmRows = computed(() => grouped.value['Tagging (VLM)'] ?? [])
+const installedVlms = computed(() => vlmRows.value.filter((r) => r.status === 'available'))
+// The backend rejects qwen38-27b as writer (422); don't offer it.
+const writerChoices = computed(() => installedVlms.value.filter((r) => r.writer_allowed !== false))
+const generalChoices = computed(() => installedVlms.value)
+
+function roleChoices(role: RoleKey): ModelRow[] {
+  return role === 'writer' ? writerChoices.value : generalChoices.value
+}
+
+// A configured model that is not installed (or not offered) still needs an
+// option, otherwise the select would render blank and hide the real value.
+function roleOptions(role: RoleKey): { id: string; label: string }[] {
+  const out = roleChoices(role).map((r) => ({ id: r.id, label: r.name }))
+  const cur = vlmRoles.value?.[role].model_id ?? null
+  if (cur && !out.some((o) => o.id === cur)) {
+    const row = vlmRows.value.find((r) => r.id === cur)
+    out.unshift({ id: cur, label: `${row?.name ?? cur} (not installed)` })
+  }
+  return out
+}
+
+function roleValue(role: RoleKey): string {
+  return vlmRoles.value?.[role].model_id ?? ''
+}
+
+function roleStateLabel(role: RoleKey): string {
+  const r = vlmRoles.value?.[role]
+  if (!r || !r.model_id) return 'none'
+  switch (r.state) {
+    case 'ready': return 'ready'
+    case 'spawning':
+    case 'loading': return 'loading'
+    case 'error': return 'error'
+    default: return 'stopped'
+  }
+}
+
+async function onRoleChange(role: RoleKey, ev: Event) {
+  const id = (ev.target as HTMLSelectElement).value
+  if (!id) return
+  const ok = await models.setVlmRoleModel(role, id)
+  // Failure: snap the select back to the server's value.
+  if (!ok) (ev.target as HTMLSelectElement).value = roleValue(role)
+}
+
 function isVlmLoaded(row: ModelRow): boolean {
   return (
     models.vlmModelId === row.id &&
@@ -506,6 +555,38 @@ async function onRetagLibrary() {
     </section>
 
     <section class="preload-hint vlm-status-block">
+      <div class="vlm-roles">
+        <label class="role-row">
+          <span class="role-label">Prompt writer</span>
+          <select
+            class="role-select"
+            data-testid="role-writer"
+            :value="roleValue('writer')"
+            @change="onRoleChange('writer', $event)"
+          >
+            <option v-for="o in roleOptions('writer')" :key="o.id" :value="o.id">{{ o.label }}</option>
+            <option v-if="roleOptions('writer').length === 0" value="" disabled>No installed model</option>
+          </select>
+          <span class="role-state" :class="`role-state-${roleStateLabel('writer')}`" data-testid="role-writer-state">{{ roleStateLabel('writer') }}</span>
+        </label>
+        <div class="muted role-hint">Fine-tunes build on this model.</div>
+        <label class="role-row">
+          <span class="role-label">Tagging &amp; chat</span>
+          <select
+            class="role-select"
+            data-testid="role-general"
+            :value="roleValue('general')"
+            @change="onRoleChange('general', $event)"
+          >
+            <option v-if="!roleValue('general')" value="" disabled>None</option>
+            <option v-for="o in roleOptions('general')" :key="o.id" :value="o.id">{{ o.label }}</option>
+          </select>
+          <span class="role-state" :class="`role-state-${roleStateLabel('general')}`" data-testid="role-general-state">{{ roleStateLabel('general') }}</span>
+        </label>
+        <div v-if="vlmRoles?.shared" class="muted role-hint">Sharing one model</div>
+        <div v-for="n in vlmRoles?.notes ?? []" :key="n" class="muted role-hint" data-testid="role-note">{{ n }}</div>
+        <div v-if="models.vlmRolesError" class="err-text" data-testid="role-error">{{ models.vlmRolesError }}</div>
+      </div>
       <div v-if="models.vlmState !== 'idle'" class="vlm-current">
         <b>VLM tagger:</b>
         <span v-if="models.vlmState === 'ready'">
@@ -765,6 +846,19 @@ section { margin-bottom: 14px; }
 .taste-actions { display: flex; align-items: center; gap: 10px; }
 .taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
 .taste-hint { color: var(--text-color-secondary); font-size: 12px; }
+.vlm-roles { display: flex; flex-direction: column; gap: 6px; }
+.role-row { display: flex; align-items: center; gap: 10px; }
+.role-label { width: 110px; font-weight: 600; }
+.role-select {
+  min-width: 220px; padding: 4px 8px; border-radius: 4px;
+  background: var(--surface-ground, transparent); color: inherit;
+  border: 1px solid var(--surface-border, #444);
+}
+.role-state { font-size: 12px; color: var(--text-color-secondary); }
+.role-state-ready { color: #22c55e; }
+.role-state-loading { color: #eab308; }
+.role-state-error { color: var(--danger-color); }
+.role-hint { font-size: 12px; }
 .vlm-current { font-size: 14px; }
 .vlm-retag { display: flex; align-items: center; gap: 12px; }
 </style>

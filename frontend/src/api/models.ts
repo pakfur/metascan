@@ -22,6 +22,9 @@ export interface ModelRow {
   preload_at_startup: boolean
   /** True for VLM (llama-server) rows — enables Load/Unload controls. */
   is_vlm?: boolean
+  /** VLM rows: roles currently pointed at this model, and writer eligibility. */
+  roles?: string[]
+  writer_allowed?: boolean
 }
 
 export interface ModelsStatusResponse {
