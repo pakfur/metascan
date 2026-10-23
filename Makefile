@@ -11,6 +11,11 @@ BLACK := $(VENV_DIR)/bin/black
 MYPY := $(VENV_DIR)/bin/mypy --check-untyped-defs
 FLAKE8 := $(VENV_DIR)/bin/flake8
 
+# Metascan supports Python 3.11.x only (see install.sh, setup.py, CI).
+PY_SERIES := 3.11
+# Interpreter used ONLY to create a missing venv; never touches an existing one.
+PYTHON_BOOTSTRAP ?= $(shell command -v python$(PY_SERIES) || command -v python3 || command -v python)
+
 # Directories to lint/format
 PY_DIRS := metascan/ backend/ tests/
 
@@ -27,13 +32,26 @@ help:  ## Show this help message
 .PHONY: install
 install: venv deps nltk-setup frontend-deps dev-install  ## Complete first-time setup
 
-.PHONY: venv
-venv:  ## Create virtual environment
-	$(shell which python3 || which python) -m venv $(VENV_DIR)
+# Real file target: the venv is created only when it is missing, so it is never
+# re-run against (and never rewrites pyvenv.cfg of) an existing environment.
+$(PYTHON):
+	@test -n "$(PYTHON_BOOTSTRAP)" || { echo "Error: no Python found. Metascan requires Python $(PY_SERIES).x (install it, or set PYTHON_BOOTSTRAP=/path/to/python$(PY_SERIES))." >&2; exit 1; }
+	@"$(PYTHON_BOOTSTRAP)" -c 'import sys; sys.exit(0 if sys.version_info[:2] == tuple(map(int, "$(PY_SERIES)".split("."))) else 1)' || { echo "Error: $(PYTHON_BOOTSTRAP) is Python $$("$(PYTHON_BOOTSTRAP)" -c 'import platform; print(platform.python_version())'); Metascan requires Python $(PY_SERIES).x. Install it (macOS: brew install python@$(PY_SERIES)) and re-run with PYTHON_BOOTSTRAP=python$(PY_SERIES)." >&2; exit 1; }
+	"$(PYTHON_BOOTSTRAP)" -m venv $(VENV_DIR)
 	@echo "Virtual environment created in $(VENV_DIR)"
 
+# Ensure the venv exists (creating it only if missing) and is Python 3.11.x.
+# Fails loudly rather than recreating an existing venv with the wrong Python.
+.PHONY: check-venv
+check-venv: $(PYTHON)
+	@$(PYTHON) -c 'import sys; sys.exit(0 if sys.version_info[:2] == tuple(map(int, "$(PY_SERIES)".split("."))) else 1)' || { echo "Error: $(VENV_DIR) uses Python $$($(PYTHON) -c 'import platform; print(platform.python_version())'), not $(PY_SERIES).x. Rebuild it explicitly: rm -rf $(VENV_DIR) && make PYTHON_BOOTSTRAP=python$(PY_SERIES) venv (or ./install.sh --recreate-venv)." >&2; exit 1; }
+
+.PHONY: venv
+venv: check-venv  ## Create virtual environment if missing (never recreates)
+	@echo "Virtual environment ready in $(VENV_DIR) (Python $(PY_SERIES).x)"
+
 .PHONY: deps
-deps: venv  ## Install Python dependencies
+deps: check-venv  ## Install Python dependencies
 	$(PIP) install --upgrade pip
 	$(PIP) install -r requirements.txt
 	$(PIP) install -r requirements-dev.txt
@@ -41,12 +59,12 @@ deps: venv  ## Install Python dependencies
 	@echo "Dependencies installed"
 
 .PHONY: nltk-setup
-nltk-setup: venv  ## Set up NLTK data and AI models
+nltk-setup: check-venv  ## Set up NLTK data and AI models
 	$(PYTHON) setup_models.py
 	@echo "NLTK data and AI models setup complete"
 
 .PHONY: models
-models: venv  ## Download AI upscaling models only
+models: check-venv  ## Download AI upscaling models only
 	$(PYTHON) setup_models.py
 	@echo "AI models setup complete"
 
@@ -56,7 +74,7 @@ frontend-deps:  ## Install frontend dependencies
 	@echo "Frontend dependencies installed"
 
 .PHONY: dev-install
-dev-install: venv  ## Install package in development mode
+dev-install: check-venv  ## Install package in development mode
 	$(PIP) install -e .
 	@echo "Development installation complete"
 
@@ -72,33 +90,33 @@ dev:  ## Run backend + frontend dev servers (use two terminals)
 
 # Testing targets
 .PHONY: test
-test: venv  ## Run all Python tests
+test: check-venv  ## Run all Python tests
 	$(PYTEST)
 
 .PHONY: test-prompt-tokenizer
-test-prompt-tokenizer: venv  ## Run prompt tokenizer tests
+test-prompt-tokenizer: check-venv  ## Run prompt tokenizer tests
 	$(PYTEST) tests/test_prompt_tokenizer.py
 
 .PHONY: test-coverage
-test-coverage: venv  ## Run tests with coverage report
+test-coverage: check-venv  ## Run tests with coverage report
 	$(PYTEST) --cov=metascan
 
 # Code quality targets
 .PHONY: lint
-lint: venv  ## Lint with flake8 (matches CI)
+lint: check-venv  ## Lint with flake8 (matches CI)
 	$(FLAKE8) $(PY_DIRS) --count --select=E9,F63,F7,F82 --show-source --statistics
 	$(FLAKE8) $(PY_DIRS) --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
 .PHONY: format
-format: venv  ## Format code with black
+format: check-venv  ## Format code with black
 	$(BLACK) $(PY_DIRS)
 
 .PHONY: format-check
-format-check: venv  ## Check formatting without modifying files (matches CI)
+format-check: check-venv  ## Check formatting without modifying files (matches CI)
 	$(BLACK) --check $(PY_DIRS)
 
 .PHONY: typecheck
-typecheck: venv  ## Run type checking with mypy
+typecheck: check-venv  ## Run type checking with mypy
 	$(MYPY) metascan/
 
 .PHONY: quality
@@ -117,11 +135,11 @@ quality-all: quality frontend-typecheck  ## Run all quality checks (Python + fro
 
 # Local run targets
 .PHONY: start-frontend
-start-frontend:  venv
+start-frontend: check-venv
 	cd frontend && npm run dev
 
 .PHONY: start-backend
-start-backend: venv
+start-backend: check-venv
 	$(PYTHON) run_server.py
 
 # Debugging and analysis targets
@@ -151,13 +169,3 @@ clean-all: clean  ## Clean everything including virtual environment and node_mod
 
 .PHONY: reinstall
 reinstall: clean-all install  ## Clean reinstall from scratch
-
-# Check if virtual environment exists
-check-venv:
-	@if [ ! -d "$(VENV_DIR)" ]; then \
-		echo "Virtual environment not found. Run 'make install' first."; \
-		exit 1; \
-	fi
-
-# Add dependency to targets that need venv
-deps nltk-setup dev-install test test-prompt-tokenizer test-coverage lint format format-check typecheck: check-venv
