@@ -1363,6 +1363,18 @@ class DatabaseManager:
                 )
                 """
             )
+            # Favorite diversity per 14-day window (mean pairwise CLIP
+            # cosine distance), written by each taste training run.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS taste_diversity (
+                    window_start TEXT PRIMARY KEY,
+                    n INTEGER,
+                    mean_distance REAL,
+                    computed_at TEXT
+                )
+                """
+            )
             # Generation lineage on both generated-media tables; nullable,
             # existing rows stay NULL.
             for _lineage_table in ("t2i_images", "i2v_videos"):
@@ -5867,6 +5879,171 @@ class DatabaseManager:
                 (int(limit),),
             ).fetchall()
         return [r["file_path"] for r in rows]
+
+    _GENERATION_TABLES = (("t2i", "t2i_images"), ("i2v", "i2v_videos"))
+
+    def generation_outcomes(
+        self, since: Optional[str] = None, include_embeddings: bool = False
+    ) -> List[Dict[str, Any]]:
+        """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
+        created_at, seen, favorite, embedding, embedding_model}``. ``seen``
+        is a ``seen_at`` or a verdict. Live generations come from the
+        lineage tables JOINed to media; deleted ones from the newest
+        tombstone whose lineage carries the generation row (so deleting
+        passes does not inflate a rate), unless the path is live again.
+        ``since`` (an ISO date) drops older generations. ``embedding`` is
+        the tombstone's vector bytes (live rows: None) when
+        ``include_embeddings``."""
+        out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        with self.lock, self._get_connection() as conn:
+            for kind, table in self._GENERATION_TABLES:
+                sql = (
+                    f"SELECT g.file_path, g.writer_id, g.created_at, "
+                    "m.is_favorite, j.passed, j.seen_at "
+                    f"FROM {table} g JOIN media m ON m.file_path = g.file_path "
+                    "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
+                )
+                params: List[Any] = []
+                if since is not None:
+                    sql += " WHERE g.created_at >= ?"
+                    params.append(since)
+                for r in conn.execute(sql, params):
+                    favorite = bool(r["is_favorite"])
+                    out[(kind, r["file_path"])] = {
+                        "kind": kind,
+                        "file_path": r["file_path"],
+                        "writer_id": r["writer_id"],
+                        "created_at": r["created_at"],
+                        "favorite": favorite,
+                        "seen": favorite
+                        or bool(r["passed"])
+                        or r["seen_at"] is not None,
+                        "embedding": None,
+                        "embedding_model": None,
+                    }
+            live = set(out)
+            cols = "id, file_path, is_favorite, passed, seen_at, lineage"
+            if include_embeddings:
+                cols += ", embedding, embedding_model"
+            for r in conn.execute(
+                f"SELECT {cols} FROM media_tombstones "
+                "WHERE lineage IS NOT NULL ORDER BY id"
+            ):
+                try:
+                    lineage = json.loads(r["lineage"]) or {}
+                except ValueError:
+                    continue
+                for kind, _ in self._GENERATION_TABLES:
+                    gen = lineage.get(kind)
+                    if not isinstance(gen, dict):
+                        continue
+                    key = (kind, r["file_path"])
+                    created_at = gen.get("created_at")
+                    if key in live or not created_at:
+                        continue
+                    if since is not None and str(created_at) < since:
+                        out.pop(key, None)
+                        continue
+                    favorite = bool(r["is_favorite"])
+                    # Ascending id: a newer tombstone replaces an older one.
+                    out[key] = {
+                        "kind": kind,
+                        "file_path": r["file_path"],
+                        "writer_id": gen.get("writer_id"),
+                        "created_at": str(created_at),
+                        "favorite": favorite,
+                        "seen": favorite
+                        or bool(r["passed"])
+                        or r["seen_at"] is not None,
+                        "embedding": (r["embedding"] if include_embeddings else None),
+                        "embedding_model": (
+                            r["embedding_model"] if include_embeddings else None
+                        ),
+                    }
+        return list(out.values())
+
+    def writer_window_stats(
+        self,
+        window_days: int = 14,
+        windows: int = 6,
+        now: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """Favorite rate among SEEN generations per writer per window:
+        ``[{kind, writer_id, window_start, n_seen, n_fav, rate}]``. Every
+        ``(kind, writer)`` with a generation in the last ``windows``
+        windows gets all of them (``rate`` None when ``n_seen`` is 0). A
+        NULL writer is ``"unknown"``. Windows by the generation's
+        ``created_at`` (UTC), counting back from today."""
+        from metascan.core.taste_labels import window_for, window_starts
+
+        starts = window_starts(now or datetime.now(timezone.utc), window_days, windows)
+        counts: Dict[Tuple[str, str], Dict[str, List[int]]] = {}
+        for g in self.generation_outcomes(since=starts[0]):
+            start = window_for(g["created_at"], starts, window_days)
+            if start is None:
+                continue
+            writer = g["writer_id"] or "unknown"
+            per = counts.setdefault((g["kind"], writer), {})
+            cell = per.setdefault(start, [0, 0])
+            if g["seen"]:
+                cell[0] += 1
+                cell[1] += int(g["favorite"])
+        rows: List[Dict[str, Any]] = []
+        for (kind, writer), per in sorted(counts.items()):
+            for start in starts:
+                n_seen, n_fav = per.get(start, [0, 0])
+                rows.append(
+                    {
+                        "kind": kind,
+                        "writer_id": writer,
+                        "window_start": start,
+                        "n_seen": n_seen,
+                        "n_fav": n_fav,
+                        "rate": n_fav / n_seen if n_seen else None,
+                    }
+                )
+        return rows
+
+    def record_taste_diversity(
+        self, rows: List[Dict[str, Any]], computed_at: str
+    ) -> None:
+        """Upsert one training run's per-window favorite diversity."""
+        with self.lock, self._get_connection() as conn:
+            for r in rows:
+                md = r.get("mean_distance")
+                conn.execute(
+                    "INSERT INTO taste_diversity (window_start, n, mean_distance, "
+                    "computed_at) VALUES (?, ?, ?, ?) ON CONFLICT(window_start) "
+                    "DO UPDATE SET n = excluded.n, "
+                    "mean_distance = excluded.mean_distance, "
+                    "computed_at = excluded.computed_at",
+                    (
+                        str(r["window_start"]),
+                        int(r.get("n") or 0),
+                        None if md is None else float(md),
+                        computed_at,
+                    ),
+                )
+            conn.commit()
+
+    def latest_taste_diversity(self) -> List[Dict[str, Any]]:
+        """The newest training run's diversity rows, oldest window first
+        (possibly older than the active model: it is whatever was last
+        computed)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT window_start, n, mean_distance FROM taste_diversity "
+                "WHERE computed_at = (SELECT MAX(computed_at) FROM taste_diversity) "
+                "ORDER BY window_start"
+            ).fetchall()
+        return [
+            {
+                "window_start": r["window_start"],
+                "n": int(r["n"] or 0),
+                "mean_distance": r["mean_distance"],
+            }
+            for r in rows
+        ]
 
     def get_t2i_batch_position(self, file_path: str) -> Optional[Tuple[int, int]]:
         """``(1-based index, size)`` of a T2I image within its ``batch_id``,
