@@ -527,3 +527,31 @@ class AngleAndExamplesTests(unittest.TestCase):
                 self.assertTrue(prompt(key).strip())
                 self.assertNotIn("(", prompt(key))
                 self.assertNotIn(")", prompt(key))
+
+
+class ExamplesPreambleMissingTests(unittest.TestCase):
+    def test_missing_preamble_drops_the_block_instead_of_raising(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from metascan.core import t2i_prompt
+        from metascan.core.prompt_store import PromptStore
+
+        real = get_prompt_store()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "meta_prompt.yml"
+            keys = ("T2I_CAPTION_PREAMBLE", "META_KREA2", "SAFETY_DIRECTIVE")
+            import yaml  # type: ignore[import-untyped]
+
+            path.write_text(yaml.safe_dump({k: real.get(k) for k in keys}))
+            store = PromptStore(path)
+            profile = MODEL_PROFILES["krea2"]
+            with mock.patch.object(t2i_prompt, "get_prompt_store", return_value=store):
+                plain = compose_t2i_prompts(profile, "A woman reads.", "sfw")
+                with self.assertLogs("metascan.core.t2i_prompt", "WARNING") as logs:
+                    guided = compose_t2i_prompts(
+                        profile, "A woman reads.", "sfw", examples=["SYNTH-EX one"]
+                    )
+        self.assertEqual(guided, plain)
+        self.assertNotIn("SYNTH-EX", "\n".join(logs.output))

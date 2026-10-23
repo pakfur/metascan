@@ -21,12 +21,15 @@ are never touched.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Dict, Optional, Sequence, Tuple
 
 from metascan.core.meta_prompt_templates import split_negative_block
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_models import T2iModelProfile
+
+logger = logging.getLogger(__name__)
 
 CONTENT_MODES: Tuple[str, ...] = ("uncensored", "sfw", "default")
 
@@ -83,15 +86,19 @@ def compose_t2i_prompts(
     system = store.get("T2I_CAPTION_PREAMBLE").rstrip() + "\n\n"
     system += store.get(profile.meta_key)
     shown = [" ".join(e.split()) for e in examples if e and e.strip()]
+    preamble: Optional[str] = None
     if shown:
+        try:
+            preamble = store.get("T2I_EXAMPLES_PREAMBLE").strip()
+        except KeyError:
+            # Removed by a hot reload: write unguided rather than fail.
+            logger.warning(
+                "T2I_EXAMPLES_PREAMBLE missing from the prompt store; "
+                "writing without taste examples"
+            )
+    if shown and preamble is not None:
         numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(shown, 1))
-        system = (
-            system.rstrip()
-            + "\n\nEXAMPLES:\n"
-            + store.get("T2I_EXAMPLES_PREAMBLE").strip()
-            + "\n\n"
-            + numbered
-        )
+        system = system.rstrip() + "\n\nEXAMPLES:\n" + preamble + "\n\n" + numbered
     directive_key = _DIRECTIVE_KEYS.get(content_mode)
     if directive_key is not None:
         system += store.get(directive_key)
