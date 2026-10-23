@@ -4,7 +4,7 @@ import type { ThumbItem } from '../../types/jobs'
 
 // One image tile: thumbnail, hover overlays (favourite, delete) and a label
 // underneath. It only reports what the user did; ThumbGrid adds the item.
-defineProps<{ item: ThumbItem; selected?: boolean }>()
+defineProps<{ item: ThumbItem; selected?: boolean; top?: boolean }>()
 const emit = defineEmits<{
   select: [evt: MouseEvent]
   open: []
@@ -31,12 +31,13 @@ function onImgError(e: Event) {
   <div class="thumb-wrap">
     <div
       class="thumb-tile"
-      :class="{ selected }"
+      :class="{ selected, top }"
       :title="item.title"
       @click="onClick"
       @dblclick="emit('open')"
     >
       <img :src="thumbnailUrl(item.file_path)" alt="" loading="lazy" decoding="async" @error="onImgError" />
+      <span v-if="item.score != null" class="score-badge" title="Taste score">{{ item.score.toFixed(2) }}</span>
       <button
         type="button"
         class="overlay star"
@@ -89,6 +90,29 @@ function onImgError(e: Event) {
 .thumb-tile.selected {
   outline: 2px solid var(--primary-color, #6366f1);
   outline-offset: 1px;
+}
+
+.thumb-tile.top {
+  outline: 2px solid #c9a227;
+  outline-offset: 1px;
+}
+
+/* Declared after .top so a selected tile keeps the selection colour. */
+.thumb-tile.top.selected {
+  outline-color: var(--primary-color, #6366f1);
+}
+
+.score-badge {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  pointer-events: none;
 }
 
 .overlay {
