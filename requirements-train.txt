@@ -4,7 +4,7 @@
 # and writer_train_backend.py) imports these, lazily. The FastAPI server never
 # does, and Metascan runs without them: the "writer_training" feature gate
 # reports them missing instead. Training needs an NVIDIA CUDA GPU with
-# >= 24 GB VRAM (LoRA in bf16 on the 8B writer; no 4-bit / bitsandbytes).
+# >= 32 GB VRAM (LoRA in bf16 on the 8B writer; no 4-bit / bitsandbytes).
 #
 # Install torch WITH CUDA first, matching your driver -- the default PyPI
 # wheel on Windows is CPU-only. For an RTX 50xx (Blackwell, sm_120) that
