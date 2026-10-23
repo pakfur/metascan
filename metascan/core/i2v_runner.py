@@ -42,6 +42,7 @@ from metascan.core.i2v_templates import (
     validate_i2v_template_fill,
 )
 from metascan.core.prompt_store import get_prompt_store
+from metascan.core.judgments import DRAFT_WRITERS, WRITER_MANUAL, normalize_prompt
 from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
@@ -262,7 +263,18 @@ class I2vRunner:
         output_root: Optional[str] = None,
         output_prefix: Optional[str] = None,
         category_ids: Optional[List[int]] = None,
+        writer_id: Optional[str] = None,
+        draft_prompt: Optional[str] = None,
     ) -> int:
+        # Lineage: a prompt with a draft names the writer that drafted it; one
+        # typed from scratch is `manual` whatever the caller says.
+        if draft_prompt is None:
+            writer_id = WRITER_MANUAL
+        elif writer_id not in DRAFT_WRITERS:
+            raise I2vRequestError(
+                f"writer_id {writer_id!r} is not a writer that drafts prompts "
+                f"({', '.join(DRAFT_WRITERS)})"
+            )
         preset = await asyncio.to_thread(self.db.get_workflow_preset, preset_id)
         if preset is None:
             raise I2vRequestError(f"Preset {preset_id} does not exist")
@@ -348,6 +360,9 @@ class I2vRunner:
             # Tagged onto the clip at ingest; session-local in the dialog,
             # so not part of the form.
             "category_ids": list(category_ids or []),
+            # Prompt lineage; NULL on the row if a restart loses it first.
+            "writer_id": writer_id,
+            "draft_prompt": draft_prompt,
             "form": build_form_state(
                 idea=idea,
                 prompt=prompt,
@@ -389,6 +404,14 @@ class I2vRunner:
         except (TypeError, ValueError):
             params = {}
         meta = self._job_meta.pop(int(job_id), {})
+        draft = meta.get("draft_prompt")
+        edited: Optional[int] = None
+        if meta.get("writer_id") is not None:
+            edited = int(
+                draft is not None
+                and normalize_prompt(draft)
+                != normalize_prompt(params.get("positive") or "")
+            )
         inserted: List[str] = []
         for f in payload.get("files") or []:
             posix = to_posix_path(f)
@@ -413,6 +436,9 @@ class I2vRunner:
                     megapixels=meta.get("megapixels"),
                     loras=meta.get("loras"),
                     form_state=meta.get("form"),
+                    writer_id=meta.get("writer_id"),
+                    draft_prompt=draft,
+                    edited=edited,
                 )
                 inserted.append(posix)
             except Exception:

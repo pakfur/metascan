@@ -1,12 +1,13 @@
 import { get, post, del, patch } from './client'
-import type { I2vConfig, I2vFormState, I2vLintReport, I2vTemplate, I2vVideo } from '../types/i2v'
+import type { I2vWriter, I2vConfig, I2vFormState, I2vLintReport, I2vTemplate, I2vVideo } from '../types/i2v'
 
 export function generatePrompt(body: {
   source_path: string
   idea: string
   duration_s: number
   template_id?: string | null
-}): Promise<{ prompt: string; warnings: string[] }> {
+  writer?: I2vWriter
+}): Promise<{ prompt: string; warnings: string[]; writer_id: string }> {
   return post('/i2v/prompt', body)
 }
 
@@ -34,6 +35,10 @@ export function generateVideo(body: {
   template_id?: string | null
   // Categories the clip is tagged with at ingest; an unknown id is a 404.
   category_ids?: number[]
+  // Lineage: the writer that drafted `prompt` and its draft. Omitted for a
+  // prompt typed from scratch (the server records it as `manual`).
+  writer_id?: string
+  draft_prompt?: string
 }): Promise<{ job_id: number; warnings: string[] }> {
   return post('/i2v/generate', body)
 }
