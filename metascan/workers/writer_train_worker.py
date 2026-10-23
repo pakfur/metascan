@@ -57,7 +57,9 @@ Outputs in ``out_dir``:
      "stage": str | null, "step": int | null,  # paused: where (stage-local)
      "resumed_from": {"stage", "step"} | null,
      "n_sft": int, "n_pref": int, "n_holdout": int,
-     "dropped_too_long": {"sft": int, "dpo": int, "holdout": int}}
+     "dropped_too_long": {"sft": int, "dpo": int, "holdout": int},
+     "leftover_checkpoint_dir": str | null}   # ok run whose checkpoint
+                                              # wipe was refused (warning)
 
   An error result carries the stage / stage-local step reached and the
   counts when known.
@@ -410,6 +412,10 @@ def load_data(task: TrainTask) -> TrainData:
         prefs=read_jsonl(task.pref_path, PREF_KEYS),
         holdout=read_jsonl(task.holdout_path, PREF_KEYS),
     )
+    if not data.prefs and not data.sft:
+        raise TrainWorkerError(
+            "no training examples (no SFT examples and no preference pairs)"
+        )
     if not data.prefs:
         raise TrainWorkerError("no preference pairs to train on")
     return data
@@ -868,6 +874,7 @@ def _blank_result() -> Dict[str, Any]:
         "n_sft": 0,
         "n_pref": 0,
         "n_holdout": 0,
+        "leftover_checkpoint_dir": None,
         "dropped_too_long": {k: 0 for k in DROP_KINDS},
     }
 
@@ -1119,14 +1126,24 @@ def _run_stages(
         if backend.train_dpo(ctx, data.prefs, init, ck, peft_dir):
             logger.info("writer train: DPO done")
         else:
+            why = (
+                "no preference pairs"
+                if not data.prefs
+                else f"every preference pair is longer than {max_len} tokens"
+            )
             if not sft_adapter:
+                if not data.prefs and not data.sft:
+                    raise TrainWorkerError("no training examples")
+                if not data.prefs:
+                    raise TrainWorkerError(
+                        f"{why} and no usable SFT example (all longer than "
+                        f"{max_len} tokens)"
+                    )
                 raise TrainWorkerError(
                     f"every training example is longer than {max_len} tokens"
                 )
             logger.warning(
-                "writer train: every preference pair is longer than %d tokens; "
-                "DPO skipped, the SFT adapter is the result",
-                max_len,
+                "writer train: %s; DPO skipped, the SFT adapter is the result", why
             )
             ctx.totals["dpo"] = 0
             reference = None
@@ -1165,7 +1182,13 @@ def _run_stages(
     ctx.report("convert", 1, force=True)
 
     meta_path = _write_meta(task, data, state, peft_dir, path, count)
-    safe_rmtree(task.checkpoint_dir, task.data_root, CHECKPOINT_ENTRIES)
+    try:
+        safe_rmtree(task.checkpoint_dir, task.data_root, CHECKPOINT_ENTRIES)
+    except (TrainWorkerError, OSError) as e:
+        # The adapter is done and verified: a cleanup refusal must not turn
+        # it into a failure. The parent can clear the dir by hand.
+        logger.warning("writer train: checkpoints left in place: %s", e)
+        result["leftover_checkpoint_dir"] = str(task.checkpoint_dir)
     result.update(
         status="ok",
         adapter_dir=str(peft_dir),

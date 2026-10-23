@@ -300,7 +300,7 @@ class RealBackend:
             raise w.TrainWorkerError(
                 "this TRL cannot use the SFT adapter as the DPO reference "
                 "(no ref_adapter_name) and there is not enough free VRAM for a "
-                "reference copy; upgrade trl (pip install -r requirements-train.txt)"
+                "reference copy; install the trl version pinned in requirements-train.txt"
             )
         logger.warning(
             "writer train: TRL lacks ref_adapter_name; loading a reference copy"
