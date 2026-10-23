@@ -210,6 +210,9 @@ WRITER_WINDOWS: int = 6
 # favorite rate rises.
 COLLAPSE_RATIO: float = 0.75
 COLLAPSE_PREV_WINDOWS: int = 5
+# The latest window needs at least this many favorites with a vector: a
+# mean distance over two or three is noise, not a collapse.
+COLLAPSE_MIN_FAVORITES: int = 5
 
 
 def window_starts(
@@ -270,13 +273,16 @@ def collapse_warning(
     """Taste collapse: the latest window's favorite diversity is below
     ``COLLAPSE_RATIO`` x the median of the previous up-to-5 windows (those
     with a value) **and** the latest pooled T2I favorite rate is above the
-    previous window's. Diversity is stored per training run with that run's
+    previous window's, and the latest window holds at least
+    ``COLLAPSE_MIN_FAVORITES`` favorites with a vector. Diversity is stored per training run with that run's
     window starts while rates slide with today: unless the latest diversity
     window starts within ``window_days`` of the latest rate window they
     describe different periods, so no flag. False whenever either side
     lacks the data."""
     div = sorted(diversity, key=lambda d: str(d["window_start"]))
     if not div or div[-1].get("mean_distance") is None:
+        return False
+    if int(div[-1].get("n") or 0) < COLLAPSE_MIN_FAVORITES:
         return False
     rate_starts = sorted(
         {str(w["window_start"]) for w in windows if (w.get("kind") or "t2i") == "t2i"}
