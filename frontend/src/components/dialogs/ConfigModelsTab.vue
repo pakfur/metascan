@@ -8,6 +8,9 @@ import { useTasteStore } from '../../stores/taste'
 import { ApiError } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
 import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
+import { useTrainingStore, trainingErrorText } from '../../stores/training'
+import { useCategoriesStore } from '../../stores/categories'
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 
 const taste = useTasteStore()
 const tasteStatus = computed(() => taste.status)
@@ -278,7 +281,9 @@ async function onDelete(row: ModelRow) {
   try {
     await models.removeCache(row.id)
   } catch (e) {
-    alert(e instanceof Error ? e.message : String(e))
+    // 409 training_uses_base (a paused / failed run still needs the base
+    // weights) and gpu_busy_training get their own text.
+    alert(trainingErrorText(e))
   }
 }
 
@@ -338,6 +343,19 @@ const missingCount = computed(
 // Writer LoRA training: the gate's reasons (CUDA, deps, base, converter)
 // shown under the group; downloads stay allowed on every machine.
 const writerTrainingGate = computed(() => models.gates['writer_training'] ?? null)
+
+// The adapters trained so far and the button that opens the training window
+// (which manages them: rename, delete, resume).
+const training = useTrainingStore()
+const categoriesStore = useCategoriesStore()
+function adapterScope(scope: string): string {
+  if (scope === 'all') return 'all'
+  return categoriesStore.categories.find((c) => String(c.id) === scope)?.name ?? `category ${scope}`
+}
+const writerAdapters = computed(() => [...training.adapters].sort((a, b) => b.id - a.id))
+function adapterAgreement(h: number | null): string {
+  return typeof h === 'number' ? `holdout ${Math.round(h * 100)}%` : ''
+}
 
 function canDelete(row: ModelRow): boolean {
   if (row.writer_training) return row.status === 'available' || row.partial === true
@@ -471,7 +489,7 @@ async function onRetagLibrary() {
     const job = await startRetag({ scope: 'all_clip' })
     lastRetagTotal.value = job.total
   } catch (e) {
-    alert(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
+    alert(isGpuBusyTraining(e) ? GPU_BUSY_TEXT : `Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
   } finally {
     retagInFlight.value = false
   }
@@ -684,6 +702,24 @@ async function onRetagLibrary() {
         </ul>
         Downloads work on any machine.
       </div>
+      <div v-if="group === 'Writer training'" class="writer-adapters" data-testid="writer-adapters">
+        <div class="writer-adapters-head">
+          <span class="muted">Prompt-writer adapters ({{ writerAdapters.length }})</span>
+          <button class="btn-secondary" data-testid="open-training-window" @click="training.openWindow()">
+            Train prompt writer
+          </button>
+        </div>
+        <div v-if="training.chipText" class="muted">{{ training.chipText }} — GPU busy: training.</div>
+        <ul v-if="writerAdapters.length" class="writer-adapter-list">
+          <li v-for="a in writerAdapters" :key="a.id">
+            <b>{{ a.name }}</b>
+            <span class="chip chip-muted">{{ a.status }}</span>
+            <span class="muted">{{ adapterScope(a.scope) }}</span>
+            <span class="muted">{{ adapterAgreement(a.holdout_agreement) }}</span>
+          </li>
+        </ul>
+        <div v-else class="muted">No adapters yet.</div>
+      </div>
     </section>
 
     <section class="preload-hint">
@@ -743,7 +779,8 @@ async function onRetagLibrary() {
       <div class="vlm-retag">
         <button
           class="btn-small"
-          :disabled="!models.isVlmReady || retagInFlight"
+          :disabled="!models.isVlmReady || retagInFlight || training.locked"
+          :title="training.locked ? GPU_BUSY_TEXT : ''"
           @click="onRetagLibrary"
         >
           {{ retagInFlight ? 'Re-tagging library…' : 'Re-tag library with VLM' }}
@@ -1067,6 +1104,10 @@ section { margin-bottom: 14px; }
 .warn-inline { color: #eab308; }
 .writer-training-gate { margin-top: 6px; font-size: 12px; }
 .writer-training-gate ul { margin: 4px 0; padding-left: 18px; }
+.writer-adapters { margin-top: 8px; font-size: 12px; }
+.writer-adapters-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.writer-adapter-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.writer-adapter-list li { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
 
 .gate-chip { margin-left: 4px; }
 .gate-good { color: #22c55e; border-color: #22c55e; }

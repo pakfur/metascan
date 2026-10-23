@@ -794,6 +794,7 @@ async def test_training_routes(db, tmp_path, dataset, monkeypatch):
             assert body["dataset"]["counts"]["content_mode"] == "uncensored"
             assert set(body["presets"]) == {"quick", "standard", "thorough"}
             assert body["clamps"]["rank"] == [4, 64]
+            assert body["next_name"] == "taste-all-v1"
 
             r = await c.get("/api/writers/dataset/preview", params={"scope": "all"})
             assert len(r.json()["prefs"]) == 10 and len(r.json()["sft"]) == 10
@@ -805,6 +806,9 @@ async def test_training_routes(db, tmp_path, dataset, monkeypatch):
             assert r.status_code == 200, r.text
             run_id = r.json()["run_id"]
             assert db.get_writer_adapter(1)["hyperparams"]["rank"] == 12
+            assert db.get_writer_adapter(1)["name"] == "taste-all-v1"
+            r = await c.get("/api/writers/training")
+            assert r.json()["next_name"] == "taste-all-v2"
             r = await c.post("/api/writers/training/start", json={})
             assert r.status_code == 409
             assert r.json()["detail"]["code"] == "already_training"

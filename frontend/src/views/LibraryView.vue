@@ -7,6 +7,7 @@ import { useFoldersStore } from '../stores/folders'
 import { useSettingsStore } from '../stores/settings'
 import { useScanStore } from '../stores/scan'
 import { useSearchStore } from '../stores/search'
+import { useTrainingStore } from '../stores/training'
 import { useKeyboard } from '../composables/useKeyboard'
 import { useWebSocket } from '../composables/useWebSocket'
 import ThreePanel from '../components/layout/ThreePanel.vue'
@@ -26,6 +27,7 @@ import I2VDialog from '../components/dialogs/I2VDialog.vue'
 import T2IDialog from '../components/dialogs/T2IDialog.vue'
 import UpscaleQueue from '../components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from '../components/dialogs/ConfigDialog.vue'
+import WriterTrainingDialog from '../components/dialogs/WriterTrainingDialog.vue'
 import ScopeBreadcrumb from '../components/layout/ScopeBreadcrumb.vue'
 import NewFolderDialog from '../components/dialogs/NewFolderDialog.vue'
 import SmartFolderEditor from '../components/dialogs/SmartFolderEditor.vue'
@@ -36,6 +38,7 @@ import MobileShell from '../components/mobile/MobileShell.vue'
 import MobileMediaViewer from '../components/mobile/MobileMediaViewer.vue'
 
 const mediaStore = useMediaStore()
+const trainingStore = useTrainingStore()
 const filterStore = useFilterStore()
 const foldersStore = useFoldersStore()
 const settingsStore = useSettingsStore()
@@ -302,6 +305,10 @@ watch(isMobile, () => {
       v-if="configOpen"
       @close="configOpen = false"
     />
+
+    <!-- Writer training window: non-modal (no overlay); opened from the
+         Models tab or the header chip; closing it never stops a run. -->
+    <WriterTrainingDialog v-if="trainingStore.windowOpen" />
 
     <!-- Folder dialogs — overlays that can be opened from anywhere via
          useFoldersUi. -->

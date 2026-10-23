@@ -6,6 +6,8 @@ import { fetchTagPaths } from '../api/filters'
 import { ApiError } from '../api/client'
 import { useMediaStore } from './media'
 import { useModelsStore } from './models'
+import { useTrainingStore } from './training'
+import { GPU_BUSY_TEXT } from '../utils/gpuBusy'
 
 export interface DimMismatch {
   message: string
@@ -137,6 +139,13 @@ export const useSearchStore = defineStore('search', () => {
   }
 
   function submitViaWorker(p: PendingSearch) {
+    // Writer training holds the GPU: CLIP search answers gpu_busy_training,
+    // so do not spawn the worker (it would refuse too).
+    if (useTrainingStore().locked) {
+      pending.value = null
+      searchError.value = GPU_BUSY_TEXT
+      return
+    }
     if (modelsStore.isInferenceReady) {
       pending.value = null
       if (p.kind === 'text') void runText(p.query)

@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useModelsStore } from '../../stores/models'
+import { useTrainingStore } from '../../stores/training'
 
 const emit = defineEmits<{
   scan: []
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 }>()
 
 const modelsStore = useModelsStore()
+const training = useTrainingStore()
 const router = useRouter()
 
 onMounted(() => {
@@ -31,6 +33,15 @@ function openStoryboards() {
 
 <template>
   <div class="content-search-bar">
+    <button
+      v-if="training.chipText"
+      class="training-chip"
+      data-testid="training-chip"
+      title="GPU busy: training. Generation, tagging, chat and search wait; browsing and rating still work. Click to open the training window."
+      @click="training.openWindow()"
+    >
+      {{ training.chipText }}
+    </button>
     <div class="action-group">
       <Button
         v-tooltip.bottom="'Import'"
@@ -117,6 +128,22 @@ function openStoryboards() {
   border-bottom: 1px solid var(--surface-border);
   background: var(--surface-section);
 }
+
+.training-chip {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #1f3550;
+  color: #cde;
+  border: none;
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.training-chip:hover { filter: brightness(1.15); }
 
 .scan-btn {
   flex-shrink: 0;

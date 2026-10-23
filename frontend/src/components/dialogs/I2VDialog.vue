@@ -30,6 +30,7 @@ import {
 import { useTasteStore } from '../../stores/taste'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useToast } from '../../composables/useToast'
+import { errorText } from '../../utils/gpuBusy'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
@@ -425,7 +426,7 @@ async function onExpandPrompt() {
     })
   } catch (e) {
     if (handledAdapterError(e)) return
-    toast.show(e instanceof Error ? e.message : String(e), 'warn')
+    toast.show(errorText(e), 'warn')
   } finally {
     expanding.value = false
   }
@@ -662,7 +663,7 @@ async function onGenerate() {
           stopped =
             'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'
         } else {
-          stopped = e instanceof Error ? e.message : String(e)
+          stopped = errorText(e)
         }
         break
       }
