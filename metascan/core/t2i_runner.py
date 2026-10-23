@@ -45,6 +45,8 @@ from metascan.core.judgments import (
     WRITER_BASE_TASTE,
     WRITER_FALLBACK,
     WRITER_MANUAL,
+    WriterModelError,
+    check_writer_model,
     normalize_prompt,
 )
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
@@ -170,7 +172,8 @@ class BatchRequest:
     variants: int = 1
     writer: str = WRITER_BASE
     # Manual, or a Random batch's first caption: one supplied prompt per
-    # variant, ``{prompt, negative, draft, writer_id, variant_index}``. None
+    # variant, ``{prompt, negative, draft, writer_id, writer_model,
+    # variant_index}``. None
     # means ``prompt``/``negative`` are the single supplied prompt (typed:
     # writer ``manual``, no draft).
     prompts: Optional[List[Dict[str, Any]]] = None
@@ -192,6 +195,8 @@ class PromptDraft:
     writer_id: str
     variant_index: int
     angle: Optional[str] = None
+    # The VLM model that wrote it; None for a fallback draft.
+    writer_model: Optional[str] = None
 
 
 @dataclass
@@ -314,6 +319,8 @@ class _Step:
     direction_parts: List[str] = field(default_factory=list)
     # Who wrote the prompt (judgments.WRITER_*): ``manual`` for a typed one.
     writer_id: Optional[str] = None
+    # The VLM model id behind a base / base+taste draft (None otherwise).
+    writer_model: Optional[str] = None
     variant_group: Optional[str] = None  # one id per caption
     variant_index: int = 0
     variants: int = 1  # steps the caption has
@@ -471,12 +478,17 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
                 f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
                 f"that drafts prompts ({', '.join(DRAFT_WRITERS)})"
             )
+        try:
+            writer_model = check_writer_model(writer_id, raw.get("writer_model"))
+        except WriterModelError as exc:
+            raise T2iRequestError(f"Variant {index + 1}: {exc}") from exc
         entries.append(
             {
                 "prompt": prompt,
                 "negative": negative,
                 "draft": draft,
                 "writer_id": writer_id,
+                "writer_model": writer_model,
                 "variant_index": index,
             }
         )
@@ -797,7 +809,12 @@ class T2iRunner:
                 )
                 drafts.append(
                     PromptDraft(
-                        prompt, negative, self._guided_writer(composed), k, angle
+                        prompt,
+                        negative,
+                        self._guided_writer(composed),
+                        k,
+                        angle,
+                        model_id,
                     )
                 )
             if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
@@ -1113,8 +1130,10 @@ class T2iRunner:
         direction: Optional[str] = None,
         angle: Optional[str] = None,
         examples: Tuple[str, ...] = (),
-    ) -> Tuple[str, Optional[str], List[str], str]:
-        """``(prompt, negative, warnings, writer_id)`` for one step of a running batch.
+    ) -> Tuple[str, Optional[str], List[str], str, Optional[str]]:
+        """``(prompt, negative, warnings, writer_id, writer_model)`` for one
+        step of a running batch (``writer_model``: the VLM model asked, None
+        for a fallback).
 
         An unattended run never dies on one bad VLM call: a call that fails
         is tried once more (starting the model again first), then the
@@ -1125,9 +1144,11 @@ class T2iRunner:
         """
         profile = batch.profile
 
-        def fall_back(warning: str) -> Tuple[str, Optional[str], List[str], str]:
+        def fall_back(
+            warning: str,
+        ) -> Tuple[str, Optional[str], List[str], str, Optional[str]]:
             prompt, negative = fallback_prompt(profile, resolved_text, direction)
-            return prompt, negative, [warning], WRITER_FALLBACK
+            return prompt, negative, [warning], WRITER_FALLBACK, None
 
         vlm = self.get_vlm()
         if vlm is None:
@@ -1147,7 +1168,13 @@ class T2iRunner:
                 prompt, negative = await self._vlm_prompt(
                     vlm, model_id, profile, composed.system, composed.user
                 )
-                return prompt, negative, notes, self._guided_writer(composed)
+                return (
+                    prompt,
+                    negative,
+                    notes,
+                    self._guided_writer(composed),
+                    model_id,
+                )
             except asyncio.CancelledError:
                 raise
             except (VlmError, TimeoutError, RuntimeError) as exc:
@@ -1173,9 +1200,10 @@ class T2iRunner:
             entry = req.prompts[variant]
             prompt, raw_negative = str(entry["prompt"]), entry["negative"]
             draft, writer_id = entry["draft"], entry["writer_id"]
+            writer_model = entry.get("writer_model")
         else:
             prompt, raw_negative = str(req.prompt), req.negative
-            draft, writer_id = None, WRITER_MANUAL
+            draft, writer_id, writer_model = None, WRITER_MANUAL, None
         blank = not isinstance(raw_negative, str) or not raw_negative.strip()
         return _Step(
             index=index,
@@ -1188,6 +1216,7 @@ class T2iRunner:
             width=width,
             height=height,
             writer_id=writer_id,
+            writer_model=writer_model,
             variant_group=batch.variant_groups[caption],
             variant_index=variant,
             variants=batch.variants_of(caption),
@@ -1262,7 +1291,7 @@ class T2iRunner:
         """Write one variant of a caption: variant 0 plainly, variant k with
         its angle; every variant gets the caption's examples."""
         direction = context.direction
-        prompt, negative, notes, writer_id = await self._write_prompt(
+        prompt, negative, notes, writer_id, writer_model = await self._write_prompt(
             batch,
             context.resolved_text,
             direction.text if direction else None,
@@ -1282,6 +1311,7 @@ class T2iRunner:
             direction=direction.text if direction else None,
             direction_parts=list(direction.parts) if direction else [],
             writer_id=writer_id,
+            writer_model=writer_model,
             variant_group=batch.variant_groups[context.index],
             variant_index=variant,
             variants=batch.variants_of(context.index),
@@ -1311,6 +1341,7 @@ class T2iRunner:
                 "caption_index": batch.plan[step.index][0],
                 "captions": len(batch.caption_seeds),
                 "writer_id": step.writer_id,
+                "writer_model": step.writer_model,
                 "draft": step.draft,
             }
         )
@@ -1408,6 +1439,7 @@ class T2iRunner:
             "loras": [dict(entry) for entry in batch.loras],
             "prompt": step.prompt,
             "writer_id": step.writer_id,
+            "writer_model": step.writer_model,
             "variant_group": step.variant_group,
             "variant_index": step.variant_index,
             "draft": step.draft,
@@ -1810,6 +1842,7 @@ class T2iRunner:
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                     form_state=form,
                     writer_id=known.get("writer_id"),
+                    writer_model=known.get("writer_model"),
                     variant_group=known.get("variant_group"),
                     variant_index=known.get("variant_index"),
                     draft_prompt=draft,

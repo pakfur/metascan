@@ -147,6 +147,9 @@ class VariantPrompt(BaseModel):
     negative: Optional[str] = None
     draft: Optional[str] = None
     writer_id: Optional[str] = None
+    # The VLM model that wrote ``draft`` (the /prompt draft's
+    # ``writer_model``); checked against the writer-eligible models.
+    writer_model: Optional[str] = None
     variant_index: int
 
 
@@ -322,6 +325,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
                 "prompt": d.prompt,
                 "negative": d.negative,
                 "writer_id": d.writer_id,
+                "writer_model": d.writer_model,
                 "variant_index": d.variant_index,
                 "angle": d.angle,
             }

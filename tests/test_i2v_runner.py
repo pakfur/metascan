@@ -140,6 +140,14 @@ class TestGeneratePrompt(I2vRunnerBase):
         self.assertIn("grammar", call)
         self.assertEqual(call["image_path"], self.src)
 
+    def test_write_prompt_names_the_model_asked(self):
+        self.vlm.model_id = "qwen3vl-4b"
+        text, warnings, model = self.run_async(
+            self.runner.write_prompt(str(self.src), "a cat jumps", 6)
+        )
+        self.assertTrue(text.startswith("For the target video"))
+        self.assertEqual(model, "qwen3vl-4b")
+
     def test_no_vlm_raises_unavailable(self):
         runner = I2vRunner(
             db=self.db,
@@ -862,6 +870,26 @@ class TestGenerateRecordsTemplateId(TestFormStateAtIngest):
     def test_writer_id_without_a_draft_is_recorded_manual(self):
         job_id = self._generate(writer_id="base")
         self.assertEqual(self._row(job_id)["writer_id"], "manual")
+
+    def test_i2v_records_the_writer_model(self):
+        job_id = self._generate(
+            writer_id="base", draft_prompt="a draft", writer_model="qwen3vl-8b"
+        )
+        self.assertEqual(self._row(job_id)["writer_model"], "qwen3vl-8b")
+
+    def test_a_typed_i2v_prompt_has_no_writer_model(self):
+        job_id = self._generate(writer_model="qwen3vl-8b")
+        row = self._row(job_id)
+        self.assertEqual(row["writer_id"], "manual")
+        self.assertIsNone(row["writer_model"])
+
+    def test_an_unusable_writer_model_is_refused(self):
+        for bad in ("nope", "qwen38-27b"):
+            with self.assertRaises(I2vRequestError):
+                self._generate(
+                    writer_id="base", draft_prompt="a draft", writer_model=bad
+                )
+        self.assertEqual(self.comfy.submits, [])
 
     def test_a_restart_between_submit_and_ingest_leaves_lineage_null(self):
         job_id = self._generate(writer_id="base", draft_prompt="a draft")

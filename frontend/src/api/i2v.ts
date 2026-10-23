@@ -7,7 +7,7 @@ export function generatePrompt(body: {
   duration_s: number
   template_id?: string | null
   writer?: I2vWriter
-}): Promise<{ prompt: string; warnings: string[]; writer_id: string }> {
+}): Promise<{ prompt: string; warnings: string[]; writer_id: string; writer_model: string | null }> {
   return post('/i2v/prompt', body)
 }
 
@@ -39,6 +39,7 @@ export function generateVideo(body: {
   // prompt typed from scratch (the server records it as `manual`).
   writer_id?: string
   draft_prompt?: string
+  writer_model?: string | null
 }): Promise<{ job_id: number; warnings: string[] }> {
   return post('/i2v/generate', body)
 }

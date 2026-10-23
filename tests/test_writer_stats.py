@@ -53,11 +53,14 @@ def _gen(
     writer: Optional[str],
     created_at: str,
     outcome: Optional[str] = None,
+    writer_model: Optional[str] = None,
 ) -> int:
     """A T2I generation at ``created_at`` with ``outcome`` in
     {None, 'seen', 'favorite', 'pass'}."""
     db.save_media(_media(path))
-    image_id = db.create_t2i_image(file_path=path, writer_id=writer)
+    image_id = db.create_t2i_image(
+        file_path=path, writer_id=writer, writer_model=writer_model
+    )
     with db.lock, db._get_connection() as conn:
         conn.execute(
             "UPDATE t2i_images SET created_at = ? WHERE id = ?", (created_at, image_id)
@@ -384,3 +387,48 @@ def test_tombstones_filtered_by_since_in_sql(db):
     )
     paths = [g["file_path"] for g in db.generation_outcomes(since="2026-08-01")]
     assert paths == ["/g/new.png"]
+
+
+def test_rates_are_per_writer_model(db):
+    """Writer lineage includes the model: a ``base`` draft from another
+    model never mixes into the 8B baseline, live or deleted."""
+    _gen(db, "/g/m1.png", "base", LATEST, "favorite", "qwen3vl-8b")
+    _gen(db, "/g/m2.png", "base", LATEST, "pass", "qwen3vl-8b")
+    _gen(db, "/g/m3.png", "base", LATEST, "favorite", "qwen3vl-4b")
+    _gen(db, "/g/m4.png", "base", LATEST, "pass", "qwen3vl-4b")
+    db.delete_media(Path("/g/m4.png"))  # the tombstone keeps its model
+    _gen(db, "/g/m5.png", "base", LATEST, "seen")  # older row: no model
+    db.save_media(_media("/g/src.png"))
+    db.save_media(_media("/g/v.mp4"))
+    db.create_i2v_video(
+        source_path="/g/src.png",
+        file_path="/g/v.mp4",
+        writer_id="base",
+        writer_model="qwen3vl-8b",
+    )
+    rows = db.writer_window_stats(14, 6, now=NOW)
+    keyed = {
+        (r["kind"], r["writer_id"], r["writer_model"])
+        for r in rows
+        if r["window_start"] == "2026-10-10"
+    }
+    assert ("t2i", "base", "qwen3vl-8b") in keyed
+    assert ("t2i", "base", "qwen3vl-4b") in keyed
+    assert ("t2i", "base", None) in keyed
+
+    def cell(model: Optional[str]) -> tuple:
+        (row,) = [
+            r
+            for r in rows
+            if r["kind"] == "t2i"
+            and r["writer_model"] == model
+            and r["window_start"] == "2026-10-10"
+        ]
+        return _cell(row)
+
+    assert cell("qwen3vl-8b") == (2, 1, 0.5)
+    assert cell("qwen3vl-4b") == (2, 1, 0.5)
+    assert cell(None) == (1, 0, 0.0)
+    outcomes = {o["file_path"]: o for o in db.generation_outcomes()}
+    assert outcomes["/g/m4.png"]["writer_model"] == "qwen3vl-4b"
+    assert outcomes["/g/v.mp4"]["writer_model"] == "qwen3vl-8b"

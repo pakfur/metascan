@@ -620,6 +620,17 @@ class TestSuppliedPromptValidation(RunnerCase):
             self.manual(prompt=None, prompts=[self.entry(0, writer_id=None)]),
         )
 
+    async def test_an_unknown_or_non_writer_model_is_rejected(self) -> None:
+        for bad in ("nope", "qwen38-27b", 3):
+            with self.subTest(writer_model=bad):
+                await self.rejects(
+                    "writer_model",
+                    self.manual(
+                        prompt=None,
+                        prompts=[self.entry(0, writer_model=bad)],
+                    ),
+                )
+
     async def test_a_random_first_batch_with_prompts_needs_a_ratio(self) -> None:
         await self.rejects(
             "Aspect ratio",
@@ -860,6 +871,7 @@ class TestVariantsApi(T2iApiCase):
                     "negative": None,
                     "draft": "SYNTH a",
                     "writer_id": "base",
+                    "writer_model": None,
                     "variant_index": 0,
                 },
                 {
@@ -867,6 +879,7 @@ class TestVariantsApi(T2iApiCase):
                     "negative": None,
                     "draft": None,
                     "writer_id": None,
+                    "writer_model": None,
                     "variant_index": 1,
                 },
             ],
@@ -910,6 +923,7 @@ class TestVariantsApi(T2iApiCase):
                 "prompt": "SYNTH d1",
                 "negative": None,
                 "writer_id": "base",
+                "writer_model": None,
                 "variant_index": 1,
                 "angle": "angle1",
             },
@@ -917,3 +931,135 @@ class TestVariantsApi(T2iApiCase):
         self.assertIn("taste guidance unavailable: x", body["warnings"])
         ((_, kwargs),) = self.runner.calls
         self.assertEqual((kwargs["variants"], kwargs["writer"]), (3, "base+taste"))
+
+
+# --------------------------------------------------------------------------
+# the writer's model is lineage too (final review item 2)
+# --------------------------------------------------------------------------
+
+
+def _models(db: Any) -> List[Tuple[Optional[str], Optional[str]]]:
+    with db.lock, db._get_connection() as conn:
+        return [
+            (r["writer_id"], r["writer_model"])
+            for r in conn.execute(
+                "SELECT writer_id, writer_model FROM t2i_images ORDER BY id"
+            )
+        ]
+
+
+class TestWriterModel(VariantCase):
+    def entry(self, index: int, **over: Any) -> Dict[str, Any]:
+        e: Dict[str, Any] = {
+            "prompt": f"SYNTH {index}",
+            "negative": None,
+            "draft": f"SYNTH {index}",
+            "writer_id": "base",
+            "writer_model": "qwen3vl-8b",
+            "variant_index": index,
+        }
+        e.update(over)
+        return e
+
+    async def test_random_steps_record_the_writer_model(self) -> None:
+        self.roomy()
+        batch_id = await self.run_to_end(
+            self.random_mode(seed=10, batch_size=1, count_per_batch=1, variants=2)
+        )
+        await self.finish_all()
+        self.assertEqual(_models(self.db), [("base", "qwen3vl-8b")] * 2)
+        self.assertEqual(
+            {s["writer_model"] for s in self.written(batch_id)}, {"qwen3vl-8b"}
+        )
+
+    async def test_the_model_actually_asked_is_recorded(self) -> None:
+        assert self.vlm is not None
+        self.vlm.model_id = "qwen3vl-4b"
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        await self.finish_all()
+        self.assertEqual(_models(self.db), [("base", "qwen3vl-4b")])
+
+    async def test_a_fallback_or_typed_prompt_has_no_writer_model(self) -> None:
+        self.vlm = None
+        self.roomy()
+        await self.run_to_end(self.random_mode(batch_size=1, count_per_batch=1))
+        await self.manual_batch(count=1)
+        await self.finish_all()
+        self.assertEqual(_models(self.db), [("fallback", None), ("manual", None)])
+
+    async def test_supplied_drafts_keep_their_writer_model(self) -> None:
+        await self.manual_batch(
+            count=1,
+            prompt=None,
+            variants=3,
+            prompts=[
+                self.entry(0),
+                self.entry(1, writer_model="qwen3vl-4b"),
+                # Typed: manual, and no model whatever the entry says.
+                self.entry(2, draft=None, writer_id=None),
+            ],
+        )
+        await self.finish_all()
+        self.assertEqual(
+            _models(self.db),
+            [("base", "qwen3vl-8b"), ("base", "qwen3vl-4b"), ("manual", None)],
+        )
+
+    async def test_a_draft_without_a_model_is_recorded_as_unknown(self) -> None:
+        entry = self.entry(0)
+        del entry["writer_model"]
+        await self.manual_batch(count=1, prompt=None, prompts=[entry])
+        await self.finish_all()
+        self.assertEqual(_models(self.db), [("base", None)])
+
+    async def test_a_fallback_draft_has_no_model(self) -> None:
+        await self.manual_batch(
+            count=1, prompt=None, prompts=[self.entry(0, writer_id="fallback")]
+        )
+        await self.finish_all()
+        self.assertEqual(_models(self.db), [("fallback", None)])
+
+    async def test_generate_prompt_drafts_name_their_model(self) -> None:
+        result = await self.runner.generate_prompt(
+            caption="SYNTH caption", seed=3, model="krea2", variants=2
+        )
+        self.assertEqual({d.writer_model for d in result.drafts}, {"qwen3vl-8b"})
+        self.vlm = None
+        result = await self.runner.generate_prompt(
+            caption="SYNTH caption", seed=3, model="krea2"
+        )
+        self.assertEqual([d.writer_model for d in result.drafts], [None])
+
+
+class TestWriterModelApi(T2iApiCase):
+    def test_prompt_endpoint_names_the_model(self) -> None:
+        self.runner.prompt_result = PromptResult(
+            "SYNTH d0",
+            None,
+            "Resolved.",
+            [],
+            drafts=[PromptDraft("SYNTH d0", None, "base", 0, None, "qwen3vl-8b")],
+        )
+        resp = self.client.post(
+            "/api/t2i/prompt", json={"caption": "x", "seed": 1, "model": "sd"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["drafts"][0]["writer_model"], "qwen3vl-8b")
+
+    def test_batch_entries_carry_the_model(self) -> None:
+        prompts = [
+            {
+                "prompt": "SYNTH a",
+                "draft": "SYNTH a",
+                "writer_id": "base",
+                "writer_model": "qwen3vl-8b",
+                "variant_index": 0,
+            }
+        ]
+        resp = self.client.post(
+            "/api/t2i/batches", json=self.batch_body(prompt=None, prompts=prompts)
+        )
+        self.assertEqual(resp.status_code, 200)
+        ((_, req),) = self.runner.calls
+        self.assertEqual(req.prompts[0]["writer_model"], "qwen3vl-8b")

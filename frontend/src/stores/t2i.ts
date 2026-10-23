@@ -605,6 +605,7 @@ export const useT2iStore = defineStore('t2i', () => {
       caption_index: asNumOrNull(d.caption_index),
       captions: asNumOrNull(d.captions),
       writer_id: typeof d.writer_id === 'string' ? d.writer_id : null,
+      writer_model: typeof d.writer_model === 'string' ? d.writer_model : null,
       draft: typeof d.draft === 'string' ? d.draft : null,
     }
     batch.step = step

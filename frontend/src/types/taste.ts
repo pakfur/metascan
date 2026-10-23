@@ -48,6 +48,9 @@ export interface WriterWindowStat {
   // A writer id ('base', 'base+taste', 'fallback', 'manual', ...) or
   // 'unknown' for generations recorded before writer lineage existed.
   writer_id: string
+  // The VLM model that wrote the drafts (e.g. 'qwen3vl-8b'); null for typed
+  // or fallback prompts and for rows recorded before the model was.
+  writer_model: string | null
   window_start: string // ISO date
   n_seen: number
   n_fav: number
