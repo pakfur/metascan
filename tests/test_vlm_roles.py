@@ -30,7 +30,7 @@ from backend.services.vlm_roles import (
     resolve_role_models,
 )
 from metascan.core.vlm_client import VlmClient, VlmError
-from tests._fake_llama_server import FakeLlamaServer
+from tests._fake_llama_server import FakeLlamaServer, fake_llama_command
 
 
 class _FakeVlm:
@@ -74,6 +74,9 @@ class _FakeVlm:
         self.in_flight -= 1
         if self.in_flight == 0:
             self._idle.set()
+
+    async def wait_loaded(self, timeout: float) -> bool:
+        return True
 
     async def wait_idle(self, timeout: float, grace: float = 0.0) -> bool:
         try:
@@ -839,9 +842,10 @@ async def test_an_eviction_during_a_request_is_retried() -> None:
     client._state = STATE_READY
     started: List[str] = []
 
-    async def ensure(mid: str) -> None:
-        started.append(mid)
+    async def ensure() -> None:
+        started.append(str(client.preferred_model_id))
         client._state = STATE_READY
+        client._stopping = False
 
     calls: List[int] = []
 
@@ -852,7 +856,7 @@ async def test_an_eviction_during_a_request_is_retried() -> None:
             return []
         return ["tag"]
 
-    client.ensure_started = ensure  # type: ignore[method-assign]
+    client._ensure_resident = ensure  # type: ignore[method-assign]
     client._generate_tags_impl = impl  # type: ignore[method-assign]
     assert await client.generate_tags(Path("x.png")) == ["tag"]
     assert started == ["qwen3vl-8b"]
@@ -887,3 +891,206 @@ def test_chat_and_playground_accept_a_swapped_out_client(module: str) -> None:
             mod._require_ready_client()
     finally:
         vlm_api.set_vlm_client(None)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3: real shutdown windows, slow loads, explicit unload wins
+# ---------------------------------------------------------------------------
+
+_TAGS = '["red car", "blue sky"]'
+
+
+def _png(tmp_path: Path) -> Path:
+    from PIL import Image
+
+    p = tmp_path / "img.png"
+    Image.new("RGB", (8, 8), (200, 0, 0)).save(p)
+    return p
+
+
+def _proc_factory(opts: Dict[str, Dict[str, Any]]) -> Any:
+    """Real VlmClients that Popen the fake llama-server (real terminate,
+    proc.wait and -- with term_delay_ms -- a slow shutdown)."""
+
+    def make() -> VlmClient:
+        c = VlmClient()
+        c._build_command = (  # type: ignore[method-assign]
+            lambda spec, port: fake_llama_command(port, **opts[spec.model_id])
+        )
+        return c
+
+    return make
+
+
+def _slow_loading_factory(urls: Dict[str, str], load_s: float, spawned: List[str]):
+    """Real VlmClients on fake servers whose model load takes ``load_s``."""
+
+    def make() -> VlmClient:
+        def spawn(mid: str) -> str:
+            spawned.append(mid)
+            return urls[mid]
+
+        c = VlmClient(spawn_override=spawn)
+        probe = c._health_probe_loop
+
+        async def slow_probe() -> None:
+            await asyncio.sleep(load_s)
+            await probe()
+
+        c._health_probe_loop = slow_probe  # type: ignore[method-assign]
+        return c
+
+    return make
+
+
+async def test_forced_eviction_during_a_slow_shutdown_never_empties_tags(
+    tmp_path: Path,
+) -> None:
+    img = _png(tmp_path)
+    opts = {
+        "qwen3vl-8b": {"canned_response": '"a prompt"'},
+        "qwen38-27b": {
+            "canned_response": _TAGS,
+            "reply_delay_ms": 1500,
+            "term_delay_ms": 1000,
+        },
+    }
+    roles = VlmRoles(
+        writer="qwen3vl-8b",
+        general="qwen38-27b",
+        client_factory=_proc_factory(opts),
+        vram_gb=24.0,
+        idle_timeout_s=0.2,  # the writer will not wait out the slow reply
+        swap_grace_s=0.0,
+    )
+    writer, general = roles.client("writer"), roles.client("general")
+    try:
+        await general.ensure_started("qwen38-27b")
+        in_flight = asyncio.create_task(general.generate_tags(img))
+        await asyncio.sleep(0.3)
+        assert general.in_flight == 1
+        take_over = asyncio.create_task(writer.ensure_started("qwen3vl-8b"))
+        # A request that starts inside the eviction's shutdown window.
+        while not general._stopping:
+            await asyncio.sleep(0.01)
+        late = asyncio.create_task(general.generate_tags(img))
+        await asyncio.wait_for(take_over, 30)
+        tags_a = await asyncio.wait_for(in_flight, 60)
+        tags_b = await asyncio.wait_for(late, 60)
+        assert tags_a and tags_b, (tags_a, tags_b)
+    finally:
+        await roles.shutdown_all()
+
+
+async def test_a_load_slower_than_the_idle_timeout_is_not_evicted(
+    tmp_path: Path,
+) -> None:
+    img = _png(tmp_path)
+    async with FakeLlamaServer(canned_response=_TAGS) as w, FakeLlamaServer(
+        canned_response=_TAGS
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        spawned: List[str] = []
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=_slow_loading_factory(urls, 0.6, spawned),
+            vram_gb=24.0,
+            idle_timeout_s=0.1,  # every load takes 6x the idle timeout
+            swap_grace_s=0.05,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await general.ensure_started("qwen38-27b")
+
+            wrote = asyncio.Event()
+
+            async def tag_loop() -> List[List[str]]:
+                # Tagging wants the GPU the whole time the writer loads.
+                out: List[List[str]] = []
+                while not wrote.is_set() and len(out) < 500:
+                    out.append(await general.generate_tags(img))
+                for _ in range(2):
+                    out.append(await general.generate_tags(img))
+                return out
+
+            async def write() -> str:
+                try:
+                    await writer.ensure_started("qwen3vl-8b")
+                    return await writer.generate_text(
+                        system_prompt="s", user_prompt="u"
+                    )
+                finally:
+                    wrote.set()
+
+            tags, text = await asyncio.wait_for(asyncio.gather(tag_loop(), write()), 60)
+            assert all(tags), tags
+            assert text
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_an_explicit_unload_during_an_eviction_wins(tmp_path: Path) -> None:
+    img = _png(tmp_path)
+    opts = {
+        "qwen3vl-8b": {"canned_response": '"a prompt"'},
+        "qwen38-27b": {"canned_response": _TAGS, "term_delay_ms": 800},
+    }
+    roles = VlmRoles(
+        writer="qwen3vl-8b",
+        general="qwen38-27b",
+        client_factory=_proc_factory(opts),
+        vram_gb=24.0,
+        idle_timeout_s=0.2,
+        swap_grace_s=0.0,
+    )
+    writer, general = roles.client("writer"), roles.client("general")
+    try:
+        await general.ensure_started("qwen38-27b")
+        take_over = asyncio.create_task(writer.ensure_started("qwen3vl-8b"))
+        while not general._stopping:
+            await asyncio.sleep(0.01)
+        await general.shutdown()  # unload for ComfyUI, mid-eviction
+        await asyncio.wait_for(take_over, 30)
+        assert general.swapped_out is False
+        # Nothing brings it back behind the render's back.
+        with pytest.raises(RuntimeError, match="not ready"):
+            await general.generate_tags(img)
+        assert general.state == "stopped"
+    finally:
+        await roles.shutdown_all()
+
+
+async def test_an_explicit_unload_aborts_a_pending_re_ensure(tmp_path: Path) -> None:
+    img = _png(tmp_path)
+    async with FakeLlamaServer(canned_response=_TAGS) as w, FakeLlamaServer(
+        canned_response=_TAGS
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        spawned: List[str] = []
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=_slow_loading_factory(urls, 0.6, spawned),
+            vram_gb=24.0,
+            idle_timeout_s=0.1,
+            swap_grace_s=0.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await general.ensure_started("qwen38-27b")
+            loading = asyncio.create_task(writer.ensure_started("qwen3vl-8b"))
+            while not general.swapped_out:
+                await asyncio.sleep(0.01)
+            # general's request waits for the writer's load to finish ...
+            request = asyncio.create_task(general.generate_tags(img))
+            await asyncio.sleep(0.2)
+            # ... and the unload for ComfyUI lands meanwhile.
+            await general.shutdown()
+            with pytest.raises(VlmError, match="unloaded"):
+                await asyncio.wait_for(request, 30)
+            await loading
+            assert spawned.count("qwen38-27b") == 1  # never respawned
+            assert general.state == "stopped"
+        finally:
+            await roles.shutdown_all()

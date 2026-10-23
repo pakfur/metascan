@@ -70,8 +70,18 @@ the root CLAUDE.md still applies.
   batch survives the writer taking over. A client is busy for swapping
   while requests are in flight, while it is spawning/loading, and for
   `SWAP_GRACE_S` after its last request (no per-item swaps). An explicit
-  `shutdown()` (ComfyUI unload, /unload) clears `swapped_out`: nothing
-  auto-restarts it. Chat / playground accept a swapped-out client as ready.
+  `shutdown()` (ComfyUI unload, /unload) clears `swapped_out` and bumps
+  `_explicit_stops`: nothing auto-restarts it, and a background re-ensure
+  that began before it aborts (`VlmError("VLM was unloaded…")`) instead of
+  spawning. Chat / playground accept a swapped-out client as ready.
+  `evict()` keeps the client non-resident for its whole shutdown
+  (`swapped_out` set first, `_quiesced` cleared; `_is_resident()` also
+  checks `_stopping`), so retries and new requests wait and re-ensure
+  rather than hit the dying server. A client that is spawning/loading is
+  never evicted: `_make_room` waits for `wait_loaded` (bounded by the
+  600 s load timeout) and the swap grace restarts at READY so the waiting
+  requests run first. Internal model changes inside `start()` use `_stop()`,
+  not `shutdown()`.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
