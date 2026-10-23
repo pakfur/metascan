@@ -431,3 +431,115 @@ async def test_no_prompt_text_logged(
         text = record.getMessage()
         for secret in secrets:
             assert secret not in text, (record.name, text)
+
+
+# --------------------------------------------------------------------------
+# the in-memory index survives an embedding run (final review item 1)
+# --------------------------------------------------------------------------
+
+
+class _ReloadedIndex(FakeIndex):
+    """Stands in for FaissIndexManager: ``load`` blocks until released."""
+
+    instances: List["_ReloadedIndex"] = []
+    release: Optional[Any] = None
+
+    def __init__(self, index_dir: Any) -> None:
+        super().__init__(RANKED)
+        self.is_loaded = False
+        self.index_dir = index_dir
+        _ReloadedIndex.instances.append(self)
+
+    def load(self) -> None:
+        if _ReloadedIndex.release is not None:
+            assert _ReloadedIndex.release.wait(10)
+        self.is_loaded = True
+
+
+async def test_examples_survive_an_embedding_complete(
+    svc_fake_index: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every embedding ``on_complete`` (the auto-index build after each T2I
+    ingest included) used to drop the in-memory index, so every later
+    caption recorded ``base``. The index is rebuilt off the loop and
+    swapped in atomically: the old one stays readable until the new one is
+    loaded."""
+    import threading
+    from types import SimpleNamespace
+
+    from backend.api import similarity
+
+    svc, old = svc_fake_index
+    _ReloadedIndex.instances = []
+    _ReloadedIndex.release = threading.Event()
+    monkeypatch.setattr(similarity, "FaissIndexManager", _ReloadedIndex)
+    monkeypatch.setattr(similarity, "_start_tombstone_backfill", lambda fm: None)
+    monkeypatch.setattr(similarity, "_faiss_manager", old)
+    monkeypatch.setattr(similarity, "_server_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(similarity, "_on_embedding_complete", None)
+    monkeypatch.setattr(similarity, "_current_scan_tag_with_vlm", False)
+    eq = SimpleNamespace(index_dir=tmp_path, get_last_progress=lambda: {})
+    monkeypatch.setattr(similarity, "_get_embedding_queue", lambda: eq)
+    similarity._attach_embedding_callbacks(eq)  # type: ignore[arg-type]
+    guided = TasteExamplesService(svc.db, get_client=lambda: FakeClient())
+
+    # on_complete fires on the embedding poller's worker thread.
+    await asyncio.to_thread(eq.on_complete, 3)  # type: ignore[attr-defined]
+    assert similarity._faiss_manager is old  # still readable while loading
+    examples, warning = await guided.examples_for(CAPTION, "krea2")
+    assert warning is None and len(examples) == 3
+
+    _ReloadedIndex.release.set()
+    for _ in range(200):
+        if similarity._faiss_manager is not old:
+            break
+        await asyncio.sleep(0.01)
+    new = similarity._faiss_manager
+    assert isinstance(new, _ReloadedIndex) and new.is_loaded
+    examples, warning = await guided.examples_for(CAPTION, "krea2")
+    assert warning is None and len(examples) == 3
+
+
+async def test_back_to_back_reloads_install_the_newest_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from backend.api import similarity
+
+    _ReloadedIndex.instances = []
+    _ReloadedIndex.release = None
+    old = FakeIndex(RANKED)
+    monkeypatch.setattr(similarity, "FaissIndexManager", _ReloadedIndex)
+    monkeypatch.setattr(similarity, "_start_tombstone_backfill", lambda fm: None)
+    monkeypatch.setattr(similarity, "_faiss_manager", old)
+    monkeypatch.setattr(similarity, "_server_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(
+        similarity, "_get_embedding_queue", lambda: SimpleNamespace(index_dir=tmp_path)
+    )
+    await asyncio.to_thread(similarity._reload_faiss_after_index_build)
+    await asyncio.to_thread(similarity._reload_faiss_after_index_build)
+    for _ in range(200):
+        if len(_ReloadedIndex.instances) == 2 and all(
+            i.is_loaded for i in _ReloadedIndex.instances
+        ):
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+    assert similarity._faiss_manager is _ReloadedIndex.instances[-1]
+
+
+async def test_no_manager_loaded_stays_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.api import similarity
+
+    def _boom(*a: Any) -> Any:
+        raise AssertionError("must not construct a manager nobody loaded")
+
+    monkeypatch.setattr(similarity, "FaissIndexManager", _boom)
+    monkeypatch.setattr(similarity, "_faiss_manager", None)
+    monkeypatch.setattr(similarity, "_server_loop", asyncio.get_running_loop())
+    await asyncio.to_thread(similarity._reload_faiss_after_index_build)
+    await asyncio.sleep(0.05)
+    assert similarity._faiss_manager is None
