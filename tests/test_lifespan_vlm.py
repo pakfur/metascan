@@ -8,11 +8,13 @@ from backend.main import create_app
 from backend.api import vlm as vlm_api
 
 
-def test_lifespan_installs_vlm_client():
+def test_lifespan_installs_vlm_client(isolated_app_paths):
     # Pin config to a deterministic empty preload list so the test does not
     # depend on the host config.json (a dev box may have qwen3vl-* in
     # `preload_at_startup`, which schedules a VlmClient.start task during
     # lifespan and races the state assertion to "loading").
+    # `isolated_app_paths` keeps the lifespan's DB / models / taste dirs off the
+    # developer's real data/ (see tests/conftest.py).
     fake_config = {
         "models": {"preload_at_startup": [], "huggingface_token": ""},
         "similarity": {},

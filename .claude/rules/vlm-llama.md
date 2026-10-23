@@ -98,6 +98,13 @@ the root CLAUDE.md still applies.
   loader's `_wait_ready` resumed counts as loaded (`ensure_started`
   returns; the next request re-ensures) — only a client evicted before
   READY raises "ended in state stopped".
+  The post-scan tag drain (`similarity._schedule_vlm_drain_after_complete`,
+  run on the captured server loop, coalesced) is a background re-ensure
+  too: `_start_index_build` snapshots the general client's
+  `_explicit_stops`, and `VlmTagPump(unless_stopped_since=…)` passes it to
+  `VlmClient.ensure_started(…, unless_stopped_since=…)`, which refuses to
+  spawn after an explicit unload since the scan began; the batch stays
+  queued in `vlm_pending.jsonl` for the next drain.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job

@@ -1363,3 +1363,18 @@ async def test_a_load_evicted_before_ready_still_raises() -> None:
     client._ready_event.set()
     with pytest.raises(RuntimeError, match="ended in state stopped"):
         await asyncio.wait_for(client._wait_ready(5.0), 5)
+
+
+async def test_ensure_started_since_refuses_after_an_explicit_unload() -> None:
+    spawned: List[str] = []
+
+    def spawn(mid: str) -> str:
+        spawned.append(mid)
+        return "http://127.0.0.1:1"
+
+    client = VlmClient(spawn_override=spawn)
+    since = client._explicit_stops
+    await client.shutdown()  # e.g. unloaded for a ComfyUI render
+    with pytest.raises(VlmError, match="unloaded"):
+        await client.ensure_started("qwen3vl-8b", unless_stopped_since=since)
+    assert spawned == []

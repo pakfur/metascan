@@ -199,8 +199,15 @@ class VlmClient:
 
     # ---- Lifecycle -----------------------------------------------------
 
-    async def ensure_started(self, model_id: str) -> None:
+    async def ensure_started(
+        self, model_id: str, *, unless_stopped_since: Optional[int] = None
+    ) -> None:
         """Bring the worker to STATE_READY; idempotent.
+
+        ``unless_stopped_since`` (an ``_explicit_stops`` value captured when
+        a background caller's work was requested) makes it refuse to spawn
+        with ``VlmError`` once an explicit shutdown landed after that; a
+        model already loaded (deliberately reloaded) is still used.
 
         Holds ``_start_lock`` for the duration of the call, including any
         wait for the server to become ready. Concurrent callers serialize
@@ -220,7 +227,16 @@ class VlmClient:
                 if self._state == STATE_LOADING:
                     await self._wait_ready(timeout=600.0)
                 return
-            await self.start(model_id, wait_ready=True)
+            if (
+                unless_stopped_since is not None
+                and self._explicit_stops != unless_stopped_since
+            ):
+                raise VlmError("VLM was unloaded; not bringing it back")
+            await self.start(
+                model_id,
+                wait_ready=True,
+                _unless_stopped_since=unless_stopped_since,
+            )
 
     async def start(
         self,
