@@ -436,3 +436,94 @@ class DirectionTests(unittest.TestCase):
             fallback_prompt(sd, "A woman reads.", "  "),
             fallback_prompt(sd, "A woman reads."),
         )
+
+
+class AngleAndExamplesTests(unittest.TestCase):
+    """Variant angles and taste examples (taste-writer-variants task 3)."""
+
+    def test_compose_unchanged_without_angle_or_examples(self) -> None:
+        for profile in MODEL_PROFILES.values():
+            for mode in CONTENT_MODES:
+                for direction in (None, "Give her a soft smile."):
+                    with self.subTest(model=profile.id, mode=mode, d=direction):
+                        plain = compose_t2i_prompts(profile, RESOLVED, mode, direction)
+                        self.assertEqual(
+                            compose_t2i_prompts(
+                                profile,
+                                RESOLVED,
+                                mode,
+                                direction,
+                                angle=None,
+                                examples=(),
+                            ),
+                            plain,
+                        )
+                        for blank in ("", "   "):
+                            self.assertEqual(
+                                compose_t2i_prompts(
+                                    profile, RESOLVED, mode, direction, angle=blank
+                                ),
+                                plain,
+                            )
+                        self.assertEqual(
+                            compose_t2i_prompts(
+                                profile, RESOLVED, mode, direction, examples=["", " "]
+                            ),
+                            plain,
+                        )
+
+    def test_compose_with_angle_and_examples(self) -> None:
+        profile = MODEL_PROFILES["krea2"]
+        examples = [
+            "Synthetic example one about a lighthouse.",
+            "Synthetic example two,\n  about a quiet  harbour.",
+        ]
+        system, user = compose_t2i_prompts(
+            profile,
+            "A woman reads.",
+            "sfw",
+            angle="light",
+            examples=examples,
+        )
+        self.assertEqual(
+            user,
+            "DESCRIPTION:\nA woman reads.\n\nANGLE: lead with light"
+            "\n\nWrite the prompt now.",
+        )
+        self.assertIn("EXAMPLES:", system)
+        self.assertIn(prompt("T2I_EXAMPLES_PREAMBLE").strip(), system)
+        self.assertIn("1. Synthetic example one about a lighthouse.", system)
+        self.assertIn("2. Synthetic example two, about a quiet harbour.", system)
+        block = system[system.index("EXAMPLES:") :]
+        self.assertNotIn("\n3. ", block)
+        guideline = prompt(profile.meta_key).strip()
+        directive = prompt("SAFETY_DIRECTIVE").strip()
+        # The block sits after the style guide and before the directive.
+        self.assertLess(system.index(guideline), system.index("EXAMPLES:"))
+        self.assertLess(system.index("EXAMPLES:"), system.index(directive))
+        self.assertTrue(system.endswith(directive))
+
+    def test_angle_follows_a_direction(self) -> None:
+        _, user = compose_t2i_prompts(
+            MODEL_PROFILES["qwen"], "A woman reads.", "default", "Smile.", "emotion"
+        )
+        self.assertEqual(
+            user,
+            "DESCRIPTION:\nA woman reads.\n\nDIRECTION:\nSmile."
+            "\n\nANGLE: lead with emotion\n\nWrite the prompt now.",
+        )
+
+    def test_angles_alone_leave_the_system_prompt_unchanged(self) -> None:
+        profile = MODEL_PROFILES["sd"]
+        plain, _ = compose_t2i_prompts(profile, "A woman reads.", "default")
+        angled, _ = compose_t2i_prompts(
+            profile, "A woman reads.", "default", angle="composition"
+        )
+        self.assertEqual(angled, plain)
+
+    def test_new_task3_keys_have_no_parenthesis(self) -> None:
+        for key in ("T2I_VARIANT_ANGLES", "T2I_EXAMPLES_PREAMBLE"):
+            with self.subTest(key=key):
+                self.assertTrue(prompt(key).strip())
+                self.assertNotIn("(", prompt(key))
+                self.assertNotIn(")", prompt(key))
