@@ -21,12 +21,17 @@ import {
 } from '../api/models'
 import {
   fetchVlmStatus,
+  fetchVlmRoles,
+  setVlmRole,
+  type VlmRole,
+  type VlmRolesSnapshot,
   setActiveVlm,
   unloadVlm,
   type VlmState,
   type VlmStatus,
 } from '../api/vlm'
 import type { Gate, Tier } from '../types/hardware'
+import { ApiError } from '../api/client'
 import { useWebSocket } from '../composables/useWebSocket'
 
 export const useModelsStore = defineStore('models', () => {
@@ -72,7 +77,54 @@ export const useModelsStore = defineStore('models', () => {
     () => vlmState.value === 'loading' || vlmState.value === 'spawning',
   )
 
+  // Per-role pickers. `vlmState`/`vlmModelId` above stay the *general* role's
+  // client; a WS payload tagged with roles that exclude 'general' belongs to
+  // the (separate) writer client and only updates `vlmRoles`.
+  const vlmRoles = ref<VlmRolesSnapshot | null>(null)
+  const vlmRolesError = ref<string | null>(null)
+
+  async function loadVlmRoles(): Promise<void> {
+    try {
+      vlmRoles.value = await fetchVlmRoles()
+      vlmRolesError.value = null
+    } catch (e) {
+      vlmRolesError.value = vlmRoleErrorText(e)
+    }
+  }
+
+  function vlmRoleErrorText(e: unknown): string {
+    if (e instanceof ApiError) {
+      const d = e.detail as { code?: string; message?: string } | string | null
+      const code = d && typeof d === 'object' ? d.code : undefined
+      const msg = d && typeof d === 'object' ? d.message : undefined
+      if (code === 'writer_model_not_allowed') {
+        return msg || 'That model cannot be the prompt writer.'
+      }
+      if (code === 'model_not_installed') {
+        return msg ? `${msg} — download it first.` : 'That model is not installed — download it first.'
+      }
+      if (code === 'unknown_model') return msg || 'Unknown model.'
+      return msg || e.message
+    }
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  async function setVlmRoleModel(role: VlmRole, modelId: string): Promise<boolean> {
+    vlmRolesError.value = null
+    try {
+      vlmRoles.value = await setVlmRole(role, modelId)
+      void loadStatus()
+      return true
+    } catch (e) {
+      vlmRolesError.value = vlmRoleErrorText(e)
+      return false
+    }
+  }
+
   function applyVlmPayload(p: Partial<VlmStatus>) {
+    // Any client's state change can move a role row (state / loaded model).
+    if (p.state) void loadVlmRoles()
+    if (p.roles && p.roles.length > 0 && !p.roles.includes('general')) return
     if (p.state) vlmState.value = p.state
     if ('model_id' in p) vlmModelId.value = p.model_id ?? null
     if ('base_url' in p) vlmBaseUrl.value = p.base_url ?? null
@@ -283,6 +335,10 @@ export const useModelsStore = defineStore('models', () => {
     vlmProgress,
     isVlmReady,
     isVlmLoading,
+    vlmRoles,
+    vlmRolesError,
+    loadVlmRoles,
+    setVlmRoleModel,
     setActiveVlmModel,
     unloadVlmModel,
     loadStatus,
