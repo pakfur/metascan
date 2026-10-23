@@ -266,3 +266,58 @@ def test_api_delete_refused_while_training(client):
     r = c.delete(f"/api/writers/adapters/{a}")
     assert r.status_code == 409 and r.json()["detail"]["code"] == "adapter_training"
     assert db.get_writer_adapter(a)["status"] == "training"
+
+
+def test_api_delete_failed_removal_is_retryable(client, monkeypatch):
+    c, db = client
+    monkeypatch.setattr(
+        "backend.api.writers.ws_manager.broadcast_sync", lambda *a: None
+    )
+    a = _make(db, name="one", status="ready")
+    db.set_writer_adapter_status(a, "ready", file_path="x/adapter.gguf")
+    from metascan.utils.app_paths import get_data_dir
+
+    folder = get_data_dir() / "models" / "vlm" / "adapters" / str(a)
+    folder.mkdir(parents=True)
+    (folder / "adapter.gguf").write_bytes(b"x")
+
+    def boom(*args, **kwargs):
+        raise OSError("busy")
+
+    with patch("backend.api.writers.shutil.rmtree", boom):
+        r = c.delete(f"/api/writers/adapters/{a}")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "adapter_files_busy"
+    row = db.get_writer_adapter(a)
+    assert row["status"] == "ready" and row["file_path"] == "x/adapter.gguf"
+    assert folder.exists()
+    # Retry succeeds once the files can go.
+    assert c.delete(f"/api/writers/adapters/{a}").json() == {"status": "deleted"}
+    assert not folder.exists()
+
+
+def test_adapter_kind_must_match_surface(db):
+    t2i = _make(db, name="a", status="ready", kind="t2i")
+    i2v = _make(db, name="b", status="ready", kind="i2v")
+    w_t2i, w_i2v = adapter_writer_id(t2i), adapter_writer_id(i2v)
+    assert writer_id_allowed(w_t2i, db, "t2i")
+    assert not writer_id_allowed(w_t2i, db, "i2v")
+    assert writer_id_allowed(w_i2v, db, "i2v")
+    assert not writer_id_allowed(w_i2v, db, "t2i")
+    assert check_writer_model(w_t2i, BASE, db=db, kind="t2i") == BASE
+    with pytest.raises(WriterModelError):
+        check_writer_model(w_t2i, BASE, db=db, kind="i2v")
+    with pytest.raises(WriterModelError):
+        check_writer_model(w_i2v, BASE, db=db, kind="t2i")
+    req = SimpleNamespace(
+        prompts=[
+            {
+                "prompt": "p",
+                "draft": "d",
+                "writer_id": w_i2v,
+                "writer_model": BASE,
+                "variant_index": 0,
+            }
+        ]
+    )
+    with pytest.raises(T2iRequestError):
+        _check_prompts(req, 1, db)  # type: ignore[arg-type]

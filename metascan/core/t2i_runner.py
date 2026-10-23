@@ -480,13 +480,15 @@ def _check_prompts(
         writer_id = raw.get("writer_id")
         if draft is None:
             writer_id = WRITER_MANUAL
-        elif not writer_id_allowed(writer_id, db):
+        elif not writer_id_allowed(writer_id, db, "t2i"):
             raise T2iRequestError(
                 f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
                 f"that drafts prompts ({', '.join(DRAFT_WRITERS)} or a ready adapter)"
             )
         try:
-            writer_model = check_writer_model(writer_id, raw.get("writer_model"), db)
+            writer_model = check_writer_model(
+                writer_id, raw.get("writer_model"), db, "t2i"
+            )
         except WriterModelError as exc:
             raise T2iRequestError(f"Variant {index + 1}: {exc}") from exc
         entries.append(

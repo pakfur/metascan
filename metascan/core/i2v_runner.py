@@ -295,14 +295,14 @@ class I2vRunner:
         # writer has a model, and it must be one the writer role can use.
         if draft_prompt is None:
             writer_id = WRITER_MANUAL
-        elif not await asyncio.to_thread(writer_id_allowed, writer_id, self.db):
+        elif not await asyncio.to_thread(writer_id_allowed, writer_id, self.db, "i2v"):
             raise I2vRequestError(
                 f"writer_id {writer_id!r} is not a writer that drafts prompts "
                 f"({', '.join(DRAFT_WRITERS)} or a ready adapter)"
             )
         try:
             writer_model = await asyncio.to_thread(
-                check_writer_model, writer_id, writer_model, self.db
+                check_writer_model, writer_id, writer_model, self.db, "i2v"
             )
         except WriterModelError as exc:
             raise I2vRequestError(str(exc)) from exc
