@@ -335,8 +335,16 @@ onMounted(() => {
 // The writer is session-local and never part of the form: switching it back
 // to Base when the selected adapter has gone (deleted, failed, out of the
 // selected categories, too few examples for the model) touches no image.
+// Names of every adapter the menu has seen, so the toast can still name one
+// that has just left the list.
+const knownNames = new Map<string, string>()
+watch(
+  () => store.adapters,
+  (rows) => rows.forEach((a) => knownNames.set(a.writer_id, a.name)),
+  { immediate: true },
+)
 function fallBackToBase(reason: string) {
-  const name = writerName(store.adapters, writer.value)
+  const name = knownNames.get(writer.value) ?? writerName(store.adapters, writer.value)
   writer.value = 'base'
   writePref(WRITER_STORAGE_KEY, 'base')
   toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
@@ -344,7 +352,7 @@ function fallBackToBase(reason: string) {
 watch([adapterOptions, () => store.adaptersLoaded], () => {
   if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
   const option = adapterOptions.value.find((o) => o.id === writer.value)
-  if (!option || option.disabled) fallBackToBase('is not available here')
+  if (!option || option.disabled) fallBackToBase('is no longer offered here')
 })
 function isAdapterUnavailable(e: unknown): boolean {
   return (

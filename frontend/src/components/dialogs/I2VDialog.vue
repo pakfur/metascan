@@ -258,8 +258,16 @@ onMounted(() => {
 })
 // Session-local, never part of a clip's form: switching back to Base when the
 // selected adapter has gone touches no clip.
+// Names of every adapter the menu has seen, so the toast can still name one
+// that has just left the list.
+const knownNames = new Map<string, string>()
+watch(
+  () => store.adapters,
+  (rows) => rows.forEach((a) => knownNames.set(a.writer_id, a.name)),
+  { immediate: true },
+)
 function fallBackToBase(reason: string) {
-  const name = writerName(store.adapters, writer.value)
+  const name = knownNames.get(writer.value) ?? writerName(store.adapters, writer.value)
   writer.value = 'base'
   storeWriter('base')
   toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
@@ -267,7 +275,7 @@ function fallBackToBase(reason: string) {
 watch([adapterOptions, () => store.adaptersLoaded], () => {
   if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
   const option = adapterOptions.value.find((o) => o.id === writer.value)
-  if (!option || option.disabled) fallBackToBase('is not available here')
+  if (!option || option.disabled) fallBackToBase('is no longer offered here')
 })
 const batchProgress = ref('')
 
