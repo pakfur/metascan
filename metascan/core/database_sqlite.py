@@ -6066,6 +6066,8 @@ class DatabaseManager:
         lineage tables JOINed to media; deleted ones from the newest
         tombstone whose lineage carries the generation row (so deleting
         passes does not inflate a rate), unless the path is live again.
+        Scorecard images (``t2i_images.scorecard_id`` set, live or in the
+        tombstone lineage) are left out: their results have their own rows.
         ``since`` (an ISO date) drops older generations. ``embedding`` is
         the tombstone's vector bytes (live rows: None) when
         ``include_embeddings``."""
@@ -6079,9 +6081,15 @@ class DatabaseManager:
                     "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
                 )
                 params: List[Any] = []
+                where: List[str] = []
+                if kind == "t2i":
+                    # Scorecard renders have their own results rows.
+                    where.append("g.scorecard_id IS NULL")
                 if since is not None:
-                    sql += " WHERE g.created_at >= ?"
+                    where.append("g.created_at >= ?")
                     params.append(since)
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
                 for r in conn.execute(sql, params):
                     favorite = bool(r["is_favorite"])
                     out[(kind, r["file_path"])] = {
@@ -6135,7 +6143,7 @@ class DatabaseManager:
                         )
                         continue
                     key = (kind, r["file_path"])
-                    if key in live:
+                    if key in live or gen.get("scorecard_id") is not None:
                         continue
                     if since is not None and str(created_at) < since:
                         continue
@@ -6426,6 +6434,20 @@ class DatabaseManager:
                 "SELECT * FROM scorecard_jobs WHERE job_id = ?", (int(job_id),)
             ).fetchone()
             return dict(r) if r else None
+
+    def scorecard_pending_briefs(self, scorecard_id: str) -> List[int]:
+        """Brief indexes of ``scorecard_id`` with a job still queued or
+        running in ComfyUI (``generation_jobs.state``; a restart re-queues
+        ``queued`` rows and fails ``running`` ones, so both are live)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT s.brief_index FROM scorecard_jobs s "
+                "JOIN generation_jobs g ON g.id = s.job_id "
+                "WHERE s.scorecard_id = ? AND g.state IN ('queued', 'running') "
+                "ORDER BY s.brief_index",
+                (scorecard_id,),
+            ).fetchall()
+            return [int(r["brief_index"]) for r in rows]
 
     def scorecard_id_for_batch(self, batch_id: str) -> Optional[str]:
         with self.lock, self._get_connection() as conn:

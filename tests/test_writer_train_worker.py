@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -490,6 +491,45 @@ class TestErrors:
 
     def test_usage(self) -> None:
         assert w.main(["x"]) == w.EXIT_USAGE
+
+    def test_an_unexpected_error_never_quotes_its_message(
+        self, tmp_path: Path, monkeypatch: Any, caplog: Any
+    ) -> None:
+        # A library error message could quote a dataset row: only the type
+        # reaches result.json and the log, never str(e).
+        from metascan.workers import writer_train_fake as fake
+
+        row_text = "ROWTEXT a private brief about a lighthouse"
+
+        def boom(*a: Any, **kw: Any) -> Any:
+            raise ValueError(f"bad example: {row_text}")
+
+        monkeypatch.setattr(fake.FakeBackend, "train_dpo", boom)
+        task = _make_task(tmp_path)
+        with caplog.at_level(logging.DEBUG):
+            assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert res["status"] == "error"
+        assert "ValueError" in res["error"]
+        assert row_text not in json.dumps(res)
+        assert row_text not in caplog.text
+        assert "ValueError" in caplog.text
+
+    def test_an_unexpected_error_before_the_run_never_quotes_it(
+        self, tmp_path: Path, monkeypatch: Any, caplog: Any
+    ) -> None:
+        row_text = "ROWTEXT from a task file"
+
+        def boom(raw: Any) -> Any:
+            raise KeyError(row_text)
+
+        monkeypatch.setattr(w, "parse_task", boom)
+        task = _make_task(tmp_path)
+        with caplog.at_level(logging.DEBUG):
+            assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert "KeyError" in res["error"] and row_text not in json.dumps(res)
+        assert row_text not in caplog.text
 
     def test_backend_failure_keeps_checkpoints(self, tmp_path: Path) -> None:
         task = _make_task(tmp_path, fake={"fail_at": {"stage": "dpo", "step": 7}})

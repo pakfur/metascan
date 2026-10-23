@@ -656,16 +656,26 @@ class VlmRoles:
         """Stop serving ``adapter_id`` (it is being deleted): drop it from
         the writer's list and restart the writer without it when idle. True
         when no running server still has its file loaded (on Windows the
-        file can only be removed then)."""
-        self._withdrawn.add(int(adapter_id))
+        file can only be removed then).
+
+        False means the caller refuses the delete (409
+        ``adapter_files_busy``): the id is put back at once, so the adapter
+        stays served and no restart without it is left pending (a pending
+        restart finds nothing stale and ends)."""
+        aid = int(adapter_id)
+        self._withdrawn.add(aid)
         await self.refresh_adapters()
-        paths = {f.path for f in self._adapter_files if f.adapter_id == adapter_id}
-        return not any(
+        paths = {f.path for f in self._adapter_files if f.adapter_id == aid}
+        free = not any(
             p in tuple(getattr(c, "loaded_lora_paths", ()))
             and getattr(c, "state", None) in _RESIDENT_STATES
             for c in self.distinct_clients()
             for p in paths
         )
+        if not free:
+            self._withdrawn.discard(aid)
+            self._apply_loras()
+        return free
 
     async def _shutdown_stale(self, stale: List[Any]) -> None:
         for c in stale:

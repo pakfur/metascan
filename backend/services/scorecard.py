@@ -177,21 +177,39 @@ def _mean(values: Iterable[Optional[float]]) -> Optional[float]:
 def _pairs(
     rows: List[Dict[str, Any]], adapter_id: int
 ) -> List[Tuple[Dict[str, Any], Dict[str, Any], Any]]:
-    """``(base row, adapter row, brief_index)`` per batch holding both."""
+    """``(base row, adapter row, brief_index)``: at most one pair per
+    ``(scorecard_id, brief_index)`` -- the most recent batch (rows come in
+    image-id order) holding both images -- so a brief rendered twice (a
+    resume while its first batch was still queued) never counts twice. A
+    batch whose brief is unknown is its own pair."""
     wid = adapter_writer_id(adapter_id)
     by_batch: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for r in rows:
+    last_seen: Dict[str, int] = {}
+    for pos, r in enumerate(rows):
         batch = r.get("batch_id")
         writer = r.get("writer_id")
         if batch is None or writer not in (WRITER_BASE, wid):
             continue
         by_batch.setdefault(str(batch), {}).setdefault(str(writer), r)
-    out = []
-    for writers in by_batch.values():
-        if WRITER_BASE in writers and wid in writers:
-            base = writers[WRITER_BASE]
-            out.append((base, writers[wid], base.get("brief_index")))
-    return out
+        last_seen[str(batch)] = pos
+    chosen: Dict[Any, Tuple[int, Dict[str, Any], Dict[str, Any]]] = {}
+    for batch, writers in by_batch.items():
+        if WRITER_BASE not in writers or wid not in writers:
+            continue
+        base = writers[WRITER_BASE]
+        index = base.get("brief_index")
+        key: Any = (
+            ("brief", base.get("scorecard_id"), index)
+            if index is not None
+            else ("batch", batch)
+        )
+        pos = last_seen[batch]
+        if key not in chosen or pos > chosen[key][0]:
+            chosen[key] = (pos, base, writers[wid])
+    return [
+        (base, adapted, base.get("brief_index"))
+        for _, base, adapted in sorted(chosen.values(), key=lambda t: t[0])
+    ]
 
 
 def compute_results(rows: List[Dict[str, Any]], adapter_id: int) -> Dict[str, Any]:
@@ -453,6 +471,11 @@ class ScorecardService:
         A refusal is announced, never raised."""
         if not render:
             return
+        if self._closing:
+            # The app is shutting down: a scorecard would only be
+            # interrupted at once (it is never auto-resumed).
+            logger.info("Scorecard for adapter %d skipped: shutting down", adapter_id)
+            return
         try:
             await self.start(adapter_id)
         except ScorecardError as exc:
@@ -484,6 +507,8 @@ class ScorecardService:
         Resumes the adapter's latest scorecard when it lacks pairs (and the
         target model is not changed), else renders a new one."""
         async with self._lock:
+            if self._closing:
+                raise ScorecardError(503, "shutting_down")
             running = self.running()
             if running is not None:
                 raise ScorecardError(
@@ -515,7 +540,23 @@ class ScorecardService:
                 )
                 missing = [i for i in todo if i not in _paired_briefs(rows, adapter_id)]
                 if missing:
-                    todo, resumed = missing, True
+                    # A brief whose batch is still in the ComfyUI queue
+                    # (e.g. it survived a restart) ingests on its own:
+                    # rendering it again would pair it twice.
+                    pending = set(
+                        await asyncio.to_thread(
+                            self.db.scorecard_pending_briefs, str(latest["id"])
+                        )
+                    )
+                    todo = [i for i in missing if i not in pending]
+                    if not todo:
+                        raise ScorecardError(
+                            409,
+                            "scorecard_pending",
+                            "The scorecard's remaining images are still "
+                            "rendering; try again when they finish.",
+                        )
+                    resumed = True
             cfg = self._get_config()
             if resumed:
                 assert latest is not None

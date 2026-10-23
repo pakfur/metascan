@@ -751,3 +751,33 @@ def test_tombstones_carry_resolved_caption_and_direction(db, store):
 def test_content_mode_is_required(db, store):
     with pytest.raises(TypeError):
         build_examples(db, "all", store, NOW)  # type: ignore[call-arg]
+
+
+def _variant_pairs(groups):
+    return [
+        PrefExample("s", f"u{g}", f"c{g}", f"r{g}", "krea2", [], "variant", g, "x")
+        for g in groups
+    ]
+
+
+def test_split_holdout_is_stable_when_groups_are_added():
+    # A run continued from an earlier adapter sees a superset of its groups:
+    # no group may cross the split, or the new holdout would contain pairs
+    # the earlier adapter trained on.
+    base = [f"group-{i}" for i in range(300)]
+    more = base + [f"later-{i}" for i in range(700)]
+    _, hold_a = split_holdout(_variant_pairs(base))
+    _, hold_b = split_holdout(_variant_pairs(more))
+    held_a = {p.group for p in hold_a}
+    held_b = {p.group for p in hold_b}
+    assert held_a == held_b & set(base)
+    # Removing groups never moves the remaining ones either.
+    _, hold_c = split_holdout(_variant_pairs(base[::2]))
+    assert {p.group for p in hold_c} == held_a & set(base[::2])
+
+
+def test_split_holdout_holds_about_ten_percent_of_a_large_set():
+    groups = [f"g-{i}" for i in range(5000)]
+    _, hold = split_holdout(_variant_pairs(groups))
+    share = len({p.group for p in hold}) / len(groups)
+    assert 0.085 <= share <= 0.115

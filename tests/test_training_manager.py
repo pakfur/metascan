@@ -1686,3 +1686,138 @@ async def test_a_mid_submit_gpu_refusal_maps_to_409(monkeypatch):
             },
         )
     assert r.status_code == 409 and r.json()["detail"]["code"] == "gpu_busy_training"
+
+
+# ---- final-review fixes ------------------------------------------------------------
+
+
+async def test_a_continued_run_resumes_after_its_source_adapter_is_deleted(
+    db, tmp_path, dataset
+):
+    # "Continue from" adapter A, pause, delete A, resume: the run must not
+    # depend on A's folder (its PEFT dir is copied into the run at start).
+    import json
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    await m.start("all", "quick")
+    await _idle(m)
+    source = db.list_writer_adapters()[0]["id"]
+    m.fake = dict(m.fake, **SLOW)
+    run_id = await m.start("all", "quick", start_from=source)
+    run_dir = Path(db.get_training_run(run_id)["run_dir"])
+    task = json.loads((run_dir / "task.json").read_text())
+    init = Path(task["init_adapter_dir"])
+    assert run_dir in init.parents
+    assert (init / "adapter_config.json").is_file()
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 2
+    )
+    await m.pause()
+    await _idle(m)
+
+    import shutil
+
+    shutil.rmtree(adapter_dir(tmp_path / "data", source))
+    db.soft_delete_writer_adapter(source)
+    _speed_up(db, run_id)
+    await m.resume(run_id)
+    await _idle(m)
+    run = db.get_training_run(run_id)
+    assert run["status"] == "completed", run
+    child = db.get_writer_adapter(run["adapter_id"])
+    meta = json.loads(
+        (adapter_dir(tmp_path / "data", child["id"]) / "meta.json").read_text()
+    )
+    assert meta["init_adapter_lora"] is not None
+
+
+async def test_completion_refreshes_the_writer_before_dropping_the_lock(
+    db, tmp_path, dataset
+):
+    # The GPU release restarts an interrupted briefs job, which may spawn
+    # the shared writer: it must already have the new --lora list.
+    order: List[Tuple[str, bool]] = []
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+
+    async def refresh() -> None:
+        order.append(("refresh", m.gpu_locked()))
+
+    m._refresh_adapters = refresh
+    m.on_gpu_released = lambda: order.append(("released", m.gpu_locked()))
+    await m.start("all", "quick")
+    await _idle(m)
+    assert db.list_writer_adapters()[0]["status"] == "untested"
+    assert [name for name, _ in order] == ["refresh", "released"]
+    assert order[0] == ("refresh", True)
+    names = [e for e, _ in rec.log]
+    assert "adapters_changed" in names[names.index("run_started") :]
+
+
+async def test_a_start_that_fails_after_spawning_stops_the_worker(
+    db, tmp_path, dataset, monkeypatch
+):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    spawned: List[Any] = []
+    orig_exec = asyncio.create_subprocess_exec
+
+    async def exec_spy(*a: Any, **kw: Any) -> Any:
+        proc = await orig_exec(*a, **kw)
+        spawned.append(proc)
+        return proc
+
+    def boom(run_dir: Path, pid: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tm.asyncio, "create_subprocess_exec", exec_spy)
+    monkeypatch.setattr(tm, "write_worker_pid", boom)
+    with pytest.raises(OSError):
+        await m.start("all", "quick")
+    assert len(spawned) == 1
+    # Terminated and reaped before the run is marked failed / lock released.
+    assert spawned[0].returncode is not None
+    assert not m.gpu_locked()
+    (run,) = db.list_training_runs()
+    assert run["status"] == "failed"
+
+
+async def test_a_run_completing_while_closing_skips_the_scorecard_hook(
+    db, tmp_path, dataset
+):
+    calls: List[Tuple[int, bool]] = []
+
+    async def hook(adapter_id: int, render: bool) -> None:
+        calls.append((adapter_id, render))
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, on_completed=hook)
+    await m.start("all", "quick", render_scorecard=True)
+    m._closing = True  # the server began shutting down meanwhile
+    await _idle(m)
+    assert db.list_writer_adapters()[0]["status"] == "untested"
+    assert calls == []
+
+
+def test_lifespan_recovers_training_before_preloading_models():
+    # An orphaned trainer (a server that died hard) holds the GPU: it must
+    # be stopped by recover() before CLIP / VLM preloads spawn anything.
+    import inspect
+
+    from backend import main
+
+    src = inspect.getsource(main.lifespan)
+    install = src.index("await _install_training(training_manager)")
+    for spawn in (
+        "asyncio.create_task(_preload())",
+        "asyncio.create_task(_preload_faiss())",
+        "asyncio.create_task(_preload_vlm())",
+        "similarity.init_embedding_queue()",
+    ):
+        assert install < src.index(spawn), spawn
+    # Shutdown order is unchanged: training first, then the scorecard.
+    tail = src[src.index("yield") :]
+    assert tail.index("await _uninstall_training(training_manager)") < tail.index(
+        "await scorecard_service.aclose()"
+    )
