@@ -176,13 +176,19 @@ onMounted(async () => {
   }
 })
 
-const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)']
+const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)', 'Writer training']
 
 const tierLabel = computed(() => TIER_LABEL[models.tier])
 const tierColor = computed(() => TIER_COLOR[models.tier])
 
 const grouped = computed<Record<string, ModelRow[]>>(() => {
-  const out: Record<string, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [], 'Tagging (VLM)': [] }
+  const out: Record<string, ModelRow[]> = {
+    Embedding: [],
+    Upscaling: [],
+    NLP: [],
+    'Tagging (VLM)': [],
+    'Writer training': [],
+  }
   for (const row of models.models) (out[row.group] ??= []).push(row)
   return out
 })
@@ -324,7 +330,19 @@ async function onTestHfToken() {
   }
 }
 
-const missingCount = computed(() => models.models.filter((m) => m.status === 'missing').length)
+// "Download all missing" skips the opt-in writer training assets.
+const missingCount = computed(
+  () => models.models.filter((m) => m.status === 'missing' && !m.writer_training).length,
+)
+
+// Writer LoRA training: the gate's reasons (CUDA, deps, base, converter)
+// shown under the group; downloads stay allowed on every machine.
+const writerTrainingGate = computed(() => models.gates['writer_training'] ?? null)
+
+function canDelete(row: ModelRow): boolean {
+  if (row.writer_training) return row.status === 'available' || row.partial === true
+  return row.status === 'available'
+}
 
 // Banner: the currently-selected CLIP model's dim vs the index on disk.
 const indexDim = computed(() => {
@@ -560,6 +578,15 @@ async function onRetagLibrary() {
           <div class="col name">
             <div class="name-line">{{ row.name }}</div>
             <div class="desc">{{ row.description }}</div>
+            <div v-if="row.writer_training && row.release" class="desc" data-testid="converter-release">
+              llama.cpp {{ row.release }}
+              <span v-if="row.release_mismatch" class="warn-inline">
+                — different from the server release ({{ row.server_release }}); download again to match.
+              </span>
+            </div>
+            <div v-if="row.writer_training && row.hint" class="desc" data-testid="writer-training-hint">
+              {{ row.hint }}
+            </div>
           </div>
           <div class="col status">
             <span class="chip" :style="{ color: statusLabel(row).color, borderColor: statusLabel(row).color }">
@@ -583,13 +610,16 @@ async function onRetagLibrary() {
           </div>
           <div class="col preload">
             <input
+              v-if="!row.writer_training"
               type="checkbox"
               :checked="row.preload_at_startup"
               @change="onTogglePreload(row, $event)"
             />
+            <span v-else class="muted">—</span>
           </div>
           <div class="col actions">
             <button
+              v-if="row.download_allowed !== false"
               class="btn-small"
               :disabled="row.status === 'available' || !!models.downloading[row.id] || !isModelDownloadable(row)"
               @click="onDownload(row)"
@@ -597,9 +627,9 @@ async function onRetagLibrary() {
               Download
             </button>
             <button
-              v-if="!row.id.startsWith('clip-')"
+              v-if="!row.id.startsWith('clip-') && row.managed !== false"
               class="btn-small btn-small-danger"
-              :disabled="row.status !== 'available'"
+              :disabled="!canDelete(row) || !!models.downloading[row.id]"
               @click="onDelete(row)"
             >
               Delete
@@ -642,6 +672,17 @@ async function onRetagLibrary() {
           </div>
         </div>
         <div v-if="grouped[group].length === 0" class="empty-msg">No models in this group.</div>
+      </div>
+      <div
+        v-if="group === 'Writer training' && writerTrainingGate && !writerTrainingGate.available"
+        class="muted writer-training-gate"
+        data-testid="writer-training-gate"
+      >
+        Prompt-writer training is not available yet:
+        <ul>
+          <li v-for="r in writerTrainingGate.reasons ?? [writerTrainingGate.reason]" :key="r">{{ r }}</li>
+        </ul>
+        Downloads work on any machine.
       </div>
     </section>
 
@@ -1024,6 +1065,8 @@ section { margin-bottom: 14px; }
 }
 
 .warn-inline { color: #eab308; }
+.writer-training-gate { margin-top: 6px; font-size: 12px; }
+.writer-training-gate ul { margin: 4px 0; padding-left: 18px; }
 
 .gate-chip { margin-left: 4px; }
 .gate-good { color: #22c55e; border-color: #22c55e; }

@@ -171,36 +171,11 @@ def training_paths_from_config(
     """The training interpreter (``models.writer_train_python``, default
     this Python), the HF base weights dir (``models.writer_train_repo``,
     default the 8B writer's source repo) and llama.cpp's LoRA converter
-    (``models.llama_cpp_dir``, default ``data/llama.cpp``)."""
-    import sys
+    (``models.llama_cpp_dir``, default ``data/llama.cpp``). One resolver
+    with the Models tab: ``writer_training_assets.asset_paths``."""
+    from backend.services.writer_training_assets import asset_paths
 
-    from metascan.core.writer_adapters import (
-        CONVERTER_SCRIPT,
-        DEFAULT_WRITER_TRAIN_REPO,
-        default_llama_cpp_dir,
-        train_base_dir,
-    )
-
-    models = config.get("models") or {}
-    if not isinstance(models, dict):
-        models = {}
-
-    def _str(key: str) -> str:
-        value = models.get(key)
-        return value.strip() if isinstance(value, str) else ""
-
-    repo = _str("writer_train_repo") or DEFAULT_WRITER_TRAIN_REPO
-    llama_dir = _str("llama_cpp_dir")
-    return WriterTrainingPaths(
-        python=_str("writer_train_python") or sys.executable,
-        base_dir=train_base_dir(data_dir, repo),
-        converter_script=(
-            Path(llama_dir).expanduser()
-            if llama_dir
-            else default_llama_cpp_dir(data_dir)
-        )
-        / CONVERTER_SCRIPT,
-    )
+    return asset_paths(config, data_dir).gate_paths()
 
 
 # ---- the worker's PID record (orphans after a hard kill) ---------------------
@@ -1330,6 +1305,37 @@ class TrainingManager:
                     "options": run["options"],
                 }
             )
+        return out
+
+    def runs_using_base(self, base_dir: Path) -> List[int]:
+        """Runs that read the HF weights in ``base_dir``: the active run and
+        every running / paused / failed (resumable) run whose task.json names
+        it -- deleting the weights would break them. A run whose task.json
+        cannot be read counts (conservative). Synchronous."""
+        want = Path(base_dir).expanduser().resolve()
+        out: List[int] = []
+        if self._active is not None:
+            out.append(self._active.run_id)
+        statuses = (RUN_RUNNING,) + tuple(RESUMABLE_RUN_STATUSES)
+        for run in self.db.list_training_runs(statuses):
+            if run["id"] in out:
+                continue
+            run_dir = run.get("run_dir")
+            if not run_dir:
+                continue
+            try:
+                task = json.loads((Path(run_dir) / "task.json").read_text())
+                used = Path(str(task["base_dir"])).expanduser().resolve()
+            except FileNotFoundError:
+                if not Path(run_dir).exists():
+                    continue  # nothing left to resume
+                out.append(run["id"])
+                continue
+            except (OSError, ValueError, KeyError, TypeError):
+                out.append(run["id"])
+                continue
+            if used == want:
+                out.append(run["id"])
         return out
 
     # ---- lifecycle ----------------------------------------------------------

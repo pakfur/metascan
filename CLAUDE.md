@@ -138,7 +138,9 @@ Defaults to OpenFreeMap liberty if absent. Override to point MapLibre GL at any 
 {
   "models": {
     "preload_at_startup": ["clip-large"],  // model ids; read by lifespan preload loop
-    "huggingface_token": ""                  // masked in UI; injected as HF_TOKEN env for subprocesses
+    "huggingface_token": "",                 // masked in UI; injected as HF_TOKEN env for subprocesses
+    "writer_train_repo": "",                 // optional: HF repo for writer LoRA training weights
+    "llama_cpp_dir": ""                      // optional: your llama.cpp checkout (LoRA converter); unset = data/llama.cpp, downloadable
   }
 }
 ```

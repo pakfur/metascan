@@ -200,6 +200,14 @@ export const useModelsStore = defineStore('models', () => {
     }
   })
 
+  // A writer-training asset was downloaded or deleted (maybe in another
+  // tab): the rows and the writer_training gate change with it.
+  useWebSocket('training', (event) => {
+    if (event === 'gate_changed') {
+      loadStatus().catch((e) => console.error('loadStatus after gate change failed', e))
+    }
+  })
+
   function applyInferencePayload(p: Partial<InferenceStatusPayload>) {
     if (p.state) inferenceState.value = p.state as InferenceState
     if ('model_key' in p) inferenceModelKey.value = p.model_key ?? null
@@ -268,7 +276,8 @@ export const useModelsStore = defineStore('models', () => {
   }
 
   async function startDownloadAllMissing() {
-    const missing = models.value.filter((m) => m.status === 'missing')
+    // Writer training assets (~16 GB of training weights) are opt-in only.
+    const missing = models.value.filter((m) => m.status === 'missing' && !m.writer_training)
     for (const m of missing) {
       // Fire in parallel; the backend dispatches each on its own asyncio task.
       void startDownload(m.id)

@@ -622,13 +622,32 @@ def _probe_trl(python: str) -> str:
     return "" if ok else reason
 
 
-def _base_weights_present(base_dir: Path) -> bool:
+def base_weights_present(base_dir: Path) -> bool:
+    """The HF training weights are complete in ``base_dir``: config.json
+    and a ``*.safetensors``, and -- for a sharded checkpoint -- every shard
+    each ``*.safetensors.index.json`` lists (an unreadable index counts as
+    incomplete), so a partial download never satisfies the gate."""
     try:
-        return (base_dir / "config.json").is_file() and any(
-            base_dir.glob("*.safetensors")
-        )
+        if not (base_dir / "config.json").is_file():
+            return False
+        if not any(base_dir.glob("*.safetensors")):
+            return False
+        for index in base_dir.glob("*.safetensors.index.json"):
+            try:
+                weight_map = json.loads(index.read_text()).get("weight_map")
+            except (OSError, ValueError, AttributeError):
+                return False
+            if not isinstance(weight_map, dict):
+                return False
+            for shard in set(weight_map.values()):
+                if not isinstance(shard, str) or not (base_dir / shard).is_file():
+                    return False
+        return True
     except OSError:
         return False
+
+
+_base_weights_present = base_weights_present
 
 
 def writer_training_reasons(
@@ -670,12 +689,14 @@ def writer_training_reasons(
         reasons.extend(r for r in cached if r)
     if not _base_weights_present(paths.base_dir):
         reasons.append(
-            f"Writer training base weights not downloaded ({paths.base_dir})."
+            f"Writer training base weights not downloaded ({paths.base_dir}); "
+            "download them in Models."
         )
     if not paths.converter_script.is_file():
         reasons.append(
             f"llama.cpp LoRA converter not found ({paths.converter_script}); "
-            "set models.llama_cpp_dir to a llama.cpp checkout."
+            "download it in Models or set models.llama_cpp_dir to a llama.cpp "
+            "checkout."
         )
     return reasons
 
