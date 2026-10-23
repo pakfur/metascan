@@ -1063,3 +1063,62 @@ class TestWriterModelApi(T2iApiCase):
         self.assertEqual(resp.status_code, 200)
         ((_, req),) = self.runner.calls
         self.assertEqual(req.prompts[0]["writer_model"], "qwen3vl-8b")
+
+
+class TestParallelVariantDrafts(VariantCase):
+    """Generate Prompt writes its variants concurrently, bounded by the
+    writer model's ``parallel_slots`` (final review item 5)."""
+
+    async def _peak(self, model_id: str, variants: int) -> Tuple[int, PromptResult]:
+        assert self.vlm is not None
+        self.vlm.model_id = model_id
+        gates = [asyncio.Event() for _ in range(variants)]
+        self.vlm.gates.extend(gates)
+        self.vlm.replies.extend(f"SYNTH d{k}" for k in range(variants))
+        task = asyncio.create_task(
+            self.runner.generate_prompt(
+                caption="SYNTH caption", seed=3, model="krea2", variants=variants
+            )
+        )
+        peak = 0
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            peak = max(peak, len(self.vlm.calls))
+        for g in gates:
+            g.set()
+        return peak, await asyncio.wait_for(task, 5)
+
+    async def test_variants_are_written_in_parallel(self) -> None:
+        peak, result = await self._peak("qwen3vl-8b", 4)  # 4 slots
+        self.assertEqual(peak, 4)
+        self.assertEqual([d.variant_index for d in result.drafts], [0, 1, 2, 3])
+        self.assertEqual(
+            sorted(d.prompt for d in result.drafts),
+            [f"SYNTH d{k}" for k in range(4)],
+        )
+        angles = self.angles()
+        self.assertEqual(
+            [d.angle for d in result.drafts], [None, angles[0], angles[1], angles[2]]
+        )
+
+    async def test_parallelism_is_bounded_by_the_slots(self) -> None:
+        peak, result = await self._peak("qwen3vl-2b", 4)  # 2 slots
+        self.assertEqual(peak, 2)
+        self.assertEqual(len(result.drafts), 4)
+
+    async def test_a_failing_variant_cancels_the_others(self) -> None:
+        from metascan.core.vlm_client import VlmError
+
+        assert self.vlm is not None
+        gate = asyncio.Event()
+        self.vlm.gates.extend([None, gate, gate])
+        self.vlm.replies.extend([VlmError("boom")])
+        with self.assertRaises(VlmError):
+            await asyncio.wait_for(
+                self.runner.generate_prompt(
+                    caption="SYNTH caption", seed=3, model="krea2", variants=3
+                ),
+                5,
+            )
+        await asyncio.sleep(0)
+        self.assertEqual(self.vlm.cancelled_calls, 2)
