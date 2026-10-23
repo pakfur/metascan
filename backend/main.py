@@ -46,6 +46,7 @@ from backend.api import (
 )
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.judgments_service import faiss_embedding_lookup
+from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import apply_pending_taste_snapshot
 from backend.ws.manager import ws_manager
@@ -370,6 +371,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     similarity.set_embedding_complete_hook(taste_service.schedule_rescore_threadsafe)
     taste_service.start_retrain_loop()
 
+    # Fresh T2I images need CLIP vectors before they can be scored: build
+    # the index incrementally 15 s after the last ingest, once no
+    # generation work is in flight (the embedding hook above rescores).
+    auto_index = AutoIndexScheduler(
+        start_build=similarity.start_auto_index_build,
+        is_indexing=similarity.is_indexing,
+        is_busy=lambda: generation_busy(t2i_runner, comfy_client),
+    )
+    t2i_runner.on_event(auto_index.on_t2i_event)
+
     try:
         yield
     finally:
@@ -379,6 +390,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except (asyncio.CancelledError, Exception):
             pass
         await upscale.shutdown_upscale_queue()
+        # The auto build starts embedding runs: stop it before the queue.
+        try:
+            await auto_index.aclose()
+        except Exception:
+            logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
         await similarity.shutdown_embedding_queue()

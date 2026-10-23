@@ -456,6 +456,23 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 @router.post("/index/build")
 async def build_index(rebuild: bool = False) -> Dict[str, Any]:
     """Start an embedding worker subprocess for unembedded (or all) files."""
+    return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True)
+
+
+async def start_auto_index_build() -> Dict[str, Any]:
+    """Incremental build started by the server itself (after T2I ingests,
+    see ``backend/services/auto_index.py``). It never queues VLM tagging:
+    that would load the VLM on the GPU behind the owner's back between
+    generation batches; the new files get CLIP tags instead."""
+    return await _start_index_build(rebuild=False, allow_vlm_tagging=False)
+
+
+def is_indexing() -> bool:
+    """True while the embedding worker subprocess runs."""
+    return _get_embedding_queue().is_indexing()
+
+
+async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
     global _current_scan_tag_with_vlm
 
     eq = _get_embedding_queue()
@@ -475,7 +492,7 @@ async def build_index(rebuild: bool = False) -> Dict[str, Any]:
         await ws_manager.broadcast("embedding", "complete", {"total": 0})
         return {"status": "noop", "total": 0}
 
-    tag_with_vlm = should_tag_with_vlm(detect_hardware())
+    tag_with_vlm = allow_vlm_tagging and should_tag_with_vlm(detect_hardware())
     _current_scan_tag_with_vlm = tag_with_vlm
 
     started = await asyncio.to_thread(
