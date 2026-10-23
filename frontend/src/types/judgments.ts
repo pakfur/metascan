@@ -22,6 +22,15 @@ export interface JudgmentState {
   confirmed_at: string | null
   is_favorite: boolean
   categories: CategoryRef[]
+  // Position of a T2I image in its generation batch. Only GET returns the
+  // key (PATCH / seen responses omit it), so undefined means "unknown",
+  // not "no batch"; null means the item has no batch.
+  batch?: BatchPosition | null
+}
+
+export interface BatchPosition {
+  index: number
+  size: number
 }
 
 // An image counts as seen after this long on screen; a video on play.
