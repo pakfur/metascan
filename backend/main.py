@@ -174,6 +174,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("Logging to %s", server_log)
 
     ws_manager.attach_loop(asyncio.get_running_loop())
+    similarity.set_server_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
 
     # Load the YAML-backed prompt store eagerly and start a watcher so
@@ -398,8 +399,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
-        await similarity.shutdown_embedding_queue()
+        await similarity.shutdown_embedding_queue()  # cancels any VLM drain
         similarity.set_embedding_complete_hook(None)
+        similarity.set_server_loop(None)
         try:
             await taste_service.aclose()
         except Exception:
