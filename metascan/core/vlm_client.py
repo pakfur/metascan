@@ -54,7 +54,7 @@ _RESPAWN_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
 
 # A request whose client was evicted (swapped out for the other role)
 # while it ran is retried this many times after re-ensuring residency.
-_EVICTION_RETRIES = 2
+_EVICTION_RETRIES = 5
 
 _T = TypeVar("_T")
 
@@ -107,6 +107,14 @@ class VlmClient:
         # for ComfyUI, /unload) and by a new spawn.
         self.swapped_out = False
         self._evictions = 0
+        # Bumped by every explicit shutdown(): a background re-ensure that
+        # began before one must not spawn after it (an unload for ComfyUI
+        # wins over a swap back).
+        self._explicit_stops = 0
+        # Cleared for the whole of an eviction's shutdown: a request or a
+        # re-ensure waits for it instead of hitting the dying server.
+        self._quiesced = asyncio.Event()
+        self._quiesced.set()
 
         self._proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._stderr_task: Optional[asyncio.Task[None]] = None
@@ -194,10 +202,12 @@ class VlmClient:
         """
         if self.retired:
             raise VlmError("client retired")
+        await self._quiesced.wait()
         async with self._start_lock:
             if (
                 self._state in (STATE_LOADING, STATE_READY)
                 and self._model_id == model_id
+                and not self._stopping
             ):
                 if self._state == STATE_LOADING:
                     await self._wait_ready(timeout=600.0)
@@ -210,27 +220,36 @@ class VlmClient:
         *,
         wait_ready: bool = True,
         ready_timeout: float = 300.0,
+        _unless_stopped_since: Optional[int] = None,
     ) -> None:
+        """Spawn ``model_id``. ``_unless_stopped_since`` (an
+        ``_explicit_stops`` value) makes a background re-ensure give up
+        when an explicit shutdown landed after it began."""
         if self.retired:
             raise VlmError("client retired")
         if self._proc is not None and self._proc.poll() is None:
-            if model_id == self._model_id and self._state in (
-                STATE_LOADING,
-                STATE_READY,
+            if (
+                model_id == self._model_id
+                and self._state in (STATE_LOADING, STATE_READY)
+                and not self._stopping
             ):
                 if wait_ready:
                     await self._wait_ready(ready_timeout)
                 return
-            await self.shutdown()
+            await self._stop()
 
         if self.before_spawn is not None:
             await self.before_spawn(self)
-            if self.retired:
-                raise VlmError("client retired")
+        if self.retired:
+            raise VlmError("client retired")
+        if (
+            _unless_stopped_since is not None
+            and self._explicit_stops != _unless_stopped_since
+        ):
+            raise VlmError("VLM was unloaded; not bringing it back")
 
         self._spec = get_spec(model_id)
         self._model_id = model_id
-        self.swapped_out = False
         self._last_error = None
         self._last_progress = {}
         self._ready_event.clear()
@@ -335,6 +354,11 @@ class VlmClient:
                 r = await self._http.get("/health")
                 if r.status_code == 200:
                     self._respawn_attempts = 0
+                    # Resident again; the swap grace counts from here so the
+                    # requests that waited for this load run before the
+                    # other role can evict it.
+                    self.swapped_out = False
+                    self._last_request_end = time.monotonic()
                     self._ready_event.set()
                     self._set_state(STATE_READY)
                     return
@@ -361,13 +385,45 @@ class VlmClient:
 
     async def evict(self) -> None:
         """Shut down to make room for the other role's model, remembering
-        that the next request should bring this model back."""
+        that the next request should bring this model back. The client is
+        non-resident for the whole shutdown (``swapped_out`` first,
+        ``_quiesced`` cleared), so a request killed by the terminate -- or
+        one that starts meanwhile -- waits and re-ensures instead of hitting
+        the dying server. An explicit ``shutdown()`` landing meanwhile
+        clears ``swapped_out`` and wins."""
         self._evictions += 1
-        await self.shutdown()
         self.swapped_out = True
+        self._quiesced.clear()
+        try:
+            await self._stop()
+        finally:
+            self._quiesced.set()
+
+    def _is_resident(self) -> bool:
+        return (
+            self._state == STATE_READY
+            and not self._stopping
+            and self._quiesced.is_set()
+        )
+
+    async def wait_loaded(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` s for a spawn / load in progress to end.
+        True when it is no longer spawning or loading."""
+        deadline = time.monotonic() + timeout
+        while self._state in (STATE_SPAWNING, STATE_LOADING):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+        return True
 
     async def shutdown(self) -> None:
+        """Explicit unload (ComfyUI, /unload, server exit): nothing brings
+        the model back until a caller deliberately ensure_started()s it."""
         self.swapped_out = False
+        self._explicit_stops += 1
+        await self._stop()
+
+    async def _stop(self) -> None:
         self._stopping = True
         proc = self._proc
         if proc is not None and proc.poll() is None:
@@ -505,30 +561,48 @@ class VlmClient:
                 return False
             await asyncio.sleep(min(0.02, max(0.0, deadline - now)))
 
+    async def _ensure_resident(self) -> None:
+        """Bring a swapped-out model back (background re-ensure). Waits out
+        an eviction in progress; gives up when an explicit shutdown landed
+        since it began."""
+        stops = self._explicit_stops
+        await self._quiesced.wait()
+        if self.retired:
+            raise VlmError("client retired")
+        async with self._start_lock:
+            if self._is_resident():
+                return
+            if self._explicit_stops != stops:
+                raise VlmError("VLM was unloaded; not bringing it back")
+            model_id = self.preferred_model_id
+            assert model_id is not None
+            await self.start(model_id, wait_ready=True, _unless_stopped_since=stops)
+
     async def _resident_request(self, call: Callable[[], Awaitable[_T]]) -> _T:
         """Run one request, bringing the model back first when VlmRoles
         swapped this client out for the other role -- and again if it was
-        swapped out while the request ran (a forced swap after the bounded
-        in-flight wait)."""
+        swapped out while the request (or its re-ensure) ran."""
         attempt = 0
         while True:
-            if (
-                self.swapped_out
-                and self._state != STATE_READY
-                and self.preferred_model_id
-            ):
-                await self.ensure_started(self.preferred_model_id)
             epoch = self._evictions
-            self._begin_request()
             try:
-                result = await call()
+                if (
+                    self.swapped_out
+                    and self.preferred_model_id
+                    and not self._is_resident()
+                ):
+                    await self._ensure_resident()
+                    epoch = self._evictions
+                self._begin_request()
+                try:
+                    result = await call()
+                finally:
+                    self._end_request()
             except Exception:
                 if self._evictions != epoch and attempt < _EVICTION_RETRIES:
                     attempt += 1
                     continue
                 raise
-            finally:
-                self._end_request()
             if not result and self._evictions != epoch and attempt < _EVICTION_RETRIES:
                 attempt += 1
                 continue
@@ -584,8 +658,8 @@ class VlmClient:
     ) -> AsyncIterator[Tuple[str, str]]:
         """Stream a chat completion (see ``_chat_stream_impl``). Brings a
         swapped-out model back first; a stream is not retried once begun."""
-        if self.swapped_out and self._state != STATE_READY and self.preferred_model_id:
-            await self.ensure_started(self.preferred_model_id)
+        if self.swapped_out and self.preferred_model_id and not self._is_resident():
+            await self._ensure_resident()
         self._begin_request()
         try:
             async for item in self._chat_stream_impl(
