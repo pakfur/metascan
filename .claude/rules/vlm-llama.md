@@ -81,7 +81,23 @@ the root CLAUDE.md still applies.
   never evicted: `_make_room` waits for `wait_loaded` (bounded by the
   600 s load timeout) and the swap grace restarts at READY so the waiting
   requests run first. Internal model changes inside `start()` use `_stop()`,
-  not `shutdown()`.
+  not `shutdown()`. `_make_room` re-checks the other client after its
+  waits: stopped meanwhile (an explicit unload landed) → nothing to
+  evict; explicitly reloaded meanwhile (`_explicit_stops` changed) → left
+  alone. `evict()` itself is a no-op on a non-resident client, so it can
+  never mark a stopped one `swapped_out`. `_resident_request` captures
+  `_explicit_stops` when the request begins and its re-ensure honours it
+  (`_ensure_resident(since=…)`). A start that times out tears the
+  process down and lands in ERROR (no zombie LOADING); `_is_loading()`
+  treats a LOADING state whose `_health_task` is done as abandoned, so
+  `wait_loaded` / `wait_idle` do not wait out the load timeout on it. A
+  failed background reload backs off (`_RESPAWN_BACKOFF_SECONDS`, reset at
+  READY): requests inside the window raise `VlmError("… retry in Ns")`
+  fast instead of evicting the other role again for every attempt. A
+  load that reached READY (`_ready_seen`) and was evicted before its
+  loader's `_wait_ready` resumed counts as loaded (`ensure_started`
+  returns; the next request re-ensures) — only a client evicted before
+  READY raises "ended in state stopped".
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
