@@ -139,27 +139,66 @@ export const useTrainingStore = defineStore('training', () => {
     return parts.join(' · ')
   })
 
-  // A WS burst can start several loads; only the newest may write.
-  let loadToken = 0
+  // A WS burst can start several loads; only the newest may write. Light
+  // loads (window closed: no dataset build) and full loads (window open)
+  // share one sequence for the run/state fields, and a full load's
+  // dataset / next_name are written only by the newest full load.
+  let loadSeq = 0
+  let writtenSeq = 0
+  let latestFull = 0
   async function load(recheck = false): Promise<void> {
-    const token = ++loadToken
+    const full = windowOpen.value
+    const token = ++loadSeq
+    if (full) latestFull = token
+    const wantScope = scope.value
     try {
-      const data = await fetchTrainingStatus(scope.value, recheck)
-      if (token !== loadToken) return
+      const data = await fetchTrainingStatus(wantScope, recheck, full)
+      const fresh = token > writtenSeq
+      const freshFull = full && token === latestFull
+      if (!fresh && !freshFull) return
+      const prev = status.value
+      const base: TrainingStatus = fresh || !prev ? data : prev
       // A progress event may be newer than the status snapshot.
-      const live = status.value?.run
-      if (data.run && live && live.run_id === data.run.run_id) {
+      const live = prev?.run
+      if (fresh && data.run && live && live.run_id === data.run.run_id) {
         const a = live.progress?.updated_at ?? ''
         const b = data.run.progress?.updated_at ?? ''
         if (a > b) data.run.progress = live.progress
       }
-      status.value = data
-      loadError.value = null
+      status.value = {
+        ...base,
+        dataset: freshFull ? data.dataset : prev?.dataset,
+        next_name: freshFull ? data.next_name : prev?.next_name,
+      }
+      if (fresh) writtenSeq = token
+      if (token === loadSeq) loadError.value = null
     } catch (e) {
-      if (token !== loadToken) return
-      loadError.value = trainingErrorText(e)
+      // The selected category was deleted: fall back to All.
+      if (full && wantScope !== 'all' && isUnknownScope(e) && scope.value === wantScope) {
+        resetScope()
+        return
+      }
+      if (token === loadSeq) loadError.value = trainingErrorText(e)
       throw e
     }
+  }
+
+  function isUnknownScope(e: unknown): boolean {
+    return e instanceof ApiError && (e.detail as { code?: unknown } | null)?.code === 'unknown_scope'
+  }
+
+  /** Back to All (the selected category no longer exists) and reload. */
+  function resetScope(): void {
+    if (scope.value === 'all') return
+    scope.value = 'all'
+    quietly(load(), 'load the status')
+  }
+
+  /** `categories_changed`: drop a scope whose category was deleted. */
+  function checkScope(categoryIds: Iterable<number | string>): void {
+    if (scope.value === 'all') return
+    for (const id of categoryIds) if (String(id) === scope.value) return
+    resetScope()
   }
 
   async function loadAdapters(): Promise<void> {
@@ -212,6 +251,19 @@ export const useTrainingStore = defineStore('training', () => {
     refreshAll()
   }
 
+  // run_progress of an unseen run: one debounced load per run id.
+  let unseenRunId: number | null = null
+  let unseenTimer: ReturnType<typeof setTimeout> | null = null
+  function loadForUnseenRun(runId: number): void {
+    if (!Number.isFinite(runId) || unseenRunId === runId) return
+    unseenRunId = runId
+    if (unseenTimer !== null) clearTimeout(unseenTimer)
+    unseenTimer = setTimeout(() => {
+      unseenTimer = null
+      quietly(load(), 'load the status')
+    }, 300)
+  }
+
   /** The always-on `training` channel bridge (App.vue). */
   function handleEvent(event: string, data: Record<string, unknown>): void {
     const runId = Number(data.run_id)
@@ -244,8 +296,9 @@ export const useTrainingStore = defineStore('training', () => {
         if (r && r.run_id === runId) {
           status.value = { ...status.value!, run: { ...r, progress: progress as TrainingProgress } }
         } else {
-          // Progress of a run this tab has not seen start (opened mid-run).
-          quietly(load(), 'load the status')
+          // Progress of a run this tab has not seen start (opened mid-run):
+          // one load per run, not one per event.
+          loadForUnseenRun(runId)
         }
         break
       }
@@ -259,11 +312,12 @@ export const useTrainingStore = defineStore('training', () => {
         endRun('failed', `Training failed: ${String(data.error ?? 'unknown error')}`)
         break
       case 'run_cancelled':
-        // Also sent when a paused run is discarded with its adapter.
-        if (status.value?.run && status.value.run.run_id !== runId) {
-          refreshAll()
-        } else {
+        // Also sent when a paused / failed run is discarded (e.g. with its
+        // adapter): only the run this tab shows as active "stopped".
+        if (status.value?.run && status.value.run.run_id === runId) {
           endRun('cancelled', 'Training cancelled; its checkpoints were deleted.')
+        } else {
+          refreshAll()
         }
         break
       case 'adapters_changed':
@@ -363,6 +417,7 @@ export const useTrainingStore = defineStore('training', () => {
     loadBriefs,
     refreshAll,
     setScope,
+    checkScope,
     openWindow,
     closeWindow,
     handleEvent,

@@ -1416,6 +1416,15 @@ class DatabaseManager:
                 )
                 """
             )
+            # The name an adapter was created with: next_adapter_name numbers
+            # from these, so a rename never frees its number. NULL on rows
+            # from before the column (their current name stands in).
+            _idempotent_add_column(
+                conn,
+                "writer_adapters",
+                "generated_name",
+                "ALTER TABLE writer_adapters ADD COLUMN generated_name TEXT",
+            )
             # A training run's working dir (task.json, JSONL, checkpoints)
             # and its options JSON (scope, effort, hyperparams, ...).
             for _col in ("run_dir", "options"):
@@ -6135,10 +6144,11 @@ class DatabaseManager:
         with self.lock, self._get_connection() as conn:
             try:
                 cur = conn.execute(
-                    "INSERT INTO writer_adapters (name, scope, kind, base_model, "
-                    "status, created_at, data_cutoff, hyperparams, counts) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO writer_adapters (name, generated_name, scope, "
+                    "kind, base_model, status, created_at, data_cutoff, "
+                    "hyperparams, counts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
+                        name,
                         name,
                         scope,
                         kind,
@@ -6373,21 +6383,36 @@ class DatabaseManager:
 
     def next_adapter_name(self, scope_slug: str) -> str:
         """``taste-<scope_slug>-v<N>`` with N one past the highest N any
-        adapter of that slug ever had (deleted ones included, so a number is
-        never reused)."""
+        adapter of that slug was *created* with (``generated_name``; deleted
+        and renamed ones included, so a number is never reused). A user's
+        rename to e.g. ``taste-all-v7`` does not move the sequence, but a
+        name already taken (UNIQUE, deleted rows included) is skipped."""
         prefix = f"taste-{scope_slug}-v"
+        low = prefix.lower()
+
+        def number(name: Any) -> Optional[int]:
+            lowered = str(name).lower()
+            tail = lowered[len(low) :]
+            if lowered.startswith(low) and tail.isascii() and tail.isdigit():
+                return int(tail)
+            return None
+
         top = 0
+        taken: Set[int] = set()
         with self.lock, self._get_connection() as conn:
-            for (name,) in conn.execute("SELECT name FROM writer_adapters"):
-                lowered = str(name).lower()
-                tail = lowered[len(prefix) :]
-                if (
-                    lowered.startswith(prefix.lower())
-                    and tail.isascii()
-                    and tail.isdigit()
-                ):
-                    top = max(top, int(tail))
-        return f"{prefix}{top + 1}"
+            for name, generated in conn.execute(
+                "SELECT name, COALESCE(generated_name, name) FROM writer_adapters"
+            ):
+                n = number(generated)
+                if n is not None:
+                    top = max(top, n)
+                n = number(name)
+                if n is not None:
+                    taken.add(n)
+        nxt = top + 1
+        while nxt in taken:
+            nxt += 1
+        return f"{prefix}{nxt}"
 
     def writer_window_stats(
         self,
