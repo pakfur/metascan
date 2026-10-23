@@ -20,7 +20,13 @@ import {
   type ResumableRun,
   type TrainingEffort,
 } from '../../types/training'
-import { SERVABLE_STATUSES, type WriterAdapter } from '../../types/writers'
+import {
+  SCORECARD_READY_PAIRS,
+  SERVABLE_STATUSES,
+  ratePct,
+  type ScorecardResult,
+  type WriterAdapter,
+} from '../../types/writers'
 
 const training = useTrainingStore()
 const categories = useCategoriesStore()
@@ -373,10 +379,73 @@ const STATUS_CLASS: Record<string, string> = {
   failed: 'st-fl',
 }
 
-/** Scorecard favorite rate — Task 9 fills this in; "—" until then. */
-function scorecardFav(_a: WriterAdapter): string {
-  void _a
-  return '—'
+// ---- scorecard: base vs adapter on fixed briefs, judged blind ------------
+const scorecardByAdapter = computed(() => {
+  const m = new Map<number, ScorecardResult>()
+  for (const r of training.scorecards?.adapters ?? []) m.set(r.adapter_id, r)
+  return m
+})
+const readyPairs = computed(() => training.scorecards?.ready_pairs ?? SCORECARD_READY_PAIRS)
+
+/** The adapter's favorite rate on its blind scorecard ("31%"), or "—". */
+function scorecardFav(a: WriterAdapter): string {
+  return ratePct(scorecardByAdapter.value.get(a.id)?.fav_rate_adapter)
+}
+
+const baseFav = computed(() => ratePct(training.scorecards?.base.fav_rate))
+
+function scorecardTitle(a: WriterAdapter): string {
+  const r = scorecardByAdapter.value.get(a.id)
+  if (!r || r.n_pairs === 0) return 'No scorecard yet'
+  const parts = [
+    `${r.n_judged} of ${r.n_pairs} pairs judged`,
+    `base ${ratePct(r.fav_rate_base)} vs this ${ratePct(r.fav_rate_adapter)} favorites`,
+  ]
+  if (r.mean_score_base !== null || r.mean_score_adapter !== null) {
+    const f = (v: number | null) => (v === null ? '—' : v.toFixed(2))
+    parts.push(`mean taste score base ${f(r.mean_score_base)} vs ${f(r.mean_score_adapter)}`)
+  }
+  return parts.join(' · ')
+}
+
+/** "12/30 judged" while untested (ready at `readyPairs` judged pairs). */
+function judgedText(a: WriterAdapter): string {
+  if (a.status !== 'untested' || a.kind !== 't2i') return ''
+  const n = scorecardByAdapter.value.get(a.id)?.n_judged ?? 0
+  return `${Math.min(n, readyPairs.value)}/${readyPairs.value} judged`
+}
+
+const scorecardRun = computed(() => training.scorecardRun)
+const scorecardRunText = computed(() => {
+  const r = scorecardRun.value
+  if (!r) return null
+  const name = training.adapters.find((a) => a.id === r.adapter_id)?.name ?? `adapter ${r.adapter_id}`
+  const what = r.phase === 'rendering' ? 'rendering' : 'writing prompts'
+  return `Scorecard for ${name}: ${what} ${r.done}/${r.total}`
+})
+
+type ScorecardAction = { label: string; fresh: boolean; title: string }
+function scorecardAction(a: WriterAdapter): ScorecardAction | null {
+  if (a.kind !== 't2i' || !SERVABLE_STATUSES.includes(a.status)) return null
+  const latest = scorecardByAdapter.value.get(a.id)?.latest ?? null
+  if (!latest) {
+    return { label: 'render scorecard', fresh: false, title: 'Render every scorecard brief with the base writer and with this adapter (same seeds), to judge blind' }
+  }
+  if (latest.status !== 'complete' && latest.status !== 'running') {
+    return { label: 'resume scorecard', fresh: false, title: 'Render the briefs that do not have both images yet' }
+  }
+  return { label: 're-render', fresh: true, title: 'Render a new scorecard (new seeds) for this adapter' }
+}
+
+function onScorecard(a: WriterAdapter) {
+  const action = scorecardAction(a)
+  if (!action) return
+  void act(() => training.renderScorecard(a.id, action.fresh))
+}
+
+function onCancelScorecard() {
+  if (!confirm('Cancel the scorecard? Images already rendered are kept; Resume renders the rest.')) return
+  void act(() => training.cancelScorecard())
 }
 
 function adapterNote(a: WriterAdapter): string {
@@ -650,7 +719,7 @@ function onRecheck() {
                 <td>{{ BASE_LABEL }}</td>
                 <td><span class="st st-ok">ready</span></td>
                 <td class="dim">—</td>
-                <td class="dim nowrap">— fav</td>
+                <td class="dim nowrap" :title="`Base writer on every judged scorecard pair (${training.scorecards?.base.n_judged ?? 0})`">{{ baseFav }} fav</td>
                 <td></td>
               </tr>
               <tr v-for="a in adapterRows" :key="a.id" :data-testid="`adapter-row-${a.id}`">
@@ -671,7 +740,10 @@ function onRecheck() {
                 </td>
                 <td><span class="st" :class="STATUS_CLASS[a.status] ?? ''">{{ a.status }}</span></td>
                 <td class="dim small note" :title="a.error ?? ''">{{ adapterNote(a) }}</td>
-                <td class="dim nowrap">{{ scorecardFav(a) }} fav</td>
+                <td class="dim nowrap" :title="scorecardTitle(a)" :data-testid="`adapter-fav-${a.id}`">
+                  {{ scorecardFav(a) }} fav
+                  <div v-if="judgedText(a)" class="small">{{ judgedText(a) }}</div>
+                </td>
                 <td class="acts">
                   <button v-if="a.status !== 'training'" class="lnk" @click="beginRename(a)">rename</button>
                   <button
@@ -685,6 +757,15 @@ function onRecheck() {
                   <button v-if="a.status === 'failed' && a.error" class="lnk" @click="failedLogOpen = failedLogOpen === a.id ? null : a.id">
                     log
                   </button>
+                  <button
+                    v-if="scorecardAction(a)"
+                    class="lnk"
+                    :title="scorecardAction(a)!.title"
+                    :disabled="busy || !!scorecardRun || training.locked"
+                    @click="onScorecard(a)"
+                  >
+                    {{ scorecardAction(a)!.label }}
+                  </button>
                   <button v-if="a.status !== 'training'" class="lnk danger" :disabled="busy" @click="onDelete(a)">delete</button>
                 </td>
               </tr>
@@ -696,7 +777,18 @@ function onRecheck() {
             </tbody>
           </table>
           <div v-if="adapterRows.length === 0" class="dim small">No adapters yet.</div>
-          <div class="dim small foot">"% fav" = your favorite rate on its blind scorecard.</div>
+          <div v-if="scorecardRunText" class="small scorecard-run" data-testid="scorecard-run">
+            {{ scorecardRunText }}
+            <button class="lnk danger" :disabled="busy" @click="onCancelScorecard">cancel</button>
+          </div>
+          <div v-else-if="training.scorecardOutcome" class="small dim" data-testid="scorecard-outcome">
+            {{ training.scorecardOutcome }}
+          </div>
+          <div class="dim small foot">
+            "% fav" = your favorite rate on its blind scorecard ({{ training.scorecards?.briefs ?? 40 }} briefs,
+            base vs adapter, same seeds). Scorecard images hide their writer until you favorite or pass them;
+            an untested adapter becomes ready at {{ readyPairs }} judged pairs.
+          </div>
         </section>
       </div>
     </div>
@@ -704,6 +796,10 @@ function onRecheck() {
 </template>
 
 <style scoped>
+.scorecard-run {
+  margin-top: 6px;
+}
+
 .tw {
   position: fixed;
   top: 6vh;

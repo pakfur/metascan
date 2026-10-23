@@ -439,6 +439,13 @@ def _reject_reason(slot: str, value: str) -> Optional[str]:
     return None
 
 
+def caption_reject_reason(text: str) -> Optional[str]:
+    """Why free caption text (e.g. a developer-written scorecard brief) must
+    not reach a prompt -- the same adult-only screen as every list line --
+    or None if it may."""
+    return _reject_reason("caption", " ".join(str(text).split()).lower())
+
+
 def _read_list(path: Path, slot: str, warnings: List[str]) -> Optional[Tuple[str, ...]]:
     """The cleaned values of one list file; None if it could not be read."""
     try:

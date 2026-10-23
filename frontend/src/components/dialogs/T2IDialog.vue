@@ -16,6 +16,7 @@ import {
   isCountEffective,
   multiVariantGroups,
   randomSeed,
+  SCORECARD_BLIND_TEXT,
   t2iImageToMedia,
   toThumbItem,
   withCurrentOption,
@@ -795,6 +796,11 @@ function onSelectTile(item: ThumbItem) {
     toast.show('A Random batch is running: wait for it to finish before loading an image.', 'info')
     return
   }
+  if (item.blind) {
+    // Loading it would show its prompt (and who wrote it): judge it first.
+    toast.show(`${SCORECARD_BLIND_TEXT}: favorite or pass it first (double-click opens it).`, 'info')
+    return
+  }
   autosave.flush() // pending edits belong to the image being left
   const stored = store.selectImage(id)
   if (!stored) return
@@ -1291,6 +1297,7 @@ onBeforeUnmount(() => {
       :allow-destructive="false"
       :allow-rating="true"
       :favorite-mirror="store.applyFavoriteFlag"
+      :judgment-mirror="store.applyJudgment"
       @close="viewerIndex = null"
     />
   </div>

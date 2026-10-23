@@ -261,6 +261,23 @@ export interface T2iImage {
   resolved_caption?: string | null
   direction?: string | null
   prompt_categories?: string[] | null
+  /** The writer-adapter scorecard the image was rendered for (null: none). */
+  scorecard_id?: string | null
+  /** The image was explicitly passed (a verdict, like is_favorite). */
+  passed?: boolean
+  /** Server's view at fetch time; the client re-derives it with t2iBlind. */
+  scorecard_blind?: boolean
+}
+
+/** What a blind scorecard tile and the viewer show instead of its details. */
+export const SCORECARD_BLIND_TEXT = 'Scorecard image — judge to reveal'
+
+/**
+ * A scorecard image with no explicit verdict yet (not favorited, not passed):
+ * its writer, variant and prompt stay hidden so base vs adapter is judged blind.
+ */
+export function t2iBlind(img: Pick<T2iImage, 'is_favorite'> & Partial<Pick<T2iImage, 'scorecard_id' | 'passed'>>): boolean {
+  return !!img.scorecard_id && !img.is_favorite && !img.passed
 }
 
 // ---- writers, variants, drafts ------------------------------------------------
@@ -650,6 +667,19 @@ export function tileVariant(
 }
 
 export function toThumbItem(img: T2iImage, multi?: Set<string>): ThumbItem {
+  if (t2iBlind(img)) {
+    // Nothing that tells base from adapter: no writer, prompt or variant
+    // (the seed and size are the same for both images of a brief).
+    return {
+      id: img.id,
+      file_path: img.file_path,
+      is_favorite: img.is_favorite,
+      title: SCORECARD_BLIND_TEXT,
+      label: t2iImageDetails(img),
+      variant: null,
+      blind: true,
+    }
+  }
   return {
     id: img.id,
     file_path: img.file_path,

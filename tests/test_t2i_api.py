@@ -1006,6 +1006,8 @@ class TestImages(T2iApiCase):
                     "edited",
                     "writer_model",
                     "scorecard_id",
+                    "scorecard_blind",
+                    "passed",
                     "resolved_caption",
                     "direction",
                     "prompt_categories",

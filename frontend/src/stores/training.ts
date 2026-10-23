@@ -11,7 +11,14 @@ import {
   runBriefs,
   startTraining,
 } from '../api/training'
-import { deleteWriterAdapter, listWriterAdapters, renameWriterAdapter } from '../api/writers'
+import {
+  cancelScorecard as cancelScorecardApi,
+  deleteWriterAdapter,
+  fetchScorecards,
+  listWriterAdapters,
+  renameWriterAdapter,
+  renderScorecard as renderScorecardApi,
+} from '../api/writers'
 import type {
   BriefsStatus,
   ResumableRun,
@@ -20,7 +27,7 @@ import type {
   TrainingStatus,
 } from '../types/training'
 import { formatEta, progressPct } from '../types/training'
-import type { WriterAdapter } from '../types/writers'
+import type { ScorecardProgress, ScorecardSummary, WriterAdapter } from '../types/writers'
 import { GPU_BUSY_TEXT } from '../utils/gpuBusy'
 
 const GPU_BUSY_REASONS: Record<string, string> = {
@@ -29,6 +36,7 @@ const GPU_BUSY_REASONS: Record<string, string> = {
   storyboard: 'a storyboard job is running',
   index_build: 'the embedding index is being built',
   upscale_active: 'upscaling is in progress',
+  scorecard: 'a scorecard is rendering',
 }
 
 /** Human text for a training / adapter / briefs refusal (ApiError detail.code). */
@@ -98,6 +106,24 @@ export function trainingErrorText(e: unknown): string {
       return 'Briefs are already being written.'
     case 'vlm_unavailable':
       return 'No VLM is available to write briefs — install one in Models.'
+    case 'scorecard_running':
+      return 'A scorecard is already rendering — wait for it or cancel it.'
+    case 'scorecard_unavailable':
+      return 'Scorecards are not set up on this server.'
+    case 'adapter_unavailable':
+      return 'That adapter cannot write prompts (only ready / untested text-to-image adapters can).'
+    case 'no_workflow':
+      return `No workflow is set for ${String(d.model ?? 'that model')}: pick one in Settings → T2I.`
+    case 'no_briefs':
+      return 'The scorecard briefs file is missing or empty.'
+    case 'unknown_model':
+      return `Unknown target model ${String(d.model ?? '')}.`
+    case 'writer_unavailable':
+      return 'No prompt writer is available: install the writer model in Models.'
+    case 'writer_failed':
+      return 'The prompt writer failed — try again.'
+    case 'adapter_loading':
+      return 'The writer is still loading the adapter — try again in a moment.'
   }
   return e.message
 }
@@ -118,6 +144,12 @@ export const useTrainingStore = defineStore('training', () => {
   /** The last run outcome (completed / failed / cancelled / paused), shown in the window. */
   const lastOutcome = ref<{ kind: 'completed' | 'failed' | 'cancelled' | 'paused'; text: string } | null>(null)
   const loadError = ref<string | null>(null)
+  /** Scorecard results per adapter + the base writer (loaded with the adapters). */
+  const scorecards = ref<ScorecardSummary | null>(null)
+  /** The scorecard rendering now (WS scorecard_progress), or null. */
+  const scorecardRun = ref<ScorecardProgress | null>(null)
+  /** The last scorecard outcome line, shown in the window. */
+  const scorecardOutcome = ref<string | null>(null)
 
   const run = computed(() => status.value?.run ?? null)
   const runActive = computed(() => !!run.value && ACTIVE_STATES.has(run.value.state))
@@ -205,6 +237,12 @@ export const useTrainingStore = defineStore('training', () => {
     adapters.value = await listWriterAdapters()
   }
 
+  async function loadScorecards(): Promise<void> {
+    const data = await fetchScorecards()
+    scorecards.value = data
+    scorecardRun.value = data.running
+  }
+
   async function loadBriefs(): Promise<void> {
     briefs.value = await fetchBriefsStatus()
   }
@@ -216,6 +254,7 @@ export const useTrainingStore = defineStore('training', () => {
   function refreshAll(): void {
     quietly(load(), 'load the status')
     quietly(loadAdapters(), 'load the adapters')
+    quietly(loadScorecards(), 'load the scorecards')
   }
 
   function setScope(next: string): void {
@@ -262,6 +301,16 @@ export const useTrainingStore = defineStore('training', () => {
       unseenTimer = null
       quietly(load(), 'load the status')
     }, 300)
+  }
+
+  // A rating burst: one results fetch per quiet half second.
+  let scorecardTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleScorecards(): void {
+    if (scorecardTimer !== null) clearTimeout(scorecardTimer)
+    scorecardTimer = setTimeout(() => {
+      scorecardTimer = null
+      quietly(loadScorecards(), 'load the scorecards')
+    }, 500)
   }
 
   /** The always-on `training` channel bridge (App.vue). */
@@ -322,6 +371,52 @@ export const useTrainingStore = defineStore('training', () => {
         break
       case 'adapters_changed':
         quietly(loadAdapters(), 'load the adapters')
+        quietly(loadScorecards(), 'load the scorecards')
+        break
+      case 'scorecard_judged':
+        // A scorecard image was judged: "n/30 judged" and the fav % move.
+        if (windowOpen.value) scheduleScorecards()
+        break
+      case 'scorecard_started':
+        scorecardOutcome.value = null
+        scorecardRun.value = {
+          adapter_id: Number(data.adapter_id),
+          scorecard_id: String(data.scorecard_id ?? ''),
+          phase: 'prompting',
+          done: 0,
+          total: Number(data.todo ?? data.total ?? 0),
+        }
+        break
+      case 'scorecard_progress':
+        scorecardRun.value = {
+          adapter_id: Number(data.adapter_id),
+          scorecard_id: String(data.scorecard_id ?? ''),
+          phase: data.phase === 'rendering' ? 'rendering' : 'prompting',
+          done: Number(data.done ?? 0),
+          total: Number(data.total ?? 0),
+        }
+        break
+      case 'scorecard_complete': {
+        scorecardRun.value = null
+        const missing = Number(data.missing ?? 0)
+        scorecardOutcome.value =
+          missing > 0
+            ? `Scorecard rendered ${String(data.done)} of ${String(data.total)} briefs; ${missing} did not render — Resume renders them.`
+            : 'Scorecard rendered: judge its images (favorite or pass) to score the adapter.'
+        quietly(loadScorecards(), 'load the scorecards')
+        break
+      }
+      case 'scorecard_failed':
+        scorecardRun.value = null
+        scorecardOutcome.value = `Scorecard failed: ${trainingErrorText(
+          new ApiError(409, { code: data.code }, String(data.error ?? data.code ?? 'error')),
+        )}`
+        quietly(loadScorecards(), 'load the scorecards')
+        break
+      case 'scorecard_cancelled':
+        scorecardRun.value = null
+        scorecardOutcome.value = 'Scorecard cancelled; Resume renders the missing briefs.'
+        quietly(loadScorecards(), 'load the scorecards')
         break
       case 'gate_changed':
         if (windowOpen.value) quietly(load(), 'load the status')
@@ -388,6 +483,15 @@ export const useTrainingStore = defineStore('training', () => {
     refreshAll()
   }
 
+  async function renderScorecard(adapterId: number, fresh = false): Promise<void> {
+    scorecardOutcome.value = null
+    await renderScorecardApi(adapterId, { fresh })
+  }
+
+  async function cancelScorecard(): Promise<void> {
+    await cancelScorecardApi()
+  }
+
   async function startBriefs(): Promise<void> {
     await runBriefs()
     briefs.value = { running: true, done: 0, total: 0, failed: 0, result: null }
@@ -406,6 +510,9 @@ export const useTrainingStore = defineStore('training', () => {
     lossPoints,
     lastOutcome,
     loadError,
+    scorecards,
+    scorecardRun,
+    scorecardOutcome,
     run,
     runActive,
     locked,
@@ -415,6 +522,9 @@ export const useTrainingStore = defineStore('training', () => {
     load,
     loadAdapters,
     loadBriefs,
+    loadScorecards,
+    renderScorecard,
+    cancelScorecard,
     refreshAll,
     setScope,
     checkScope,

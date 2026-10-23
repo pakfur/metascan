@@ -6,7 +6,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +64,7 @@ from backend.api.vlm import (
     set_vlm_roles,
 )
 from backend.services.vlm_roles import VlmRoles
+from backend.services.scorecard import ScorecardService, set_scorecard_service
 from backend.services.training_manager import (
     TrainingManager,
     set_training_manager,
@@ -208,11 +209,15 @@ def _build_training_manager(
     t2i_runner: Any,
     inference_client: Any,
     vlm_roles: Any,
+    on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
 ) -> TrainingManager:
-    """Wire the writer training manager to the live services."""
+    """Wire the writer training manager to the live services.
+    ``on_completed(adapter_id, render_scorecard)`` runs after a completed
+    run (the scorecard service's hook)."""
     from backend.api.storyboard import storyboard_busy
     from backend.api.vlm import cancel_retag_jobs, refresh_writer_adapters
     from backend.services import hindsight_briefs
+    from backend.services import scorecard as scorecard_mod
 
     interrupted: Dict[str, bool] = {"briefs": False}
     restarts: "set[asyncio.Task[None]]" = set()
@@ -266,6 +271,8 @@ def _build_training_manager(
             reasons.append("index_build")
         if upscale.upscale_active():
             reasons.append("upscale_active")
+        if scorecard_mod.scorecard_busy():
+            reasons.append("scorecard")
         return reasons
 
     async def release_gpu() -> None:
@@ -295,6 +302,7 @@ def _build_training_manager(
         ),
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
         on_gpu_released=on_gpu_released,
+        on_completed=on_completed,
     )
     manager.add_close_hook(on_close)
     return manager
@@ -573,6 +581,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client)
     )
 
+    # Writer-adapter scorecards: base vs adapter on fixed briefs, judged
+    # blind; started from the training window or after a completed run.
+    scorecard_service = ScorecardService(
+        get_db(),
+        t2i_runner,
+        broadcast=lambda event, data: ws_manager.broadcast_sync(
+            "training", event, data
+        ),
+        get_config=lambda: get_t2i_config(load_app_config()),
+    )
+    await scorecard_service.recover()
+    set_scorecard_service(scorecard_service)
+
     # Writer LoRA training: one run at a time, holding the GPU (every GPU
     # consumer answers 409 gpu_busy_training meanwhile).
     training_manager = _build_training_manager(
@@ -582,6 +603,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         t2i_runner=t2i_runner,
         inference_client=client,
         vlm_roles=vlm_roles,
+        on_completed=scorecard_service.on_training_completed,
     )
     await _install_training(training_manager)
 
@@ -595,6 +617,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pass
         # Pause the training worker first (its checkpoint resumes later).
         await _uninstall_training(training_manager)
+        # A running scorecard is interrupted (its missing briefs render on
+        # the next start); before the T2I runner and ComfyUI go.
+        try:
+            await scorecard_service.aclose()
+        except Exception:
+            logger.exception("Scorecard service shutdown raised")
+        set_scorecard_service(None)
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:

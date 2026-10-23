@@ -26,6 +26,13 @@ class JudgmentsService:
         pos = await asyncio.to_thread(self.db.get_t2i_batch_position, path)
         return {"index": pos[0], "size": pos[1]} if pos is not None else None
 
+    async def scorecard(self, path: str) -> Optional[Dict[str, Any]]:
+        """``{"id", "blind"}`` of a scorecard image, else None."""
+        info = await asyncio.to_thread(self.db.scorecard_for_path, path)
+        if info is None:
+            return None
+        return {"id": info["scorecard_id"], "blind": bool(info["blind"])}
+
     async def mark_seen(
         self, path: str, score_shown: Optional[float] = None
     ) -> Optional[JudgmentState]:

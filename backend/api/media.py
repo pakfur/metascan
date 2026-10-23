@@ -1,5 +1,6 @@
 """Media CRUD and streaming endpoints."""
 
+import asyncio
 import mimetypes
 from pathlib import Path
 
@@ -53,7 +54,15 @@ async def get_media(
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
     tags = await service.get_tags_for_file(file_path)
-    return {**service.media_to_dict(media), "tags": tags}
+    scorecard = await asyncio.to_thread(get_db().scorecard_for_path, file_path)
+    return {
+        **service.media_to_dict(media),
+        "tags": tags,
+        # A scorecard image without a favorite / pass yet: the details panel
+        # hides its prompt and generation data ("judge to reveal").
+        "scorecard_id": scorecard["scorecard_id"] if scorecard else None,
+        "scorecard_blind": bool(scorecard and scorecard["blind"]),
+    }
 
 
 @router.delete("/media/{file_path:path}")
@@ -77,6 +86,9 @@ async def update_media(
     """Update media fields (favorite, playback_speed)."""
     if "is_favorite" in body:
         await service.set_favorite(file_path, body["is_favorite"])
+        from backend.api.judgments import _scorecard_check
+
+        await _scorecard_check(file_path)
     if "playback_speed" in body:
         await service.update_playback_speed(file_path, body["playback_speed"])
     media = await service.get_media(file_path)

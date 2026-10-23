@@ -207,6 +207,12 @@ class BatchRequest:
     # means ``prompt``/``negative`` are the single supplied prompt (typed:
     # writer ``manual``, no draft).
     prompts: Optional[List[Dict[str, Any]]] = None
+    # Set only by the writer-adapter scorecard (never by a route): every
+    # image of the batch records it in ``t2i_images.scorecard_id``.
+    scorecard_id: Optional[str] = None
+    # The brief the scorecard batch renders (recorded with its batch id
+    # before any job is submitted, so a late ingest finds the scorecard).
+    scorecard_brief: Optional[int] = None
 
 
 @dataclass
@@ -313,6 +319,8 @@ class _Batch:
     # Jobs whose outputs have been announced and whose ingest is running.
     ingesting: Set[int] = field(default_factory=set)
     resolved: int = 0  # jobs accounted for; the batch ends when it reaches the total
+    # Set by ``_retire``: the terminal frame went out (``wait_finished``).
+    over: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def mode(self) -> str:
@@ -1357,6 +1365,15 @@ class T2iRunner:
             other.mode == "random" for other in self._batches.values()
         ):
             await self._prepare_adapter(batch)
+        if batch.req.scorecard_id is not None:
+            # Before registration and before any job exists: an ingest after
+            # a restart (no snapshot) still finds the batch's scorecard.
+            await asyncio.to_thread(
+                self.db.add_scorecard_batch,
+                batch.id,
+                batch.req.scorecard_id,
+                int(batch.req.scorecard_brief or 0),
+            )
         # No await between this check and the registration below, so two
         # concurrent Random requests cannot both pass it.
         if batch.mode == "random":
@@ -1790,7 +1807,7 @@ class T2iRunner:
         finally:
             batch.prompting = False
 
-    async def _unload_vlm(self, batch: _Batch) -> None:
+    async def _unload_vlm(self, batch: Optional[_Batch]) -> None:
         """Free the GPU for ComfyUI: shut down each distinct VLM client
         that has a model loaded, once -- except the prompt writer while
         another Random batch is still writing prompts with it. Only called
@@ -1853,6 +1870,7 @@ class T2iRunner:
             # typed even if the workflow could not take it.
             "negative": step.form_negative if manual else step.negative,
             "category_ids": list(batch.req.category_ids),
+            "scorecard_id": batch.req.scorecard_id,
         }
         while len(self._job_meta) > _JOB_META_LIMIT:
             self._job_meta.pop(next(iter(self._job_meta)))
@@ -2024,6 +2042,7 @@ class T2iRunner:
         batch.ingesting.clear()
         self._batches.pop(batch.id, None)
         self._finished[batch.id] = batch
+        batch.over.set()
         while len(self._finished) > _FINISHED_KEEP:
             self._finished.popitem(last=False)
         batch.picker = None  # let the caption index go
@@ -2089,6 +2108,27 @@ class T2iRunner:
         task = batch.task
         if task is not None and not task.done():
             await asyncio.wait({task})
+
+    async def wait_finished(self, batch_id: str) -> Dict[str, Any]:
+        """Wait for a batch's terminal frame (every image rendered, failed
+        or cancelled) and return ``{result, images_done, images_failed}``;
+        ``result`` is ``complete`` / ``cancelled`` / ``error``."""
+        batch = self._batches.get(batch_id) or self._finished.get(batch_id)
+        if batch is None:
+            raise T2iNotFoundError(f"No t2i batch {batch_id}")
+        await batch.over.wait()
+        return {
+            "result": batch.finished,
+            "images_done": batch.images_done,
+            "images_failed": batch.images_failed,
+        }
+
+    async def unload_vlms(self) -> None:
+        """Free the GPU for ComfyUI the way a Random batch does before it
+        renders (only with ``unload_vlm_during_generation`` on; a writer a
+        Random batch is still prompting with is left alone)."""
+        if self.unload_vlm_during_generation:
+            await self._unload_vlm(None)
 
     # ---- job events ---------------------------------------------------------------
 
@@ -2222,6 +2262,13 @@ class T2iRunner:
                 != normalize_prompt(str(rendered or ""))
             )
         render_s = render_seconds(job.get("started_at"), job.get("finished_at"))
+        scorecard_id = known.get("scorecard_id")
+        if meta is None:
+            # After a restart the snapshot is gone, but a scorecard image
+            # must still be tagged (blind, never training data).
+            lookup = getattr(self.db, "scorecard_id_for_batch", None)
+            if callable(lookup):
+                scorecard_id = await asyncio.to_thread(lookup, batch_id)
         inserted: List[str] = []
         for entry in files:
             posix = to_posix_path(entry)
@@ -2256,6 +2303,7 @@ class T2iRunner:
                     resolved_caption=known.get("resolved_caption"),
                     direction=known.get("direction"),
                     prompt_categories=known.get("categories"),
+                    scorecard_id=scorecard_id,
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)

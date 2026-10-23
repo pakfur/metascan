@@ -138,3 +138,56 @@ export function writerName(adapters: WriterAdapter[], writerId: string): string 
   if (!isAdapterWriterId(writerId)) return writerId
   return adapters.find((a) => a.writer_id === writerId)?.name ?? writerId
 }
+
+// ---- scorecard: base vs adapter on fixed briefs, judged blind ----------------
+
+/** Judged pairs that make an untested adapter ready. */
+export const SCORECARD_READY_PAIRS = 30
+
+export interface ScorecardRun {
+  id: string
+  status: 'running' | 'complete' | 'incomplete' | 'interrupted' | 'cancelled' | 'failed'
+  target_model: string
+  done: number
+  total: number
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** One adapter's result over its scorecards (GET /api/writers/scorecards rows). */
+export interface ScorecardResult {
+  adapter_id: number
+  name?: string
+  status?: WriterAdapterStatus
+  n_pairs: number
+  /** Pairs whose two images are both judged (favorite, pass, or seen). */
+  n_judged: number
+  fav_rate_base: number | null
+  fav_rate_adapter: number | null
+  mean_score_base: number | null
+  mean_score_adapter: number | null
+  latest?: ScorecardRun | null
+}
+
+/** The scorecard run in progress (WS `scorecard_progress`). */
+export interface ScorecardProgress {
+  adapter_id: number
+  scorecard_id: string
+  phase: 'prompting' | 'rendering'
+  done: number
+  total: number
+}
+
+export interface ScorecardSummary {
+  briefs: number
+  ready_pairs: number
+  running: ScorecardProgress | null
+  base: { n_judged: number; fav_rate: number | null; mean_score: number | null }
+  adapters: ScorecardResult[]
+}
+
+/** "31%" / "—". */
+export function ratePct(rate: number | null | undefined): string {
+  return rate === null || rate === undefined ? '—' : `${Math.round(rate * 100)}%`
+}

@@ -1464,6 +1464,38 @@ class DatabaseManager:
                 "scorecard_id",
                 "ALTER TABLE t2i_images ADD COLUMN scorecard_id TEXT",
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_t2i_images_scorecard "
+                "ON t2i_images(scorecard_id)"
+            )
+            # Writer-adapter scorecard runs (backend/services/scorecard.py):
+            # one row per run, and the T2I batch each brief rendered in (a
+            # late ingest after a restart finds its scorecard_id here).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecards (
+                    id TEXT PRIMARY KEY,
+                    adapter_id INTEGER NOT NULL,
+                    target_model TEXT NOT NULL,
+                    preset_id INTEGER,
+                    status TEXT NOT NULL,
+                    total INTEGER NOT NULL DEFAULT 0,
+                    done INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecard_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    scorecard_id TEXT NOT NULL,
+                    brief_index INTEGER NOT NULL
+                )
+                """
+            )
             # The caption as the writer saw it (tokens resolved) and the
             # direction it was written with: the writer training data's user
             # turn. NULL on older rows and typed prompts.
@@ -4339,8 +4371,10 @@ class DatabaseManager:
 
     # media LEFT JOIN: a NULL media_path marks a row whose media is gone.
     _T2I_IMAGE_SELECT: ClassVar[str] = (
-        "SELECT t.*, m.file_path AS media_path, m.is_favorite "
-        "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path"
+        "SELECT t.*, m.file_path AS media_path, m.is_favorite, "
+        "j.passed AS judged_passed "
+        "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path "
+        "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
     )
 
     @staticmethod
@@ -4357,6 +4391,14 @@ class DatabaseManager:
         d["file_path"] = to_native_path(posix)
         d["file_name"] = posix.rsplit("/", 1)[-1]
         d["is_favorite"] = bool(d.get("is_favorite"))
+        d["passed"] = bool(d.pop("judged_passed", None))
+        # A scorecard image with no explicit verdict yet: the dialog hides
+        # its writer, variant and prompt until it is favorited or passed.
+        d["scorecard_blind"] = (
+            d.get("scorecard_id") is not None
+            and not d["is_favorite"]
+            and not d["passed"]
+        )
         for column, kind in (
             ("loras", list),
             ("form_state", dict),
@@ -6228,6 +6270,173 @@ class DatabaseManager:
                 (self._iso(None), adapter_id),
             )
             conn.commit()
+
+    def promote_writer_adapter(self, adapter_id: int) -> bool:
+        """``untested -> ready`` (a compare-and-set: True only for the call
+        that flipped it; a ready, deleted or failed adapter stays as is)."""
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE writer_adapters SET status = 'ready' "
+                "WHERE id = ? AND status = 'untested' AND deleted_at IS NULL",
+                (adapter_id,),
+            )
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    # ---- writer-adapter scorecards ---------------------------------------
+
+    _SCORECARD_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "status",
+        "total",
+        "done",
+        "error",
+        "target_model",
+        "preset_id",
+    )
+
+    def create_scorecard(
+        self,
+        scorecard_id: str,
+        adapter_id: int,
+        target_model: str,
+        preset_id: Optional[int],
+        total: int,
+        status: str = "running",
+    ) -> None:
+        ts = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO scorecards (id, adapter_id, target_model, preset_id, "
+                "status, total, done, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (
+                    scorecard_id,
+                    adapter_id,
+                    target_model,
+                    preset_id,
+                    status,
+                    total,
+                    ts,
+                    ts,
+                ),
+            )
+            conn.commit()
+
+    def update_scorecard(self, scorecard_id: str, **fields: Any) -> None:
+        unknown = set(fields) - set(self._SCORECARD_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown scorecard fields: {sorted(unknown)}")
+        sets = [f"{k} = ?" for k in fields] + ["updated_at = ?"]
+        args = list(fields.values()) + [self._iso(None), scorecard_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(f"UPDATE scorecards SET {', '.join(sets)} WHERE id = ?", args)
+            conn.commit()
+
+    def get_scorecard(self, scorecard_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM scorecards WHERE id = ?", (scorecard_id,)
+            ).fetchone()
+            return dict(r) if r else None
+
+    def list_scorecards(self, adapter_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Scorecards oldest first (one adapter's, or all)."""
+        sql = "SELECT * FROM scorecards"
+        args: Tuple[Any, ...] = ()
+        if adapter_id is not None:
+            sql += " WHERE adapter_id = ?"
+            args = (adapter_id,)
+        with self.lock, self._get_connection() as conn:
+            return [
+                dict(r) for r in conn.execute(sql + " ORDER BY created_at, rowid", args)
+            ]
+
+    def mark_interrupted_scorecards(self) -> int:
+        """Startup: a run the last server left ``running`` is ``interrupted``
+        (its missing briefs render on the next start)."""
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE scorecards SET status = 'interrupted', updated_at = ? "
+                "WHERE status = 'running'",
+                (self._iso(None),),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def add_scorecard_batch(
+        self, batch_id: str, scorecard_id: str, brief_index: int
+    ) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scorecard_batches (batch_id, scorecard_id, "
+                "brief_index) VALUES (?, ?, ?)",
+                (batch_id, scorecard_id, brief_index),
+            )
+            conn.commit()
+
+    def scorecard_id_for_batch(self, batch_id: str) -> Optional[str]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT scorecard_id FROM scorecard_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            return str(r["scorecard_id"]) if r else None
+
+    def scorecard_image_rows(
+        self,
+        adapter_id: Optional[int] = None,
+        scorecard_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """One row per live scorecard image (of one adapter, one scorecard,
+        or all): ``adapter_id``, ``scorecard_id``, ``batch_id``,
+        ``brief_index`` (None when its batch is unknown), ``writer_id``,
+        ``is_favorite``, ``passed``, ``seen_at`` and the stored taste
+        ``score`` (None when unscored)."""
+        sql = (
+            "SELECT c.adapter_id, t.scorecard_id, t.batch_id, b.brief_index, "
+            "t.writer_id, m.is_favorite, j.passed, j.seen_at, s.score "
+            "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
+            "JOIN scorecards c ON c.id = t.scorecard_id "
+            "LEFT JOIN scorecard_batches b ON b.batch_id = t.batch_id "
+            "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
+            "LEFT JOIN taste_scores s ON s.file_path = t.file_path "
+            "WHERE t.scorecard_id IS NOT NULL"
+        )
+        args: List[Any] = []
+        if adapter_id is not None:
+            sql += " AND c.adapter_id = ?"
+            args.append(adapter_id)
+        if scorecard_id is not None:
+            sql += " AND t.scorecard_id = ?"
+            args.append(scorecard_id)
+        with self.lock, self._get_connection() as conn:
+            rows = [dict(r) for r in conn.execute(sql + " ORDER BY t.id", args)]
+        for r in rows:
+            r["is_favorite"] = bool(r["is_favorite"])
+            r["passed"] = bool(r["passed"])
+        return rows
+
+    def scorecard_for_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """``{scorecard_id, adapter_id, blind}`` for a scorecard image, else
+        None. ``blind``: no explicit verdict yet (not favorited, not passed)
+        -- the viewer and the T2I tiles hide its writer until then."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT t.scorecard_id, c.adapter_id, m.is_favorite, j.passed "
+                "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
+                "LEFT JOIN scorecards c ON c.id = t.scorecard_id "
+                "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
+                "WHERE t.file_path = ? AND t.scorecard_id IS NOT NULL "
+                "ORDER BY t.id DESC LIMIT 1",
+                (to_posix_path(file_path),),
+            ).fetchone()
+        if r is None:
+            return None
+        return {
+            "scorecard_id": str(r["scorecard_id"]),
+            "adapter_id": int(r["adapter_id"]) if r["adapter_id"] is not None else None,
+            "blind": not r["is_favorite"] and not r["passed"],
+        }
 
     # ---- training runs (writer LoRA training) ----------------------------
 
