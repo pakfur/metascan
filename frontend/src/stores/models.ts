@@ -81,14 +81,24 @@ export const useModelsStore = defineStore('models', () => {
   // client; a WS payload tagged with roles that exclude 'general' belongs to
   // the (separate) writer client and only updates `vlmRoles`.
   const vlmRoles = ref<VlmRolesSnapshot | null>(null)
-  const vlmRolesError = ref<string | null>(null)
+  // A failed role change and a failed roles fetch are separate: a later
+  // successful refetch must not wipe the change error the user is reading.
+  const vlmRolesChangeError = ref<string | null>(null)
+  const vlmRolesFetchError = ref<string | null>(null)
+  const vlmRolesError = computed(() => vlmRolesChangeError.value ?? vlmRolesFetchError.value)
+  // Monotonic token: only the newest request may write vlmRoles.
+  let vlmRolesSeq = 0
 
   async function loadVlmRoles(): Promise<void> {
+    const seq = ++vlmRolesSeq
     try {
-      vlmRoles.value = await fetchVlmRoles()
-      vlmRolesError.value = null
+      const snap = await fetchVlmRoles()
+      if (seq !== vlmRolesSeq) return
+      vlmRoles.value = snap
+      vlmRolesFetchError.value = null
     } catch (e) {
-      vlmRolesError.value = vlmRoleErrorText(e)
+      if (seq !== vlmRolesSeq) return
+      vlmRolesFetchError.value = vlmRoleErrorText(e)
     }
   }
 
@@ -110,13 +120,20 @@ export const useModelsStore = defineStore('models', () => {
   }
 
   async function setVlmRoleModel(role: VlmRole, modelId: string): Promise<boolean> {
-    vlmRolesError.value = null
+    vlmRolesChangeError.value = null
+    const seq = ++vlmRolesSeq
     try {
-      vlmRoles.value = await setVlmRole(role, modelId)
-      void loadStatus()
+      const snap = await setVlmRole(role, modelId)
+      // Invalidate fetches started before this response; keep it if a newer
+      // fetch already started after it was sent.
+      if (seq === vlmRolesSeq) vlmRoles.value = snap
+      loadStatus().catch((e) => {
+        console.error('loadStatus after role change failed', e)
+        vlmRolesFetchError.value = vlmRoleErrorText(e)
+      })
       return true
     } catch (e) {
-      vlmRolesError.value = vlmRoleErrorText(e)
+      vlmRolesChangeError.value = vlmRoleErrorText(e)
       return false
     }
   }
@@ -124,7 +141,7 @@ export const useModelsStore = defineStore('models', () => {
   function applyVlmPayload(p: Partial<VlmStatus>) {
     // Any client's state change can move a role row (state / loaded model).
     if (p.state) void loadVlmRoles()
-    if (p.roles && p.roles.length > 0 && !p.roles.includes('general')) return
+    if (p.roles && !p.roles.includes('general')) return
     if (p.state) vlmState.value = p.state
     if ('model_id' in p) vlmModelId.value = p.model_id ?? null
     if ('base_url' in p) vlmBaseUrl.value = p.base_url ?? null
@@ -158,7 +175,7 @@ export const useModelsStore = defineStore('models', () => {
         delete downloading.value[p.id]
         delete downloadErrors.value[p.id]
         // Refresh status so the row flips from 'missing' to 'available'.
-        void loadStatus()
+        loadStatus().catch((e) => console.error('loadStatus after download failed', e))
         break
       }
       case 'download_error': {
@@ -172,7 +189,12 @@ export const useModelsStore = defineStore('models', () => {
         applyVlmPayload(data as unknown as VlmStatus)
         break
       case 'vlm_progress':
-        // Generic VLM progress events from retag jobs etc.
+        // Generic VLM progress events from retag jobs etc. Writer-only (or
+        // retired-client) progress must not overwrite the general role's.
+        {
+          const roles = (data as { roles?: string[] }).roles
+          if (roles && !roles.includes('general')) break
+        }
         vlmProgress.value = data as Record<string, unknown>
         break
     }
