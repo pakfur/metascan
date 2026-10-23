@@ -55,6 +55,11 @@ _vlm_drain_running: bool = False
 _vlm_drain_rerun: bool = False
 # The in-flight scheduled drain, cancelled on shutdown.
 _vlm_drain_future: Optional["concurrent.futures.Future[None]"] = None
+# True while ComfyUI generation work is in flight (installed from the
+# lifespan: auto_index.generation_busy). The post-embedding VLM drain waits
+# for it to settle -- no VLM tagging competes with a render for the GPU.
+_generation_busy: Optional[Callable[[], bool]] = None
+_VLM_DRAIN_DEFER_POLL_S = 5.0
 
 
 def _capture_vlm_scan_stops() -> Optional[Tuple[Any, int]]:
@@ -91,6 +96,39 @@ def set_server_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
     """Attach (or clear) the loop used to run the post-embedding VLM drain."""
     global _server_loop
     _server_loop = loop
+
+
+def set_generation_busy_probe(probe: Optional[Callable[[], bool]]) -> None:
+    """Install (or clear) the "generation in flight" probe the post-embedding
+    VLM drain waits on."""
+    global _generation_busy
+    _generation_busy = probe
+
+
+def _generation_in_flight() -> bool:
+    probe = _generation_busy
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except Exception:
+        # A probe that cannot answer counts as busy: check again later.
+        logger.debug("generation busy probe failed", exc_info=True)
+        return True
+
+
+async def _wait_for_generation_to_settle() -> bool:
+    """Wait (on the loop) while generation work is in flight. True when it
+    had to wait."""
+    if not _generation_in_flight():
+        return False
+    logger.info(
+        "VLM drain after scan deferred: ComfyUI generation in flight; "
+        "it runs when the generation settles"
+    )
+    while _generation_in_flight():
+        await asyncio.sleep(_VLM_DRAIN_DEFER_POLL_S)
+    return True
 
 
 def set_embedding_complete_hook(hook: Optional[Callable[[], None]]) -> None:
@@ -315,6 +353,9 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
             return
         _vlm_drain_running = True
         try:
+            # Never tag while ComfyUI renders: wait for the generation to
+            # settle (requests arriving meanwhile coalesce into the rerun).
+            deferred = await _wait_for_generation_to_settle()
             from backend.api.vlm import get_vlm_client
             from backend.services.vlm_tag_pump import VlmTagPump
 
@@ -336,6 +377,16 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
                 logger.debug("VLM drain skipped: no preferred VLM model for this host")
                 return
             spec = VLM_REGISTRY.get(mid)
+            # A drain that waited for a render: the render's own VLM unload
+            # (an explicit stop) is behind it, so snapshot again now that
+            # the GPU is free; otherwise an unload since the scan began wins.
+            since = (
+                getattr(client, "_explicit_stops", None)
+                if deferred
+                else _vlm_stops_since_scan(client)
+            )
+            if not isinstance(since, int):
+                since = None
             pump = VlmTagPump(
                 queue_dir=eq.index_dir,
                 client=client,
@@ -344,10 +395,15 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
                 concurrency=spec.parallel_slots if spec is not None else 2,
                 # An explicit unload (ComfyUI render, /unload) since the
                 # scan started wins: the drain must not bring the VLM back.
-                unless_stopped_since=_vlm_stops_since_scan(client),
+                unless_stopped_since=since,
             )
             while True:
                 _vlm_drain_rerun = False
+                if await _wait_for_generation_to_settle():
+                    stops = getattr(client, "_explicit_stops", None)
+                    pump._unless_stopped_since = (
+                        stops if isinstance(stops, int) else None
+                    )
                 drained = await pump.drain_once()
                 logger.info(f"VLM drain after scan: tagged {drained} file(s)")
                 if not _vlm_drain_rerun:

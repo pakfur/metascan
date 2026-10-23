@@ -424,6 +424,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         is_busy=lambda: generation_busy(t2i_runner, comfy_client),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
+    # The post-embedding VLM tag drain waits for the same "no generation in
+    # flight" so a 27B never loads into a render.
+    similarity.set_generation_busy_probe(
+        lambda: generation_busy(t2i_runner, comfy_client)
+    )
 
     try:
         yield
@@ -443,6 +448,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # before closing the taste service that consumes it.
         await similarity.shutdown_embedding_queue()  # cancels any VLM drain
         similarity.set_embedding_complete_hook(None)
+        similarity.set_generation_busy_probe(None)
         similarity.set_server_loop(None)
         try:
             await taste_service.aclose()

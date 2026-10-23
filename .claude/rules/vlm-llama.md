@@ -122,7 +122,14 @@ the root CLAUDE.md still applies.
   `_explicit_stops`, and `VlmTagPump(unless_stopped_since=…)` passes it to
   `VlmClient.ensure_started(…, unless_stopped_since=…)`, which refuses to
   spawn after an explicit unload since the scan began; the batch stays
-  queued in `vlm_pending.jsonl` for the next drain.
+  queued in `vlm_pending.jsonl` for the next drain. The drain also waits
+  while ComfyUI generation is in flight (`similarity.
+  set_generation_busy_probe`, installed from the lifespan with
+  `auto_index.generation_busy`; a failing probe counts as busy), polling
+  every `_VLM_DRAIN_DEFER_POLL_S` and running on its own once the work
+  settles — before each pass, including coalesced reruns. A drain that
+  had to wait re-snapshots `_explicit_stops` after the wait: the render's
+  own VLM unload is then behind it and must not strand the batch.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
