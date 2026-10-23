@@ -39,6 +39,7 @@ from uuid import uuid4
 import httpx
 import websockets
 
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, gpu_reserved
 from metascan.core.comfy_bindings import (
     Bindings,
     GenerationParams,
@@ -568,6 +569,10 @@ class ComfyClient:
         actually reaches the front of the queue, so this is cheap and
         changes no happy-path behaviour.
         """
+        if gpu_reserved():
+            # Writer training holds the GPU (the routes already 409; this
+            # catches work admitted just before the lock was taken).
+            raise ComfyError(GPU_BUSY_MESSAGE)
         workflow, bindings = await self._load_preset(preset_id)
         apply_overrides(workflow, bindings, params)
         job_id = int(

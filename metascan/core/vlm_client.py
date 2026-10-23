@@ -38,6 +38,7 @@ from typing import (
 
 import httpx
 
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, gpu_reserved
 from metascan.core.vlm_models import VlmModelSpec, get_spec
 from metascan.utils.app_paths import get_data_dir
 from metascan.utils.llama_server import binary_path
@@ -342,10 +343,15 @@ class VlmClient:
                 return
             await self._stop()
 
+        if gpu_reserved():
+            # Writer training holds the GPU: never load a model under it.
+            raise VlmError(GPU_BUSY_MESSAGE)
         if self.before_spawn is not None:
             await self.before_spawn(self)
         if self.retired:
             raise VlmError("client retired")
+        if gpu_reserved():
+            raise VlmError(GPU_BUSY_MESSAGE)
         if (
             _unless_stopped_since is not None
             and self._explicit_stops != _unless_stopped_since

@@ -1,0 +1,924 @@
+"""Writer LoRA training manager (Task 6): the GPU lock, the run lifecycle
+on the FAKE worker backend (no CUDA, no torch), the API and the gate.
+
+Every run spawns the real worker subprocess (``backend: "fake"``) in a temp
+data dir; the dataset builder is replaced by canned examples."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
+
+from backend.services import training_manager as tm
+from backend.services.gpu_lock import require_gpu_free
+from backend.services.training_manager import TrainingError, TrainingManager
+from metascan.core import gpu_guard
+from metascan.core import writer_dataset as wd
+from metascan.core.database_sqlite import DatabaseManager
+from metascan.core.hardware import (
+    CudaInfo,
+    Gate,
+    HardwareReport,
+    WriterTrainingPaths,
+    clear_writer_training_probe_cache,
+    writer_training_gate,
+    writer_training_reasons,
+)
+from metascan.core.writer_adapters import adapter_dir
+
+TIMEOUT = 60.0
+
+
+# ---- fixtures ------------------------------------------------------------------
+
+
+@pytest.fixture
+def db(tmp_path):
+    mgr = DatabaseManager(tmp_path / "db")
+    yield mgr
+    mgr.close()
+
+
+@pytest.fixture(autouse=True)
+def _clear_reservation():
+    yield
+    gpu_guard.set_gpu_reservation(None)
+
+
+def _examples(n_pairs: int) -> Tuple[list, list, wd.DatasetCounts]:
+    prefs = [
+        wd.PrefExample(
+            system="S",
+            user=f"u{i}",
+            chosen=f"c{i}",
+            rejected=f"r{i}",
+            target_model="krea2",
+            categories=[],
+            source="variant",
+            group=f"krea2|g{i % 20}",
+        )
+        for i in range(n_pairs)
+    ]
+    sft = [
+        wd.SftExample(
+            system="S",
+            user=f"s{i}",
+            chosen=f"t{i}",
+            target_model="krea2",
+            categories=[],
+            source="edit",
+            group=f"krea2|g{i % 20}",
+        )
+        for i in range(12)
+    ]
+    counts = wd.DatasetCounts(
+        pref_pairs=n_pairs, edit_pairs=0, hindsight=0, content_mode="uncensored"
+    )
+    return sft, prefs, counts
+
+
+@pytest.fixture
+def dataset(monkeypatch):
+    state: Dict[str, Any] = {"n": 120, "calls": []}
+
+    def build(db, scope, store, now, *, content_mode, resolve=None):
+        state["calls"].append((scope, content_mode))
+        return _examples(state["n"])
+
+    monkeypatch.setattr(wd, "build_examples", build)
+    return state
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.log: List[Tuple[str, Any]] = []
+
+    def events(self, name: str) -> List[Any]:
+        return [d for e, d in self.log if e == name]
+
+
+def _paths(tmp_path: Path) -> WriterTrainingPaths:
+    return WriterTrainingPaths(
+        python=sys.executable,
+        base_dir=tmp_path / "base",
+        converter_script=tmp_path / "convert_lora_to_gguf.py",
+    )
+
+
+def _manager(
+    db: Any,
+    tmp_path: Path,
+    rec: Recorder,
+    *,
+    busy: Optional[List[str]] = None,
+    fake: Optional[Dict[str, Any]] = None,
+    gate: Optional[Gate] = None,
+    **kw: Any,
+) -> TrainingManager:
+    async def release() -> None:
+        rec.log.append(("release_gpu", None))
+
+    async def refresh() -> None:
+        rec.log.append(("refresh_adapters", None))
+
+    return TrainingManager(
+        db,
+        tmp_path / "data",
+        dataset_inputs=lambda: (object(), "uncensored", None),
+        gpu_busy=lambda: list(busy or []),
+        release_gpu=release,
+        refresh_adapters=refresh,
+        broadcast=lambda e, d: rec.log.append((e, d)),
+        paths=lambda: _paths(tmp_path),
+        gate=lambda p: gate or Gate(True, True, "", []),
+        backend="fake",
+        fake={"sft_steps": 4, "dpo_steps": 4, "progress_every": 1, **(fake or {})},
+        poll_s=0.02,
+        **kw,
+    )
+
+
+async def _until(pred, timeout: float = TIMEOUT) -> None:
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while not pred():
+        if loop.time() > end:
+            raise AssertionError("timed out")
+        await asyncio.sleep(0.02)
+
+
+async def _idle(m: TrainingManager) -> None:
+    await _until(lambda: m.status()["state"] == "idle")
+
+
+SLOW = {"sft_steps": 200, "dpo_steps": 200, "step_sleep_s": 0.05}
+
+
+def _speed_up(db: Any, run_id: int) -> None:
+    """Drop the fake's per-step sleep before a resume (the fake knobs are
+    not part of the worker's resume fingerprint)."""
+    import json
+
+    task_path = Path(db.get_training_run(run_id)["run_dir"]) / "task.json"
+    task = json.loads(task_path.read_text())
+    task["fake"]["step_sleep_s"] = 0.0
+    task_path.write_text(json.dumps(task))
+
+
+# ---- hyperparameters -----------------------------------------------------------
+
+
+def test_presets_resolve_and_overrides_are_clamped():
+    presets = tm.resolved_presets()
+    assert presets["quick"]["rank"] == 8 and presets["thorough"]["epochs"] == 3
+    assert presets["standard"]["dpo_lr"] == 1e-5
+    hp = tm.resolve_hyperparams("quick", {"rank": 999, "lr": 1.0, "epochs": 0.2})
+    assert hp == {"rank": 64, "lr": 5e-4, "epochs": 1, "dpo_lr": 1e-5}
+    with pytest.raises(TrainingError) as e:
+        tm.resolve_hyperparams("quick", {"beta": 0.2})
+    assert e.value.status == 422
+    with pytest.raises(TrainingError):
+        tm.resolve_hyperparams("insane")
+
+
+def test_training_paths_from_config(tmp_path):
+    p = tm.training_paths_from_config({}, tmp_path)
+    assert p.python == sys.executable
+    assert p.base_dir == (
+        tmp_path / "models/vlm/train/huihui-ai--Huihui-Qwen3-VL-8B-Instruct-abliterated"
+    )
+    assert p.converter_script == tmp_path / "llama.cpp/convert_lora_to_gguf.py"
+    p = tm.training_paths_from_config(
+        {
+            "models": {
+                "writer_train_python": "/opt/py/bin/python",
+                "writer_train_repo": "org/repo",
+                "llama_cpp_dir": str(tmp_path / "lc"),
+            }
+        },
+        tmp_path,
+    )
+    assert p.python == "/opt/py/bin/python"
+    assert p.base_dir == tmp_path / "models/vlm/train/org--repo"
+    assert p.converter_script == tmp_path / "lc/convert_lora_to_gguf.py"
+
+
+# ---- the run lifecycle ------------------------------------------------------------
+
+
+async def test_a_completed_run_registers_exactly_one_adapter(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    run_id = await m.start("all", "quick")
+    assert m.gpu_locked()
+    await _idle(m)
+    assert not m.gpu_locked()
+
+    run = db.get_training_run(run_id)
+    assert run["status"] == "completed"
+    adapters = db.list_writer_adapters()
+    assert len(adapters) == 1
+    a = adapters[0]
+    assert a["status"] == "untested" and a["name"] == "taste-all-v1"
+    assert a["scope"] == "all" and a["base_model"] == "qwen3vl-8b"
+    assert a["data_cutoff"] and a["holdout_agreement"] is not None
+    assert a["counts"]["content_mode"] == "uncensored"
+    folder = adapter_dir(tmp_path / "data", a["id"])
+    for name in ("adapter.gguf", "adapter_config.json", "meta.json"):
+        assert (folder / name).is_file()
+    assert (folder / "peft" / "adapter_config.json").is_file()
+    assert a["file_path"] == str(folder / "adapter.gguf")
+    import json
+
+    meta = json.loads((folder / "meta.json").read_text())
+    assert meta["counts"]["content_mode"] == "uncensored"
+    assert meta["adapter_id"] == a["id"] and meta["run_id"] == run_id
+    assert not Path(run["run_dir"]).exists()  # checkpoints + JSONL cleaned
+
+    names = [e for e, _ in rec.log]
+    assert names.index("release_gpu") < names.index("run_started")
+    assert rec.events("run_progress")
+    assert rec.events("run_completed") == [{"run_id": run_id, "adapter_id": a["id"]}]
+    # The writer reloads its adapter list BEFORE the UI hears of it.
+    assert names.index("refresh_adapters") < len(names) - 1 - names[::-1].index(
+        "adapters_changed"
+    )
+    assert names.count("refresh_adapters") == 1
+
+    # A duplicate completion (e.g. a second supervisor) registers nothing.
+    active = tm._Active(
+        run_id=run_id,
+        adapter_id=a["id"],
+        name=a["name"],
+        scope="all",
+        run_dir=Path(run["run_dir"]),
+        resumed=False,
+    )
+    await m._complete(active, {"status": "ok"})
+    assert not db.complete_training_run(run_id, a["id"], {})
+    assert names.count("refresh_adapters") == 1
+    assert len(db.list_writer_adapters()) == 1
+    assert len(rec.events("run_completed")) == 1
+
+
+async def test_jsonl_files_keep_the_holdout_out_of_training(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    run_dir = Path(db.get_training_run(run_id)["run_dir"])
+    import json
+
+    task = json.loads((run_dir / "task.json").read_text())
+    assert task["backend"] == "fake" and task["resume"] is False
+    assert task["data_root"] == str(run_dir)
+    train = (run_dir / "data/prefs.jsonl").read_text().splitlines()
+    held = (run_dir / "data/holdout.jsonl").read_text().splitlines()
+    assert held and len(train) + len(held) == 120
+    held_groups = {json.loads(x)["group"] for x in held}
+    assert not held_groups & {json.loads(x)["group"] for x in train}
+    sft = (run_dir / "data/sft.jsonl").read_text().splitlines()
+    assert not held_groups & {json.loads(x)["group"] for x in sft}
+    await m.cancel()
+    await _idle(m)
+
+
+async def test_start_refusals(db, tmp_path, dataset):
+    rec = Recorder()
+    gate = Gate(False, False, "a b", ["no CUDA", "no deps"])
+    m = _manager(db, tmp_path, rec, gate=gate)
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert (e.value.status, e.value.code) == (409, "gate_unavailable")
+    assert e.value.detail()["reasons"] == ["no CUDA", "no deps"]
+
+    m = _manager(db, tmp_path, rec)
+    dataset["n"] = 50
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert e.value.code == "not_ready"
+    assert e.value.detail()["readiness"]["missing"] == 50
+    with pytest.raises(TrainingError) as e:
+        await m.start("12345", "quick")
+    assert (e.value.status, e.value.code) == (422, "unknown_scope")
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "insane")
+    assert e.value.status == 422
+    assert db.list_writer_adapters() == [] and not m.gpu_locked()
+
+    dataset["n"] = 120
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    await m.start("all", "quick")
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert e.value.code == "already_training"
+    await m.cancel()
+    await _idle(m)
+
+
+async def test_start_refused_while_gpu_busy_releases_the_lock(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, busy=["comfy_jobs"])
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert (e.value.status, e.value.code) == (409, "gpu_busy")
+    assert e.value.detail()["reasons"] == ["comfy_jobs"]
+    assert not m.gpu_locked()
+    assert ("release_gpu", None) not in rec.log
+    assert db.list_writer_adapters() == [] and db.list_training_runs() == []
+
+
+class _FakeComfy:
+    def __init__(self) -> None:
+        self.pending = False
+
+    def has_pending_jobs(self) -> bool:
+        return self.pending
+
+
+class _FakeT2i:
+    def __init__(self) -> None:
+        self.batches: List[Any] = []
+
+    def active_batches(self) -> List[Any]:
+        return self.batches
+
+
+class _FakeUnloadable:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def shutdown_all(self) -> None:
+        self.calls += 1
+
+    async def shutdown(self) -> None:
+        self.calls += 1
+
+
+async def test_lifespan_wiring_refuses_while_a_comfy_job_is_pending(
+    db, tmp_path, dataset
+):
+    """The real gpu_busy / release_gpu wiring from backend.main."""
+    from backend.main import _build_training_manager
+
+    comfy, t2i = _FakeComfy(), _FakeT2i()
+    roles, clip = _FakeUnloadable(), _FakeUnloadable()
+    m = _build_training_manager(
+        db=db,
+        data_dir=tmp_path / "data",
+        comfy_client=comfy,
+        t2i_runner=t2i,
+        inference_client=clip,
+        vlm_roles=roles,
+    )
+    rec = Recorder()
+    m._dataset_inputs = lambda: (object(), "uncensored", None)
+    m._paths = lambda: _paths(tmp_path)
+    m._gate = lambda p: Gate(True, True, "", [])
+    m._broadcast = lambda e, d: rec.log.append((e, d))
+
+    async def no_refresh() -> None:
+        return None
+
+    m._refresh_adapters = no_refresh
+    m.backend, m.fake, m.poll_s = "fake", {"sft_steps": 3, "dpo_steps": 3}, 0.02
+
+    comfy.pending = True
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert e.value.code == "gpu_busy" and e.value.extra["reasons"] == ["comfy_jobs"]
+    comfy.pending = False
+    t2i.batches = [{"id": "b"}]
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert e.value.extra["reasons"] == ["t2i_batch"]
+    assert roles.calls == 0 and clip.calls == 0
+    assert db.list_writer_adapters() == [] and not m.gpu_locked()
+
+    t2i.batches = []
+    await m.start("all", "quick")
+    assert roles.calls == 1 and clip.calls == 1  # every VLM + CLIP unloaded
+    await _idle(m)
+    assert db.list_writer_adapters()[0]["status"] == "untested"
+
+
+async def test_pause_releases_the_lock_and_resume_continues(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 3
+    )
+    await m.pause()
+    await _idle(m)
+    assert not m.gpu_locked()
+    assert db.get_training_run(run_id)["status"] == "paused"
+    adapter_id = db.get_training_run(run_id)["adapter_id"]
+    assert db.get_writer_adapter(adapter_id)["status"] == "paused"
+    assert rec.events("run_paused")[0]["run_id"] == run_id
+    with pytest.raises(TrainingError) as e:
+        await m.pause()
+    assert e.value.code == "not_running"
+
+    results: List[Dict[str, Any]] = []
+    orig = m._read_result
+
+    def spy(active):
+        r = orig(active)
+        results.append(r)
+        return r
+
+    m._read_result = spy  # type: ignore[method-assign]
+    _speed_up(db, run_id)
+    await m.resume(run_id)
+    assert m.gpu_locked()
+    await _idle(m)
+    assert results[-1]["status"] == "ok"
+    assert results[-1]["resumed_from"] is not None  # from the pause checkpoint
+    assert db.get_training_run(run_id)["status"] == "completed"
+    assert [a["id"] for a in db.list_writer_adapters()] == [adapter_id]
+    assert db.get_writer_adapter(adapter_id)["status"] == "untested"
+    assert rec.events("run_started")[-1]["resumed"] is True
+    with pytest.raises(TrainingError) as e:
+        await m.resume(run_id)
+    assert e.value.detail() == {"code": "not_resumable", "run_status": "completed"}
+    with pytest.raises(TrainingError) as e:
+        await m.cancel(run_id)
+    assert e.value.code == "not_cancellable"
+
+
+async def test_server_stop_pauses_and_a_restart_resumes(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW, shutdown_grace_s=20.0)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 2
+    )
+    await m.aclose()  # lifespan shutdown: pause, checkpoint, exit
+    assert db.get_training_run(run_id)["status"] == "paused"
+    assert not m.gpu_locked()
+    with pytest.raises(TrainingError):
+        await m.start("all", "quick")  # a closing manager starts nothing
+
+    m2 = _manager(db, tmp_path, rec, fake={"step_sleep_s": 0.0})
+    assert await m2.recover() == []  # nothing was left running
+    _speed_up(db, run_id)
+    await m2.resume(run_id)
+    await _idle(m2)
+    assert db.get_training_run(run_id)["status"] == "completed"
+    assert len(db.list_writer_adapters()) == 1
+
+
+async def test_a_crashed_server_leaves_running_and_recover_pauses_it(
+    db, tmp_path, dataset
+):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 2
+    )
+    active = m._active
+    assert active is not None and active.proc is not None
+    # The server process dies: its supervisor never runs again.
+    active.supervisor.cancel()
+    active.proc.kill()
+    await active.proc.wait()
+    adapter_id = db.get_training_run(run_id)["adapter_id"]
+    assert db.get_training_run(run_id)["status"] == "running"
+    assert db.get_writer_adapter(adapter_id)["status"] == "training"
+
+    m2 = _manager(db, tmp_path, rec, fake={"step_sleep_s": 0.0})
+    assert await m2.recover() == [run_id]
+    assert db.get_training_run(run_id)["status"] == "paused"
+    assert db.get_writer_adapter(adapter_id)["status"] == "paused"
+    assert [r["run_id"] for r in m2.resumable_runs()] == [run_id]
+    _speed_up(db, run_id)
+    await m2.resume(run_id)
+    await _idle(m2)
+    assert db.get_training_run(run_id)["status"] == "completed"
+    assert [a["id"] for a in db.list_writer_adapters()] == [adapter_id]
+
+
+async def test_cancel_cleans_the_run(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    run_dir = Path(db.get_training_run(run_id)["run_dir"])
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 1
+    )
+    await m.cancel()
+    await _idle(m)
+    assert not m.gpu_locked()
+    run = db.get_training_run(run_id)
+    assert run["status"] == "cancelled"
+    assert db.list_writer_adapters() == []  # soft-deleted
+    assert db.get_writer_adapter(run["adapter_id"])["status"] == "deleted"
+    assert not run_dir.exists()
+    assert rec.events("run_cancelled") == [
+        {"run_id": run_id, "adapter_id": run["adapter_id"]}
+    ]
+
+    # A paused run is cancelled by id without a worker.
+    run2 = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 1
+    )
+    await m.pause()
+    await _idle(m)
+    dir2 = Path(db.get_training_run(run2)["run_dir"])
+    assert dir2.exists()
+    await m.cancel(run2)
+    assert db.get_training_run(run2)["status"] == "cancelled"
+    assert not dir2.exists()
+    assert db.list_writer_adapters() == []
+    # The next adapter never reuses a cancelled run's number.
+    await m.start("all", "quick")
+    assert db.list_writer_adapters()[0]["name"] == "taste-all-v3"
+    await m.cancel()
+    await _idle(m)
+
+
+async def test_a_failed_run_marks_the_adapter_failed(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake={"fail_at": {"stage": "dpo", "step": 2}})
+    run_id = await m.start("all", "quick")
+    await _idle(m)
+    run = db.get_training_run(run_id)
+    assert run["status"] == "failed" and "fake failure" in run["error"]
+    assert db.get_writer_adapter(run["adapter_id"])["status"] == "failed"
+    assert rec.events("run_failed")[0]["run_id"] == run_id
+    assert not m.gpu_locked()
+
+
+async def test_stdout_and_stderr_are_drained(db, tmp_path, dataset, monkeypatch):
+    """Both pipes are read line by line: a worker that floods stdout and
+    stderr far past the pipe buffer still finishes."""
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    flood = (
+        "import runpy, sys\n"
+        "for i in range(20000):\n"
+        "    print('stdout line', i)\n"
+        "    print('stderr line', i, file=sys.stderr)\n"
+        "sys.stdout.flush(); sys.stderr.flush()\n"
+        "sys.argv = ['writer_train_worker', sys.argv[1]]\n"
+        "runpy.run_module('metascan.workers.writer_train_worker', run_name='__main__')\n"
+    )
+
+    def command(active):
+        return [sys.executable, "-c", flood, str(active.run_dir / "task.json")]
+
+    monkeypatch.setattr(m, "_command", command)
+    seen: Dict[str, int] = {}
+    orig_finish = m._finish
+
+    async def finish(active, rc):
+        seen.update(active.streams)
+        await orig_finish(active, rc)
+
+    monkeypatch.setattr(m, "_finish", finish)
+    run_id = await m.start("all", "quick")
+    await asyncio.wait_for(_idle(m), timeout=TIMEOUT)
+    assert db.get_training_run(run_id)["status"] == "completed"
+    assert seen["stdout"] >= 20000 and seen["stderr"] >= 20000
+
+
+# ---- the lock on every GPU consumer ---------------------------------------------
+
+# (method, path) of every GPU consumer route.
+CONSUMERS: List[Tuple[str, str]] = [
+    ("POST", "/api/t2i/prompt"),
+    ("POST", "/api/t2i/batches"),
+    ("POST", "/api/i2v/prompt"),
+    ("POST", "/api/i2v/generate"),
+    ("POST", "/api/storyboard/1/parse"),
+    ("POST", "/api/storyboard/1/synthesize"),
+    ("POST", "/api/storyboard/1/compile"),
+    ("POST", "/api/storyboard/1/generate"),
+    ("POST", "/api/storyboard/1/generate-video"),
+    ("POST", "/api/storyboard/1/compose"),
+    ("POST", "/api/storyboard/subjects/1/describe"),
+    ("POST", "/api/storyboard/scenes/1/describe"),
+    ("POST", "/api/vlm/tag"),
+    ("POST", "/api/vlm/retag"),
+    ("POST", "/api/vlm/active"),
+    ("POST", "/api/chat"),
+    ("POST", "/api/prompt/generate"),
+    ("POST", "/api/prompt/transform"),
+    ("POST", "/api/prompt/clean"),
+    ("POST", "/api/similarity/search"),
+    ("POST", "/api/similarity/content-search"),
+    ("POST", "/api/similarity/index/build"),
+    ("POST", "/api/models/inference/start"),
+    ("POST", "/api/models/rebuild-index"),
+    ("POST", "/api/comfy/submit"),
+    ("POST", "/api/upscale"),
+    ("POST", "/api/upscale/resume-all"),
+]
+# Routes that must keep working while training (browsing and rating).
+NOT_LOCKED = [
+    ("GET", "/api/media"),
+    ("POST", "/api/judgments/seen"),
+    ("GET", "/api/writers/training"),
+    ("GET", "/api/t2i/images"),
+    ("POST", "/api/vlm/unload"),
+]
+
+
+def _consumer_modules() -> List[Any]:
+    from backend.api import (
+        chat,
+        comfy,
+        i2v,
+        judgments,
+        media,
+        models,
+        prompt,
+        similarity,
+        storyboard,
+        t2i,
+        upscale,
+        vlm,
+        writers,
+    )
+
+    return [
+        t2i,
+        i2v,
+        storyboard,
+        vlm,
+        chat,
+        prompt,
+        similarity,
+        models,
+        comfy,
+        upscale,
+        media,
+        judgments,
+        writers,
+    ]
+
+
+def _consumer_app() -> FastAPI:
+    app = FastAPI()
+    for mod in _consumer_modules():
+        app.include_router(mod.router)
+    return app
+
+
+def _api_routes() -> List[APIRoute]:
+    return [
+        r
+        for mod in _consumer_modules()
+        for r in mod.router.routes
+        if isinstance(r, APIRoute)
+    ]
+
+
+def _matches(path: str, template: str) -> bool:
+    a, b = path.split("/"), template.split("/")
+    return len(a) == len(b) and all(x == y or y.startswith("{") for x, y in zip(a, b))
+
+
+def _accepts_empty_body(route: APIRoute) -> bool:
+    from pydantic import TypeAdapter, ValidationError
+
+    assert route.body_field is not None
+    try:
+        TypeAdapter(route.body_field.field_info.annotation).validate_python({})
+    except ValidationError:
+        return False
+    return True
+
+
+def _route_has_lock(method: str, path: str) -> Optional[bool]:
+    for r in _api_routes():
+        if method in r.methods and _matches(path, r.path):
+            return any(d.call is require_gpu_free for d in r.dependant.dependencies)
+    return None
+
+
+def test_every_consumer_route_declares_the_lock_and_browsing_does_not():
+    for method, path in CONSUMERS:
+        assert _route_has_lock(method, path) is True, path
+    for method, path in NOT_LOCKED:
+        assert _route_has_lock(method, path) is False, path
+
+
+async def test_the_lock_blocks_every_consumer_and_releases_after(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    gpu_guard.set_gpu_reservation(m.gpu_locked)
+    app = _consumer_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        await m.start("all", "quick")
+        for method, path in CONSUMERS:
+            r = await client.request(method, path, json={})
+            assert r.status_code == 409, (path, r.status_code, r.text)
+            assert r.json()["detail"]["code"] == "gpu_busy_training", path
+        await m.cancel()
+        await _idle(m)
+        assert not gpu_guard.gpu_reserved()
+        # Released: the same requests get past the lock to body validation.
+        # Only routes whose body is required are sent (a 422 proves the
+        # handler is reachable without running it -- a handler would touch
+        # the real library); the others are covered by the dependency.
+        require_gpu_free()
+        checked = 0
+        for method, path in CONSUMERS:
+            route = next(
+                r
+                for r in _api_routes()
+                if method in r.methods and _matches(path, r.path)
+            )
+            if route.body_field is None or _accepts_empty_body(route):
+                continue
+            r = await client.request(method, path, json={})
+            assert r.status_code == 422, (path, r.status_code)
+            checked += 1
+        assert checked >= 15
+
+
+async def test_clients_refuse_to_load_models_under_the_lock():
+    from backend.api import similarity
+    from fastapi import HTTPException
+
+    from metascan.core.comfy_client import ComfyClient, ComfyError
+    from metascan.core.inference_client import InferenceClient, InferenceError
+    from metascan.core.vlm_client import VlmClient, VlmError
+
+    gpu_guard.set_gpu_reservation(lambda: True)
+    with pytest.raises(VlmError, match="GPU busy: training"):
+        await VlmClient().start("qwen3vl-8b")
+    with pytest.raises(InferenceError, match="GPU busy: training"):
+        await InferenceClient().start("small", wait_ready=False)
+    with pytest.raises(ComfyError, match="GPU busy: training"):
+        await ComfyClient.submit(SimpleNamespace(), 1, None)  # type: ignore[arg-type]
+    with pytest.raises(HTTPException) as e:
+        await similarity._start_index_build(rebuild=False, allow_vlm_tagging=False)
+    assert e.value.status_code == 409
+    assert e.value.detail["code"] == "gpu_busy_training"
+
+
+# ---- the writers API ---------------------------------------------------------------
+
+
+async def test_training_routes(db, tmp_path, dataset, monkeypatch):
+    from backend.api import writers
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    tm.set_training_manager(m)
+    monkeypatch.setattr(writers, "get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(writers.router)
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.get("/api/writers/training", params={"scope": "all"})
+            body = r.json()
+            assert r.status_code == 200
+            assert body["state"] == "idle" and body["gate"]["available"] is True
+            assert body["dataset"]["readiness"]["trainable"] is True
+            assert body["dataset"]["counts"]["content_mode"] == "uncensored"
+            assert set(body["presets"]) == {"quick", "standard", "thorough"}
+            assert body["clamps"]["rank"] == [4, 64]
+
+            r = await c.get("/api/writers/dataset/preview", params={"scope": "all"})
+            assert len(r.json()["prefs"]) == 10 and len(r.json()["sft"]) == 10
+
+            r = await c.post(
+                "/api/writers/training/start",
+                json={"scope": "all", "effort": "quick", "overrides": {"rank": 12}},
+            )
+            assert r.status_code == 200, r.text
+            run_id = r.json()["run_id"]
+            assert db.get_writer_adapter(1)["hyperparams"]["rank"] == 12
+            r = await c.post("/api/writers/training/start", json={})
+            assert r.status_code == 409
+            assert r.json()["detail"]["code"] == "already_training"
+            await _until(
+                lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0)
+                >= 1
+            )
+            r = await c.post("/api/writers/training/pause")
+            assert r.status_code == 200 and r.json()["state"] == "pausing"
+            await _idle(m)
+            r = await c.get("/api/writers/training")
+            assert [x["run_id"] for x in r.json()["runs"]] == [run_id]
+            r = await c.post("/api/writers/training/resume", json={"run_id": run_id})
+            assert r.status_code == 200
+            r = await c.post("/api/writers/training/cancel", json={})
+            assert r.status_code == 200 and r.json()["state"] == "cancelling"
+            await _idle(m)
+            r = await c.post("/api/writers/training/cancel", json={})
+            assert r.status_code == 409
+            r = await c.get("/api/writers/training", params={"scope": "999"})
+            assert r.status_code == 422
+    finally:
+        tm.set_training_manager(None)
+
+
+# ---- the gate -------------------------------------------------------------------------
+
+
+def _report(vram: Optional[float]) -> HardwareReport:
+    return HardwareReport(
+        os="Linux",
+        machine="x86_64",
+        python="3.11",
+        is_wsl=False,
+        cpu_count=16,
+        cuda=(
+            None
+            if vram is None
+            else CudaInfo(name="GPU", vram_gb=vram, capability="12.0")
+        ),
+    )
+
+
+def test_gate_reports_each_missing_piece(tmp_path):
+    clear_writer_training_probe_cache()
+    paths = WriterTrainingPaths(
+        python=str(tmp_path / "py"),
+        base_dir=tmp_path / "base",
+        converter_script=tmp_path / "lc" / "convert_lora_to_gguf.py",
+    )
+    calls: List[str] = []
+
+    def deps(python):
+        calls.append("deps")
+        return "training dependencies not installed: peft"
+
+    def trl(python):
+        calls.append("trl")
+        return "trl 0.27 lacks DPOConfig.ref_adapter_name"
+
+    reasons = writer_training_reasons(
+        _report(None), paths, deps_probe=deps, trl_probe=trl
+    )
+    assert len(reasons) == 4
+    assert "CUDA" in reasons[0]
+    assert reasons[1] == "training dependencies not installed: peft"
+    assert "base weights" in reasons[2] and "converter" in reasons[3]
+    assert calls == ["deps"]  # the TRL probe needs the deps
+
+    # 24 GB is not enough (2048 tokens, DPO): 32 GB is the floor.
+    clear_writer_training_probe_cache()
+    reasons = writer_training_reasons(
+        _report(24.0), paths, deps_probe=lambda p: "", trl_probe=trl
+    )
+    assert reasons[0] == "Requires 32 GB VRAM; detected 24.0 GB."
+    assert reasons[1] == "trl 0.27 lacks DPOConfig.ref_adapter_name"
+
+    # Everything present.
+    clear_writer_training_probe_cache()
+    paths.base_dir.mkdir()
+    (paths.base_dir / "config.json").write_text("{}")
+    (paths.base_dir / "model-00001.safetensors").write_bytes(b"x")
+    paths.converter_script.parent.mkdir()
+    paths.converter_script.write_text("")
+    gate = writer_training_gate(
+        _report(32.0), paths, deps_probe=lambda p: "", trl_probe=lambda p: ""
+    )
+    assert gate.available and gate.reasons == []
+
+    # probe=False never spawns: cached result reused, else "not checked".
+    assert writer_training_gate(_report(32.0), paths, probe=False).available
+    clear_writer_training_probe_cache()
+    gate = writer_training_gate(_report(32.0), paths, probe=False)
+    assert gate.reasons == ["Training dependencies not checked yet."]
+    clear_writer_training_probe_cache()
+
+
+def test_feature_gates_include_writer_training_without_probing(monkeypatch):
+    from metascan.core import hardware
+
+    def boom(python, timeout=300.0):
+        raise AssertionError("feature_gates must not probe")
+
+    monkeypatch.setattr(hardware, "probe_training_deps", boom)
+    clear_writer_training_probe_cache()
+    gates = hardware.feature_gates(_report(None))
+    assert gates["writer_training"].available is False
+    assert any("CUDA" in r for r in gates["writer_training"].reasons)
+
+
+def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python():
+    from metascan.core.hardware import probe_training_deps
+
+    reason = probe_training_deps(sys.executable)
+    # This venv has no training deps installed (they are optional).
+    assert reason.startswith("training dependencies not installed")
+    assert "requirements-train.txt" in reason
+    assert "could not run" in probe_training_deps(str(Path("/nonexistent/python")))

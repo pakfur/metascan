@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
+from metascan.core.gpu_guard import gpu_reserved
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
@@ -535,7 +538,7 @@ def _assert_dim_matches(fm: FaissIndexManager, vec_dim: int) -> None:
         )
 
 
-@router.post("/search")
+@router.post("/search", dependencies=GPU_FREE)
 async def search_similar(
     body: SimilaritySearchRequest,
 ) -> List[Dict[str, Any]]:
@@ -580,7 +583,7 @@ async def search_similar(
     ]
 
 
-@router.post("/content-search")
+@router.post("/content-search", dependencies=GPU_FREE)
 async def content_search(
     body: ContentSearchRequest,
 ) -> List[Dict[str, Any]]:
@@ -660,6 +663,10 @@ async def update_similarity_settings(body: SimilaritySettingsUpdate):
 async def _reload_inference_client(model_key: str, device: str) -> None:
     if _inference_client is None:
         return
+    if gpu_reserved():
+        # Training holds the GPU: the next search after it ends spawns the
+        # worker with the new settings (ensure_started compares them).
+        return
     try:
         await _inference_client.reload(model_key=model_key, device=device)
     except Exception:
@@ -669,7 +676,7 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 # ----- Index build/cancel (subprocess-driven) -----
 
 
-@router.post("/index/build")
+@router.post("/index/build", dependencies=GPU_FREE)
 async def build_index(rebuild: bool = False) -> Dict[str, Any]:
     """Start an embedding worker subprocess for unembedded (or all) files."""
     return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True)
@@ -691,6 +698,10 @@ def is_indexing() -> bool:
 async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
     global _current_scan_tag_with_vlm, _vlm_scan_stops
 
+    if gpu_reserved():
+        # Writer training holds the GPU (every entry point: the route, the
+        # post-scan auto trigger, the Models tab rebuild, the auto index).
+        raise gpu_busy_http_error()
     eq = _get_embedding_queue()
     if eq.is_indexing():
         raise HTTPException(status_code=409, detail="Index build already in progress")

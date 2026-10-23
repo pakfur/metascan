@@ -1,0 +1,1083 @@
+"""Writer LoRA training manager (taste learning project 4).
+
+Owns the single training run of the prompt writer:
+
+* builds the dataset (``metascan.core.writer_dataset``) for a scope, checks
+  readiness and writes the run's JSONL files;
+* holds the **GPU lock** for the whole run: training starts only when no
+  ComfyUI job is pending/running and no T2I / storyboard batch or embedding
+  build is active; it shuts down every VLM client and the CLIP inference
+  worker first; while it holds the lock every GPU consumer answers 409
+  ``gpu_busy_training`` (``backend.services.gpu_lock`` /
+  ``metascan.core.gpu_guard``). The lock is released on completion,
+  failure, pause or cancel;
+* spawns ``python -m metascan.workers.writer_train_worker <task.json>``
+  (the training interpreter: ``models.writer_train_python`` or this
+  Python), drains its stdout AND stderr line by line, polls
+  ``progress.json`` and broadcasts on WS ``training``;
+* on completion copies ``adapter.gguf`` / ``adapter_config.json`` /
+  ``meta.json`` (and the PEFT dir, for "Continue <adapter>") into
+  ``data/models/vlm/adapters/<id>/``, marks the adapter ``untested`` --
+  exactly once per run (a compare-and-set on the run row) -- refreshes the
+  writer server's adapter list and broadcasts ``adapters_changed``.
+
+Each run works in its own directory ``data/training/runs/<run_id>/``
+(``task.json``, ``data/*.jsonl``, ``out/``, ``checkpoints/``, ``control/``)
+so a resume reuses the same hyperparameters and JSONL files (the worker
+refuses anything else) and a later fresh run never sees another run's
+checkpoints. A server stop pauses the worker (``pause.signal``, then
+terminate after a grace period); a server that died leaves rows
+``running`` and :meth:`TrainingManager.recover` marks them ``paused``.
+
+WS ``training`` events: ``run_started {run_id, adapter_id, name, scope,
+resumed}``, ``run_progress {run_id, adapter_id, stage, step, total_steps,
+...}``, ``run_paused {run_id, adapter_id}``, ``run_completed {run_id,
+adapter_id}``, ``run_failed {run_id, adapter_id, error}``, ``run_cancelled
+{run_id, adapter_id}``, ``adapters_changed``. Example text is never logged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import json
+import logging
+import os
+import re
+import shutil
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
+
+from metascan.core import writer_dataset as wd
+from metascan.core.hardware import (
+    Gate,
+    WriterTrainingPaths,
+    detect_hardware,
+    writer_training_gate,
+)
+from metascan.core.writer_adapters import (
+    ADAPTER_BASE_MODEL,
+    ADAPTER_CONFIG,
+    ADAPTER_GGUF,
+    ADAPTER_META,
+    ADAPTER_PEFT_DIRNAME,
+    SERVABLE_STATUSES,
+    STATUS_DELETED,
+    STATUS_FAILED,
+    STATUS_PAUSED,
+    STATUS_TRAINING,
+    adapter_dir,
+)
+from metascan.workers import writer_train_worker as ww
+
+logger = logging.getLogger(__name__)
+worker_logger = logging.getLogger(__name__ + ".worker")
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKER_MODULE = "metascan.workers.writer_train_worker"
+
+RUN_RUNNING = "running"
+RUN_PAUSED = "paused"
+RUN_COMPLETED = "completed"
+RUN_FAILED = "failed"
+RUN_CANCELLED = "cancelled"
+RESUMABLE_RUN_STATUSES = (RUN_PAUSED, RUN_FAILED)
+
+EFFORTS = tuple(ww.EFFORT_PRESETS)
+DEFAULT_EFFORT = "standard"
+OVERRIDE_KEYS = ("rank", "lr", "epochs", "dpo_lr")
+OVERRIDE_CLAMPS: Dict[str, Tuple[float, float]] = {
+    **ww.CLAMPS,
+    "dpo_lr": ww.DPO_LR_CLAMP,
+}
+
+_ERROR_LINE = re.compile(r"\b(error|exception|traceback|failed|fatal)\b", re.I)
+_TAIL_LINES = 40
+
+
+class TrainingError(Exception):
+    """A refused training operation: the routes answer ``status`` with
+    ``{"code": code, **extra}``."""
+
+    def __init__(self, status: int, code: str, **extra: Any) -> None:
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.extra = extra
+
+    def detail(self) -> Dict[str, Any]:
+        return {"code": self.code, **self.extra}
+
+
+# ---- hyperparameters --------------------------------------------------------
+
+
+def resolved_presets() -> Dict[str, Dict[str, Any]]:
+    """Every effort preset as the worker resolves it (shown read-only)."""
+    return {
+        name: ww.validate_hyperparams(dict(preset))
+        for name, preset in ww.EFFORT_PRESETS.items()
+    }
+
+
+def resolve_hyperparams(
+    effort: str, overrides: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The preset with Advanced ``overrides`` clamped into range (rank and
+    epochs rounded to integers). Unknown keys / non-numbers are refused."""
+    if effort not in ww.EFFORT_PRESETS:
+        raise TrainingError(422, "invalid_effort", efforts=list(EFFORTS))
+    hp: Dict[str, Any] = dict(ww.EFFORT_PRESETS[effort])
+    for key, value in (overrides or {}).items():
+        if value is None:
+            continue
+        if key not in OVERRIDE_KEYS:
+            raise TrainingError(422, "invalid_hyperparams", message=f"unknown {key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TrainingError(
+                422, "invalid_hyperparams", message=f"{key} must be a number"
+            )
+        lo, hi = OVERRIDE_CLAMPS[key]
+        v = min(max(float(value), lo), hi)
+        hp[key] = int(round(v)) if key in ("rank", "epochs") else v
+    try:
+        ww.validate_hyperparams(hp)
+    except ww.TrainWorkerError as exc:
+        raise TrainingError(422, "invalid_hyperparams", message=str(exc)) from exc
+    return hp
+
+
+def scope_slug(scope: str, categories: Dict[int, str]) -> str:
+    """``all`` or the category's name slugified (``cat<id>`` if empty)."""
+    if scope == wd.SCOPE_ALL:
+        return wd.SCOPE_ALL
+    name = categories.get(int(scope), "")
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or f"cat{scope}"
+
+
+def training_paths_from_config(
+    config: Dict[str, Any], data_dir: Path
+) -> WriterTrainingPaths:
+    """The training interpreter (``models.writer_train_python``, default
+    this Python), the HF base weights dir (``models.writer_train_repo``,
+    default the 8B writer's source repo) and llama.cpp's LoRA converter
+    (``models.llama_cpp_dir``, default ``data/llama.cpp``)."""
+    import sys
+
+    from metascan.core.writer_adapters import (
+        CONVERTER_SCRIPT,
+        DEFAULT_WRITER_TRAIN_REPO,
+        default_llama_cpp_dir,
+        train_base_dir,
+    )
+
+    models = config.get("models") or {}
+    if not isinstance(models, dict):
+        models = {}
+
+    def _str(key: str) -> str:
+        value = models.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    repo = _str("writer_train_repo") or DEFAULT_WRITER_TRAIN_REPO
+    llama_dir = _str("llama_cpp_dir")
+    return WriterTrainingPaths(
+        python=_str("writer_train_python") or sys.executable,
+        base_dir=train_base_dir(data_dir, repo),
+        converter_script=(
+            Path(llama_dir).expanduser()
+            if llama_dir
+            else default_llama_cpp_dir(data_dir)
+        )
+        / CONVERTER_SCRIPT,
+    )
+
+
+# ---- the manager ------------------------------------------------------------
+
+
+DatasetInputs = Tuple[Any, str, Optional[wd.CaptionResolver]]
+
+
+@dataclass
+class _Built:
+    scope: str
+    slug: str
+    sft: List[wd.SftExample]
+    prefs: List[wd.PrefExample]
+    counts: wd.DatasetCounts
+    readiness: Dict[str, Any]
+    built_at: str
+
+
+@dataclass
+class _Active:
+    run_id: int
+    adapter_id: int
+    name: str
+    scope: str
+    run_dir: Path
+    resumed: bool
+    state: str = "starting"  # starting | running | pausing | cancelling
+    proc: Optional[asyncio.subprocess.Process] = None
+    supervisor: Optional["asyncio.Task[None]"] = None
+    progress: Dict[str, Any] = field(default_factory=dict)
+    tail: Deque[str] = field(
+        default_factory=lambda: collections.deque(maxlen=_TAIL_LINES)
+    )
+    streams: Dict[str, int] = field(default_factory=lambda: {"stdout": 0, "stderr": 0})
+
+
+class TrainingManager:
+    """See the module docstring. ``gpu_busy()`` returns the reasons the GPU
+    cannot be taken now ([] = free); ``release_gpu()`` shuts down every
+    VLM client and the CLIP worker; ``dataset_inputs()`` gives ``(prompt
+    store, content_mode, caption resolver)`` exactly as T2I inference uses
+    them; ``paths()`` the training interpreter / base dir / converter."""
+
+    def __init__(
+        self,
+        db: Any,
+        data_dir: Path,
+        *,
+        dataset_inputs: Callable[[], DatasetInputs],
+        gpu_busy: Callable[[], List[str]],
+        release_gpu: Callable[[], Awaitable[None]],
+        refresh_adapters: Callable[[], Awaitable[None]],
+        broadcast: Callable[[str, Dict[str, Any]], None],
+        paths: Callable[[], WriterTrainingPaths],
+        gate: Optional[Callable[[WriterTrainingPaths], Gate]] = None,
+        backend: str = "real",
+        fake: Optional[Dict[str, Any]] = None,
+        poll_s: float = 1.0,
+        shutdown_grace_s: float = 30.0,
+        on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
+        now: Optional[Callable[[], datetime]] = None,
+    ) -> None:
+        self.db = db
+        self.data_dir = Path(data_dir)
+        self._dataset_inputs = dataset_inputs
+        self._gpu_busy = gpu_busy
+        self._release_gpu = release_gpu
+        self._refresh_adapters = refresh_adapters
+        self._broadcast = broadcast
+        self._paths = paths
+        self._gate = gate or (
+            lambda p: writer_training_gate(detect_hardware(), p, probe=True)
+        )
+        self.backend = backend
+        self.fake = dict(fake or {})
+        self.poll_s = float(poll_s)
+        self.shutdown_grace_s = float(shutdown_grace_s)
+        # Task 9 hook: (adapter_id, render_scorecard) after a completed run.
+        self.on_completed = on_completed
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._op_lock = asyncio.Lock()
+        self._active: Optional[_Active] = None
+        self._gpu_held = False
+        self._closing = False
+
+    # ---- GPU lock -------------------------------------------------------
+
+    def gpu_locked(self) -> bool:
+        """True while a run holds the GPU (consulted by every consumer)."""
+        return self._gpu_held
+
+    async def _take_gpu(self) -> None:
+        """Set the lock FIRST (new consumer requests 409 from here on), then
+        check nothing is using the GPU, free it, and check again (a request
+        admitted just before the lock may have registered work meanwhile)."""
+        self._gpu_held = True
+        try:
+            busy = self._gpu_busy()
+            if busy:
+                raise TrainingError(409, "gpu_busy", reasons=busy)
+            await self._release_gpu()
+            busy = self._gpu_busy()
+            if busy:
+                raise TrainingError(409, "gpu_busy", reasons=busy)
+        except BaseException:
+            self._gpu_held = False
+            raise
+
+    # ---- dataset --------------------------------------------------------
+
+    def _categories(self) -> Dict[int, str]:
+        return {int(c["id"]): str(c["name"]) for c in self.db.list_categories()}
+
+    def _normalize_scope(self, scope: Any) -> Tuple[str, Dict[int, str]]:
+        categories = self._categories()
+        try:
+            cid = wd.parse_scope(scope, categories)
+        except ValueError:
+            raise TrainingError(422, "unknown_scope") from None
+        return (wd.SCOPE_ALL if cid is None else str(cid)), categories
+
+    def _build(self, scope: Any) -> _Built:
+        """Synchronous (callers use ``asyncio.to_thread``)."""
+        norm, categories = self._normalize_scope(scope)
+        store, content_mode, resolve = self._dataset_inputs()
+        now = self._now()
+        sft, prefs, counts = wd.build_examples(
+            self.db, norm, store, now, content_mode=content_mode, resolve=resolve
+        )
+        cutoff = wd.last_adapter_cutoff(self.db.list_writer_adapters(), norm)
+        return _Built(
+            scope=norm,
+            slug=scope_slug(norm, categories),
+            sft=sft,
+            prefs=prefs,
+            counts=counts,
+            readiness=wd.readiness(counts, cutoff),
+            built_at=now.astimezone(timezone.utc).isoformat(),
+        )
+
+    async def dataset_summary(self, scope: Any = wd.SCOPE_ALL) -> Dict[str, Any]:
+        built = await asyncio.to_thread(self._build, scope)
+        _, holdout = wd.split_holdout(built.prefs)
+        return {
+            "scope": built.scope,
+            "counts": built.counts.to_dict(),
+            "readiness": built.readiness,
+            "holdout_pairs": len(holdout),
+            "holdout_fraction": wd.DEFAULT_HOLDOUT_FRACTION,
+        }
+
+    async def dataset_preview(self, scope: Any = wd.SCOPE_ALL) -> Dict[str, Any]:
+        built = await asyncio.to_thread(self._build, scope)
+        return {
+            "scope": built.scope,
+            "prefs": wd.preview(built.prefs),
+            "sft": wd.preview(built.sft),
+        }
+
+    def gate(self) -> Gate:
+        """Synchronous: runs the (cached) subprocess probes."""
+        return self._gate(self._paths())
+
+    # ---- start / resume -------------------------------------------------
+
+    def _init_adapter_dir(self, start_from: Any, scope: str) -> Optional[str]:
+        if start_from in (None, "", "fresh"):
+            return None
+        try:
+            aid = int(start_from)
+        except (TypeError, ValueError):
+            raise TrainingError(422, "invalid_start_from") from None
+        row = self.db.get_writer_adapter(aid)
+        if row is None or row["deleted_at"] is not None:
+            raise TrainingError(404, "unknown_adapter")
+        if row["status"] not in SERVABLE_STATUSES or row["kind"] != "t2i":
+            raise TrainingError(409, "adapter_not_continuable")
+        peft = adapter_dir(self.data_dir, aid) / ADAPTER_PEFT_DIRNAME
+        if not (peft / ADAPTER_CONFIG).is_file():
+            raise TrainingError(409, "adapter_not_continuable")
+        return str(peft)
+
+    def _runs_root(self) -> Path:
+        return self.data_dir / "training" / "runs"
+
+    def _create_run(
+        self,
+        built: _Built,
+        hyperparams: Dict[str, Any],
+        effort: str,
+        init_adapter_dir: Optional[str],
+        start_from: Any,
+        render_scorecard: bool,
+    ) -> _Active:
+        """Register the adapter (``training``) and the run, write the JSONL
+        files and task.json. Synchronous."""
+        name = self.db.next_adapter_name(built.slug)
+        try:
+            adapter_id = self.db.create_writer_adapter(
+                name=name,
+                scope=built.scope,
+                kind="t2i",
+                base_model=ADAPTER_BASE_MODEL,
+                status=STATUS_TRAINING,
+                hyperparams=hyperparams,
+                counts=built.counts.to_dict(),
+            )
+        except ValueError:  # a concurrent rename took the name: next one
+            name = self.db.next_adapter_name(built.slug)
+            adapter_id = self.db.create_writer_adapter(
+                name=name,
+                scope=built.scope,
+                kind="t2i",
+                base_model=ADAPTER_BASE_MODEL,
+                status=STATUS_TRAINING,
+                hyperparams=hyperparams,
+                counts=built.counts.to_dict(),
+            )
+        options = {
+            "scope": built.scope,
+            "effort": effort,
+            "hyperparams": hyperparams,
+            "start_from": "fresh" if init_adapter_dir is None else str(start_from),
+            "render_scorecard": bool(render_scorecard),
+            "data_cutoff": built.built_at,
+        }
+        run_id = self.db.create_training_run(
+            adapter_id, status=RUN_RUNNING, options=options
+        )
+        run_dir = self._runs_root() / str(run_id)
+        if run_dir.exists():  # a stale dir from a reset DB: never reuse it
+            shutil.rmtree(run_dir)
+        data = run_dir / "data"
+        train, holdout = wd.split_holdout(built.prefs)
+        sft = wd.sft_without_holdout(built.sft, holdout)
+        wd.write_jsonl(sft, data / "sft.jsonl")
+        wd.write_jsonl(train, data / "prefs.jsonl")
+        wd.write_jsonl(holdout, data / "holdout.jsonl")
+        paths = self._paths()
+        task: Dict[str, Any] = {
+            "backend": self.backend,
+            "base_dir": str(paths.base_dir),
+            "data_root": str(run_dir),
+            "sft_path": str(data / "sft.jsonl"),
+            "pref_path": str(data / "prefs.jsonl"),
+            "holdout_path": str(data / "holdout.jsonl"),
+            "out_dir": str(run_dir / "out"),
+            "checkpoint_dir": str(run_dir / "checkpoints"),
+            "control_dir": str(run_dir / "control"),
+            "resume": False,
+            "hyperparams": hyperparams,
+            "init_adapter_dir": init_adapter_dir,
+            "meta": {
+                "counts": built.counts.to_dict(),
+                "scope": built.scope,
+                "name": name,
+                "run_id": run_id,
+                "adapter_id": adapter_id,
+                "effort": effort,
+                "data_cutoff": built.built_at,
+                "n_train_pairs": len(train),
+                "n_holdout_pairs": len(holdout),
+            },
+        }
+        if self.backend == "real":
+            task["converter"] = {
+                "python": paths.python,
+                "script": str(paths.converter_script),
+            }
+        if self.fake:
+            task["fake"] = self.fake
+        ww.write_json_atomic(run_dir / "task.json", task)
+        self.db.update_training_run(
+            run_id,
+            run_dir=str(run_dir),
+            checkpoint_dir=str(run_dir / "checkpoints"),
+        )
+        return _Active(
+            run_id=run_id,
+            adapter_id=adapter_id,
+            name=name,
+            scope=built.scope,
+            run_dir=run_dir,
+            resumed=False,
+        )
+
+    async def start(
+        self,
+        scope: Any = wd.SCOPE_ALL,
+        effort: str = DEFAULT_EFFORT,
+        overrides: Optional[Dict[str, Any]] = None,
+        start_from: Any = "fresh",
+        render_scorecard: bool = False,
+    ) -> int:
+        """Start a fresh run; returns its id. Raises :class:`TrainingError`
+        (409 ``already_training`` / ``gate_unavailable`` / ``not_ready`` /
+        ``gpu_busy``; 422 for bad input)."""
+        async with self._op_lock:
+            self._refuse_if_running()
+            hyperparams = resolve_hyperparams(effort, overrides)
+            await self._require_gate()
+            norm, _ = await asyncio.to_thread(self._normalize_scope, scope)
+            init_dir = await asyncio.to_thread(self._init_adapter_dir, start_from, norm)
+            built = await asyncio.to_thread(self._build, norm)
+            if not built.readiness["trainable"]:
+                raise TrainingError(409, "not_ready", readiness=built.readiness)
+            await self._take_gpu()
+            try:
+                active = await asyncio.to_thread(
+                    self._create_run,
+                    built,
+                    hyperparams,
+                    effort,
+                    init_dir,
+                    start_from,
+                    render_scorecard,
+                )
+                self._active = active
+                await self._spawn(active)
+            except BaseException:
+                await self._abort_start()
+                raise
+            logger.info(
+                "writer training run %d started (adapter %d, scope %s, effort %s)",
+                active.run_id,
+                active.adapter_id,
+                active.scope,
+                effort,
+            )
+            self._emit("adapters_changed", {})
+            return active.run_id
+
+    async def resume(self, run_id: int) -> int:
+        """Resume a paused (or failed) run from its last checkpoint, with
+        the same task (hyperparameters and JSONL files)."""
+        async with self._op_lock:
+            self._refuse_if_running()
+            run = await asyncio.to_thread(self.db.get_training_run, int(run_id))
+            if run is None:
+                raise TrainingError(404, "unknown_run")
+            if run["status"] not in RESUMABLE_RUN_STATUSES:
+                raise TrainingError(409, "not_resumable", run_status=run["status"])
+            adapter = await asyncio.to_thread(
+                self.db.get_writer_adapter, run["adapter_id"]
+            )
+            run_dir = Path(run["run_dir"] or "")
+            task_path = run_dir / "task.json"
+            if adapter is None or adapter["deleted_at"] is not None:
+                raise TrainingError(409, "not_resumable", run_status="adapter_deleted")
+            if not run["run_dir"] or not task_path.is_file():
+                raise TrainingError(409, "not_resumable", run_status="files_missing")
+            await self._require_gate()
+            await self._take_gpu()
+            active = _Active(
+                run_id=int(run["id"]),
+                adapter_id=int(run["adapter_id"]),
+                name=str(adapter["name"]),
+                scope=str(adapter["scope"]),
+                run_dir=run_dir,
+                resumed=True,
+            )
+            try:
+                await asyncio.to_thread(self._prepare_resume, active, task_path)
+                self._active = active
+                await self._spawn(active)
+            except BaseException:
+                self._active = None
+                self._gpu_held = False
+                await asyncio.to_thread(
+                    self._set_states, active, run["status"], adapter["status"]
+                )
+                raise
+            logger.info("writer training run %d resumed", active.run_id)
+            self._emit("adapters_changed", {})
+            return active.run_id
+
+    def _prepare_resume(self, active: _Active, task_path: Path) -> None:
+        task = json.loads(task_path.read_text())
+        task["resume"] = True
+        if task.get("backend") == "real":
+            # The converter is not part of the resume fingerprint: pick up a
+            # moved llama.cpp checkout.
+            paths = self._paths()
+            task["converter"] = {
+                "python": paths.python,
+                "script": str(paths.converter_script),
+            }
+        ww.write_json_atomic(task_path, task)
+        self._set_states(active, RUN_RUNNING, STATUS_TRAINING, error=None)
+
+    def _set_states(
+        self, active: _Active, run_status: str, adapter_status: str, **extra: Any
+    ) -> None:
+        self.db.update_training_run(active.run_id, status=run_status, **extra)
+        self.db.set_writer_adapter_status(active.adapter_id, adapter_status, **extra)
+
+    def _refuse_if_running(self) -> None:
+        if self._active is not None or self._gpu_held:
+            raise TrainingError(409, "already_training")
+        if self._closing:
+            raise TrainingError(503, "shutting_down")
+
+    async def _require_gate(self) -> None:
+        gate = await asyncio.to_thread(self.gate)
+        if not gate.available:
+            raise TrainingError(
+                409, "gate_unavailable", reasons=list(gate.reasons or [gate.reason])
+            )
+
+    async def _abort_start(self) -> None:
+        """A start that failed after registering: the run is failed, the
+        adapter too, and the GPU is released."""
+        active = self._active
+        self._active = None
+        self._gpu_held = False
+        if active is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self._set_states,
+                active,
+                RUN_FAILED,
+                STATUS_FAILED,
+                error="the training worker could not start",
+            )
+        except Exception:
+            logger.exception("Marking an aborted training start failed")
+
+    # ---- the subprocess ---------------------------------------------------
+
+    def _command(self, active: _Active) -> List[str]:
+        return [
+            self._paths().python,
+            "-m",
+            WORKER_MODULE,
+            str(active.run_dir / "task.json"),
+        ]
+
+    async def _spawn(self, active: _Active) -> None:
+        control = active.run_dir / "control"
+        await asyncio.to_thread(self._empty_dir, control)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if p
+        )
+        env["PYTHONUNBUFFERED"] = "1"
+        active.proc = await asyncio.create_subprocess_exec(
+            *self._command(active),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(REPO_ROOT),
+            env=env,
+            limit=1 << 20,
+        )
+        active.state = "running"
+        active.supervisor = asyncio.create_task(
+            self._supervise(active), name=f"writer-train-{active.run_id}"
+        )
+        self._emit(
+            "run_started",
+            {
+                "run_id": active.run_id,
+                "adapter_id": active.adapter_id,
+                "name": active.name,
+                "scope": active.scope,
+                "resumed": active.resumed,
+            },
+        )
+
+    @staticmethod
+    def _empty_dir(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        for child in path.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
+    async def _drain(self, active: _Active, stream: Any, name: str) -> None:
+        """Forward one worker pipe line by line (never left undrained: a
+        full pipe would hang the worker). HF's PrinterCallback prints log
+        dicts on stdout (DEBUG); the worker's own logging is on stderr."""
+        while True:
+            try:
+                raw = await stream.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                raw = await stream.read(1 << 16)  # an over-long line: skip it
+                if not raw:
+                    return
+                continue
+            if not raw:
+                return
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if not text:
+                continue
+            active.streams[name] += 1
+            active.tail.append(text)
+            if _ERROR_LINE.search(text):
+                level = logging.WARNING
+            else:
+                level = logging.INFO if name == "stderr" else logging.DEBUG
+            worker_logger.log(level, "[run %d %s] %s", active.run_id, name, text)
+
+    async def _supervise(self, active: _Active) -> None:
+        proc = active.proc
+        assert proc is not None
+        drains = [
+            asyncio.create_task(self._drain(active, proc.stdout, "stdout")),
+            asyncio.create_task(self._drain(active, proc.stderr, "stderr")),
+        ]
+        rc: Optional[int] = None
+        try:
+            while rc is None:
+                try:
+                    rc = await asyncio.wait_for(proc.wait(), timeout=self.poll_s)
+                except asyncio.TimeoutError:
+                    await self._poll_progress(active)
+            await asyncio.gather(*drains, return_exceptions=True)
+            await self._poll_progress(active)
+            await self._finish(active, rc)
+        except asyncio.CancelledError:
+            for t in drains:
+                t.cancel()
+            raise
+        except Exception:
+            logger.exception("writer training run %d: supervisor failed", active.run_id)
+            try:
+                await self._failed(active, "internal error while finishing the run")
+            except Exception:
+                logger.exception("Marking run %d failed raised", active.run_id)
+        finally:
+            if self._active is active:
+                self._active = None
+                self._gpu_held = False
+
+    async def _poll_progress(self, active: _Active) -> None:
+        path = active.run_dir / "out" / ww.PROGRESS_NAME
+        try:
+            raw = await asyncio.to_thread(path.read_text)
+            progress = json.loads(raw)
+        except (OSError, ValueError):
+            return
+        if not isinstance(progress, dict) or progress == active.progress:
+            return
+        step_changed = progress.get("step") != active.progress.get("step") or (
+            progress.get("total_steps") != active.progress.get("total_steps")
+        )
+        active.progress = progress
+        if step_changed:
+            try:
+                await asyncio.to_thread(
+                    self.db.update_training_run,
+                    active.run_id,
+                    step=int(progress.get("step") or 0),
+                    total_steps=progress.get("total_steps"),
+                )
+            except Exception:
+                logger.exception("Recording training progress failed")
+        self._emit(
+            "run_progress",
+            {"run_id": active.run_id, "adapter_id": active.adapter_id, **progress},
+        )
+
+    def _read_result(self, active: _Active) -> Dict[str, Any]:
+        try:
+            data = json.loads((active.run_dir / "out" / ww.RESULT_NAME).read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def _finish(self, active: _Active, rc: int) -> None:
+        result = await asyncio.to_thread(self._read_result, active)
+        status = result.get("status")
+        if rc == ww.EXIT_OK and status == "ok":
+            await self._complete(active, result)
+        elif rc == ww.EXIT_CANCELLED:
+            await self._cancelled(active)
+        elif rc == ww.EXIT_PAUSED or self._closing:
+            # A server stop pauses (and terminates a worker that does not
+            # reach a step boundary in time): the last checkpoint resumes.
+            await self._paused(active)
+        else:
+            error = result.get("error") or (
+                f"the training worker exited with code {rc}"
+                + (f": {active.tail[-1]}" if active.tail else "")
+            )
+            await self._failed(active, str(error)[:2000])
+
+    # ---- outcomes ---------------------------------------------------------
+
+    def _install_adapter(self, active: _Active) -> Path:
+        """Copy the worker's outputs into the adapter folder (atomically
+        replacing it). Synchronous."""
+        out = active.run_dir / "out"
+        peft = out / ww.PEFT_DIRNAME
+        dest = adapter_dir(self.data_dir, active.adapter_id)
+        tmp = dest.with_name(f".{dest.name}.installing")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True)
+        shutil.copy2(out / ww.GGUF_NAME, tmp / ADAPTER_GGUF)
+        shutil.copy2(peft / ADAPTER_CONFIG, tmp / ADAPTER_CONFIG)
+        shutil.copy2(out / ww.META_NAME, tmp / ADAPTER_META)
+        shutil.copytree(peft, tmp / ADAPTER_PEFT_DIRNAME)
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(tmp, dest)
+        return dest
+
+    async def _complete(self, active: _Active, result: Dict[str, Any]) -> None:
+        run = await asyncio.to_thread(self.db.get_training_run, active.run_id)
+        if run is None or run["status"] == RUN_COMPLETED:
+            logger.info("writer training run %d already completed", active.run_id)
+            return
+        try:
+            dest = await asyncio.to_thread(self._install_adapter, active)
+        except OSError as exc:
+            await self._failed(active, f"could not install the adapter files: {exc}")
+            return
+        options = run.get("options") or {}
+        fields: Dict[str, Any] = {
+            "file_path": str(dest / ADAPTER_GGUF),
+            "holdout_agreement": result.get("holdout_agreement"),
+            "base_agreement": result.get("base_agreement"),
+            "data_cutoff": options.get("data_cutoff") or self._now().isoformat(),
+        }
+        registered = await asyncio.to_thread(
+            self.db.complete_training_run, active.run_id, active.adapter_id, fields
+        )
+        if not registered:
+            logger.info("writer training run %d already completed", active.run_id)
+            return
+        logger.info(
+            "writer training run %d completed: adapter %d (holdout %s, base %s)",
+            active.run_id,
+            active.adapter_id,
+            result.get("holdout_agreement"),
+            result.get("base_agreement"),
+        )
+        # The checkpoints (and a refused-wipe leftover) and the JSONL live
+        # in the run dir; the adapter folder now holds everything kept.
+        await asyncio.to_thread(shutil.rmtree, active.run_dir, True)
+        # Release the GPU before the writer reloads with the new adapter.
+        if self._active is active:
+            self._active = None
+            self._gpu_held = False
+        await self._registry_changed()
+        self._emit(
+            "run_completed",
+            {"run_id": active.run_id, "adapter_id": active.adapter_id},
+        )
+        hook = self.on_completed
+        if hook is not None:
+            try:
+                await hook(active.adapter_id, bool(options.get("render_scorecard")))
+            except Exception:
+                logger.exception("Post-training hook failed")
+
+    async def _paused(self, active: _Active) -> None:
+        await asyncio.to_thread(self._set_states, active, RUN_PAUSED, STATUS_PAUSED)
+        if self._active is active:
+            self._active = None
+            self._gpu_held = False
+        logger.info("writer training run %d paused", active.run_id)
+        self._emit(
+            "run_paused",
+            {
+                "run_id": active.run_id,
+                "adapter_id": active.adapter_id,
+                "step": active.progress.get("step"),
+                "total_steps": active.progress.get("total_steps"),
+            },
+        )
+        self._emit("adapters_changed", {})
+
+    async def _failed(self, active: _Active, error: str) -> None:
+        await asyncio.to_thread(
+            self._set_states, active, RUN_FAILED, STATUS_FAILED, error=error
+        )
+        if self._active is active:
+            self._active = None
+            self._gpu_held = False
+        logger.warning("writer training run %d failed: %s", active.run_id, error)
+        self._emit(
+            "run_failed",
+            {"run_id": active.run_id, "adapter_id": active.adapter_id, "error": error},
+        )
+        self._emit("adapters_changed", {})
+
+    def _discard_run(
+        self, run_id: int, adapter_id: int, run_dir: Optional[str]
+    ) -> None:
+        """Cancelled: the run's files go, the adapter row is soft-deleted
+        (its name stays taken, like every deleted adapter). Synchronous."""
+        self.db.update_training_run(run_id, status=RUN_CANCELLED)
+        row = self.db.get_writer_adapter(adapter_id)
+        if row is not None and row["status"] != STATUS_DELETED:
+            self.db.soft_delete_writer_adapter(adapter_id)
+        folder = adapter_dir(self.data_dir, adapter_id)
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        if run_dir:
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    async def _cancelled(self, active: _Active) -> None:
+        await asyncio.to_thread(
+            self._discard_run, active.run_id, active.adapter_id, str(active.run_dir)
+        )
+        if self._active is active:
+            self._active = None
+            self._gpu_held = False
+        logger.info("writer training run %d cancelled", active.run_id)
+        self._emit(
+            "run_cancelled", {"run_id": active.run_id, "adapter_id": active.adapter_id}
+        )
+        self._emit("adapters_changed", {})
+
+    async def _registry_changed(self) -> None:
+        """The writer server reloads its adapter list (restarted when idle)
+        BEFORE the UI hears about it."""
+        try:
+            await self._refresh_adapters()
+        except Exception:
+            logger.exception("Applying the adapter registry to the writer failed")
+        self._emit("adapters_changed", {})
+
+    # ---- pause / cancel ---------------------------------------------------
+
+    def _signal(self, active: _Active, name: str) -> None:
+        control = active.run_dir / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        (control / name).write_text("")
+
+    async def pause(self) -> Dict[str, Any]:
+        """Ask the running worker to checkpoint and stop (it exits at the
+        next step boundary; a pause during eval lands at the convert
+        boundary). The GPU is released once it has exited."""
+        active = self._active
+        if active is None or active.state not in ("running",):
+            raise TrainingError(409, "not_running")
+        await asyncio.to_thread(self._signal, active, ww.PAUSE_SIGNAL)
+        active.state = "pausing"
+        return self.status()
+
+    async def cancel(self, run_id: Optional[int] = None) -> Dict[str, Any]:
+        """Cancel the running run (the worker deletes its checkpoints), or
+        a paused / failed one by id (its files are removed here)."""
+        active = self._active
+        if active is not None and (run_id is None or int(run_id) == active.run_id):
+            if active.state == "cancelling":
+                return self.status()
+            await asyncio.to_thread(self._signal, active, ww.CANCEL_SIGNAL)
+            active.state = "cancelling"
+            return self.status()
+        if run_id is None:
+            raise TrainingError(409, "not_running")
+        async with self._op_lock:
+            run = await asyncio.to_thread(self.db.get_training_run, int(run_id))
+            if run is None:
+                raise TrainingError(404, "unknown_run")
+            if run["status"] not in RESUMABLE_RUN_STATUSES:
+                raise TrainingError(409, "not_cancellable", run_status=run["status"])
+            await asyncio.to_thread(
+                self._discard_run,
+                int(run["id"]),
+                int(run["adapter_id"]),
+                run["run_dir"],
+            )
+        self._emit(
+            "run_cancelled", {"run_id": int(run["id"]), "adapter_id": run["adapter_id"]}
+        )
+        self._emit("adapters_changed", {})
+        return self.status()
+
+    # ---- status -------------------------------------------------------------
+
+    def status(self) -> Dict[str, Any]:
+        active = self._active
+        run: Optional[Dict[str, Any]] = None
+        if active is not None:
+            run = {
+                "run_id": active.run_id,
+                "adapter_id": active.adapter_id,
+                "name": active.name,
+                "scope": active.scope,
+                "resumed": active.resumed,
+                "state": active.state,
+                "progress": dict(active.progress),
+            }
+        return {
+            "state": active.state if active is not None else "idle",
+            "gpu_locked": self._gpu_held,
+            "run": run,
+        }
+
+    def resumable_runs(self) -> List[Dict[str, Any]]:
+        """Paused / failed runs, newest first, with their adapter's name.
+        Synchronous."""
+        out: List[Dict[str, Any]] = []
+        for run in reversed(self.db.list_training_runs(RESUMABLE_RUN_STATUSES)):
+            adapter = self.db.get_writer_adapter(run["adapter_id"])
+            if adapter is None or adapter["deleted_at"] is not None:
+                continue
+            out.append(
+                {
+                    "run_id": run["id"],
+                    "adapter_id": run["adapter_id"],
+                    "name": adapter["name"],
+                    "scope": adapter["scope"],
+                    "status": run["status"],
+                    "step": run["step"],
+                    "total_steps": run["total_steps"],
+                    "error": run["error"],
+                    "updated_at": run["updated_at"],
+                    "options": run["options"],
+                }
+            )
+        return out
+
+    # ---- lifecycle ----------------------------------------------------------
+
+    async def recover(self) -> List[int]:
+        """Startup: runs a stopped server left ``running`` become
+        ``paused`` (resumable from their last checkpoint)."""
+        ids: List[int] = await asyncio.to_thread(self.db.mark_interrupted_training_runs)
+        if ids:
+            logger.info("writer training runs marked paused at startup: %s", ids)
+        return ids
+
+    async def aclose(self) -> None:
+        """Server shutdown: pause the worker (a checkpoint at the next step
+        boundary), terminate it after the grace period, and record the run
+        ``paused``."""
+        self._closing = True
+        active = self._active
+        if active is None or active.proc is None:
+            return
+        proc = active.proc
+        sup = active.supervisor
+        if proc.returncode is None:
+            try:
+                await asyncio.to_thread(self._signal, active, ww.PAUSE_SIGNAL)
+            except OSError:
+                logger.exception("Could not signal the training worker to pause")
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=self.shutdown_grace_s)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "training worker did not pause within %.0fs; terminating",
+                    self.shutdown_grace_s,
+                )
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+        if sup is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(sup), timeout=30.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                sup.cancel()
+            except Exception:
+                logger.exception("Training supervisor raised on shutdown")
+
+    # ---- helpers --------------------------------------------------------------
+
+    def _emit(self, event: str, payload: Dict[str, Any]) -> None:
+        try:
+            self._broadcast(event, payload)
+        except Exception:
+            logger.exception("training broadcast failed")
+
+
+# ---- singleton (installed by the lifespan) ------------------------------------
+
+_manager: Optional[TrainingManager] = None
+
+
+def set_training_manager(manager: Optional[TrainingManager]) -> None:
+    global _manager
+    _manager = manager
+
+
+def get_training_manager() -> Optional[TrainingManager]:
+    return _manager
