@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
@@ -325,7 +327,7 @@ async def resolve_caption(body: CaptionRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/prompt")
+@router.post("/prompt", dependencies=GPU_FREE)
 async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     runner = _require_runner()
     category_ids = await checked_category_ids(body.category_ids)
@@ -367,7 +369,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/batches")
+@router.post("/batches", dependencies=GPU_FREE)
 async def start_batch(body: BatchBody) -> Dict[str, Any]:
     runner = _require_runner()
     category_ids = await checked_category_ids(body.category_ids)

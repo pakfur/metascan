@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, Final, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
@@ -223,7 +225,7 @@ async def _run_generation(
 # ---- Generation endpoints ------------------------------------------------
 
 
-@router.post("/generate", response_model=GenerateResponse)
+@router.post("/generate", response_model=GenerateResponse, dependencies=GPU_FREE)
 async def generate(body: GenerateRequest) -> GenerateResponse:
     client = _require_ready_client()
     p = _require_existing_file(body.file_path)
@@ -270,7 +272,7 @@ async def list_elements(target_model: TargetModel) -> ElementsResponse:
     return ElementsResponse(target_model=target_model, elements=elements)
 
 
-@router.post("/transform", response_model=GenerateResponse)
+@router.post("/transform", response_model=GenerateResponse, dependencies=GPU_FREE)
 async def transform(body: TransformRequest) -> GenerateResponse:
     client = _require_ready_client()
     image_path = _require_existing_file(body.file_path) if body.file_path else None
@@ -294,7 +296,7 @@ async def transform(body: TransformRequest) -> GenerateResponse:
     )
 
 
-@router.post("/clean", response_model=GenerateResponse)
+@router.post("/clean", response_model=GenerateResponse, dependencies=GPU_FREE)
 async def clean(body: CleanRequest) -> GenerateResponse:
     client = _require_ready_client()
     system, user = compose_clean_prompts(body.source_prompt)

@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.api import similarity
@@ -336,7 +338,7 @@ async def get_inference_status() -> Dict[str, Any]:
     return client.snapshot()
 
 
-@router.post("/inference/start")
+@router.post("/inference/start", dependencies=GPU_FREE)
 async def start_inference() -> Dict[str, Any]:
     """Spawn the inference worker in the background using the
     currently-configured CLIP model. The UI calls this when the user
@@ -413,6 +415,7 @@ def _build_status_payload() -> Dict[str, Any]:
                 "available": g.available,
                 "recommended": g.recommended,
                 "reason": g.reason,
+                "reasons": list(g.reasons),
             }
             for k, g in feature_gates(report).items()
         },
@@ -576,7 +579,7 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
     raise HTTPException(status_code=404, detail=f"unknown model id: {model_id}")
 
 
-@router.post("/rebuild-index")
+@router.post("/rebuild-index", dependencies=GPU_FREE)
 async def rebuild_index() -> Dict[str, Any]:
     """Convenience wrapper that forwards to the existing similarity index
     rebuild endpoint so the Models tab can surface a 'Rebuild index' button

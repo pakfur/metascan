@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.dependencies import get_db
@@ -117,7 +119,7 @@ async def status() -> Dict[str, Any]:
     return client.snapshot()
 
 
-@router.post("/tag")
+@router.post("/tag", dependencies=GPU_FREE)
 async def tag_one(body: TagRequest) -> Dict[str, List[str]]:
     """Tag a single image file using the active VLM model.
 
@@ -358,7 +360,7 @@ def _format_eta(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-@router.post("/retag", status_code=202)
+@router.post("/retag", status_code=202, dependencies=GPU_FREE)
 async def retag(body: RetagRequest) -> Dict[str, Any]:
     if get_vlm_client() is None:
         raise HTTPException(status_code=503, detail="vlm client not initialized")
@@ -399,6 +401,11 @@ def _cancel_retag_jobs() -> None:
         job.cancelled = True
 
 
+def cancel_retag_jobs() -> None:
+    """Stop every running retag job (writer training takes the GPU)."""
+    _cancel_retag_jobs()
+
+
 async def _point_role(roles: VlmRoles, role: Role, model_id: str) -> None:
     """Re-point ``role``; retag jobs run on the general client, so stop
     them when that client changes."""
@@ -408,7 +415,7 @@ async def _point_role(roles: VlmRoles, role: Role, model_id: str) -> None:
         _cancel_retag_jobs()
 
 
-@router.post("/active")
+@router.post("/active", dependencies=GPU_FREE)
 async def set_active(body: ActiveBody) -> Dict[str, Any]:
     """Load ``model_id`` for ``role`` (default general, the pre-roles
     meaning) and make it that role's model."""

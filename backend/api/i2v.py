@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
@@ -139,7 +141,7 @@ class GenerateRequest(BaseModel):
     writer_model: Optional[str] = None
 
 
-@router.post("/prompt")
+@router.post("/prompt", dependencies=GPU_FREE)
 async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     runner = _require_runner()
     if body.duration_s <= 0:
@@ -212,7 +214,7 @@ async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
     return report
 
 
-@router.post("/generate")
+@router.post("/generate", dependencies=GPU_FREE)
 async def generate(body: GenerateRequest) -> Dict[str, Any]:
     runner = _require_runner()
     if body.duration_s <= 0:

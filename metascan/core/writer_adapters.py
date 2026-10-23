@@ -63,6 +63,34 @@ def adapter_dir(data_dir: Path, adapter_id: int) -> Path:
 
 # The GGUF the writer llama-server loads (``--lora``), inside adapter_dir.
 ADAPTER_GGUF = "adapter.gguf"
+ADAPTER_CONFIG = "adapter_config.json"
+ADAPTER_META = "meta.json"
+# The PEFT adapter kept beside the GGUF so "Continue <adapter>" can train on.
+ADAPTER_PEFT_DIRNAME = "peft"
+
+# The base model adapters are trained on (the writer role's 8B) and its
+# HF-format training weights (the source of the installed GGUF);
+# ``models.writer_train_repo`` overrides the repo.
+ADAPTER_BASE_MODEL = "qwen3vl-8b"
+DEFAULT_WRITER_TRAIN_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+CONVERTER_SCRIPT = "convert_lora_to_gguf.py"
+
+
+def train_base_dir(data_dir: Path, repo: str) -> Path:
+    """Where the HF training weights of ``repo`` live:
+    ``data/models/vlm/train/<org>--<name>/``."""
+    return data_dir / "models" / "vlm" / "train" / repo.strip().replace("/", "--")
+
+
+def default_llama_cpp_dir(data_dir: Path) -> Path:
+    """The llama.cpp checkout holding the LoRA converter when config
+    ``models.llama_cpp_dir`` is unset (``scripts/build_llama_server.sh``
+    builds in a temp dir and keeps no checkout)."""
+    return data_dir / "llama.cpp"
+
+
+def default_converter_script(data_dir: Path) -> Path:
+    return default_llama_cpp_dir(data_dir) / CONVERTER_SCRIPT
 
 
 # 409 detail codes: the adapter cannot be served (the dialog falls back to

@@ -64,6 +64,13 @@ from backend.api.vlm import (
     set_vlm_roles,
 )
 from backend.services.vlm_roles import VlmRoles
+from backend.services.training_manager import (
+    TrainingManager,
+    set_training_manager,
+    training_paths_from_config,
+)
+from metascan.core.gpu_guard import gpu_reserved, set_gpu_reservation
+from metascan.core.writer_dataset import caption_resolver
 from backend.api.comfy import set_comfy_client
 from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
@@ -191,6 +198,70 @@ async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
             )
     except Exception:
         logger.exception("Applying the pending taste snapshot failed")
+
+
+def _build_training_manager(
+    *,
+    db: Any,
+    data_dir: Path,
+    comfy_client: Any,
+    t2i_runner: Any,
+    inference_client: Any,
+    vlm_roles: Any,
+) -> TrainingManager:
+    """Wire the writer training manager to the live services."""
+    from backend.api.storyboard import storyboard_busy
+    from backend.api.vlm import cancel_retag_jobs, refresh_writer_adapters
+    from backend.services import hindsight_briefs
+
+    def dataset_inputs() -> Any:
+        cfg = get_t2i_config(load_app_config())
+        library, _ = t2i_runner.library.get()
+        return (
+            get_prompt_store(),
+            cfg["content_mode"],
+            caption_resolver(library, cfg["identity"]),
+        )
+
+    def gpu_busy() -> List[str]:
+        reasons: List[str] = []
+        if comfy_client.has_pending_jobs():
+            reasons.append("comfy_jobs")
+        if t2i_runner.active_batches():
+            reasons.append("t2i_batch")
+        if storyboard_busy():
+            reasons.append("storyboard")
+        if similarity.is_indexing():
+            reasons.append("index_build")
+        return reasons
+
+    async def release_gpu() -> None:
+        # No new GPU work can start (the lock is already held): stop what
+        # runs on the VLMs, then unload every VLM and the CLIP worker.
+        # A post-scan tag drain mid-batch ends at the explicit unload (its
+        # files stay queued); one still waiting waits out the lock.
+        cancel_retag_jobs()
+        job = hindsight_briefs.peek_briefs_job()
+        if job is not None:
+            job.cancel()
+        await vlm_roles.shutdown_all()
+        try:
+            await inference_client.shutdown()
+        except Exception:
+            logger.exception("Unloading the CLIP worker for training raised")
+
+    return TrainingManager(
+        db,
+        data_dir,
+        dataset_inputs=dataset_inputs,
+        gpu_busy=gpu_busy,
+        release_gpu=release_gpu,
+        refresh_adapters=refresh_writer_adapters,
+        broadcast=lambda event, data: ws_manager.broadcast_sync(
+            "training", event, data
+        ),
+        paths=lambda: training_paths_from_config(load_app_config(), data_dir),
+    )
 
 
 @asynccontextmanager
@@ -432,14 +503,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     auto_index = AutoIndexScheduler(
         start_build=similarity.start_auto_index_build,
         is_indexing=similarity.is_indexing,
-        is_busy=lambda: generation_busy(t2i_runner, comfy_client),
+        is_busy=lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
     # The post-embedding VLM tag drain waits for the same "no generation in
     # flight" so a 27B never loads into a render.
+    # Writer training holds the GPU: the drain (and the hindsight briefs,
+    # which wait on the same probe) wait it out too.
     similarity.set_generation_busy_probe(
-        lambda: generation_busy(t2i_runner, comfy_client)
+        lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client)
     )
+
+    # Writer LoRA training: one run at a time, holding the GPU (every GPU
+    # consumer answers 409 gpu_busy_training meanwhile).
+    training_manager = _build_training_manager(
+        db=get_db(),
+        data_dir=get_data_dir(),
+        comfy_client=comfy_client,
+        t2i_runner=t2i_runner,
+        inference_client=client,
+        vlm_roles=vlm_roles,
+    )
+    set_training_manager(training_manager)
+    set_gpu_reservation(training_manager.gpu_locked)
+    await training_manager.recover()
+    # Hindsight briefs pause (and refuse to start) while training runs.
+    from backend.services.hindsight_briefs import get_briefs_job
+
+    get_briefs_job().blocked = training_manager.gpu_locked
 
     try:
         yield
@@ -449,6 +540,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
+        # Pause the training worker first (its checkpoint resumes later);
+        # completing a run refreshes the writer, so the VLMs must be alive.
+        try:
+            await training_manager.aclose()
+        except Exception:
+            logger.exception("Training manager shutdown raised")
+        set_training_manager(None)
+        set_gpu_reservation(None)
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:

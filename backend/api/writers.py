@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -145,3 +145,118 @@ async def cancel_briefs() -> Dict[str, Any]:
     from backend.services.hindsight_briefs import get_briefs_job
 
     return {"status": "cancelling" if get_briefs_job().cancel() else "idle"}
+
+
+# ---- writer LoRA training ------------------------------------------------------
+
+
+class TrainingStartRequest(BaseModel):
+    scope: str = "all"
+    effort: str = "standard"
+    overrides: Optional[Dict[str, Any]] = None
+    start_from: Union[str, int] = "fresh"
+    render_scorecard: bool = False
+
+
+class TrainingRunRequest(BaseModel):
+    run_id: Optional[int] = None
+
+
+def _manager() -> Any:
+    from backend.services.training_manager import get_training_manager
+
+    manager = get_training_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail={"code": "training_unavailable"})
+    return manager
+
+
+async def _training_call(coro: Any) -> Any:
+    from backend.services.training_manager import TrainingError
+
+    try:
+        return await coro
+    except TrainingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+
+
+def _gate_payload(gate: Any) -> Dict[str, Any]:
+    return {
+        "available": gate.available,
+        "reason": gate.reason,
+        "reasons": list(gate.reasons),
+    }
+
+
+@router.get("/training")
+async def training_status(scope: str = "all") -> Dict[str, Any]:
+    """The training window's state: the active run (if any) and resumable
+    runs, the dataset counts + readiness for ``scope``, the
+    ``writer_training`` gate (each missing piece) and every effort preset
+    resolved, with the Advanced clamps."""
+    from backend.services.training_manager import (
+        OVERRIDE_CLAMPS,
+        TrainingError,
+        resolved_presets,
+    )
+
+    manager = _manager()
+    try:
+        dataset = await manager.dataset_summary(scope)
+    except TrainingError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
+    gate = await asyncio.to_thread(manager.gate)
+    return {
+        **manager.status(),
+        "runs": await asyncio.to_thread(manager.resumable_runs),
+        "dataset": dataset,
+        "gate": _gate_payload(gate),
+        "presets": resolved_presets(),
+        "clamps": {k: list(v) for k, v in OVERRIDE_CLAMPS.items()},
+    }
+
+
+@router.post("/training/start")
+async def start_training(body: TrainingStartRequest) -> Dict[str, Any]:
+    manager = _manager()
+    run_id = await _training_call(
+        manager.start(
+            scope=body.scope,
+            effort=body.effort,
+            overrides=body.overrides,
+            start_from=body.start_from,
+            render_scorecard=body.render_scorecard,
+        )
+    )
+    return {"run_id": run_id, **manager.status()}
+
+
+@router.post("/training/pause")
+async def pause_training() -> Dict[str, Any]:
+    result: Dict[str, Any] = await _training_call(_manager().pause())
+    return result
+
+
+@router.post("/training/resume")
+async def resume_training(body: TrainingRunRequest) -> Dict[str, Any]:
+    manager = _manager()
+    if body.run_id is None:
+        raise HTTPException(status_code=422, detail={"code": "run_id_required"})
+    run_id = await _training_call(manager.resume(body.run_id))
+    return {"run_id": run_id, **manager.status()}
+
+
+@router.post("/training/cancel")
+async def cancel_training(body: Optional[TrainingRunRequest] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = await _training_call(
+        _manager().cancel(body.run_id if body is not None else None)
+    )
+    return result
+
+
+@router.get("/dataset/preview")
+async def dataset_preview(scope: str = "all") -> Dict[str, Any]:
+    """Up to 10 preference pairs and 10 SFT examples of ``scope``, for the
+    owner's training window only (never logged)."""
+    result: Dict[str, Any] = await _training_call(_manager().dataset_preview(scope))
+    return result

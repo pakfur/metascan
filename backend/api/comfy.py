@@ -13,6 +13,8 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel, Field
 
 from backend.dependencies import get_db
@@ -247,7 +249,7 @@ async def delete_preset(preset_id: int) -> Dict[str, str]:
     return {"status": "deleted"}
 
 
-@router.post("/submit")
+@router.post("/submit", dependencies=GPU_FREE)
 async def submit(body: SubmitRequest) -> Dict[str, int]:
     client = _require_client()
     params = GenerationParams(

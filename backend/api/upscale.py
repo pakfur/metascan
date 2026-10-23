@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from pydantic import BaseModel
 
 from backend.ws.manager import ws_manager
@@ -139,7 +141,7 @@ class UpscaleSubmitRequest(BaseModel):
     concurrent_workers: int = 1
 
 
-@router.post("")
+@router.post("", dependencies=GPU_FREE)
 async def submit_upscale(body: UpscaleSubmitRequest):
     """Add upscale tasks to the queue and start processing."""
     queue = _get_queue()
@@ -216,7 +218,7 @@ async def pause_all():
     return {"status": "paused", "count": count}
 
 
-@router.post("/resume-all")
+@router.post("/resume-all", dependencies=GPU_FREE)
 async def resume_all():
     """Resume processing."""
     queue = _get_queue()

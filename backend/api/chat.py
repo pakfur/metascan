@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
+
+from backend.services.gpu_lock import GPU_FREE
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -73,7 +75,7 @@ def _ndjson(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-@router.post("")
+@router.post("", dependencies=GPU_FREE)
 async def chat(body: ChatRequest) -> StreamingResponse:
     client = _require_ready_client()
 

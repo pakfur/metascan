@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar, Callable
+from typing import Optional, List, Dict, Any, Sequence, Set, Tuple, ClassVar, Callable
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
@@ -1416,6 +1416,15 @@ class DatabaseManager:
                 )
                 """
             )
+            # A training run's working dir (task.json, JSONL, checkpoints)
+            # and its options JSON (scope, effort, hyperparams, ...).
+            for _col in ("run_dir", "options"):
+                _idempotent_add_column(
+                    conn,
+                    "training_runs",
+                    _col,
+                    f"ALTER TABLE training_runs ADD COLUMN {_col} TEXT",
+                )
             # Generation lineage on both generated-media tables; nullable,
             # existing rows stay NULL.
             for _lineage_table in ("t2i_images", "i2v_videos"):
@@ -6209,6 +6218,158 @@ class DatabaseManager:
                 (self._iso(None), adapter_id),
             )
             conn.commit()
+
+    # ---- training runs (writer LoRA training) ----------------------------
+
+    _RUN_FIELDS = (
+        "status",
+        "step",
+        "total_steps",
+        "checkpoint_dir",
+        "started_at",
+        "updated_at",
+        "log_path",
+        "error",
+        "run_dir",
+        "options",
+    )
+
+    @staticmethod
+    def _run_row(r: Any) -> Dict[str, Any]:
+        out = dict(r)
+        out["options"] = json.loads(out["options"]) if out.get("options") else {}
+        return out
+
+    def create_training_run(
+        self,
+        adapter_id: int,
+        *,
+        status: str = "running",
+        run_dir: Optional[str] = None,
+        checkpoint_dir: Optional[str] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO training_runs (adapter_id, status, step, "
+                "checkpoint_dir, started_at, updated_at, run_dir, options) "
+                "VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
+                (
+                    adapter_id,
+                    status,
+                    checkpoint_dir,
+                    now,
+                    now,
+                    run_dir,
+                    json.dumps(options or {}),
+                ),
+            )
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+    def get_training_run(self, run_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM training_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            return self._run_row(r) if r else None
+
+    def list_training_runs(
+        self, statuses: Optional[Sequence[str]] = None
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM training_runs"
+        args: List[Any] = []
+        if statuses:
+            sql += f" WHERE status IN ({', '.join('?' for _ in statuses)})"
+            args.extend(statuses)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql + " ORDER BY id", args).fetchall()
+            return [self._run_row(r) for r in rows]
+
+    def update_training_run(
+        self,
+        run_id: int,
+        *,
+        only_if_status: Optional[Sequence[str]] = None,
+        **fields: Any,
+    ) -> bool:
+        """Set ``fields`` (and ``updated_at``). With ``only_if_status`` the
+        update applies only while the run's status is one of those (a
+        compare-and-set); returns whether a row changed."""
+        unknown = set(fields) - set(self._RUN_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown training run fields: {sorted(unknown)}")
+        sets = ["updated_at = ?"]
+        args: List[Any] = [self._iso(None)]
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            args.append(json.dumps(value) if key == "options" else value)
+        sql = f"UPDATE training_runs SET {', '.join(sets)} WHERE id = ?"
+        args.append(run_id)
+        if only_if_status:
+            sql += f" AND status IN ({', '.join('?' for _ in only_if_status)})"
+            args.extend(only_if_status)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(sql, args)
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    def complete_training_run(
+        self, run_id: int, adapter_id: int, adapter_fields: Dict[str, Any]
+    ) -> bool:
+        """Atomically mark the run ``completed`` and its adapter
+        ``untested`` with ``adapter_fields`` -- only while the run is not
+        already completed. False when another completion got there first
+        (so a run never registers its adapter twice)."""
+        unknown = set(adapter_fields) - set(self._ADAPTER_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown adapter fields: {sorted(unknown)}")
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE training_runs SET status = 'completed', updated_at = ?, "
+                "error = NULL WHERE id = ? AND status != 'completed'",
+                (now, run_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            sets = ["status = 'untested'", "error = NULL"]
+            args: List[Any] = []
+            for key, value in adapter_fields.items():
+                sets.append(f"{key} = ?")
+                args.append(json.dumps(value) if key in self._ADAPTER_JSON else value)
+            args.append(adapter_id)
+            conn.execute(
+                f"UPDATE writer_adapters SET {', '.join(sets)} WHERE id = ?", args
+            )
+            conn.commit()
+            return True
+
+    def mark_interrupted_training_runs(self) -> List[int]:
+        """Startup: runs left ``running`` by a server that stopped become
+        ``paused`` (resumable), and so do their ``training`` adapters.
+        Returns the run ids."""
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, adapter_id FROM training_runs WHERE status = 'running'"
+            ).fetchall()
+            for run_id, adapter_id in rows:
+                conn.execute(
+                    "UPDATE training_runs SET status = 'paused', updated_at = ? "
+                    "WHERE id = ?",
+                    (now, run_id),
+                )
+                conn.execute(
+                    "UPDATE writer_adapters SET status = 'paused' "
+                    "WHERE id = ? AND status = 'training'",
+                    (adapter_id,),
+                )
+            conn.commit()
+            return [int(r[0]) for r in rows]
 
     def next_adapter_name(self, scope_slug: str) -> str:
         """``taste-<scope_slug>-v<N>`` with N one past the highest N any

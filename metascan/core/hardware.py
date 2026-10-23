@@ -12,6 +12,7 @@ field at its default. This module never raises on import or on
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import os
 import platform
@@ -20,7 +21,8 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from typing import List, Optional
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
 
@@ -238,6 +240,8 @@ class Gate:
     available: bool
     recommended: bool
     reason: str = ""
+    # Each missing piece separately (writer_training); ``reason`` joins them.
+    reasons: List[str] = field(default_factory=list)
 
 
 # Per-model VRAM floors (GB) for "available". Below this, the model is
@@ -443,7 +447,203 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
         reason="" if has_binary else "Click to install llama.cpp runtime.",
     )
 
+    # ---- Prompt-writer LoRA training ----
+    # Never blocks: the subprocess probes run only from the training
+    # endpoints (writer_training_gate(probe=True)); until then their part
+    # reads "not checked yet".
+    gates["writer_training"] = writer_training_gate(report, probe=False)
+
     return gates
+
+
+# ---- writer LoRA training gate --------------------------------------------
+
+# bf16 LoRA on the 8B writer at 2048 tokens; DPO runs chosen, rejected and
+# the reference adapter's passes.
+WRITER_TRAINING_MIN_VRAM_GB = 32.0
+# Imported (for real) by the deps probe with the TRAINING interpreter.
+WRITER_TRAINING_DEPS: Tuple[str, ...] = (
+    "peft",
+    "trl",
+    "accelerate",
+    "datasets",
+    "safetensors",
+    "transformers",
+    "torch",
+)
+_DEPS_CHECK = """
+import importlib, importlib.util, json, sys
+names = %r
+missing = [n for n in names if importlib.util.find_spec(n) is None]
+if missing:
+    print(json.dumps({"missing": missing}))
+    sys.exit(0)
+broken = []
+for n in names:
+    try:
+        importlib.import_module(n)
+    except Exception as e:
+        broken.append("%%s (%%s)" %% (n, type(e).__name__))
+print(json.dumps({"missing": [], "broken": broken}))
+""" % (
+    list(WRITER_TRAINING_DEPS),
+)
+_DEPS_HINT = "pip install -r requirements-train.txt"
+
+
+@dataclass(frozen=True)
+class WriterTrainingPaths:
+    """Where the training pieces live (resolved from config by the backend:
+    ``models.writer_train_python`` / ``writer_train_repo`` /
+    ``llama_cpp_dir``)."""
+
+    python: str
+    base_dir: Path
+    converter_script: Path
+
+
+_training_paths: Optional[WriterTrainingPaths] = None
+# Probe results per training interpreter: (deps_reason, trl_reason); "" = ok.
+_training_probe_cache: Dict[str, Tuple[str, str]] = {}
+
+
+def set_writer_training_paths(paths: Optional[WriterTrainingPaths]) -> None:
+    """Install the resolved paths (lifespan / training endpoints)."""
+    global _training_paths
+    _training_paths = paths
+
+
+def clear_writer_training_probe_cache() -> None:
+    _training_probe_cache.clear()
+
+
+def default_writer_training_paths() -> WriterTrainingPaths:
+    from metascan.core.writer_adapters import (
+        DEFAULT_WRITER_TRAIN_REPO,
+        default_converter_script,
+        train_base_dir,
+    )
+    from metascan.utils.app_paths import get_data_dir
+
+    data_dir = get_data_dir()
+    return WriterTrainingPaths(
+        python=sys.executable,
+        base_dir=train_base_dir(data_dir, DEFAULT_WRITER_TRAIN_REPO),
+        converter_script=default_converter_script(data_dir),
+    )
+
+
+def probe_training_deps(python: str, timeout: float = 300.0) -> str:
+    """Import the training stack in a subprocess with ``python``. "" when
+    every module imports, else an owner-facing reason."""
+    try:
+        proc = subprocess.run(
+            [python, "-c", _DEPS_CHECK],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"could not run the training dependency probe: {e}"
+    lines = (proc.stdout or "").strip().splitlines()
+    try:
+        info = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        info = None
+    if proc.returncode != 0 or not isinstance(info, dict):
+        return f"the training dependency probe failed (exit {proc.returncode})"
+    if info.get("missing"):
+        return (
+            "training dependencies not installed: "
+            f"{', '.join(info['missing'])} ({_DEPS_HINT})"
+        )
+    if info.get("broken"):
+        return f"training dependencies fail to import: {', '.join(info['broken'])}"
+    return ""
+
+
+def _probe_trl(python: str) -> str:
+    from metascan.workers.writer_train_probe import probe_trl_reference_support
+
+    ok, reason = probe_trl_reference_support(python)
+    return "" if ok else reason
+
+
+def _base_weights_present(base_dir: Path) -> bool:
+    try:
+        return (base_dir / "config.json").is_file() and any(
+            base_dir.glob("*.safetensors")
+        )
+    except OSError:
+        return False
+
+
+def writer_training_reasons(
+    report: HardwareReport,
+    paths: Optional[WriterTrainingPaths] = None,
+    *,
+    probe: bool = True,
+    deps_probe: Optional[Callable[[str], str]] = None,
+    trl_probe: Optional[Callable[[str], str]] = None,
+) -> List[str]:
+    """Every missing piece for writer LoRA training, one reason each ([] =
+    available): a CUDA GPU with >= 32 GB VRAM; the training deps importing
+    in a subprocess with the training interpreter; TRL's SFT-adapter DPO
+    reference support; the HF base weights; llama.cpp's LoRA converter.
+
+    ``probe=False`` never spawns a subprocess: it uses the cached probe
+    results for this interpreter (or reports them as not checked yet)."""
+    paths = paths or _training_paths or default_writer_training_paths()
+    reasons: List[str] = []
+    if report.cuda is None:
+        reasons.append(
+            f"Requires a CUDA GPU with {WRITER_TRAINING_MIN_VRAM_GB:.0f} GB VRAM; "
+            "none detected."
+        )
+    elif report.cuda.vram_gb < WRITER_TRAINING_MIN_VRAM_GB:
+        reasons.append(
+            f"Requires {WRITER_TRAINING_MIN_VRAM_GB:.0f} GB VRAM; "
+            f"detected {report.cuda.vram_gb} GB."
+        )
+    cached = _training_probe_cache.get(paths.python)
+    if cached is None and probe:
+        deps = (deps_probe or probe_training_deps)(paths.python)
+        trl = "" if deps else (trl_probe or _probe_trl)(paths.python)
+        cached = (deps, trl)
+        _training_probe_cache[paths.python] = cached
+    if cached is None:
+        reasons.append("Training dependencies not checked yet.")
+    else:
+        reasons.extend(r for r in cached if r)
+    if not _base_weights_present(paths.base_dir):
+        reasons.append(
+            f"Writer training base weights not downloaded ({paths.base_dir})."
+        )
+    if not paths.converter_script.is_file():
+        reasons.append(
+            f"llama.cpp LoRA converter not found ({paths.converter_script}); "
+            "set models.llama_cpp_dir to a llama.cpp checkout."
+        )
+    return reasons
+
+
+def writer_training_gate(
+    report: HardwareReport,
+    paths: Optional[WriterTrainingPaths] = None,
+    *,
+    probe: bool = True,
+    deps_probe: Optional[Callable[[str], str]] = None,
+    trl_probe: Optional[Callable[[str], str]] = None,
+) -> Gate:
+    reasons = writer_training_reasons(
+        report, paths, probe=probe, deps_probe=deps_probe, trl_probe=trl_probe
+    )
+    return Gate(
+        available=not reasons,
+        recommended=not reasons,
+        reason=" ".join(reasons),
+        reasons=reasons,
+    )
 
 
 def _nltk_geq_3_8_2(version: str) -> bool:
