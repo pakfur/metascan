@@ -365,6 +365,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             work_dir=get_data_dir() / "taste",
         ),
         get_config=lambda: get_taste_config(load_app_config()),
+        is_indexing=similarity.is_indexing,
     )
     taste_service.attach_loop(asyncio.get_running_loop())
     taste_api.set_taste_service(taste_service)

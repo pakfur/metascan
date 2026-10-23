@@ -273,6 +273,14 @@ class TasteRunner:
             except Exception as e:
                 logger.exception("taste training failed")
                 result = {"status": "error", "error": str(e) or repr(e)}
+            if result.get("status") == "not_enough_data":
+                # Enough labels, too few with a vector (a partial index):
+                # not a failure -- no failed row, nothing activated.
+                logger.info(
+                    "taste training skipped: labels lack vectors (%s)",
+                    result.get("missing"),
+                )
+                return result
             if result.get("status") != "ok":
                 return await self._record_failure(ls, half_life_days, result)
             return await self._record_success(ls, half_life_days, result)
@@ -326,6 +334,7 @@ class TasteRunner:
             "half_life_days": half_life_days,
             "params_path": str(params_path),
             "error": None,
+            "n_no_vector": int(result.get("n_no_vector") or 0),
         }
         model_id = await asyncio.to_thread(self.db.record_taste_model, row)
         scores: Dict[str, float] = result.get("scores") or {}
@@ -340,6 +349,7 @@ class TasteRunner:
             "n_pos": row["n_pos"],
             "n_neg": row["n_neg"],
             "n_pairs": row["n_pairs"],
+            "n_no_vector": row["n_no_vector"],
             "dim": row["dim"],
             "embedding_model": row["embedding_model"],
             "n_scored": n_scored,

@@ -221,3 +221,83 @@ def test_label_counts_match_build_label_set(db):
         full.n_neg,
     )
     assert (full.n_pos, full.n_neg) == (5, 5)
+
+
+# ---- partial index / CLIP switch guards ----------------------------------
+
+
+async def test_loop_skips_while_the_index_is_building(service, db, fake_runner):
+    seed_labels(db)
+    fake_runner.indexing = True
+    assert await service.maybe_retrain(now=after(500)) is False
+    assert fake_runner.train_calls == []
+    fake_runner.indexing = False
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+
+
+async def test_not_enough_vectors_is_reported_as_missing(
+    service, db, fake_runner, recorder
+):
+    seed_labels(db)
+    fake_runner.result = {
+        "status": "not_enough_data",
+        "reason": "vectors",
+        "missing": {"positives": 9, "negatives": 0},
+    }
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    st = await service.status()
+    assert st["missing"] == {"positives": 9, "negatives": 0}
+    assert st["missing_reason"] == "vectors"
+    assert st["last_error"] is None
+    assert db.list_taste_models() == []
+    # Same inputs: not retried every tick.
+    assert await service.maybe_retrain(now=after(600)) is False
+    # A finished embedding run may have added the vectors: try again.
+    service._on_embedding_complete()
+    await service.wait_idle()
+    st = await service.status()
+    assert st["missing"] is None and st["missing_reason"] is None
+    fake_runner.result = {"status": "ok"}
+    assert await service.maybe_retrain(now=after(700)) is True
+    await service.wait_idle()
+
+
+async def test_label_shortage_reports_labels_reason(service, db):
+    seed_labels(db, n_fav=5, n_pass=30)
+    st = await service.status()
+    assert st["missing"] == {"positives": 15, "negatives": 0}
+    assert st["missing_reason"] == "labels"
+
+
+async def test_under_vectored_model_is_due_after_an_embedding_run(
+    service, db, fake_runner
+):
+    seed_labels(db)
+    # Trained while 10 of 50 labeled rows (20%) had no vector.
+    db.record_taste_model(
+        model_row(labels_as_of=after(1).isoformat(), n_pos=20, n_neg=20, n_no_vector=10)
+    )
+    assert await service.maybe_retrain(now=after(500)) is False
+    service._on_embedding_complete()
+    await service.wait_idle()
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    assert len(fake_runner.train_calls) == 1
+    # Not due again until the next embedding run.
+    assert await service.maybe_retrain(now=after(600)) is False
+
+
+async def test_well_vectored_model_is_not_due_after_an_embedding_run(
+    service, db, fake_runner
+):
+    seed_labels(db)
+    # 4 of 44 (9%) without a vector: under the 10% threshold.
+    db.record_taste_model(
+        model_row(labels_as_of=after(1).isoformat(), n_pos=20, n_neg=20, n_no_vector=4)
+    )
+    service._on_embedding_complete()
+    await service.wait_idle()
+    assert await service.maybe_retrain(now=after(500)) is False
+    assert fake_runner.train_calls == []

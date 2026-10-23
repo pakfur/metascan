@@ -77,6 +77,8 @@ class FakeRunner:
         self.rescore_gate: Optional[asyncio.Event] = None
         self.rescore_started = asyncio.Event()
         self.fingerprint: Any = ("small", 32, 1.0)
+        # The embedding queue's is_indexing(), as the service sees it.
+        self.indexing = False
 
     def index_fingerprint(self) -> Any:
         return self.fingerprint
@@ -157,7 +159,11 @@ def service(db, fake_runner, recorder, taste_config):
     from backend.services.taste_service import TasteService
 
     return TasteService(
-        db, fake_runner, get_config=lambda: dict(taste_config), broadcast=recorder
+        db,
+        fake_runner,
+        get_config=lambda: dict(taste_config),
+        broadcast=recorder,
+        is_indexing=lambda: fake_runner.indexing,
     )
 
 

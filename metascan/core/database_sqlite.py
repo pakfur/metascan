@@ -1335,10 +1335,24 @@ class DatabaseManager:
                     holdout_auc REAL,
                     half_life_days REAL NOT NULL,
                     params_path TEXT NOT NULL,
-                    error TEXT
+                    error TEXT,
+                    n_no_vector INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Labeled rows the worker had no CLIP vector for (a partial
+            # index); the retrain loop treats a large share as due.
+            _taste_cols = [
+                c[1] for c in conn.execute("PRAGMA table_info(taste_models)")
+            ]
+            if "n_no_vector" not in _taste_cols:
+                _idempotent_add_column(
+                    conn,
+                    "taste_models",
+                    "n_no_vector",
+                    "ALTER TABLE taste_models ADD COLUMN "
+                    "n_no_vector INTEGER NOT NULL DEFAULT 0",
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS taste_scores (
@@ -5614,8 +5628,8 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO taste_models (created_at, labels_as_of, status, "
                 "embedding_model, dim, categories, n_pos, n_neg, n_pairs, "
-                "holdout_auc, half_life_days, params_path, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "holdout_auc, half_life_days, params_path, error, n_no_vector) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["created_at"],
                     row["labels_as_of"],
@@ -5630,6 +5644,7 @@ class DatabaseManager:
                     float(row["half_life_days"]),
                     row["params_path"],
                     row.get("error"),
+                    int(row.get("n_no_vector") or 0),
                 ),
             )
             conn.commit()
