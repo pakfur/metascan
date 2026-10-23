@@ -19,6 +19,8 @@ from metascan.core.writer_dataset import (
     PrefExample,
     SftExample,
     build_examples,
+    caption_resolver,
+    holdout_key,
     preview,
     readiness,
     sft_without_holdout,
@@ -89,6 +91,9 @@ def _img(
     edited: Optional[int] = None,
     scorecard: Optional[str] = None,
     created_at: str = T0,
+    resolved: Optional[str] = None,
+    direction: Optional[str] = None,
+    prompt_seed: Optional[int] = None,
 ) -> None:
     db.save_media(_media(path))
     image_id = db.create_t2i_image(
@@ -103,6 +108,9 @@ def _img(
         draft_prompt=draft if draft is not None else prompt,
         edited=edited if edited is not None else 0,
         scorecard_id=scorecard,
+        resolved_caption=resolved,
+        direction=direction,
+        prompt_seed=prompt_seed,
     )
     with db.lock, db._get_connection() as conn:
         conn.execute(
@@ -116,6 +124,15 @@ def _img(
         db.set_verdict(path, outcome, None, NOW)
 
 
+def _build(db, scope, store, now, **kw):
+    kw.setdefault("content_mode", "default")
+    return build_examples(db, scope, store, now, **kw)
+
+
+def _key(model="krea2", description="a red fox in snow"):
+    return holdout_key(model, description)
+
+
 def _pair_group(db, group="g1", fav="/g/fav.png", seen="/g/seen.png", **kw):
     _img(db, fav, outcome="favorite", group=group, index=0, prompt="WINNER", **kw)
     _img(db, seen, outcome="seen", group=group, index=1, prompt="LOSER", **kw)
@@ -123,12 +140,12 @@ def _pair_group(db, group="g1", fav="/g/fav.png", seen="/g/seen.png", **kw):
 
 def test_variant_group_yields_one_pair_in_order(db, store):
     _pair_group(db)
-    sft, prefs, counts = build_examples(db, "all", store, NOW)
+    sft, prefs, counts = _build(db, "all", store, NOW)
     assert len(prefs) == 1
     p = prefs[0]
     assert (p.chosen, p.rejected, p.source) == ("WINNER", "LOSER", "variant")
     assert p.target_model == "krea2"
-    assert p.group == "g1"
+    assert p.group == _key()
     # System prompt as at inference: preamble + the target model's guide.
     assert p.system.startswith("PREAMBLE-TEXT")
     assert "KREA-GUIDE" in p.system
@@ -138,6 +155,7 @@ def test_variant_group_yields_one_pair_in_order(db, store):
     assert "ANGLE" not in p.user
     assert "CATEGORIES" not in p.user  # no categories on these images
     assert counts.pref_pairs == 1 and counts.edit_pairs == 0
+    assert counts.content_mode == "default"
     assert sft == []  # nothing edited, no hindsight briefs
 
 
@@ -146,7 +164,7 @@ def test_unseen_variant_and_all_favorite_groups_make_no_pair(db, store):
     _img(db, "/g/b.png", outcome=None, index=1, prompt="B")  # never seen
     _img(db, "/h/a.png", outcome="favorite", group="g2", index=0, prompt="C")
     _img(db, "/h/b.png", outcome="favorite", group="g2", index=1, prompt="D")
-    _, prefs, _ = build_examples(db, "all", store, NOW)
+    _, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == []
 
 
@@ -156,7 +174,7 @@ def test_variant_with_a_favorite_seed_is_a_winner(db, store):
     _img(db, "/g/a2.png", outcome="favorite", index=0, prompt="WIN")
     _img(db, "/g/b1.png", outcome="pass", index=1, prompt="LOSE")
     _img(db, "/g/b2.png", outcome="seen", index=1, prompt="LOSE")
-    _, prefs, _ = build_examples(db, "all", store, NOW)
+    _, prefs, _ = _build(db, "all", store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WIN", "LOSE")]
 
 
@@ -172,7 +190,7 @@ def test_manual_writer_excluded_everywhere(db, store):
         draft="DRAFT",
         edited=1,
     )
-    sft, prefs, counts = build_examples(db, "all", store, NOW)
+    sft, prefs, counts = _build(db, "all", store, NOW)
     assert prefs == [] and sft == []
     assert counts.pref_pairs == counts.edit_pairs == 0
 
@@ -188,7 +206,7 @@ def test_scorecard_images_excluded(db, store):
         edited=1,
         scorecard="sc-1",
     )
-    sft, prefs, _ = build_examples(db, "all", store, NOW)
+    sft, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == [] and sft == []
 
 
@@ -196,7 +214,7 @@ def test_scorecard_loser_drops_only_itself(db, store):
     _img(db, "/g/fav.png", outcome="favorite", index=0, prompt="WIN")
     _img(db, "/g/sc.png", outcome="seen", index=1, prompt="SC", scorecard="x")
     _img(db, "/g/ok.png", outcome="seen", index=2, prompt="OK")
-    _, prefs, _ = build_examples(db, "all", store, NOW)
+    _, prefs, _ = _build(db, "all", store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WIN", "OK")]
 
 
@@ -208,7 +226,7 @@ def test_videos_are_not_training_data(db, store):
         source_path="/v/src.png", file_path="/v/clip.mp4", writer_id="base"
     )
     db.set_verdict("/v/clip.mp4", "favorite", None, NOW)
-    _, prefs, counts = build_examples(db, "all", store, NOW)
+    _, prefs, counts = _build(db, "all", store, NOW)
     assert len(prefs) == 1 and counts.pref_pairs == 1
 
 
@@ -225,7 +243,7 @@ def test_edit_pairs(db, store):
     # Whitespace-only difference is not an edit, nor is edited=0.
     _img(db, "/e/2.png", group=None, prompt="same  text", draft="same text", edited=1)
     _img(db, "/e/3.png", group=None, prompt="X", draft="Y", edited=0)
-    sft, prefs, counts = build_examples(db, "all", store, NOW)
+    sft, prefs, counts = _build(db, "all", store, NOW)
     assert counts.edit_pairs == 1
     edit_prefs = [p for p in prefs if p.source == "edit"]
     assert [(p.chosen, p.rejected) for p in edit_prefs] == [
@@ -239,7 +257,7 @@ def test_edit_pairs(db, store):
 def test_edit_pair_counted_once_per_variant(db, store):
     for i in range(3):  # three seeds of one edited variant
         _img(db, f"/e/{i}.png", prompt="EDITED", draft="DRAFT", edited=1)
-    _, prefs, counts = build_examples(db, "all", store, NOW)
+    _, prefs, counts = _build(db, "all", store, NOW)
     assert counts.edit_pairs == 1 and len(prefs) == 1
 
 
@@ -256,31 +274,39 @@ def test_category_scope_filters_and_all_scope_names_categories(db, store):
     )
     cat = db.create_category("Landscapes")
     other = db.create_category("Portraits")
-    db.add_media_categories(["/a/fav.png"], cat.id, "viewer")
-    db.add_media_categories(["/b/seen.png"], other.id, "viewer")
+    db.add_media_categories(["/a/fav.png", "/a/seen.png"], cat.id, "generation")
+    db.add_media_categories(["/b/seen.png"], other.id, "generation")
+    # A viewer-added category filters a scope but is not in the line.
+    viewer = db.create_category("Later")
+    db.add_media_categories(["/a/fav.png"], viewer.id, "viewer")
+    g1, g2 = _key(), _key(description="a blue boat")
 
-    _, prefs, counts = build_examples(db, str(cat.id), store, NOW)
-    assert [p.group for p in prefs] == ["g1"]
+    _, prefs, counts = _build(db, str(cat.id), store, NOW)
+    assert [p.group for p in prefs] == [g1]
     assert counts.pref_pairs == 1
     # A category scope adds no CATEGORIES line (every example carries it).
     assert "CATEGORIES" not in prefs[0].user
 
-    _, prefs, _ = build_examples(db, "all", store, NOW)
+    _, prefs, _ = _build(db, "all", store, NOW)
     by_group = {p.group: p for p in prefs}
-    assert "CATEGORIES: Landscapes\n" in by_group["g1"].user
-    assert "CATEGORIES: Portraits\n" in by_group["g2"].user
-    assert by_group["g1"].categories == ["Landscapes"]
-    assert by_group["g1"].user.endswith("Write the prompt now.")
+    assert "CATEGORIES: Landscapes\n" in by_group[g1].user
+    assert "Later" not in by_group[g1].user
+    assert "CATEGORIES: Portraits\n" in by_group[g2].user
+    assert by_group[g1].categories == ["Landscapes"]
+    assert by_group[g1].user.endswith("Write the prompt now.")
 
-    _, prefs, _ = build_examples(db, str(other.id), store, NOW)
-    assert [p.group for p in prefs] == ["g2"]
+    _, prefs, _ = _build(db, str(other.id), store, NOW)
+    assert [p.group for p in prefs] == [g2]
+    _, prefs, _ = _build(db, str(viewer.id), store, NOW)
+    assert [p.group for p in prefs] == [g1]
+    assert prefs[0].categories == [] and "CATEGORIES" not in prefs[0].user
 
 
 def test_unknown_scope_raises(db, store):
     with pytest.raises(ValueError):
-        build_examples(db, "999", store, NOW)
+        _build(db, "999", store, NOW)
     with pytest.raises(ValueError):
-        build_examples(db, "nope", store, NOW)
+        _build(db, "nope", store, NOW)
 
 
 def test_deleted_generations_count_via_tombstones(db, store):
@@ -289,14 +315,14 @@ def test_deleted_generations_count_via_tombstones(db, store):
     db.add_media_categories(["/g/fav.png"], cat.id, "viewer")
     assert db.delete_media(Path("/g/seen.png"))
     assert db.delete_media(Path("/g/fav.png"))
-    _, prefs, _ = build_examples(db, str(cat.id), store, NOW)
+    _, prefs, _ = _build(db, str(cat.id), store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WINNER", "LOSER")]
 
 
 def test_unknown_target_model_and_blank_caption_skipped(db, store):
     _pair_group(db, group="g1", model="mystery")
     _pair_group(db, group="g2", fav="/b/f.png", seen="/b/s.png", caption="  ")
-    _, prefs, _ = build_examples(db, "all", store, NOW)
+    _, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == []
 
 
@@ -314,7 +340,7 @@ def test_hindsight_examples(db, store):
     db.set_hindsight_brief("/h/fav.png", "a fox in the snow", "qwen3vl-8b")
     db.set_hindsight_brief("/h/seen.png", "something", "qwen3vl-8b")
     db.set_hindsight_brief("/h/man.png", "manual brief", "qwen3vl-8b")
-    sft, prefs, counts = build_examples(db, "all", store, NOW)
+    sft, prefs, counts = _build(db, "all", store, NOW)
     assert prefs == []
     assert counts.hindsight == 1
     (ex,) = sft
@@ -346,7 +372,7 @@ def test_hindsight_library_item_needs_a_known_family(db, store):
             conn.commit()
         db.set_verdict(path, "favorite", None, NOW)
         db.set_hindsight_brief(path, f"brief {path}", "qwen3vl-8b")
-    sft, _, counts = build_examples(db, "all", store, NOW)
+    sft, _, counts = _build(db, "all", store, NOW)
     assert [(s.chosen, s.target_model) for s in sft] == [
         ("LIB PROMPT /lib/a.png", "krea2")
     ]
@@ -357,7 +383,7 @@ def test_counts_per_target_model_and_span(db, store):
     _pair_group(db, group="g1")
     _pair_group(db, group="g2", fav="/b/f.png", seen="/b/s.png", model="sd")
     _img(db, "/e/1.png", group=None, prompt="E", draft="D", edited=1, model="sd")
-    _, _, counts = build_examples(db, "all", store, NOW)
+    _, _, counts = _build(db, "all", store, NOW)
     assert counts.by_target_model == {"krea2": 1, "sd": 2}
     assert counts.pref_pairs == 2 and counts.edit_pairs == 1
     assert counts.new_since_last == 3  # no previous adapter
@@ -397,7 +423,7 @@ def test_new_since_last_uses_the_newest_ready_adapter_of_the_scope(db, store):
         data_cutoff="2026-12-01",
     )
     assert aid
-    _, _, counts = build_examples(db, "all", store, NOW)
+    _, _, counts = _build(db, "all", store, NOW)
     assert counts.pref_pairs == 2
     assert counts.new_since_last == 1
 
@@ -435,12 +461,12 @@ def test_split_holdout_is_seeded_disjoint_and_by_group():
 
     sft = [
         SftExample("s", "u", "c0", "krea2", [], "hindsight", "g0"),
-        SftExample("s", "u", "zz", "krea2", [], "hindsight", None),
+        SftExample("s", "u", "zz", "krea2", [], "hindsight", "solo"),
     ]
     held = {p.group for p in hold}
     kept = sft_without_holdout(sft, hold)
     assert all(s.group not in held for s in kept)
-    assert any(s.group is None for s in kept)
+    assert any(s.group == "solo" for s in kept)
 
 
 def test_split_holdout_small_sets():
@@ -452,7 +478,7 @@ def test_split_holdout_small_sets():
 
 def test_write_jsonl_and_preview(tmp_path):
     prefs = [PrefExample("SYS", "USR", "C", "R", "qwen", ["Cat"], "variant", "g", "x")]
-    sft = [SftExample("SYS", "USR", "C", "qwen", [], "edit", None)]
+    sft = [SftExample("SYS", "USR", "C", "qwen", [], "edit", "k")]
     p = tmp_path / "out" / "prefs.jsonl"
     assert write_jsonl(prefs, p) == 1
     line = json.loads(p.read_text(encoding="utf-8").strip())
@@ -475,7 +501,7 @@ def test_write_jsonl_and_preview(tmp_path):
         "target_model": "qwen",
         "categories": [],
         "source": "edit",
-        "group": None,
+        "group": "k",
     }
     many = sft * 15
     assert len(preview(many)) == 10
@@ -509,7 +535,7 @@ def test_nothing_logged_with_example_text(db, store, caplog):
     _img(db, "/e/1.png", group=None, prompt="EDITED", draft="DRAFT", edited=1)
     db.set_hindsight_brief("/g/fav.png", "SECRET-BRIEF", "qwen3vl-8b")
     with caplog.at_level(logging.DEBUG):
-        sft, prefs, _ = build_examples(db, "all", store, NOW)
+        sft, prefs, _ = _build(db, "all", store, NOW)
         preview(prefs)
     assert sft and prefs
     text = caplog.text
@@ -527,3 +553,161 @@ def test_hindsight_briefs_db_roundtrip(db):
     assert db.get_hindsight_briefs(["/x/other.png"]) == {}
     db.delete_media(Path("/x/a.png"))
     assert db.get_hindsight_briefs() == {}
+
+
+# ---- fix round 1: turns as at inference, fallback, holdout key ------------
+
+
+def test_stored_resolved_caption_and_direction_are_the_turn(db, store):
+    _pair_group(
+        db,
+        caption="__PERSON__ in snow",
+        resolved="a tall woman in snow",
+        direction="slow, tender",
+    )
+    _, prefs, _ = _build(db, "all", store, NOW)
+    (p,) = prefs
+    assert p.user == (
+        "DESCRIPTION:\na tall woman in snow\n\nDIRECTION:\nslow, tender\n\n"
+        "Write the prompt now."
+    )
+    assert p.group == _key(description="a tall woman in snow")
+
+
+def test_sides_with_different_directions_make_no_pair(db, store):
+    _img(db, "/g/a.png", outcome="favorite", prompt="A", direction="one")
+    _img(db, "/g/b.png", outcome="seen", index=1, prompt="B", direction="two")
+    _, prefs, _ = _build(db, "all", store, NOW)
+    assert prefs == []
+
+
+def test_old_rows_with_tokens_are_re_resolved_or_skipped(db, store):
+    seen = []
+
+    def resolve(caption, seed, model):
+        seen.append((caption, seed, model))
+        return f"resolved {seed}"
+
+    _pair_group(db, group="g1", caption="__X__ fox", prompt_seed=7)
+    _pair_group(
+        db, group="g2", fav="/b/f.png", seen="/b/s.png", caption="__X__ owl"
+    )  # tokens, no prompt seed: skipped
+    _, prefs, _ = _build(db, "all", store, NOW, resolve=resolve)
+    assert [p.user.split("\n")[1] for p in prefs] == ["resolved 7"]
+    assert seen == [("__X__ fox", 7, "krea2")]  # cached per caption + seed
+    # Without a resolver a tokened caption cannot be described.
+    _, prefs, _ = _build(db, "all", store, NOW)
+    assert prefs == []
+
+
+def test_caption_resolver_resolves_like_the_runner():
+    from metascan.core.t2i_characters import CharacterConfig, Library
+
+    library = Library(config=CharacterConfig(), lists={"weather": ("rain",)})
+    resolve = caption_resolver(library, {})
+    assert resolve("a fox in __WEATHER__", 3, "krea2") == "a fox in rain"
+    assert resolve("a fox", 3, "nope") is None
+
+
+def test_fallback_is_never_a_target(db, store):
+    # Fallback winner: no pair. Fallback loser: a pair.
+    _img(db, "/f/w.png", outcome="favorite", writer="fallback", prompt="FB")
+    _img(db, "/f/l.png", outcome="seen", index=1, prompt="L")
+    _img(db, "/k/w.png", outcome="favorite", group="g2", prompt="W")
+    _img(
+        db,
+        "/k/l.png",
+        outcome="seen",
+        group="g2",
+        index=1,
+        writer="fallback",
+        prompt="FBL",
+    )
+    # An edit of a fallback draft keeps the owner's text as the target.
+    _img(
+        db,
+        "/e/1.png",
+        group=None,
+        writer="fallback",
+        prompt="MINE",
+        draft="FBDRAFT",
+        edited=1,
+        caption="an edit",
+    )
+    # A favorited fallback image is not a hindsight target.
+    _img(
+        db,
+        "/h/1.png",
+        outcome="favorite",
+        group=None,
+        writer="fallback",
+        prompt="FBH",
+        caption="hind",
+    )
+    db.set_hindsight_brief("/h/1.png", "a brief", "qwen3vl-8b")
+    sft, prefs, counts = _build(db, "all", store, NOW)
+    pairs = sorted((p.chosen, p.rejected, p.source) for p in prefs)
+    assert pairs == [("MINE", "FBDRAFT", "edit"), ("W", "FBL", "variant")]
+    assert [s.chosen for s in sft] == ["MINE"]
+    assert counts.hindsight == 0
+
+
+def test_holdout_groups_by_model_and_description(db, store):
+    # The same caption generated in two batches is one holdout group.
+    _pair_group(db, group="b1", fav="/1/f.png", seen="/1/s.png")
+    _pair_group(db, group="b2", fav="/2/f.png", seen="/2/s.png")
+    for i in range(3):
+        _pair_group(
+            db,
+            group=f"o{i}",
+            fav=f"/o{i}/f.png",
+            seen=f"/o{i}/s.png",
+            caption=f"other {i}",
+        )
+    # A hindsight example of a favorite in the shared caption joins its group.
+    db.set_hindsight_brief("/1/f.png", "a brief", "qwen3vl-8b")
+    sft, prefs, _ = _build(db, "all", store, NOW)
+    assert len({p.group for p in prefs}) == 4
+    hint = next(s for s in sft if s.source == "hindsight")
+    assert hint.group == _key()
+    for seed in range(20):
+        train, hold = split_holdout(prefs, fraction=0.25, seed=seed)
+        shared = [p for p in prefs if p.group == _key()]
+        assert all(p in hold for p in shared) or all(p in train for p in shared)
+        if any(p in hold for p in shared):
+            assert hint not in sft_without_holdout(sft, hold)
+
+
+def test_malformed_tombstones_warn_with_a_count_only(db, store, caplog):
+    with db.lock, db._get_connection() as conn:
+        for path in ("/t/x.png", "/t/y.png"):
+            # Category names that are not JSON: unreadable.
+            conn.execute(
+                "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
+                "passed, reasons, categories, lineage) "
+                "VALUES (?, '2026-10-01', 1, 0, '[]', 'oops', ?)",
+                (path, '{"t2i": {"caption": "SECRET"}}'),
+            )
+        conn.commit()
+    with caplog.at_level(logging.DEBUG):
+        _build(db, "all", store, NOW)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "2 malformed" in warnings[0].getMessage()
+    assert "SECRET" not in caplog.text
+
+
+def test_tombstones_carry_resolved_caption_and_direction(db, store):
+    _pair_group(db, resolved="a resolved fox", direction="calm")
+    db.delete_media(Path("/g/fav.png"))
+    db.delete_media(Path("/g/seen.png"))
+    (t,) = [x for x in db.list_tombstones() if x["file_path"] == "/g/fav.png"]
+    assert t["lineage"]["t2i"]["resolved_caption"] == "a resolved fox"
+    assert t["lineage"]["t2i"]["direction"] == "calm"
+    _, prefs, _ = _build(db, "all", store, NOW)
+    assert "a resolved fox" in prefs[0].user and "DIRECTION:\ncalm" in prefs[0].user
+
+
+def test_content_mode_is_required(db, store):
+    with pytest.raises(TypeError):
+        build_examples(db, "all", store, NOW)  # type: ignore[call-arg]

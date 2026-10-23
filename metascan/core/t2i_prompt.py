@@ -154,8 +154,16 @@ def compose_guided_t2i_prompts(
 def add_categories_line(user: str, names: Sequence[str]) -> str:
     """Splice a ``CATEGORIES: a, b`` line in front of the closing line of a
     composed user turn (an ``all``-scope writer adapter is trained with the
-    image's category names there). No non-blank names: unchanged."""
-    shown = [" ".join(n.split()) for n in names if n and n.strip()]
+    image's generation categories there, and writes with the dialog's).
+    Names are deduplicated and sorted case-insensitively, so training and
+    inference build the same line whatever order they come in. No
+    non-blank names: unchanged."""
+    unique: Dict[str, str] = {}
+    for n in names:
+        if n and n.strip():
+            clean = " ".join(n.split())
+            unique.setdefault(clean.lower(), clean)
+    shown = [unique[k] for k in sorted(unique)]
     if not shown or not user.endswith(_CLOSING):
         return user
     return user[: -len(_CLOSING)] + f"CATEGORIES: {', '.join(shown)}\n\n" + _CLOSING

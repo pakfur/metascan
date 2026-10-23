@@ -446,6 +446,7 @@ async function onGeneratePrompt() {
     directions: useDirections.value,
     variants: variants.value,
     writer: writer.value,
+    category_ids: [...categoryIds.value],
   }
   const target = store.selectedId
   generating.value = true
@@ -474,6 +475,15 @@ async function onGeneratePrompt() {
     resolvedOpen.value = true
   } catch (e) {
     if (handledAdapterError(e)) return
+    if (isUnknownCategoryError(e)) {
+      void refreshCategories()
+      toast.show(
+        'A chosen category no longer exists. It was removed from Categories; check them and Generate Prompt again.',
+        'warn',
+        6000,
+      )
+      return
+    }
     toast.show(
       e instanceof ApiError && e.status === 502
         ? `The prompt writer failed (${e.message}). Press Generate Prompt to try again.`

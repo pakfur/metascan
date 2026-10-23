@@ -38,7 +38,18 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    TypeVar,
+)
 
 from metascan.core.judgments import (
     DRAFT_WRITERS,
@@ -84,6 +95,7 @@ from metascan.core.t2i_models import (
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_prompt import (
     ComposedPrompts,
+    add_categories_line,
     compose_guided_t2i_prompts,
     fallback_prompt,
     parse_t2i_output,
@@ -266,6 +278,13 @@ class _Batch:
     lora_path: Optional[Path] = None
     # That adapter's base model, read from the registry at plan time.
     adapter_base: Optional[str] = None
+    # An ``all``-scope adapter's CATEGORIES line: the batch's category names
+    # (read at plan time); empty for the base writers and a one-category
+    # adapter, which were trained without the line.
+    adapter_categories: List[str] = field(default_factory=list)
+    # The supplied caption's resolved text and direction (lineage for the
+    # writer training data), worked out once.
+    supplied_lineage: Optional[Tuple[Optional[str], Optional[str]]] = None
     step: Optional[Dict[str, Any]] = None  # snapshot of the step on show
     # Every step written so far, in order: a prompt can be written well ahead
     # of the render, and waits here until its images are the ones rendering.
@@ -350,6 +369,12 @@ class _Step:
     # The writer's draft (None: typed from scratch). Rendered ``prompt`` may
     # be the owner's edit of it; the ingest records whether it differs.
     draft: Optional[str] = None
+    # The caption as the writer saw it (tokens resolved for this step's
+    # prompt seed); stored for the writer training data.
+    resolved_caption: Optional[str] = None
+    # A supplied step's direction as Generate Prompt wrote its drafts with
+    # (lineage only; ``direction`` stays what this run itself directed).
+    lineage_direction: Optional[str] = None
     # Manual only: the Negative box as typed (kept even if the workflow
     # cannot take it), for the image's form state.
     form_negative: Optional[str] = None
@@ -707,6 +732,70 @@ class T2iRunner:
         row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
         return str(row["base_model"]) if row else None
 
+    async def _adapter_categories(
+        self, writer: str, category_ids: Sequence[int]
+    ) -> List[str]:
+        """The category names an ``all``-scope adapter's user turn carries
+        (the line it was trained with); [] for any other writer."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None or not category_ids:
+            return []
+        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
+        if row is None or str(row.get("scope", "")).strip().lower() != "all":
+            return []
+        wanted = {int(c) for c in category_ids}
+        rows = await asyncio.to_thread(self.db.list_categories)
+        return [str(r["name"]) for r in rows if int(r["id"]) in wanted]
+
+    @staticmethod
+    def _for_adapter(
+        composed: ComposedPrompts, categories: List[str]
+    ) -> ComposedPrompts:
+        """``composed`` with an adapter's CATEGORIES line (none: unchanged)."""
+        if not categories:
+            return composed
+        return composed._replace(user=add_categories_line(composed.user, categories))
+
+    async def _supplied_lineage(
+        self, batch: _Batch, step: _Step
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """``(resolved caption, direction)`` of a supplied step whose prompts
+        a writer drafted (Generate Prompt resolved and directed the same
+        caption for the same seed), for its lineage only: nothing here
+        changes what renders, and a failure is just a missing value. A typed
+        prompt, or no caption, has neither."""
+        req = batch.req
+        if req.prompts is None or not isinstance(req.caption, str):
+            return None, None
+        if not req.caption.strip():
+            return None, None
+        if batch.supplied_lineage is None:
+            warnings: List[str] = []
+            resolved: Optional[str] = None
+            direction: Optional[str] = None
+            try:
+                library, _ = await asyncio.to_thread(self.library.get)
+                resolved = resolve_caption(
+                    req.caption, step.prompt_seed, batch.identity, library
+                ).text
+                if batch.directions and self.directions is not None:
+                    row = await self._find_row(req.caption, warnings)
+                    found = await self._direction(
+                        row,
+                        step.prompt_seed,
+                        batch.content_mode,
+                        batch.direction_settings,
+                        batch.directions,
+                        warnings,
+                    )
+                    direction = found.text if found else None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("t2i batch %s: no caption lineage (%s)", batch.id, exc)
+            batch.supplied_lineage = (resolved, direction)
+        return batch.supplied_lineage
+
     async def _vlm_prompt(
         self,
         vlm: Any,
@@ -826,9 +915,14 @@ class T2iRunner:
         directions: Optional[bool] = None,
         variants: int = 1,
         writer: str = WRITER_BASE,
+        category_ids: Sequence[int] = (),
     ) -> PromptResult:
         """Resolve ``caption`` and have the VLM write ``model``'s prompt for
         it, once per variant (variant k > 0 with its angle). Writes nothing.
+        An adapter writes every variant without an angle (it was trained
+        without one; its variants differ by sampling), and an ``all``-scope
+        adapter gets a ``CATEGORIES`` line naming ``category_ids`` -- the
+        user turn it was trained on.
         ``writer = base+taste`` adds the owner's favorite prompts as examples
         (fetched once for all variants); when none can be had the drafts are
         ``base`` and a warning says why. ``writer = adapter:<id>`` writes
@@ -891,6 +985,7 @@ class T2iRunner:
                 raise WriterAdapterUnavailable(
                     writer, f"it is built on {adapter_base}, the writer runs {model_id}"
                 )
+            adapter_categories = await self._adapter_categories(writer, category_ids)
             examples, taste_warning = await self._examples_for(
                 writer, resolved.text, profile.id
             )
@@ -902,9 +997,17 @@ class T2iRunner:
             slots = asyncio.Semaphore(max(1, spec.parallel_slots if spec else 1))
 
             async def write(k: int) -> PromptDraft:
-                angle = self._angle(k)
-                composed = compose_guided_t2i_prompts(
-                    profile, resolved.text, cfg["content_mode"], text, angle, examples
+                angle = None if lora_path is not None else self._angle(k)
+                composed = self._for_adapter(
+                    compose_guided_t2i_prompts(
+                        profile,
+                        resolved.text,
+                        cfg["content_mode"],
+                        text,
+                        angle,
+                        examples,
+                    ),
+                    adapter_categories,
                 )
                 async with slots:
                     prompt, negative = await self._vlm_prompt(
@@ -1022,6 +1125,11 @@ class T2iRunner:
         # renders the prompts it was given (their lineage is checked above).
         lora_path = await self._adapter_lora(writer) if req.mode == "random" else None
         adapter_base = await self._adapter_base(writer) if lora_path else None
+        adapter_categories = (
+            await self._adapter_categories(writer, req.category_ids)
+            if lora_path
+            else []
+        )
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
@@ -1159,6 +1267,7 @@ class T2iRunner:
             prompting=req.mode == "random",
             lora_path=lora_path,
             adapter_base=adapter_base,
+            adapter_categories=adapter_categories,
         )
 
     async def start_batch(self, req: BatchRequest) -> BatchStarted:
@@ -1314,8 +1423,11 @@ class T2iRunner:
                     f"writer {batch.req.writer} is built on {adapter_base}, the "
                     f"writer runs {model_id} - used the resolved caption"
                 )
-        composed = compose_guided_t2i_prompts(
-            profile, resolved_text, batch.content_mode, direction, angle, examples
+        composed = self._for_adapter(
+            compose_guided_t2i_prompts(
+                profile, resolved_text, batch.content_mode, direction, angle, examples
+            ),
+            batch.adapter_categories,
         )
         notes = (
             [WARN_TASTE_NO_PREAMBLE] if examples and not composed.examples_used else []
@@ -1463,7 +1575,9 @@ class T2iRunner:
             batch,
             context.resolved_text,
             direction.text if direction else None,
-            self._angle(variant),
+            # An adapter was trained without angles: its variants differ by
+            # sampling alone.
+            None if batch.lora_path is not None else self._angle(variant),
             tuple(context.examples),
         )
         return _Step(
@@ -1485,6 +1599,7 @@ class T2iRunner:
             variants=batch.variants_of(context.index),
             # What the writer produced is the draft; nobody edits it here.
             draft=prompt,
+            resolved_caption=context.resolved_text,
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -1558,6 +1673,9 @@ class T2iRunner:
                     caption == 0 and _supplies_first_step(batch.req)
                 ):
                     step = self._supplied_step(batch, index, variant)
+                    resolved, direction = await self._supplied_lineage(batch, step)
+                    step.resolved_caption = resolved
+                    step.lineage_direction = direction
                 else:
                     if context is None or context.index != caption:
                         context = await self._caption_context(batch, index)
@@ -1623,6 +1741,10 @@ class T2iRunner:
             "variant_group": step.variant_group,
             "variant_index": step.variant_index,
             "draft": step.draft,
+            "resolved_caption": step.resolved_caption,
+            "direction": (
+                step.direction if step.direction is not None else step.lineage_direction
+            ),
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
             "negative": step.form_negative if manual else step.negative,
@@ -2027,6 +2149,8 @@ class T2iRunner:
                     variant_index=known.get("variant_index"),
                     draft_prompt=draft,
                     edited=edited,
+                    resolved_caption=known.get("resolved_caption"),
+                    direction=known.get("direction"),
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)

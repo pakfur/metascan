@@ -1446,6 +1446,16 @@ class DatabaseManager:
                 "scorecard_id",
                 "ALTER TABLE t2i_images ADD COLUMN scorecard_id TEXT",
             )
+            # The caption as the writer saw it (tokens resolved) and the
+            # direction it was written with: the writer training data's user
+            # turn. NULL on older rows and typed prompts.
+            for _col in ("resolved_caption", "direction"):
+                _idempotent_add_column(
+                    conn,
+                    "t2i_images",
+                    _col,
+                    f"ALTER TABLE t2i_images ADD COLUMN {_col} TEXT",
+                )
             # The general VLM's short brief of a favorited image: the user
             # turn of a writer-training "hindsight" example. Cascades with
             # its media row (a deleted image yields no hindsight example).
@@ -4251,6 +4261,8 @@ class DatabaseManager:
         edited: Optional[int] = None,
         writer_model: Optional[str] = None,
         scorecard_id: Optional[str] = None,
+        resolved_caption: Optional[str] = None,
+        direction: Optional[str] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4263,9 +4275,10 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index, draft_prompt, edited, writer_model, scorecard_id) "
+                "variant_index, draft_prompt, edited, writer_model, scorecard_id, "
+                "resolved_caption, direction) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4291,6 +4304,8 @@ class DatabaseManager:
                     edited,
                     writer_model,
                     scorecard_id,
+                    resolved_caption,
+                    direction,
                 ),
             )
             conn.commit()
@@ -6314,6 +6329,9 @@ class DatabaseManager:
     _DATASET_LINEAGE_COLS: ClassVar[Tuple[str, ...]] = (
         "model",
         "caption",
+        "resolved_caption",
+        "direction",
+        "prompt_seed",
         "prompt_used",
         "draft_prompt",
         "edited",
@@ -6336,11 +6354,15 @@ class DatabaseManager:
           lineage carries a ``t2i`` row. Keys: ``file_path``, ``live``, the
           lineage columns (``_DATASET_LINEAGE_COLS``), ``is_favorite``,
           ``passed``, ``seen_at``, ``judged_at`` (a tombstone's
-          ``confirmed_at``), ``category_ids`` and ``category_names``.
+          ``confirmed_at``), ``category_ids`` and ``category_names`` (every
+          link source) and ``generation_categories`` (names of the
+          ``source = 'generation'`` links; a tombstone's stored names).
+          Malformed tombstones are skipped with one WARNING (count only).
         * ``briefs``: ``{path: {brief, model, created_at}}``.
         * ``library``: favorited images that have a brief but no live T2I
           row: ``{path: {prompt, model_names, judged_at, seen_at,
-          category_ids, category_names}}`` (prompt from the metadata blob).
+          category_ids, category_names, generation_categories}}`` (prompt
+          from the metadata blob).
         """
         cols = self._DATASET_LINEAGE_COLS
         with self.lock, self._get_connection() as conn:
@@ -6350,11 +6372,19 @@ class DatabaseManager:
             }
             by_name = {name.lower(): cid for cid, name in categories.items()}
             links: Dict[str, List[int]] = {}
+            generated: Dict[str, List[int]] = {}
             for r in conn.execute(
-                "SELECT file_path, category_id FROM media_categories "
+                "SELECT file_path, category_id, source FROM media_categories "
                 "ORDER BY category_id"
             ):
                 links.setdefault(r["file_path"], []).append(int(r["category_id"]))
+                if r["source"] == "generation":
+                    generated.setdefault(r["file_path"], []).append(
+                        int(r["category_id"])
+                    )
+
+            def names_of(ids: List[int]) -> List[str]:
+                return [categories[i] for i in ids if i in categories]
 
             generations: Dict[str, Dict[str, Any]] = {}
             select = ", ".join(f"g.{c}" for c in cols)
@@ -6370,9 +6400,11 @@ class DatabaseManager:
                 d["passed"] = bool(d["passed"])
                 ids = links.get(d["file_path"], [])
                 d["category_ids"] = list(ids)
-                d["category_names"] = [categories[i] for i in ids if i in categories]
+                d["category_names"] = names_of(ids)
+                d["generation_categories"] = names_of(generated.get(d["file_path"], []))
                 generations[d["file_path"]] = d
             live = set(generations)
+            malformed = 0
             for r in conn.execute(
                 "SELECT id, file_path, is_favorite, passed, seen_at, "
                 "confirmed_at, categories, lineage FROM media_tombstones "
@@ -6385,7 +6417,10 @@ class DatabaseManager:
                     gen = json.loads(r["lineage"])["t2i"]
                     names = json.loads(r["categories"] or "[]")
                 except (ValueError, KeyError, TypeError):
-                    logger.debug("skipping malformed tombstone (id %s)", r["id"])
+                    malformed += 1
+                    continue
+                if not isinstance(gen, dict):
+                    malformed += 1
                     continue
                 if not isinstance(names, list):
                     names = []
@@ -6400,6 +6435,8 @@ class DatabaseManager:
                 d["category_ids"] = [
                     by_name[str(n).lower()] for n in names if str(n).lower() in by_name
                 ]
+                # Tombstones keep no link source: their stored names stand in.
+                d["generation_categories"] = list(d["category_names"])
                 # Newest tombstone wins (ORDER BY id).
                 generations[r["file_path"]] = d
 
@@ -6426,7 +6463,9 @@ class DatabaseManager:
                     part,
                 ):
                     ids = links.get(r["file_path"], [])
+                    gen_ids = generated.get(r["file_path"], [])
                     library[r["file_path"]] = {
+                        "generation_categories": names_of(gen_ids),
                         "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
                         "model_names": [],
                         "seen_at": r["seen_at"],
@@ -6446,6 +6485,10 @@ class DatabaseManager:
                     part,
                 ):
                     library[r["file_path"]]["model_names"].append(r["index_key"])
+        if malformed:
+            logger.warning(
+                "writer dataset: skipped %d malformed tombstone(s)", malformed
+            )
         return {
             "categories": categories,
             "generations": list(generations.values()),

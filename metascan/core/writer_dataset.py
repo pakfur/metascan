@@ -19,12 +19,13 @@ Example kinds
   rendered (edited) prompt, ``rejected`` = the writer's draft. Each edit
   yields one ``PrefExample`` (DPO) AND one ``SftExample`` (SFT target),
   counted once (``edit_pairs``). Several seeds of one edited variant are one
-  edit (deduplicated on target model + caption + both normalized texts).
+  edit (deduplicated on target model + description + direction + both
+  normalized texts).
 * **Hindsight examples** (``SftExample``, ``source="hindsight"``): a
   favorited image with a known prompt and a cached ``hindsight_briefs``
-  brief. User turn = the brief, target = the prompt that produced the
-  image. A T2I image's target model is its ``model`` column; a library
-  item (no T2I row) needs a metadata prompt and a model name that
+  brief. User turn = the brief (no direction), target = the prompt that
+  produced the image. A T2I image's target model is its ``model`` column; a
+  library item (no T2I row) needs a metadata prompt and a model name that
   ``taste_examples.matches_model_family`` places in exactly one
   ``MODEL_PROFILES`` family (none or several: left out).
 
@@ -37,23 +38,26 @@ Inclusion rules (all kinds)
   is not a candidate.
 * ``writer_id = 'manual'`` is excluded everywhere: a pair with a manual
   side, a manual edit (there is no writer draft to prefer against) and a
-  manual image as hindsight target. Every other writer counts (``base``,
-  ``base+taste``, ``fallback``, ``adapter:<id>``); two sides that share a
-  ``writer_id`` + ``writer_model`` are fine.
-* The target model must be a ``MODEL_PROFILES`` id and the caption (brief
-  for hindsight) non-blank; a pair whose two prompts normalize equal, or
-  whose sides disagree on caption or model, is skipped.
+  manual image as hindsight target.
+* ``writer_id = 'fallback'`` (the resolved caption with stock pieces, not
+  something a writer wrote) is never a target: never ``chosen`` of a pair,
+  never a hindsight target. It may be ``rejected`` (a loser variant, or the
+  draft an edit replaced). Every other writer counts (``base``,
+  ``base+taste``, ``adapter:<id>``); two sides that share a ``writer_id`` +
+  ``writer_model`` are fine.
+* The target model must be a ``MODEL_PROFILES`` id and the description
+  (below) known; a pair whose two prompts normalize equal, or whose sides
+  disagree on model, description or direction, is skipped.
 * Deleted generations count: a path with no live media row is read from its
   newest ``media_tombstones`` row whose lineage carries the ``t2i`` row
   (judgment state and category NAMES as at deletion; a category scope
   matches them by the category's current name). A live row always wins. A
   deleted image has no brief (the table cascades), so no hindsight.
-* An example's *categories* are the union over the images it was built
-  from (both variants of a pair; every seed of an edit; the one hindsight
-  image). Scope ``"all"`` keeps every example and adds a
-  ``CATEGORIES: a, b`` line to its user turn (none when it has no
-  categories); scope ``"<category id>"`` keeps only examples carrying that
-  category and adds no line.
+  Malformed tombstones are skipped with one WARNING carrying the count.
+* Scope: ``"all"`` keeps every example; ``"<category id>"`` keeps only
+  examples whose images (the union over both variants of a pair, every seed
+  of an edit, the one hindsight image) carry that category, from any link
+  source.
 * An example's ``as_of`` is the newest of its images' ``created_at``,
   ``judged_at`` and ``seen_at`` (for a library item: its ``judged_at`` and
   ``seen_at``; never the brief's own time, which says nothing about the
@@ -61,16 +65,29 @@ Inclusion rules (all kinds)
   left out, so a run that records ``data_cutoff = now`` (or
   ``counts.date_span[1]``) counts everything later as new.
 
-Prompts (as at inference)
--------------------------
+Prompts (exactly as the T2I runner sends them)
+----------------------------------------------
 ``system`` and ``user`` come from ``t2i_prompt.compose_guided_t2i_prompts``
-with the row's target-model profile, ``content_mode`` (the T2I config's;
-``"default"`` adds no directive) and NO direction, angle or taste examples:
-the angle a variant was written with is not in the user turn, so a pair
-compares two outputs for the very same request. The user turn's
-``DESCRIPTION`` is the stored caption as typed (``t2i_images.caption``, its
-tokens unresolved), or the brief. ``add_categories_line`` adds the
-``CATEGORIES`` line for scope ``all``.
+with the row's target-model profile, the REQUIRED ``content_mode`` (the
+T2I config's; recorded in ``DatasetCounts.content_mode`` for the adapter's
+meta), the row's stored ``direction`` (NULL: no DIRECTION block) and NO
+angle or taste examples -- an adapter writes without an angle (the runner
+passes none for an adapter writer), so a pair compares two outputs for the
+very same request.
+
+The user turn's ``DESCRIPTION`` is the caption as the writer saw it:
+``t2i_images.resolved_caption`` when stored; for an older row, the caption
+itself when it has no ``__TOKEN__``s, else the injected ``resolve(caption,
+prompt_seed, model)`` (``caption_resolver`` builds the real one from the
+T2I library snapshot); a row with tokens and no ``prompt_seed`` or resolver
+is left out. A hindsight user turn's DESCRIPTION is the brief.
+
+For scope ``all`` the user turn also carries ``CATEGORIES: a, b``
+(``t2i_prompt.add_categories_line``) naming the image's ``generation``
+category links only -- the batch's categories, which is what the runner
+names when an ``all``-scope adapter writes (tombstones keep no link source:
+their stored names stand in). A one-category scope has no line, at
+training and at inference.
 
 JSONL schema (one JSON object per line, UTF-8; what the training worker
 reads)
@@ -79,28 +96,32 @@ reads)
 
     {"system": str, "user": str, "chosen": str, "target_model": str,
      "categories": [str], "source": "edit" | "hindsight",
-     "group": str | null}
+     "group": str}
 
 * Preference file (``prefs.jsonl``) and holdout file (``holdout.jsonl``,
   same shape)::
 
     {"system": str, "user": str, "chosen": str, "rejected": str,
      "target_model": str, "categories": [str],
-     "source": "variant" | "edit", "group": str | null}
+     "source": "variant" | "edit", "group": str}
 
 ``chosen`` is the assistant turn to learn (SFT) or prefer (DPO);
-``rejected`` the dispreferred one. ``group`` is the ``variant_group`` the
-example came from (null for an edit or hindsight image outside one): the
-holdout is drawn by group, and ``sft_without_holdout`` drops SFT examples of
-held-out groups, so no held-out prompt is ever trained on.
+``rejected`` the dispreferred one. ``categories`` are the generation
+categories in the CATEGORIES line (scope ``all``) or ``[]``. ``group`` is
+the holdout key: ``holdout_key(target_model, description)`` of the request
+the example answers (a hindsight example of a T2I image uses the image's
+caption description, not the brief, so it shares its pairs' group).
 
 Holdout
 -------
-``split_holdout`` holds out ``fraction`` of the variant groups (seeded,
-order-independent; at least one when there are two or more groups, never
-all), and with them every preference example of those groups (edit pairs
-included). Holdout agreement = the fraction of held-out pairs whose chosen
-log-prob beats the rejected one.
+``split_holdout`` holds out ``fraction`` of the groups that have a variant
+pair (seeded, order-independent; at least one when there are two or more,
+never all), and with them every preference example of those groups (edit
+pairs included). Grouping by (target model, resolved caption) rather than
+``variant_group`` keeps a caption generated twice on one side.
+``sft_without_holdout`` drops SFT examples of held-out groups, so no
+held-out prompt is ever trained on. Holdout agreement = the fraction of
+held-out pairs whose chosen log-prob beats the rejected one.
 
 Readiness
 ---------
@@ -114,6 +135,7 @@ too: counting only ``ready`` ones would call the data just trained on
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -122,11 +144,24 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
-from metascan.core.judgments import WRITER_MANUAL, normalize_prompt
+from metascan.core.judgments import WRITER_FALLBACK, WRITER_MANUAL, normalize_prompt
 from metascan.core.prompt_store import PromptStore
-from metascan.core.t2i_models import MODEL_PROFILES, T2iModelProfile
+from metascan.core.t2i_characters import Library, has_tokens, resolve_caption
+from metascan.core.t2i_models import MODEL_PROFILES, T2iModelProfile, effective_identity
 from metascan.core.t2i_prompt import add_categories_line, compose_guided_t2i_prompts
 from metascan.core.taste_examples import is_image_path, matches_model_family
 from metascan.core.writer_adapters import STATUS_READY, STATUS_UNTESTED
@@ -145,6 +180,9 @@ SOURCE_HINDSIGHT = "hindsight"
 
 _CUTOFF_STATUSES = (STATUS_READY, STATUS_UNTESTED)
 
+# (caption, prompt_seed, target model id) -> the resolved caption, or None.
+CaptionResolver = Callable[[str, int, str], Optional[str]]
+
 
 @dataclass
 class SftExample:
@@ -154,7 +192,7 @@ class SftExample:
     target_model: str
     categories: List[str]
     source: str  # "edit" | "hindsight"
-    group: Optional[str]
+    group: str
     as_of: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -172,7 +210,7 @@ class PrefExample:
     target_model: str
     categories: List[str]
     source: str  # "variant" | "edit"
-    group: Optional[str]
+    group: str
     as_of: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -189,6 +227,9 @@ class DatasetCounts:
     by_target_model: Dict[str, int] = field(default_factory=dict)
     new_since_last: int = 0
     date_span: Tuple[str, str] = ("", "")
+    # The content mode the system prompts were composed with (the adapter's
+    # meta.json records it: inference must use the same one).
+    content_mode: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -200,6 +241,36 @@ Example = Union[SftExample, PrefExample]
 
 
 # ---- small pure helpers ---------------------------------------------------
+
+
+def holdout_key(target_model: str, description: str) -> str:
+    """The holdout group of a request: target model + description."""
+    raw = f"{target_model}\n{description}".encode("utf-8", "surrogatepass")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def caption_resolver(
+    library: Library, identity_overrides: Mapping[str, str]
+) -> CaptionResolver:
+    """The real ``resolve`` for :func:`build_examples`: resolves a caption
+    the way the T2I runner does (``resolve_caption`` in the target model's
+    effective identity style, ``identity_overrides`` = the T2I config's
+    ``identity``) against one library snapshot (``T2iRunner.library.get()``).
+    An unknown model or a resolving error gives None (the row is skipped).
+    Lists edited since the image was made can make an old row resolve
+    differently; new rows store ``resolved_caption`` and never need this."""
+
+    def resolve(caption: str, seed: int, model: str) -> Optional[str]:
+        profile = MODEL_PROFILES.get(model)
+        if profile is None:
+            return None
+        try:
+            identity = effective_identity(profile, identity_overrides)
+            return resolve_caption(caption, seed, identity, library).text
+        except Exception:
+            return None
+
+    return resolve
 
 
 def _utc_iso(ts: Any) -> Optional[str]:
@@ -246,16 +317,30 @@ def _row_stamps(row: Dict[str, Any]) -> List[Any]:
     return [row.get("created_at"), row.get("judged_at"), row.get("seen_at")]
 
 
-def _union_categories(
-    rows: Iterable[Dict[str, Any]],
-) -> Tuple[Set[int], List[str]]:
+def _direction(row: Dict[str, Any]) -> Optional[str]:
+    text = row.get("direction")
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _scope_categories(rows: Iterable[Dict[str, Any]]) -> Tuple[Set[int], Set[str]]:
+    """Every category (any link source) of ``rows``: ids and lowered names."""
     ids: Set[int] = set()
-    names: Dict[str, str] = {}
+    names: Set[str] = set()
     for r in rows:
         ids.update(int(i) for i in r.get("category_ids") or [])
-        for n in r.get("category_names") or []:
-            names.setdefault(str(n).lower(), str(n))
-    return ids, sorted(names.values(), key=str.lower)
+        names.update(str(n).lower() for n in r.get("category_names") or [])
+    return ids, names
+
+
+def _line_categories(rows: Iterable[Dict[str, Any]]) -> List[str]:
+    """The generation categories of ``rows`` for the CATEGORIES line."""
+    names: Dict[str, str] = {}
+    for r in rows:
+        for n in r.get("generation_categories") or []:
+            clean = " ".join(str(n).split())
+            if clean:
+                names.setdefault(clean.lower(), clean)
+    return [names[k] for k in sorted(names)]
 
 
 def parse_scope(scope: Union[str, int], categories: Dict[int, str]) -> Optional[int]:
@@ -271,6 +356,36 @@ def parse_scope(scope: Union[str, int], categories: Dict[int, str]) -> Optional[
     return cid
 
 
+class _Describer:
+    """The DESCRIPTION of a T2I row (see the module docstring), cached."""
+
+    def __init__(self, resolve: Optional[CaptionResolver]) -> None:
+        self.resolve = resolve
+        self._cache: Dict[Tuple[str, int, str], Optional[str]] = {}
+
+    def __call__(self, row: Dict[str, Any]) -> Optional[str]:
+        stored = row.get("resolved_caption")
+        if not _blank(stored):
+            return str(stored)
+        caption = row.get("caption")
+        if _blank(caption):
+            return None
+        caption = str(caption)
+        if not has_tokens(caption):
+            return caption
+        seed, model = row.get("prompt_seed"), row.get("model")
+        if self.resolve is None or seed is None or not isinstance(model, str):
+            return None
+        key = (caption, int(seed), model)
+        if key not in self._cache:
+            try:
+                text = self.resolve(caption, int(seed), model)
+            except Exception:
+                text = None
+            self._cache[key] = None if _blank(text) else text
+        return self._cache[key]
+
+
 class _Composer:
     """System/user turns exactly as the T2I writer composes them."""
 
@@ -282,15 +397,23 @@ class _Composer:
         self.scope_id = scope_id
 
     def turns(
-        self, profile: T2iModelProfile, description: str, categories: List[str]
-    ) -> Tuple[str, str]:
+        self,
+        profile: T2iModelProfile,
+        description: str,
+        direction: Optional[str],
+        categories: List[str],
+    ) -> Tuple[str, str, List[str]]:
+        """``(system, user, categories shown)``."""
         composed = compose_guided_t2i_prompts(
-            profile, description, self.content_mode, store=self.store
+            profile, description, self.content_mode, direction, store=self.store
         )
-        user = composed.user
-        if self.scope_id is None:
-            user = add_categories_line(user, categories)
-        return composed.system, user
+        if self.scope_id is not None:
+            return composed.system, composed.user, []
+        return (
+            composed.system,
+            add_categories_line(composed.user, categories),
+            categories,
+        )
 
 
 # ---- the builder ----------------------------------------------------------
@@ -301,8 +424,10 @@ def examples_from_raw(
     scope: Union[str, int],
     store: PromptStore,
     now: datetime,
-    content_mode: str = "default",
+    *,
+    content_mode: str,
     last_cutoff: Optional[str] = None,
+    resolve: Optional[CaptionResolver] = None,
 ) -> Tuple[List[SftExample], List[PrefExample], DatasetCounts]:
     """The pure core of :func:`build_examples` over
     ``DatabaseManager.writer_dataset_raw()``; see the module docstring."""
@@ -313,11 +438,13 @@ def examples_from_raw(
     scope_name = categories[scope_id].lower() if scope_id is not None else None
     now_iso = _utc_iso(now.isoformat()) or ""
     composer = _Composer(store, content_mode, scope_id)
+    describe = _Describer(resolve)
 
-    def in_scope(ids: Set[int], names: List[str]) -> bool:
+    def in_scope(rows: Iterable[Dict[str, Any]]) -> bool:
         if scope_id is None:
             return True
-        return scope_id in ids or any(n.lower() == scope_name for n in names)
+        ids, names = _scope_categories(rows)
+        return scope_id in ids or scope_name in names
 
     def in_time(as_of: str) -> bool:
         return not as_of or as_of <= now_iso
@@ -335,37 +462,41 @@ def examples_from_raw(
             int(g["variant_index"]), []
         ).append(g)
     for group in sorted(variants):
-        winners: List[Tuple[int, List[Dict[str, Any]]]] = []
-        losers: List[Tuple[int, List[Dict[str, Any]]]] = []
+        winners: List[List[Dict[str, Any]]] = []
+        losers: List[List[Dict[str, Any]]] = []
         for index in sorted(variants[group]):
             rows = variants[group][index]
             prompts = {r.get("prompt_used") for r in rows}
             if len(prompts) != 1 or _blank(next(iter(prompts))):
                 continue
             if any(r.get("is_favorite") for r in rows):
-                winners.append((index, rows))
+                # A fallback prompt is never a target.
+                if rows[0].get("writer_id") != WRITER_FALLBACK:
+                    winners.append(rows)
             elif all(_seen(r) for r in rows):
-                losers.append((index, rows))
-        for _, win in winners:
-            for _, lose in losers:
+                losers.append(rows)
+        for win in winners:
+            for lose in losers:
                 head, other = win[0], lose[0]
                 profile = _profile(head.get("model"))
-                caption = head.get("caption")
+                description = describe(head)
                 if (
                     profile is None
-                    or _blank(caption)
+                    or description is None
                     or other.get("model") != head.get("model")
-                    or other.get("caption") != caption
+                    or describe(other) != description
+                    or _direction(other) != _direction(head)
                     or normalize_prompt(head["prompt_used"])
                     == normalize_prompt(other["prompt_used"])
                 ):
                     continue
                 both = win + lose
-                ids, names = _union_categories(both)
                 as_of = _newest(s for r in both for s in _row_stamps(r))
-                if not in_scope(ids, names) or not in_time(as_of):
+                if not in_scope(both) or not in_time(as_of):
                     continue
-                system, user = composer.turns(profile, str(caption), names)
+                system, user, shown = composer.turns(
+                    profile, description, _direction(head), _line_categories(both)
+                )
                 prefs.append(
                     PrefExample(
                         system=system,
@@ -373,9 +504,9 @@ def examples_from_raw(
                         chosen=head["prompt_used"],
                         rejected=other["prompt_used"],
                         target_model=profile.id,
-                        categories=names,
+                        categories=shown,
                         source=SOURCE_VARIANT,
-                        group=group,
+                        group=holdout_key(profile.id, description),
                         as_of=as_of,
                     )
                 )
@@ -383,32 +514,33 @@ def examples_from_raw(
 
     # -- edit pairs --
     sft: List[SftExample] = []
-    edits: Dict[Tuple[str, str, str, str], List[Dict[str, Any]]] = {}
+    edits: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = {}
     for g in gens:
         if not g.get("edited"):
             continue
         draft, used = g.get("draft_prompt"), g.get("prompt_used")
-        if _blank(draft) or _blank(used) or _blank(g.get("caption")):
-            continue
-        if _profile(g.get("model")) is None:
+        if _blank(draft) or _blank(used) or _profile(g.get("model")) is None:
             continue
         nd, nu = normalize_prompt(draft), normalize_prompt(used)
-        if nd == nu:
+        description = describe(g)
+        if nd == nu or description is None:
             continue
-        edits.setdefault((g["model"], g["caption"], nd, nu), []).append(g)
+        key = (g["model"], description, _direction(g) or "", nd, nu)
+        edits.setdefault(key, []).append(g)
     n_edit = 0
     for key in sorted(edits):
         rows = edits[key]
         head = rows[0]
         profile = _profile(head["model"])
         assert profile is not None
-        ids, names = _union_categories(rows)
+        description = key[1]
         as_of = _newest(s for r in rows for s in _row_stamps(r))
-        if not in_scope(ids, names) or not in_time(as_of):
+        if not in_scope(rows) or not in_time(as_of):
             continue
-        groups = sorted({str(r["variant_group"]) for r in rows if r["variant_group"]})
-        group = groups[0] if groups else None
-        system, user = composer.turns(profile, head["caption"], names)
+        system, user, shown = composer.turns(
+            profile, description, _direction(head), _line_categories(rows)
+        )
+        group = holdout_key(profile.id, description)
         prefs.append(
             PrefExample(
                 system,
@@ -416,7 +548,7 @@ def examples_from_raw(
                 head["prompt_used"],
                 head["draft_prompt"],
                 profile.id,
-                names,
+                shown,
                 SOURCE_EDIT,
                 group,
                 as_of,
@@ -428,7 +560,7 @@ def examples_from_raw(
                 user,
                 head["prompt_used"],
                 profile.id,
-                names,
+                shown,
                 SOURCE_EDIT,
                 group,
                 as_of,
@@ -444,15 +576,22 @@ def examples_from_raw(
         brief = briefs[path].get("brief")
         if _blank(brief) or not is_image_path(path):
             continue
+        brief = str(brief)
         gen = by_path.get(path)
         stamps: List[Any] = []
+        group_text: Optional[str] = None
         if gen is not None:
-            if not gen.get("live") or not gen.get("is_favorite") or not _usable(gen):
+            if (
+                not gen.get("live")
+                or not gen.get("is_favorite")
+                or not _usable(gen)
+                or gen.get("writer_id") == WRITER_FALLBACK
+            ):
                 continue
             profile = _profile(gen.get("model"))
             prompt = gen.get("prompt_used")
-            group = gen.get("variant_group")
-            source_rows = [gen]
+            group_text = describe(gen)
+            source_row: Dict[str, Any] = gen
             stamps += _row_stamps(gen)
         else:
             lib = (raw.get("library") or {}).get(path)
@@ -465,25 +604,25 @@ def examples_from_raw(
             ]
             profile = MODEL_PROFILES[families[0]] if len(families) == 1 else None
             prompt = lib.get("prompt")
-            group = None
-            source_rows = [lib]
+            source_row = lib
             stamps += [lib.get("judged_at"), lib.get("seen_at")]
         if profile is None or _blank(prompt):
             continue
-        ids, names = _union_categories(source_rows)
         as_of = _newest(stamps)
-        if not in_scope(ids, names) or not in_time(as_of):
+        if not in_scope([source_row]) or not in_time(as_of):
             continue
-        system, user = composer.turns(profile, str(brief), names)
+        system, user, shown = composer.turns(
+            profile, brief, None, _line_categories([source_row])
+        )
         sft.append(
             SftExample(
                 system,
                 user,
                 str(prompt),
                 profile.id,
-                names,
+                shown,
                 SOURCE_HINDSIGHT,
-                str(group) if group else None,
+                holdout_key(profile.id, group_text or brief),
                 as_of,
             )
         )
@@ -494,11 +633,10 @@ def examples_from_raw(
     sft.sort(key=lambda e: e.as_of, reverse=True)
 
     by_model: Dict[str, int] = {}
-    pairs = prefs  # variant + edit, each edit once
-    for e in list(pairs) + [s for s in sft if s.source == SOURCE_HINDSIGHT]:
+    for e in list(prefs) + [s for s in sft if s.source == SOURCE_HINDSIGHT]:
         by_model[e.target_model] = by_model.get(e.target_model, 0) + 1
     cutoff = _utc_iso(last_cutoff) if last_cutoff else None
-    new = sum(1 for p in pairs if cutoff is None or (p.as_of and p.as_of > cutoff))
+    new = sum(1 for p in prefs if cutoff is None or (p.as_of and p.as_of > cutoff))
     stamps_all = [e.as_of for e in list(prefs) + list(sft) if e.as_of]
     counts = DatasetCounts(
         pref_pairs=n_variant,
@@ -507,6 +645,7 @@ def examples_from_raw(
         by_target_model=dict(sorted(by_model.items())),
         new_since_last=new,
         date_span=(min(stamps_all), max(stamps_all)) if stamps_all else ("", ""),
+        content_mode=content_mode,
     )
     logger.info(
         "writer dataset (scope %s): %d preference, %d edit, %d hindsight",
@@ -547,14 +686,27 @@ def build_examples(
     scope: Union[str, int],
     store: PromptStore,
     now: datetime,
-    content_mode: str = "default",
+    *,
+    content_mode: str,
+    resolve: Optional[CaptionResolver] = None,
 ) -> Tuple[List[SftExample], List[PrefExample], DatasetCounts]:
     """``(sft, prefs, counts)`` for ``scope`` (``"all"`` or a category id).
-    Synchronous: the caller wraps it in ``asyncio.to_thread``. ``prefs``
-    holds variant AND edit pairs before any holdout split."""
+    ``content_mode`` is the T2I config's (required: the system prompt must
+    match inference); ``resolve`` re-resolves older rows' captions (see
+    :func:`caption_resolver`). Synchronous: the caller wraps it in
+    ``asyncio.to_thread``. ``prefs`` holds variant AND edit pairs before any
+    holdout split."""
     raw = db.writer_dataset_raw()
     cutoff = last_adapter_cutoff(db.list_writer_adapters(), scope)
-    return examples_from_raw(raw, scope, store, now, content_mode, cutoff)
+    return examples_from_raw(
+        raw,
+        scope,
+        store,
+        now,
+        content_mode=content_mode,
+        last_cutoff=cutoff,
+        resolve=resolve,
+    )
 
 
 # ---- holdout, output, readiness -------------------------------------------
@@ -565,9 +717,10 @@ def split_holdout(
     fraction: float = DEFAULT_HOLDOUT_FRACTION,
     seed: int = 0,
 ) -> Tuple[List[PrefExample], List[PrefExample]]:
-    """``(train, holdout)``: ``fraction`` of the variant groups (seeded),
-    and every preference example of those groups. Input order is kept."""
-    groups = sorted({p.group for p in prefs if p.source == SOURCE_VARIANT and p.group})
+    """``(train, holdout)``: ``fraction`` of the groups that have a variant
+    pair (seeded), and every preference example of those groups. Input
+    order is kept."""
+    groups = sorted({p.group for p in prefs if p.source == SOURCE_VARIANT})
     held: Set[str] = set()
     if len(groups) >= 2 and fraction > 0:
         n = min(len(groups) - 1, max(1, round(fraction * len(groups))))
@@ -581,7 +734,7 @@ def sft_without_holdout(
     sft: Sequence[SftExample], holdout: Sequence[PrefExample]
 ) -> List[SftExample]:
     """The SFT examples safe to train on: none from a held-out group."""
-    held = {p.group for p in holdout if p.group}
+    held = {p.group for p in holdout}
     return [s for s in sft if s.group not in held]
 
 
