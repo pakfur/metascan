@@ -20,7 +20,14 @@ export type CategoriesChangedPayload = Record<string, never>
 // status changed (refetch GET /api/taste/status).
 
 // `training` channel: `adapters_changed` with an empty payload whenever a
-// prompt-writer adapter is renamed, deleted or changes status. Clients
-// refetch GET /api/writers/adapters.
-export type TrainingWsEvent = 'adapters_changed'
+// prompt-writer adapter is renamed, deleted or changes status (clients
+// refetch GET /api/writers/adapters); `gate_changed` when a training asset
+// was downloaded / deleted (refetch GET /api/writers/training); the run
+// lifecycle (`run_*`) and the hindsight briefs job (`briefs_*`), see
+// types/training.ts and stores/training.ts::handleEvent.
+export type TrainingWsEvent =
+  | 'adapters_changed'
+  | 'gate_changed'
+  | import('./training').TrainingRunEvent
+  | import('./training').BriefsEvent
 export type AdaptersChangedPayload = Record<string, never>

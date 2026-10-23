@@ -12,6 +12,7 @@
 // T2I / I2V pipelines and the Saved Prompts metadata section.
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, streamUrl, thumbnailUrl } from '../../api/client'
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import { streamChat, type ChatMessageIn } from '../../api/chat'
 import { fetchMediaDetails } from '../../api/media'
 import { useChatStore, DEFAULT_SYSTEM_PROMPT, type ChatTurn } from '../../stores/chat'
@@ -167,7 +168,8 @@ async function runAssistant() {
     if (e instanceof DOMException && e.name === 'AbortError') {
       reply.stopped = true
     } else {
-      reply.error = e instanceof ApiError ? e.message : String(e)
+      // streamChat builds its own ApiError: a training refusal's detail is an object.
+      reply.error = isGpuBusyTraining(e) ? GPU_BUSY_TEXT : e instanceof ApiError ? e.message : String(e)
     }
   } finally {
     reply.streaming = false

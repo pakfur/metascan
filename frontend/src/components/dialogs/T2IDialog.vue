@@ -45,6 +45,7 @@ import { useFormAutosave } from '../../composables/useFormAutosave'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
 import { useWebSocket } from '../../composables/useWebSocket'
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import {
   buildBatchRequest,
   defaultPresetFor,
@@ -481,6 +482,10 @@ async function onGeneratePrompt() {
     resolvedOpen.value = true
   } catch (e) {
     if (handledAdapterError(e)) return
+    if (isGpuBusyTraining(e)) {
+      toast.show(GPU_BUSY_TEXT, 'warn', 5000)
+      return
+    }
     if (isUnknownCategoryError(e)) {
       void refreshCategories()
       toast.show(
@@ -686,6 +691,7 @@ const blocker = computed(() =>
 )
 
 function startErrorText(e: unknown): string {
+  if (isGpuBusyTraining(e)) return GPU_BUSY_TEXT
   if (e instanceof ApiError && e.status === 409) {
     return 'A Random batch is already running. Cancel it or wait for it to finish.'
   }

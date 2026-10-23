@@ -539,6 +539,12 @@ class TrainingManager:
             "holdout_fraction": wd.DEFAULT_HOLDOUT_FRACTION,
         }
 
+    def next_adapter_name(self, scope: Any = wd.SCOPE_ALL) -> str:
+        """The name a run of ``scope`` started now would get (the window
+        shows it; the final one is assigned at start). Synchronous."""
+        norm, categories = self._normalize_scope(scope)
+        return str(self.db.next_adapter_name(scope_slug(norm, categories)))
+
     async def dataset_preview(self, scope: Any = wd.SCOPE_ALL) -> Dict[str, Any]:
         built = await asyncio.to_thread(self._build, scope)
         return {

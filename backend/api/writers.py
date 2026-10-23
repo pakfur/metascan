@@ -216,6 +216,7 @@ def _gate_payload(gate: Any) -> Dict[str, Any]:
 async def training_status(scope: str = "all", recheck: bool = False) -> Dict[str, Any]:
     """The training window's state: the active run (if any) and resumable
     runs, the dataset counts + readiness for ``scope`` (cached ~30 s), the
+    name the next run of ``scope`` would get (``next_name``), the
     ``writer_training`` gate (each missing piece; ``recheck=1`` re-runs its
     subprocess probes, e.g. after installing the training deps) and every
     effort preset resolved, with the Advanced clamps."""
@@ -230,6 +231,9 @@ async def training_status(scope: str = "all", recheck: bool = False) -> Dict[str
         **manager.status(),
         "runs": await asyncio.to_thread(manager.resumable_runs),
         "dataset": dataset,
+        "next_name": await _training_call(
+            asyncio.to_thread(manager.next_adapter_name, scope)
+        ),
         "gate": {**_gate_payload(gate), "checking": checking},
         "presets": resolved_presets(),
         "clamps": {k: list(v) for k, v in OVERRIDE_CLAMPS.items()},
