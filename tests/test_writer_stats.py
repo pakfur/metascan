@@ -218,6 +218,19 @@ def test_collapse_flag_condition():
     assert collapse_warning(_div(0.5, None, 0.5, 0.2), rising) is True
 
 
+def test_collapse_needs_five_favorites_in_the_latest_window():
+    """Two or three favorites give a mean distance, but far too noisy to
+    call a collapse: the latest window needs n >= 5 favorites with vectors."""
+    rising = _rates((10, 3), (10, 5))
+    collapsed = _div(0.5, 0.5, 0.6, 0.4, 0.5, 0.30)
+    for n, flag in ((2, False), (4, False), (5, True), (9, True)):
+        latest = {**collapsed[-1], "n": n}
+        assert collapse_warning(collapsed[:-1] + [latest], rising) is flag, n
+    # Earlier windows' n does not gate the flag.
+    thin_history = [{**d, "n": 2} for d in collapsed[:-1]] + [collapsed[-1]]
+    assert collapse_warning(thin_history, rising) is True
+
+
 def _shift(div: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
     """``div`` as a training run ``days`` days ago would have stored it."""
     out = []
