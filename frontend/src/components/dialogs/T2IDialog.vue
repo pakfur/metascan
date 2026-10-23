@@ -37,6 +37,7 @@ import { useWebSocket } from '../../composables/useWebSocket'
 import {
   buildBatchRequest,
   defaultPresetFor,
+  draftSetFromImage,
   draftSetFromResult,
   draftSetFromSteps,
   firstBatchSource,
@@ -366,10 +367,16 @@ async function onGeneratePrompt() {
   generating.value = true
   try {
     const r = await store.generatePrompt(body)
-    if (store.selectedId !== target) {
-      // The user loaded another image while the prompt was being written:
-      // filling its box would edit (and autosave into) an image they did not ask about.
-      toast.show('The prompt was ready, but you switched images meanwhile, so it was not used.', 'info', 4000)
+    // The drafts are for this caption and model only. Another image loaded
+    // meanwhile would get them autosaved into it; an edited caption would
+    // drop them on the next Generate and send the box as a typed prompt; a
+    // different model would install drafts written in another model's style.
+    if (store.selectedId !== target || form.caption !== body.caption || form.model !== body.model) {
+      toast.show(
+        'The prompt was ready, but the image, caption or model changed meanwhile, so it was not used.',
+        'info',
+        4000,
+      )
       return
     }
     form.prompt = r.prompt // a Random Generate renders it as its first batch
@@ -684,10 +691,14 @@ function onSelectTile(item: ThumbItem) {
   const stored = store.selectImage(id)
   if (!stored) return
   Object.assign(form, mergeFormState(form, stored))
+  // Re-rendering a writer's prompt keeps its lineage (writer, model, draft):
+  // the tile's draft rides along as a one-entry set, never as a typed prompt.
+  const image = store.images.find((i) => i.id === id)
+  store.setDrafts(image ? draftSetFromImage(image, form) : null)
   // The form now equals what the server holds, so loading must not echo back
   // as a save. An untouched Generate would render the same image again.
   autosave.markLoaded()
-  lastSubmitted = requestSignature(form, hasNegative.value)
+  lastSubmitted = requestSignature(form, hasNegative.value, usablePrompts(form, batchContext.value))
 }
 
 // The form keeps its values and goes back to being a scratch area.
