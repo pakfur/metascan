@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ThumbItem } from '../../types/jobs'
 import ThumbTile from './ThumbTile.vue'
 
@@ -27,6 +28,16 @@ const props = withDefaults(
   { emptyText: '', loading: false, hasMore: false, loadingMore: false, tileSize: 132, columns: 3 },
 )
 
+// The (up to) two highest-scored tiles among the items rendered get a gold
+// outline; ties go to the earlier tile. Callers that pass no scores get none.
+const topIds = computed(() => {
+  const scored = props.items
+    .map((item, i) => ({ id: item.id, score: item.score, i }))
+    .filter((x): x is { id: number | string; score: number; i: number } => x.score != null)
+  scored.sort((a, b) => b.score - a.score || a.i - b.i)
+  return new Set(scored.slice(0, 2).map((x) => x.id))
+})
+
 const emit = defineEmits<{
   select: [item: ThumbItem, evt: MouseEvent]
   open: [index: number]
@@ -45,6 +56,7 @@ const emit = defineEmits<{
         :key="item.id"
         :item="item"
         :selected="item.id === selectedId"
+        :top="topIds.has(item.id)"
         @select="emit('select', item, $event)"
         @open="emit('open', index)"
         @favorite="emit('favorite', item)"

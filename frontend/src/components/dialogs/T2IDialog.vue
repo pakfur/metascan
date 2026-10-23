@@ -24,6 +24,7 @@ import { ApiError } from '../../api/client'
 import { listPresets } from '../../api/comfy'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
+import { useTasteStore } from '../../stores/taste'
 import { useFormAutosave } from '../../composables/useFormAutosave'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
@@ -53,6 +54,7 @@ import MediaViewer from '../viewer/MediaViewer.vue'
 const emit = defineEmits<{ close: [] }>()
 
 const store = useT2iStore()
+const taste = useTasteStore()
 const foldersStore = useFoldersStore()
 const toast = useToast()
 
@@ -545,7 +547,16 @@ async function onCancel() {
 
 // ---- the image grid: select, favourite, delete, view ----------------------------------------------------------
 // Whole pages of the images held, newest first (the store's window over them).
-const gridItems = computed(() => store.shownImages.map(toThumbItem))
+// Order is untouched; scores are looked up per tile. `taste.scores` is a
+// shallowRef replaced wholesale on scores_updated, so reading it here
+// makes the list recompute on every rescore.
+const gridItems = computed(() => {
+  const scores = taste.scores
+  return store.shownImages.map((img) => {
+    const item = toThumbItem(img)
+    return { ...item, score: scores.get(item.file_path) ?? null }
+  })
+})
 
 // Clicking an image loads its saved form_state into the form and starts
 // autosaving into it. Seed policy, Batch Size and Count per Batch stay as they
