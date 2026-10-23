@@ -130,6 +130,29 @@ the root CLAUDE.md still applies.
   settles — before each pass, including coalesced reruns. A drain that
   had to wait re-snapshots `_explicit_stops` after the wait: the render's
   own VLM unload is then behind it and must not strand the batch.
+- **Prompt-writer adapters (LoRA) ride the writer's llama-server.**
+  `VlmRoles(adapter_source=…)` (wired in the lifespan to
+  `writer_adapters.servable_adapter_files`: `ready`/`untested` rows whose
+  `data/models/vlm/adapters/<id>/adapter.gguf` exists) gives the writer
+  client `lora_paths` = the adapters whose `base_model` is the writer model
+  (a general-only client gets none); `_build_command` appends `--lora <p>`
+  per path plus `--lora-init-without-apply`, and `_loaded_lora_paths` is
+  what the running server spawned with. `generate_text(lora_id=…)` /
+  `(lora_path=…)` adds `"lora": [{"id": <position>, "scale": 1.0}]` — a
+  base request has NO `lora` key (byte-identical to before; tested).
+  `lora_path` is resolved against the running server at request time; an
+  adapter added after the spawn brings the server back with it
+  (`_ensure_lora`), one withdrawn and no longer loaded raises
+  `AdapterNotLoadedError` (routes: 409 `adapter_unavailable`).
+  `refresh_adapters()` restarts a stale client only when idle
+  (`busy_for_background(swap_grace)` false: nothing in flight or waiting,
+  no `hold()`, not loading) — via `restart_for_loras()` = `evict()`, so it
+  comes back on its next request — else `restart_pending` until it is; a
+  stopped client just spawns with the new list. `withdraw_adapter(id)`
+  (DELETE `/api/writers/adapters/{id}` calls it BEFORE removing files, for
+  Windows' mapped-file lock) drops it for this process even if the removal
+  fails. Tests: `tests/test_writer_adapter_serving.py` (the fake server's
+  `--record` file logs argv and request bodies).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job

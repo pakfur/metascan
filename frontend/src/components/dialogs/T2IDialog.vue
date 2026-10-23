@@ -23,6 +23,12 @@ import {
   type T2iWriter,
 } from '../../types/t2i'
 import type { ThumbItem } from '../../types/jobs'
+import {
+  ADAPTER_UNAVAILABLE,
+  adapterMenuOptions,
+  isAdapterWriterId,
+  writerName,
+} from '../../types/writers'
 import type { Media } from '../../types/media'
 import type { WorkflowPreset } from '../../types/storyboard'
 import { ApiError } from '../../api/client'
@@ -278,7 +284,8 @@ function writePref(key: string, value: string) {
 }
 function storedWriter(): T2iWriter {
   const v = readPref(WRITER_STORAGE_KEY)
-  return T2I_WRITERS.some((w) => w.id === v) ? (v as T2iWriter) : 'base'
+  // An adapter is kept until the adapter list says it is gone (see below).
+  return T2I_WRITERS.some((w) => w.id === v) || isAdapterWriterId(v) ? (v as T2iWriter) : 'base'
 }
 function storedVariants(): number {
   const n = Number(readPref(VARIANTS_STORAGE_KEY))
@@ -288,7 +295,8 @@ const writer = ref<T2iWriter>(storedWriter())
 const variants = ref<number>(storedVariants())
 const variantChoices = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1)
 function setWriter(v: string) {
-  if (!T2I_WRITERS.some((w) => w.id === v)) return
+  const adapter = adapterOptions.value.find((o) => o.id === v)
+  if (!T2I_WRITERS.some((w) => w.id === v) && !(adapter && !adapter.disabled)) return
   writer.value = v as T2iWriter
   writePref(WRITER_STORAGE_KEY, v)
 }
@@ -305,6 +313,50 @@ function setVariants(v: string) {
 const { selected: categoryIds, refresh: refreshCategories } = useGenerationCategories(
   'metascan.t2i.categories.v1',
 )
+
+// Prompt-writer adapters after Base / Base + taste: the T2I ones scoped to
+// `all` or to a selected category, labelled with their favorite rate; one
+// with too few examples for the selected model is listed disabled.
+const adapterOptions = computed(() =>
+  adapterMenuOptions(store.adapters, {
+    kind: 't2i',
+    categoryIds: categoryIds.value,
+    targetModel: form.model || null,
+    stats: taste.writerStats,
+  }),
+)
+useWebSocket('training', (event) => {
+  if (event === 'adapters_changed') void store.loadAdapters()
+})
+onMounted(() => {
+  if (!taste.writerStats) taste.loadWriterStats().catch(() => {}) // labels only
+})
+
+// The writer is session-local and never part of the form: switching it back
+// to Base when the selected adapter has gone (deleted, failed, out of the
+// selected categories, too few examples for the model) touches no image.
+function fallBackToBase(reason: string) {
+  const name = writerName(store.adapters, writer.value)
+  writer.value = 'base'
+  writePref(WRITER_STORAGE_KEY, 'base')
+  toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
+}
+watch([adapterOptions, () => store.adaptersLoaded], () => {
+  if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
+  const option = adapterOptions.value.find((o) => o.id === writer.value)
+  if (!option || option.disabled) fallBackToBase('is not available here')
+})
+function isAdapterUnavailable(e: unknown): boolean {
+  return (
+    e instanceof ApiError &&
+    e.status === 409 &&
+    (e.detail as { code?: unknown } | null)?.code === ADAPTER_UNAVAILABLE
+  )
+}
+function onAdapterUnavailable() {
+  fallBackToBase('is no longer available')
+  void store.loadAdapters()
+}
 
 // The direction the prompt in the box was written with (Generate Prompt), or
 // the running step's while a Random batch has the boxes. Display only.
@@ -389,6 +441,10 @@ async function onGeneratePrompt() {
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
     resolvedOpen.value = true
   } catch (e) {
+    if (isAdapterUnavailable(e)) {
+      onAdapterUnavailable()
+      return
+    }
     toast.show(
       e instanceof ApiError && e.status === 502
         ? `The prompt writer failed (${e.message}). Press Generate Prompt to try again.`
@@ -450,7 +506,7 @@ const draftLabel = computed(() => {
   const set = draftSet.value
   if (!set) return ''
   const entry = set.entries[set.current]
-  return `variant ${set.current + 1} of ${set.entries.length} · ${entry.writer_id}`
+  return `variant ${set.current + 1} of ${set.entries.length} · ${writerName(store.adapters, entry.writer_id)}`
 })
 // An explicit user action: what the boxes hold stays with the variant being
 // left, and the other variant's text (as last left) goes in.
@@ -641,6 +697,10 @@ async function onGenerate() {
     )
   } catch (e) {
     supplyingFirstStep.value = false
+    if (isAdapterUnavailable(e)) {
+      onAdapterUnavailable()
+      return
+    }
     toast.show(startErrorText(e), 'warn', 6000)
   } finally {
     submitting.value = false
@@ -902,7 +962,7 @@ onBeforeUnmount(() => {
                   @click="toggleResolved"
                 >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
                 <div class="writer-row">
-                  <label class="inline-pick" title="Who writes the prompts: base Qwen, or base Qwen shown your favorite prompts as examples">
+                  <label class="inline-pick" title="Who writes the prompts: base Qwen, base Qwen shown your favorite prompts as examples, or one of your trained writers (name · date · favorite rate)">
                     <span>Writer</span>
                     <select
                       :value="writer"
@@ -910,6 +970,13 @@ onBeforeUnmount(() => {
                       @change="setWriter(($event.target as HTMLSelectElement).value)"
                     >
                       <option v-for="w in T2I_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+                      <option
+                        v-for="a in adapterOptions"
+                        :key="a.id"
+                        :value="a.id"
+                        :disabled="a.disabled"
+                        :title="a.title"
+                      >{{ a.label }}</option>
                     </select>
                   </label>
                   <label class="inline-pick" title="How many different prompts are written for one caption; each renders the caption's same seeds">

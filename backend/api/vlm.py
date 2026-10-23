@@ -65,6 +65,28 @@ def get_writer_vlm() -> Any:
     return get_vlm_client("writer")
 
 
+def get_writer_adapter_path(adapter_id: int) -> Optional[Path]:
+    """The GGUF of adapter ``adapter_id`` when the writer serves it (see
+    ``VlmRoles.adapter_path``); None without roles or when it does not."""
+    if _vlm_roles is None:
+        return None
+    return _vlm_roles.adapter_path(adapter_id)
+
+
+async def refresh_writer_adapters() -> None:
+    """Apply an adapter registry change to the writer (no-op without roles)."""
+    if _vlm_roles is not None:
+        await _vlm_roles.refresh_adapters()
+
+
+async def withdraw_writer_adapter(adapter_id: int) -> bool:
+    """Stop serving ``adapter_id`` before its files are deleted; True when
+    no running server still has its file loaded."""
+    if _vlm_roles is None:
+        return True
+    return await _vlm_roles.withdraw_adapter(adapter_id)
+
+
 def get_all_vlm_clients() -> List[Any]:
     """Every distinct client once -- what unloading for ComfyUI shuts down."""
     if _vlm_roles is not None:

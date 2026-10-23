@@ -3,6 +3,8 @@ import { computed, ref } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as t2iApi from '../api/t2i'
 import { setVerdict } from '../api/judgments'
+import { listWriterAdapters } from '../api/writers'
+import type { WriterAdapter } from '../types/writers'
 import { useJobTracker } from '../composables/useJobTracker'
 import { useToast } from '../composables/useToast'
 import { useFoldersStore } from './folders'
@@ -239,6 +241,25 @@ export const useT2iStore = defineStore('t2i', () => {
     if (images.value.length > paging.shown) shownPages.value += 1
   }
 
+  // Prompt-writer adapters for the Writer menu (GET /api/writers/adapters),
+  // refetched on the `training` channel's adapters_changed. A failed load
+  // keeps the last list; `adaptersLoaded` says whether one ever arrived (a
+  // selected adapter is only judged gone against a list that did).
+  const adapters = ref<WriterAdapter[]>([])
+  const adaptersLoaded = ref(false)
+  let adaptersSeq = 0
+  async function loadAdapters(): Promise<void> {
+    const seq = ++adaptersSeq
+    try {
+      const rows = await listWriterAdapters()
+      if (seq !== adaptersSeq) return
+      adapters.value = rows
+      adaptersLoaded.value = true
+    } catch {
+      // The menus keep what they had; a request naming a gone adapter 409s.
+    }
+  }
+
   /** Opening the dialog: a fresh session over whatever the server is still running. */
   async function open(): Promise<void> {
     imagesSeq += 1
@@ -260,6 +281,7 @@ export const useT2iStore = defineStore('t2i', () => {
     await Promise.all([
       loaded?.csv.available ? loadCaptionMeta() : Promise.resolve(null),
       reattach(),
+      loadAdapters(),
     ])
   }
 
@@ -837,6 +859,9 @@ export const useT2iStore = defineStore('t2i', () => {
 
   return {
     // state
+    adapters,
+    adaptersLoaded,
+    loadAdapters,
     config,
     configLoading,
     configError,

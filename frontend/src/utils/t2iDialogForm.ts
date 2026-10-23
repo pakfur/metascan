@@ -24,6 +24,7 @@ import {
   type T2iLora,
   type T2iMode,
 } from '../types/t2i'
+import { isAdapterWriterId } from '../types/writers'
 
 /**
  * Every value the dialog's inputs hold. The first eleven are the editable copy
@@ -233,6 +234,7 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
 }
 
 /** Writers whose drafts a supplied prompt may name (judgments.DRAFT_WRITERS). */
+// The writers whose drafts a tile can hand back (plus any `adapter:<id>`).
 const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
 
 /**
@@ -247,7 +249,8 @@ export function draftSetFromImage(
   f: Pick<T2iFields, 'caption' | 'prompt' | 'negative'>,
 ): T2iDraftSet | null {
   const writerId = img.writer_id
-  if (img.draft_prompt == null || !writerId || !DRAFT_WRITERS.includes(writerId)) return null
+  if (img.draft_prompt == null || !writerId) return null
+  if (!DRAFT_WRITERS.includes(writerId) && !isAdapterWriterId(writerId)) return null
   return {
     caption: f.caption,
     variants: 1,

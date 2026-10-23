@@ -15,10 +15,10 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
 from backend.api.categories import checked_category_ids
@@ -52,6 +52,10 @@ from metascan.core.t2i_runner import (
 )
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
+from metascan.core.writer_adapters import (
+    WriterAdapterUnavailable,
+    parse_adapter_writer_id,
+)
 from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
@@ -96,6 +100,12 @@ _BAD_REQUEST = (
 def _http_error(exc: Exception) -> Optional[HTTPException]:
     """The HTTP answer for a runner error, or None for an unexpected one
     (which stays a 500 with a traceback in the log)."""
+    if isinstance(exc, WriterAdapterUnavailable):
+        # The dialog falls back to Base on this code.
+        return HTTPException(
+            status_code=409,
+            detail={"code": "adapter_unavailable", "message": str(exc)},
+        )
     if isinstance(exc, _BAD_REQUEST):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, T2iNotFoundError):
@@ -121,8 +131,15 @@ class CaptionFilterBody(BaseModel):
     filter: Optional[Dict[str, Any]] = None
 
 
-# The writers a request may ask for (adapters arrive later).
-WriterChoice = Literal["base", "base+taste"]
+def _writer_choice(value: str) -> str:
+    if value in ("base", "base+taste") or parse_adapter_writer_id(value) is not None:
+        return value
+    raise ValueError("writer must be 'base', 'base+taste' or 'adapter:<id>'")
+
+
+# The writers a request may ask for: the base writer, the base writer with
+# taste examples, or a prompt-writer adapter (``adapter:<id>``).
+WriterChoice = Annotated[str, AfterValidator(_writer_choice)]
 
 
 class CaptionRequest(BaseModel):

@@ -6,8 +6,12 @@ writer id is ``adapter:<registry id>``. The id is the lineage key, so it
 survives a rename, and a deleted adapter's row is kept (soft delete) to
 remember its name in history."""
 
+import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 WRITER_ADAPTER_PREFIX = "adapter:"
 
@@ -55,3 +59,57 @@ def parse_adapter_writer_id(writer_id: Any) -> Optional[int]:
 def adapter_dir(data_dir: Path, adapter_id: int) -> Path:
     """Where adapter ``adapter_id``'s files live."""
     return data_dir / "models" / "vlm" / "adapters" / str(int(adapter_id))
+
+
+# The GGUF the writer llama-server loads (``--lora``), inside adapter_dir.
+ADAPTER_GGUF = "adapter.gguf"
+
+
+class WriterAdapterUnavailable(RuntimeError):
+    """A request named an adapter the writer cannot serve (deleted, failed,
+    still training, another surface's, or not loaded for the writer's model)
+    -- the routes answer 409 ``adapter_unavailable``."""
+
+    def __init__(self, writer_id: str, reason: str = "") -> None:
+        self.writer_id = writer_id
+        super().__init__(
+            f"writer {writer_id!r} is not available" + (f": {reason}" if reason else "")
+        )
+
+
+@dataclass(frozen=True)
+class AdapterFile:
+    """A servable adapter (``ready`` / ``untested``) whose GGUF is on disk."""
+
+    adapter_id: int
+    kind: str
+    base_model: str
+    path: Path
+
+
+def servable_adapter_files(db: Any, data_dir: Path) -> List[AdapterFile]:
+    """Every ``ready`` / ``untested`` registry adapter whose GGUF exists, in
+    id order -- the ``--lora`` list of the writer llama-server. An adapter
+    whose file is missing is skipped (llama-server would refuse to start)."""
+    out: List[AdapterFile] = []
+    for row in db.list_writer_adapters():
+        if row["status"] not in SERVABLE_STATUSES:
+            continue
+        path = adapter_dir(data_dir, row["id"]) / ADAPTER_GGUF
+        if not path.is_file():
+            logger.warning(
+                "writer adapter %s is %s but %s is missing; not loading it",
+                row["id"],
+                row["status"],
+                path,
+            )
+            continue
+        out.append(
+            AdapterFile(
+                adapter_id=int(row["id"]),
+                kind=str(row["kind"]),
+                base_model=str(row["base_model"]),
+                path=path,
+            )
+        )
+    return out
