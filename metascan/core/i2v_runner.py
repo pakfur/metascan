@@ -42,6 +42,7 @@ from metascan.core.i2v_templates import (
     validate_i2v_template_fill,
 )
 from metascan.core.prompt_store import get_prompt_store
+from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -93,10 +94,15 @@ class I2vRunner:
         comfy: Any,
         get_vlm: Callable[[], Any],
         output_root: Path,
+        vlm_installed: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
         self.get_vlm = get_vlm  # the prompt-writer client
+        # Says whether a model's files are on disk (None: trust the picker).
+        # A missing writer model is refused with a "download it" hint rather
+        # than spawning a llama-server that cannot load it.
+        self.vlm_installed = vlm_installed
         self.output_root = Path(output_root)
         self._on_event: List[EventCb] = []
         self._ingest_tasks: Set["asyncio.Task[None]"] = set()
@@ -151,6 +157,9 @@ class I2vRunner:
         if not path.exists():
             raise I2vRequestError(f"File not found: {source_path}")
         model_id = pick_vlm_model(vlm, role="writer")
+        check = self.vlm_installed
+        if check is not None and not await asyncio.to_thread(check, model_id):
+            raise I2vUnavailableError(writer_missing_hint(model_id))
         await vlm.ensure_started(model_id)
 
         if template is None:

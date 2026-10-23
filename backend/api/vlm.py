@@ -393,14 +393,25 @@ async def set_active(body: ActiveBody) -> Dict[str, Any]:
             "writer_model_not_allowed",
             f"{body.model_id} cannot be the prompt writer",
         )
+    if not await asyncio.to_thread(vlm_model_installed, body.model_id):
+        raise _error(409, "model_not_installed", f"{body.model_id} is not installed")
     roles = _vlm_roles
-    if roles is not None:
-        await _point_role(roles, body.role, body.model_id)
     if body.role == "general":
         _cancel_retag_jobs()
-    client = get_vlm_client(body.role)
-    await client.swap_model(body.model_id)
-    return dict(client.snapshot())
+    if roles is None:
+        client = get_vlm_client(body.role)
+        await client.swap_model(body.model_id)
+        return dict(client.snapshot())
+
+    async def _swap(c: Any) -> None:
+        await c.swap_model(body.model_id)
+
+    # The role is persisted only once the model actually loaded.
+    general_before = roles.client("general")
+    await roles.activate(body.role, body.model_id, _swap)
+    if roles.client("general") is not general_before:
+        _cancel_retag_jobs()
+    return dict(roles.client(body.role).snapshot())
 
 
 class RoleBody(BaseModel):
@@ -416,8 +427,11 @@ def _require_roles() -> VlmRoles:
 
 @router.get("/roles")
 async def get_roles() -> Dict[str, Any]:
-    """Which model each role uses and its client's state."""
-    return _require_roles().snapshot()
+    """Which model each role uses, its client's state, whether the two
+    models stay loaded together, and notes for the Models tab."""
+    roles = _require_roles()
+    await roles.refresh()  # a writer download takes effect without restart
+    return roles.snapshot()
 
 
 @router.post("/roles")

@@ -163,6 +163,11 @@ def writer_allowed(model_id: str) -> bool:
     return spec is not None and spec.writer_allowed
 
 
+def writer_missing_hint(model_id: str) -> str:
+    """What to tell the user when the prompt-writer model is not installed."""
+    return f"prompt writer {model_id} not installed — download it in Models"
+
+
 def resolve_repo(model_id: str, override: dict[str, str] | None = None) -> str:
     """Apply optional config override on top of the registry's default repo."""
     if override and model_id in override:
@@ -177,4 +182,5 @@ __all__ = [
     "get_spec",
     "resolve_repo",
     "writer_allowed",
+    "writer_missing_hint",
 ]

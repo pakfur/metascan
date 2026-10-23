@@ -76,6 +76,7 @@ from metascan.core.t2i_prompt import (
 )
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_models import writer_missing_hint
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -432,17 +433,19 @@ class T2iRunner:
         _check_seed(seed)
         return await self._resolve(profile, caption, seed, self._get_config())
 
-    async def _usable_model(self, vlm: Any) -> Optional[str]:
-        """The model to ask, or None when there is none: the picker found no
-        loadable model, or the one it found is not installed."""
+    async def _usable_model(self, vlm: Any) -> Tuple[Optional[str], str]:
+        """The model to ask and, when there is none, the warning to show:
+        the picker found no loadable model (``WARN_VLM_UNAVAILABLE``), or
+        the prompt-writer model it found is not installed (says which, and
+        to download it in Models)."""
         try:
             model_id = pick_vlm_model(vlm, role="writer")
         except VlmSelectError:
-            return None
+            return None, WARN_VLM_UNAVAILABLE
         check = self.vlm_installed
         if check is not None and not await asyncio.to_thread(check, model_id):
-            return None
-        return model_id
+            return None, f"{writer_missing_hint(model_id)} - used the resolved caption"
+        return model_id, WARN_VLM_UNAVAILABLE
 
     async def _vlm_prompt(
         self,
@@ -556,10 +559,14 @@ class T2iRunner:
         parts = list(direction.parts) if direction else []
 
         vlm = self.get_vlm()
-        model_id = await self._usable_model(vlm) if vlm is not None else None
+        model_id, unavailable = (
+            await self._usable_model(vlm)
+            if vlm is not None
+            else (None, WARN_VLM_UNAVAILABLE)
+        )
         if vlm is None or model_id is None:
             prompt, negative = fallback_prompt(profile, resolved.text, text)
-            warnings.append(WARN_VLM_UNAVAILABLE)
+            warnings.append(unavailable)
             return PromptResult(prompt, negative, resolved.text, warnings, text, parts)
 
         system_prompt, user_prompt = compose_t2i_prompts(
@@ -839,9 +846,9 @@ class T2iRunner:
         vlm = self.get_vlm()
         if vlm is None:
             return fall_back(WARN_VLM_UNAVAILABLE)
-        model_id = await self._usable_model(vlm)
+        model_id, unavailable = await self._usable_model(vlm)
         if model_id is None:
-            return fall_back(WARN_VLM_UNAVAILABLE)
+            return fall_back(unavailable)
         system_prompt, user_prompt = compose_t2i_prompts(
             profile, resolved_text, batch.content_mode, direction
         )

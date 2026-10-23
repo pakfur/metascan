@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -79,6 +80,18 @@ class VlmClient:
         # (set by backend.services.vlm_roles.VlmRoles); pick_vlm_model
         # starts it when nothing is loaded. None: no role preference.
         self.preferred_model_id: Optional[str] = None
+        # Set by VlmRoles when no role uses this client any more: a caller
+        # still holding it must not respawn the old model untracked.
+        self.retired = False
+        # Awaited before a llama-server is spawned; VlmRoles uses it to make
+        # room in VRAM (shut the other role's client down) when the two
+        # role models do not fit together.
+        self.before_spawn: Optional[Callable[["VlmClient"], Awaitable[None]]] = None
+        # Requests in flight (generate_tags / generate_text / chat_stream),
+        # so a swap can wait for them before shutting this client down.
+        self._in_flight = 0
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
 
         self._proc: Optional[subprocess.Popen] = None  # type: ignore[type-arg]
         self._stderr_task: Optional[asyncio.Task[None]] = None
@@ -164,6 +177,8 @@ class VlmClient:
         if a hot path could fan out: prefer one ``ensure_started`` from the
         coordinator and have other callers await the resulting state.
         """
+        if self.retired:
+            raise VlmError("client retired")
         async with self._start_lock:
             if (
                 self._state in (STATE_LOADING, STATE_READY)
@@ -181,6 +196,8 @@ class VlmClient:
         wait_ready: bool = True,
         ready_timeout: float = 300.0,
     ) -> None:
+        if self.retired:
+            raise VlmError("client retired")
         if self._proc is not None and self._proc.poll() is None:
             if model_id == self._model_id and self._state in (
                 STATE_LOADING,
@@ -190,6 +207,11 @@ class VlmClient:
                     await self._wait_ready(ready_timeout)
                 return
             await self.shutdown()
+
+        if self.before_spawn is not None:
+            await self.before_spawn(self)
+            if self.retired:
+                raise VlmError("client retired")
 
         self._spec = get_spec(model_id)
         self._model_id = model_id
@@ -354,6 +376,9 @@ class VlmClient:
             except Exception:
                 pass
             self._http = None
+        # Wake anyone waiting for READY (a start that was in progress): they
+        # see STOPPED and raise instead of waiting out the ready timeout.
+        self._ready_event.set()
         self._ready_event.clear()
         self._set_state(STATE_STOPPED)
 
@@ -422,9 +447,99 @@ class VlmClient:
         self._ready_event.set()
         self._set_state(STATE_ERROR, error=self._last_error)
 
+    # ---- In-flight tracking --------------------------------------------
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+    def _begin_request(self) -> None:
+        self._in_flight += 1
+        self._idle_event.clear()
+
+    def _end_request(self) -> None:
+        self._in_flight = max(0, self._in_flight - 1)
+        if self._in_flight == 0:
+            self._idle_event.set()
+
+    async def wait_idle(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` s for in-flight requests to finish.
+        True when idle, False on timeout."""
+        try:
+            await asyncio.wait_for(self._idle_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     # ---- Inference methods -------------------------------------------
 
     async def generate_tags(
+        self,
+        image_path: Path,
+        *,
+        timeout: float = 60.0,
+    ) -> list[str]:
+        """Tag a single image (see ``_generate_tags_impl``)."""
+        self._begin_request()
+        try:
+            return await self._generate_tags_impl(image_path, timeout=timeout)
+        finally:
+            self._end_request()
+
+    async def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[Path] = None,
+        image_paths: Optional[Sequence[Path]] = None,
+        temperature: float = 0.6,
+        max_tokens: int = 250,
+        timeout: float = 120.0,
+        grammar: Optional[str] = None,
+    ) -> str:
+        """Free-form text generation (see ``_generate_text_impl``)."""
+        self._begin_request()
+        try:
+            return await self._generate_text_impl(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_path=image_path,
+                image_paths=image_paths,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                grammar=grammar,
+            )
+        finally:
+            self._end_request()
+
+    async def chat_stream(
+        self,
+        *,
+        messages: Sequence[Dict[str, str]],
+        image_path: Optional[Path] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        timeout: float = 300.0,
+    ) -> AsyncIterator[Tuple[str, str]]:
+        """Stream a chat completion (see ``_chat_stream_impl``)."""
+        self._begin_request()
+        try:
+            async for item in self._chat_stream_impl(
+                messages=messages,
+                image_path=image_path,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            ):
+                yield item
+        finally:
+            self._end_request()
+
+    # ---- Implementations -----------------------------------------------
+
+    async def _generate_tags_impl(
         self,
         image_path: Path,
         *,
@@ -507,7 +622,7 @@ class VlmClient:
         logger.debug("VLM tagged %s -> %d tags", image_path, len(tags))
         return tags
 
-    async def generate_text(
+    async def _generate_text_impl(
         self,
         *,
         system_prompt: str,
@@ -602,7 +717,7 @@ class VlmClient:
             raise VlmError(f"llama-server request failed: {e}") from e
         return str(content).strip()
 
-    async def chat_stream(
+    async def _chat_stream_impl(
         self,
         *,
         messages: Sequence[Dict[str, str]],

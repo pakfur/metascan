@@ -220,17 +220,15 @@ def _nltk_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
 
 
 def _vlm_roles_payload() -> Optional[Dict[str, Any]]:
-    """The writer / general role snapshot for the Models tab, with a
-    ``note`` when the writer falls back to the general model. None before
-    the lifespan installs the roles."""
+    """The writer / general role snapshot for the Models tab (``notes``
+    says when the writer falls back, is not installed, or the two models
+    take turns in VRAM). None before the lifespan installs the roles."""
     from backend.api.vlm import get_vlm_roles
 
     roles = get_vlm_roles()
     if roles is None:
         return None
-    snap = roles.snapshot()
-    snap["note"] = "writer falls back to general" if roles.writer_falls_back else None
-    return snap
+    return roles.snapshot()
 
 
 def _vlm_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
@@ -688,4 +686,13 @@ async def _download_vlm(mid: str) -> None:
         logger.exception("VLM download for %s failed", mid)
         _broadcast_download(mid, "download_error", error=str(e))
         return
+    # A newly installed writer default replaces the writer's fallback now.
+    from backend.api.vlm import get_vlm_roles
+
+    roles = get_vlm_roles()
+    if roles is not None:
+        try:
+            await roles.refresh()
+        except Exception:
+            logger.exception("Refreshing the VLM roles after a download failed")
     _broadcast_download(mid, "download_complete")

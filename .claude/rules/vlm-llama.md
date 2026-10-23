@@ -48,7 +48,21 @@ the root CLAUDE.md still applies.
   the writer while another T2I Random batch is still prompting.
   `pick_vlm_model` prefers the loaded model, then the client's
   `preferred_model_id` (stamped by `VlmRoles`). `POST /api/vlm/active`
-  without `role` still targets general (and now persists it).
+  without `role` still targets general; it 409s on a missing model and
+  persists the role only after the swap succeeds (`VlmRoles.activate`).
+  A client no role uses is **retired** (`VlmClient.retired`): `start` /
+  `ensure_started` raise `VlmError("client retired")` instead of
+  respawning an untracked llama-server. Two distinct role models stay
+  co-resident only when their `approx_vram_gb` sum fits the detected VRAM
+  (CUDA VRAM, MPS unified RAM; unknown = no) minus 2 GB; otherwise they
+  **take turns** via `VlmClient.before_spawn` (`VlmRoles._make_room`):
+  the other client is shut down after a bounded (30 s) wait for its
+  in-flight requests (`VlmClient.wait_idle`). An unset writer whose
+  default is not installed and whose general model is not writer-eligible
+  stays `qwen3vl-8b` (missing): T2I falls back with
+  `writer_missing_hint`, I2V raises `I2vUnavailableError` with it.
+  `refresh()` (GET /roles, after a VLM download) re-applies the
+  unset-writer rule without a restart.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
