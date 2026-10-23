@@ -1496,6 +1496,21 @@ class DatabaseManager:
                 )
                 """
             )
+            # One row per submitted scorecard job: the writer lineage a late
+            # ingest after a restart (no in-memory snapshot) needs to pair it.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecard_jobs (
+                    job_id INTEGER PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    scorecard_id TEXT NOT NULL,
+                    brief_index INTEGER NOT NULL,
+                    writer_id TEXT,
+                    writer_model TEXT,
+                    variant_index INTEGER
+                )
+                """
+            )
             # The caption as the writer saw it (tokens resolved) and the
             # direction it was written with: the writer training data's user
             # turn. NULL on older rows and typed prompts.
@@ -6373,6 +6388,44 @@ class DatabaseManager:
                 (batch_id, scorecard_id, brief_index),
             )
             conn.commit()
+
+    def add_scorecard_job(
+        self,
+        job_id: int,
+        batch_id: str,
+        scorecard_id: str,
+        brief_index: int,
+        writer_id: Optional[str],
+        writer_model: Optional[str],
+        variant_index: Optional[int],
+    ) -> None:
+        """Remember a submitted scorecard job's writer lineage (a late ingest
+        after a restart reads it back with ``scorecard_job``)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scorecard_jobs (job_id, batch_id, "
+                "scorecard_id, brief_index, writer_id, writer_model, variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(job_id),
+                    batch_id,
+                    scorecard_id,
+                    int(brief_index),
+                    writer_id,
+                    writer_model,
+                    variant_index,
+                ),
+            )
+            conn.commit()
+
+    def scorecard_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """``{job_id, batch_id, scorecard_id, brief_index, writer_id,
+        writer_model, variant_index}`` of a scorecard job, else None."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM scorecard_jobs WHERE job_id = ?", (int(job_id),)
+            ).fetchone()
+            return dict(r) if r else None
 
     def scorecard_id_for_batch(self, batch_id: str) -> Optional[str]:
         with self.lock, self._get_connection() as conn:

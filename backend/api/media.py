@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
+from backend.services.scorecard import notify_scorecard_judgment
+from metascan.core.scorecard_blind import blind_media_detail
 
 router = APIRouter(prefix="/api", tags=["media"])
 
@@ -55,14 +57,15 @@ async def get_media(
         raise HTTPException(status_code=404, detail="Media not found")
     tags = await service.get_tags_for_file(file_path)
     scorecard = await asyncio.to_thread(get_db().scorecard_for_path, file_path)
-    return {
+    detail = {
         **service.media_to_dict(media),
         "tags": tags,
         # A scorecard image without a favorite / pass yet: the details panel
-        # hides its prompt and generation data ("judge to reveal").
+        # shows "judge to reveal", and the record carries no prompt or tags.
         "scorecard_id": scorecard["scorecard_id"] if scorecard else None,
         "scorecard_blind": bool(scorecard and scorecard["blind"]),
     }
+    return blind_media_detail(detail)
 
 
 @router.delete("/media/{file_path:path}")
@@ -86,9 +89,7 @@ async def update_media(
     """Update media fields (favorite, playback_speed)."""
     if "is_favorite" in body:
         await service.set_favorite(file_path, body["is_favorite"])
-        from backend.api.judgments import _scorecard_check
-
-        await _scorecard_check(file_path)
+        await notify_scorecard_judgment(get_db(), file_path)
     if "playback_speed" in body:
         await service.update_playback_speed(file_path, body["playback_speed"])
     media = await service.get_media(file_path)

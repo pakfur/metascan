@@ -102,6 +102,7 @@ from metascan.core.t2i_prompt import (
 )
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
+from metascan.core.scorecard_blind import blind_step
 from metascan.core.vlm_client import (
     AdapterLoadingError,
     AdapterNotLoadedError,
@@ -1359,6 +1360,8 @@ class T2iRunner:
         request leaves no batch and emits no event). A Random batch is
         refused while another one is active; Manual batches are unlimited.
         """
+        if req.scorecard_id is not None and req.scorecard_brief is None:
+            raise T2iRequestError("A scorecard batch needs its scorecard_brief")
         cfg = self._get_config()
         batch = await self._plan_batch(req, cfg)
         if batch.mode == "random" and not any(
@@ -1368,11 +1371,12 @@ class T2iRunner:
         if batch.req.scorecard_id is not None:
             # Before registration and before any job exists: an ingest after
             # a restart (no snapshot) still finds the batch's scorecard.
+            assert batch.req.scorecard_brief is not None  # checked above
             await asyncio.to_thread(
                 self.db.add_scorecard_batch,
                 batch.id,
                 batch.req.scorecard_id,
-                int(batch.req.scorecard_brief or 0),
+                int(batch.req.scorecard_brief),
             )
         # No await between this check and the registration below, so two
         # concurrent Random requests cannot both pass it.
@@ -1387,12 +1391,15 @@ class T2iRunner:
         self._emit(
             "t2i",
             "batch_started",
-            {
-                "batch_id": batch.id,
-                "mode": batch.mode,
-                "total_steps": batch.total_steps,
-                "total_images": batch.total_images,
-            },
+            self._with_scorecard(
+                batch,
+                {
+                    "batch_id": batch.id,
+                    "mode": batch.mode,
+                    "total_steps": batch.total_steps,
+                    "total_images": batch.total_images,
+                },
+            ),
         )
         self._emit_progress(batch)
         batch.task = asyncio.create_task(
@@ -1450,21 +1457,34 @@ class T2iRunner:
     def active_batches(self) -> List[Dict[str, Any]]:
         """Every registered batch, oldest first, as JSON-ready rows."""
         return [
-            {
-                "batch_id": b.id,
-                "mode": b.mode,
-                "state": b.phase,
-                "total_steps": b.total_steps,
-                "step": copy.deepcopy(b.step),
-                "images_total": b.total_images,
-                "images_done": b.images_done,
-                "images_failed": b.images_failed,
-                "seed": b.current_seed,
-                "next_seed": b.next_seed,
-                "started_at": b.started_at,
-            }
+            self._with_scorecard(
+                b,
+                {
+                    "batch_id": b.id,
+                    "mode": b.mode,
+                    "state": b.phase,
+                    "total_steps": b.total_steps,
+                    "step": self._public_step(b, b.step),
+                    "images_total": b.total_images,
+                    "images_done": b.images_done,
+                    "images_failed": b.images_failed,
+                    "seed": b.current_seed,
+                    "next_seed": b.next_seed,
+                    "started_at": b.started_at,
+                },
+            )
             for b in self._batches.values()
         ]
+
+    @staticmethod
+    def _with_scorecard(batch: _Batch, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``data`` plus ``scorecard_id`` for a scorecard batch (only then:
+        an ordinary batch's frames keep their documented shape). The
+        training window owns such a batch; the T2I dialog never adopts or
+        cancels it."""
+        if batch.req.scorecard_id is not None:
+            data["scorecard_id"] = batch.req.scorecard_id
+        return data
 
     # ---- the run: prompts, then jobs ------------------------------------------
 
@@ -1760,8 +1780,21 @@ class T2iRunner:
         batch.shown = index
         batch.step = batch.steps[index]
         self._emit(
-            "t2i", "batch_step", {"batch_id": batch.id, **copy.deepcopy(batch.step)}
+            "t2i",
+            "batch_step",
+            {"batch_id": batch.id, **(self._public_step(batch, batch.step) or {})},
         )
+
+    @staticmethod
+    def _public_step(
+        batch: _Batch, step: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """A copy of ``step`` for the wire. A scorecard batch is judged
+        blind: its frames and listing never carry the prompt or the writer."""
+        if step is None:
+            return None
+        out = copy.deepcopy(step)
+        return blind_step(out) if batch.req.scorecard_id is not None else out
 
     def _set_phase(self, batch: _Batch, phase: str) -> None:
         if batch.phase != phase and batch.finished is None:
@@ -1912,7 +1945,35 @@ class T2iRunner:
             )
         )
         self._register_job(batch, job_id, step, seed)
+        if batch.req.scorecard_id is not None:
+            await self._record_scorecard_job(batch, job_id, step)
         return job_id
+
+    async def _record_scorecard_job(
+        self, batch: _Batch, job_id: int, step: _Step
+    ) -> None:
+        """Persist the job's writer lineage: after a restart the in-memory
+        snapshot is gone, and an image without its writer can never pair."""
+        assert batch.req.scorecard_id is not None
+        assert batch.req.scorecard_brief is not None
+        try:
+            await asyncio.to_thread(
+                self.db.add_scorecard_job,
+                job_id,
+                batch.id,
+                batch.req.scorecard_id,
+                int(batch.req.scorecard_brief),
+                step.writer_id,
+                step.writer_model,
+                step.variant_index,
+            )
+        except Exception:
+            logger.warning(
+                "could not record scorecard job %s of batch %s",
+                job_id,
+                batch.id,
+                exc_info=True,
+            )
 
     async def _submit_one(self, batch: _Batch, step: _Step, seed: int) -> int:
         """Submit one image. Called holding a window slot: on success the
@@ -2263,12 +2324,26 @@ class T2iRunner:
             )
         render_s = render_seconds(job.get("started_at"), job.get("finished_at"))
         scorecard_id = known.get("scorecard_id")
+        writer_id = known.get("writer_id")
+        writer_model = known.get("writer_model")
+        variant_index = known.get("variant_index")
         if meta is None:
             # After a restart the snapshot is gone, but a scorecard image
-            # must still be tagged (blind, never training data).
-            lookup = getattr(self.db, "scorecard_id_for_batch", None)
-            if callable(lookup):
-                scorecard_id = await asyncio.to_thread(lookup, batch_id)
+            # must still be tagged (blind, never training data) and keep its
+            # writer, or its brief can never pair.
+            record = None
+            job_lookup = getattr(self.db, "scorecard_job", None)
+            if callable(job_lookup) and job.get("id") is not None:
+                record = await asyncio.to_thread(job_lookup, int(job["id"]))
+            if record is not None:
+                scorecard_id = record["scorecard_id"]
+                writer_id = record["writer_id"]
+                writer_model = record["writer_model"]
+                variant_index = record["variant_index"]
+            else:
+                lookup = getattr(self.db, "scorecard_id_for_batch", None)
+                if callable(lookup):
+                    scorecard_id = await asyncio.to_thread(lookup, batch_id)
         inserted: List[str] = []
         for entry in files:
             posix = to_posix_path(entry)
@@ -2294,10 +2369,10 @@ class T2iRunner:
                     render_s=render_s,
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                     form_state=form,
-                    writer_id=known.get("writer_id"),
-                    writer_model=known.get("writer_model"),
+                    writer_id=writer_id,
+                    writer_model=writer_model,
                     variant_group=known.get("variant_group"),
-                    variant_index=known.get("variant_index"),
+                    variant_index=variant_index,
                     draft_prompt=draft,
                     edited=edited,
                     resolved_caption=known.get("resolved_caption"),

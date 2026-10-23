@@ -354,12 +354,16 @@ async def adapter_scorecard_results(adapter_id: int) -> Dict[str, Any]:
     """``{adapter_id, n_pairs, n_judged, fav_rate_base, fav_rate_adapter,
     mean_score_base, mean_score_adapter, ready_pairs, latest, running}``.
     Also promotes an untested adapter whose judged pairs suffice."""
-    from backend.services.scorecard import adapter_scorecard, evaluate_adapter
+    from backend.services.scorecard import (
+        adapter_scorecard,
+        evaluate_adapter,
+        running_scorecard,
+    )
 
     await asyncio.to_thread(_live, adapter_id)
     await evaluate_adapter(get_db(), adapter_id, _training_broadcast)
     result: Dict[str, Any] = await asyncio.to_thread(
-        adapter_scorecard, get_db(), adapter_id
+        adapter_scorecard, get_db(), adapter_id, running_scorecard()
     )
     return result
 
@@ -371,10 +375,13 @@ async def scorecards() -> Dict[str, Any]:
     from backend.services.scorecard import (
         READY_PAIRS,
         evaluate_adapter,
+        running_scorecard,
         scorecard_summary,
     )
 
-    result: Dict[str, Any] = await asyncio.to_thread(scorecard_summary, get_db())
+    result: Dict[str, Any] = await asyncio.to_thread(
+        scorecard_summary, get_db(), running=running_scorecard()
+    )
     due = [
         r["adapter_id"]
         for r in result["adapters"]
@@ -383,5 +390,7 @@ async def scorecards() -> Dict[str, Any]:
     for adapter_id in due:
         await evaluate_adapter(get_db(), adapter_id, _training_broadcast)
     if due:
-        result = await asyncio.to_thread(scorecard_summary, get_db())
+        result = await asyncio.to_thread(
+            scorecard_summary, get_db(), running=running_scorecard()
+        )
     return result

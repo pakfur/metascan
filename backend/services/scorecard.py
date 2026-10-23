@@ -15,8 +15,9 @@ Results per adapter, over every scorecard of it, are computed from the
 images that are still live:
 
 * a **pair** is a brief's batch holding a base image and an adapter image;
-* an image is **judged** when it is favorited, passed, or seen without a
-  verdict (the taste-label rules: favorite -> 1, pass / seen -> 0);
+* an image is **judged** only with an explicit verdict -- favorited or
+  passed -- the same rule that lifts the blind. Seen without a verdict is
+  an ordinary taste label elsewhere (0) but never judges a scorecard image;
 * ``n_judged`` counts pairs whose two images are both judged;
   ``fav_rate_X`` = favorites among writer X's images of those pairs /
   ``n_judged``; ``mean_score_X`` = the mean stored taste score of X's
@@ -164,7 +165,8 @@ def adapter_first(scorecard_id: str, index: int) -> bool:
 
 
 def _judged(row: Dict[str, Any]) -> bool:
-    return bool(row.get("is_favorite") or row.get("passed") or row.get("seen_at"))
+    """An explicit verdict (favorite or pass); seen-only never counts."""
+    return bool(row.get("is_favorite") or row.get("passed"))
 
 
 def _mean(values: Iterable[Optional[float]]) -> Optional[float]:
@@ -245,7 +247,7 @@ async def evaluate_adapter(
 async def note_scorecard_judgment(
     db: Any, file_path: str, broadcast: Broadcast
 ) -> None:
-    """After any verdict / seen of ``file_path``: when it is a scorecard
+    """After any verdict of ``file_path``: when it is a scorecard
     image, re-check its adapter's promotion (untested only) and announce
     ``scorecard_judged {adapter_id}`` (the training window refetches the
     results). Cheap for every other image (one indexed lookup); never
@@ -261,6 +263,18 @@ async def note_scorecard_judgment(
         broadcast("scorecard_judged", {"adapter_id": adapter_id})
     except Exception:
         logger.exception("Scorecard promotion check failed")
+
+
+async def notify_scorecard_judgment(db: Any, file_path: str) -> None:
+    """The verdict routes' hook: ``note_scorecard_judgment`` broadcasting on
+    WS ``training``. A seen without a verdict never calls it."""
+    from backend.ws.manager import ws_manager
+
+    await note_scorecard_judgment(
+        db,
+        file_path,
+        lambda event, data: ws_manager.broadcast_sync("training", event, data),
+    )
 
 
 def _card_public(card: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -282,10 +296,13 @@ def scorecard_summary(
     db: Any,
     briefs_path: Path = SCORECARD_BRIEFS_PATH,
     with_empty: bool = True,
+    running: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Every live T2I adapter's scorecard result (``with_empty=False``:
     only those with a pair), its latest scorecard, the base writer pooled
-    over every judged pair, the brief count and the running scorecard."""
+    over every judged pair, the brief count and ``running`` (the caller
+    reads ``ScorecardService.running()`` on the event loop: this runs in a
+    worker thread and must not touch the asyncio task)."""
     rows = db.scorecard_image_rows()
     cards = db.list_scorecards()
     adapters = [a for a in db.list_writer_adapters() if a.get("kind") == "t2i"]
@@ -314,11 +331,10 @@ def scorecard_summary(
         res = compute_results(own, aid)
         n_judged += res["n_judged"]
         fav += res["fav_base"]
-    service = get_scorecard_service()
     return {
         "briefs": len(load_briefs(briefs_path)[0]),
         "ready_pairs": READY_PAIRS,
-        "running": service.running() if service is not None else None,
+        "running": running,
         "base": {
             "n_judged": n_judged,
             "fav_rate": fav / n_judged if n_judged else None,
@@ -330,12 +346,13 @@ def scorecard_summary(
     }
 
 
-def adapter_scorecard(db: Any, adapter_id: int) -> Dict[str, Any]:
-    """One adapter's result plus its latest scorecard (sync)."""
+def adapter_scorecard(
+    db: Any, adapter_id: int, running: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """One adapter's result plus its latest scorecard (sync; ``running`` as
+    read on the loop by the caller, kept only when it is this adapter's)."""
     rows = db.scorecard_image_rows(adapter_id)
     cards = db.list_scorecards(adapter_id)
-    service = get_scorecard_service()
-    running = service.running() if service is not None else None
     return {
         **compute_results(rows, adapter_id),
         "ready_pairs": READY_PAIRS,
@@ -772,6 +789,12 @@ def set_scorecard_service(service: Optional[ScorecardService]) -> None:
 
 def get_scorecard_service() -> Optional[ScorecardService]:
     return _SERVICE
+
+
+def running_scorecard() -> Optional[Dict[str, Any]]:
+    """The installed service's run in progress (call on the event loop)."""
+    service = get_scorecard_service()
+    return service.running() if service is not None else None
 
 
 def scorecard_busy(service: Optional[ScorecardService] = None) -> bool:
