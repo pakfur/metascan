@@ -24,9 +24,9 @@ from backend.config import get_comfy_config, get_t2i_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.t2i_service import T2iService
-from backend.services.gpu_lock import GPU_FREE
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError
-from metascan.core.comfy_client import ComfyError, PresetNotFoundError
+from metascan.core.comfy_client import ComfyError, GpuBusyError, PresetNotFoundError
 from metascan.core.i2v_output import (
     I2vOutputError,
     output_prefix_warnings,
@@ -119,6 +119,8 @@ def _http_error(exc: Exception) -> Optional[HTTPException]:
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, (T2iUnavailableError, VlmSelectError)):
         return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, GpuBusyError):  # training took the GPU mid-submit
+        return gpu_busy_http_error()
     if isinstance(exc, (ComfyError, VlmError, TimeoutError, RuntimeError)):
         return HTTPException(status_code=502, detail=str(exc))
     return None

@@ -719,13 +719,13 @@ async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str
         return {"status": "noop", "total": 0}
 
     tag_with_vlm = allow_vlm_tagging and should_tag_with_vlm(detect_hardware())
+    # Re-checked after the last await and before the scan-tag state is
+    # touched: the lock may have been taken while the paths were read.
+    if gpu_reserved():
+        raise gpu_busy_http_error()
     _current_scan_tag_with_vlm = tag_with_vlm
     _vlm_scan_stops = _capture_vlm_scan_stops() if tag_with_vlm else None
 
-    # Re-checked with no await before the worker spawns: the lock may have
-    # been taken while the unembedded paths were read.
-    if gpu_reserved():
-        raise gpu_busy_http_error()
     started = await asyncio.to_thread(
         eq.start_indexing,
         paths,

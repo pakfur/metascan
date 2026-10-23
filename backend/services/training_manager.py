@@ -52,10 +52,15 @@ from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 
 from metascan.core import writer_dataset as wd
 from metascan.core.hardware import (
+    DEPS_CHECK,
+    TRAINING_DEPS_UNCHECKED,
     Gate,
     WriterTrainingPaths,
+    cached_training_probe,
     clear_writer_training_probe_cache,
     detect_hardware,
+    parse_deps_probe,
+    store_training_probe,
     writer_training_gate,
 )
 from metascan.core.writer_adapters import (
@@ -72,6 +77,7 @@ from metascan.core.writer_adapters import (
     adapter_dir,
 )
 from metascan.workers import writer_train_worker as ww
+from metascan.workers.writer_train_probe import TRL_CHECK, parse_trl_probe
 
 logger = logging.getLogger(__name__)
 worker_logger = logging.getLogger(__name__ + ".worker")
@@ -225,34 +231,56 @@ def clear_worker_pid(run_dir: Path) -> None:
         logger.debug("could not remove %s", run_dir / WORKER_PID_NAME)
 
 
-def recorded_worker(run_dir: Optional[Path]) -> Any:
-    """The live process recorded in ``run_dir/worker.pid`` -- only when it
-    is provably OUR worker: same PID, same start time (+- 1 s) and a command
-    line naming ``writer_train_worker``. None otherwise (dead, reused PID,
-    unreadable): such a process is never touched."""
+WORKER_NONE = "none"
+WORKER_OURS = "ours"
+WORKER_UNVERIFIABLE = "unverifiable"
+
+
+def worker_state(run_dir: Optional[Path]) -> Tuple[str, Any]:
+    """What ``run_dir/worker.pid`` points at:
+
+    * ``("ours", process)`` -- alive, same start time (+- 1 s) and a
+      command line naming ``writer_train_worker``;
+    * ``("unverifiable", pid)`` -- alive with the same start time but its
+      command line cannot be read (another user's process): never killed,
+      never assumed gone;
+    * ``("none", None)`` -- no record, dead, a reused PID, or not ours.
+    """
     import psutil
 
     if run_dir is None:
-        return None
+        return WORKER_NONE, None
     try:
         rec = json.loads((Path(run_dir) / WORKER_PID_NAME).read_text())
         pid = int(rec["pid"])
         created = rec.get("create_time")
     except (OSError, ValueError, KeyError, TypeError):
-        return None
+        return WORKER_NONE, None
     if created is None:
-        return None
+        return WORKER_NONE, None
     try:
         proc = psutil.Process(pid)
         if abs(proc.create_time() - float(created)) > _CREATE_TIME_TOLERANCE_S:
-            return None
-        if "writer_train_worker" not in " ".join(proc.cmdline()):
-            return None
+            return WORKER_NONE, None
         if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
-            return None
-        return proc
+            return WORKER_NONE, None
+        try:
+            cmdline = " ".join(proc.cmdline())
+        except psutil.AccessDenied:
+            return WORKER_UNVERIFIABLE, pid
+        if "writer_train_worker" not in cmdline:
+            return WORKER_NONE, None
+        return WORKER_OURS, proc
+    except psutil.AccessDenied:
+        return WORKER_UNVERIFIABLE, pid
     except (psutil.Error, OSError):
-        return None
+        return WORKER_NONE, None
+
+
+def recorded_worker(run_dir: Optional[Path]) -> Any:
+    """The recorded worker process when it is provably ours, else None."""
+    state, proc = worker_state(run_dir)
+    return proc if state == WORKER_OURS else None
 
 
 def stop_orphan_worker(run_dir: Optional[Path], timeout: float = 10.0) -> bool:
@@ -282,6 +310,62 @@ def stop_orphan_worker(run_dir: Optional[Path], timeout: float = 10.0) -> bool:
     if run_dir is not None:
         clear_worker_pid(Path(run_dir))
     return True
+
+
+# ---- the training-interpreter probe (async, never in the default pool) --------
+
+PROBE_TIMEOUT_S = 300.0
+ProbeFn = Callable[[str], Awaitable[Tuple[str, str]]]
+GATE_CHECKING_REASON = "Checking training dependencies…"
+
+
+async def _run_check(
+    python: str, code: str, timeout: float
+) -> Tuple[Optional[int], str, str]:
+    """``(returncode, stdout, error)`` of ``python -c code``; ``error`` is
+    non-empty when it could not run (missing interpreter, timeout)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            python,
+            "-c",
+            code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        return None, "", str(exc) or type(exc).__name__
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None, "", f"timed out after {timeout:.0f}s"
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise
+    return proc.returncode, out.decode("utf-8", errors="replace"), ""
+
+
+async def probe_training_python(
+    python: str, timeout: float = PROBE_TIMEOUT_S
+) -> Tuple[str, str]:
+    """``(deps_reason, trl_reason)`` for ``python`` ("" = ok), run with
+    asyncio subprocesses so it never occupies a thread."""
+    rc, out, err = await _run_check(python, DEPS_CHECK, timeout)
+    deps = (
+        f"could not run the training dependency probe: {err}"
+        if err
+        else parse_deps_probe(rc, out)
+    )
+    if deps:
+        return deps, ""
+    rc, out, err = await _run_check(python, TRL_CHECK, timeout)
+    if err:
+        return "", f"could not run the TRL probe: {err}"
+    ok, reason = parse_trl_probe(rc, out)
+    return "", ("" if ok else reason)
 
 
 # ---- the manager ------------------------------------------------------------
@@ -344,6 +428,7 @@ class TrainingManager:
         shutdown_grace_s: float = 30.0,
         on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
         on_gpu_released: Optional[Callable[[], None]] = None,
+        probe: Optional[ProbeFn] = None,
         now: Optional[Callable[[], datetime]] = None,
         summary_ttl_s: float = 30.0,
     ) -> None:
@@ -355,9 +440,13 @@ class TrainingManager:
         self._refresh_adapters = refresh_adapters
         self._broadcast = broadcast
         self._paths = paths
-        self._gate = gate or (
-            lambda p: writer_training_gate(detect_hardware(), p, probe=True)
-        )
+        # A test override of the whole gate (no probing); else the real
+        # gate with the background probe below.
+        self._gate = gate
+        self._probe = probe or probe_training_python
+        # One background probe per training interpreter (single flight).
+        self._probes: Dict[str, "asyncio.Task[None]"] = {}
+        self._close_hooks: List[Callable[[], Awaitable[None]]] = []
         self.backend = backend
         self.fake = dict(fake or {})
         self.poll_s = float(poll_s)
@@ -410,7 +499,7 @@ class TrainingManager:
         self._gpu_held = False
         released, self._released = self._released, False
         hook = self.on_gpu_released
-        if released and hook is not None:
+        if released and hook is not None and not self._closing:
             try:
                 hook()
             except Exception:
@@ -483,13 +572,81 @@ class TrainingManager:
             "sft": wd.preview(built.sft),
         }
 
-    def gate(self, recheck: bool = False) -> Gate:
-        """Synchronous: runs the subprocess probes (cached per interpreter;
-        ``recheck`` drops the cache first, e.g. after installing deps)."""
+    @property
+    def op_lock(self) -> asyncio.Lock:
+        """Serialises start / resume / cancel-by-id and adapter deletes."""
+        return self._op_lock
+
+    def add_close_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Awaited at the end of :meth:`aclose` (the lifespan's own cleanup,
+        e.g. a scheduled briefs restart)."""
+        self._close_hooks.append(hook)
+
+    def probing(self, python: Optional[str] = None) -> bool:
+        python = python or self._paths().python
+        task = self._probes.get(python)
+        return task is not None and not task.done()
+
+    def _ensure_probe(self, python: str, force: bool = False) -> bool:
+        """Start the background probe unless a fresh result is cached or one
+        is already running (single flight). ``force`` (recheck) drops the
+        cache and restarts it. True while a probe is in flight."""
+        task = self._probes.get(python)
+        if task is not None and not task.done():
+            if not force:
+                return True
+            task.cancel()
+        if force:
+            clear_writer_training_probe_cache(python)
+        elif cached_training_probe(python) is not None:
+            return False
+        if self._closing:
+            return False
+        new = asyncio.get_running_loop().create_task(
+            self._probe_task(python), name=f"writer-train-probe:{python}"
+        )
+        self._probes[python] = new
+        return True
+
+    async def _probe_task(self, python: str) -> None:
+        me = asyncio.current_task()
+        try:
+            deps, trl = await self._probe(python)
+            store_training_probe(python, deps, trl)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("writer training probe failed")
+            store_training_probe(
+                python,
+                f"could not run the training dependency probe: {type(exc).__name__}",
+                "",
+            )
+        finally:
+            if self._probes.get(python) is me:
+                del self._probes[python]
+
+    async def gate_status(self, recheck: bool = False) -> Tuple[Gate, bool]:
+        """``(gate, checking)`` without ever waiting for the dependency
+        probe: it runs in the background and, while it does, the gate is
+        unavailable with "Checking training dependencies…" in place of its
+        result (the other pieces are reported as usual)."""
         paths = self._paths()
-        if recheck:
-            clear_writer_training_probe_cache(paths.python)
-        return self._gate(paths)
+        if self._gate is not None:
+            return await asyncio.to_thread(self._gate, paths), False
+        checking = self._ensure_probe(paths.python, force=recheck)
+        gate = await asyncio.to_thread(
+            lambda: writer_training_gate(detect_hardware(), paths, probe=False)
+        )
+        if checking:
+            reasons = [
+                GATE_CHECKING_REASON if r == TRAINING_DEPS_UNCHECKED else r
+                for r in gate.reasons
+            ]
+            if GATE_CHECKING_REASON not in reasons:
+                reasons.append(GATE_CHECKING_REASON)
+            gate = Gate(False, False, " ".join(reasons), reasons)
+        return gate, checking
 
     # ---- start / resume -------------------------------------------------
 
@@ -680,11 +837,37 @@ class TrainingManager:
                 raise TrainingError(409, "not_resumable", run_status="adapter_deleted")
             if not run["run_dir"] or not task_path.is_file():
                 raise TrainingError(409, "not_resumable", run_status="files_missing")
-            if await asyncio.to_thread(recorded_worker, run_dir) is not None:
+            state, who = await asyncio.to_thread(worker_state, run_dir)
+            if state == WORKER_OURS:
                 # Never two workers on one checkpoint dir.
                 raise TrainingError(409, "worker_alive")
+            if state == WORKER_UNVERIFIABLE:
+                raise TrainingError(
+                    409,
+                    "worker_unverifiable",
+                    pid=who,
+                    message=(
+                        "A process with the recorded training worker's PID is "
+                        f"running but cannot be inspected; stop the process "
+                        f"yourself, PID {who}."
+                    ),
+                )
             await self._require_gate()
             await self._take_gpu()
+            # Re-read after the await-heavy GPU take: a delete may have
+            # discarded the run (or its adapter) meanwhile.
+            run = await asyncio.to_thread(self.db.get_training_run, int(run_id))
+            adapter = await asyncio.to_thread(
+                self.db.get_writer_adapter, int(run["adapter_id"]) if run else 0
+            )
+            if (
+                run is None
+                or run["status"] not in RESUMABLE_RUN_STATUSES
+                or adapter is None
+                or adapter["deleted_at"] is not None
+            ):
+                self._drop_lock()
+                raise TrainingError(409, "run_discarded")
             active = _Active(
                 run_id=int(run["id"]),
                 adapter_id=int(run["adapter_id"]),
@@ -734,7 +917,9 @@ class TrainingManager:
             raise TrainingError(503, "shutting_down")
 
     async def _require_gate(self) -> None:
-        gate = await asyncio.to_thread(self.gate)
+        gate, checking = await self.gate_status()
+        if checking:
+            raise TrainingError(409, "gate_checking")
         if not gate.available:
             raise TrainingError(
                 409, "gate_unavailable", reasons=list(gate.reasons or [gate.reason])
@@ -1168,6 +1353,18 @@ class TrainingManager:
         boundary), terminate it after the grace period, and record the run
         ``paused``."""
         self._closing = True
+        for task in list(self._probes.values()):
+            task.cancel()
+        try:
+            await self._pause_for_shutdown()
+        finally:
+            for hook in self._close_hooks:
+                try:
+                    await hook()
+                except Exception:
+                    logger.exception("Training close hook failed")
+
+    async def _pause_for_shutdown(self) -> None:
         active = self._active
         if active is None or active.proc is None:
             return

@@ -109,6 +109,14 @@ class ComfyError(RuntimeError):
     """A ComfyUI request failed, or was made against unusable state."""
 
 
+class GpuBusyError(ComfyError):
+    """Refused: writer training holds the GPU (routes answer 409
+    ``gpu_busy_training``)."""
+
+    def __init__(self) -> None:
+        super().__init__(GPU_BUSY_MESSAGE)
+
+
 class PresetNotFoundError(ComfyError):
     """A request named a preset id that does not exist.
 
@@ -348,7 +356,7 @@ class ComfyClient:
         Returns the generation_jobs row id.
         """
         if gpu_reserved():
-            raise ComfyError(GPU_BUSY_MESSAGE)
+            raise GpuBusyError()
         workflow, bindings = await self._load_preset(preset_id)
         graph = apply_overrides(workflow, bindings, params)
 
@@ -574,7 +582,7 @@ class ComfyClient:
         if gpu_reserved():
             # Writer training holds the GPU (the routes already 409; this
             # catches work admitted just before the lock was taken).
-            raise ComfyError(GPU_BUSY_MESSAGE)
+            raise GpuBusyError()
         workflow, bindings = await self._load_preset(preset_id)
         apply_overrides(workflow, bindings, params)
         job_id = int(
@@ -600,7 +608,7 @@ class ComfyClient:
                 state="failed",
                 error=GPU_BUSY_MESSAGE,
             )
-            raise ComfyError(GPU_BUSY_MESSAGE)
+            raise GpuBusyError()
         if priority:
             self._queue.appendleft(job_id)
         else:

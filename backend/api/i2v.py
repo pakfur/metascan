@@ -21,9 +21,9 @@ from backend.config import get_i2v_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.dependencies import get_db
 from backend.services.i2v_service import I2vService
-from backend.services.gpu_lock import GPU_FREE
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError
-from metascan.core.comfy_client import ComfyError, PresetNotFoundError
+from metascan.core.comfy_client import ComfyError, GpuBusyError, PresetNotFoundError
 from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt
 from metascan.core.i2v_fixes import lint_i2v_report
 from metascan.core.i2v_form import FormStateError, validate_form_patch
@@ -278,6 +278,8 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (BindingError, PresetNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:
+        raise gpu_busy_http_error() from exc
     except ComfyError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {

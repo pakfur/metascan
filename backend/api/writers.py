@@ -107,8 +107,26 @@ def _delete(adapter_id: int) -> None:
         )
 
 
+def _op_lock() -> Any:
+    """The training manager's operation lock (a delete never interleaves
+    with a resume of the same adapter's run); a no-op without a manager."""
+    import contextlib
+
+    from backend.services.training_manager import get_training_manager
+
+    manager = get_training_manager()
+    return manager.op_lock if manager is not None else contextlib.nullcontext()
+
+
 @router.delete("/adapters/{adapter_id}")
 async def delete_adapter(adapter_id: int) -> Dict[str, str]:
+    async with _op_lock():
+        await _delete_locked(adapter_id)
+    await _changed()
+    return {"status": "deleted"}
+
+
+async def _delete_locked(adapter_id: int) -> None:
     from backend.api.vlm import withdraw_writer_adapter
 
     await asyncio.to_thread(_deletable, adapter_id)
@@ -120,8 +138,6 @@ async def delete_adapter(adapter_id: int) -> Dict[str, str]:
         # Never left to the file removal failing: POSIX would succeed.
         raise HTTPException(status_code=409, detail={"code": "adapter_files_busy"})
     await asyncio.to_thread(_delete, adapter_id)
-    await _changed()
-    return {"status": "deleted"}
 
 
 # ---- hindsight briefs (training data) ----------------------------------------
@@ -207,12 +223,14 @@ async def training_status(scope: str = "all", recheck: bool = False) -> Dict[str
 
     manager = _manager()
     dataset = await _training_call(manager.dataset_summary(scope))
-    gate = await asyncio.to_thread(manager.gate, recheck)
+    # Never waits for the dependency probe: it runs in the background and
+    # the gate says "checking" until it has finished.
+    gate, checking = await manager.gate_status(recheck)
     return {
         **manager.status(),
         "runs": await asyncio.to_thread(manager.resumable_runs),
         "dataset": dataset,
-        "gate": _gate_payload(gate),
+        "gate": {**_gate_payload(gate), "checking": checking},
         "presets": resolved_presets(),
         "clamps": {k: list(v) for k, v in OVERRIDE_CLAMPS.items()},
     }

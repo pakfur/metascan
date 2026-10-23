@@ -951,7 +951,7 @@ def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python(tmp_path):
     assert "could not run" in probe_training_deps(str(tmp_path / "nonexistent"))
 
 
-def test_probe_failures_are_never_cached_and_recheck_reprobes(tmp_path):
+def test_probe_failures_are_cached_briefly_and_answers_for_good(tmp_path, monkeypatch):
     from metascan.core import hardware
 
     clear_writer_training_probe_cache()
@@ -968,39 +968,21 @@ def test_probe_failures_are_never_cached_and_recheck_reprobes(tmp_path):
 
     writer_training_reasons(_report(48.0), paths, deps_probe=failing)
     writer_training_reasons(_report(48.0), paths, deps_probe=failing)
-    assert calls == ["deps", "deps"]  # a failed probe is retried
-    assert paths.python not in hardware._training_probe_cache
+    assert calls == ["deps"]  # a failure is cached for PROBE_FAILURE_TTL_S
+    monkeypatch.setattr(hardware, "PROBE_FAILURE_TTL_S", 0.0)
+    clear_writer_training_probe_cache()
+    writer_training_reasons(_report(48.0), paths, deps_probe=failing)
+    writer_training_reasons(_report(48.0), paths, deps_probe=failing)
+    assert calls == ["deps", "deps", "deps"]  # ... and expires
 
     def definitive(python):
         calls.append("deps2")
         return "training dependencies not installed: peft"
 
+    clear_writer_training_probe_cache()
     writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
     writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
-    assert calls.count("deps2") == 1  # a definitive answer is cached
-
-    rec = Recorder()
-    gates: List[Any] = []
-
-    def gate(p):
-        gates.append(hardware._training_probe_cache.get(p.python))
-        return Gate(True, True, "", [])
-
-    hardware._training_probe_cache[sys.executable] = ("x", "")
-    m = TrainingManager(
-        None,
-        tmp_path,
-        dataset_inputs=lambda: (None, "", None),
-        gpu_busy=lambda: [],
-        release_gpu=_anoop,
-        refresh_adapters=_anoop,
-        broadcast=lambda e, d: rec.log.append((e, d)),
-        paths=lambda: _paths(tmp_path),
-        gate=gate,
-    )
-    m.gate()
-    m.gate(recheck=True)
-    assert gates == [("x", ""), None]  # recheck dropped the cached result
+    assert calls.count("deps2") == 1  # a definitive answer is kept
     clear_writer_training_probe_cache()
 
 
@@ -1325,3 +1307,308 @@ async def test_index_build_rechecks_the_lock_right_before_spawning(monkeypatch):
         await similarity._start_index_build(rebuild=False, allow_vlm_tagging=False)
     assert e.value.detail["code"] == "gpu_busy_training"
     assert started == []
+
+
+# ---- fix round 2: the background gate probe ------------------------------------------
+
+
+class _Probe:
+    """A controllable async probe: counts calls, waits for ``release``."""
+
+    def __init__(self, result=("", "")) -> None:
+        self.calls = 0
+        self.release = asyncio.Event()
+        self.result = result
+        self.cancelled = 0
+
+    async def __call__(self, python: str) -> Tuple[str, str]:
+        self.calls += 1
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        return self.result
+
+
+def _probing_manager(db, tmp_path, probe, **kw) -> TrainingManager:
+    clear_writer_training_probe_cache()
+    m = _manager(db, tmp_path, Recorder(), **kw)
+    m._gate = None  # the real gate with the background probe
+    m._probe = probe
+    m._paths = lambda: WriterTrainingPaths(
+        python=str(tmp_path / "train-python"),
+        base_dir=tmp_path / "base",
+        converter_script=tmp_path / "conv.py",
+    )
+    return m
+
+
+async def test_gate_probe_runs_in_the_background_single_flight(db, tmp_path, dataset):
+    probe = _Probe(result=("training dependencies not installed: peft", ""))
+    m = _probing_manager(db, tmp_path, probe)
+    results = await asyncio.wait_for(
+        asyncio.gather(*[m.gate_status() for _ in range(5)]), timeout=2.0
+    )
+    assert probe.calls == 1  # one probe for five concurrent requests
+    for gate, checking in results:
+        assert checking and not gate.available
+        assert "Checking training dependencies…" in gate.reasons
+        assert any("base weights" in r for r in gate.reasons)  # other pieces
+    with pytest.raises(TrainingError) as e:
+        await m.start("all", "quick")
+    assert (e.value.status, e.value.code) == (409, "gate_checking")
+    assert not m.gpu_locked()
+
+    probe.release.set()
+    await _until(lambda: not m.probing())
+    gate, checking = await m.gate_status()
+    assert not checking and probe.calls == 1
+    assert "training dependencies not installed: peft" in gate.reasons
+    clear_writer_training_probe_cache()
+
+
+async def test_get_training_never_waits_for_the_probe(
+    db, tmp_path, dataset, monkeypatch
+):
+    from backend.api import writers
+
+    probe = _Probe()
+    m = _probing_manager(db, tmp_path, probe)
+    tm.set_training_manager(m)
+    monkeypatch.setattr(writers, "get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(writers.router)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            rs = await asyncio.wait_for(
+                asyncio.gather(*[c.get("/api/writers/training") for _ in range(4)]),
+                timeout=5.0,
+            )
+            assert probe.calls == 1
+            for r in rs:
+                assert r.status_code == 200
+                assert r.json()["gate"]["checking"] is True
+            r = await c.post("/api/writers/training/start", json={})
+            assert r.json()["detail"]["code"] == "gate_checking"
+            probe.release.set()
+            await _until(lambda: not m.probing())
+            r = await c.get("/api/writers/training")
+            assert r.json()["gate"]["checking"] is False
+            # recheck clears the cache and starts a fresh background probe
+            probe.release = asyncio.Event()
+            r = await c.get("/api/writers/training", params={"recheck": 1})
+            assert r.json()["gate"]["checking"] is True and probe.calls == 2
+            probe.release.set()
+            await _until(lambda: not m.probing())
+    finally:
+        tm.set_training_manager(None)
+        clear_writer_training_probe_cache()
+
+
+async def test_probe_failures_are_negative_cached_and_recheck_restarts(
+    db, tmp_path, monkeypatch
+):
+    from metascan.core import hardware
+
+    probe = _Probe(result=("could not run the training dependency probe: x", ""))
+    probe.release.set()
+    m = _probing_manager(db, tmp_path, probe)
+    await m.gate_status()
+    await _until(lambda: not m.probing())
+    gate, checking = await m.gate_status()
+    assert not checking and probe.calls == 1  # the failure is cached (60 s)
+    assert any(r.startswith("could not run") for r in gate.reasons)
+
+    monkeypatch.setattr(hardware, "PROBE_FAILURE_TTL_S", 0.0)
+    await m.gate_status(recheck=True)
+    await _until(lambda: not m.probing())
+    _, checking = await m.gate_status()  # expired at once: probes again
+    assert checking and probe.calls == 3
+    await _until(lambda: not m.probing())
+
+    # A recheck during a probe cancels it and starts a fresh one.
+    slow = _Probe()
+    m._probe = slow
+    await m.gate_status(recheck=True)
+    await m.gate_status(recheck=True)
+    await asyncio.sleep(0.01)
+    assert slow.calls == 2 and slow.cancelled == 1
+    slow.release.set()
+    await _until(lambda: not m.probing())
+    await m.aclose()
+    clear_writer_training_probe_cache()
+
+
+async def test_the_async_probe_never_uses_a_thread(tmp_path, monkeypatch):
+    def no_threads(*a, **k):
+        raise AssertionError("the probe must not use the default executor")
+
+    monkeypatch.setattr(asyncio, "to_thread", no_threads)
+    missing = _stub_python(tmp_path, "m", """echo '{"missing": ["peft"]}'""")
+    deps, trl = await tm.probe_training_python(missing)
+    assert deps.startswith("training dependencies not installed: peft") and trl == ""
+    ok = _stub_python(
+        tmp_path,
+        "ok",
+        """echo '{"missing": [], "broken": [], "installed": true, "version": "0.25.1"}'""",
+    )
+    assert await tm.probe_training_python(ok) == ("", "")
+    slow = _stub_python(tmp_path, "slow", "sleep 5")
+    deps, _ = await tm.probe_training_python(slow, timeout=0.3)
+    assert deps == "could not run the training dependency probe: timed out after 0s"
+    deps, _ = await tm.probe_training_python(str(tmp_path / "nope"))
+    assert deps.startswith("could not run the training dependency probe")
+
+
+# ---- fix round 2: shutdown, races, unverifiable workers, mapping ------------------------
+
+
+async def test_no_briefs_restart_while_closing(db, tmp_path, dataset):
+    from backend.main import _build_training_manager
+    from backend.services import hindsight_briefs
+
+    briefs = _FakeBriefs()
+    hindsight_briefs.set_briefs_job(briefs)  # type: ignore[arg-type]
+    try:
+        m = _build_training_manager(
+            db=db,
+            data_dir=tmp_path / "data",
+            comfy_client=_FakeComfy(),
+            t2i_runner=_FakeT2i(),
+            inference_client=_FakeUnloadable(),
+            vlm_roles=_FakeUnloadable(),
+        )
+        m._dataset_inputs = lambda: (object(), "uncensored", None)
+        m._paths = lambda: _paths(tmp_path)
+        m._gate = lambda p: Gate(True, True, "", [])
+        m._broadcast = lambda e, d: None
+        m._refresh_adapters = _anoop
+        m.backend, m.fake, m.poll_s = "fake", SLOW, 0.02
+        await m.start("all", "quick")
+        assert briefs.cancelled == 1
+        await m.aclose()  # pauses the run while closing
+        await asyncio.sleep(0.05)
+        assert briefs.started == 0
+    finally:
+        hindsight_briefs.set_briefs_job(None)
+
+
+async def test_resume_rechecks_the_run_after_taking_the_gpu(db, tmp_path, dataset):
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 1
+    )
+    await m.pause()
+    await _idle(m)
+    adapter_id = db.get_training_run(run_id)["adapter_id"]
+    orig = m._take_gpu
+
+    async def take_then_discard():
+        await orig()
+        db.soft_delete_writer_adapter(adapter_id)  # a delete lands meanwhile
+        tm.discard_open_runs(db, adapter_id)
+
+    m._take_gpu = take_then_discard  # type: ignore[method-assign]
+    with pytest.raises(TrainingError) as e:
+        await m.resume(run_id)
+    assert (e.value.status, e.value.code) == (409, "run_discarded")
+    assert not m.gpu_locked() and m.status()["state"] == "idle"
+
+
+async def test_an_adapter_delete_waits_for_the_op_lock(db, tmp_path, monkeypatch):
+    from backend.api import writers
+
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec)
+    tm.set_training_manager(m)
+    aid = db.create_writer_adapter("p", "all", "t2i", "qwen3vl-8b", status="paused")
+    monkeypatch.setattr(writers, "get_db", lambda: db)
+    monkeypatch.setattr(writers, "get_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(writers.ws_manager, "broadcast_sync", lambda *a: None)
+    app = FastAPI()
+    app.include_router(writers.router)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            async with m.op_lock:  # e.g. a resume in progress
+                task = asyncio.create_task(c.delete(f"/api/writers/adapters/{aid}"))
+                await asyncio.sleep(0.2)
+                assert not task.done()
+                assert db.get_writer_adapter(aid)["deleted_at"] is None
+            r = await task
+        assert r.json() == {"status": "deleted"}
+    finally:
+        tm.set_training_manager(None)
+
+
+async def test_an_unverifiable_worker_is_never_killed_and_blocks_resume(
+    db, tmp_path, dataset, monkeypatch
+):
+    import psutil
+
+    proc = _dummy_worker()
+    try:
+        run_id, run_dir = _paused_run(db, tmp_path, status="running")
+        (run_dir / "task.json").write_text("{}")
+        tm.write_worker_pid(run_dir, proc.pid)
+        real = psutil.Process.cmdline
+
+        def denied(self):
+            if self.pid == proc.pid:
+                raise psutil.AccessDenied(self.pid)
+            return real(self)
+
+        monkeypatch.setattr(psutil.Process, "cmdline", denied)
+        assert tm.worker_state(run_dir) == (tm.WORKER_UNVERIFIABLE, proc.pid)
+        assert tm.recorded_worker(run_dir) is None
+        assert not tm.stop_orphan_worker(run_dir)
+        m = _manager(db, tmp_path, Recorder())
+        assert await m.recover() == [run_id]  # paused, worker untouched
+        await asyncio.sleep(0.3)
+        assert proc.poll() is None
+        with pytest.raises(TrainingError) as e:
+            await m.resume(run_id)
+        assert (e.value.status, e.value.code) == (409, "worker_unverifiable")
+        assert e.value.extra["pid"] == proc.pid
+        assert f"PID {proc.pid}" in e.value.extra["message"]
+    finally:
+        proc.kill()
+
+
+async def test_a_mid_submit_gpu_refusal_maps_to_409(monkeypatch):
+    from backend.api import comfy as comfy_api
+    from backend.api import t2i as t2i_api
+    from metascan.core.comfy_client import GpuBusyError
+
+    err = t2i_api._http_error(GpuBusyError())
+    assert err is not None and err.status_code == 409
+    assert err.detail["code"] == "gpu_busy_training"
+
+    async def submit(*a, **k):
+        raise GpuBusyError()
+
+    monkeypatch.setattr(
+        comfy_api, "_require_client", lambda: SimpleNamespace(submit=submit)
+    )
+    app = FastAPI()
+    app.include_router(comfy_api.router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as c:
+        r = await c.post(
+            "/api/comfy/submit",
+            json={
+                "preset_id": 1,
+                "positive": "p",
+                "seed": 1,
+                "width": 64,
+                "height": 64,
+            },
+        )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "gpu_busy_training"

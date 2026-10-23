@@ -471,7 +471,7 @@ WRITER_TRAINING_DEPS: Tuple[str, ...] = (
     "transformers",
     "torch",
 )
-_DEPS_CHECK = """
+DEPS_CHECK = """
 import importlib, importlib.util, json, sys
 names = %r
 missing = [n for n in names if importlib.util.find_spec(n) is None]
@@ -489,6 +489,7 @@ print(json.dumps({"missing": [], "broken": broken}))
     list(WRITER_TRAINING_DEPS),
 )
 _DEPS_HINT = "pip install -r requirements-train.txt"
+TRAINING_DEPS_UNCHECKED = "Training dependencies not checked yet."
 
 
 @dataclass(frozen=True)
@@ -504,7 +505,11 @@ class WriterTrainingPaths:
 
 _training_paths: Optional[WriterTrainingPaths] = None
 # Probe results per training interpreter: (deps_reason, trl_reason); "" = ok.
-_training_probe_cache: Dict[str, Tuple[str, str]] = {}
+# Probe results per training interpreter: python -> (deps_reason,
+# trl_reason, expires_at). "" = ok. A definitive answer never expires
+# (expires_at None); a probe that could not run is kept PROBE_FAILURE_TTL_S.
+_training_probe_cache: Dict[str, Tuple[str, str, Optional[float]]] = {}
+PROBE_FAILURE_TTL_S = 60.0
 
 
 def set_writer_training_paths(paths: Optional[WriterTrainingPaths]) -> None:
@@ -534,6 +539,50 @@ def _probe_failed(reason: str) -> bool:
     return reason.startswith(_PROBE_FAILURE_PREFIXES)
 
 
+def cached_training_probe(python: str) -> Optional[Tuple[str, str]]:
+    """The cached ``(deps_reason, trl_reason)`` for ``python``, or None
+    when never probed or a cached failure has expired."""
+    import time
+
+    hit = _training_probe_cache.get(python)
+    if hit is None:
+        return None
+    deps, trl, expires = hit
+    if expires is not None and time.monotonic() >= expires:
+        _training_probe_cache.pop(python, None)
+        return None
+    return deps, trl
+
+
+def store_training_probe(python: str, deps: str, trl: str) -> None:
+    """Cache a probe result: definitive answers for good, probe failures
+    (timeouts, crashes) for ``PROBE_FAILURE_TTL_S`` only."""
+    import time
+
+    failed = _probe_failed(deps) or _probe_failed(trl)
+    expires = time.monotonic() + PROBE_FAILURE_TTL_S if failed else None
+    _training_probe_cache[python] = (deps, trl, expires)
+
+
+def parse_deps_probe(returncode: Optional[int], stdout: str) -> str:
+    """The owner-facing reason from the deps probe's exit code + stdout."""
+    lines = (stdout or "").strip().splitlines()
+    try:
+        info = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        info = None
+    if returncode != 0 or not isinstance(info, dict):
+        return f"the training dependency probe failed (exit {returncode})"
+    if info.get("missing"):
+        return (
+            "training dependencies not installed: "
+            f"{', '.join(info['missing'])} ({_DEPS_HINT})"
+        )
+    if info.get("broken"):
+        return f"training dependencies fail to import: {', '.join(info['broken'])}"
+    return ""
+
+
 def default_writer_training_paths() -> WriterTrainingPaths:
     from metascan.core.writer_adapters import (
         DEFAULT_WRITER_TRAIN_REPO,
@@ -552,31 +601,18 @@ def default_writer_training_paths() -> WriterTrainingPaths:
 
 def probe_training_deps(python: str, timeout: float = 300.0) -> str:
     """Import the training stack in a subprocess with ``python``. "" when
-    every module imports, else an owner-facing reason."""
+    every module imports, else an owner-facing reason. Blocking: the
+    server runs the async form (training_manager) instead."""
     try:
         proc = subprocess.run(
-            [python, "-c", _DEPS_CHECK],
+            [python, "-c", DEPS_CHECK],
             capture_output=True,
             text=True,
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"could not run the training dependency probe: {e}"
-    lines = (proc.stdout or "").strip().splitlines()
-    try:
-        info = json.loads(lines[-1]) if lines else None
-    except ValueError:
-        info = None
-    if proc.returncode != 0 or not isinstance(info, dict):
-        return f"the training dependency probe failed (exit {proc.returncode})"
-    if info.get("missing"):
-        return (
-            "training dependencies not installed: "
-            f"{', '.join(info['missing'])} ({_DEPS_HINT})"
-        )
-    if info.get("broken"):
-        return f"training dependencies fail to import: {', '.join(info['broken'])}"
-    return ""
+    return parse_deps_probe(proc.returncode, proc.stdout)
 
 
 def _probe_trl(python: str) -> str:
@@ -622,15 +658,14 @@ def writer_training_reasons(
             f"Requires {WRITER_TRAINING_MIN_VRAM_GB:.0f} GB VRAM; "
             f"detected {report.cuda.vram_gb} GB."
         )
-    cached = _training_probe_cache.get(paths.python)
+    cached = cached_training_probe(paths.python)
     if cached is None and probe:
         deps = (deps_probe or probe_training_deps)(paths.python)
         trl = "" if deps else (trl_probe or _probe_trl)(paths.python)
         cached = (deps, trl)
-        if not (_probe_failed(deps) or _probe_failed(trl)):
-            _training_probe_cache[paths.python] = cached
+        store_training_probe(paths.python, deps, trl)
     if cached is None:
-        reasons.append("Training dependencies not checked yet.")
+        reasons.append(TRAINING_DEPS_UNCHECKED)
     else:
         reasons.extend(r for r in cached if r)
     if not _base_weights_present(paths.base_dir):
