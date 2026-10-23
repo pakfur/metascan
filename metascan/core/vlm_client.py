@@ -83,6 +83,7 @@ def background_vlm_work() -> Iterator[None]:
 def is_background_vlm_work() -> bool:
     return _BACKGROUND_WORK.get()
 
+
 _T = TypeVar("_T")
 
 

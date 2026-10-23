@@ -1514,9 +1514,7 @@ async def test_a_writer_run_overlapping_a_tag_batch_swaps_at_most_twice(
             with writer.hold():  # a Random batch writing its prompts
                 for _ in range(5):
                     await writer.ensure_started("qwen3vl-8b")
-                    out = await writer.generate_text(
-                        system_prompt="s", user_prompt="u"
-                    )
+                    out = await writer.generate_text(system_prompt="s", user_prompt="u")
                     assert out
                     writer_states.append(writer.state)
                     # Gaps between prompts longer than the swap grace and
