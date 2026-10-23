@@ -1295,6 +1295,13 @@ class T2iRunner:
                 "direction_parts": list(step.direction_parts),
                 "variant_index": step.variant_index,
                 "variants": step.variants,
+                # Which caption of how many (the dialog's "Batch k/N"), and
+                # the step's lineage: the hand-back keeps it so the next
+                # Generate records the writer's draft, not a typed prompt.
+                "caption_index": batch.plan[step.index][0],
+                "captions": len(batch.caption_seeds),
+                "writer_id": step.writer_id,
+                "draft": step.draft,
             }
         )
         self._show_step(batch)
