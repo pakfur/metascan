@@ -175,6 +175,12 @@ class VariantPrompt(BaseModel):
     # ``writer_model``); checked against the writer-eligible models.
     writer_model: Optional[str] = None
     variant_index: int
+    # What the drafts were written for (the /prompt response's
+    # resolved_caption / direction / categories, a hand-back frame's
+    # ``lineage`` or the tile's row): stored as the image's lineage.
+    resolved_caption: Optional[str] = Field(default=None, max_length=8000)
+    direction: Optional[str] = Field(default=None, max_length=8000)
+    categories: Optional[List[str]] = Field(default=None, max_length=64)
 
 
 class BatchBody(BaseModel):
@@ -345,6 +351,7 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         "warnings": result.warnings,
         "direction": result.direction,
         "direction_parts": result.direction_parts,
+        "categories": result.categories,
         # drafts[0] is the top-level prompt/negative.
         "drafts": [
             {

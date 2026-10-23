@@ -1449,7 +1449,9 @@ class DatabaseManager:
             # The caption as the writer saw it (tokens resolved) and the
             # direction it was written with: the writer training data's user
             # turn. NULL on older rows and typed prompts.
-            for _col in ("resolved_caption", "direction"):
+            # prompt_categories: JSON list of the category names the prompt
+            # was written for (an all-scope adapter's CATEGORIES line).
+            for _col in ("resolved_caption", "direction", "prompt_categories"):
                 _idempotent_add_column(
                     conn,
                     "t2i_images",
@@ -4263,6 +4265,7 @@ class DatabaseManager:
         scorecard_id: Optional[str] = None,
         resolved_caption: Optional[str] = None,
         direction: Optional[str] = None,
+        prompt_categories: Optional[List[str]] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4276,9 +4279,9 @@ class DatabaseManager:
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
                 "variant_index, draft_prompt, edited, writer_model, scorecard_id, "
-                "resolved_caption, direction) "
+                "resolved_caption, direction, prompt_categories) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4306,6 +4309,11 @@ class DatabaseManager:
                     scorecard_id,
                     resolved_caption,
                     direction,
+                    (
+                        _json.dumps(list(prompt_categories))
+                        if prompt_categories is not None
+                        else None
+                    ),
                 ),
             )
             conn.commit()
@@ -4331,7 +4339,11 @@ class DatabaseManager:
         d["file_path"] = to_native_path(posix)
         d["file_name"] = posix.rsplit("/", 1)[-1]
         d["is_favorite"] = bool(d.get("is_favorite"))
-        for column, kind in (("loras", list), ("form_state", dict)):
+        for column, kind in (
+            ("loras", list),
+            ("form_state", dict),
+            ("prompt_categories", list),
+        ):
             raw = d.get(column)
             parsed = None
             if raw:
@@ -6331,6 +6343,7 @@ class DatabaseManager:
         "caption",
         "resolved_caption",
         "direction",
+        "prompt_categories",
         "prompt_seed",
         "prompt_used",
         "draft_prompt",
@@ -6344,6 +6357,19 @@ class DatabaseManager:
         "created_at",
     )
 
+    @staticmethod
+    def _name_list(raw: Any) -> Optional[List[str]]:
+        """A stored JSON list of names, or None (absent or unreadable)."""
+        if not isinstance(raw, str):
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(value, list):
+            return None
+        return [str(v) for v in value]
+
     def writer_dataset_raw(self) -> Dict[str, Any]:
         """Raw rows for ``writer_dataset.build_examples`` (no filtering
         beyond shape; the rules live there):
@@ -6355,7 +6381,9 @@ class DatabaseManager:
           lineage columns (``_DATASET_LINEAGE_COLS``), ``is_favorite``,
           ``passed``, ``seen_at``, ``judged_at`` (a tombstone's
           ``confirmed_at``), ``category_ids`` and ``category_names`` (every
-          link source) and ``generation_categories`` (names of the
+          link source), ``prompt_categories`` (the stored names the prompt
+          was written for, parsed; None when absent) and
+          ``generation_categories`` (names of the
           ``source = 'generation'`` links; a tombstone's stored names).
           Malformed tombstones are skipped with one WARNING (count only).
         * ``briefs``: ``{path: {brief, model, created_at}}``.
@@ -6396,6 +6424,7 @@ class DatabaseManager:
             ):
                 d = dict(r)
                 d["live"] = True
+                d["prompt_categories"] = self._name_list(d["prompt_categories"])
                 d["is_favorite"] = bool(d["is_favorite"])
                 d["passed"] = bool(d["passed"])
                 ids = links.get(d["file_path"], [])
@@ -6427,6 +6456,7 @@ class DatabaseManager:
                 d = {"file_path": r["file_path"], "live": False}
                 for c in cols:
                     d[c] = gen.get(c)
+                d["prompt_categories"] = self._name_list(d["prompt_categories"])
                 d["is_favorite"] = bool(r["is_favorite"])
                 d["passed"] = bool(r["passed"])
                 d["seen_at"] = r["seen_at"]

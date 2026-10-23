@@ -468,7 +468,13 @@ async function onGeneratePrompt() {
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
     // Every draft is held in the store for the caption it was written for;
     // the box shows variant 1.
-    store.setDrafts(draftSetFromResult(body.caption, r.drafts ?? []))
+    store.setDrafts(
+      draftSetFromResult(body.caption, r.drafts ?? [], {
+        resolved_caption: r.resolved_caption,
+        direction: r.direction,
+        categories: r.categories ?? [],
+      }),
+    )
     promptWarnings.value = r.warnings
     promptDirection.value = r.direction ? { text: r.direction, parts: r.direction_parts } : null
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }

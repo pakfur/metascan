@@ -257,6 +257,10 @@ export interface T2iImage {
   variant_index?: number | null
   draft_prompt?: string | null
   edited?: number | null
+  /** What the draft was written for (null on older rows and typed prompts). */
+  resolved_caption?: string | null
+  direction?: string | null
+  prompt_categories?: string[] | null
 }
 
 // ---- writers, variants, drafts ------------------------------------------------
@@ -293,6 +297,17 @@ export interface T2iPromptDraft {
   angle: string | null
 }
 
+/**
+ * What a set of drafts was written for: the resolved caption the writer saw,
+ * its direction block and the CATEGORIES names. It rides with the drafts so
+ * the rendered images record exactly that, however far the seed has moved.
+ */
+export interface T2iDraftLineage {
+  resolved_caption: string
+  direction: string | null
+  categories: string[] | null
+}
+
 /** One variant's prompt as Generate sends it (BatchBody.prompts). */
 export interface T2iVariantPrompt {
   prompt: string
@@ -302,6 +317,10 @@ export interface T2iVariantPrompt {
   writer_id: string | null
   writer_model: string | null
   variant_index: number
+  /** The draft's lineage (T2iDraftLineage), absent for a typed prompt. */
+  resolved_caption?: string | null
+  direction?: string | null
+  categories?: string[] | null
 }
 
 /**
@@ -315,6 +334,8 @@ export interface T2iHeldDraft {
   draft: string
   text: string
   negative: string
+  /** What the draft was written for; null when unknown (older rows). */
+  lineage: T2iDraftLineage | null
 }
 
 /**
@@ -340,6 +361,8 @@ export interface T2iPromptResult {
   /** The caption direction the prompt was written with, if any. */
   direction: string | null
   direction_parts: string[]
+  /** The names of the request's category_ids (the drafts' lineage). */
+  categories?: string[]
   /** One per variant; drafts[0] is `prompt` / `negative`. */
   drafts: T2iPromptDraft[]
 }
@@ -418,6 +441,8 @@ export interface T2iBatchStep {
   writer_id: string | null
   writer_model: string | null
   draft: string | null
+  /** What the step's draft was written for (null: typed, or unknown). */
+  lineage?: T2iDraftLineage | null
 }
 
 /** One entry of GET /api/t2i/batches. */

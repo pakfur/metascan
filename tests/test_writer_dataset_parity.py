@@ -279,3 +279,256 @@ class TestGeneratePromptThenManualParity(ParityCase):
         (row,) = _lineage(self.db)
         self.assertIsNone(row["resolved_caption"])
         self.assertIsNone(row["direction"])
+
+
+# ---- round 2: the lineage rides with the drafts ---------------------------
+
+WX = "__ALICE__ under a __WEATHER__ sky."
+WEATHER = "\n".join(f"weather kind {n}" for n in range(40)) + "\n"
+
+
+def _entry(
+    prompt: str,
+    draft: str,
+    writer_id: str,
+    writer_model: Any,
+    index: int,
+    lineage: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "prompt": prompt,
+        "negative": None,
+        "draft": draft,
+        "writer_id": writer_id,
+        "writer_model": writer_model,
+        "variant_index": index,
+        **lineage,
+    }
+
+
+class LineageCase(ParityCase):
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        (self.root / "lists" / "weather.txt").write_text(WEATHER, encoding="utf-8")
+
+    def assert_seed_matters(self, seed_a: int, seed_b: int) -> None:
+        # Precondition: rebuilding for the new seed WOULD give other text.
+        self.assertNotEqual(
+            self.expected_text(WX, seed_a), self.expected_text(WX, seed_b)
+        )
+
+
+class TestLineageTravelsWithDrafts(LineageCase):
+    async def test_a_second_generate_after_the_seed_moved(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.assert_seed_matters(100, 101)
+        self.vlm.replies.extend(["SYNTH one", "SYNTH two"])
+        result = await self.runner.generate_prompt(
+            caption=WX,
+            seed=100,
+            model="krea2",
+            variants=2,
+            writer=self.wid,
+            category_ids=[self.cat.id],
+        )
+        self.assertEqual(result.categories, ["Bedroom"])
+        user = self.turns()[0]["user_prompt"]
+        system = self.turns()[0]["system_prompt"]
+        lineage = {
+            "resolved_caption": result.resolved_caption,
+            "direction": result.direction,
+            "categories": result.categories,
+        }
+        entries = [
+            _entry(d.prompt, d.prompt, d.writer_id, d.writer_model, i, lineage)
+            for i, d in enumerate(result.drafts)
+        ]
+        # The first Generate moved the seed box on; the category was renamed.
+        self.db.rename_category(self.cat.id, "Renamed")
+        await self.run_to_end(
+            self.manual(
+                caption=WX,
+                seed=101,
+                count_per_batch=1,
+                variants=2,
+                category_ids=[self.cat.id],
+                prompts=entries,
+            )
+        )
+        first, second = await self.render_all()
+        rows = _lineage(self.db)
+        self.assertEqual({r["prompt_seed"] for r in rows}, {101})
+        self.assertEqual(
+            {r["resolved_caption"] for r in rows}, {result.resolved_caption}
+        )
+        self.judge(first, second)
+        _, prefs, _ = self.build()
+        (pair,) = prefs
+        self.assertEqual(pair.user, user)
+        self.assertEqual(pair.system, system)
+        self.assertIn("CATEGORIES: Bedroom\n", pair.user)
+
+    async def test_a_random_hand_back_rendered_later(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.assert_seed_matters(10, 50)
+        self.vlm.replies.extend(["SYNTH first", "SYNTH second"])
+        batch_id = await self.run_to_end(
+            self.random_mode(
+                caption=WX,
+                aspect_ratio="3:2",
+                seed=10,
+                batch_size=1,
+                count_per_batch=1,
+                variants=2,
+                writer=self.wid,
+                category_ids=[self.cat.id],
+            )
+        )
+        user = self.turns()[0]["user_prompt"]
+        steps = self.written(batch_id)
+        self.assertTrue(all(s["lineage"] is not None for s in steps))
+        # What draftSetFromSteps holds and usablePrompts sends back.
+        entries = [
+            _entry(
+                s["prompt"],
+                s["draft"],
+                s["writer_id"],
+                s["writer_model"],
+                s["variant_index"],
+                s["lineage"],
+            )
+            for s in steps
+        ]
+        jobs_before = set(self.comfy.job_ids)
+        await self.run_to_end(
+            self.manual(
+                caption=WX,
+                seed=50,
+                count_per_batch=1,
+                variants=2,
+                category_ids=[self.cat.id],
+                prompts=entries,
+            )
+        )
+        paths = await self.render_all()
+        manual = [self.image(j) for j in self.comfy.job_ids if j not in jobs_before]
+        self.assertEqual(len(manual), 2)
+        self.assertTrue(set(manual) <= set(paths))
+        self.judge(manual[0], manual[1])
+        _, prefs, _ = self.build()
+        (pair,) = prefs
+        self.assertEqual(pair.user, user)
+
+    async def test_a_tile_reload_rendered_with_a_newer_seed(self) -> None:
+        assert self.vlm is not None
+        self.roomy()
+        self.assert_seed_matters(10, 77)
+        self.vlm.replies.extend(["SYNTH tile"])
+        await self.run_to_end(
+            self.random_mode(
+                caption=WX,
+                aspect_ratio="3:2",
+                seed=10,
+                batch_size=1,
+                count_per_batch=1,
+                writer=self.wid,
+                category_ids=[self.cat.id],
+            )
+        )
+        user = self.turns()[0]["user_prompt"]
+        await self.render_all()
+        (tile,) = self.db.list_t2i_images()
+        self.assertEqual(tile["prompt_categories"], ["Bedroom"])
+        # draftSetFromImage: the tile's lineage columns ride with its draft.
+        entry = _entry(
+            "SYNTH tile, edited by hand",
+            tile["draft_prompt"],
+            tile["writer_id"],
+            tile["writer_model"],
+            0,
+            {
+                "resolved_caption": tile["resolved_caption"],
+                "direction": tile["direction"],
+                "categories": tile["prompt_categories"],
+            },
+        )
+        await self.run_to_end(
+            self.manual(
+                caption=WX,
+                seed=77,
+                count_per_batch=1,
+                category_ids=[self.cat.id],
+                prompts=[entry],
+            )
+        )
+        await self.render_all()
+        sft, prefs, counts = self.build()
+        self.assertEqual(counts.edit_pairs, 1)
+        (edit,) = [p for p in prefs if p.source == "edit"]
+        self.assertEqual(
+            (edit.chosen, edit.rejected), ("SYNTH tile, edited by hand", "SYNTH tile")
+        )
+        self.assertEqual(edit.user, user)
+
+    async def test_a_typed_entry_stores_no_lineage_whatever_it_says(self) -> None:
+        self.roomy()
+        await self.run_to_end(
+            self.manual(
+                caption=WX,
+                count_per_batch=1,
+                prompts=[
+                    {
+                        "prompt": "typed",
+                        "negative": None,
+                        "draft": None,
+                        "writer_id": None,
+                        "writer_model": None,
+                        "variant_index": 0,
+                        "resolved_caption": "claimed",
+                        "direction": "claimed",
+                        "categories": ["claimed"],
+                    }
+                ],
+            )
+        )
+        await self.render_all()
+        (row,) = _lineage(self.db)
+        self.assertIsNone(row["resolved_caption"])
+        self.assertIsNone(row["direction"])
+
+    async def test_bad_lineage_is_a_request_error_without_its_text(self) -> None:
+        from metascan.core.t2i_runner import T2iRequestError
+
+        base = _entry("p", "p", "base", None, 0, {})
+        for bad in (
+            {"resolved_caption": 5},
+            {"resolved_caption": "x" * 9000},
+            {"resolved_caption": "ok", "direction": ["SECRETDIR"]},
+            {"resolved_caption": "ok", "categories": "SECRETCAT"},
+            {"resolved_caption": "ok", "categories": [""]},
+            {"resolved_caption": "ok", "categories": ["c"] * 65},
+        ):
+            with self.subTest(bad=list(bad)):
+                with self.assertRaises(T2iRequestError) as caught:
+                    await self.runner.start_batch(
+                        self.manual(caption=WX, prompts=[{**base, **bad}])
+                    )
+                self.assertNotIn("SECRET", str(caught.exception))
+                self.assertNotIn("xxxx", str(caught.exception))
+
+    async def test_a_rebuild_failure_logs_the_exception_type_only(self) -> None:
+        from unittest import mock
+
+        self.roomy()
+        entry = _entry("p", "p", "base", None, 0, {})  # an older client
+        with mock.patch.object(
+            self.library, "get", side_effect=RuntimeError("SECRET caption text")
+        ), self.assertLogs("metascan.core.t2i_runner", "WARNING") as logs:
+            await self.run_to_end(
+                self.manual(caption=WX, count_per_batch=1, prompts=[entry])
+            )
+        text = "\n".join(logs.output)
+        self.assertIn("RuntimeError", text)
+        self.assertNotIn("SECRET", text)

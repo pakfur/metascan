@@ -238,6 +238,9 @@ class PromptResult:
     direction: Optional[str] = None
     direction_parts: List[str] = field(default_factory=list)
     drafts: List[PromptDraft] = field(default_factory=list)
+    # The names of the request's category_ids: the drafts' lineage (an
+    # ``all``-scope adapter wrote with them as its CATEGORIES line).
+    categories: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -282,6 +285,9 @@ class _Batch:
     # (read at plan time); empty for the base writers and a one-category
     # adapter, which were trained without the line.
     adapter_categories: List[str] = field(default_factory=list)
+    # The names of the batch's category_ids (read at plan time): every
+    # written step's lineage.
+    category_names: List[str] = field(default_factory=list)
     # The supplied caption's resolved text and direction (lineage for the
     # writer training data), worked out once.
     supplied_lineage: Optional[Tuple[Optional[str], Optional[str]]] = None
@@ -375,6 +381,9 @@ class _Step:
     # A supplied step's direction as Generate Prompt wrote its drafts with
     # (lineage only; ``direction`` stays what this run itself directed).
     lineage_direction: Optional[str] = None
+    # The category names of the request the prompt was written for (an
+    # ``all``-scope adapter's CATEGORIES line); None for a typed prompt.
+    categories: Optional[List[str]] = None
     # Manual only: the Negative box as typed (kept even if the workflow
     # cannot take it), for the image's form state.
     form_negative: Optional[str] = None
@@ -484,6 +493,56 @@ def _optional_text(value: Any, label: str) -> Optional[str]:
     raise T2iRequestError(f"{label} must be text")
 
 
+# Bounds on the lineage a prompts[] entry may carry (never logged).
+LINEAGE_TEXT_MAX = 8000
+LINEAGE_CATEGORIES_MAX = 64
+LINEAGE_CATEGORY_NAME_MAX = 200
+
+
+def _check_lineage(raw: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+    """The entry's lineage -- ``resolved_caption`` (what the writer was
+    given), ``direction`` and ``categories`` (the CATEGORIES names) -- or
+    None when it carries no ``resolved_caption`` (an older client; the
+    runner then rebuilds it). Errors name the field, never its text."""
+    resolved = raw.get("resolved_caption")
+    if resolved is None:
+        return None
+    label = f"Variant {index + 1}"
+    if not isinstance(resolved, str) or len(resolved) > LINEAGE_TEXT_MAX:
+        raise T2iRequestError(
+            f"{label}: resolved_caption must be text of at most "
+            f"{LINEAGE_TEXT_MAX} characters"
+        )
+    direction = raw.get("direction")
+    if direction is not None and (
+        not isinstance(direction, str) or len(direction) > LINEAGE_TEXT_MAX
+    ):
+        raise T2iRequestError(
+            f"{label}: direction must be text of at most {LINEAGE_TEXT_MAX} "
+            "characters"
+        )
+    categories = raw.get("categories")
+    if categories is not None:
+        if (
+            not isinstance(categories, list)
+            or len(categories) > LINEAGE_CATEGORIES_MAX
+            or not all(
+                isinstance(c, str) and 0 < len(c) <= LINEAGE_CATEGORY_NAME_MAX
+                for c in categories
+            )
+        ):
+            raise T2iRequestError(
+                f"{label}: categories must be at most {LINEAGE_CATEGORIES_MAX} "
+                f"names of 1 to {LINEAGE_CATEGORY_NAME_MAX} characters"
+            )
+        categories = list(categories)
+    return {
+        "resolved_caption": resolved,
+        "direction": direction if direction and direction.strip() else None,
+        "categories": categories,
+    }
+
+
 def _check_prompts(
     req: BatchRequest, variants: int, db: Any = None
 ) -> Optional[List[Dict[str, Any]]]:
@@ -549,6 +608,8 @@ def _check_prompts(
                 "writer_id": writer_id,
                 "writer_model": writer_model,
                 "variant_index": index,
+                # A typed prompt has no lineage, whatever the entry says.
+                "lineage": _check_lineage(raw, index) if draft is not None else None,
             }
         )
     entries.sort(key=lambda e: e["variant_index"])
@@ -732,20 +793,25 @@ class T2iRunner:
         row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
         return str(row["base_model"]) if row else None
 
-    async def _adapter_categories(
-        self, writer: str, category_ids: Sequence[int]
-    ) -> List[str]:
-        """The category names an ``all``-scope adapter's user turn carries
-        (the line it was trained with); [] for any other writer."""
-        adapter_id = parse_adapter_writer_id(writer)
-        if adapter_id is None or not category_ids:
-            return []
-        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
-        if row is None or str(row.get("scope", "")).strip().lower() != "all":
+    async def _category_names(self, category_ids: Sequence[int]) -> List[str]:
+        """The current names of ``category_ids`` (unknown ids dropped)."""
+        if not category_ids:
             return []
         wanted = {int(c) for c in category_ids}
         rows = await asyncio.to_thread(self.db.list_categories)
         return [str(r["name"]) for r in rows if int(r["id"]) in wanted]
+
+    async def _adapter_categories(self, writer: str, names: List[str]) -> List[str]:
+        """``names`` when ``writer`` is an ``all``-scope adapter (its user
+        turn carries them as the CATEGORIES line it was trained with); []
+        for any other writer."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None or not names:
+            return []
+        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
+        if row is None or str(row.get("scope", "")).strip().lower() != "all":
+            return []
+        return list(names)
 
     @staticmethod
     def _for_adapter(
@@ -759,11 +825,12 @@ class T2iRunner:
     async def _supplied_lineage(
         self, batch: _Batch, step: _Step
     ) -> Tuple[Optional[str], Optional[str]]:
-        """``(resolved caption, direction)`` of a supplied step whose prompts
-        a writer drafted (Generate Prompt resolved and directed the same
-        caption for the same seed), for its lineage only: nothing here
-        changes what renders, and a failure is just a missing value. A typed
-        prompt, or no caption, has neither."""
+        """``(resolved caption, direction)`` rebuilt for a supplied drafted
+        step whose entry carried no lineage (an older client): the caption
+        re-resolved and re-directed for the step's prompt seed -- right only
+        when the drafts were written for that seed, hence the fallback.
+        Lineage only: nothing here changes what renders, and a failure is
+        just a missing value. No caption: neither."""
         req = batch.req
         if req.prompts is None or not isinstance(req.caption, str):
             return None, None
@@ -792,7 +859,12 @@ class T2iRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("t2i batch %s: no caption lineage (%s)", batch.id, exc)
+                # The type only: a message could quote the caption.
+                logger.warning(
+                    "t2i batch %s: no caption lineage (%s)",
+                    batch.id,
+                    type(exc).__name__,
+                )
             batch.supplied_lineage = (resolved, direction)
         return batch.supplied_lineage
 
@@ -942,6 +1014,7 @@ class T2iRunner:
         if not isinstance(caption, str) or not caption.strip():
             raise T2iRequestError("Caption is empty")
         lora_path = await self._adapter_lora(writer)
+        category_names = await self._category_names(category_ids)
         cfg = self._get_config()
         resolved = await self._resolve(profile, caption, seed, cfg)
         warnings = list(resolved.warnings)
@@ -985,7 +1058,7 @@ class T2iRunner:
                 raise WriterAdapterUnavailable(
                     writer, f"it is built on {adapter_base}, the writer runs {model_id}"
                 )
-            adapter_categories = await self._adapter_categories(writer, category_ids)
+            adapter_categories = await self._adapter_categories(writer, category_names)
             examples, taste_warning = await self._examples_for(
                 writer, resolved.text, profile.id
             )
@@ -1046,6 +1119,7 @@ class T2iRunner:
             text,
             parts,
             drafts,
+            category_names,
         )
 
     # ---- batch planning ----------------------------------------------------
@@ -1125,10 +1199,9 @@ class T2iRunner:
         # renders the prompts it was given (their lineage is checked above).
         lora_path = await self._adapter_lora(writer) if req.mode == "random" else None
         adapter_base = await self._adapter_base(writer) if lora_path else None
+        category_names = await self._category_names(req.category_ids)
         adapter_categories = (
-            await self._adapter_categories(writer, req.category_ids)
-            if lora_path
-            else []
+            await self._adapter_categories(writer, category_names) if lora_path else []
         )
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
@@ -1268,6 +1341,7 @@ class T2iRunner:
             lora_path=lora_path,
             adapter_base=adapter_base,
             adapter_categories=adapter_categories,
+            category_names=category_names,
         )
 
     async def start_batch(self, req: BatchRequest) -> BatchStarted:
@@ -1485,7 +1559,8 @@ class T2iRunner:
             prompt, raw_negative = str(req.prompt), req.negative
             draft, writer_id, writer_model = None, WRITER_MANUAL, None
         blank = not isinstance(raw_negative, str) or not raw_negative.strip()
-        return _Step(
+        lineage = entry.get("lineage") if req.prompts is not None else None
+        step = _Step(
             index=index,
             caption=req.caption or "",
             aspect_ratio=aspect,
@@ -1503,6 +1578,13 @@ class T2iRunner:
             draft=draft,
             form_negative=raw_negative,
         )
+        if lineage is not None and draft is not None:
+            # Exactly what Generate Prompt (or the step it was handed back
+            # from, or the tile's row) recorded for these drafts.
+            step.resolved_caption = lineage["resolved_caption"]
+            step.lineage_direction = lineage["direction"]
+            step.categories = lineage["categories"]
+        return step
 
     async def _caption_context(self, batch: _Batch, index: int) -> _CaptionContext:
         """Draw (or take the named) caption for the caption of step
@@ -1600,6 +1682,7 @@ class T2iRunner:
             # What the writer produced is the draft; nobody edits it here.
             draft=prompt,
             resolved_caption=context.resolved_text,
+            categories=list(batch.category_names),
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -1626,9 +1709,27 @@ class T2iRunner:
                 "writer_id": step.writer_id,
                 "writer_model": step.writer_model,
                 "draft": step.draft,
+                # What the drafts were written for, so a hand-back sends it
+                # back with them (None for a typed prompt).
+                "lineage": (
+                    {
+                        "resolved_caption": step.resolved_caption,
+                        "direction": self._lineage_direction(step),
+                        "categories": step.categories,
+                    }
+                    if step.draft is not None
+                    else None
+                ),
             }
         )
         self._show_step(batch)
+
+    @staticmethod
+    def _lineage_direction(step: _Step) -> Optional[str]:
+        """The direction the step's prompt was written with."""
+        if step.direction is not None:
+            return step.direction
+        return step.lineage_direction
 
     def _show_step(self, batch: _Batch) -> None:
         """Put the step being rendered on show (``batch_step``): its caption,
@@ -1673,9 +1774,13 @@ class T2iRunner:
                     caption == 0 and _supplies_first_step(batch.req)
                 ):
                     step = self._supplied_step(batch, index, variant)
-                    resolved, direction = await self._supplied_lineage(batch, step)
-                    step.resolved_caption = resolved
-                    step.lineage_direction = direction
+                    if step.draft is not None and step.resolved_caption is None:
+                        # No lineage came with the entry: rebuild it.
+                        resolved, direction = await self._supplied_lineage(batch, step)
+                        step.resolved_caption = resolved
+                        step.lineage_direction = direction
+                    if step.draft is not None and step.categories is None:
+                        step.categories = list(batch.category_names)
                 else:
                     if context is None or context.index != caption:
                         context = await self._caption_context(batch, index)
@@ -1742,9 +1847,8 @@ class T2iRunner:
             "variant_index": step.variant_index,
             "draft": step.draft,
             "resolved_caption": step.resolved_caption,
-            "direction": (
-                step.direction if step.direction is not None else step.lineage_direction
-            ),
+            "direction": self._lineage_direction(step),
+            "categories": step.categories,
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
             "negative": step.form_negative if manual else step.negative,
@@ -2151,6 +2255,7 @@ class T2iRunner:
                     edited=edited,
                     resolved_caption=known.get("resolved_caption"),
                     direction=known.get("direction"),
+                    prompt_categories=known.get("categories"),
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)

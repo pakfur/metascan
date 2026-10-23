@@ -26,6 +26,7 @@ import {
   type T2iBatchOutcome,
   type T2iBatchRequest,
   type T2iBatchStepEvent,
+  type T2iDraftLineage,
   type T2iBatchStep,
   type T2iConfig,
   type T2iDraftSet,
@@ -608,6 +609,18 @@ export const useT2iStore = defineStore('t2i', () => {
     })
   }
 
+  // A frame's `lineage` (what the step's draft was written for), or null.
+  function asLineage(v: unknown): T2iDraftLineage | null {
+    if (!v || typeof v !== 'object') return null
+    const o = v as Record<string, unknown>
+    if (typeof o.resolved_caption !== 'string') return null
+    return {
+      resolved_caption: o.resolved_caption,
+      direction: typeof o.direction === 'string' ? o.direction : null,
+      categories: Array.isArray(o.categories) ? o.categories.map(String) : null,
+    }
+  }
+
   function onBatchStep(d: Record<string, unknown>): void {
     const batch = findBatch(asStr(d.batch_id))
     if (!batch) return
@@ -630,6 +643,7 @@ export const useT2iStore = defineStore('t2i', () => {
       writer_id: typeof d.writer_id === 'string' ? d.writer_id : null,
       writer_model: typeof d.writer_model === 'string' ? d.writer_model : null,
       draft: typeof d.draft === 'string' ? d.draft : null,
+      lineage: asLineage(d.lineage),
     }
     batch.step = step
     rememberStep(batch.batch_id, step)
