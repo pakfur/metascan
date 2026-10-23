@@ -18,7 +18,9 @@ export interface TasteStatus {
   active_model: TasteModelInfo | null
   stale: boolean
   training: boolean
-  new_events: number
+  // Label-changing events since the active model's snapshot; null when
+  // there is no model yet (the first one trains once `missing` is null).
+  new_events: number | null
   missing: TasteMissing | null
   // 'labels': too few ratings; 'vectors': enough ratings, but too few of
   // them have a CLIP vector yet (index missing or mid-rebuild).

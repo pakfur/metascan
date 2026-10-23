@@ -58,7 +58,9 @@ class _Index:
     def __init__(self, index_dir: Path) -> None:
         meta_path = index_dir / "index_meta.json"
         if not meta_path.exists():
-            raise TasteWorkerError("similarity index has no index_meta.json")
+            raise TasteWorkerError(
+                "Build the similarity index first (Similarity Settings > Build Index)"
+            )
         meta = json.loads(meta_path.read_text())
         self.model_key = str(meta.get("model_key") or "")
         self.dim = int(meta.get("embedding_dim") or 0)

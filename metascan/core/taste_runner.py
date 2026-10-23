@@ -53,6 +53,11 @@ def _labels_doc(ls: LabelSet) -> Dict[str, Any]:
     }
 
 
+def _read_result(path: Path) -> Dict[str, Any]:
+    result: Dict[str, Any] = json.loads(path.read_text())
+    return result
+
+
 def _write_json(path: Path, doc: Dict[str, Any]) -> None:
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
@@ -194,8 +199,9 @@ class TasteRunner:
                 await proc.wait()
             await drain
         try:
-            result: Dict[str, Any] = json.loads(
-                (out_dir / "taste_result.json").read_text()
+            # A full-library score map: parse it off the event loop.
+            result = await asyncio.to_thread(
+                _read_result, out_dir / "taste_result.json"
             )
         except (OSError, ValueError):
             return {
@@ -210,6 +216,13 @@ class TasteRunner:
         run_dir = self.work_dir / "runs" / f"{mode}-{uuid.uuid4().hex}"
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
+
+    def _install_params(self, src: Path) -> Path:
+        """Move the worker's params file into ``models_dir``. Blocking."""
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        params_path = self.models_dir / src.name
+        os.replace(src, params_path)
+        return params_path
 
     def _prune_params(self, keep: Path) -> None:
         files = sorted(self.models_dir.glob("taste_*.npz"), key=lambda p: p.name)
@@ -317,10 +330,9 @@ class TasteRunner:
     async def _record_success(
         self, ls: LabelSet, half_life_days: float, result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        src = Path(result["params_path"])
-        params_path = self.models_dir / src.name
-        os.replace(src, params_path)
+        params_path = await asyncio.to_thread(
+            self._install_params, Path(result["params_path"])
+        )
         row = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "labels_as_of": ls.as_of,
@@ -338,12 +350,22 @@ class TasteRunner:
         }
         model_id = await asyncio.to_thread(self.db.record_taste_model, row)
         scores: Dict[str, float] = result.get("scores") or {}
-        n_scored = await asyncio.to_thread(
-            self.db.replace_taste_scores, model_id, scores
-        )
-        self._prune_params(keep=params_path)
+        n_scored: Optional[int] = None
+        try:
+            n_scored = await asyncio.to_thread(
+                self.db.replace_taste_scores, model_id, scores
+            )
+        except Exception:
+            # The model is recorded and active; its scores just did not
+            # land. The service schedules a rescore to write them.
+            logger.exception("writing taste scores for model %s failed", model_id)
+        try:
+            await asyncio.to_thread(self._prune_params, params_path)
+        except Exception:
+            logger.warning("pruning old taste params failed", exc_info=True)
         return {
             "status": "ok",
+            "rescore_needed": n_scored is None,
             "model_id": model_id,
             "holdout_auc": row["holdout_auc"],
             "n_pos": row["n_pos"],
@@ -371,7 +393,8 @@ class TasteRunner:
         model = await asyncio.to_thread(self.db.get_active_taste_model)
         if model is None or await asyncio.to_thread(self.is_stale, model):
             return None
-        raw = await asyncio.to_thread(self.db.taste_training_raw)
+        # Paths + categories only: no judgments, events or tombstones.
+        raw = await asyncio.to_thread(self.db.taste_scoring_raw)
         image_paths, image_cats = await asyncio.to_thread(self._scoring_targets, raw)
         run_dir = self._new_run_dir("score")
         try:

@@ -59,8 +59,10 @@ def test_status_without_model(client):
     body = client.get("/api/taste/status").json()
     assert body["active_model"] is None
     assert body["stale"] is False and body["training"] is False
-    assert body["new_events"] == 0
+    # Nothing to be "new since the last training" before the first one.
+    assert body["new_events"] is None
     assert body["missing"] == {"positives": 20, "negatives": 20}
+    assert body["missing_reason"] == "labels"
     assert body["auto_retrain"] is True
     assert body["last_error"] is None
 
