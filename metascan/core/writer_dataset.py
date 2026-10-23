@@ -119,8 +119,9 @@ caption description, not the brief, so it shares its pairs' group).
 Holdout
 -------
 ``split_holdout`` holds out ``fraction`` of the groups that have a variant
-pair (seeded, order-independent; at least one when there are two or more,
-never all), and with them every preference example of those groups (edit
+pair by a stable sha256 rank of the group key (order- and set-independent,
+so a "Continue from" run never holds out a group its source trained on;
+at least one when there are two or more, never all), and with them every preference example of those groups (edit
 pairs included). Grouping by (target model, resolved caption) rather than
 ``variant_group`` keeps a caption generated twice on one side.
 ``sft_without_holdout`` drops SFT examples of held-out groups, so no
@@ -143,7 +144,6 @@ import hashlib
 import json
 import logging
 import os
-import random
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -748,19 +748,35 @@ def build_examples(
 # ---- holdout, output, readiness -------------------------------------------
 
 
+def _holdout_rank(group: str, seed: int) -> float:
+    """A stable number in ``[0, 1)`` for ``group``: sha256 of the seed and
+    the group key. Depends on nothing else, so adding or removing other
+    groups never moves a group across the split."""
+    digest = hashlib.sha256(f"{seed}:{group}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / float(1 << 64)
+
+
 def split_holdout(
     prefs: Sequence[PrefExample],
     fraction: float = DEFAULT_HOLDOUT_FRACTION,
     seed: int = 0,
 ) -> Tuple[List[PrefExample], List[PrefExample]]:
-    """``(train, holdout)``: ``fraction`` of the groups that have a variant
-    pair (seeded), and every preference example of those groups. Input
-    order is kept."""
+    """``(train, holdout)``: the groups that have a variant pair and whose
+    stable hash rank (:func:`_holdout_rank`) is below ``fraction`` (about
+    ``fraction`` of them), and every preference example of those groups.
+    Membership is per group, so a run continued from an earlier adapter
+    never finds that adapter's training groups in its holdout. Edge cases
+    on tiny sets: with two or more groups at least one is held (the lowest
+    rank) and never all (the highest rank trains). Input order is kept."""
     groups = sorted({p.group for p in prefs if p.source == SOURCE_VARIANT})
     held: Set[str] = set()
     if len(groups) >= 2 and fraction > 0:
-        n = min(len(groups) - 1, max(1, round(fraction * len(groups))))
-        held = set(random.Random(seed).sample(groups, n))
+        ranked = sorted(groups, key=lambda g: (_holdout_rank(g, seed), g))
+        held = {g for g in ranked if _holdout_rank(g, seed) < fraction}
+        if not held:
+            held = {ranked[0]}
+        elif len(held) == len(groups):
+            held.discard(ranked[-1])
     train = [p for p in prefs if p.group not in held]
     holdout = [p for p in prefs if p.group in held]
     return train, holdout

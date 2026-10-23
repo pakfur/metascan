@@ -84,6 +84,9 @@ worker_logger = logging.getLogger(__name__ + ".worker")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKER_MODULE = "metascan.workers.writer_train_worker"
+# The run's private copy of the "Continue from" adapter's PEFT dir (so a
+# resume never depends on the source adapter still existing).
+INIT_ADAPTER_DIRNAME = "init_adapter"
 
 RUN_RUNNING = "running"
 RUN_PAUSED = "paused"
@@ -731,6 +734,13 @@ class TrainingManager:
         wd.write_jsonl(sft, data / "sft.jsonl")
         wd.write_jsonl(train, data / "prefs.jsonl")
         wd.write_jsonl(holdout, data / "holdout.jsonl")
+        if init_adapter_dir is not None:
+            # The run keeps its own copy of the "Continue from" PEFT dir:
+            # deleting the source adapter while this run is paused or
+            # failed must never break its resume.
+            copy = run_dir / INIT_ADAPTER_DIRNAME
+            shutil.copytree(init_adapter_dir, copy)
+            init_adapter_dir = str(copy)
         paths = self._paths()
         task: Dict[str, Any] = {
             "backend": self.backend,
@@ -889,6 +899,12 @@ class TrainingManager:
                 self._active = active
                 await self._spawn(active)
             except BaseException:
+                try:
+                    await self._stop_spawned(active)
+                except Exception:
+                    logger.exception(
+                        "Stopping the training worker of a failed resume raised"
+                    )
                 self._drop_lock()
                 await asyncio.to_thread(
                     self._set_states, active, run["status"], adapter["status"]
@@ -933,10 +949,41 @@ class TrainingManager:
                 409, "gate_unavailable", reasons=list(gate.reasons or [gate.reason])
             )
 
+    @staticmethod
+    async def _stop_spawned(active: Optional[_Active]) -> None:
+        """A start/resume that failed after the worker was spawned (e.g.
+        writing ``worker.pid`` raised): stop that worker and reap it BEFORE
+        the lock is released, so it never trains on behind a free GPU."""
+        if active is None:
+            return
+        sup = active.supervisor
+        if sup is not None and not sup.done():
+            sup.cancel()
+        proc = active.proc
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+
     async def _abort_start(self) -> None:
-        """A start that failed after registering: the run is failed, the
-        adapter too, and the GPU is released."""
+        """A start that failed after registering: the worker (if spawned) is
+        stopped, the run is failed, the adapter too, and the GPU is
+        released."""
         active = self._active
+        try:
+            await self._stop_spawned(active)
+        except Exception:
+            logger.exception("Stopping the training worker of a failed start raised")
         self._drop_lock()
         if active is None:
             return
@@ -1167,16 +1214,26 @@ class TrainingManager:
         # The checkpoints (and a refused-wipe leftover) and the JSONL live
         # in the run dir; the adapter folder now holds everything kept.
         await asyncio.to_thread(shutil.rmtree, active.run_dir, True)
-        # Release the GPU before the writer reloads with the new adapter.
+        # Apply the new adapter to the writer BEFORE releasing the GPU: the
+        # release restarts an interrupted briefs job, which may spawn the
+        # (shared) writer client -- it must already carry the new --lora
+        # list. Refreshing never spawns (an idle stale client is only
+        # evicted), so it is safe under the lock.
+        await self._refresh_writer()
         if self._active is active:
             self._drop_lock()
-        await self._registry_changed()
+        self._emit("adapters_changed", {})
         self._emit(
             "run_completed",
             {"run_id": active.run_id, "adapter_id": active.adapter_id},
         )
         hook = self.on_completed
-        if hook is not None:
+        if hook is not None and self._closing:
+            logger.info(
+                "writer training run %d completed during shutdown: no scorecard",
+                active.run_id,
+            )
+        elif hook is not None:
             try:
                 await hook(active.adapter_id, bool(options.get("render_scorecard")))
             except Exception:
@@ -1238,14 +1295,13 @@ class TrainingManager:
         )
         self._emit("adapters_changed", {})
 
-    async def _registry_changed(self) -> None:
-        """The writer server reloads its adapter list (restarted when idle)
-        BEFORE the UI hears about it."""
+    async def _refresh_writer(self) -> None:
+        """The writer server reloads its adapter list (restarted when idle);
+        call it BEFORE ``adapters_changed`` reaches the UI."""
         try:
             await self._refresh_adapters()
         except Exception:
             logger.exception("Applying the adapter registry to the writer failed")
-        self._emit("adapters_changed", {})
 
     # ---- pause / cancel ---------------------------------------------------
 

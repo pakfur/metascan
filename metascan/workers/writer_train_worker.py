@@ -115,6 +115,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1066,11 +1067,7 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
         result.update(status="cancelled", stage=ctx.stage if ctx else None)
         return EXIT_CANCELLED, result
     except Exception as e:
-        if isinstance(e, TrainWorkerError):
-            logger.error("writer train failed: %s", e)
-        else:
-            logger.exception("writer train failed")
-        result.update(status="error", error=str(e) or repr(e))
+        result.update(status="error", error=_report_failure(e))
         if ctx is not None:
             result.update(
                 stage=ctx.stage,
@@ -1201,6 +1198,32 @@ def _run_stages(
     return EXIT_OK
 
 
+def _report_failure(e: BaseException) -> str:
+    """Log a failed run and return the ``result.json`` error text. A
+    :class:`TrainWorkerError` is ours (written to never quote data) and
+    keeps its message; anything else (a library error) could quote a
+    dataset row, so only its type name is stored and logged, plus the
+    traceback's file/line/function frames -- no values -- at DEBUG."""
+    if isinstance(e, TrainWorkerError):
+        logger.error("writer train failed: %s", e)
+        return str(e) or type(e).__name__
+    name = type(e).__name__
+    logger.error("writer train failed: unexpected %s", name)
+    if logger.isEnabledFor(logging.DEBUG):
+        frames = traceback.extract_tb(e.__traceback__)
+        logger.debug(
+            "writer train %s at: %s",
+            name,
+            " <- ".join(
+                f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames)
+            ),
+        )
+    return (
+        f"unexpected {name} in the training worker (its message is not kept: "
+        "it could quote training data)"
+    )
+
+
 def main(argv: List[str]) -> int:
     logging.basicConfig(
         stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(message)s"
@@ -1217,14 +1240,11 @@ def main(argv: List[str]) -> int:
         task = parse_task(raw)
         code, result = execute(task)
     except Exception as e:
-        if isinstance(e, TrainWorkerError):
-            logger.error("writer train failed: %s", e)
-        else:
-            logger.exception("writer train failed")
+        error = _report_failure(e)
         out = raw.get("out_dir") if isinstance(raw, dict) else None
         if isinstance(out, str) and out:
             res = _blank_result()
-            res["error"] = str(e) or repr(e)
+            res["error"] = error
             try:
                 write_json_atomic(Path(out) / RESULT_NAME, res)
             except OSError:

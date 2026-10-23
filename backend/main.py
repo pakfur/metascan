@@ -481,6 +481,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     comfy_client.on_job_event(t2i_runner.handle_job_event)
     t2i.set_t2i_runner(t2i_runner)
 
+    # Writer-adapter scorecards: base vs adapter on fixed briefs, judged
+    # blind; started from the training window or after a completed run.
+    scorecard_service = ScorecardService(
+        get_db(),
+        t2i_runner,
+        broadcast=lambda event, data: ws_manager.broadcast_sync(
+            "training", event, data
+        ),
+        get_config=lambda: get_t2i_config(load_app_config()),
+    )
+    await scorecard_service.recover()
+    set_scorecard_service(scorecard_service)
+
+    # Writer LoRA training: one run at a time, holding the GPU (every GPU
+    # consumer answers 409 gpu_busy_training meanwhile). Installed (and
+    # recover() run, which stops a provably-ours orphaned worker a hard-
+    # killed server left training) BEFORE any CLIP / VLM preload spawns.
+    training_manager = _build_training_manager(
+        db=get_db(),
+        data_dir=get_data_dir(),
+        comfy_client=comfy_client,
+        t2i_runner=t2i_runner,
+        inference_client=client,
+        vlm_roles=vlm_roles,
+        on_completed=scorecard_service.on_training_completed,
+    )
+    await _install_training(training_manager)
+
     # Preload the inference worker eagerly when the user has opted in for
     # the currently-selected CLIP model. Non-blocking so the server comes
     # up immediately.
@@ -580,32 +608,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     similarity.set_generation_busy_probe(
         lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client)
     )
-
-    # Writer-adapter scorecards: base vs adapter on fixed briefs, judged
-    # blind; started from the training window or after a completed run.
-    scorecard_service = ScorecardService(
-        get_db(),
-        t2i_runner,
-        broadcast=lambda event, data: ws_manager.broadcast_sync(
-            "training", event, data
-        ),
-        get_config=lambda: get_t2i_config(load_app_config()),
-    )
-    await scorecard_service.recover()
-    set_scorecard_service(scorecard_service)
-
-    # Writer LoRA training: one run at a time, holding the GPU (every GPU
-    # consumer answers 409 gpu_busy_training meanwhile).
-    training_manager = _build_training_manager(
-        db=get_db(),
-        data_dir=get_data_dir(),
-        comfy_client=comfy_client,
-        t2i_runner=t2i_runner,
-        inference_client=client,
-        vlm_roles=vlm_roles,
-        on_completed=scorecard_service.on_training_completed,
-    )
-    await _install_training(training_manager)
 
     try:
         yield

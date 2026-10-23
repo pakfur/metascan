@@ -286,9 +286,12 @@ async def test_an_idle_writer_restarts_at_once_without_a_deleted_adapter(
         await _ask(client, lora_path=a)
 
 
-async def test_deleting_an_adapter_while_a_request_is_in_flight_defers_the_restart(
+async def test_a_refused_withdraw_keeps_the_adapter_usable(
     setup: Any,
 ) -> None:
+    # The DELETE answers 409 adapter_files_busy when the writer still maps
+    # the GGUF: the adapter was NOT deleted, so it must stay servable (no
+    # withdrawn id left behind, no restart without it).
     build, _source, rec, a, b = setup
     roles = build(reply_delay_ms=600)
     await roles.refresh_adapters()
@@ -298,16 +301,15 @@ async def test_deleting_an_adapter_while_a_request_is_in_flight_defers_the_resta
     await _until(lambda: client.in_flight == 1, "the request to start")
 
     assert await roles.withdraw_adapter(1) is False  # still mapped
-    assert roles.restart_pending
-    assert client.state == "ready"
-    # The in-flight request still runs on the adapter it asked for.
+    assert roles._withdrawn == set()
+    assert roles.adapter_path(1) == a
+    assert client.lora_paths == (a, b)
     assert await task == "SYNTH prompt"
-    assert rec.bodies()[0]["lora"] == [{"id": 0, "scale": 1.0}]
-    await _until(lambda: not roles.restart_pending, "the deferred restart")
-    assert client.state == "stopped"
-    assert roles.adapter_path(1) is None
-    await _ask(client)
-    assert [_loras_of(s) for s in rec.spawns()] == [[str(a), str(b)], [str(b)]]
+    await _until(lambda: not roles.restart_pending, "any pending restart")
+    assert client.state == "ready"
+    # Still served on the same server: no respawn without it.
+    assert await _ask(client, lora_path=a) == "SYNTH prompt"
+    assert len(rec.spawns()) == 1
 
 
 async def test_a_hold_defers_the_restart_until_it_ends(setup: Any) -> None:
@@ -458,7 +460,8 @@ async def test_withdrawing_an_adapter_a_loading_writer_has_is_refused(
     client._loaded_lora_paths = (a,)
     try:
         assert await roles.withdraw_adapter(1) is False
-        assert roles.restart_pending and client.lora_paths == ()
+        # Refused: the adapter stays on the list (nothing deleted).
+        assert roles._withdrawn == set() and client.lora_paths == (a,)
     finally:
         client._state = "stopped"
         await roles.shutdown_all()

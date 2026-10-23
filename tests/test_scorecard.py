@@ -156,6 +156,34 @@ def test_results_math() -> None:
     assert out["mean_score_adapter"] == pytest.approx((0.8 + 0.4 + 1.0) / 3)
 
 
+def test_a_brief_rendered_twice_counts_once_with_its_latest_batch() -> None:
+    # A resumed scorecard re-rendered brief 0 while its first batch was
+    # still queued; both batches ingested. One pair per (scorecard, brief):
+    # the most recent batch holding both images.
+    a = adapter_writer_id(7)
+
+    def row(batch: str, writer: str, index: Optional[int], **kw: Any) -> Any:
+        return {**_row(batch, writer, **kw), "scorecard_id": "c", "brief_index": index}
+
+    rows = [
+        row("old", "base", 0, fav=True),
+        row("old", a, 0, fav=True),
+        row("b1", "base", 1, passed=True),
+        row("b1", a, 1, fav=True),
+        row("new", "base", 0, passed=True),
+        row("new", a, 0, passed=True),
+        # A later batch of brief 1 with only one image: the complete one stays.
+        row("half", a, 1, fav=True),
+        # Another scorecard's brief 0 is its own pair.
+        {**row("other", "base", 0, fav=True), "scorecard_id": "d"},
+        {**row("other", a, 0, fav=True), "scorecard_id": "d"},
+    ]
+    out = sc.compute_results(rows, 7)
+    assert (out["n_pairs"], out["n_judged"]) == (3, 3)
+    assert (out["fav_base"], out["fav_adapter"]) == (1, 2)
+    assert sc._paired_briefs(rows, 7) == {0, 1}
+
+
 def test_results_with_nothing_judged_are_null() -> None:
     out = sc.compute_results([_row("b1", "base"), _row("b1", "adapter:7")], 7)
     assert out["n_pairs"] == 1 and out["n_judged"] == 0
@@ -503,6 +531,34 @@ class TestScorecardRun(ScorecardCase):
         self.assertEqual(fresh["todo"], 3)
         await self.service.wait()
 
+    async def test_resume_skips_a_brief_whose_render_is_still_queued(self) -> None:
+        path = self.briefs_file("A quiet harbour", "A red kite", "A tin lantern")
+        self.service = self.make_service(path)
+        self.fail_jobs = {2, 4}  # briefs 1 and 2 lose an image
+        self.autorender()
+        card = (await self.service.start(self.adapter))["scorecard_id"]
+        await self.service.wait()
+        self.assertEqual(self.db.get_scorecard(card)["done"], 1)
+        # Brief 1's batch is still queued in ComfyUI (e.g. it survived a
+        # restart): re-rendering it would pair the brief twice.
+        job = self.db.create_generation_job(self.plain, "{}")
+        self.db.add_scorecard_job(job, "queued-batch", card, 1, "base", BASE, 0)
+        again = await self.service.start(self.adapter)
+        self.assertTrue(again["resumed"])
+        self.assertEqual(again["todo"], 1)
+        await self.service.wait()
+        captions = {r["caption"] for r in _rows(self.db)[3:]}
+        self.assertEqual(captions, {"A tin lantern"})
+        # Only the queued brief is left: nothing to render now.
+        with self.assertRaises(sc.ScorecardError) as caught:
+            await self.service.start(self.adapter)
+        self.assertEqual(caught.exception.code, "scorecard_pending")
+        # Once the job ends, the brief renders again.
+        self.db.update_generation_job(job, state="failed")
+        again = await self.service.start(self.adapter)
+        self.assertEqual((again["resumed"], again["todo"]), (True, 1))
+        await self.service.wait()
+
     async def test_only_one_scorecard_at_a_time_and_cancel(self) -> None:
         assert self.vlm is not None
         gate = asyncio.Event()
@@ -686,6 +742,16 @@ class TestTrainingHook(ScorecardCase):
         (failed,) = self.sent_events("scorecard_failed")
         self.assertEqual(failed["adapter_id"], self.adapter)
         self.assertEqual(failed["code"], "gpu_busy_training")
+
+    async def test_no_scorecard_starts_while_the_app_is_closing(self) -> None:
+        self.service._closing = True
+        with self.assertRaises(sc.ScorecardError) as caught:
+            await self.service.start(self.adapter)
+        self.assertEqual(caught.exception.code, "shutting_down")
+        # The post-training hook skips quietly: no scorecard_failed noise.
+        await self.service.on_training_completed(self.adapter, True)
+        self.assertEqual(self.sent_events("scorecard_failed"), [])
+        self.assertEqual(self.db.list_scorecards(self.adapter), [])
 
     async def test_training_is_refused_while_a_scorecard_runs(self) -> None:
         from backend.main import _build_training_manager
