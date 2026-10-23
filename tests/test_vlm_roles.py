@@ -842,7 +842,7 @@ async def test_an_eviction_during_a_request_is_retried() -> None:
     client._state = STATE_READY
     started: List[str] = []
 
-    async def ensure() -> None:
+    async def ensure(*, since: Optional[int] = None) -> None:
         started.append(str(client.preferred_model_id))
         client._state = STATE_READY
         client._stopping = False
@@ -1094,3 +1094,272 @@ async def test_an_explicit_unload_aborts_a_pending_re_ensure(tmp_path: Path) -> 
             assert general.state == "stopped"
         finally:
             await roles.shutdown_all()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4: unload during a swap's wait, abandoned loads, reload backoff
+# ---------------------------------------------------------------------------
+
+
+def _spawn_counting_factory(urls: Dict[str, str], spawned: List[str]):
+    def make() -> VlmClient:
+        def spawn(mid: str) -> str:
+            spawned.append(mid)
+            return urls[mid]
+
+        return VlmClient(spawn_override=spawn)
+
+    return make
+
+
+async def test_an_explicit_unload_during_the_swap_wait_wins(tmp_path: Path) -> None:
+    """ComfyUI unloads general while the writer's _make_room is waiting for
+    general's in-flight request: the eviction that follows must not mark
+    the stopped client swapped_out, or the tag pump respawns it mid-render."""
+    img = _png(tmp_path)
+    async with FakeLlamaServer(canned_response=_TAGS) as w, FakeLlamaServer(
+        canned_response=_TAGS
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        spawned: List[str] = []
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=_spawn_counting_factory(urls, spawned),
+            vram_gb=24.0,
+            idle_timeout_s=5.0,
+            swap_grace_s=0.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await general.ensure_started("qwen38-27b")
+            general._begin_request()  # a tag request in flight
+            take_over = asyncio.create_task(writer.ensure_started("qwen3vl-8b"))
+            await asyncio.sleep(0.3)  # _make_room sits in wait_idle
+            assert general.state == "ready"
+            await general.shutdown()  # unload for ComfyUI
+            general._end_request()
+            await asyncio.wait_for(take_over, 10)
+            assert writer.state == "ready"
+            assert general.swapped_out is False
+            assert general.state == "stopped"
+            # The next tag request (the pump's) must not bring it back.
+            with pytest.raises(RuntimeError, match="not ready"):
+                await general.generate_tags(img)
+            assert spawned.count("qwen38-27b") == 1
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_evicting_a_stopped_client_does_not_mark_it_swapped_out() -> None:
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    await client.evict()
+    assert client.swapped_out is False
+    await client.start("qwen3vl-8b", wait_ready=False)
+    await client.shutdown()
+    await client.evict()
+    assert client.swapped_out is False
+
+
+async def test_a_request_begun_before_an_explicit_unload_never_respawns(
+    tmp_path: Path,
+) -> None:
+    """The request's own re-ensure (after a forced eviction mid-call) honours
+    an explicit unload that landed after the request began."""
+    from metascan.core.vlm_client import STATE_READY
+
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    client._state = STATE_READY
+    calls: List[int] = []
+
+    async def impl(path: Any, *, timeout: float = 60.0) -> List[str]:
+        calls.append(1)
+        await client.shutdown()  # ComfyUI unload lands mid-request ...
+        client._evictions += 1  # ... and so does a forced eviction
+        client.swapped_out = True
+        return []
+
+    client._generate_tags_impl = impl  # type: ignore[method-assign]
+    with pytest.raises(VlmError, match="unloaded"):
+        await client.generate_tags(Path("x.png"))
+    assert len(calls) == 1
+    assert client.state == "stopped"
+
+
+async def test_a_timed_out_start_is_not_a_zombie_load() -> None:
+    async with FakeLlamaServer(health_fails_forever=True) as srv:
+        client = VlmClient(spawn_override=lambda mid: srv.base_url)
+        with pytest.raises(TimeoutError):
+            await client.start("qwen3vl-8b", ready_timeout=0.3)
+        assert client.state == "error"
+        assert "did not become ready" in (client.last_error or "")
+        t0 = time.monotonic()
+        assert await client.wait_loaded(5.0) is True
+        assert await client.wait_idle(5.0) is True
+        assert time.monotonic() - t0 < 1.0
+        await client.shutdown()
+
+
+async def test_a_dead_health_probe_is_not_a_load_in_progress() -> None:
+    from metascan.core.vlm_client import STATE_LOADING
+
+    client = VlmClient()
+    client._state = STATE_LOADING
+
+    async def noop() -> None:
+        return None
+
+    client._health_task = asyncio.create_task(noop())
+    await asyncio.sleep(0)
+    assert client._health_task.done()
+    t0 = time.monotonic()
+    assert await client.wait_loaded(5.0) is True
+    assert await client.wait_idle(5.0) is True
+    assert time.monotonic() - t0 < 1.0
+
+
+async def test_the_swap_does_not_wait_for_an_abandoned_load() -> None:
+    async with FakeLlamaServer(canned_response=_TAGS) as w, FakeLlamaServer(
+        health_fails_forever=True
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=lambda: VlmClient(spawn_override=lambda mid: urls[mid]),
+            vram_gb=24.0,
+            idle_timeout_s=0.2,
+            swap_grace_s=0.0,
+            load_timeout_s=30.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            with pytest.raises(TimeoutError):
+                await general.start("qwen38-27b", ready_timeout=0.3)
+            t0 = time.monotonic()
+            await asyncio.wait_for(writer.ensure_started("qwen3vl-8b"), 10)
+            assert time.monotonic() - t0 < 2.0
+            assert writer.state == "ready"
+        finally:
+            await roles.shutdown_all()
+
+
+async def test_a_failing_reload_backs_off_instead_of_thrashing_the_writer(
+    tmp_path: Path,
+) -> None:
+    from metascan.core import vlm_client as vc
+
+    img = _png(tmp_path)
+    async with FakeLlamaServer(canned_response=_TAGS) as w, FakeLlamaServer(
+        canned_response=_TAGS
+    ) as g:
+        urls = {"qwen3vl-8b": w.base_url, "qwen38-27b": g.base_url}
+        spawned: List[str] = []
+        fail_general_reloads = {"on": True}
+
+        def make() -> VlmClient:
+            def spawn(mid: str) -> str:
+                spawned.append(mid)
+                return urls[mid]
+
+            c = VlmClient(spawn_override=spawn)
+            probe = c._health_probe_loop
+
+            async def maybe_failing_probe() -> None:
+                # General's reloads crash on load (bad GBNF, OOM, ...).
+                if c.preferred_model_id == "qwen38-27b" and fail_general_reloads["on"]:
+                    if spawned.count("qwen38-27b") > 1:
+                        c._last_error = "crashed on load"
+                        c._ready_event.set()
+                        c._set_state(vc.STATE_ERROR, error=c._last_error)
+                        return
+                await probe()
+
+            c._health_probe_loop = maybe_failing_probe  # type: ignore[method-assign]
+            return c
+
+        roles = VlmRoles(
+            writer="qwen3vl-8b",
+            general="qwen38-27b",
+            client_factory=make,
+            vram_gb=24.0,
+            idle_timeout_s=0.2,
+            swap_grace_s=0.0,
+        )
+        writer, general = roles.client("writer"), roles.client("general")
+        try:
+            await general.ensure_started("qwen38-27b")
+            await writer.ensure_started("qwen3vl-8b")
+            assert general.swapped_out is True
+            # First reload: evicts the writer, then fails on load.
+            with pytest.raises(RuntimeError):
+                await general.generate_tags(img)
+            assert spawned.count("qwen38-27b") == 2
+            assert writer._evictions == 1
+            assert general.swapped_out is True  # still swappable
+            # Inside the backoff: fail fast, no spawn, writer left alone.
+            writer_back = asyncio.create_task(writer.ensure_started("qwen3vl-8b"))
+            await writer_back
+            t0 = time.monotonic()
+            with pytest.raises(VlmError, match="retry"):
+                await general.generate_tags(img)
+            assert time.monotonic() - t0 < 0.5
+            assert spawned.count("qwen38-27b") == 2
+            assert writer._evictions == 1
+            assert writer.state == "ready"
+            # After the backoff a reload is tried again and may succeed.
+            fail_general_reloads["on"] = False
+            await asyncio.sleep(vc._RESPAWN_BACKOFF_SECONDS[0] + 0.1)
+            assert await general.generate_tags(img)
+            assert spawned.count("qwen38-27b") == 3
+            assert general.swapped_out is False
+        finally:
+            await roles.shutdown_all()
+
+
+def test_reload_backoff_grows_and_resets() -> None:
+    from metascan.core import vlm_client as vc
+
+    client = VlmClient()
+    assert client._reload_backoff_remaining() == 0.0
+    client._note_reload_failure()
+    assert 0 < client._reload_backoff_remaining() <= vc._RESPAWN_BACKOFF_SECONDS[0]
+    client._note_reload_failure()
+    client._note_reload_failure()
+    client._note_reload_failure()
+    assert client._reload_backoff_remaining() > vc._RESPAWN_BACKOFF_SECONDS[1]
+    client._reload_failures = 0
+    client._reload_failed_at = None
+    assert client._reload_backoff_remaining() == 0.0
+
+
+async def test_a_load_evicted_right_after_ready_still_counts_as_loaded() -> None:
+    """The other role may evict this client between its /health flipping
+    READY and the loader's own waiter resuming (swap_grace_s=0 makes it
+    likely): the load succeeded, so the start returns -- the next request
+    re-ensures -- instead of raising "ended in state stopped"."""
+    from metascan.core.vlm_client import STATE_READY
+
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    await client.start("qwen3vl-8b", wait_ready=False)
+    # The probe flips READY ...
+    client._ready_seen = True
+    client._set_state(STATE_READY)
+    # ... and the other role evicts it before the waiter resumes.
+    await client.evict()
+    client._ready_event.set()  # the waiter was already woken
+    await asyncio.wait_for(client._wait_ready(5.0), 5)
+    assert client.state == "stopped" and client.swapped_out is True
+
+
+async def test_a_load_evicted_before_ready_still_raises() -> None:
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    await client.start("qwen3vl-8b", wait_ready=False)
+    await client.evict()  # a forced eviction of a load that never ended
+    client._ready_event.set()
+    with pytest.raises(RuntimeError, match="ended in state stopped"):
+        await asyncio.wait_for(client._wait_ready(5.0), 5)

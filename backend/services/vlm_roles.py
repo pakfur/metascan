@@ -376,6 +376,9 @@ class VlmRoles:
                     continue
                 if getattr(other, "state", None) not in _RESIDENT_STATES:
                     continue
+                # An explicit shutdown (ComfyUI unload, /unload) landing
+                # during the waits below wins: it is re-checked afterwards.
+                stops_before = getattr(other, "_explicit_stops", None)
                 # Never evict a load in progress: wait for it (bounded by
                 # the load timeout); the swap grace then lets the requests
                 # that waited for it run before it can go.
@@ -396,6 +399,22 @@ class VlmRoles:
                         self._idle_timeout_s,
                         client.preferred_model_id,
                     )
+                if getattr(other, "state", None) not in _RESIDENT_STATES:
+                    # Stopped (or failed) meanwhile -- nothing to evict, and
+                    # evict() must not mark it swapped_out behind an
+                    # explicit unload's back.
+                    continue
+                if getattr(other, "_explicit_stops", None) != stops_before:
+                    # Explicitly unloaded and started again while we waited:
+                    # a deliberate load, leave it alone (co-resident for
+                    # now) rather than undo it behind the caller's back.
+                    logger.warning(
+                        "VLM %s was explicitly reloaded while %s waited for "
+                        "it; not evicting it",
+                        other.model_id,
+                        client.preferred_model_id,
+                    )
+                    continue
                 logger.info(
                     "VLM roles take turns: unloading %s for %s",
                     other.model_id,

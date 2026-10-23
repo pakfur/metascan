@@ -111,6 +111,14 @@ class VlmClient:
         # began before one must not spawn after it (an unload for ComfyUI
         # wins over a swap back).
         self._explicit_stops = 0
+        # Failed background reloads (a swapped-out model that would not
+        # come back): requests inside the backoff fail fast instead of
+        # evicting the other role again for every attempt.
+        self._reload_failures = 0
+        self._reload_failed_at: Optional[float] = None
+        # True once the current load reached READY: a client evicted
+        # between that and its loader's waiter resuming did load.
+        self._ready_seen = False
         # Cleared for the whole of an eviction's shutdown: a request or a
         # re-ensure waits for it instead of hitting the dying server.
         self._quiesced = asyncio.Event()
@@ -254,6 +262,8 @@ class VlmClient:
         self._last_progress = {}
         self._ready_event.clear()
         self._stopping = False
+        self._health_task = None
+        self._ready_seen = False
         self._set_state(STATE_SPAWNING)
 
         if self._spawn_override is not None:
@@ -328,14 +338,24 @@ class VlmClient:
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
         except asyncio.TimeoutError as e:
-            # Cancel the background /health probe — otherwise it keeps polling
-            # for up to 600s after the caller has already given up, holding
-            # the httpx client open.
-            if self._health_task is not None and not self._health_task.done():
-                self._health_task.cancel()
-            raise TimeoutError(
-                f"llama-server did not become ready within {timeout:.0f}s"
-            ) from e
+            msg = f"llama-server did not become ready within {timeout:.0f}s"
+            if self._state in (STATE_SPAWNING, STATE_LOADING):
+                # The load is abandoned: tear the process down and land in
+                # ERROR rather than leaving a zombie LOADING (its /health
+                # probe cancelled, the process alive) that wait_loaded /
+                # wait_idle would wait out for the full load timeout.
+                logger.error("%s; stopping it", msg)
+                self._last_error = msg
+                await self._stop()
+                self._set_state(STATE_ERROR, error=msg)
+            raise TimeoutError(msg) from e
+        if self._state == STATE_READY:
+            return
+        if self._ready_seen and self.swapped_out and self._state == STATE_STOPPED:
+            # Loaded, then evicted for the other role before this waiter
+            # resumed: the start succeeded; the next request re-ensures.
+            logger.info("VLM %s loaded and was swapped out at once", self._model_id)
+            return
         if self._state != STATE_READY:
             raise RuntimeError(
                 f"llama-server ended in state {self._state}: "
@@ -354,6 +374,9 @@ class VlmClient:
                 r = await self._http.get("/health")
                 if r.status_code == 200:
                     self._respawn_attempts = 0
+                    self._reload_failures = 0
+                    self._reload_failed_at = None
+                    self._ready_seen = True
                     # Resident again; the swap grace counts from here so the
                     # requests that waited for this load run before the
                     # other role can evict it.
@@ -365,6 +388,12 @@ class VlmClient:
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0.1)
+        if self._stopping or self._state != STATE_LOADING:
+            return
+        self._last_error = "llama-server /health never returned 200"
+        logger.error(self._last_error)
+        self._ready_event.set()
+        self._set_state(STATE_ERROR, error=self._last_error)
 
     async def swap_model(
         self,
@@ -390,7 +419,12 @@ class VlmClient:
         ``_quiesced`` cleared), so a request killed by the terminate -- or
         one that starts meanwhile -- waits and re-ensures instead of hitting
         the dying server. An explicit ``shutdown()`` landing meanwhile
-        clears ``swapped_out`` and wins."""
+        clears ``swapped_out`` and wins. A client that is not resident
+        (already stopped by an explicit shutdown, in error) is left alone:
+        marking it ``swapped_out`` would let its next request bring it
+        back behind that shutdown's back."""
+        if self._state not in (STATE_SPAWNING, STATE_LOADING, STATE_READY):
+            return
         self._evictions += 1
         self.swapped_out = True
         self._quiesced.clear()
@@ -406,11 +440,21 @@ class VlmClient:
             and self._quiesced.is_set()
         )
 
+    def _is_loading(self) -> bool:
+        """Spawning or loading with a live /health probe. A LOADING state
+        whose probe task has finished (cancelled, crashed) is abandoned,
+        not in progress."""
+        if self._state == STATE_SPAWNING:
+            return True
+        if self._state != STATE_LOADING:
+            return False
+        return self._health_task is None or not self._health_task.done()
+
     async def wait_loaded(self, timeout: float) -> bool:
         """Wait up to ``timeout`` s for a spawn / load in progress to end.
         True when it is no longer spawning or loading."""
         deadline = time.monotonic() + timeout
-        while self._state in (STATE_SPAWNING, STATE_LOADING):
+        while self._is_loading():
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.02)
@@ -553,7 +597,7 @@ class VlmClient:
             now = time.monotonic()
             if (
                 self._in_flight == 0
-                and self._state not in (STATE_SPAWNING, STATE_LOADING)
+                and not self._is_loading()
                 and now - self._last_request_end >= grace
             ):
                 return True
@@ -561,11 +605,26 @@ class VlmClient:
                 return False
             await asyncio.sleep(min(0.02, max(0.0, deadline - now)))
 
-    async def _ensure_resident(self) -> None:
+    def _reload_backoff_remaining(self) -> float:
+        """Seconds until a failed background reload may be tried again."""
+        if self._reload_failed_at is None or self._reload_failures == 0:
+            return 0.0
+        idx = min(self._reload_failures, len(_RESPAWN_BACKOFF_SECONDS)) - 1
+        backoff = _RESPAWN_BACKOFF_SECONDS[idx]
+        return max(0.0, self._reload_failed_at + backoff - time.monotonic())
+
+    def _note_reload_failure(self) -> None:
+        self._reload_failures += 1
+        self._reload_failed_at = time.monotonic()
+
+    async def _ensure_resident(self, *, since: Optional[int] = None) -> None:
         """Bring a swapped-out model back (background re-ensure). Waits out
         an eviction in progress; gives up when an explicit shutdown landed
-        since it began."""
-        stops = self._explicit_stops
+        after ``since`` (an ``_explicit_stops`` value captured when the
+        request began; default: now). A reload that failed is not retried
+        inside its backoff: the request fails fast rather than evicting
+        the other role again for every attempt."""
+        stops = self._explicit_stops if since is None else since
         await self._quiesced.wait()
         if self.retired:
             raise VlmError("client retired")
@@ -574,15 +633,28 @@ class VlmClient:
                 return
             if self._explicit_stops != stops:
                 raise VlmError("VLM was unloaded; not bringing it back")
+            remaining = self._reload_backoff_remaining()
+            if remaining > 0:
+                raise VlmError(
+                    f"VLM reload failed {self._reload_failures}x "
+                    f"({self._last_error or 'no error reported'}); "
+                    f"retry in {remaining:.0f}s"
+                )
             model_id = self.preferred_model_id
             assert model_id is not None
-            await self.start(model_id, wait_ready=True, _unless_stopped_since=stops)
+            try:
+                await self.start(model_id, wait_ready=True, _unless_stopped_since=stops)
+            except Exception:
+                if self._state != STATE_READY and self._explicit_stops == stops:
+                    self._note_reload_failure()
+                raise
 
     async def _resident_request(self, call: Callable[[], Awaitable[_T]]) -> _T:
         """Run one request, bringing the model back first when VlmRoles
         swapped this client out for the other role -- and again if it was
         swapped out while the request (or its re-ensure) ran."""
         attempt = 0
+        stops = self._explicit_stops
         while True:
             epoch = self._evictions
             try:
@@ -591,7 +663,7 @@ class VlmClient:
                     and self.preferred_model_id
                     and not self._is_resident()
                 ):
-                    await self._ensure_resident()
+                    await self._ensure_resident(since=stops)
                     epoch = self._evictions
                 self._begin_request()
                 try:
