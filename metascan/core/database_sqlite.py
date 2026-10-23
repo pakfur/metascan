@@ -5500,6 +5500,94 @@ class DatabaseManager:
 
         return Path(path).suffix.lower() not in VIDEO_EXTENSIONS
 
+    def favorite_prompt_candidates(
+        self, paths: List[str], model_id: Optional[str] = None
+    ) -> Dict[str, str]:
+        """``{posix_path: prompt}`` for the favorited images among ``paths``
+        whose prompt is known: ``t2i_images.prompt_used`` first, else the
+        library metadata prompt. Videos and blank prompts are left out.
+
+        With ``model_id`` (a ``MODEL_PROFILES`` id) only items of that model
+        family are kept; the rule is ``taste_examples.matches_model_family``'s
+        module docstring. Cheap by construction: ``is_favorite`` is read from
+        the covering summary index (the ``data`` blob sits before it in the
+        row), and ``data`` is opened only for favorited library items that
+        have no T2I prompt. Callers pass a bounded list (a FAISS top-k)."""
+        from metascan.core.taste_examples import is_image_path, matches_model_family
+
+        wanted = list(
+            dict.fromkeys(to_posix_path(p) for p in paths if is_image_path(str(p)))
+        )
+        if not wanted:
+            return {}
+        out: Dict[str, str] = {}
+        chunk = 500
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(wanted), chunk):
+                part = wanted[start : start + chunk]
+                marks = ",".join("?" * len(part))
+                favorites = [
+                    r["file_path"]
+                    for r in conn.execute(
+                        "SELECT file_path FROM media "
+                        "INDEXED BY idx_media_summary_added "
+                        f"WHERE is_favorite = 1 AND file_path IN ({marks})",
+                        part,
+                    )
+                ]
+                if not favorites:
+                    continue
+                fmarks = ",".join("?" * len(favorites))
+                t2i: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+                    r["file_path"]: (r["model"], r["prompt_used"])
+                    for r in conn.execute(
+                        "SELECT file_path, model, prompt_used FROM t2i_images "
+                        f"WHERE file_path IN ({fmarks})",
+                        favorites,
+                    )
+                }
+                # Metadata model names, only where no T2I row names the model.
+                models: Dict[str, List[str]] = {}
+                unnamed = [p for p in favorites if not t2i.get(p, (None, None))[0]]
+                if model_id is not None and unnamed:
+                    umarks = ",".join("?" * len(unnamed))
+                    for r in conn.execute(
+                        "SELECT file_path, index_key FROM indices "
+                        f"WHERE index_type = 'model' AND file_path IN ({umarks})",
+                        unnamed,
+                    ):
+                        models.setdefault(r["file_path"], []).append(r["index_key"])
+
+                def family_ok(path: str) -> bool:
+                    if model_id is None:
+                        return True
+                    t2i_model = t2i.get(path, (None, None))[0]
+                    if t2i_model:
+                        return t2i_model == model_id
+                    return matches_model_family(models.get(path, []), model_id)
+
+                kept = [p for p in favorites if family_ok(p)]
+                need = [
+                    p for p in kept if not (t2i.get(p, (None, None))[1] or "").strip()
+                ]
+                metadata: Dict[str, str] = {}
+                if need:
+                    nmarks = ",".join("?" * len(need))
+                    for r in conn.execute(
+                        "SELECT file_path, json_extract(data, '$.prompt') AS prompt "
+                        f"FROM media WHERE file_path IN ({nmarks})",
+                        need,
+                    ):
+                        if isinstance(r["prompt"], str) and r["prompt"].strip():
+                            metadata[r["file_path"]] = r["prompt"]
+                for p in kept:
+                    used = t2i.get(p, (None, None))[1]
+                    if used and used.strip():
+                        out[p] = used
+                    elif p in metadata:
+                        out[p] = metadata[p]
+        return out
+
     def taste_training_raw(self) -> Dict[str, Any]:
         """Raw rows for ``taste_labels.build_label_set``: live images and
         tombstoned images only (videos are never training data)."""

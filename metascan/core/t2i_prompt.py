@@ -22,7 +22,7 @@ are never touched.
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from metascan.core.meta_prompt_templates import split_negative_block
 from metascan.core.prompt_store import get_prompt_store
@@ -44,9 +44,10 @@ _FALLBACK_NEGATIVE_KEYS: Dict[str, str] = {
     "qwen": "T2I_FALLBACK_NEGATIVE_QWEN",
 }
 
-_USER_TEMPLATE = "DESCRIPTION:\n{description}\n\nWrite the prompt now."
+_CLOSING = "Write the prompt now."
+_USER_TEMPLATE = "DESCRIPTION:\n{description}\n\n" + _CLOSING
 _USER_TEMPLATE_DIRECTED = (
-    "DESCRIPTION:\n{description}\n\nDIRECTION:\n{direction}\n\nWrite the prompt now."
+    "DESCRIPTION:\n{description}\n\nDIRECTION:\n{direction}\n\n" + _CLOSING
 )
 
 
@@ -55,6 +56,8 @@ def compose_t2i_prompts(
     resolved_caption: str,
     content_mode: str,
     direction: Optional[str] = None,
+    angle: Optional[str] = None,
+    examples: Sequence[str] = (),
 ) -> Tuple[str, str]:
     """Return ``(system_prompt, user_prompt)`` for ``VlmClient.generate_text``.
 
@@ -63,6 +66,13 @@ def compose_t2i_prompts(
     ``default`` adds nothing. The caption goes into the user turn verbatim.
     A non-blank ``direction`` (caption directions, ``t2i_directions``) adds a
     DIRECTION block after it; without one the user turn is unchanged.
+
+    A non-blank ``angle`` (a variant's ``T2I_VARIANT_ANGLES`` entry) adds an
+    ``ANGLE: lead with <angle>`` line before the closing line. Non-blank
+    ``examples`` (taste guidance) add an ``EXAMPLES:`` block, the
+    ``T2I_EXAMPLES_PREAMBLE`` and the numbered examples, after the style
+    guide and before the directive. With neither, both prompts are exactly
+    what they were before these arguments existed.
     """
     if content_mode not in CONTENT_MODES:
         raise ValueError(
@@ -72,14 +82,32 @@ def compose_t2i_prompts(
     store = get_prompt_store()
     system = store.get("T2I_CAPTION_PREAMBLE").rstrip() + "\n\n"
     system += store.get(profile.meta_key)
+    shown = [" ".join(e.split()) for e in examples if e and e.strip()]
+    if shown:
+        numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(shown, 1))
+        system = (
+            system.rstrip()
+            + "\n\nEXAMPLES:\n"
+            + store.get("T2I_EXAMPLES_PREAMBLE").strip()
+            + "\n\n"
+            + numbered
+        )
     directive_key = _DIRECTIVE_KEYS.get(content_mode)
     if directive_key is not None:
         system += store.get(directive_key)
     if direction is not None and direction.strip():
-        return system, _USER_TEMPLATE_DIRECTED.format(
+        user = _USER_TEMPLATE_DIRECTED.format(
             description=resolved_caption, direction=direction.strip()
         )
-    return system, _USER_TEMPLATE.format(description=resolved_caption)
+    else:
+        user = _USER_TEMPLATE.format(description=resolved_caption)
+    if angle is not None and angle.strip():
+        # The closing line ends every template; splice in front of it (a
+        # caption may itself contain the closing words).
+        user = (
+            user[: -len(_CLOSING)] + f"ANGLE: lead with {angle.strip()}\n\n" + _CLOSING
+        )
+    return system, user
 
 
 def strip_parentheses(text: str) -> str:
