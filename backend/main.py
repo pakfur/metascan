@@ -59,6 +59,7 @@ from backend.api.vlm import (
     get_all_vlm_clients,
     get_vlm_client,
     get_vlm_roles,
+    get_writer_adapter_path,
     get_writer_vlm,
     set_vlm_roles,
 )
@@ -74,6 +75,7 @@ from metascan.core.t2i_directions import DIRECTIONS_DIRNAME, SnippetCache
 from metascan.core.t2i_wildcards import LibraryCache
 from metascan.core.taste_runner import TasteRunner
 from metascan.core.vlm_select import vlm_model_installed
+from metascan.core.writer_adapters import servable_adapter_files
 from metascan.core.scanner import Scanner
 from metascan.utils.app_paths import get_data_dir
 from metascan.utils.log_files import install_server_log
@@ -259,9 +261,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # roles; one client when both name the same model. Resolving defaults
     # probes the hardware and the installed weights, so off the loop.
     vlm_roles = await asyncio.to_thread(
-        VlmRoles.from_config, app_config, client_factory=_new_vlm_client
+        VlmRoles.from_config,
+        app_config,
+        client_factory=_new_vlm_client,
+        adapter_source=lambda: servable_adapter_files(get_db(), get_data_dir()),
     )
     set_vlm_roles(vlm_roles)
+    # Prompt-writer adapters: the writer's llama-server loads them all.
+    await vlm_roles.refresh_adapters()
 
     comfy_cfg = get_comfy_config(app_config)
     comfy_client = ComfyClient(
@@ -301,6 +308,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         get_vlm=get_writer_vlm,
         output_root=Path(comfy_cfg["output_root"]),
         vlm_installed=vlm_model_installed,
+        writer_adapter=get_writer_adapter_path,
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -326,6 +334,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
         # "base+taste": favorite prompts as examples, CLIP only when ready.
         taste_examples=TasteExamplesService(get_db()).examples_for,
+        # "adapter:<id>": the writer's llama-server serves the adapter.
+        writer_adapter=get_writer_adapter_path,
     )
     t2i_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)

@@ -1,5 +1,6 @@
 import type { Media } from './media'
 import type { ThumbItem } from './jobs'
+import type { AdapterWriterId } from './writers'
 
 // Reused, not copied: a select's options plus a stored value that has since
 // left the config list (types/i2v.ts owns the one implementation).
@@ -260,9 +261,14 @@ export interface T2iImage {
 
 // ---- writers, variants, drafts ------------------------------------------------
 
-/** Who drafts the prompts a Generate Prompt (or a Random batch) writes. */
-export type T2iWriter = 'base' | 'base+taste'
+/**
+ * Who drafts the prompts a Generate Prompt (or a Random batch) writes: the base
+ * writer, the base writer shown favorite prompts, or a prompt-writer adapter
+ * (`adapter:<id>`, used without examples).
+ */
+export type T2iWriter = 'base' | 'base+taste' | AdapterWriterId
 
+/** The fixed entries of the Writer menu (adapters follow them). */
 export const T2I_WRITERS: { id: T2iWriter; label: string }[] = [
   { id: 'base', label: 'Base' },
   { id: 'base+taste', label: 'Base + taste' },

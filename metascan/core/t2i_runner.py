@@ -90,9 +90,13 @@ from metascan.core.t2i_prompt import (
 )
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
-from metascan.core.vlm_client import VlmError
+from metascan.core.vlm_client import AdapterNotLoadedError, VlmError
 from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
 from metascan.core.vlm_models import writer_missing_hint
+from metascan.core.writer_adapters import (
+    WriterAdapterUnavailable,
+    parse_adapter_writer_id,
+)
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -117,7 +121,8 @@ WARN_TYPED_PROMPT_ONCE = (
     "variants apply to written prompts: the typed prompt renders once"
 )
 
-# Prompt variants per caption, and the writers a request may ask for.
+# Prompt variants per caption, and the writers a request may ask for
+# (besides ``adapter:<id>``, a prompt-writer adapter, used without examples).
 MAX_VARIANTS = 4
 REQUEST_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
 
@@ -248,6 +253,9 @@ class _Batch:
     started_at: str
     phase: str  # "prompting" | "rendering"
     prompting: bool  # still writing prompts (Random batches only)
+    # The adapter GGUF the writer applies (writer ``adapter:<id>``), resolved
+    # when the batch was planned; None for the base writer.
+    lora_path: Optional[Path] = None
     step: Optional[Dict[str, Any]] = None  # snapshot of the step on show
     # Every step written so far, in order: a prompt can be written well ahead
     # of the render, and waits here until its images are the ones rendering.
@@ -427,9 +435,10 @@ def _supplies_first_step(req: BatchRequest) -> bool:
 
 
 def _check_writer(writer: Any) -> str:
-    if writer not in REQUEST_WRITERS:
+    if writer not in REQUEST_WRITERS and parse_adapter_writer_id(writer) is None:
         raise T2iRequestError(
-            f"Unknown writer {writer!r}; use one of {', '.join(REQUEST_WRITERS)}"
+            f"Unknown writer {writer!r}; use one of {', '.join(REQUEST_WRITERS)} "
+            "or adapter:<id>"
         )
     return str(writer)
 
@@ -566,8 +575,12 @@ class T2iRunner:
         directions: Optional[SnippetCache] = None,
         get_all_vlms: Optional[Callable[[], List[Any]]] = None,
         taste_examples: Optional[TasteExamplesFn] = None,
+        writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
     ) -> None:
         self.db = db
+        # Adapter id -> its GGUF when the writer's llama-server serves it
+        # (``VlmRoles.adapter_path``); None: no adapter can be used.
+        self.writer_adapter = writer_adapter
         self.comfy = comfy
         # The prompt-writer client; ``get_all_vlms`` lists every distinct
         # VLM client (writer and general roles) -- unloading for ComfyUI
@@ -653,6 +666,31 @@ class T2iRunner:
             return None, f"{writer_missing_hint(model_id)} - used the resolved caption"
         return model_id, WARN_VLM_UNAVAILABLE
 
+    async def _adapter_lora(self, writer: str) -> Optional[Path]:
+        """The GGUF to apply for ``writer``: None for the base writers; for
+        ``adapter:<id>`` its file, when the registry says it is a servable
+        T2I adapter and the writer's llama-server serves it. Raises
+        ``WriterAdapterUnavailable`` otherwise (the route answers 409)."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None:
+            return None
+        if not await asyncio.to_thread(writer_id_allowed, writer, self.db, "t2i"):
+            raise WriterAdapterUnavailable(writer, "not a ready text-to-image adapter")
+        path = self.writer_adapter(adapter_id) if self.writer_adapter else None
+        if path is None:
+            raise WriterAdapterUnavailable(
+                writer, "the prompt writer does not serve it"
+            )
+        return path
+
+    async def _adapter_base(self, writer: str) -> Optional[str]:
+        """The base model of adapter ``writer`` (None: not an adapter)."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None:
+            return None
+        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
+        return str(row["base_model"]) if row else None
+
     async def _vlm_prompt(
         self,
         vlm: Any,
@@ -660,11 +698,17 @@ class T2iRunner:
         profile: T2iModelProfile,
         system_prompt: str,
         user_prompt: str,
+        lora_path: Optional[Path] = None,
     ) -> Tuple[str, Optional[str]]:
         """One VLM round trip: start the model, ask, split off the negative.
+        ``lora_path``: the adapter to apply (the base model when None; the
+        request then carries no ``lora`` field at all).
         Raises VlmError, TimeoutError or RuntimeError; an OSError (the spawn
         of a missing or non-executable llama-server, a dropped connection)
         becomes a VlmError so callers handle it like any other VLM failure."""
+        extra: Dict[str, Any] = {}
+        if lora_path is not None:
+            extra["lora_path"] = lora_path
         try:
             await vlm.ensure_started(model_id)
             raw = await vlm.generate_text(
@@ -673,6 +717,7 @@ class T2iRunner:
                 temperature=_VLM_TEMPERATURE,
                 max_tokens=profile.max_tokens,
                 timeout=_VLM_TIMEOUT_S,
+                **extra,
             )
         except TimeoutError:
             raise  # a TimeoutError is an OSError: callers already know it
@@ -770,7 +815,9 @@ class T2iRunner:
         it, once per variant (variant k > 0 with its angle). Writes nothing.
         ``writer = base+taste`` adds the owner's favorite prompts as examples
         (fetched once for all variants); when none can be had the drafts are
-        ``base`` and a warning says why.
+        ``base`` and a warning says why. ``writer = adapter:<id>`` writes
+        with that adapter applied, without examples (409 when it cannot be
+        served).
 
         No VLM, or none loadable on this hardware, is not an error: the
         resolved caption is the prompt (see ``fallback_prompt``) and a
@@ -784,6 +831,7 @@ class T2iRunner:
         writer = _check_writer(writer)
         if not isinstance(caption, str) or not caption.strip():
             raise T2iRequestError("Caption is empty")
+        lora_path = await self._adapter_lora(writer)
         cfg = self._get_config()
         resolved = await self._resolve(profile, caption, seed, cfg)
         warnings = list(resolved.warnings)
@@ -822,6 +870,11 @@ class T2iRunner:
                 for k in range(variants)
             ]
         else:
+            adapter_base = await self._adapter_base(writer)
+            if adapter_base is not None and adapter_base != model_id:
+                raise WriterAdapterUnavailable(
+                    writer, f"it is built on {adapter_base}, the writer runs {model_id}"
+                )
             examples, taste_warning = await self._examples_for(
                 writer, resolved.text, profile.id
             )
@@ -839,18 +892,26 @@ class T2iRunner:
                 )
                 async with slots:
                     prompt, negative = await self._vlm_prompt(
-                        vlm, model_id, profile, composed.system, composed.user
+                        vlm,
+                        model_id,
+                        profile,
+                        composed.system,
+                        composed.user,
+                        lora_path,
                     )
                 return PromptDraft(
                     prompt,
                     negative,
-                    self._guided_writer(composed),
+                    writer if lora_path is not None else self._guided_writer(composed),
                     k,
                     angle,
                     model_id,
                 )
 
-            drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            try:
+                drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            except AdapterNotLoadedError as exc:
+                raise WriterAdapterUnavailable(writer, str(exc)) from exc
             if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
                 warnings.append(WARN_TASTE_NO_PREAMBLE)
         first = drafts[0]
@@ -937,6 +998,9 @@ class T2iRunner:
         variants = _check_count(req.variants, "Variants", MAX_VARIANTS)
         writer = _check_writer(req.writer)
         prompts = await asyncio.to_thread(_check_prompts, req, variants, self.db)
+        # Only a batch that writes prompts needs its adapter served; Manual
+        # renders the prompts it was given (their lineage is checked above).
+        lora_path = await self._adapter_lora(writer) if req.mode == "random" else None
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
@@ -1072,6 +1136,7 @@ class T2iRunner:
             started_at=datetime.now(timezone.utc).isoformat(),
             phase="prompting" if req.mode == "random" else "rendering",
             prompting=req.mode == "random",
+            lora_path=lora_path,
         )
 
     async def start_batch(self, req: BatchRequest) -> BatchStarted:
@@ -1190,6 +1255,14 @@ class T2iRunner:
         model_id, unavailable = await self._usable_model(vlm)
         if model_id is None:
             return fall_back(unavailable)
+        lora_path = batch.lora_path
+        if lora_path is not None:
+            adapter_base = await self._adapter_base(batch.req.writer)
+            if adapter_base != model_id:
+                return fall_back(
+                    f"writer {batch.req.writer} is built on {adapter_base}, the "
+                    f"writer runs {model_id} - used the resolved caption"
+                )
         composed = compose_guided_t2i_prompts(
             profile, resolved_text, batch.content_mode, direction, angle, examples
         )
@@ -1200,13 +1273,17 @@ class T2iRunner:
         for attempt in (1, 2):
             try:
                 prompt, negative = await self._vlm_prompt(
-                    vlm, model_id, profile, composed.system, composed.user
+                    vlm, model_id, profile, composed.system, composed.user, lora_path
                 )
                 return (
                     prompt,
                     negative,
                     notes,
-                    self._guided_writer(composed),
+                    (
+                        batch.req.writer
+                        if lora_path is not None
+                        else self._guided_writer(composed)
+                    ),
                     model_id,
                 )
             except asyncio.CancelledError:

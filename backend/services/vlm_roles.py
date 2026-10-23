@@ -22,6 +22,15 @@ model -- only which one is resident.
 A client no role uses any more is *retired*: it refuses to start again,
 so a caller still holding it cannot respawn the old model untracked.
 
+Prompt-writer adapters (LoRA fine-tunes of the writer model) are served
+by the writer's llama-server: it spawns with ``--lora <file>`` for every
+servable registry adapter whose base model is the writer model, and a
+request picks one by position. ``refresh_adapters()`` re-reads the
+registry; a client whose running server has a different list is restarted
+when it is idle (no request in flight or waiting, no hold, not loading),
+otherwise ``restart_pending`` is set and the restart happens after its next
+idle moment. A stopped client just spawns with the new list next time.
+
 Config keys: ``models.writer_vlm`` / ``models.general_vlm``.
 """
 
@@ -30,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import (
     Any,
     Awaitable,
@@ -38,10 +48,13 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
+    Set,
     Tuple,
 )
 
 from metascan.core.vlm_client import is_background_vlm_work
+from metascan.core.writer_adapters import AdapterFile
 from metascan.core.vlm_models import (
     REGISTRY,
     WRITER_DEFAULT_MODEL,
@@ -81,6 +94,20 @@ _RESIDENT_STATES = ("spawning", "loading", "ready")
 
 class WriterModelNotAllowed(ValueError):
     """The model may not serve the writer role (``writer_allowed=False``)."""
+
+
+@dataclass(frozen=True)
+class AdapterSlot:
+    """An adapter the writer client loads: ``position`` is its index in the
+    ``--lora`` list the writer's next spawn uses."""
+
+    adapter_id: int
+    position: int
+    path: Path
+
+
+# Poll interval of a deferred adapter restart's wait for an idle client.
+_ADAPTER_RESTART_POLL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -204,8 +231,17 @@ class VlmRoles:
         swap_grace_s: float = SWAP_GRACE_S,
         load_timeout_s: float = LOAD_TIMEOUT_S,
         background_grace_s: float = BACKGROUND_GRACE_S,
+        adapter_source: Optional[Callable[[], Sequence[AdapterFile]]] = None,
     ) -> None:
         self._factory = client_factory
+        # Reads the servable adapters off the registry (sync: DB + disk);
+        # None means no adapters are served.
+        self._adapter_source = adapter_source
+        self._adapter_files: List[AdapterFile] = []
+        # Adapters being deleted: never loaded again by this process, even
+        # while their registry row survives a failed file removal.
+        self._withdrawn: Set[int] = set()
+        self._restart_task: Optional["asyncio.Task[None]"] = None
         self._save = save_model
         self._installed: Callable[[str], bool] = installed or (lambda _mid: True)
         self._vram_gb = vram_gb
@@ -234,6 +270,7 @@ class VlmRoles:
         *,
         client_factory: Callable[[], Any],
         save_model: Optional[Callable[[Role, str], None]] = persist_role_model,
+        adapter_source: Optional[Callable[[], Sequence[AdapterFile]]] = None,
     ) -> "VlmRoles":
         """Build from the app config (sync: probes hardware and disk).
 
@@ -282,6 +319,7 @@ class VlmRoles:
             save_model=save_model,
             installed=vlm_model_installed,
             vram_gb=vram,
+            adapter_source=adapter_source,
         )
 
     # ---- lookups -------------------------------------------------------
@@ -515,7 +553,115 @@ class VlmRoles:
                 self._clients[mid] = c
         for c in stale:
             c.retired = True
+        self._apply_loras()
         return stale
+
+    # ---- writer adapters -----------------------------------------------
+
+    def _writer_adapter_files(self) -> List[AdapterFile]:
+        """The adapters the writer loads: servable, built on the writer's
+        model, not being deleted; in registry id order."""
+        writer = self._models["writer"]
+        return [
+            f
+            for f in self._adapter_files
+            if f.base_model == writer and f.adapter_id not in self._withdrawn
+        ]
+
+    def _apply_loras(self) -> None:
+        """Give each client the adapter list its next spawn should load:
+        the writer's adapters for the writer client (shared or not), none
+        for a general-only client."""
+        writer_paths = tuple(f.path for f in self._writer_adapter_files())
+        writer_client = self._clients.get(self._models["writer"])
+        for c in self._clients.values():
+            c.lora_paths = writer_paths if c is writer_client else ()
+
+    def writer_adapters(self) -> List[AdapterSlot]:
+        """The writer's adapters with their ``--lora`` positions."""
+        return [
+            AdapterSlot(f.adapter_id, position, f.path)
+            for position, f in enumerate(self._writer_adapter_files())
+        ]
+
+    def adapter_path(self, adapter_id: int) -> Optional[Path]:
+        """The GGUF of ``adapter_id`` when the writer serves it, else None
+        (not servable, not on disk, another base model, being deleted)."""
+        for slot in self.writer_adapters():
+            if slot.adapter_id == adapter_id:
+                return slot.path
+        return None
+
+    @property
+    def restart_pending(self) -> bool:
+        """True while a client waits to go idle for an adapter restart."""
+        return self._restart_task is not None and not self._restart_task.done()
+
+    def _needs_adapter_restart(self, client: Any) -> bool:
+        return bool(getattr(client, "loras_stale", False)) and (
+            getattr(client, "state", None) in _RESIDENT_STATES
+        )
+
+    def _idle_for_restart(self, client: Any) -> bool:
+        """Nothing in flight or waiting, no hold (a T2I Random batch's
+        prompting phase), not loading, and past the swap grace."""
+        busy = getattr(client, "busy_for_background", None)
+        if busy is None:
+            return int(getattr(client, "in_flight", 0)) == 0
+        return not busy(self._swap_grace_s)
+
+    async def _restart_idle_stale(self) -> bool:
+        """Restart every idle client whose server has a stale adapter list.
+        True when some client still waits (busy)."""
+        waiting = False
+        for c in self.distinct_clients():
+            if not self._needs_adapter_restart(c):
+                continue
+            if self._idle_for_restart(c):
+                try:
+                    await c.restart_for_loras()
+                except Exception:
+                    logger.exception("Restarting a VLM for its adapters raised")
+            else:
+                waiting = True
+        return waiting
+
+    async def _deferred_restart(self) -> None:
+        while await self._restart_idle_stale():
+            await asyncio.sleep(_ADAPTER_RESTART_POLL_S)
+
+    async def refresh_adapters(self) -> None:
+        """Re-read the adapter registry and apply it: an idle writer whose
+        server has a different list is restarted now (it comes back with
+        the new list on its next request), a busy one after its next idle
+        moment (``restart_pending``), a stopped one at its next start."""
+        if self._adapter_source is not None:
+            try:
+                files = list(await asyncio.to_thread(self._adapter_source))
+            except Exception:
+                logger.exception("Could not read the writer adapter registry")
+                files = list(self._adapter_files)
+            self._adapter_files = files
+        self._apply_loras()
+        if await self._restart_idle_stale() and not self.restart_pending:
+            self._restart_task = asyncio.create_task(
+                self._deferred_restart(), name="vlm-adapter-restart"
+            )
+
+    async def withdraw_adapter(self, adapter_id: int) -> bool:
+        """Stop serving ``adapter_id`` (it is being deleted): drop it from
+        the writer's list and restart the writer without it when idle. True
+        when no running server still has its file loaded (on Windows the
+        file can only be removed then)."""
+        self._withdrawn.add(int(adapter_id))
+        await self.refresh_adapters()
+        paths = {f.path for f in self._adapter_files if f.adapter_id == adapter_id}
+        return not any(
+            p in tuple(getattr(c, "loaded_lora_paths", ()))
+            and getattr(c, "state", None) in _RESIDENT_STATES
+            for c in self.distinct_clients()
+            for p in paths
+        )
 
     async def _shutdown_stale(self, stale: List[Any]) -> None:
         for c in stale:
@@ -591,6 +737,9 @@ class VlmRoles:
 
     async def shutdown_all(self) -> None:
         """Shut each distinct client down once."""
+        task = self._restart_task
+        if task is not None and not task.done():
+            task.cancel()
         for c in self.distinct_clients():
             try:
                 await c.shutdown()

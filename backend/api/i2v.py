@@ -12,10 +12,10 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
 from backend.api.categories import checked_category_ids
@@ -40,6 +40,10 @@ from metascan.core.i2v_templates import (
 from metascan.utils.path_utils import to_native_path
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
+from metascan.core.writer_adapters import (
+    WriterAdapterUnavailable,
+    parse_adapter_writer_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +75,21 @@ def _service() -> I2vService:
     return I2vService(get_db())
 
 
+def _writer_choice(value: str) -> str:
+    if value == "base" or parse_adapter_writer_id(value) is not None:
+        return value
+    raise ValueError("writer must be 'base' or 'adapter:<id>'")
+
+
 class PromptRequest(BaseModel):
     source_path: str
     idea: str = ""
     duration_s: float
     # Découpage cadence; null = single take (the pre-template behaviour).
     template_id: Optional[str] = None
-    # The I2V writer is the unguided base writer for now (taste guidance and
-    # adapters are T2I-only); the field exists so the picker can grow.
-    writer: Literal["base"] = "base"
+    # The unguided base writer, or an I2V prompt-writer adapter
+    # (``adapter:<id>``); taste examples are T2I-only.
+    writer: Annotated[str, AfterValidator(_writer_choice)] = "base"
 
 
 class LintRequest(BaseModel):
@@ -125,8 +135,18 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
     try:
         prompt, warnings, writer_model = await runner.write_prompt(
-            body.source_path, body.idea, body.duration_s, template_id=body.template_id
+            body.source_path,
+            body.idea,
+            body.duration_s,
+            template_id=body.template_id,
+            writer=body.writer,
         )
+    except WriterAdapterUnavailable as exc:
+        # The dialog falls back to Base on this code.
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "adapter_unavailable", "message": str(exc)},
+        ) from exc
     except I2vUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VlmSelectError as exc:

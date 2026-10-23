@@ -5,6 +5,8 @@ import type { I2vDraft, I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVid
 import { fetchI2vConfig, listI2vTemplates, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { updateMedia } from '../api/media'
+import { listWriterAdapters } from '../api/writers'
+import type { WriterAdapter } from '../types/writers'
 
 // POSIX/native tolerance: job rows store POSIX, Media paths are native.
 function norm(p: string): string {
@@ -28,6 +30,25 @@ export const useI2vStore = defineStore('i2v', () => {
     draft.value = d
   }
 
+  // Prompt-writer adapters for the Writer menu (GET /api/writers/adapters),
+  // refetched on the `training` channel's adapters_changed. A failed load
+  // keeps the last list; `adaptersLoaded` says whether one ever arrived (a
+  // selected adapter is only judged gone against a list that did).
+  const adapters = ref<WriterAdapter[]>([])
+  const adaptersLoaded = ref(false)
+  let adaptersSeq = 0
+  async function loadAdapters(): Promise<void> {
+    const seq = ++adaptersSeq
+    try {
+      const rows = await listWriterAdapters()
+      if (seq !== adaptersSeq) return
+      adapters.value = rows
+      adaptersLoaded.value = true
+    } catch {
+      // The menus keep what they had; a request naming a gone adapter 409s.
+    }
+  }
+
   async function open(media: Media): Promise<void> {
     source.value = media
     draft.value = null
@@ -39,7 +60,7 @@ export const useI2vStore = defineStore('i2v', () => {
     } catch {
       templates.value = []
     }
-    await Promise.all([refreshVideos(), refreshActiveJobs()])
+    await Promise.all([refreshVideos(), refreshActiveJobs(), loadAdapters()])
   }
 
   function close(): void {
@@ -188,6 +209,9 @@ export const useI2vStore = defineStore('i2v', () => {
   }
 
   return {
+    adapters,
+    adaptersLoaded,
+    loadAdapters,
     source,
     videos,
     jobs,

@@ -50,7 +50,12 @@ from metascan.core.judgments import (
     writer_id_allowed,
     normalize_prompt,
 )
+from metascan.core.vlm_client import AdapterNotLoadedError
 from metascan.core.vlm_models import writer_missing_hint
+from metascan.core.writer_adapters import (
+    WriterAdapterUnavailable,
+    parse_adapter_writer_id,
+)
 from metascan.core.vlm_select import pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -103,10 +108,14 @@ class I2vRunner:
         get_vlm: Callable[[], Any],
         output_root: Path,
         vlm_installed: Optional[Callable[[str], bool]] = None,
+        writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
         self.get_vlm = get_vlm  # the prompt-writer client
+        # Adapter id -> its GGUF when the writer's llama-server serves it;
+        # None: no adapter can be used.
+        self.writer_adapter = writer_adapter
         # Says whether a model's files are on disk (None: trust the picker).
         # A missing writer model is refused with a "download it" hint rather
         # than spawning a llama-server that cannot load it.
@@ -153,12 +162,16 @@ class I2vRunner:
         idea: str,
         duration_s: float,
         template_id: Optional[str] = None,
+        writer: str = "base",
     ) -> Tuple[str, List[str], str]:
         """Expand an idea into the H3 prompt: ``(text, warnings,
         writer_model)``, the last being the VLM model that wrote it (lineage).
         With ``template_id`` the découpage template owns the shot structure
         and the VLM fills only prose; without it, this is the single-take
-        path, unchanged."""
+        path, unchanged. ``writer`` is ``base`` or ``adapter:<id>`` (an I2V
+        prompt-writer adapter, applied to the writer model; 409 when it
+        cannot be served)."""
+        lora_path = await self._adapter_lora(writer)
         template = None
         if template_id:
             try:
@@ -183,8 +196,55 @@ class I2vRunner:
         check = self.vlm_installed
         if check is not None and not await asyncio.to_thread(check, model_id):
             raise I2vUnavailableError(writer_missing_hint(model_id))
+        if lora_path is not None:
+            row = await asyncio.to_thread(
+                self.db.get_writer_adapter, parse_adapter_writer_id(writer)
+            )
+            base = row["base_model"] if row else None
+            if base != model_id:
+                raise WriterAdapterUnavailable(
+                    writer, f"it is built on {base}, the writer runs {model_id}"
+                )
+        extra: Dict[str, Any] = {}
+        if lora_path is not None:
+            extra["lora_path"] = lora_path
         await vlm.ensure_started(model_id)
+        try:
+            return await self._write(
+                vlm, path, idea, duration_s, template, model_id, extra
+            )
+        except AdapterNotLoadedError as exc:
+            raise WriterAdapterUnavailable(writer, str(exc)) from exc
 
+    async def _adapter_lora(self, writer: str) -> Optional[Path]:
+        """None for ``base``; the GGUF of a servable I2V adapter for
+        ``adapter:<id>``; ``WriterAdapterUnavailable`` otherwise."""
+        if writer == "base":
+            return None
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None:
+            raise I2vRequestError(
+                f"Unknown writer {writer!r}; use base or adapter:<id>"
+            )
+        if not await asyncio.to_thread(writer_id_allowed, writer, self.db, "i2v"):
+            raise WriterAdapterUnavailable(writer, "not a ready image-to-video adapter")
+        path = self.writer_adapter(adapter_id) if self.writer_adapter else None
+        if path is None:
+            raise WriterAdapterUnavailable(
+                writer, "the prompt writer does not serve it"
+            )
+        return path
+
+    async def _write(
+        self,
+        vlm: Any,
+        path: Path,
+        idea: str,
+        duration_s: float,
+        template: Any,
+        model_id: str,
+        extra: Dict[str, Any],
+    ) -> Tuple[str, List[str], str]:
         if template is None:
             raw = await vlm.generate_text(
                 system_prompt=get_prompt_store().get("I2V_BEATS_SYSTEM"),
@@ -194,6 +254,7 @@ class I2vRunner:
                 temperature=0.6,
                 max_tokens=i2v_max_tokens(duration_s),
                 timeout=240.0,
+                **extra,
             )
             result = validate_i2v_beats(raw)
             text = assemble_i2v_prompt(result)
@@ -207,6 +268,7 @@ class I2vRunner:
             temperature=0.6,
             max_tokens=i2v_template_max_tokens(template),
             timeout=240.0,
+            **extra,
         )
         fill = validate_i2v_template_fill(raw, template)
         text, notes = assemble_i2v_template_prompt(template, fill)

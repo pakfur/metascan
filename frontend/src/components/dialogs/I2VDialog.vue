@@ -16,7 +16,14 @@ import {
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
 import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
-import { thumbnailUrl } from '../../api/client'
+import { ApiError, thumbnailUrl } from '../../api/client'
+import {
+  ADAPTER_UNAVAILABLE,
+  adapterMenuOptions,
+  isAdapterWriterId,
+  writerName,
+} from '../../types/writers'
+import { useTasteStore } from '../../stores/taste'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useToast } from '../../composables/useToast'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
@@ -40,6 +47,7 @@ const store = useI2vStore()
 const mediaStore = useMediaStore()
 const foldersStore = useFoldersStore()
 const toast = useToast()
+const taste = useTasteStore()
 
 const idea = ref('')
 const prompt = ref('')
@@ -107,20 +115,25 @@ const WRITER_STORAGE_KEY = 'metascan.i2v.writer.v1'
 function storedWriter(): I2vWriter {
   try {
     const v = localStorage.getItem(WRITER_STORAGE_KEY)
-    return I2V_WRITERS.some((w) => w.id === v) ? (v as I2vWriter) : 'base'
+    // An adapter is kept until the adapter list says it is gone (see below).
+    return I2V_WRITERS.some((w) => w.id === v) || isAdapterWriterId(v) ? (v as I2vWriter) : 'base'
   } catch {
     return 'base'
   }
 }
 const writer = ref<I2vWriter>(storedWriter())
-function setWriter(v: string) {
-  if (!I2V_WRITERS.some((w) => w.id === v)) return
-  writer.value = v as I2vWriter
+function storeWriter(v: string) {
   try {
     localStorage.setItem(WRITER_STORAGE_KEY, v)
   } catch {
     /* private mode: the choice lasts for this session */
   }
+}
+function setWriter(v: string) {
+  const adapter = adapterOptions.value.find((o) => o.id === v)
+  if (!I2V_WRITERS.some((w) => w.id === v) && !(adapter && !adapter.disabled)) return
+  writer.value = v as I2vWriter
+  storeWriter(v)
 }
 
 // The held draft stops describing the prompt when the idea or cadence it was
@@ -226,6 +239,36 @@ const generateCount = ref(1)
 const { selected: categoryIds, refresh: refreshCategories } = useGenerationCategories(
   'metascan.i2v.categories.v1',
 )
+
+// Prompt-writer adapters after Base: the I2V ones scoped to `all` or to a
+// selected category, labelled with their favorite rate.
+const adapterOptions = computed(() =>
+  adapterMenuOptions(store.adapters, {
+    kind: 'i2v',
+    categoryIds: categoryIds.value,
+    targetModel: null,
+    stats: taste.writerStats,
+  }),
+)
+useWebSocket('training', (event) => {
+  if (event === 'adapters_changed') void store.loadAdapters()
+})
+onMounted(() => {
+  if (!taste.writerStats) taste.loadWriterStats().catch(() => {}) // labels only
+})
+// Session-local, never part of a clip's form: switching back to Base when the
+// selected adapter has gone touches no clip.
+function fallBackToBase(reason: string) {
+  const name = writerName(store.adapters, writer.value)
+  writer.value = 'base'
+  storeWriter('base')
+  toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
+}
+watch([adapterOptions, () => store.adaptersLoaded], () => {
+  if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
+  const option = adapterOptions.value.find((o) => o.id === writer.value)
+  if (!option || option.disabled) fallBackToBase('is not available here')
+})
 const batchProgress = ref('')
 
 // A Fixed seed would render the same video N times, so the count is ignored
@@ -350,6 +393,15 @@ async function onExpandPrompt() {
       templateId: forTemplate,
     })
   } catch (e) {
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      (e.detail as { code?: unknown } | null)?.code === ADAPTER_UNAVAILABLE
+    ) {
+      fallBackToBase('is no longer available')
+      void store.loadAdapters()
+      return
+    }
     toast.show(e instanceof Error ? e.message : String(e), 'warn')
   } finally {
     expanding.value = false
@@ -737,13 +789,20 @@ function jobLabel(chip: {
             />
           </label>
           <div class="writer-row">
-            <label class="inline-pick" title="Who writes the prompt (Base: the unguided prompt-writer model)">
+            <label class="inline-pick" title="Who writes the prompt: Base (the unguided prompt-writer model) or one of your trained writers (name · date · favorite rate)">
               <span>Writer</span>
               <select
                 :value="writer"
                 @change="setWriter(($event.target as HTMLSelectElement).value)"
               >
                 <option v-for="w in I2V_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+                <option
+                  v-for="a in adapterOptions"
+                  :key="a.id"
+                  :value="a.id"
+                  :disabled="a.disabled"
+                  :title="a.title"
+                >{{ a.label }}</option>
               </select>
             </label>
             <button class="btn" :disabled="expanding" @click="onExpandPrompt">

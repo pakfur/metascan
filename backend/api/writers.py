@@ -39,7 +39,15 @@ def _live(adapter_id: int) -> Dict[str, Any]:
     return row
 
 
-def _changed() -> None:
+async def _changed() -> None:
+    """A registry change: the writer's llama-server picks it up (restarted
+    when idle, else after its next idle moment), and the UI refetches."""
+    from backend.api.vlm import refresh_writer_adapters
+
+    try:
+        await refresh_writer_adapters()
+    except Exception:
+        logger.exception("Applying the adapter registry to the writer failed")
     ws_manager.broadcast_sync("training", "adapters_changed", {})
 
 
@@ -66,14 +74,18 @@ def _rename(adapter_id: int, name: str) -> Dict[str, Any]:
 @router.patch("/adapters/{adapter_id}")
 async def rename_adapter(adapter_id: int, body: RenameRequest) -> Dict[str, Any]:
     row = await asyncio.to_thread(_rename, adapter_id, body.name)
-    _changed()
+    ws_manager.broadcast_sync("training", "adapters_changed", {})
     return row
 
 
-def _delete(adapter_id: int) -> None:
+def _deletable(adapter_id: int) -> None:
     row = _live(adapter_id)
     if row["status"] == STATUS_TRAINING:
         raise HTTPException(status_code=409, detail={"code": "adapter_training"})
+
+
+def _delete(adapter_id: int) -> None:
+    _deletable(adapter_id)
     folder = adapter_dir(get_data_dir(), adapter_id)
     try:
         if folder.exists():
@@ -89,6 +101,14 @@ def _delete(adapter_id: int) -> None:
 
 @router.delete("/adapters/{adapter_id}")
 async def delete_adapter(adapter_id: int) -> Dict[str, str]:
+    from backend.api.vlm import withdraw_writer_adapter
+
+    await asyncio.to_thread(_deletable, adapter_id)
+    # Stop serving it first: the writer restarts without it when idle, so
+    # its GGUF is no longer mapped (Windows cannot delete a mapped file;
+    # a busy writer leaves the removal failing with adapter_files_busy,
+    # retryable once the deferred restart has happened).
+    await withdraw_writer_adapter(adapter_id)
     await asyncio.to_thread(_delete, adapter_id)
-    _changed()
+    await _changed()
     return {"status": "deleted"}
