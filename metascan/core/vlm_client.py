@@ -681,6 +681,18 @@ class VlmClient:
                 ):
                     await self._ensure_resident(since=stops)
                     epoch = self._evictions
+                    if not self._is_resident():
+                        # The load reached READY and was evicted before
+                        # its waiter resumed (``_ready_seen``): bring it
+                        # back again rather than run against a stopped
+                        # server.
+                        if attempt < _EVICTION_RETRIES:
+                            attempt += 1
+                            continue
+                        raise VlmError(
+                            "VLM was swapped out again before the request "
+                            f"could run ({_EVICTION_RETRIES} retries)"
+                        )
                 self._begin_request()
                 try:
                     result = await call()

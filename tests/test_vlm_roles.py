@@ -1378,3 +1378,56 @@ async def test_ensure_started_since_refuses_after_an_explicit_unload() -> None:
     with pytest.raises(VlmError, match="unloaded"):
         await client.ensure_started("qwen3vl-8b", unless_stopped_since=since)
     assert spawned == []
+
+
+async def test_a_request_whose_re_ensure_was_evicted_after_ready_retries() -> None:
+    """``_ensure_resident`` returns when its load reached READY and was
+    evicted before the waiter resumed (``_ready_seen``). The request must
+    not then run against the stopped client ("not ready"): it re-ensures
+    again (bounded by the eviction retries) and succeeds."""
+    from metascan.core.vlm_client import STATE_READY, STATE_STOPPED
+
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    client.preferred_model_id = "qwen3vl-8b"
+    client.swapped_out = True
+    client._state = STATE_STOPPED
+    real_start = client.start
+    starts: List[int] = []
+
+    async def start(
+        model_id: str,
+        *,
+        wait_ready: bool = True,
+        ready_timeout: float = 300.0,
+        _unless_stopped_since: Optional[int] = None,
+    ) -> None:
+        starts.append(1)
+        await real_start(
+            model_id, wait_ready=False, _unless_stopped_since=_unless_stopped_since
+        )
+        client._ready_seen = True
+        client.swapped_out = False
+        client._set_state(STATE_READY)
+        if len(starts) == 1:
+            # The other role evicts it before this waiter resumes.
+            await client.evict()
+        client._ready_event.set()
+        await client._wait_ready(5.0)
+
+    client.start = start  # type: ignore[method-assign]
+    calls: List[str] = []
+
+    async def impl(path: Any, *, timeout: float = 60.0) -> List[str]:
+        calls.append(client.state)
+        if client.state != STATE_READY:
+            raise RuntimeError(f"VlmClient not ready (state={client.state})")
+        return ["ok"]
+
+    client._generate_tags_impl = impl  # type: ignore[method-assign]
+    try:
+        res = await asyncio.wait_for(client.generate_tags(Path("x.png")), 10)
+    finally:
+        await client._stop()
+    assert res == ["ok"]
+    assert len(starts) == 2
+    assert calls == ["ready"]
