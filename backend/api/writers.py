@@ -105,10 +105,12 @@ async def delete_adapter(adapter_id: int) -> Dict[str, str]:
 
     await asyncio.to_thread(_deletable, adapter_id)
     # Stop serving it first: the writer restarts without it when idle, so
-    # its GGUF is no longer mapped (Windows cannot delete a mapped file;
-    # a busy writer leaves the removal failing with adapter_files_busy,
-    # retryable once the deferred restart has happened).
-    await withdraw_writer_adapter(adapter_id)
+    # its GGUF is no longer mapped (Windows cannot delete a mapped file).
+    if not await withdraw_writer_adapter(adapter_id):
+        # A running (or loading) writer still maps its GGUF; the deferred
+        # restart drops it at the writer's next idle moment -- retry then.
+        # Never left to the file removal failing: POSIX would succeed.
+        raise HTTPException(status_code=409, detail={"code": "adapter_files_busy"})
     await asyncio.to_thread(_delete, adapter_id)
     await _changed()
     return {"status": "deleted"}

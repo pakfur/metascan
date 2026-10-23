@@ -642,6 +642,10 @@ class VlmRoles:
                 logger.exception("Could not read the writer adapter registry")
                 files = list(self._adapter_files)
             self._adapter_files = files
+            # A withdrawn adapter the registry no longer lists was deleted:
+            # nothing left to keep out.
+            listed = {f.adapter_id for f in files}
+            self._withdrawn &= listed
         self._apply_loras()
         if await self._restart_idle_stale() and not self.restart_pending:
             self._restart_task = asyncio.create_task(

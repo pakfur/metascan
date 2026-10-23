@@ -140,18 +140,27 @@ the root CLAUDE.md still applies.
   what the running server spawned with. `generate_text(lora_id=…)` /
   `(lora_path=…)` adds `"lora": [{"id": <position>, "scale": 1.0}]` — a
   base request has NO `lora` key (byte-identical to before; tested).
-  `lora_path` is resolved against the running server at request time; an
-  adapter added after the spawn brings the server back with it
-  (`_ensure_lora`), one withdrawn and no longer loaded raises
-  `AdapterNotLoadedError` (routes: 409 `adapter_unavailable`).
+  `lora_path` is resolved against the running server right before the POST
+  (with the HTTP client snapshot, after any image encoding). An adapter
+  added after the spawn restarts the server (`_ensure_lora` /
+  `prepare_lora`) only once it is not busy — nothing in flight or waiting,
+  NO `hold()`, not loading — never evicting work or breaking a T2I Random
+  batch's prompting hold; still busy after `lora_wait_s` (60 s) →
+  `AdapterLoadingError` (409 `adapter_loading`, "try again when the current
+  batch finishes") and the pending restart runs at the next idle. A Random
+  batch calls `prepare_lora` BEFORE taking its hold. One withdrawn and no
+  longer loaded raises `AdapterNotLoadedError` (409 `adapter_unavailable`).
   `refresh_adapters()` restarts a stale client only when idle
   (`busy_for_background(swap_grace)` false: nothing in flight or waiting,
   no `hold()`, not loading) — via `restart_for_loras()` = `evict()`, so it
   comes back on its next request — else `restart_pending` until it is; a
   stopped client just spawns with the new list. `withdraw_adapter(id)`
   (DELETE `/api/writers/adapters/{id}` calls it BEFORE removing files, for
-  Windows' mapped-file lock) drops it for this process even if the removal
-  fails. Tests: `tests/test_writer_adapter_serving.py` (the fake server's
+  Windows' mapped-file lock) answers 409 `adapter_files_busy` at once when it
+  returns False (a running or loading server still maps the GGUF) instead of
+  relying on the removal failing; a withdrawn id is forgotten once the
+  registry no longer lists it. A registry change leaves an idle writer
+  `stopped` until its next request (user-visible: no model shown loaded). Tests: `tests/test_writer_adapter_serving.py` (the fake server's
   `--record` file logs argv and request bodies).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both

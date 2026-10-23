@@ -247,10 +247,14 @@ const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
 export function draftSetFromImage(
   img: Pick<T2iImage, 'writer_id' | 'writer_model' | 'draft_prompt'>,
   f: Pick<T2iFields, 'caption' | 'prompt' | 'negative'>,
+  servableAdapters: readonly string[] = [],
 ): T2iDraftSet | null {
   const writerId = img.writer_id
   if (img.draft_prompt == null || !writerId) return null
-  if (!DRAFT_WRITERS.includes(writerId) && !isAdapterWriterId(writerId)) return null
+  // An adapter's draft keeps its lineage only while that adapter can still
+  // serve (the server refuses a gone one); otherwise the text goes out typed.
+  const adapterOk = isAdapterWriterId(writerId) && servableAdapters.includes(writerId)
+  if (!DRAFT_WRITERS.includes(writerId) && !adapterOk) return null
   return {
     caption: f.caption,
     variants: 1,

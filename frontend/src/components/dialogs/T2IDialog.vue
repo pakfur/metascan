@@ -24,9 +24,13 @@ import {
 } from '../../types/t2i'
 import type { ThumbItem } from '../../types/jobs'
 import {
+  ADAPTER_LOADING,
+  ADAPTER_LOADING_TEXT,
   ADAPTER_UNAVAILABLE,
+  adapterErrorCode,
   adapterMenuOptions,
   isAdapterWriterId,
+  servableAdapterIds,
   writerName,
 } from '../../types/writers'
 import type { Media } from '../../types/media'
@@ -354,16 +358,30 @@ watch([adapterOptions, () => store.adaptersLoaded], () => {
   const option = adapterOptions.value.find((o) => o.id === writer.value)
   if (!option || option.disabled) fallBackToBase('is no longer offered here')
 })
-function isAdapterUnavailable(e: unknown): boolean {
-  return (
-    e instanceof ApiError &&
-    e.status === 409 &&
-    (e.detail as { code?: unknown } | null)?.code === ADAPTER_UNAVAILABLE
-  )
-}
-function onAdapterUnavailable() {
-  fallBackToBase('is no longer available')
-  void store.loadAdapters()
+// True when `e` was an adapter refusal, after dealing with it: a gone
+// adapter falls back to Base; a new one the busy writer has not loaded yet
+// keeps the choice and says to try again.
+function handledAdapterError(e: unknown): boolean {
+  const code = adapterErrorCode(e)
+  if (code === ADAPTER_LOADING) {
+    toast.show(ADAPTER_LOADING_TEXT, 'info', 6000)
+    return true
+  }
+  if (code === ADAPTER_UNAVAILABLE) {
+    if (isAdapterWriterId(writer.value)) fallBackToBase('is no longer available')
+    else toast.show('The trained writer of this prompt is no longer available. Generate again to send it as typed.', 'warn', 6000)
+    void store.loadAdapters().then(() => {
+      // Drafts by an adapter that can no longer serve go: the box keeps its
+      // text, which the next Generate sends as typed.
+      const ok = servableAdapterIds(store.adapters, 't2i')
+      const gone = store.drafts?.entries.some(
+        (d) => isAdapterWriterId(d.writer_id) && !ok.includes(d.writer_id),
+      )
+      if (gone) store.discardDrafts()
+    })
+    return true
+  }
+  return false
 }
 
 // The direction the prompt in the box was written with (Generate Prompt), or
@@ -449,10 +467,7 @@ async function onGeneratePrompt() {
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
     resolvedOpen.value = true
   } catch (e) {
-    if (isAdapterUnavailable(e)) {
-      onAdapterUnavailable()
-      return
-    }
+    if (handledAdapterError(e)) return
     toast.show(
       e instanceof ApiError && e.status === 502
         ? `The prompt writer failed (${e.message}). Press Generate Prompt to try again.`
@@ -705,10 +720,7 @@ async function onGenerate() {
     )
   } catch (e) {
     supplyingFirstStep.value = false
-    if (isAdapterUnavailable(e)) {
-      onAdapterUnavailable()
-      return
-    }
+    if (handledAdapterError(e)) return
     toast.show(startErrorText(e), 'warn', 6000)
   } finally {
     submitting.value = false
@@ -762,7 +774,7 @@ function onSelectTile(item: ThumbItem) {
   // Re-rendering a writer's prompt keeps its lineage (writer, model, draft):
   // the tile's draft rides along as a one-entry set, never as a typed prompt.
   const image = store.images.find((i) => i.id === id)
-  store.setDrafts(image ? draftSetFromImage(image, form) : null)
+  store.setDrafts(image ? draftSetFromImage(image, form, servableAdapterIds(store.adapters, 't2i')) : null)
   // The form now equals what the server holds, so loading must not echo back
   // as a save. An untouched Generate would render the same image again.
   autosave.markLoaded()

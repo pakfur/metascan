@@ -18,9 +18,10 @@ from metascan.core.judgments import (
     writer_id_allowed,
 )
 from metascan.core.media import Media
-from metascan.core.t2i_runner import T2iRequestError, _check_prompts
+from metascan.core.t2i_runner import _check_prompts
 from metascan.core.writer_adapters import (
     WRITER_ADAPTER_PREFIX,
+    WriterAdapterUnavailable,
     adapter_writer_id,
     parse_adapter_writer_id,
 )
@@ -170,7 +171,9 @@ def test_t2i_prompts_accept_ready_adapter_only(db):
     out = _check_prompts(req(ok), 1, db)  # type: ignore[arg-type]
     assert out and out[0]["writer_id"] == f"adapter:{ok}"
     assert out[0]["writer_model"] == BASE
-    with pytest.raises(T2iRequestError):
+    # A gone adapter's draft is a 409 adapter_unavailable (stale clients
+    # fall back to Base), not a 400.
+    with pytest.raises(WriterAdapterUnavailable):
         _check_prompts(req(gone), 1, db)  # type: ignore[arg-type]
 
 
@@ -319,5 +322,5 @@ def test_adapter_kind_must_match_surface(db):
             }
         ]
     )
-    with pytest.raises(T2iRequestError):
+    with pytest.raises(WriterAdapterUnavailable):
         _check_prompts(req, 1, db)  # type: ignore[arg-type]

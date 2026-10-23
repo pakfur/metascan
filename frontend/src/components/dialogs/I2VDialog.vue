@@ -16,9 +16,12 @@ import {
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
 import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
-import { ApiError, thumbnailUrl } from '../../api/client'
+import { thumbnailUrl } from '../../api/client'
 import {
+  ADAPTER_LOADING,
+  ADAPTER_LOADING_TEXT,
   ADAPTER_UNAVAILABLE,
+  adapterErrorCode,
   adapterMenuOptions,
   isAdapterWriterId,
   writerName,
@@ -272,6 +275,20 @@ function fallBackToBase(reason: string) {
   storeWriter('base')
   toast.show(`Writer ${name} ${reason}; using Base.`, 'warn', 6000)
 }
+// True when `e` was an adapter refusal, after dealing with it (see T2IDialog).
+function handledAdapterError(e: unknown): boolean {
+  const code = adapterErrorCode(e)
+  if (code === ADAPTER_LOADING) {
+    toast.show(ADAPTER_LOADING_TEXT, 'info', 6000)
+    return true
+  }
+  if (code === ADAPTER_UNAVAILABLE) {
+    if (isAdapterWriterId(writer.value)) fallBackToBase('is no longer available')
+    void store.loadAdapters()
+    return true
+  }
+  return false
+}
 watch([adapterOptions, () => store.adaptersLoaded], () => {
   if (!isAdapterWriterId(writer.value) || !store.adaptersLoaded) return
   const option = adapterOptions.value.find((o) => o.id === writer.value)
@@ -401,15 +418,7 @@ async function onExpandPrompt() {
       templateId: forTemplate,
     })
   } catch (e) {
-    if (
-      e instanceof ApiError &&
-      e.status === 409 &&
-      (e.detail as { code?: unknown } | null)?.code === ADAPTER_UNAVAILABLE
-    ) {
-      fallBackToBase('is no longer available')
-      void store.loadAdapters()
-      return
-    }
+    if (handledAdapterError(e)) return
     toast.show(e instanceof Error ? e.message : String(e), 'warn')
   } finally {
     expanding.value = false
@@ -637,7 +646,12 @@ async function onGenerate() {
         store.trackJob(res.job_id)
         queued += 1
       } catch (e) {
-        if (isUnknownCategoryError(e)) {
+        if (adapterErrorCode(e) === ADAPTER_UNAVAILABLE) {
+          // The draft's adapter has gone: the prompt goes out as typed next.
+          store.setDraft(null)
+          void store.loadAdapters()
+          stopped = 'the trained writer of this prompt is no longer available; Generate again to send it as typed'
+        } else if (isUnknownCategoryError(e)) {
           void refreshCategories()
           stopped =
             'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'

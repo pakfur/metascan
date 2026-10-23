@@ -38,6 +38,22 @@ export const MIN_TARGET_MODEL_EXAMPLES = 50
 
 /** 409 detail code when a request names an adapter the writer cannot serve. */
 export const ADAPTER_UNAVAILABLE = 'adapter_unavailable'
+/** 409 detail code: the adapter is registered, but the busy writer has not loaded it yet. */
+export const ADAPTER_LOADING = 'adapter_loading'
+export const ADAPTER_LOADING_TEXT = 'The writer is busy — try again when the current batch finishes.'
+
+/** The `adapter:<id>` ids of the servable adapters of `kind`. */
+export function servableAdapterIds(adapters: WriterAdapter[], kind: 't2i' | 'i2v'): string[] {
+  return adapters.filter((a) => a.kind === kind && SERVABLE_STATUSES.includes(a.status)).map((a) => a.writer_id)
+}
+
+/** The 409 detail code of an adapter refusal, or null. */
+export function adapterErrorCode(e: unknown): string | null {
+  const err = e as { status?: unknown; detail?: unknown } | null
+  if (!err || err.status !== 409) return null
+  const code = (err.detail as { code?: unknown } | null)?.code
+  return code === ADAPTER_UNAVAILABLE || code === ADAPTER_LOADING ? code : null
+}
 
 export function isAdapterWriterId(id: unknown): id is AdapterWriterId {
   return typeof id === 'string' && /^adapter:[1-9]\d*$/.test(id)
