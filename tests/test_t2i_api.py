@@ -602,6 +602,7 @@ class TestPrompt(T2iApiCase):
                 "warnings": ["a warning"],
                 "direction": None,
                 "direction_parts": [],
+                "categories": [],
                 "drafts": [],
             },
         )
@@ -1007,6 +1008,7 @@ class TestImages(T2iApiCase):
                     "scorecard_id",
                     "resolved_caption",
                     "direction",
+                    "prompt_categories",
                 ]
             ),
         )

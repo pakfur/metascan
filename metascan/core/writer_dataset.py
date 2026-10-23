@@ -76,18 +76,22 @@ passes none for an adapter writer), so a pair compares two outputs for the
 very same request.
 
 The user turn's ``DESCRIPTION`` is the caption as the writer saw it:
-``t2i_images.resolved_caption`` when stored; for an older row, the caption
+``t2i_images.resolved_caption`` when stored (Random steps store their own;
+a supplied drafted step stores the lineage its ``prompts[]`` entry carried
+from Generate Prompt, a hand-back frame or the tile's row, so a seed that
+moved on since cannot change it); for an older row, the caption
 itself when it has no ``__TOKEN__``s, else the injected ``resolve(caption,
 prompt_seed, model)`` (``caption_resolver`` builds the real one from the
 T2I library snapshot); a row with tokens and no ``prompt_seed`` or resolver
 is left out. A hindsight user turn's DESCRIPTION is the brief.
 
 For scope ``all`` the user turn also carries ``CATEGORIES: a, b``
-(``t2i_prompt.add_categories_line``) naming the image's ``generation``
-category links only -- the batch's categories, which is what the runner
-names when an ``all``-scope adapter writes (tombstones keep no link source:
-their stored names stand in). A one-category scope has no line, at
-training and at inference.
+(``t2i_prompt.add_categories_line``) naming ``t2i_images.prompt_categories``
+-- the category names the prompt was written for, stored at ingest, which
+is exactly the line the runner sends when an ``all``-scope adapter writes.
+Older rows fall back to the image's ``generation`` category links
+(tombstones keep no link source: their stored names stand in). A
+one-category scope has no line, at training and at inference.
 
 JSONL schema (one JSON object per line, UTF-8; what the training worker
 reads)
@@ -333,10 +337,14 @@ def _scope_categories(rows: Iterable[Dict[str, Any]]) -> Tuple[Set[int], Set[str
 
 
 def _line_categories(rows: Iterable[Dict[str, Any]]) -> List[str]:
-    """The generation categories of ``rows`` for the CATEGORIES line."""
+    """The CATEGORIES names of ``rows``: each row's stored
+    ``prompt_categories`` (exactly what its prompt was written for), else
+    its generation-source category links."""
     names: Dict[str, str] = {}
     for r in rows:
-        for n in r.get("generation_categories") or []:
+        stored = r.get("prompt_categories")
+        source = stored if isinstance(stored, list) else r.get("generation_categories")
+        for n in source or []:
             clean = " ".join(str(n).split())
             if clean:
                 names.setdefault(clean.lower(), clean)
