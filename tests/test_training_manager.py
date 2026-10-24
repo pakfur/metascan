@@ -889,6 +889,14 @@ def test_gate_reports_each_missing_piece(tmp_path):
     assert reasons[0] == "Requires 32 GB VRAM; detected 24.0 GB."
     assert reasons[1] == "trl 0.27 lacks DPOConfig.ref_adapter_name"
 
+    # A "32 GB" card reports ~31.8 GiB through torch (32607 MiB on an RTX
+    # 5090): it must pass the VRAM check.
+    clear_writer_training_probe_cache()
+    reasons = writer_training_reasons(
+        _report(31.8), paths, deps_probe=lambda p: "", trl_probe=trl
+    )
+    assert not any("VRAM" in r for r in reasons)
+
     # Everything present.
     clear_writer_training_probe_cache()
     paths.base_dir.mkdir()

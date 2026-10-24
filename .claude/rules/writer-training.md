@@ -107,8 +107,9 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   The lifespan installs training (`recover()`) right after the T2I runner, before any
   CLIP / FAISS / VLM preload.
 - **The gate** (`hardware.writer_training_reasons`) lists one reason per missing
-  piece: CUDA, VRAM >= 32 GB (`WRITER_TRAINING_MIN_VRAM_GB`, at max_seq 2048 with DPO's
-  three passes), training deps, the TRL reference probe (skipped when the deps are
+  piece: CUDA, a 32 GB card (`WRITER_TRAINING_MIN_VRAM_GB`, at max_seq 2048 with DPO's
+  three passes; compared against `WRITER_TRAINING_VRAM_FLOOR_GB` = 30 because torch
+  reports GiB and a 5090 shows 31.8), training deps, the TRL reference probe (skipped when the deps are
   missing), base weights (every shard listed by the index), converter script. The
   deps/TRL probe runs in a single-flight background subprocess per interpreter
   (`gate.checking`); definitive answers are cached for the process, probe failures for
