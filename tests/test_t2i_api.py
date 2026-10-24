@@ -602,6 +602,7 @@ class TestPrompt(T2iApiCase):
                 "warnings": ["a warning"],
                 "direction": None,
                 "direction_parts": [],
+                "categories": [],
                 "drafts": [],
             },
         )
@@ -610,7 +611,13 @@ class TestPrompt(T2iApiCase):
             [
                 (
                     "generate_prompt",
-                    {**self.BODY, "directions": None, "variants": 1, "writer": "base"},
+                    {
+                        **self.BODY,
+                        "directions": None,
+                        "variants": 1,
+                        "writer": "base",
+                        "category_ids": [],
+                    },
                 )
             ],
         )
@@ -625,7 +632,13 @@ class TestPrompt(T2iApiCase):
             [
                 (
                     "generate_prompt",
-                    {**self.BODY, "directions": False, "variants": 1, "writer": "base"},
+                    {
+                        **self.BODY,
+                        "directions": False,
+                        "variants": 1,
+                        "writer": "base",
+                        "category_ids": [],
+                    },
                 )
             ],
         )
@@ -884,6 +897,22 @@ class TestBatches(T2iApiCase):
 
 
 class TestBatchCategories(T2iApiCase):
+    def test_prompt_categories_are_checked_then_reach_the_runner(self) -> None:
+        anime = self.db.create_category("Anime").id
+        body = {"caption": "__ALICE__ reads.", "seed": 7, "model": "sd"}
+        resp = self.client.post(
+            "/api/t2i/prompt", json={**body, "category_ids": [anime, 999]}
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["detail"]["code"], "unknown_category")
+        self.assertEqual(self.runner.calls, [])
+        resp = self.client.post(
+            "/api/t2i/prompt", json={**body, "category_ids": [anime, anime]}
+        )
+        self.assertEqual(resp.status_code, 200)
+        ((_, kwargs),) = self.runner.calls
+        self.assertEqual(kwargs["category_ids"], [anime])
+
     def test_t2i_unknown_category_rejected_before_queueing(self) -> None:
         known = self.db.create_category("Anime").id
         resp = self.client.post(
@@ -976,6 +1005,12 @@ class TestImages(T2iApiCase):
                     "draft_prompt",
                     "edited",
                     "writer_model",
+                    "scorecard_id",
+                    "scorecard_blind",
+                    "passed",
+                    "resolved_caption",
+                    "direction",
+                    "prompt_categories",
                 ]
             ),
         )

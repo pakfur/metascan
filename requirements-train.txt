@@ -1,0 +1,42 @@
+# Optional: prompt-writer LoRA training (taste learning, project 4).
+#
+# Only the training worker subprocess (metascan/workers/writer_train_worker.py
+# and writer_train_backend.py) imports these, lazily. The FastAPI server never
+# does, and Metascan runs without them: the "writer_training" feature gate
+# reports them missing instead. Training needs an NVIDIA CUDA GPU with
+# >= 32 GB VRAM (LoRA in bf16 on the 8B writer; no 4-bit / bitsandbytes).
+#
+# Install torch WITH CUDA first, matching your driver -- the default PyPI
+# wheel on Windows is CPU-only. For an RTX 50xx (Blackwell, sm_120) that
+# means a CUDA 12.8+ build, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# then:
+#   pip install -r requirements-train.txt
+torch>=2.7.0
+# Qwen3-VL (Qwen3VLForConditionalGeneration, model_type "qwen3_vl") landed
+# in transformers 4.57; ``dtype=`` in from_pretrained needs >= 4.56.
+transformers>=4.57.0
+# Regex target_modules + disable_adapter() for the DPO reference.
+peft>=0.17.0
+# SFTConfig(completion_only_loss), conversational prompt/completion and
+# preference data, processing_class=, and DPOConfig(model_adapter_name,
+# ref_adapter_name) so the SFT adapter (loaded twice) is the DPO reference.
+# Capped below 0.26: only the 0.25 docs confirm those two DPOConfig fields
+# (TRL 1.0 rewrote DPOTrainer). Before widening the cap, install the new
+# version and check it still has them -- this must print True:
+#   python -c "import dataclasses,trl;print({f.name for f in dataclasses.fields(trl.DPOConfig)}>={'model_adapter_name','ref_adapter_name'})"
+# (metascan.workers.writer_train_probe.probe_trl_reference_support runs the
+# same check for the writer_training gate.)
+trl>=0.25.0,<0.26
+accelerate>=1.4.0
+datasets>=3.0.0
+safetensors>=0.4.3
+# The llama.cpp converter (convert_lora_to_gguf.py, run with this same
+# interpreter) imports torch, transformers, numpy, sentencepiece and gguf.
+# Prefer llama.cpp's own pins for it:
+#   pip install -r <llama.cpp>/requirements/requirements-convert_lora_to_gguf.txt
+# The worker also reads the converted adapter with the gguf package
+# (GGUFReader) to verify its LoRA tensors; it ships with llama.cpp
+# (gguf-py) -- the PyPI release below is the fallback.
+sentencepiece>=0.2.0
+gguf>=0.17.0

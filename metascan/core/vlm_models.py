@@ -45,6 +45,9 @@ class VlmModelSpec:
       - ``writer_allowed``: False keeps the model out of the prompt-writer
         role (T2I / I2V prompt writing). Fine-tune adapters build on the
         writer model, so it must be one they can target.
+      - ``hf_train_repo``: the HF safetensors repo the GGUF was quantized
+        from -- the weights writer LoRA training runs on (the GGUF repo's
+        ``base_model``). None for models adapters are never trained on.
     """
 
     model_id: str
@@ -61,6 +64,7 @@ class VlmModelSpec:
     cuda_gate_vram_gb: Optional[float] = None
     mmproj_repo_filename: str = "mmproj-F16.gguf"
     writer_allowed: bool = True
+    hf_train_repo: Optional[str] = None
 
 
 # The prompt-writer role's default model (taste learning: adapters are
@@ -110,6 +114,8 @@ REGISTRY: dict[str, VlmModelSpec] = {
         min_vram_gb=9.0,
         parallel_slots=4,
         cuda_gate_vram_gb=10.0,
+        # The noctrex GGUF's model card base_model (confirmed Oct 2026).
+        hf_train_repo="huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
     ),
     "qwen3vl-30b-a3b": VlmModelSpec(
         model_id="qwen3vl-30b-a3b",

@@ -23,6 +23,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, gpu_reserved
+
 logger = logging.getLogger(__name__)
 
 # State machine strings. Kept as plain strings so they can be broadcast
@@ -193,6 +195,9 @@ class InferenceClient:
                 return
             await self.shutdown()
 
+        if gpu_reserved():
+            # Writer training holds the GPU: never load CLIP under it.
+            raise InferenceError(GPU_BUSY_MESSAGE)
         self._model_key = model_key
         self._device = device
         self._resolved_device = None

@@ -23,12 +23,16 @@ from pydantic import BaseModel
 from backend.api import similarity
 from backend.config import get_models_config, load_app_config, save_app_config
 from backend.ws.manager import ws_manager
+from backend.services import writer_training_assets as wta
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.embedding_manager import CLIP_MODELS, EmbeddingManager
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, GPU_BUSY_TRAINING
 from metascan.core.hardware import (
     classify_tier,
     detect_hardware,
     feature_gates,
     report_to_dict,
+    writer_training_gate,
 )
 from metascan.utils.app_paths import get_data_dir
 
@@ -336,7 +340,7 @@ async def get_inference_status() -> Dict[str, Any]:
     return client.snapshot()
 
 
-@router.post("/inference/start")
+@router.post("/inference/start", dependencies=GPU_FREE)
 async def start_inference() -> Dict[str, Any]:
     """Spawn the inference worker in the background using the
     currently-configured CLIP model. The UI calls this when the user
@@ -388,11 +392,15 @@ def _build_status_payload() -> Dict[str, Any]:
     preload = models_cfg["preload_at_startup"]
     sim_cfg = config.get("similarity", {}) or {}
 
+    # Writer training rows sit right after the VLM rows (they train the
+    # writer VLM); paths resolve exactly as the training manager's do.
+    training_paths = wta.asset_paths(config)
     rows = (
         _clip_status_rows(preload)
         + _upscale_status_rows(preload)
         + _nltk_status_rows(preload)
         + _vlm_status_rows(preload)
+        + wta.status_rows(training_paths)
     )
 
     # Surface the currently-selected CLIP model + dim so the UI can render
@@ -401,6 +409,13 @@ def _build_status_payload() -> Dict[str, Any]:
     current_dim = int(CLIP_MODELS.get(current_clip, {}).get("embedding_dim") or 0)
 
     report = detect_hardware()
+    gates = feature_gates(report)
+    # The filesystem pieces are checked on every call against the
+    # config-resolved paths (feature_gates alone uses the defaults); the
+    # dependency probe part stays cached / "not checked yet" (never spawns).
+    gates["writer_training"] = writer_training_gate(
+        report, training_paths.gate_paths(), probe=False
+    )
     payload: Dict[str, Any] = {
         "models": rows,
         "hf_token_set": bool(models_cfg["huggingface_token"]),
@@ -413,8 +428,9 @@ def _build_status_payload() -> Dict[str, Any]:
                 "available": g.available,
                 "recommended": g.recommended,
                 "reason": g.reason,
+                "reasons": list(g.reasons),
             }
-            for k, g in feature_gates(report).items()
+            for k, g in gates.items()
         },
     }
     return payload
@@ -535,6 +551,50 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
         asyncio.create_task(_download_vlm(mid))
         return {"status": "started", "id": mid}
 
+    if mid in wta.IDS:
+        from backend.services.training_manager import get_training_manager
+
+        manager = get_training_manager()
+
+        async def _start() -> Dict[str, Any]:
+            if mid == wta.CONVERTER_ID:
+                paths = await asyncio.to_thread(wta.asset_paths)
+                try:
+                    wta.require_managed(paths)
+                except wta.AssetError as exc:
+                    raise HTTPException(exc.status, detail=exc.detail()) from None
+                # A run's final convert step may execute from this dir.
+                if (
+                    manager is not None
+                    and manager.status().get("state", "idle") != "idle"
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": GPU_BUSY_TRAINING,
+                            "message": GPU_BUSY_MESSAGE,
+                        },
+                    )
+            if mid in _writer_deletes:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "delete_running",
+                        "message": "A delete is running.",
+                    },
+                )
+            # Single flight per id: a second click while one runs is a no-op.
+            if mid in _writer_downloads:
+                return {"status": "already_running", "id": mid}
+            _writer_downloads.add(mid)
+            asyncio.create_task(_download_writer_asset(mid))
+            return {"status": "started", "id": mid}
+
+        if manager is not None:
+            async with manager.op_lock:
+                return await _start()
+        return await _start()
+
     raise HTTPException(status_code=404, detail=f"unknown model id: {mid}")
 
 
@@ -543,6 +603,8 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
     """Delete cached weights for a non-CLIP model. CLIP weights live in the
     shared huggingface_hub cache and are not deleted here — that cache is
     managed by the HF tooling."""
+    if model_id in wta.IDS:
+        return await _delete_writer_asset(model_id)
     if model_id.startswith("clip-"):
         raise HTTPException(
             status_code=400,
@@ -576,7 +638,7 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
     raise HTTPException(status_code=404, detail=f"unknown model id: {model_id}")
 
 
-@router.post("/rebuild-index")
+@router.post("/rebuild-index", dependencies=GPU_FREE)
 async def rebuild_index() -> Dict[str, Any]:
     """Convenience wrapper that forwards to the existing similarity index
     rebuild endpoint so the Models tab can surface a 'Rebuild index' button
@@ -696,3 +758,123 @@ async def _download_vlm(mid: str) -> None:
         except Exception:
             logger.exception("Refreshing the VLM roles after a download failed")
     _broadcast_download(mid, "download_complete")
+
+
+# ----------------------------------------------------------------------
+# Writer training assets (HF base weights, llama.cpp LoRA converter)
+# ----------------------------------------------------------------------
+
+# Ids with a download in flight (single flight per id).
+_writer_downloads: "set[str]" = set()
+# Ids with a delete in flight (a download of the same row is refused).
+_writer_deletes: "set[str]" = set()
+
+
+def _broadcast_gate_changed() -> None:
+    """The writer_training gate's filesystem pieces changed: the training
+    window refetches ``GET /api/writers/training``."""
+    ws_manager.broadcast_sync("training", "gate_changed", {})
+
+
+async def _download_writer_asset(mid: str) -> None:
+    """Download the HF training weights or fetch the converter; progress on
+    the ``models`` channel, ``training``/``gate_changed`` on success."""
+    _writer_downloads.add(mid)
+    try:
+        _broadcast_download(mid, "download_progress", stage="starting", percent=0.0)
+        paths = await asyncio.to_thread(wta.asset_paths)
+        if mid == wta.BASE_ID:
+            token = get_models_config(load_app_config())["huggingface_token"] or None
+            _broadcast_download(
+                mid, "download_progress", stage="downloading", percent=0.0
+            )
+
+            def progress(fraction: float) -> None:
+                _broadcast_download(
+                    mid, "download_progress", stage="downloading", percent=fraction
+                )
+
+            await asyncio.to_thread(
+                wta.download_base, paths, token=token, on_progress=progress
+            )
+        else:
+            _broadcast_download(
+                mid, "download_progress", stage="fetching source", percent=0.0
+            )
+            await asyncio.to_thread(wta.fetch_converter, paths)
+    except Exception as e:
+        logger.exception("Writer training download for %s failed", mid)
+        message = e.message if isinstance(e, wta.AssetError) else str(e)
+        _broadcast_download(mid, "download_error", error=message)
+        return
+    finally:
+        _writer_downloads.discard(mid)
+    _broadcast_download(mid, "download_complete")
+    _broadcast_gate_changed()
+
+
+async def _delete_writer_asset(mid: str) -> Dict[str, Any]:
+    """Delete the base weights (refused while a run would read them) or a
+    metascan-managed converter dir (refused while training runs)."""
+    from backend.services.training_manager import get_training_manager
+
+    if mid in _writer_downloads:
+        raise HTTPException(
+            409,
+            detail={"code": "download_running", "message": "A download is running."},
+        )
+    paths = await asyncio.to_thread(wta.asset_paths)
+    manager = get_training_manager()
+
+    async def _do() -> None:
+        if mid == wta.BASE_ID:
+            if manager is not None:
+                run_ids = await asyncio.to_thread(
+                    manager.runs_using_base, paths.base_dir
+                )
+                if run_ids:
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "training_uses_base",
+                            "message": (
+                                "Training runs use these weights (running, "
+                                "paused or failed): cancel them first."
+                            ),
+                            "run_ids": run_ids,
+                        },
+                    )
+            await asyncio.to_thread(wta.delete_base, paths)
+            return
+        if manager is not None and manager.status().get("state", "idle") != "idle":
+            raise HTTPException(
+                409,
+                detail={"code": GPU_BUSY_TRAINING, "message": GPU_BUSY_MESSAGE},
+            )
+        try:
+            await asyncio.to_thread(wta.delete_converter, paths)
+        except wta.AssetError as exc:
+            raise HTTPException(exc.status, detail=exc.detail()) from None
+
+    _writer_deletes.add(mid)
+    try:
+        if manager is not None:
+            # Serialised with training start / resume (no run can begin
+            # reading the weights between the check and the removal).
+            async with manager.op_lock:
+                await _do()
+        else:
+            await _do()
+    except OSError as exc:
+        logger.exception("Writer training delete of %s failed", mid)
+        raise HTTPException(
+            500,
+            detail={
+                "code": "delete_failed",
+                "message": f"Could not remove the files: {exc}",
+            },
+        ) from None
+    finally:
+        _writer_deletes.discard(mid)
+        _broadcast_gate_changed()
+    return {"ok": True}

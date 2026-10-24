@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from backend.dependencies import get_db
 from backend.services.judgments_service import JudgmentsService
+from backend.services.scorecard import notify_scorecard_judgment
 from backend.ws.manager import ws_manager
 
 router = APIRouter(prefix="/api", tags=["judgments"])
@@ -41,6 +42,7 @@ async def mark_seen(
     state = await service.mark_seen(body.file_path, body.score_shown)
     if state is None:
         raise _not_found()
+    # Seen without a verdict never judges a scorecard image: no check here.
     return state.to_dict()
 
 
@@ -53,6 +55,9 @@ async def get_judgment(
         raise _not_found()
     out = state.to_dict()
     out["batch"] = await service.batch_position(file_path)
+    # A scorecard image: the viewer hides it as "judge to reveal" while
+    # ``blind`` (no favorite / pass yet). None for any other item.
+    out["scorecard"] = await service.scorecard(file_path)
     return out
 
 
@@ -103,4 +108,6 @@ async def patch_judgment(
         raise HTTPException(status_code=status[code], detail={"code": code})
     if state is None:
         raise _not_found()
+    if has_verdict:
+        await notify_scorecard_judgment(get_db(), file_path)
     return state.to_dict()

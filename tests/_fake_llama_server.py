@@ -15,14 +15,14 @@ import tempfile
 import textwrap
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import httpx
 
 
 _FAKE_SCRIPT = textwrap.dedent(
     """
-    import argparse, asyncio, sys
+    import argparse, asyncio, json, sys
     from aiohttp import web
 
     ap = argparse.ArgumentParser()
@@ -33,7 +33,20 @@ _FAKE_SCRIPT = textwrap.dedent(
     ap.add_argument("--health-fails-forever", action="store_true")
     ap.add_argument("--reply-delay-ms", type=int, default=0)
     ap.add_argument("--term-delay-ms", type=int, default=0)
+    # JSON lines: {"argv": [...]} at start, then {"body": {...}} per chat
+    # request -- what a test asserts the client spawned with and sent.
+    ap.add_argument("--record", type=str, default="")
+    # llama-server flags the fake accepts and ignores (they are recorded).
+    ap.add_argument("--lora", action="append", default=[])
+    ap.add_argument("--lora-init-without-apply", action="store_true")
     args = ap.parse_args()
+
+    def record(entry):
+        if args.record:
+            with open(args.record, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\\n")
+
+    record({"argv": sys.argv[1:]})
 
     state = {"ready": False, "served": 0}
 
@@ -43,7 +56,7 @@ _FAKE_SCRIPT = textwrap.dedent(
         return web.json_response({"status": "ok"})
 
     async def chat(request):
-        await request.json()
+        record({"body": await request.json()})
         if args.reply_delay_ms:
             await asyncio.sleep(args.reply_delay_ms / 1000.0)
         state["served"] += 1
@@ -245,6 +258,8 @@ def fake_llama_command(
     reply_delay_ms: int = 0,
     term_delay_ms: int = 0,
     load_ms: int = 0,
+    record: Optional[Path] = None,
+    extra_args: Sequence[str] = (),
 ) -> list:
     """argv that runs the fake llama-server on ``port`` -- for a real
     ``VlmClient`` to Popen (override its ``_build_command``), so terminate,
@@ -270,4 +285,6 @@ def fake_llama_command(
         str(reply_delay_ms),
         "--term-delay-ms",
         str(term_delay_ms),
+        *(["--record", str(record)] if record is not None else []),
+        *extra_args,
     ]

@@ -8,6 +8,9 @@ paths:
   - "backend/services/scan_dispatch.py"
   - "frontend/src/api/vlm.ts"
   - "scripts/build_llama_server.sh"
+  - "backend/services/vlm_roles.py"
+  - "metascan/core/writer_adapters.py"
+  - "tests/test_writer_adapter_serving.py"
   - "setup_models.py"
   - "tests/_fake_llama_server.py"
   - "tests/test_vlm_*.py"
@@ -130,6 +133,46 @@ the root CLAUDE.md still applies.
   settles — before each pass, including coalesced reruns. A drain that
   had to wait re-snapshots `_explicit_stops` after the wait: the render's
   own VLM unload is then behind it and must not strand the batch.
+- **Prompt-writer adapters (LoRA) ride the writer's llama-server.**
+  `VlmRoles(adapter_source=…)` (wired in the lifespan to
+  `writer_adapters.servable_adapter_files`: `ready`/`untested` rows whose
+  `data/models/vlm/adapters/<id>/adapter.gguf` exists) gives the writer
+  client `lora_paths` = the adapters whose `base_model` is the writer model
+  (a general-only client gets none); `_build_command` appends `--lora <p>`
+  per path plus `--lora-init-without-apply`, and `_loaded_lora_paths` is
+  what the running server spawned with. `generate_text(lora_id=…)` /
+  `(lora_path=…)` adds `"lora": [{"id": <position>, "scale": 1.0}]` — a
+  base request has NO `lora` key (byte-identical to before; tested).
+  `lora_path` is resolved against the running server right before the POST
+  (with the HTTP client snapshot, after any image encoding). An adapter
+  added after the spawn restarts the server (`_ensure_lora` /
+  `prepare_lora`) only once it is not busy — nothing in flight or waiting,
+  NO `hold()`, not loading — never evicting work or breaking a T2I Random
+  batch's prompting hold; still busy after `lora_wait_s` (60 s) →
+  `AdapterLoadingError` (409 `adapter_loading`, "try again when the current
+  batch finishes") and the pending restart runs at the next idle. The
+  caller's OWN hold never counts (`_OWN_HOLDS` contextvar, set by `hold()`),
+  the wait returns as soon as another caller's restart loaded the adapter,
+  and the restart is single-flight (`_lora_restart_lock`). POST
+  /api/t2i/batches calls `prepare_lora(wait_s=15)` before registering a
+  Random batch and refuses it with 409 `adapter_loading` when the writer
+  stays busy; a step whose adapter is not loaded falls back at once (no
+  retry). Adapter 409s carry `writer_id` so the dialog falls back the Writer
+  pick only when it is the refused adapter, else drops the held draft. One withdrawn and no
+  longer loaded raises `AdapterNotLoadedError` (409 `adapter_unavailable`).
+  `refresh_adapters()` restarts a stale client only when idle
+  (`busy_for_background(swap_grace)` false: nothing in flight or waiting,
+  no `hold()`, not loading) — via `restart_for_loras()` = `evict()`, so it
+  comes back on its next request — else `restart_pending` until it is; a
+  stopped client just spawns with the new list. `withdraw_adapter(id)`
+  (DELETE `/api/writers/adapters/{id}` calls it BEFORE removing files, for
+  Windows' mapped-file lock) answers 409 `adapter_files_busy` at once when it
+  returns False (a running or loading server still maps the GGUF) instead of
+  relying on the removal failing; a refused withdraw puts the id back, so the adapter
+  stays served and no restart is left pending; a withdrawn id is forgotten once the
+  registry no longer lists it. A registry change leaves an idle writer
+  `stopped` until its next request (user-visible: no model shown loaded). Tests: `tests/test_writer_adapter_serving.py` (the fake server's
+  `--record` file logs argv and request bodies).
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
@@ -226,6 +269,50 @@ the root CLAUDE.md still applies.
   Going below it leaves GPU slots idle in `llama-server`'s
   `--parallel`; going above it forces the server to queue requests and
   removes the overlap benefit.
+- **LoRA adapter serving (prompt-writer adapters).** `VlmClient(lora_paths=...)`
+  adds one `--lora <adapter.gguf>` per adapter followed by a single
+  `--lora-init-without-apply` (only when the list is non-empty, so a
+  base-only command line is unchanged). The adapters are loaded but not
+  applied; each request selects one with `lora: [{id: <position>, scale: 1}]`
+  and the `lora` key is absent from base requests. The position is the index
+  in the list the RUNNING server was spawned with (`_loaded_lora_paths`,
+  snapshotted at `start()`), resolved together with the HTTP client right
+  before the POST. Never compute it from the registry's current list.
+  `VlmRoles` feeds the writer client the `ready`/`untested` adapters whose
+  `adapters/<id>/adapter.gguf` exists and whose `base_model` equals the
+  writer's model; a general-only client gets none. Adapter ids are
+  `adapter:<id>` writer ids (`writer_adapters.adapter_writer_id`); a
+  T2I adapter is only valid on T2I, an I2V one on I2V.
+- **Restart only when idle.** A registry change (new, deleted, withdrawn or
+  failed adapter) does not interrupt work: an idle stale client is evicted
+  and respawns lazily on its next request (so the writer reads "stopped"
+  until then); a busy one sets `restart_pending` and a background task
+  restarts it when `busy_for_background` is false (nothing in flight or
+  waiting, no `hold()`, not loading). `_ensure_lora` for an adapter the
+  server does not yet hold waits (bounded by `lora_wait_s`, 60 s) for that
+  idle moment and never preempts a Random batch's hold: past the wait it
+  raises `AdapterLoadingError` -> 409 `adapter_loading` (retry later). A T2I
+  Random batch calls `prepare_lora` BEFORE taking its hold. A withdrawn
+  adapter the running server still holds keeps serving until the pending
+  restart; one it no longer holds raises `AdapterNotLoadedError`.
+  `WriterAdapterUnavailable` (gone, failed, still training, other kind, not
+  served, other base model) -> 409 `adapter_unavailable`; the frontend falls
+  back to Base. `DELETE /api/writers/adapters/{id}` withdraws first and
+  answers 409 `adapter_files_busy` if a running server still maps the file.
+  After any registry change call `refresh_writer_adapters()` BEFORE
+  broadcasting `adapters_changed`.
+- **Adapter prompts match the training prompts.** Adapter requests send no
+  taste examples and no variant angle, and add the `CATEGORIES:` line only
+  for a scope-`all` adapter (`t2i_prompt.add_categories_line`);
+  `tests/test_writer_dataset_parity.py` guards that train and inference
+  render the same user turn. Never log the prompts or examples.
+- **The adapter GGUF comes from `convert_lora_to_gguf.py`** run by the
+  training worker with `--base <HF dir>`; the worker verifies the GGUF (LoRA
+  tensor count, no vision tensors) and fails the run otherwise. The
+  converter is pinned to `LLAMA_CPP_RELEASE`; a `llama-server` built from a
+  much different llama.cpp may not load the adapter (Models tab shows
+  `release_mismatch`).
+
 - **VLM status row requires the binary too.** `_vlm_status_rows` in
   `backend/api/models.py` only flips a row to `available` when GGUF +
   mmproj + `binary_path()` are all present. A partial download (weights

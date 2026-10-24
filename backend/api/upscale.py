@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.ws.manager import ws_manager
+from backend.services.gpu_lock import GPU_FREE
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,13 @@ def _get_queue():
         _upscale_queue = ProcessUpscaleQueue(queue_dir)
         _attach_callbacks(_upscale_queue)
     return _upscale_queue
+
+
+def upscale_active() -> bool:
+    """True while an upscale task is pending or running (writer training
+    refuses to take the GPU). Never creates the queue."""
+    queue = _upscale_queue
+    return bool(queue is not None and queue.has_active_tasks())
 
 
 def _task_payload(task: Any) -> Dict[str, Any]:
@@ -139,7 +147,7 @@ class UpscaleSubmitRequest(BaseModel):
     concurrent_workers: int = 1
 
 
-@router.post("")
+@router.post("", dependencies=GPU_FREE)
 async def submit_upscale(body: UpscaleSubmitRequest):
     """Add upscale tasks to the queue and start processing."""
     queue = _get_queue()
@@ -216,7 +224,7 @@ async def pause_all():
     return {"status": "paused", "count": count}
 
 
-@router.post("/resume-all")
+@router.post("/resume-all", dependencies=GPU_FREE)
 async def resume_all():
     """Resume processing."""
     queue = _get_queue()

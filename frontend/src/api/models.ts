@@ -7,7 +7,7 @@ export type HardwareInfo = HardwarePayload
 export type { Gate, Tier }
 
 export type ModelStatus = 'available' | 'missing' | 'downloading' | 'error'
-export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP' | 'Tagging (VLM)'
+export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP' | 'Tagging (VLM)' | 'Writer training'
 
 export interface ModelRow {
   id: string
@@ -25,6 +25,20 @@ export interface ModelRow {
   /** VLM rows: roles currently pointed at this model, and writer eligibility. */
   roles?: string[]
   writer_allowed?: boolean
+  /** Writer LoRA training assets (`writer-train-base`, `llama-cpp-converter`). */
+  writer_training?: boolean
+  /** False hides Download (and Delete): the user manages it via config. */
+  download_allowed?: boolean
+  managed?: boolean
+  /** Owner-facing note (config key, build script, interrupted download). */
+  hint?: string
+  /** Base weights: the HF repo, and whether an incomplete download is on disk. */
+  repo?: string
+  partial?: boolean
+  /** Converter: the extracted llama.cpp tag vs the served llama-server's. */
+  release?: string | null
+  server_release?: string
+  release_mismatch?: boolean
 }
 
 export interface ModelsStatusResponse {

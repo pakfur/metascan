@@ -19,6 +19,8 @@ from typing import IO, Callable, Dict, List, Optional, Any, cast
 from dataclasses import dataclass, asdict
 import portalocker
 
+from metascan.core.gpu_guard import gpu_reserved
+
 
 class UpscaleStatus(Enum):
     """Status of an upscale task."""
@@ -893,13 +895,33 @@ class ProcessUpscaleQueue:
 
         return resumed_count
 
+    def has_active_tasks(self) -> bool:
+        """True while any task is pending, downloading models or processing
+        (writer training refuses to take the GPU meanwhile)."""
+        busy = {
+            UpscaleStatus.PENDING.value,
+            UpscaleStatus.PROCESSING.value,
+            UpscaleStatus.DOWNLOADING_MODELS.value,
+        }
+        try:
+            tasks = self._read_queue_file()["tasks"].values()
+        except Exception:
+            return False
+        return any(t.get("status") in busy for t in tasks) or bool(
+            self.active_processes
+        )
+
     def start_processing(self) -> None:
         """Start processing pending tasks up to max_workers limit."""
+        if gpu_reserved():
+            # Writer training holds the GPU: pending tasks wait (the poller
+            # calls this again after the lock is released).
+            return
         # Recover any stale tasks before starting new ones
         self._recover_stale_tasks(timeout=3600.0)
 
         # Start workers up to the limit
-        while len(self.active_processes) < self.max_workers:
+        while len(self.active_processes) < self.max_workers and not gpu_reserved():
             # Atomically claim next pending task
             task = self.claim_next_pending()
 

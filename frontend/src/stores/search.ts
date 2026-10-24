@@ -6,6 +6,7 @@ import { fetchTagPaths } from '../api/filters'
 import { ApiError } from '../api/client'
 import { useMediaStore } from './media'
 import { useModelsStore } from './models'
+import { errorText } from '../utils/gpuBusy'
 
 export interface DimMismatch {
   message: string
@@ -57,6 +58,11 @@ export const useSearchStore = defineStore('search', () => {
         pending.value = null
         if (p.kind === 'text') void runText(p.query)
         else void runSimilar(p.media)
+      } else if (state === 'error' && pending.value) {
+        // The worker could not start (e.g. 409 gpu_busy_training while a
+        // writer LoRA trains: "GPU busy: training"); drop the search.
+        pending.value = null
+        searchError.value = modelsStore.inferenceError ?? 'The search worker could not start.'
       }
     },
   )
@@ -105,7 +111,7 @@ export const useSearchStore = defineStore('search', () => {
     } catch (e) {
       const mismatch = extractDimMismatch(e)
       if (mismatch) dimMismatch.value = mismatch
-      else searchError.value = e instanceof Error ? e.message : String(e)
+      else searchError.value = errorText(e)
       restoreSort()
       scores.value = null
       console.error('Content search failed:', e)
@@ -127,7 +133,7 @@ export const useSearchStore = defineStore('search', () => {
     } catch (e) {
       const mismatch = extractDimMismatch(e)
       if (mismatch) dimMismatch.value = mismatch
-      else searchError.value = e instanceof Error ? e.message : String(e)
+      else searchError.value = errorText(e)
       restoreSort()
       scores.value = null
       console.error('Similarity search failed:', e)

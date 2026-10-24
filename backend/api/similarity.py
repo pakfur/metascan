@@ -14,8 +14,10 @@ from backend.config import load_app_config, save_app_config
 from backend.dependencies import get_db
 from backend.services.scan_dispatch import preferred_vlm_model_id, should_tag_with_vlm
 from backend.ws.manager import ws_manager
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.embedding_queue import EmbeddingQueue
+from metascan.core.gpu_guard import gpu_reserved
 from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
@@ -115,6 +117,12 @@ def _generation_in_flight() -> bool:
         # A probe that cannot answer counts as busy: check again later.
         logger.debug("generation busy probe failed", exc_info=True)
         return True
+
+
+def generation_in_flight() -> bool:
+    """Public form of the generation-busy probe (other background VLM jobs
+    wait on the same signal)."""
+    return _generation_in_flight()
 
 
 async def _wait_for_generation_to_settle() -> bool:
@@ -529,7 +537,7 @@ def _assert_dim_matches(fm: FaissIndexManager, vec_dim: int) -> None:
         )
 
 
-@router.post("/search")
+@router.post("/search", dependencies=GPU_FREE)
 async def search_similar(
     body: SimilaritySearchRequest,
 ) -> List[Dict[str, Any]]:
@@ -574,7 +582,7 @@ async def search_similar(
     ]
 
 
-@router.post("/content-search")
+@router.post("/content-search", dependencies=GPU_FREE)
 async def content_search(
     body: ContentSearchRequest,
 ) -> List[Dict[str, Any]]:
@@ -654,6 +662,10 @@ async def update_similarity_settings(body: SimilaritySettingsUpdate):
 async def _reload_inference_client(model_key: str, device: str) -> None:
     if _inference_client is None:
         return
+    if gpu_reserved():
+        # Training holds the GPU: the next search after it ends spawns the
+        # worker with the new settings (ensure_started compares them).
+        return
     try:
         await _inference_client.reload(model_key=model_key, device=device)
     except Exception:
@@ -663,7 +675,7 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 # ----- Index build/cancel (subprocess-driven) -----
 
 
-@router.post("/index/build")
+@router.post("/index/build", dependencies=GPU_FREE)
 async def build_index(rebuild: bool = False) -> Dict[str, Any]:
     """Start an embedding worker subprocess for unembedded (or all) files."""
     return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True)
@@ -685,6 +697,10 @@ def is_indexing() -> bool:
 async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
     global _current_scan_tag_with_vlm, _vlm_scan_stops
 
+    if gpu_reserved():
+        # Writer training holds the GPU (every entry point: the route, the
+        # post-scan auto trigger, the Models tab rebuild, the auto index).
+        raise gpu_busy_http_error()
     eq = _get_embedding_queue()
     if eq.is_indexing():
         raise HTTPException(status_code=409, detail="Index build already in progress")
@@ -703,6 +719,10 @@ async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str
         return {"status": "noop", "total": 0}
 
     tag_with_vlm = allow_vlm_tagging and should_tag_with_vlm(detect_hardware())
+    # Re-checked after the last await and before the scan-tag state is
+    # touched: the lock may have been taken while the paths were read.
+    if gpu_reserved():
+        raise gpu_busy_http_error()
     _current_scan_tag_with_vlm = tag_with_vlm
     _vlm_scan_stops = _capture_vlm_scan_stops() if tag_with_vlm else None
 

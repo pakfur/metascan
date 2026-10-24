@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
+import { useRegisterViewer } from '../../composables/useViewerPresence'
 import { streamUrl } from '../../api/client'
 import { fileName } from '../../utils/path'
 import {
@@ -22,6 +23,8 @@ const emit = defineEmits<{
 }>()
 
 const mediaStore = useMediaStore()
+// The writer training window steps aside while a viewer is open.
+useRegisterViewer()
 const currentIndex = ref(props.initialIndex)
 const current = computed(() => props.mediaList[currentIndex.value] ?? null)
 const positionLabel = computed(

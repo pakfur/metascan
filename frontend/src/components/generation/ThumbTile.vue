@@ -54,6 +54,7 @@ function onImgError(e: Event) {
     >
       <img :src="thumbnailUrl(item.file_path)" alt="" loading="lazy" decoding="async" @error="onImgError" />
       <span v-if="badge" class="score-badge" :title="badgeTitle">{{ badge }}</span>
+      <span v-if="item.blind" class="blind-badge" :title="item.title">judge to reveal</span>
       <button
         type="button"
         class="overlay star"
@@ -130,6 +131,18 @@ function onImgError(e: Event) {
   line-height: 1.5;
   /* Hoverable for its tooltip; a click still reaches the tile under it. */
   cursor: pointer;
+}
+
+.blind-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(201, 162, 39, 0.85);
+  color: #111;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .overlay {

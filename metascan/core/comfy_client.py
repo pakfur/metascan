@@ -39,6 +39,7 @@ from uuid import uuid4
 import httpx
 import websockets
 
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, gpu_reserved
 from metascan.core.comfy_bindings import (
     Bindings,
     GenerationParams,
@@ -106,6 +107,14 @@ _OUTPUT_KEYS: Tuple[str, ...] = ("images", "gifs", "videos", "video", "audio")
 
 class ComfyError(RuntimeError):
     """A ComfyUI request failed, or was made against unusable state."""
+
+
+class GpuBusyError(ComfyError):
+    """Refused: writer training holds the GPU (routes answer 409
+    ``gpu_busy_training``)."""
+
+    def __init__(self) -> None:
+        super().__init__(GPU_BUSY_MESSAGE)
 
 
 class PresetNotFoundError(ComfyError):
@@ -346,6 +355,8 @@ class ComfyClient:
 
         Returns the generation_jobs row id.
         """
+        if gpu_reserved():
+            raise GpuBusyError()
         workflow, bindings = await self._load_preset(preset_id)
         graph = apply_overrides(workflow, bindings, params)
 
@@ -568,6 +579,10 @@ class ComfyClient:
         actually reaches the front of the queue, so this is cheap and
         changes no happy-path behaviour.
         """
+        if gpu_reserved():
+            # Writer training holds the GPU (the routes already 409; this
+            # catches work admitted just before the lock was taken).
+            raise GpuBusyError()
         workflow, bindings = await self._load_preset(preset_id)
         apply_overrides(workflow, bindings, params)
         job_id = int(
@@ -584,6 +599,16 @@ class ComfyClient:
                 t2i_batch_id,
             )
         )
+        # Re-checked with no await before the append: the lock may have been
+        # taken while the preset loaded / the row was written.
+        if gpu_reserved():
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="failed",
+                error=GPU_BUSY_MESSAGE,
+            )
+            raise GpuBusyError()
         if priority:
             self._queue.appendleft(job_id)
         else:
@@ -596,7 +621,14 @@ class ComfyClient:
         """Keep at most ``in_flight`` jobs inside ComfyUI."""
         while True:
             try:
-                while self._queue and len(self._running) < self.in_flight:
+                # Queued jobs are HELD while writer training owns the GPU
+                # (one may have been admitted just before the lock); the
+                # 0.5 s wake below dispatches them once it is released.
+                while (
+                    self._queue
+                    and len(self._running) < self.in_flight
+                    and not gpu_reserved()
+                ):
                     job_id = self._queue.popleft()
                     # Added to _running in the same synchronous step as the
                     # popleft above -- no await between them -- so a job id

@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Tuple, ClassVar, Callable
+from typing import Optional, List, Dict, Any, Sequence, Set, Tuple, ClassVar, Callable
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ import numpy as np
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.writer_adapters import parse_adapter_writer_id
 from metascan.core.judgments import (
     CATEGORY_NAME_MAX,
     CATEGORY_SOURCES,
@@ -1375,6 +1376,64 @@ class DatabaseManager:
                 )
                 """
             )
+            # Prompt-writer LoRA adapters (taste learning) and their training
+            # runs. A deleted adapter keeps its row (deleted_at) so history
+            # rows named ``adapter:<id>`` still show its name.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS writer_adapters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    scope TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('t2i','i2v')),
+                    base_model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    data_cutoff TEXT,
+                    hyperparams TEXT NOT NULL,
+                    counts TEXT NOT NULL,
+                    holdout_agreement REAL,
+                    base_agreement REAL,
+                    file_path TEXT,
+                    error TEXT,
+                    deleted_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS training_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    adapter_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    step INTEGER NOT NULL DEFAULT 0,
+                    total_steps INTEGER,
+                    checkpoint_dir TEXT,
+                    started_at TEXT,
+                    updated_at TEXT,
+                    log_path TEXT,
+                    error TEXT
+                )
+                """
+            )
+            # The name an adapter was created with: next_adapter_name numbers
+            # from these, so a rename never frees its number. NULL on rows
+            # from before the column (their current name stands in).
+            _idempotent_add_column(
+                conn,
+                "writer_adapters",
+                "generated_name",
+                "ALTER TABLE writer_adapters ADD COLUMN generated_name TEXT",
+            )
+            # A training run's working dir (task.json, JSONL, checkpoints)
+            # and its options JSON (scope, effort, hyperparams, ...).
+            for _col in ("run_dir", "options"):
+                _idempotent_add_column(
+                    conn,
+                    "training_runs",
+                    _col,
+                    f"ALTER TABLE training_runs ADD COLUMN {_col} TEXT",
+                )
             # Generation lineage on both generated-media tables; nullable,
             # existing rows stay NULL.
             for _lineage_table in ("t2i_images", "i2v_videos"):
@@ -1397,6 +1456,87 @@ class DatabaseManager:
                         f"ALTER TABLE {_lineage_table} ADD COLUMN "
                         f"{_lineage_col} {_lineage_type}",
                     )
+            # The scorecard run a T2I image was rendered for (NULL for every
+            # ordinary generation). Scorecard images are never training data.
+            _idempotent_add_column(
+                conn,
+                "t2i_images",
+                "scorecard_id",
+                "ALTER TABLE t2i_images ADD COLUMN scorecard_id TEXT",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_t2i_images_scorecard "
+                "ON t2i_images(scorecard_id)"
+            )
+            # Writer-adapter scorecard runs (backend/services/scorecard.py):
+            # one row per run, and the T2I batch each brief rendered in (a
+            # late ingest after a restart finds its scorecard_id here).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecards (
+                    id TEXT PRIMARY KEY,
+                    adapter_id INTEGER NOT NULL,
+                    target_model TEXT NOT NULL,
+                    preset_id INTEGER,
+                    status TEXT NOT NULL,
+                    total INTEGER NOT NULL DEFAULT 0,
+                    done INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecard_batches (
+                    batch_id TEXT PRIMARY KEY,
+                    scorecard_id TEXT NOT NULL,
+                    brief_index INTEGER NOT NULL
+                )
+                """
+            )
+            # One row per submitted scorecard job: the writer lineage a late
+            # ingest after a restart (no in-memory snapshot) needs to pair it.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scorecard_jobs (
+                    job_id INTEGER PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    scorecard_id TEXT NOT NULL,
+                    brief_index INTEGER NOT NULL,
+                    writer_id TEXT,
+                    writer_model TEXT,
+                    variant_index INTEGER
+                )
+                """
+            )
+            # The caption as the writer saw it (tokens resolved) and the
+            # direction it was written with: the writer training data's user
+            # turn. NULL on older rows and typed prompts.
+            # prompt_categories: JSON list of the category names the prompt
+            # was written for (an all-scope adapter's CATEGORIES line).
+            for _col in ("resolved_caption", "direction", "prompt_categories"):
+                _idempotent_add_column(
+                    conn,
+                    "t2i_images",
+                    _col,
+                    f"ALTER TABLE t2i_images ADD COLUMN {_col} TEXT",
+                )
+            # The general VLM's short brief of a favorited image: the user
+            # turn of a writer-training "hindsight" example. Cascades with
+            # its media row (a deleted image yields no hindsight example).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hindsight_briefs (
+                    file_path TEXT PRIMARY KEY
+                        REFERENCES media(file_path) ON DELETE CASCADE,
+                    brief TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -4187,6 +4327,10 @@ class DatabaseManager:
         draft_prompt: Optional[str] = None,
         edited: Optional[int] = None,
         writer_model: Optional[str] = None,
+        scorecard_id: Optional[str] = None,
+        resolved_caption: Optional[str] = None,
+        direction: Optional[str] = None,
+        prompt_categories: Optional[List[str]] = None,
     ) -> int:
         """Record one generated picture: its as-rendered facts, plus the
         form_state the dialog will load when its tile is selected. Raises
@@ -4199,9 +4343,10 @@ class DatabaseManager:
                 "caption, prompt_used, negative_used, seed, prompt_seed, width, "
                 "height, megapixels, aspect_ratio, loras, render_s, "
                 "comfy_prompt_id, form_state, writer_id, variant_group, "
-                "variant_index, draft_prompt, edited, writer_model) "
+                "variant_index, draft_prompt, edited, writer_model, scorecard_id, "
+                "resolved_caption, direction, prompt_categories) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?)",
+                "?, ?, ?, ?, ?, ?, ?)",
                 (
                     to_posix_path(file_path),
                     batch_id,
@@ -4226,6 +4371,14 @@ class DatabaseManager:
                     draft_prompt,
                     edited,
                     writer_model,
+                    scorecard_id,
+                    resolved_caption,
+                    direction,
+                    (
+                        _json.dumps(list(prompt_categories))
+                        if prompt_categories is not None
+                        else None
+                    ),
                 ),
             )
             conn.commit()
@@ -4233,8 +4386,10 @@ class DatabaseManager:
 
     # media LEFT JOIN: a NULL media_path marks a row whose media is gone.
     _T2I_IMAGE_SELECT: ClassVar[str] = (
-        "SELECT t.*, m.file_path AS media_path, m.is_favorite "
-        "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path"
+        "SELECT t.*, m.file_path AS media_path, m.is_favorite, "
+        "j.passed AS judged_passed "
+        "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path "
+        "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
     )
 
     @staticmethod
@@ -4251,7 +4406,19 @@ class DatabaseManager:
         d["file_path"] = to_native_path(posix)
         d["file_name"] = posix.rsplit("/", 1)[-1]
         d["is_favorite"] = bool(d.get("is_favorite"))
-        for column, kind in (("loras", list), ("form_state", dict)):
+        d["passed"] = bool(d.pop("judged_passed", None))
+        # A scorecard image with no explicit verdict yet: the dialog hides
+        # its writer, variant and prompt until it is favorited or passed.
+        d["scorecard_blind"] = (
+            d.get("scorecard_id") is not None
+            and not d["is_favorite"]
+            and not d["passed"]
+        )
+        for column, kind in (
+            ("loras", list),
+            ("form_state", dict),
+            ("prompt_categories", list),
+        ):
             raw = d.get(column)
             parsed = None
             if raw:
@@ -5899,6 +6066,8 @@ class DatabaseManager:
         lineage tables JOINed to media; deleted ones from the newest
         tombstone whose lineage carries the generation row (so deleting
         passes does not inflate a rate), unless the path is live again.
+        Scorecard images (``t2i_images.scorecard_id`` set, live or in the
+        tombstone lineage) are left out: their results have their own rows.
         ``since`` (an ISO date) drops older generations. ``embedding`` is
         the tombstone's vector bytes (live rows: None) when
         ``include_embeddings``."""
@@ -5912,9 +6081,15 @@ class DatabaseManager:
                     "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
                 )
                 params: List[Any] = []
+                where: List[str] = []
+                if kind == "t2i":
+                    # Scorecard renders have their own results rows.
+                    where.append("g.scorecard_id IS NULL")
                 if since is not None:
-                    sql += " WHERE g.created_at >= ?"
+                    where.append("g.created_at >= ?")
                     params.append(since)
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
                 for r in conn.execute(sql, params):
                     favorite = bool(r["is_favorite"])
                     out[(kind, r["file_path"])] = {
@@ -5968,7 +6143,7 @@ class DatabaseManager:
                         )
                         continue
                     key = (kind, r["file_path"])
-                    if key in live:
+                    if key in live or gen.get("scorecard_id") is not None:
                         continue
                     if since is not None and str(created_at) < since:
                         continue
@@ -5990,6 +6165,538 @@ class DatabaseManager:
                         ),
                     }
         return list(out.values())
+
+    # ---- prompt-writer adapters -------------------------------------
+
+    _ADAPTER_JSON = ("hyperparams", "counts")
+    _ADAPTER_FIELDS = (
+        "data_cutoff",
+        "hyperparams",
+        "counts",
+        "holdout_agreement",
+        "base_agreement",
+        "file_path",
+        "error",
+    )
+
+    def _adapter_row(self, r: sqlite3.Row) -> Dict[str, Any]:
+        out = dict(r)
+        for key in self._ADAPTER_JSON:
+            out[key] = json.loads(out[key]) if out[key] else {}
+        return out
+
+    @staticmethod
+    def _clean_adapter_name(name: str) -> str:
+        name = " ".join(str(name).split())
+        if not name or len(name) > 80:
+            raise ValueError("invalid_name")
+        return name
+
+    def create_writer_adapter(
+        self,
+        name: str,
+        scope: str,
+        kind: str,
+        base_model: str,
+        status: str = "training",
+        data_cutoff: Optional[str] = None,
+        hyperparams: Optional[Dict[str, Any]] = None,
+        counts: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Register an adapter; ValueError("duplicate_name") when the name
+        (case-insensitive, deleted adapters included) is taken."""
+        name = self._clean_adapter_name(name)
+        with self.lock, self._get_connection() as conn:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO writer_adapters (name, generated_name, scope, "
+                    "kind, base_model, status, created_at, data_cutoff, "
+                    "hyperparams, counts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        name,
+                        scope,
+                        kind,
+                        base_model,
+                        status,
+                        self._iso(None),
+                        data_cutoff,
+                        json.dumps(hyperparams or {}),
+                        json.dumps(counts or {}),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+    def get_writer_adapter(self, adapter_id: int) -> Optional[Dict[str, Any]]:
+        """One adapter row (deleted ones included), or None."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM writer_adapters WHERE id = ?", (adapter_id,)
+            ).fetchone()
+            return self._adapter_row(r) if r else None
+
+    def list_writer_adapters(
+        self, include_deleted: bool = False
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM writer_adapters"
+        if not include_deleted:
+            sql += " WHERE deleted_at IS NULL"
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql + " ORDER BY id").fetchall()
+            return [self._adapter_row(r) for r in rows]
+
+    def rename_writer_adapter(self, adapter_id: int, name: str) -> bool:
+        """False when no such adapter; ValueError for a blank/duplicate name."""
+        name = self._clean_adapter_name(name)
+        with self.lock, self._get_connection() as conn:
+            try:
+                cur = conn.execute(
+                    "UPDATE writer_adapters SET name = ? WHERE id = ?",
+                    (name, adapter_id),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("duplicate_name") from None
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    def set_writer_adapter_status(
+        self, adapter_id: int, status: str, **fields: Any
+    ) -> None:
+        """Set the status and any of data_cutoff / hyperparams / counts /
+        holdout_agreement / base_agreement / file_path / error."""
+        unknown = set(fields) - set(self._ADAPTER_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown adapter fields: {sorted(unknown)}")
+        sets = ["status = ?"]
+        args: List[Any] = [status]
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            args.append(json.dumps(value) if key in self._ADAPTER_JSON else value)
+        args.append(adapter_id)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE writer_adapters SET {', '.join(sets)} WHERE id = ?", args
+            )
+            conn.commit()
+
+    def soft_delete_writer_adapter(self, adapter_id: int) -> None:
+        """Mark deleted but keep the row: history rows named
+        ``adapter:<id>`` still resolve its name."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE writer_adapters SET status = 'deleted', deleted_at = ?, "
+                "file_path = NULL WHERE id = ?",
+                (self._iso(None), adapter_id),
+            )
+            conn.commit()
+
+    def promote_writer_adapter(self, adapter_id: int) -> bool:
+        """``untested -> ready`` (a compare-and-set: True only for the call
+        that flipped it; a ready, deleted or failed adapter stays as is)."""
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE writer_adapters SET status = 'ready' "
+                "WHERE id = ? AND status = 'untested' AND deleted_at IS NULL",
+                (adapter_id,),
+            )
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    # ---- writer-adapter scorecards ---------------------------------------
+
+    _SCORECARD_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "status",
+        "total",
+        "done",
+        "error",
+        "target_model",
+        "preset_id",
+    )
+
+    def create_scorecard(
+        self,
+        scorecard_id: str,
+        adapter_id: int,
+        target_model: str,
+        preset_id: Optional[int],
+        total: int,
+        status: str = "running",
+    ) -> None:
+        ts = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO scorecards (id, adapter_id, target_model, preset_id, "
+                "status, total, done, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (
+                    scorecard_id,
+                    adapter_id,
+                    target_model,
+                    preset_id,
+                    status,
+                    total,
+                    ts,
+                    ts,
+                ),
+            )
+            conn.commit()
+
+    def update_scorecard(self, scorecard_id: str, **fields: Any) -> None:
+        unknown = set(fields) - set(self._SCORECARD_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown scorecard fields: {sorted(unknown)}")
+        sets = [f"{k} = ?" for k in fields] + ["updated_at = ?"]
+        args = list(fields.values()) + [self._iso(None), scorecard_id]
+        with self.lock, self._get_connection() as conn:
+            conn.execute(f"UPDATE scorecards SET {', '.join(sets)} WHERE id = ?", args)
+            conn.commit()
+
+    def get_scorecard(self, scorecard_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM scorecards WHERE id = ?", (scorecard_id,)
+            ).fetchone()
+            return dict(r) if r else None
+
+    def list_scorecards(self, adapter_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Scorecards oldest first (one adapter's, or all)."""
+        sql = "SELECT * FROM scorecards"
+        args: Tuple[Any, ...] = ()
+        if adapter_id is not None:
+            sql += " WHERE adapter_id = ?"
+            args = (adapter_id,)
+        with self.lock, self._get_connection() as conn:
+            return [
+                dict(r) for r in conn.execute(sql + " ORDER BY created_at, rowid", args)
+            ]
+
+    def mark_interrupted_scorecards(self) -> int:
+        """Startup: a run the last server left ``running`` is ``interrupted``
+        (its missing briefs render on the next start)."""
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE scorecards SET status = 'interrupted', updated_at = ? "
+                "WHERE status = 'running'",
+                (self._iso(None),),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def add_scorecard_batch(
+        self, batch_id: str, scorecard_id: str, brief_index: int
+    ) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scorecard_batches (batch_id, scorecard_id, "
+                "brief_index) VALUES (?, ?, ?)",
+                (batch_id, scorecard_id, brief_index),
+            )
+            conn.commit()
+
+    def add_scorecard_job(
+        self,
+        job_id: int,
+        batch_id: str,
+        scorecard_id: str,
+        brief_index: int,
+        writer_id: Optional[str],
+        writer_model: Optional[str],
+        variant_index: Optional[int],
+    ) -> None:
+        """Remember a submitted scorecard job's writer lineage (a late ingest
+        after a restart reads it back with ``scorecard_job``)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scorecard_jobs (job_id, batch_id, "
+                "scorecard_id, brief_index, writer_id, writer_model, variant_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(job_id),
+                    batch_id,
+                    scorecard_id,
+                    int(brief_index),
+                    writer_id,
+                    writer_model,
+                    variant_index,
+                ),
+            )
+            conn.commit()
+
+    def scorecard_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        """``{job_id, batch_id, scorecard_id, brief_index, writer_id,
+        writer_model, variant_index}`` of a scorecard job, else None."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM scorecard_jobs WHERE job_id = ?", (int(job_id),)
+            ).fetchone()
+            return dict(r) if r else None
+
+    def scorecard_pending_briefs(self, scorecard_id: str) -> List[int]:
+        """Brief indexes of ``scorecard_id`` with a job still queued or
+        running in ComfyUI (``generation_jobs.state``; a restart re-queues
+        ``queued`` rows and fails ``running`` ones, so both are live)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT s.brief_index FROM scorecard_jobs s "
+                "JOIN generation_jobs g ON g.id = s.job_id "
+                "WHERE s.scorecard_id = ? AND g.state IN ('queued', 'running') "
+                "ORDER BY s.brief_index",
+                (scorecard_id,),
+            ).fetchall()
+            return [int(r["brief_index"]) for r in rows]
+
+    def scorecard_id_for_batch(self, batch_id: str) -> Optional[str]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT scorecard_id FROM scorecard_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            return str(r["scorecard_id"]) if r else None
+
+    def scorecard_image_rows(
+        self,
+        adapter_id: Optional[int] = None,
+        scorecard_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """One row per live scorecard image (of one adapter, one scorecard,
+        or all): ``adapter_id``, ``scorecard_id``, ``batch_id``,
+        ``brief_index`` (None when its batch is unknown), ``writer_id``,
+        ``is_favorite``, ``passed``, ``seen_at`` and the stored taste
+        ``score`` (None when unscored)."""
+        sql = (
+            "SELECT c.adapter_id, t.scorecard_id, t.batch_id, b.brief_index, "
+            "t.writer_id, m.is_favorite, j.passed, j.seen_at, s.score "
+            "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
+            "JOIN scorecards c ON c.id = t.scorecard_id "
+            "LEFT JOIN scorecard_batches b ON b.batch_id = t.batch_id "
+            "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
+            "LEFT JOIN taste_scores s ON s.file_path = t.file_path "
+            "WHERE t.scorecard_id IS NOT NULL"
+        )
+        args: List[Any] = []
+        if adapter_id is not None:
+            sql += " AND c.adapter_id = ?"
+            args.append(adapter_id)
+        if scorecard_id is not None:
+            sql += " AND t.scorecard_id = ?"
+            args.append(scorecard_id)
+        with self.lock, self._get_connection() as conn:
+            rows = [dict(r) for r in conn.execute(sql + " ORDER BY t.id", args)]
+        for r in rows:
+            r["is_favorite"] = bool(r["is_favorite"])
+            r["passed"] = bool(r["passed"])
+        return rows
+
+    def scorecard_for_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """``{scorecard_id, adapter_id, blind}`` for a scorecard image, else
+        None. ``blind``: no explicit verdict yet (not favorited, not passed)
+        -- the viewer and the T2I tiles hide its writer until then."""
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT t.scorecard_id, c.adapter_id, m.is_favorite, j.passed "
+                "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
+                "LEFT JOIN scorecards c ON c.id = t.scorecard_id "
+                "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
+                "WHERE t.file_path = ? AND t.scorecard_id IS NOT NULL "
+                "ORDER BY t.id DESC LIMIT 1",
+                (to_posix_path(file_path),),
+            ).fetchone()
+        if r is None:
+            return None
+        return {
+            "scorecard_id": str(r["scorecard_id"]),
+            "adapter_id": int(r["adapter_id"]) if r["adapter_id"] is not None else None,
+            "blind": not r["is_favorite"] and not r["passed"],
+        }
+
+    # ---- training runs (writer LoRA training) ----------------------------
+
+    _RUN_FIELDS = (
+        "status",
+        "step",
+        "total_steps",
+        "checkpoint_dir",
+        "started_at",
+        "updated_at",
+        "log_path",
+        "error",
+        "run_dir",
+        "options",
+    )
+
+    @staticmethod
+    def _run_row(r: Any) -> Dict[str, Any]:
+        out = dict(r)
+        out["options"] = json.loads(out["options"]) if out.get("options") else {}
+        return out
+
+    def create_training_run(
+        self,
+        adapter_id: int,
+        *,
+        status: str = "running",
+        run_dir: Optional[str] = None,
+        checkpoint_dir: Optional[str] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO training_runs (adapter_id, status, step, "
+                "checkpoint_dir, started_at, updated_at, run_dir, options) "
+                "VALUES (?, ?, 0, ?, ?, ?, ?, ?)",
+                (
+                    adapter_id,
+                    status,
+                    checkpoint_dir,
+                    now,
+                    now,
+                    run_dir,
+                    json.dumps(options or {}),
+                ),
+            )
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+    def get_training_run(self, run_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock, self._get_connection() as conn:
+            r = conn.execute(
+                "SELECT * FROM training_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            return self._run_row(r) if r else None
+
+    def list_training_runs(
+        self, statuses: Optional[Sequence[str]] = None
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM training_runs"
+        args: List[Any] = []
+        if statuses:
+            sql += f" WHERE status IN ({', '.join('?' for _ in statuses)})"
+            args.extend(statuses)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql + " ORDER BY id", args).fetchall()
+            return [self._run_row(r) for r in rows]
+
+    def update_training_run(
+        self,
+        run_id: int,
+        *,
+        only_if_status: Optional[Sequence[str]] = None,
+        **fields: Any,
+    ) -> bool:
+        """Set ``fields`` (and ``updated_at``). With ``only_if_status`` the
+        update applies only while the run's status is one of those (a
+        compare-and-set); returns whether a row changed."""
+        unknown = set(fields) - set(self._RUN_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown training run fields: {sorted(unknown)}")
+        sets = ["updated_at = ?"]
+        args: List[Any] = [self._iso(None)]
+        for key, value in fields.items():
+            sets.append(f"{key} = ?")
+            args.append(json.dumps(value) if key == "options" else value)
+        sql = f"UPDATE training_runs SET {', '.join(sets)} WHERE id = ?"
+        args.append(run_id)
+        if only_if_status:
+            sql += f" AND status IN ({', '.join('?' for _ in only_if_status)})"
+            args.extend(only_if_status)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(sql, args)
+            conn.commit()
+            return bool(cur.rowcount > 0)
+
+    def complete_training_run(
+        self, run_id: int, adapter_id: int, adapter_fields: Dict[str, Any]
+    ) -> bool:
+        """Atomically mark the run ``completed`` and its adapter
+        ``untested`` with ``adapter_fields`` -- only while the run is not
+        already completed. False when another completion got there first
+        (so a run never registers its adapter twice)."""
+        unknown = set(adapter_fields) - set(self._ADAPTER_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown adapter fields: {sorted(unknown)}")
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE training_runs SET status = 'completed', updated_at = ?, "
+                "error = NULL WHERE id = ? AND status != 'completed'",
+                (now, run_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return False
+            sets = ["status = 'untested'", "error = NULL"]
+            args: List[Any] = []
+            for key, value in adapter_fields.items():
+                sets.append(f"{key} = ?")
+                args.append(json.dumps(value) if key in self._ADAPTER_JSON else value)
+            args.append(adapter_id)
+            conn.execute(
+                f"UPDATE writer_adapters SET {', '.join(sets)} WHERE id = ?", args
+            )
+            conn.commit()
+            return True
+
+    def mark_interrupted_training_runs(self) -> List[int]:
+        """Startup: runs left ``running`` by a server that stopped become
+        ``paused`` (resumable), and so do their ``training`` adapters.
+        Returns the run ids."""
+        now = self._iso(None)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, adapter_id FROM training_runs WHERE status = 'running'"
+            ).fetchall()
+            for run_id, adapter_id in rows:
+                conn.execute(
+                    "UPDATE training_runs SET status = 'paused', updated_at = ? "
+                    "WHERE id = ?",
+                    (now, run_id),
+                )
+                conn.execute(
+                    "UPDATE writer_adapters SET status = 'paused' "
+                    "WHERE id = ? AND status = 'training'",
+                    (adapter_id,),
+                )
+            conn.commit()
+            return [int(r[0]) for r in rows]
+
+    def next_adapter_name(self, scope_slug: str) -> str:
+        """``taste-<scope_slug>-v<N>`` with N one past the highest N any
+        adapter of that slug was *created* with (``generated_name``; deleted
+        and renamed ones included, so a number is never reused). A user's
+        rename to e.g. ``taste-all-v7`` does not move the sequence, but a
+        name already taken (UNIQUE, deleted rows included) is skipped."""
+        prefix = f"taste-{scope_slug}-v"
+        low = prefix.lower()
+
+        def number(name: Any) -> Optional[int]:
+            lowered = str(name).lower()
+            tail = lowered[len(low) :]
+            if lowered.startswith(low) and tail.isascii() and tail.isdigit():
+                return int(tail)
+            return None
+
+        top = 0
+        taken: Set[int] = set()
+        with self.lock, self._get_connection() as conn:
+            for name, generated in conn.execute(
+                "SELECT name, COALESCE(generated_name, name) FROM writer_adapters"
+            ):
+                n = number(generated)
+                if n is not None:
+                    top = max(top, n)
+                n = number(name)
+                if n is not None:
+                    taken.add(n)
+        nxt = top + 1
+        while nxt in taken:
+            nxt += 1
+        return f"{prefix}{nxt}"
 
     def writer_window_stats(
         self,
@@ -6021,23 +6728,284 @@ class DatabaseManager:
                 cell[0] += 1
                 cell[1] += int(g["favorite"])
         rows: List[Dict[str, Any]] = []
+        names = {a["id"]: a["name"] for a in self.list_writer_adapters(True)}
         for (kind, writer, model), per in sorted(
             counts.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or "")
         ):
+            adapter_id = parse_adapter_writer_id(writer)
             for start in starts:
                 n_seen, n_fav = per.get(start, [0, 0])
-                rows.append(
-                    {
-                        "kind": kind,
-                        "writer_id": writer,
-                        "writer_model": model,
-                        "window_start": start,
-                        "n_seen": n_seen,
-                        "n_fav": n_fav,
-                        "rate": n_fav / n_seen if n_seen else None,
-                    }
-                )
+                row: Dict[str, Any] = {
+                    "kind": kind,
+                    "writer_id": writer,
+                    "writer_model": model,
+                    "window_start": start,
+                    "n_seen": n_seen,
+                    "n_fav": n_fav,
+                    "rate": n_fav / n_seen if n_seen else None,
+                }
+                if adapter_id is not None:
+                    # An adapter row carries its remembered name (the
+                    # registry keeps deleted adapters for exactly this).
+                    row["name"] = names.get(adapter_id)
+                rows.append(row)
         return rows
+
+    # ---- prompt-writer training data (taste learning project 4) ----------
+
+    def set_hindsight_brief(
+        self,
+        file_path: str,
+        brief: str,
+        model: str,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Store (or replace) the hindsight brief of one image. False when
+        the path has no media row (the FK would refuse it)."""
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM media WHERE file_path = ?", (posix_path,)
+                ).fetchone()
+                is None
+            ):
+                return False
+            conn.execute(
+                "INSERT INTO hindsight_briefs (file_path, brief, model, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+                "brief = excluded.brief, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (posix_path, brief, model, self._iso(now)),
+            )
+            conn.commit()
+            return True
+
+    def get_hindsight_briefs(
+        self, paths: Optional[List[str]] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """``{posix_path: {brief, model, created_at}}`` for ``paths`` (every
+        brief when None)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        sql = "SELECT file_path, brief, model, created_at FROM hindsight_briefs"
+        with self.lock, self._get_connection() as conn:
+            if paths is None:
+                rows = list(conn.execute(sql))
+            else:
+                wanted = list(dict.fromkeys(to_posix_path(p) for p in paths))
+                rows = []
+                for start in range(0, len(wanted), 500):
+                    part = wanted[start : start + 500]
+                    marks = ",".join("?" * len(part))
+                    rows.extend(
+                        conn.execute(f"{sql} WHERE file_path IN ({marks})", part)
+                    )
+        for r in rows:
+            out[r["file_path"]] = {
+                "brief": r["brief"],
+                "model": r["model"],
+                "created_at": r["created_at"],
+            }
+        return out
+
+    _DATASET_LINEAGE_COLS: ClassVar[Tuple[str, ...]] = (
+        "model",
+        "caption",
+        "resolved_caption",
+        "direction",
+        "prompt_categories",
+        "prompt_seed",
+        "prompt_used",
+        "draft_prompt",
+        "edited",
+        "writer_id",
+        "writer_model",
+        "variant_group",
+        "variant_index",
+        "batch_id",
+        "scorecard_id",
+        "created_at",
+    )
+
+    @staticmethod
+    def _name_list(raw: Any) -> Optional[List[str]]:
+        """A stored JSON list of names, or None (absent or unreadable)."""
+        if not isinstance(raw, str):
+            return None
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(value, list):
+            return None
+        return [str(v) for v in value]
+
+    def writer_dataset_raw(self, candidates: bool = False) -> Dict[str, Any]:
+        """Raw rows for ``writer_dataset.build_examples`` (no filtering
+        beyond shape; the rules live there):
+
+        * ``categories``: ``{id: name}``.
+        * ``generations``: one dict per T2I image -- live rows (JOINed to
+          media) and, for paths no longer live, the newest tombstone whose
+          lineage carries a ``t2i`` row. Keys: ``file_path``, ``live``, the
+          lineage columns (``_DATASET_LINEAGE_COLS``), ``is_favorite``,
+          ``passed``, ``seen_at``, ``judged_at`` (a tombstone's
+          ``confirmed_at``), ``category_ids`` and ``category_names`` (every
+          link source), ``prompt_categories`` (the stored names the prompt
+          was written for, parsed; None when absent) and
+          ``generation_categories`` (names of the
+          ``source = 'generation'`` links; a tombstone's stored names).
+          Malformed tombstones are skipped with one WARNING (count only).
+        * ``briefs``: ``{path: {brief, model, created_at}}``.
+        * ``library``: favorited images that have a brief but no live T2I
+          row (with ``candidates=True``: every favorited image without a
+          live T2I row, briefed or not -- what the hindsight-briefs job
+          selects from): ``{path: {prompt, model_names, judged_at, seen_at,
+          category_ids, category_names, generation_categories}}`` (prompt
+          from the metadata blob).
+        """
+        cols = self._DATASET_LINEAGE_COLS
+        with self.lock, self._get_connection() as conn:
+            categories = {
+                int(r["id"]): str(r["name"])
+                for r in conn.execute("SELECT id, name FROM categories")
+            }
+            by_name = {name.lower(): cid for cid, name in categories.items()}
+            links: Dict[str, List[int]] = {}
+            generated: Dict[str, List[int]] = {}
+            for r in conn.execute(
+                "SELECT file_path, category_id, source FROM media_categories "
+                "ORDER BY category_id"
+            ):
+                links.setdefault(r["file_path"], []).append(int(r["category_id"]))
+                if r["source"] == "generation":
+                    generated.setdefault(r["file_path"], []).append(
+                        int(r["category_id"])
+                    )
+
+            def names_of(ids: List[int]) -> List[str]:
+                return [categories[i] for i in ids if i in categories]
+
+            generations: Dict[str, Dict[str, Any]] = {}
+            select = ", ".join(f"g.{c}" for c in cols)
+            for r in conn.execute(
+                f"SELECT g.file_path, {select}, m.is_favorite, j.passed, "
+                "j.seen_at, j.judged_at FROM t2i_images g "
+                "JOIN media m ON m.file_path = g.file_path "
+                "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
+            ):
+                d = dict(r)
+                d["live"] = True
+                d["prompt_categories"] = self._name_list(d["prompt_categories"])
+                d["is_favorite"] = bool(d["is_favorite"])
+                d["passed"] = bool(d["passed"])
+                ids = links.get(d["file_path"], [])
+                d["category_ids"] = list(ids)
+                d["category_names"] = names_of(ids)
+                d["generation_categories"] = names_of(generated.get(d["file_path"], []))
+                generations[d["file_path"]] = d
+            live = set(generations)
+            malformed = 0
+            for r in conn.execute(
+                "SELECT id, file_path, is_favorite, passed, seen_at, "
+                "confirmed_at, categories, lineage FROM media_tombstones "
+                "WHERE lineage IS NOT NULL AND json_valid(lineage) "
+                "AND json_type(lineage, '$.t2i') = 'object' ORDER BY id"
+            ):
+                if r["file_path"] in live:
+                    continue
+                try:
+                    gen = json.loads(r["lineage"])["t2i"]
+                    names = json.loads(r["categories"] or "[]")
+                except (ValueError, KeyError, TypeError):
+                    malformed += 1
+                    continue
+                if not isinstance(gen, dict):
+                    malformed += 1
+                    continue
+                if not isinstance(names, list):
+                    names = []
+                d = {"file_path": r["file_path"], "live": False}
+                for c in cols:
+                    d[c] = gen.get(c)
+                d["prompt_categories"] = self._name_list(d["prompt_categories"])
+                d["is_favorite"] = bool(r["is_favorite"])
+                d["passed"] = bool(r["passed"])
+                d["seen_at"] = r["seen_at"]
+                d["judged_at"] = r["confirmed_at"]
+                d["category_names"] = [str(n) for n in names]
+                d["category_ids"] = [
+                    by_name[str(n).lower()] for n in names if str(n).lower() in by_name
+                ]
+                # Tombstones keep no link source: their stored names stand in.
+                d["generation_categories"] = list(d["category_names"])
+                # Newest tombstone wins (ORDER BY id).
+                generations[r["file_path"]] = d
+
+            briefs: Dict[str, Dict[str, Any]] = {
+                r["file_path"]: {
+                    "brief": r["brief"],
+                    "model": r["model"],
+                    "created_at": r["created_at"],
+                }
+                for r in conn.execute(
+                    "SELECT file_path, brief, model, created_at FROM hindsight_briefs"
+                )
+            }
+            library: Dict[str, Dict[str, Any]] = {}
+            if candidates:
+                others = [
+                    r["file_path"]
+                    for r in conn.execute(
+                        "SELECT file_path FROM media WHERE is_favorite = 1"
+                    )
+                    if r["file_path"] not in live
+                ]
+            else:
+                others = [p for p in briefs if p not in live]
+            for start in range(0, len(others), 500):
+                part = others[start : start + 500]
+                marks = ",".join("?" * len(part))
+                for r in conn.execute(
+                    "SELECT m.file_path, json_extract(m.data, '$.prompt') AS prompt, "
+                    "j.seen_at, j.judged_at FROM media m "
+                    "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
+                    f"WHERE m.is_favorite = 1 AND m.file_path IN ({marks})",
+                    part,
+                ):
+                    ids = links.get(r["file_path"], [])
+                    gen_ids = generated.get(r["file_path"], [])
+                    library[r["file_path"]] = {
+                        "generation_categories": names_of(gen_ids),
+                        "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
+                        "model_names": [],
+                        "seen_at": r["seen_at"],
+                        "judged_at": r["judged_at"],
+                        "category_ids": list(ids),
+                        "category_names": [
+                            categories[i] for i in ids if i in categories
+                        ],
+                    }
+            found = list(library)
+            for start in range(0, len(found), 500):
+                part = found[start : start + 500]
+                marks = ",".join("?" * len(part))
+                for r in conn.execute(
+                    "SELECT file_path, index_key FROM indices "
+                    f"WHERE index_type = 'model' AND file_path IN ({marks})",
+                    part,
+                ):
+                    library[r["file_path"]]["model_names"].append(r["index_key"])
+        if malformed:
+            logger.warning(
+                "writer dataset: skipped %d malformed tombstone(s)", malformed
+            )
+        return {
+            "categories": categories,
+            "generations": list(generations.values()),
+            "briefs": briefs,
+            "library": library,
+        }
 
     def record_taste_diversity(
         self, rows: List[Dict[str, Any]], computed_at: str

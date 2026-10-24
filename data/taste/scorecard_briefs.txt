@@ -1,0 +1,44 @@
+# Scorecard briefs for writer adapters (developer-written, fixed set).
+# One brief per line; blank lines and lines starting with # are ignored.
+# Neutral, adult-safe scenes; no real people's names; every line must pass
+# the T2I caption screen (tests/test_scorecard.py checks it).
+A lighthouse on a rocky headland during a winter storm, waves breaking over the rocks
+A quiet ramen shop counter late at night, steam rising from two bowls
+An abandoned greenhouse overgrown with vines, morning light through broken glass panes
+A red vintage motorcycle parked outside a desert gas station at dusk
+A narrow cobblestone alley in an old Mediterranean town, laundry hanging between balconies
+A fox curled up asleep in fresh snow at the edge of a pine forest
+A cluttered watchmaker's workbench with tiny gears and a brass magnifier
+A woman in her forties reading a paperback on a train, rain streaking the window
+A koi pond in a Japanese garden in autumn, maple leaves floating on the water
+A rooftop vegetable garden in a dense city, water towers in the background
+A lone hiker in his thirties on a ridge above a sea of clouds at sunrise
+A bowl of ripe peaches on a wooden table beside an open window, summer afternoon
+An old library reading room with green desk lamps and tall shelves
+A neon-lit noodle stall in a rainy street market, reflections on wet pavement
+A sailboat anchored in a turquoise lagoon, seen from a cliff above
+A blacksmith in his fifties hammering a glowing blade, sparks flying in a dark forge
+A field of sunflowers under a dramatic thunderstorm sky
+A cozy cabin interior with a wood stove, knitted blankets and snow outside
+A grey heron standing in shallow marsh water at dawn mist
+A busy flower market stall with buckets of tulips and peonies
+An astronaut in a white suit standing on a red rocky plain, two moons in the sky
+A vintage diner booth with a milkshake and a jukebox, chrome and teal colors
+A desert canyon with layered sandstone walls and a thin stream at the bottom
+A potter in her sixties shaping clay on a wheel, hands covered in slip
+A medieval stone bridge over a misty river in the early morning
+A street musician in his twenties playing saxophone under a streetlamp at night
+A glass of iced coffee with condensation on a marble cafe table
+A snowy mountain village at blue hour, warm lights in the windows
+A tabby cat sitting on a stack of books in a sunny bookshop window
+An underwater coral reef with a sea turtle swimming over it
+A steam locomotive crossing a tall viaduct through autumn hills
+A chef in her thirties plating a dessert in a professional kitchen
+A wind farm on rolling green hills under fast moving clouds
+A paper lantern festival over a river at night
+An old pickup truck rusting in a field of tall grass and wildflowers
+A modern concrete house on a cliff overlooking the ocean, minimalist architecture
+A close-up of a hummingbird feeding from a red flower
+A farmer's market table of heirloom tomatoes in many colors
+A foggy redwood forest with a narrow trail and beams of light
+A chess game in progress in a park, two elderly men concentrating over the board

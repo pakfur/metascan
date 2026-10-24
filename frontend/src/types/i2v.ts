@@ -1,3 +1,4 @@
+import type { AdapterWriterId } from './writers'
 /**
  * The EDITABLE copy of the dialog's form kept on each clip. Seeded from the
  * request at ingest, loaded when the clip is clicked, autosaved into as the
@@ -244,8 +245,8 @@ export function i2vVideoDetails(v: I2vVideo): {
   return { quality, timing, generated: formatI2vTimestamp(v.created_at) }
 }
 
-/** Who writes an I2V prompt. Base only for now; taste guidance and adapters are T2I-first. */
-export type I2vWriter = 'base'
+/** The base writer, or an I2V prompt-writer adapter (`adapter:<id>`). */
+export type I2vWriter = 'base' | AdapterWriterId
 
 export const I2V_WRITERS: { id: I2vWriter; label: string }[] = [{ id: 'base', label: 'Base' }]
 

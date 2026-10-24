@@ -1,3 +1,5 @@
+import type { ScorecardResult } from './writers'
+
 export interface TasteModelInfo {
   id: number
   created_at: string
@@ -72,4 +74,6 @@ export interface WriterStats {
   windows: WriterWindowStat[]
   diversity: DiversityWindow[]
   collapse_warning: boolean
+  /** Per adapter with a scorecard pair: base vs adapter on the blind scorecard. */
+  scorecards?: ScorecardResult[]
 }

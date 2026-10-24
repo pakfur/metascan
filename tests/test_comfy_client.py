@@ -1589,3 +1589,59 @@ async def test_reconcile_reports_a_failure_it_never_heard_about(
     row = await started_client.wait_for_job(job_id, timeout=15.0)
     assert row["state"] == "failed"
     assert "CUDA out of memory" in row["error"]
+
+
+# ---- writer-training GPU lock ---------------------------------------------
+
+
+async def test_pump_holds_queued_jobs_while_training_holds_the_gpu(
+    started_client, fake_comfy  # noqa: F811
+):
+    from metascan.core import gpu_guard
+
+    locked = {"on": False}
+    gpu_guard.set_gpu_reservation(lambda: locked["on"])
+    try:
+        pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+        before = len(fake_comfy.submitted)
+        # Admitted just before the lock: submit returns with the job queued
+        # and the pump not yet run (no await after the append).
+        job_id = await started_client.submit(pid, params())
+        locked["on"] = True
+        await asyncio.sleep(1.5)  # several pump wakes
+        assert len(fake_comfy.submitted) == before
+        assert started_client.db.get_generation_job(job_id)["state"] == "queued"
+        assert started_client.has_pending_jobs()
+        locked["on"] = False
+        job = await started_client.wait_for_job(job_id, timeout=10.0)
+        assert job["state"] == "done"
+    finally:
+        gpu_guard.set_gpu_reservation(None)
+
+
+async def test_submit_refuses_when_the_lock_lands_mid_submit(
+    started_client, fake_comfy  # noqa: F811
+):
+    from metascan.core import gpu_guard
+
+    locked = {"on": False}
+    gpu_guard.set_gpu_reservation(lambda: locked["on"])
+    orig = started_client._load_preset
+
+    async def load_then_lock(preset_id):
+        result = await orig(preset_id)
+        locked["on"] = True  # training takes the GPU during the submit
+        return result
+
+    started_client._load_preset = load_then_lock
+    try:
+        pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
+        with pytest.raises(ComfyError, match="GPU busy: training"):
+            await started_client.submit(pid, params())
+        assert not started_client.has_pending_jobs()
+        jobs = started_client.db.list_generation_jobs(states=["failed"])
+        assert [j["error"] for j in jobs] == ["GPU busy: training"]
+        with pytest.raises(ComfyError, match="GPU busy: training"):
+            await started_client.submit_now(pid, params())
+    finally:
+        gpu_guard.set_gpu_reservation(None)

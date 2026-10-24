@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import type { Media } from '../../types/media'
 import { useMediaStore } from '../../stores/media'
@@ -277,7 +278,7 @@ async function ctxRetagWithVlm() {
     const { tags } = await tagOne(target.file_path)
     toast.show(`Re-tagged with ${tags.length} tag${tags.length !== 1 ? 's' : ''}`, 'success')
   } catch (e) {
-    toast.show(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`, 'warn')
+    toast.show(isGpuBusyTraining(e) ? GPU_BUSY_TEXT : `Re-tag failed: ${e instanceof Error ? e.message : String(e)}`, 'warn')
   }
 }
 

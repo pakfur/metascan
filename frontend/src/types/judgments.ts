@@ -26,6 +26,9 @@ export interface JudgmentState {
   // key (PATCH / seen responses omit it), so undefined means "unknown",
   // not "no batch"; null means the item has no batch.
   batch?: BatchPosition | null
+  // A writer-adapter scorecard image (GET only, like `batch`): hidden as
+  // "judge to reveal" until it has a favorite / pass verdict. null: not one.
+  scorecard?: { id: string; blind: boolean } | null
 }
 
 export interface BatchPosition {

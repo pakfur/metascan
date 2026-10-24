@@ -31,8 +31,9 @@ from backend.services.storyboard_service import (
     ParentNotFoundError,
     StoryboardService,
 )
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core import ref_describe as rd
-from metascan.core.comfy_client import ComfyError
+from metascan.core.comfy_client import ComfyError, GpuBusyError
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.storyboard_brief import bucket_dims
 from metascan.core.storyboard_parse import ParseError
@@ -150,6 +151,13 @@ def set_storyboard_runner(runner: Any) -> None:
 
 def get_storyboard_runner() -> Any:
     return _storyboard_runner
+
+
+def storyboard_busy() -> bool:
+    """True while a storyboard background job (synthesis, compile, compose)
+    started from these routes is still running -- writer training refuses
+    to take the GPU meanwhile."""
+    return any(not t.done() for t in _background_tasks)
 
 
 def _require_runner() -> Any:
@@ -534,7 +542,7 @@ async def delete_storyboard(
 # ---- runner-backed endpoints ------------------------------------------------
 
 
-@router.post("/{storyboard_id}/parse")
+@router.post("/{storyboard_id}/parse", dependencies=GPU_FREE)
 async def parse_storyboard(storyboard_id: int, body: ParseRequest) -> Dict[str, Any]:
     runner = _require_runner()
     from metascan.core import shot_templates
@@ -560,7 +568,7 @@ async def parse_storyboard(storyboard_id: int, body: ParseRequest) -> Dict[str, 
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.post("/{storyboard_id}/synthesize", status_code=202)
+@router.post("/{storyboard_id}/synthesize", status_code=202, dependencies=GPU_FREE)
 async def synthesize_storyboard(
     storyboard_id: int, body: SynthesizeRequest
 ) -> Dict[str, Any]:
@@ -590,7 +598,7 @@ async def synthesize_storyboard(
     return {"status": "started", "total": total}
 
 
-@router.post("/{storyboard_id}/compile", status_code=202)
+@router.post("/{storyboard_id}/compile", status_code=202, dependencies=GPU_FREE)
 async def compile_storyboard(
     storyboard_id: int, body: CompileRequest
 ) -> Dict[str, Any]:
@@ -631,7 +639,7 @@ async def compile_storyboard(
     return {"status": "started", "total": total}
 
 
-@router.post("/{storyboard_id}/generate")
+@router.post("/{storyboard_id}/generate", dependencies=GPU_FREE)
 async def generate_storyboard(
     storyboard_id: int, body: GenerateRequest
 ) -> Dict[str, Any]:
@@ -644,10 +652,12 @@ async def generate_storyboard(
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:  # training took the GPU mid-submit
+        raise gpu_busy_http_error() from exc
     return {"jobs": job_ids}
 
 
-@router.post("/{storyboard_id}/generate-video")
+@router.post("/{storyboard_id}/generate-video", dependencies=GPU_FREE)
 async def generate_storyboard_video(
     storyboard_id: int, body: GenerateVideoRequest
 ) -> Dict[str, Any]:
@@ -665,12 +675,14 @@ async def generate_storyboard_video(
         )
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:
+        raise gpu_busy_http_error() from exc
     except ComfyError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return result
 
 
-@router.post("/{storyboard_id}/compose", status_code=202)
+@router.post("/{storyboard_id}/compose", status_code=202, dependencies=GPU_FREE)
 async def compose_storyboard(
     storyboard_id: int, body: ComposeRequest
 ) -> Dict[str, str]:
@@ -797,7 +809,7 @@ async def delete_subject(subject_id: int, mode: str = "unlink") -> Dict[str, str
     return {"status": "deleted"}
 
 
-@router.post("/subjects/{subject_id}/describe")
+@router.post("/subjects/{subject_id}/describe", dependencies=GPU_FREE)
 async def describe_subject(subject_id: int) -> Dict[str, Any]:
     """VLM-describe a subject from its reference image(s).
 
@@ -914,7 +926,7 @@ async def delete_scene(scene_id: int, purge_images: bool = False) -> Dict[str, s
     return {"status": "deleted"}
 
 
-@router.post("/scenes/{scene_id}/describe")
+@router.post("/scenes/{scene_id}/describe", dependencies=GPU_FREE)
 async def describe_scene(scene_id: int) -> Dict[str, Any]:
     """VLM-describe a scene from its reference image.
 

@@ -37,6 +37,8 @@ export interface Gate {
   available: boolean
   recommended: boolean
   reason: string
+  /** Each missing piece separately (writer_training); `reason` joins them. */
+  reasons?: string[]
 }
 
 export interface HardwarePayload {
