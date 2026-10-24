@@ -59,14 +59,23 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   or `RuntimeError("... out of memory ...")`) -> `result.error_code = "oom"` and the
   message "Ran out of GPU memory during <stage> at step <n> (peak <x> GiB of <y>)."
   (the failing step = last finished + 1; `load` while loading). progress.json carries
-  `alloc_gib`, `peak_gib` (this stage) and `vram_cap_gb` (applied). The manager's
+  `alloc_gib`, `peak_gib` (this stage), `vram_cap_gb` (applied) and
+  `vram_cap_ignored_total_gib` (card total when a cap >= the card was ignored).
+  `is_oom_error` follows `__cause__` / `__context__` 5 links deep; the OOM branch logs
+  only the DEBUG frame trace (file:line function), never the exception text. The manager's
   `_finish` calls `training_profiles.record_attempt` FIRST (completion / cancel delete
   the run dir): the profile minus `timeline`, plus `adapter_id` / `adapter_name`, goes
   into `<data_dir>/logs/writer_training_profiles.json` (newest 50, atomic tmp + fsync +
   replace: a capped document, not a log stream, so `log_files.py` does not apply),
   the full one into `writer_training_last_profile.json`; an outcome the worker never
-  wrote gets the manager's verdict + `ended_by: "server"`; a corrupt history is renamed
-  `.corrupt-<ts>` (WARNING). `GET /api/writers/training/profiles` is read-only (no GPU
+  wrote gets the manager's verdict + `ended_by: "server"`; `recover` records every
+  `running` run's stale profile (verdict `paused`, exit -1, `ended_by:
+  "server_restart"`) since its supervisor never did; `_spawn` moves the previous
+  `out/profile.json` to `profile.prev.json` first, and the history dedupes on
+  `(run_id, attempt.attempt_id)` (a uuid per worker invocation), so no attempt is
+  recorded twice. A corrupt history is renamed `.corrupt-<ts>` (WARNING); one that
+  exists but cannot be read (OSError) is never replaced: the entry is dropped with a
+  WARNING. A bad config cap value warns once per value. `GET /api/writers/training/profiles` is read-only (no GPU
   lock). **VRAM cap rehearsal**: `models.writer_train_vram_cap_gb` (default) or
   `vram_cap_gb` on `POST .../training/start` (0 = off, 8..1024 else 422
   `invalid_vram_cap`; a bad config value is ignored) -> task key `vram_cap_gb` (not

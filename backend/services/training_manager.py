@@ -49,7 +49,18 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from metascan.core import writer_dataset as wd
 from metascan.core.hardware import (
@@ -179,12 +190,19 @@ def _valid_cap(value: Any) -> Optional[float]:
     return v
 
 
+_WARNED_CAPS: Set[str] = set()  # bad config values already logged (once each)
+
+
 def config_vram_cap(value: Any) -> Optional[float]:
     """``models.writer_train_vram_cap_gb`` validated; a bad value is
     ignored (logged), never fatal."""
     try:
         return _valid_cap(value)
     except ValueError:
+        key = repr(value)
+        if key in _WARNED_CAPS:
+            return None
+        _WARNED_CAPS.add(key)
         logger.warning(
             "models.writer_train_vram_cap_gb=%r ignored (needs %g..%g GB, or 0/null)",
             value,
@@ -1075,6 +1093,9 @@ class TrainingManager:
     async def _spawn(self, active: _Active) -> None:
         control = active.run_dir / "control"
         await asyncio.to_thread(self._empty_dir, control)
+        # The previous attempt (already recorded) must not be recorded again
+        # if this worker dies before writing its own profile.
+        await asyncio.to_thread(training_profiles.set_aside_run_profile, active.run_dir)
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             p for p in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if p
@@ -1545,10 +1566,28 @@ class TrainingManager:
             # the GPU: stop it (only when provably ours), then pause.
             if run.get("run_dir"):
                 await asyncio.to_thread(stop_orphan_worker, Path(run["run_dir"]))
+                # Nobody recorded that attempt; the resume would overwrite
+                # its profile.json.
+                await asyncio.to_thread(self._record_interrupted, run)
         ids: List[int] = await asyncio.to_thread(self.db.mark_interrupted_training_runs)
         if ids:
             logger.info("writer training runs marked paused at startup: %s", ids)
         return ids
+
+    def _record_interrupted(self, run: Dict[str, Any]) -> None:
+        adapter = self.db.get_writer_adapter(run["adapter_id"])
+        training_profiles.record_attempt(
+            self.data_dir,
+            SimpleNamespace(
+                run_id=run["id"],
+                adapter_id=run["adapter_id"],
+                name=adapter["name"] if adapter else None,
+                run_dir=Path(run["run_dir"]),
+            ),
+            verdict="paused",
+            exit_code=-1,
+            ended_by="server_restart",
+        )
 
     async def aclose(self) -> None:
         """Server shutdown: pause the worker (a checkpoint at the next step

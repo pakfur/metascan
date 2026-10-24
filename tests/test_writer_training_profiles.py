@@ -381,3 +381,141 @@ async def test_start_route_takes_the_cap(
             await _idle(m)
     finally:
         tm.set_training_manager(None)
+
+
+# ---- fix round 1: attempts nobody recorded, unreadable history, cap warnings -----------
+
+
+async def test_an_attempt_cut_by_a_hard_stop_is_recorded_at_restart(
+    db, tmp_path, dataset  # noqa: F811
+):
+    """The server died with the worker mid-run: its supervisor never
+    recorded the attempt. ``recover`` records it (from the stale
+    profile.json) before the resume overwrites that file."""
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 2
+    )
+    run_dir = Path(db.get_training_run(run_id)["run_dir"])
+    await _until(lambda: tp.run_profile_path(run_dir).exists())
+    active = m._active
+    assert active is not None and active.proc is not None
+    active.supervisor.cancel()
+    active.proc.kill()
+    await active.proc.wait()
+    assert not (tmp_path / "data" / "logs" / tp.HISTORY_NAME).exists()
+
+    m2 = _manager(db, tmp_path, rec, fake={"step_sleep_s": 0.0})
+    assert await m2.recover() == [run_id]
+    entries = _history(tmp_path)["profiles"]
+    assert len(entries) == 1
+    attempt = entries[0]["attempt"]
+    assert attempt["run_id"] == run_id
+    assert attempt["outcome"] == "paused"
+    assert attempt["exit_code"] == -1
+    assert attempt["ended_by"] == "server_restart"
+    assert entries[0]["adapter_id"] == db.get_training_run(run_id)["adapter_id"]
+    assert entries[0]["adapter_name"] == "taste-all-v1"
+
+    _speed_up(db, run_id)
+    await m2.resume(run_id)
+    await _idle(m2)
+    outcomes = [p["attempt"]["outcome"] for p in _history(tmp_path)["profiles"]]
+    assert outcomes == ["paused", "completed"]
+
+
+async def test_a_resume_whose_worker_dies_early_is_not_recorded_twice(
+    db, tmp_path, dataset, monkeypatch  # noqa: F811
+):
+    """The previous attempt's profile.json is moved aside before a spawn:
+    a worker that dies before writing its own leaves nothing to record,
+    instead of the previous attempt being recorded again."""
+    rec = Recorder()
+    m = _manager(db, tmp_path, rec, fake=SLOW)
+    run_id = await m.start("all", "quick")
+    await _until(
+        lambda: (m.status()["run"] or {}).get("progress", {}).get("step", 0) >= 1
+    )
+    await m.pause()
+    await _idle(m)
+    assert len(_history(tmp_path)["profiles"]) == 1
+
+    import sys
+
+    monkeypatch.setattr(
+        m, "_command", lambda active: [sys.executable, "-c", "raise SystemExit(7)"]
+    )
+    await m.resume(run_id)
+    await _idle(m)
+    assert db.get_training_run(run_id)["status"] == "failed"
+    assert [p["attempt"]["outcome"] for p in _history(tmp_path)["profiles"]] == [
+        "paused"
+    ]
+
+
+def test_an_unreadable_history_is_never_replaced(tmp_path, caplog, monkeypatch):
+    data_dir = tmp_path / "data"
+    tp.append_profile(
+        data_dir,
+        {"schema": 1, "attempt": {"run_id": 1}},
+        adapter_id=1,
+        adapter_name="a",
+    )
+    path = data_dir / "logs" / tp.HISTORY_NAME
+    before = path.read_bytes()
+    real_read_text = Path.read_text
+
+    def locked(self: Path, *a: Any, **kw: Any) -> str:
+        if self == path:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    with caplog.at_level(logging.WARNING, logger=tp.__name__):
+        tp.append_profile(
+            data_dir,
+            {"schema": 1, "attempt": {"run_id": 2}},
+            adapter_id=1,
+            adapter_name="a",
+        )
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    survivors = [path] + list(path.parent.glob(f"{tp.HISTORY_NAME}.corrupt-*"))
+    assert any(p.exists() and p.read_bytes() == before for p in survivors)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    # Reading for the endpoint still never raises.
+    monkeypatch.setattr(Path, "read_text", locked)
+    assert tp.read_history(data_dir)["profiles"] == []
+
+
+def test_a_bad_config_cap_warns_once(caplog):
+    with caplog.at_level(logging.WARNING, logger=tm.__name__):
+        for _ in range(3):
+            assert tm.config_vram_cap("warn-once-value") is None
+            assert tm.config_vram_cap(5.25) is None
+    warnings = [r for r in caplog.records if "writer_train_vram_cap_gb" in r.message]
+    assert len(warnings) == 2
+
+
+def test_an_attempt_is_recorded_once(tmp_path):
+    out = tmp_path / "run" / "out"
+    out.mkdir(parents=True)
+    (out / "profile.json").write_text(
+        json.dumps({"schema": 1, "attempt": {"run_id": 3, "attempt_id": "a1"}})
+    )
+    active = tm._Active(
+        run_id=3,
+        adapter_id=9,
+        name="x",
+        scope="all",
+        run_dir=tmp_path / "run",
+        resumed=False,
+    )
+    tp.record_attempt(tmp_path / "data", active, verdict="paused", exit_code=-15)
+    tp.record_attempt(tmp_path / "data", active, verdict="paused", exit_code=-1)
+    assert len(_history(tmp_path)["profiles"]) == 1
+    tp.set_aside_run_profile(tmp_path / "run")
+    assert not (out / "profile.json").exists()
+    assert (out / tp.PREV_PROFILE_NAME).exists()
+    tp.set_aside_run_profile(tmp_path / "run")  # nothing to move: no error
