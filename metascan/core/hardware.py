@@ -689,13 +689,13 @@ def writer_training_reasons(
     if not _base_weights_present(paths.base_dir):
         reasons.append(
             f"Writer training base weights not downloaded ({paths.base_dir}); "
-            "download them in Models."
+            "download them in Configuration → Training."
         )
     if not paths.converter_script.is_file():
         reasons.append(
             f"llama.cpp LoRA converter not found ({paths.converter_script}); "
-            "download it in Models or set models.llama_cpp_dir to a llama.cpp "
-            "checkout."
+            "download it in Configuration → Training or set models.llama_cpp_dir "
+            "to a llama.cpp checkout."
         )
     return reasons
 
