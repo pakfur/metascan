@@ -945,9 +945,11 @@ def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python(tmp_path):
         tmp_path, "missing", """echo '{"missing": ["peft", "trl"]}'"""
     )
     reason = probe_training_deps(missing)
+    # Names the interpreter it checked and the exact command for it, so a
+    # pip run into another venv is obvious.
     assert reason == (
-        "training dependencies not installed: peft, trl "
-        "(pip install -r requirements-train.txt)"
+        f"training dependencies not installed for {missing}: peft, trl "
+        f'(run "{missing}" -m pip install -r requirements-train.txt)'
     )
     broken = _stub_python(
         tmp_path, "broken", """echo '{"missing": [], "broken": ["torch (OSError)"]}'"""
@@ -966,7 +968,7 @@ def test_the_deps_probe_runs_in_a_subprocess_with_the_given_python(tmp_path):
     assert "could not run" in probe_training_deps(str(tmp_path / "nonexistent"))
 
 
-def test_probe_failures_are_cached_briefly_and_answers_for_good(tmp_path, monkeypatch):
+def test_only_a_passing_probe_is_cached_for_good(tmp_path, monkeypatch):
     from metascan.core import hardware
 
     clear_writer_training_probe_cache()
@@ -994,10 +996,27 @@ def test_probe_failures_are_cached_briefly_and_answers_for_good(tmp_path, monkey
         calls.append("deps2")
         return "training dependencies not installed: peft"
 
+    # "Not installed" is cached only briefly too: installing the deps while
+    # the server runs must not need a restart.
+    monkeypatch.setattr(hardware, "PROBE_FAILURE_TTL_S", 60.0)
     clear_writer_training_probe_cache()
     writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
     writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
-    assert calls.count("deps2") == 1  # a definitive answer is kept
+    assert calls.count("deps2") == 1  # kept within the TTL
+    monkeypatch.setattr(hardware, "PROBE_FAILURE_TTL_S", 0.0)
+    clear_writer_training_probe_cache()
+    writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
+    writer_training_reasons(_report(48.0), paths, deps_probe=definitive)
+    assert calls.count("deps2") == 3  # ... and expires
+
+    def ok(python):
+        calls.append("ok")
+        return ""
+
+    clear_writer_training_probe_cache()
+    writer_training_reasons(_report(48.0), paths, deps_probe=ok, trl_probe=lambda p: "")
+    writer_training_reasons(_report(48.0), paths, deps_probe=ok, trl_probe=lambda p: "")
+    assert calls.count("ok") == 1  # a passing answer is kept for good
     clear_writer_training_probe_cache()
 
 
@@ -1426,6 +1445,27 @@ def _probing_manager(db, tmp_path, probe, **kw) -> TrainingManager:
     return m
 
 
+async def test_a_finished_probe_broadcasts_gate_changed(db, tmp_path, dataset):
+    # The Models tab only shows cached probe results: tell it when one lands.
+    probe = _Probe(result=("training dependencies not installed: peft", ""))
+    rec = Recorder()
+    clear_writer_training_probe_cache()
+    m = _manager(db, tmp_path, rec)
+    m._gate = None
+    m._probe = probe
+    m._paths = lambda: WriterTrainingPaths(
+        python=str(tmp_path / "train-python"),
+        base_dir=tmp_path / "base",
+        converter_script=tmp_path / "conv.py",
+    )
+    await m.gate_status()
+    assert rec.events("gate_changed") == []
+    probe.release.set()
+    await _until(lambda: not m.probing())
+    assert rec.events("gate_changed") == [{}]
+    clear_writer_training_probe_cache()
+
+
 async def test_gate_probe_runs_in_the_background_single_flight(db, tmp_path, dataset):
     probe = _Probe(result=("training dependencies not installed: peft", ""))
     m = _probing_manager(db, tmp_path, probe)
@@ -1531,7 +1571,8 @@ async def test_the_async_probe_never_uses_a_thread(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "to_thread", no_threads)
     missing = _stub_python(tmp_path, "m", """echo '{"missing": ["peft"]}'""")
     deps, trl = await tm.probe_training_python(missing)
-    assert deps.startswith("training dependencies not installed: peft") and trl == ""
+    assert deps.startswith("training dependencies not installed for ") and trl == ""
+    assert ": peft" in deps
     ok = _stub_python(
         tmp_path,
         "ok",

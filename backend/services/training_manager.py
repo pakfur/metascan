@@ -407,7 +407,7 @@ async def probe_training_python(
     deps = (
         f"could not run the training dependency probe: {err}"
         if err
-        else parse_deps_probe(rc, out)
+        else parse_deps_probe(rc, out, python)
     )
     if deps:
         return deps, ""
@@ -699,6 +699,8 @@ class TrainingManager:
         try:
             deps, trl = await self._probe(python)
             store_training_probe(python, deps, trl)
+            # The Models tab shows only cached results: tell it one landed.
+            self._emit("gate_changed", {})
         except asyncio.CancelledError:
             raise
         except Exception as exc:

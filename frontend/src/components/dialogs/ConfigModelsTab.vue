@@ -360,6 +360,18 @@ function adapterScope(scope: string): string {
   return categoriesStore.categories.find((c) => String(c.id) === scope)?.name ?? `category ${scope}`
 }
 const writerAdapters = computed(() => [...training.adapters].sort((a, b) => b.id - a.id))
+// Re-run the training dependency probe; its gate_changed event reloads the rows.
+const rechecking = ref(false)
+async function recheckTraining(): Promise<void> {
+  rechecking.value = true
+  try {
+    await training.load(true)
+  } catch (e) {
+    console.warn('training re-check failed', (e as Error).message)
+  } finally {
+    rechecking.value = false
+  }
+}
 function adapterAgreement(h: number | null): string {
   return typeof h === 'number' ? `holdout ${Math.round(h * 100)}%` : ''
 }
@@ -708,6 +720,14 @@ async function onRetagLibrary() {
           <li v-for="r in writerTrainingGate.reasons ?? [writerTrainingGate.reason]" :key="r">{{ r }}</li>
         </ul>
         Downloads work on any machine.
+        <button
+          class="btn-secondary"
+          data-testid="writer-training-recheck"
+          :disabled="rechecking"
+          @click="recheckTraining"
+        >
+          {{ rechecking ? 'Checking…' : 'Re-check' }}
+        </button>
       </div>
       <div v-if="group === 'Writer training'" class="writer-adapters" data-testid="writer-adapters">
         <div class="writer-adapters-head">
