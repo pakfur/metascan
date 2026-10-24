@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Writer training window (Models tab → "Train prompt writer", or the header
+// Writer training window (Training tab → "Train prompt writer", or the header
 // chip). Non-modal: the run lives on the server, so closing this window (or
 // the browser) never stops it. Example text is shown ONLY in the Preview
 // panel below — never logged, never rendered anywhere else.

@@ -307,7 +307,7 @@ watch(isMobile, () => {
     />
 
     <!-- Writer training window: non-modal (no overlay); opened from the
-         Models tab or the header chip; closing it never stops a run. -->
+         Training tab or the header chip; closing it never stops a run. -->
     <WriterTrainingDialog v-if="trainingStore.windowOpen" />
 
     <!-- Folder dialogs — overlays that can be opened from anywhere via

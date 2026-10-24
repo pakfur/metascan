@@ -51,8 +51,8 @@ useWebSocket('categories', (event) => {
 })
 
 // Taste scorer: new scores refetch the map the Taste sort reads; training
-// lifecycle events refresh the Models tab status. Always on so the sort stays
-// current whether or not the Models tab is open.
+// lifecycle events refresh the Training tab status. Always on so the sort stays
+// current whether or not the Training tab is open.
 useWebSocket('taste', (event) => {
   if (event === ('scores_updated' satisfies TasteWsEvent)) {
     tasteStore.load().catch((e) => console.error('Failed to load taste scores', e))
