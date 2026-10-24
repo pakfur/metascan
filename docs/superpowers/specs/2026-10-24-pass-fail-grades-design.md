@@ -1,6 +1,7 @@
 # Pass / fail grades: separating favorites from training signals
 
-Date: 2026-10-24. Status: design, awaiting the owner's approval.
+Date: 2026-10-24. Status: approved by the owner (2026-10-24), with the
+Training tab added at their request.
 
 This changes the rating model built in taste-learning projects 1–4
 (`docs/superpowers/specs/2026-10-22-taste-learning-design.md`, §1 rating
@@ -124,6 +125,29 @@ Rules:
   "Ratings (favorite/pass) … preserved" → favorites and grades; score-badge
   tooltip → "chance you'd pass this"; taste status "needs N more" counts ✓
   and ✗.
+
+## Config → Training tab (owner's request)
+
+The training sections move out of Config → Models into a new **Training**
+tab of the Config dialog, placed right after Models *(order: my call)*:
+
+- the **Writer training** group: the "Writer training base" and "llama.cpp
+  LoRA converter" rows (download / delete / progress / release note), the
+  training check with its reasons and Re-check, the adapter list and the
+  **Train prompt writer** button;
+- the **Taste scorer** block (status, retrain, missing counts);
+- the **Writers** block (pass-rate windows, diversity, collapse warning, the
+  scorecard table).
+
+The Models tab keeps model downloads, the hardware and HF token blocks,
+preload settings and the VLM roles (writer / general model choice, which is
+model configuration, not training). Behaviour does not change by moving:
+same stores, same WebSocket listeners, same actions — and "Download all
+missing" keeps skipping the writer-training rows. Any copy that says "Models
+tab" for these sections (docs, help text, the training window's own
+references) says "Training tab". *(My call:)* split the code into a
+`ConfigTrainingTab.vue` rather than leave the sections in `ConfigModelsTab.vue`
+behind a flag.
 
 ## API
 
@@ -347,6 +371,7 @@ those named; ordering of the work.
 8. Archived thumbnails for graded images only, 512 px, uncapped; after a CLIP
    switch the app starts CLIP itself (when idle) to re-embed them.
 9. Slideshow and mobile keep ★ only.
+10. The Training tab sits right after Models, as its own component.
 
 ## Testing
 
