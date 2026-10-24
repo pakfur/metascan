@@ -59,9 +59,12 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   (`t2i_images.scorecard_id` not NULL), `manual` and (as a target) `fallback` writers
   are excluded; deleted generations are read from `media_tombstones`. Trainable at
   `MIN_TRAINABLE_PAIRS = 100`, "enough new" at `ENOUGH_NEW_PAIRS = 200` counted since
-  the newest `ready` OR `untested` adapter of the scope. The holdout (10% of groups)
-  is removed from SFT too. The user turn must stay identical to inference (parity
-  test). Examples and briefs are NEVER logged (counts and exception types only); the
+  the newest `ready` OR `untested` adapter of the scope. The holdout is a stable
+  sha256 rank of `{seed}:{group}` (about 10% of groups; a group never changes sides as
+  data grows; with 2+ groups at least one is held and never all) and is removed from
+  SFT too. The user turn must stay identical to inference (parity
+  test). Examples and briefs are NEVER logged (counts and exception types only; for a non-`TrainWorkerError` the worker's `result.json`
+  `error` holds the type name only); the
   Preview endpoint (`GET /api/writers/dataset/preview`) is the only egress.
 - **Run lifecycle.** `start` checks, in order: `already_training`, hyperparams
   (422), `gate_unavailable` / `gate_checking` (409), `unknown_scope`, `start_from`,
@@ -69,8 +72,13 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   row (`training`) and run row are created at start; on success a single compare-and-set
   (`db.complete_training_run`) marks the run `completed` and the adapter `untested`
   with `file_path`, agreements and `data_cutoff`, then the manager calls
-  `refresh_writer_adapters()` BEFORE `adapters_changed`, then `run_completed`, then the
-  `on_completed` hook (scorecard). Exit 3 -> run+adapter `paused`; 4 -> `cancelled`
+  `_refresh_writer()` (`refresh_writer_adapters()`) BEFORE the GPU lock is dropped, then
+  emits `adapters_changed`, then `run_completed`, then the `on_completed` hook
+  (scorecard; skipped while the manager is closing). "Continue from" copies the source
+  PEFT dir into `<run_dir>/init_adapter` (`INIT_ADAPTER_DIRNAME`; `init_adapter_dir`
+  points at the copy), so deleting the source never breaks resume. A start or resume
+  that fails after the spawn stops the worker (`_stop_spawned`: terminate, wait, kill,
+  reap) BEFORE releasing the lock. Exit 3 -> run+adapter `paused`; 4 -> `cancelled`
   (adapter soft-deleted, files removed); anything else -> `failed`, checkpoints kept,
   resumable. `recover()` at startup turns `running` runs into `paused`. The pid file
   `worker.pid` (`pid`, psutil `create_time`, module) identifies an orphan: it is
@@ -96,6 +104,8 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   enumerates the consumer routes; add a new GPU route to its list. Not locked: browsing,
   rating, judgments, the taste scorer (CPU), `/api/vlm/unload`. Shutdown closes the
   training manager first (a completion refreshes the writer), then the scorecard.
+  The lifespan installs training (`recover()`) right after the T2I runner, before any
+  CLIP / FAISS / VLM preload.
 - **The gate** (`hardware.writer_training_reasons`) lists one reason per missing
   piece: CUDA, VRAM >= 32 GB (`WRITER_TRAINING_MIN_VRAM_GB`, at max_seq 2048 with DPO's
   three passes), training deps, the TRL reference probe (skipped when the deps are
@@ -126,7 +136,11 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `scorecard_jobs` keep the scorecard id, writer and variant for jobs that ingest after a
   restart. Scorecard batches are never adopted by the T2I dialog or "Cancel all";
   `BatchRequest.scorecard_id` is internal. Scorecard images are normal taste labels but
-  never writer training data. A scorecard is not auto-resumed after a restart
+  never writer training data nor writer-stats rows (`generation_outcomes` skips them,
+  tombstones included). A pair is one per `(scorecard, brief)`: the latest complete
+  batch. A resume skips briefs whose job is still queued or running (409
+  `scorecard_pending` when nothing else is left); a start answers 503 `shutting_down`
+  while the app is closing. A scorecard is not auto-resumed after a restart
   (`interrupted`), and it needs a `t2i.model_workflows` preset for the target model
   (default `krea2`; else 409 `no_workflow`).
 - **Hindsight briefs.** `HindsightBriefsJob` (general VLM role, one image per request,
