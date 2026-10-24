@@ -25,7 +25,13 @@ _thumbnail_cache_lock = Lock()
 
 
 def get_db() -> DatabaseManager:
-    """Process-wide DatabaseManager singleton."""
+    """Process-wide DatabaseManager singleton.
+
+    Creating it runs the schema migrations. The server's lifespan creates it
+    before accepting any request (``backend/main.py``), so a failed migration
+    (``MigrationError``) stops startup with its owner-facing message instead
+    of failing request after request; the singleton then stays unset and the
+    next start retries the migration."""
     global _db_singleton
     if _db_singleton is not None:
         return _db_singleton

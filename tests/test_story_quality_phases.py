@@ -54,7 +54,7 @@ def test_subject_type_persists_and_migration_infers(tmp_path):
     db2 = DatabaseManager(tmp_path / "t.db")
     assert db2.get_subject(loc)["subject_type"] == "location"
     with db2._get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 # ---- D: scene function ----------------------------------------------------

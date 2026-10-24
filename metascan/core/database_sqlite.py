@@ -1,5 +1,8 @@
 import json
+import math
+import os
 import re
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Sequence, Set, Tuple, ClassVar, Callable
@@ -235,6 +238,196 @@ def _idempotent_add_column(
             )
             return
         raise
+
+
+class MigrationError(RuntimeError):
+    """A schema migration could not run: none of its changes were made
+    (``PRAGMA user_version`` is unchanged, the ratings are as they were)
+    and opening the database failed. The message is owner-facing -- it
+    names the cause and what to do -- and the server prints it and refuses
+    to start (``backend/main.py`` lifespan). The next start retries the
+    migration."""
+
+
+# Free space the v6 backup needs on the database's drive: a full copy of
+# the database plus a margin for the migration's own writes.
+V6_BACKUP_SPACE_FACTOR = 1.2
+
+
+def _free_disk_bytes(directory: Path) -> int:
+    """Free bytes on the drive holding ``directory``."""
+    return int(shutil.disk_usage(str(directory)).free)
+
+
+def _human_size(n: int) -> str:
+    """``n`` bytes for a person, rounded up: ``3.5 GB``, ``120 MB``."""
+    if n >= 1_000_000_000:
+        return f"{math.ceil(n / 100_000_000) / 10:.1f} GB"
+    return f"{max(1, math.ceil(n / 1_000_000))} MB"
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename in ``directory`` durable. Best effort: Windows (and
+    some filesystems) cannot open or fsync a directory."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _copy_database(src: sqlite3.Connection, dest: Path) -> None:
+    """Write a consistent copy of ``src`` to ``dest`` through the SQLite
+    backup API, as one self-contained file: the copy inherits WAL mode from
+    the source's header, so it is switched to a rollback journal and
+    opening it never grows ``-wal`` / ``-shm`` files beside it."""
+    dst = sqlite3.connect(str(dest))
+    try:
+        src.backup(dst)
+        dst.execute("PRAGMA journal_mode = DELETE")
+    finally:
+        dst.close()
+
+
+def _has_ratings_to_migrate(conn: sqlite3.Connection) -> bool:
+    """True when v6 has something to map: a judgment row, a tombstone or a
+    favorite (read as v5 read it: any non-zero ``is_favorite``). A missing
+    table counts as empty."""
+    tables = {
+        r[0]
+        for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    probes = (
+        ("media_judgments", "SELECT 1 FROM media_judgments LIMIT 1"),
+        ("media_tombstones", "SELECT 1 FROM media_tombstones LIMIT 1"),
+        ("media", "SELECT 1 FROM media WHERE is_favorite != 0 LIMIT 1"),
+    )
+    return any(
+        table in tables and conn.execute(sql).fetchone() is not None
+        for table, sql in probes
+    )
+
+
+def _partial_path(target: Path) -> Path:
+    """Where a backup is written before it is complete."""
+    return target.with_name(target.name + ".partial")
+
+
+def _v6_backup_target(db_path: Path, now: datetime) -> Path:
+    """``<db file>.pre-v6-<YYYYmmdd-HHMMSS>.bak`` from ``now``. When that name
+    (or its ``.partial``) is taken -- two starts within one second -- the
+    timestamp gets ``-2``, ``-3``, ...: an existing backup is never
+    overwritten."""
+    stamp = now.strftime("%Y%m%d-%H%M%S")
+    n = 1
+    while True:
+        suffix = "" if n == 1 else f"-{n}"
+        target = db_path.with_name(f"{db_path.name}.pre-v6-{stamp}{suffix}.bak")
+        if not target.exists() and not _partial_path(target).exists():
+            return target
+        n += 1
+
+
+def _remove_partial_backup(partial: Path) -> None:
+    """Delete an incomplete backup and any journal SQLite left beside it."""
+    for path in (partial,) + tuple(
+        partial.with_name(partial.name + s) for s in ("-journal", "-wal", "-shm")
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove the incomplete backup %s: %s", path, exc)
+
+
+def backup_before_v6(db_path: Path, now: datetime) -> Optional[Path]:
+    """Back up the database file ``db_path`` before the v6 (pass/fail
+    grades) migration: a consistent copy through the SQLite backup API at
+    ``<db file>.pre-v6-<YYYYmmdd-HHMMSS>.bak``, the timestamp being ``now``
+    as given (the migration passes its UTC migration time). The copy is
+    written as ``<backup>.partial`` and renamed once complete, so a
+    ``.bak`` file is always a whole copy. The owner deletes it when
+    satisfied.
+
+    Returns the backup's path, or None when there is nothing to back up
+    for: the database is already at version 6, or holds nothing to
+    migrate (no judgment rows, tombstones or favorites).
+
+    The drive must have ``V6_BACKUP_SPACE_FACTOR`` x the database's size
+    free first. When it hasn't, or the backup fails in any way, raises
+    ``MigrationError`` (owner-facing) with no partial copy left; the
+    database itself is only ever read. The caller must have nothing
+    uncommitted on the database."""
+    directory = db_path.parent
+    partial: Optional[Path] = None
+    try:
+        src = sqlite3.connect(str(db_path))
+        try:
+            version = int(src.execute("PRAGMA user_version").fetchone()[0])
+            if version >= 6 or not _has_ratings_to_migrate(src):
+                logger.debug("No ratings to migrate: the pre-v6 backup is skipped")
+                return None
+            page_size = int(src.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(src.execute("PRAGMA page_count").fetchone()[0])
+            need = math.ceil(page_size * page_count * V6_BACKUP_SPACE_FACTOR)
+            free: Optional[int]
+            try:
+                free = _free_disk_bytes(directory)
+            except OSError as exc:
+                # The copy's own failure (handled below) still guards the drive.
+                logger.warning(
+                    "Could not read the free space on the drive holding %s "
+                    "(%s); backing up anyway",
+                    directory,
+                    exc,
+                )
+                free = None
+            if free is not None and free < need:
+                raise MigrationError(
+                    "Metascan has to back up its database before upgrading it "
+                    "to version 6 (pass/fail grades), but the drive holding "
+                    f"{directory} has only {_human_size(free)} free and the "
+                    f"backup needs about {_human_size(need)}. Free at least "
+                    f"{_human_size(need - free)} on that drive, then start "
+                    "Metascan again. Your ratings have not been changed."
+                )
+            target = _v6_backup_target(db_path, now)
+            partial = _partial_path(target)
+            logger.info(
+                "Backing up the database (%s) to %s before upgrading it to "
+                "version 6 (pass/fail grades); this can take a while",
+                _human_size(page_size * page_count),
+                target,
+            )
+            _copy_database(src, partial)
+        finally:
+            src.close()
+        os.replace(partial, target)
+        _fsync_dir(directory)
+    except MigrationError:
+        raise
+    except Exception as exc:
+        if partial is not None:
+            _remove_partial_backup(partial)
+        raise MigrationError(
+            "Metascan could not back up its database before upgrading it to "
+            f"version 6 (pass/fail grades): {exc}. Your ratings have not been "
+            f"changed. Make sure {directory} is writable and has free space, "
+            "then start Metascan again."
+        ) from exc
+    logger.info(
+        "Backed up the database to %s before upgrading it to version 6 "
+        "(pass/fail grades); delete the backup once you are happy with the "
+        "upgrade",
+        target,
+    )
+    return target
 
 
 class DatabaseManager:
@@ -1290,6 +1483,52 @@ class DatabaseManager:
                 )
                 """
             )
+            # Pass / fail grades (filled from the old ratings once, by
+            # _migrate_to_v6): grade is 'pass' / 'fail' / NULL (no grade),
+            # the only training signal. The old ``passed`` columns mean
+            # *reject* and are kept, unread by grade code, until they are
+            # dropped. A tombstone also keeps what a deleted graded item
+            # still teaches: its hindsight brief and the model that wrote
+            # it, a library item's prompt and model name, and an archived
+            # thumbnail (thumb_path, relative to the data dir).
+            _grade_ddl = "grade TEXT CHECK (grade IN ('pass', 'fail'))"
+            _idempotent_add_column(
+                conn,
+                "media_judgments",
+                "grade",
+                f"ALTER TABLE media_judgments ADD COLUMN {_grade_ddl}",
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_judgments_grade "
+                "ON media_judgments(grade)"
+            )
+            for _col, _ddl in (
+                ("grade", _grade_ddl),
+                ("brief", "brief TEXT"),
+                ("brief_model", "brief_model TEXT"),
+                ("prompt", "prompt TEXT"),
+                ("model_name", "model_name TEXT"),
+                ("thumb_path", "thumb_path TEXT"),
+            ):
+                _idempotent_add_column(
+                    conn,
+                    "media_tombstones",
+                    _col,
+                    f"ALTER TABLE media_tombstones ADD COLUMN {_ddl}",
+                )
+            # A deleted item's CLIP vector, one per CLIP model (model_key as
+            # the FAISS index names it). No FK: tombstones are never deleted.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tombstone_vectors (
+                    tombstone_id INTEGER NOT NULL,
+                    model_key TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (tombstone_id, model_key)
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS categories (
@@ -1940,7 +2179,117 @@ class DatabaseManager:
                 )
                 conn.execute("PRAGMA user_version = 5")
 
+            # Everything above is committed before v6: the v6 backup must
+            # see it, and v6 runs as a transaction of its own.
             conn.commit()
+
+            if user_version < 6:
+                self._migrate_to_v6(conn)
+
+    def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
+        """user_version 5 -> 6: today's ratings become pass / fail grades
+        (spec docs/superpowers/specs/2026-10-24-pass-fail-grades-design.md,
+        "Migration"). ``conn`` must have nothing uncommitted.
+
+        ``backup_before_v6`` first, then ONE transaction: a favorite gets
+        grade 'pass' (one with no judgment row gets a row, its seen_at /
+        judged_at / confirmed_at the migration time); the old
+        ``passed = 1`` -- a *reject* -- gets 'fail'; every other row NULL
+        (seen-only rows stay seen-only). Tombstones the same way. Every
+        tombstone embedding is copied into ``tombstone_vectors`` under its
+        ``embedding_model``. Where an item is both favorite and passed, ★
+        wins, as v5 read it (``_read_judgment``, the taste labels).
+        Reasons, seen_at / judged_at / confirmed_at, ``passed`` and
+        ``is_favorite`` are not touched, and no event is written: a
+        synthetic event would become the newest verdict event, erase its
+        score_shown halving and trip the retrain count at once.
+
+        On any failure none of this is written (user_version stays 5) and
+        ``MigrationError`` is raised; the next open retries. Concurrent
+        managers are safe: the version is re-read under the write lock."""
+        now = datetime.now(timezone.utc)
+        backup = backup_before_v6(self.db_file, now)
+        ts = now.isoformat()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 6:
+                conn.rollback()  # another manager migrated meanwhile
+                return
+            # Favorites are read from the covering summary index (the
+            # ``data`` blob sits before ``is_favorite`` in the row).
+            conn.execute(
+                "UPDATE media_judgments SET grade = CASE "
+                "WHEN file_path IN "
+                "(SELECT file_path FROM media WHERE is_favorite != 0) "
+                "THEN 'pass' WHEN passed != 0 THEN 'fail' ELSE NULL END"
+            )
+            created = conn.execute(
+                "INSERT INTO media_judgments (file_path, passed, reasons, "
+                "seen_at, judged_at, confirmed_at, grade) "
+                "SELECT file_path, 0, '[]', ?, ?, ?, 'pass' FROM media "
+                "WHERE is_favorite != 0 ON CONFLICT(file_path) DO NOTHING",
+                (ts, ts, ts),
+            ).rowcount
+            conn.execute(
+                "UPDATE media_tombstones SET grade = CASE "
+                "WHEN is_favorite != 0 THEN 'pass' "
+                "WHEN passed != 0 THEN 'fail' ELSE NULL END"
+            )
+            vectors = conn.execute(
+                "INSERT OR IGNORE INTO tombstone_vectors "
+                "(tombstone_id, model_key, embedding, created_at) "
+                "SELECT id, embedding_model, embedding, ? FROM media_tombstones "
+                "WHERE embedding IS NOT NULL AND embedding_model IS NOT NULL",
+                (ts,),
+            ).rowcount
+            conn.execute("PRAGMA user_version = 6")
+            counts = self._v6_counts(conn)
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                # Closing the connection discards the transaction anyway.
+                logger.exception("Rolling back the failed v6 migration raised")
+            at_backup = (
+                f" The backup taken just before is at {backup}." if backup else ""
+            )
+            raise MigrationError(
+                "Metascan could not upgrade its database to version 6 "
+                f"(pass/fail grades): {exc}. The upgrade was rolled back, so "
+                "your ratings are unchanged and the database is still at "
+                f"version 5.{at_backup} To retry, start Metascan again; if it "
+                "fails the same way, keep the database and the backup and "
+                "report this message."
+            ) from exc
+        logger.info(
+            "Database upgraded to version 6 (pass/fail grades): favorites -> "
+            "pass %d (judgment rows created %d), rejects -> fail %d, "
+            "tombstones -> pass %d / fail %d, tombstone vectors copied %d",
+            counts["pass"],
+            created,
+            counts["fail"],
+            counts["tomb_pass"],
+            counts["tomb_fail"],
+            vectors,
+        )
+
+    @staticmethod
+    def _v6_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+        """Grades by kind after the v6 mapping (counts only, for the log)."""
+        row = conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM media_judgments WHERE grade = 'pass'), "
+            "(SELECT COUNT(*) FROM media_judgments WHERE grade = 'fail'), "
+            "(SELECT COUNT(*) FROM media_tombstones WHERE grade = 'pass'), "
+            "(SELECT COUNT(*) FROM media_tombstones WHERE grade = 'fail')"
+        ).fetchone()
+        return {
+            "pass": int(row[0]),
+            "fail": int(row[1]),
+            "tomb_pass": int(row[2]),
+            "tomb_fail": int(row[3]),
+        }
 
     @contextmanager
     def _get_connection(self):  # type: ignore[no-untyped-def]
@@ -1973,6 +2322,12 @@ class DatabaseManager:
     # ``DEFAULT CURRENT_TIMESTAMP`` every time, making ``created_at`` track
     # the most recent rescan rather than the first ingest. Smart folders
     # keying off "Added" need that first-ingest semantic.
+    #
+    # It also never changes an existing row's ★: ``Media.is_favorite``
+    # defaults to False, so re-ingesting a path (a rescan, ``ingest_file``)
+    # used to clear a favorite with no event. Only the ★ paths
+    # (``set_favorite`` and friends) change it; a new row takes the
+    # caller's value.
     _MEDIA_UPSERT_SQL = """
         INSERT INTO media (
             file_path, data, is_favorite, playback_speed,
@@ -1984,7 +2339,7 @@ class DatabaseManager:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(file_path) DO UPDATE SET
             data = excluded.data,
-            is_favorite = excluded.is_favorite,
+            is_favorite = media.is_favorite,
             playback_speed = excluded.playback_speed,
             width = excluded.width,
             height = excluded.height,
@@ -3361,7 +3716,7 @@ class DatabaseManager:
         transaction and lock -- never takes the lock itself."""
         for path in posix_paths:
             judgment = conn.execute(
-                "SELECT passed, reasons, seen_at, confirmed_at "
+                "SELECT passed, grade, reasons, seen_at, confirmed_at "
                 "FROM media_judgments WHERE file_path = ?",
                 (path,),
             ).fetchone()
@@ -3430,14 +3785,18 @@ class DatabaseManager:
                 blob, model_key = None, None
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
-            "is_favorite, passed, reasons, categories, seen_at, "
+            "is_favorite, passed, grade, reasons, categories, seen_at, "
             "confirmed_at, embedding, embedding_model, lineage) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 now,
                 1 if is_favorite else 0,
                 int(judgment["passed"]) if judgment is not None else 0,
+                # Copied as stored, never derived: a judgment without a
+                # grade key (a pre-v2 snapshot row) leaves the tombstone
+                # without a grade.
+                judgment.get("grade") if judgment is not None else None,
                 judgment["reasons"] if judgment is not None else "[]",
                 json.dumps(sorted(cat_names)),
                 judgment["seen_at"] if judgment is not None else None,

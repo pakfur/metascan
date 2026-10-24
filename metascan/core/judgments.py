@@ -14,6 +14,20 @@ REASONS: Tuple[str, ...] = (
 
 Verdict = Literal["favorite", "pass"]
 
+# Pass / fail grades (spec 2026-10-24-pass-fail-grades): the only training
+# signal, independent of ★ favorite. Stored in ``grade`` columns (NULL = no
+# grade). Never reuse the words pass / passed / unpass / verdict for the new
+# ✓: in every pre-v6 column, event and snapshot they mean *reject*.
+Grade = Literal["pass", "fail"]
+GRADES: Tuple[Grade, ...] = ("pass", "fail")
+EVENT_GRADE_PASS = "grade_pass"
+EVENT_GRADE_FAIL = "grade_fail"
+EVENT_GRADE_CLEAR = "grade_clear"
+# The old favorite-or-pass verdict's reject events ("pass" = rejected,
+# "unpass" = reject withdrawn). They stay in the append-only log and are
+# never read as a grade.
+LEGACY_REJECT_EVENTS: Tuple[str, ...] = ("pass", "unpass")
+
 # Minimum gap between two reconfirm events on the same item.
 RECONFIRM_MIN_INTERVAL_S: int = 86_400
 

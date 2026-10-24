@@ -75,6 +75,7 @@ from metascan.core.writer_dataset import caption_resolver
 from backend.api.comfy import set_comfy_client
 from backend.api.storyboard import set_storyboard_runner
 from metascan.core.comfy_client import ComfyClient
+from metascan.core.database_sqlite import MigrationError
 from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.i2v_runner import I2vRunner
 from metascan.core.t2i_captions import CaptionStore
@@ -184,6 +185,33 @@ async def _event_loop_heartbeat() -> None:
                 drift_ms,
             )
         last = now
+
+
+async def _open_database() -> None:
+    """Lifespan startup, first step: open the DB (and warm the thumbnail
+    cache) off the loop. Both do synchronous work (schema migrations +
+    index builds for the DB, directory creation + ffmpeg lookup for the
+    cache), and the first request must not pay for it.
+
+    A failed migration (``MigrationError``: the v6 backup refused for disk
+    space, an error mid-transaction) leaves the ratings untouched
+    (user_version unchanged): its owner-facing message is logged and it is
+    re-raised, which stops the server before it accepts a request. There
+    is no degraded mode -- new code on an unmigrated database would let
+    fresh grades be overwritten when the migration later runs."""
+    t0 = time.perf_counter()
+    try:
+        await asyncio.gather(
+            asyncio.to_thread(get_db),
+            asyncio.to_thread(get_thumbnail_cache),
+        )
+    except MigrationError as exc:
+        logger.critical("Metascan cannot start: %s", exc)
+        raise
+    logger.info(
+        "Warmed DB + thumbnail cache singletons in %.0fms",
+        (time.perf_counter() - t0) * 1000,
+    )
 
 
 async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
@@ -343,6 +371,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if server_log is not None:
         logger.info("Logging to %s", server_log)
 
+    # Before anything else starts: a failed migration stops the server
+    # here, and nothing has been started yet that would need stopping.
+    await _open_database()
+
     ws_manager.attach_loop(asyncio.get_running_loop())
     similarity.set_server_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
@@ -359,23 +391,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("prompt-store loaded %d entries", len(prompt_store.keys()))
     except Exception:
         logger.exception("Failed to initialize prompt store; prompt endpoints may 500")
-
-    # Warm the singletons before we start accepting requests. Both do
-    # synchronous work (SQLite schema migration + index builds for the
-    # DB, directory creation + ffmpeg lookup for the thumbnail cache) so
-    # running them via `asyncio.to_thread` keeps the lifespan free to
-    # handle other startup steps in parallel and, crucially, keeps the
-    # first incoming request from paying the init cost on the asyncio
-    # thread.
-    t0 = time.perf_counter()
-    await asyncio.gather(
-        asyncio.to_thread(get_db),
-        asyncio.to_thread(get_thumbnail_cache),
-    )
-    logger.info(
-        "Warmed DB + thumbnail cache singletons in %.0fms",
-        (time.perf_counter() - t0) * 1000,
-    )
 
     # Tombstones snapshot a deleted item's CLIP vector from the in-memory
     # FAISS index (never loads it from disk under the DB lock).
