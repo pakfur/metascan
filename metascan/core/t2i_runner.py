@@ -38,7 +38,18 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    TypeVar,
+)
 
 from metascan.core.judgments import (
     DRAFT_WRITERS,
@@ -48,6 +59,7 @@ from metascan.core.judgments import (
     WRITER_MANUAL,
     WriterModelError,
     check_writer_model,
+    writer_id_allowed,
     normalize_prompt,
 )
 from metascan.core.comfy_bindings import Bindings, GenerationParams, resolve_bindings
@@ -83,15 +95,26 @@ from metascan.core.t2i_models import (
 from metascan.core.prompt_store import get_prompt_store
 from metascan.core.t2i_prompt import (
     ComposedPrompts,
+    add_categories_line,
     compose_guided_t2i_prompts,
     fallback_prompt,
     parse_t2i_output,
 )
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
-from metascan.core.vlm_client import VlmError
+from metascan.core.scorecard_blind import blind_step
+from metascan.core.vlm_client import (
+    AdapterLoadingError,
+    AdapterNotLoadedError,
+    VlmError,
+)
 from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
 from metascan.core.vlm_models import writer_missing_hint
+from metascan.core.writer_adapters import (
+    ADAPTER_LOADING,
+    WriterAdapterUnavailable,
+    parse_adapter_writer_id,
+)
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -116,11 +139,15 @@ WARN_TYPED_PROMPT_ONCE = (
     "variants apply to written prompts: the typed prompt renders once"
 )
 
-# Prompt variants per caption, and the writers a request may ask for.
+# Prompt variants per caption, and the writers a request may ask for
+# (besides ``adapter:<id>``, a prompt-writer adapter, used without examples).
 MAX_VARIANTS = 4
 REQUEST_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
 
 _VLM_TEMPERATURE = 0.6
+# How long POST /batches waits for a busy writer to load a new adapter
+# before refusing the Random batch (409 adapter_loading).
+_ADAPTER_PREPARE_WAIT_S = 15.0
 _VLM_TIMEOUT_S = 240.0
 _TERMINAL_JOB_STATES = ("done", "failed", "cancelled")
 # Finished batches remembered (so a cancel of one is "already over", not
@@ -181,6 +208,12 @@ class BatchRequest:
     # means ``prompt``/``negative`` are the single supplied prompt (typed:
     # writer ``manual``, no draft).
     prompts: Optional[List[Dict[str, Any]]] = None
+    # Set only by the writer-adapter scorecard (never by a route): every
+    # image of the batch records it in ``t2i_images.scorecard_id``.
+    scorecard_id: Optional[str] = None
+    # The brief the scorecard batch renders (recorded with its batch id
+    # before any job is submitted, so a late ingest finds the scorecard).
+    scorecard_brief: Optional[int] = None
 
 
 @dataclass
@@ -212,6 +245,9 @@ class PromptResult:
     direction: Optional[str] = None
     direction_parts: List[str] = field(default_factory=list)
     drafts: List[PromptDraft] = field(default_factory=list)
+    # The names of the request's category_ids: the drafts' lineage (an
+    # ``all``-scope adapter wrote with them as its CATEGORIES line).
+    categories: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -247,6 +283,21 @@ class _Batch:
     started_at: str
     phase: str  # "prompting" | "rendering"
     prompting: bool  # still writing prompts (Random batches only)
+    # The adapter GGUF the writer applies (writer ``adapter:<id>``), resolved
+    # when the batch was planned; None for the base writer.
+    lora_path: Optional[Path] = None
+    # That adapter's base model, read from the registry at plan time.
+    adapter_base: Optional[str] = None
+    # An ``all``-scope adapter's CATEGORIES line: the batch's category names
+    # (read at plan time); empty for the base writers and a one-category
+    # adapter, which were trained without the line.
+    adapter_categories: List[str] = field(default_factory=list)
+    # The names of the batch's category_ids (read at plan time): every
+    # written step's lineage.
+    category_names: List[str] = field(default_factory=list)
+    # The supplied caption's resolved text and direction (lineage for the
+    # writer training data), worked out once.
+    supplied_lineage: Optional[Tuple[Optional[str], Optional[str]]] = None
     step: Optional[Dict[str, Any]] = None  # snapshot of the step on show
     # Every step written so far, in order: a prompt can be written well ahead
     # of the render, and waits here until its images are the ones rendering.
@@ -269,6 +320,8 @@ class _Batch:
     # Jobs whose outputs have been announced and whose ingest is running.
     ingesting: Set[int] = field(default_factory=set)
     resolved: int = 0  # jobs accounted for; the batch ends when it reaches the total
+    # Set by ``_retire``: the terminal frame went out (``wait_finished``).
+    over: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def mode(self) -> str:
@@ -331,6 +384,15 @@ class _Step:
     # The writer's draft (None: typed from scratch). Rendered ``prompt`` may
     # be the owner's edit of it; the ingest records whether it differs.
     draft: Optional[str] = None
+    # The caption as the writer saw it (tokens resolved for this step's
+    # prompt seed); stored for the writer training data.
+    resolved_caption: Optional[str] = None
+    # A supplied step's direction as Generate Prompt wrote its drafts with
+    # (lineage only; ``direction`` stays what this run itself directed).
+    lineage_direction: Optional[str] = None
+    # The category names of the request the prompt was written for (an
+    # ``all``-scope adapter's CATEGORIES line); None for a typed prompt.
+    categories: Optional[List[str]] = None
     # Manual only: the Negative box as typed (kept even if the workflow
     # cannot take it), for the image's form state.
     form_negative: Optional[str] = None
@@ -426,9 +488,10 @@ def _supplies_first_step(req: BatchRequest) -> bool:
 
 
 def _check_writer(writer: Any) -> str:
-    if writer not in REQUEST_WRITERS:
+    if writer not in REQUEST_WRITERS and parse_adapter_writer_id(writer) is None:
         raise T2iRequestError(
-            f"Unknown writer {writer!r}; use one of {', '.join(REQUEST_WRITERS)}"
+            f"Unknown writer {writer!r}; use one of {', '.join(REQUEST_WRITERS)} "
+            "or adapter:<id>"
         )
     return str(writer)
 
@@ -439,7 +502,59 @@ def _optional_text(value: Any, label: str) -> Optional[str]:
     raise T2iRequestError(f"{label} must be text")
 
 
-def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, Any]]]:
+# Bounds on the lineage a prompts[] entry may carry (never logged).
+LINEAGE_TEXT_MAX = 8000
+LINEAGE_CATEGORIES_MAX = 64
+LINEAGE_CATEGORY_NAME_MAX = 200
+
+
+def _check_lineage(raw: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+    """The entry's lineage -- ``resolved_caption`` (what the writer was
+    given), ``direction`` and ``categories`` (the CATEGORIES names) -- or
+    None when it carries no ``resolved_caption`` (an older client; the
+    runner then rebuilds it). Errors name the field, never its text."""
+    resolved = raw.get("resolved_caption")
+    if resolved is None:
+        return None
+    label = f"Variant {index + 1}"
+    if not isinstance(resolved, str) or len(resolved) > LINEAGE_TEXT_MAX:
+        raise T2iRequestError(
+            f"{label}: resolved_caption must be text of at most "
+            f"{LINEAGE_TEXT_MAX} characters"
+        )
+    direction = raw.get("direction")
+    if direction is not None and (
+        not isinstance(direction, str) or len(direction) > LINEAGE_TEXT_MAX
+    ):
+        raise T2iRequestError(
+            f"{label}: direction must be text of at most {LINEAGE_TEXT_MAX} "
+            "characters"
+        )
+    categories = raw.get("categories")
+    if categories is not None:
+        if (
+            not isinstance(categories, list)
+            or len(categories) > LINEAGE_CATEGORIES_MAX
+            or not all(
+                isinstance(c, str) and 0 < len(c) <= LINEAGE_CATEGORY_NAME_MAX
+                for c in categories
+            )
+        ):
+            raise T2iRequestError(
+                f"{label}: categories must be at most {LINEAGE_CATEGORIES_MAX} "
+                f"names of 1 to {LINEAGE_CATEGORY_NAME_MAX} characters"
+            )
+        categories = list(categories)
+    return {
+        "resolved_caption": resolved,
+        "direction": direction if direction and direction.strip() else None,
+        "categories": categories,
+    }
+
+
+def _check_prompts(
+    req: BatchRequest, variants: int, db: Any = None
+) -> Optional[List[Dict[str, Any]]]:
     """The supplied per-variant prompts, normalised and ordered by
     ``variant_index``; None when the request has none. A prompt without a
     draft was typed from scratch, so its writer is ``manual`` whatever the
@@ -477,13 +592,21 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
         writer_id = raw.get("writer_id")
         if draft is None:
             writer_id = WRITER_MANUAL
-        elif writer_id not in DRAFT_WRITERS:
+        elif not writer_id_allowed(writer_id, db, "t2i"):
+            if parse_adapter_writer_id(writer_id) is not None:
+                # A draft by an adapter that has gone (deleted, failed, the
+                # other kind): 409, so a stale client falls back to Base.
+                raise WriterAdapterUnavailable(
+                    str(writer_id), "not a ready text-to-image adapter"
+                )
             raise T2iRequestError(
                 f"writer_id {writer_id!r} of variant {index + 1} is not a writer "
-                f"that drafts prompts ({', '.join(DRAFT_WRITERS)})"
+                f"that drafts prompts ({', '.join(DRAFT_WRITERS)} or a ready adapter)"
             )
         try:
-            writer_model = check_writer_model(writer_id, raw.get("writer_model"))
+            writer_model = check_writer_model(
+                writer_id, raw.get("writer_model"), db, "t2i"
+            )
         except WriterModelError as exc:
             raise T2iRequestError(f"Variant {index + 1}: {exc}") from exc
         entries.append(
@@ -494,6 +617,8 @@ def _check_prompts(req: BatchRequest, variants: int) -> Optional[List[Dict[str, 
                 "writer_id": writer_id,
                 "writer_model": writer_model,
                 "variant_index": index,
+                # A typed prompt has no lineage, whatever the entry says.
+                "lineage": _check_lineage(raw, index) if draft is not None else None,
             }
         )
     entries.sort(key=lambda e: e["variant_index"])
@@ -561,8 +686,12 @@ class T2iRunner:
         directions: Optional[SnippetCache] = None,
         get_all_vlms: Optional[Callable[[], List[Any]]] = None,
         taste_examples: Optional[TasteExamplesFn] = None,
+        writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
     ) -> None:
         self.db = db
+        # Adapter id -> its GGUF when the writer's llama-server serves it
+        # (``VlmRoles.adapter_path``); None: no adapter can be used.
+        self.writer_adapter = writer_adapter
         self.comfy = comfy
         # The prompt-writer client; ``get_all_vlms`` lists every distinct
         # VLM client (writer and general roles) -- unloading for ComfyUI
@@ -648,6 +777,106 @@ class T2iRunner:
             return None, f"{writer_missing_hint(model_id)} - used the resolved caption"
         return model_id, WARN_VLM_UNAVAILABLE
 
+    async def _adapter_lora(self, writer: str) -> Optional[Path]:
+        """The GGUF to apply for ``writer``: None for the base writers; for
+        ``adapter:<id>`` its file, when the registry says it is a servable
+        T2I adapter and the writer's llama-server serves it. Raises
+        ``WriterAdapterUnavailable`` otherwise (the route answers 409)."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None:
+            return None
+        if not await asyncio.to_thread(writer_id_allowed, writer, self.db, "t2i"):
+            raise WriterAdapterUnavailable(writer, "not a ready text-to-image adapter")
+        path = self.writer_adapter(adapter_id) if self.writer_adapter else None
+        if path is None:
+            raise WriterAdapterUnavailable(
+                writer, "the prompt writer does not serve it"
+            )
+        return path
+
+    async def _adapter_base(self, writer: str) -> Optional[str]:
+        """The base model of adapter ``writer`` (None: not an adapter)."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None:
+            return None
+        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
+        return str(row["base_model"]) if row else None
+
+    async def _category_names(self, category_ids: Sequence[int]) -> List[str]:
+        """The current names of ``category_ids`` (unknown ids dropped)."""
+        if not category_ids:
+            return []
+        wanted = {int(c) for c in category_ids}
+        rows = await asyncio.to_thread(self.db.list_categories)
+        return [str(r["name"]) for r in rows if int(r["id"]) in wanted]
+
+    async def _adapter_categories(self, writer: str, names: List[str]) -> List[str]:
+        """``names`` when ``writer`` is an ``all``-scope adapter (its user
+        turn carries them as the CATEGORIES line it was trained with); []
+        for any other writer."""
+        adapter_id = parse_adapter_writer_id(writer)
+        if adapter_id is None or not names:
+            return []
+        row = await asyncio.to_thread(self.db.get_writer_adapter, adapter_id)
+        if row is None or str(row.get("scope", "")).strip().lower() != "all":
+            return []
+        return list(names)
+
+    @staticmethod
+    def _for_adapter(
+        composed: ComposedPrompts, categories: List[str]
+    ) -> ComposedPrompts:
+        """``composed`` with an adapter's CATEGORIES line (none: unchanged)."""
+        if not categories:
+            return composed
+        return composed._replace(user=add_categories_line(composed.user, categories))
+
+    async def _supplied_lineage(
+        self, batch: _Batch, step: _Step
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """``(resolved caption, direction)`` rebuilt for a supplied drafted
+        step whose entry carried no lineage (an older client): the caption
+        re-resolved and re-directed for the step's prompt seed -- right only
+        when the drafts were written for that seed, hence the fallback.
+        Lineage only: nothing here changes what renders, and a failure is
+        just a missing value. No caption: neither."""
+        req = batch.req
+        if req.prompts is None or not isinstance(req.caption, str):
+            return None, None
+        if not req.caption.strip():
+            return None, None
+        if batch.supplied_lineage is None:
+            warnings: List[str] = []
+            resolved: Optional[str] = None
+            direction: Optional[str] = None
+            try:
+                library, _ = await asyncio.to_thread(self.library.get)
+                resolved = resolve_caption(
+                    req.caption, step.prompt_seed, batch.identity, library
+                ).text
+                if batch.directions and self.directions is not None:
+                    row = await self._find_row(req.caption, warnings)
+                    found = await self._direction(
+                        row,
+                        step.prompt_seed,
+                        batch.content_mode,
+                        batch.direction_settings,
+                        batch.directions,
+                        warnings,
+                    )
+                    direction = found.text if found else None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # The type only: a message could quote the caption.
+                logger.warning(
+                    "t2i batch %s: no caption lineage (%s)",
+                    batch.id,
+                    type(exc).__name__,
+                )
+            batch.supplied_lineage = (resolved, direction)
+        return batch.supplied_lineage
+
     async def _vlm_prompt(
         self,
         vlm: Any,
@@ -655,11 +884,17 @@ class T2iRunner:
         profile: T2iModelProfile,
         system_prompt: str,
         user_prompt: str,
+        lora_path: Optional[Path] = None,
     ) -> Tuple[str, Optional[str]]:
         """One VLM round trip: start the model, ask, split off the negative.
+        ``lora_path``: the adapter to apply (the base model when None; the
+        request then carries no ``lora`` field at all).
         Raises VlmError, TimeoutError or RuntimeError; an OSError (the spawn
         of a missing or non-executable llama-server, a dropped connection)
         becomes a VlmError so callers handle it like any other VLM failure."""
+        extra: Dict[str, Any] = {}
+        if lora_path is not None:
+            extra["lora_path"] = lora_path
         try:
             await vlm.ensure_started(model_id)
             raw = await vlm.generate_text(
@@ -668,6 +903,7 @@ class T2iRunner:
                 temperature=_VLM_TEMPERATURE,
                 max_tokens=profile.max_tokens,
                 timeout=_VLM_TIMEOUT_S,
+                **extra,
             )
         except TimeoutError:
             raise  # a TimeoutError is an OSError: callers already know it
@@ -760,12 +996,19 @@ class T2iRunner:
         directions: Optional[bool] = None,
         variants: int = 1,
         writer: str = WRITER_BASE,
+        category_ids: Sequence[int] = (),
     ) -> PromptResult:
         """Resolve ``caption`` and have the VLM write ``model``'s prompt for
         it, once per variant (variant k > 0 with its angle). Writes nothing.
+        An adapter writes every variant without an angle (it was trained
+        without one; its variants differ by sampling), and an ``all``-scope
+        adapter gets a ``CATEGORIES`` line naming ``category_ids`` -- the
+        user turn it was trained on.
         ``writer = base+taste`` adds the owner's favorite prompts as examples
         (fetched once for all variants); when none can be had the drafts are
-        ``base`` and a warning says why.
+        ``base`` and a warning says why. ``writer = adapter:<id>`` writes
+        with that adapter applied, without examples (409 when it cannot be
+        served).
 
         No VLM, or none loadable on this hardware, is not an error: the
         resolved caption is the prompt (see ``fallback_prompt``) and a
@@ -779,6 +1022,8 @@ class T2iRunner:
         writer = _check_writer(writer)
         if not isinstance(caption, str) or not caption.strip():
             raise T2iRequestError("Caption is empty")
+        lora_path = await self._adapter_lora(writer)
+        category_names = await self._category_names(category_ids)
         cfg = self._get_config()
         resolved = await self._resolve(profile, caption, seed, cfg)
         warnings = list(resolved.warnings)
@@ -817,6 +1062,12 @@ class T2iRunner:
                 for k in range(variants)
             ]
         else:
+            adapter_base = await self._adapter_base(writer)
+            if adapter_base is not None and adapter_base != model_id:
+                raise WriterAdapterUnavailable(
+                    writer, f"it is built on {adapter_base}, the writer runs {model_id}"
+                )
+            adapter_categories = await self._adapter_categories(writer, category_names)
             examples, taste_warning = await self._examples_for(
                 writer, resolved.text, profile.id
             )
@@ -828,24 +1079,44 @@ class T2iRunner:
             slots = asyncio.Semaphore(max(1, spec.parallel_slots if spec else 1))
 
             async def write(k: int) -> PromptDraft:
-                angle = self._angle(k)
-                composed = compose_guided_t2i_prompts(
-                    profile, resolved.text, cfg["content_mode"], text, angle, examples
+                angle = None if lora_path is not None else self._angle(k)
+                composed = self._for_adapter(
+                    compose_guided_t2i_prompts(
+                        profile,
+                        resolved.text,
+                        cfg["content_mode"],
+                        text,
+                        angle,
+                        examples,
+                    ),
+                    adapter_categories,
                 )
                 async with slots:
                     prompt, negative = await self._vlm_prompt(
-                        vlm, model_id, profile, composed.system, composed.user
+                        vlm,
+                        model_id,
+                        profile,
+                        composed.system,
+                        composed.user,
+                        lora_path,
                     )
                 return PromptDraft(
                     prompt,
                     negative,
-                    self._guided_writer(composed),
+                    writer if lora_path is not None else self._guided_writer(composed),
                     k,
                     angle,
                     model_id,
                 )
 
-            drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            try:
+                drafts = await _gather_or_cancel([write(k) for k in range(variants)])
+            except AdapterLoadingError as exc:
+                raise WriterAdapterUnavailable(
+                    writer, str(exc), code=ADAPTER_LOADING
+                ) from exc
+            except AdapterNotLoadedError as exc:
+                raise WriterAdapterUnavailable(writer, str(exc)) from exc
             if examples and not any(d.writer_id == WRITER_BASE_TASTE for d in drafts):
                 warnings.append(WARN_TASTE_NO_PREAMBLE)
         first = drafts[0]
@@ -857,6 +1128,7 @@ class T2iRunner:
             text,
             parts,
             drafts,
+            category_names,
         )
 
     # ---- batch planning ----------------------------------------------------
@@ -931,7 +1203,15 @@ class T2iRunner:
             )
         variants = _check_count(req.variants, "Variants", MAX_VARIANTS)
         writer = _check_writer(req.writer)
-        prompts = _check_prompts(req, variants)
+        prompts = await asyncio.to_thread(_check_prompts, req, variants, self.db)
+        # Only a batch that writes prompts needs its adapter served; Manual
+        # renders the prompts it was given (their lineage is checked above).
+        lora_path = await self._adapter_lora(writer) if req.mode == "random" else None
+        adapter_base = await self._adapter_base(writer) if lora_path else None
+        category_names = await self._category_names(req.category_ids)
+        adapter_categories = (
+            await self._adapter_categories(writer, category_names) if lora_path else []
+        )
 
         if isinstance(req.preset_id, bool) or not isinstance(req.preset_id, int):
             raise T2iRequestError("preset_id must be a whole number")
@@ -1067,6 +1347,10 @@ class T2iRunner:
             started_at=datetime.now(timezone.utc).isoformat(),
             phase="prompting" if req.mode == "random" else "rendering",
             prompting=req.mode == "random",
+            lora_path=lora_path,
+            adapter_base=adapter_base,
+            adapter_categories=adapter_categories,
+            category_names=category_names,
         )
 
     async def start_batch(self, req: BatchRequest) -> BatchStarted:
@@ -1076,8 +1360,24 @@ class T2iRunner:
         request leaves no batch and emits no event). A Random batch is
         refused while another one is active; Manual batches are unlimited.
         """
+        if req.scorecard_id is not None and req.scorecard_brief is None:
+            raise T2iRequestError("A scorecard batch needs its scorecard_brief")
         cfg = self._get_config()
         batch = await self._plan_batch(req, cfg)
+        if batch.mode == "random" and not any(
+            other.mode == "random" for other in self._batches.values()
+        ):
+            await self._prepare_adapter(batch)
+        if batch.req.scorecard_id is not None:
+            # Before registration and before any job exists: an ingest after
+            # a restart (no snapshot) still finds the batch's scorecard.
+            assert batch.req.scorecard_brief is not None  # checked above
+            await asyncio.to_thread(
+                self.db.add_scorecard_batch,
+                batch.id,
+                batch.req.scorecard_id,
+                int(batch.req.scorecard_brief),
+            )
         # No await between this check and the registration below, so two
         # concurrent Random requests cannot both pass it.
         if batch.mode == "random":
@@ -1091,12 +1391,15 @@ class T2iRunner:
         self._emit(
             "t2i",
             "batch_started",
-            {
-                "batch_id": batch.id,
-                "mode": batch.mode,
-                "total_steps": batch.total_steps,
-                "total_images": batch.total_images,
-            },
+            self._with_scorecard(
+                batch,
+                {
+                    "batch_id": batch.id,
+                    "mode": batch.mode,
+                    "total_steps": batch.total_steps,
+                    "total_images": batch.total_images,
+                },
+            ),
         )
         self._emit_progress(batch)
         batch.task = asyncio.create_task(
@@ -1107,6 +1410,31 @@ class T2iRunner:
             total_images=batch.total_images,
             warnings=list(batch.warnings),
         )
+
+    async def _prepare_adapter(self, batch: _Batch) -> None:
+        """Load a Random batch's adapter before the batch exists: one
+        registered since the writer spawned restarts it once the writer is
+        idle -- before the batch takes its own hold. Still busy (or gone):
+        the batch is refused with 409 ``adapter_loading`` /
+        ``adapter_unavailable``; nothing has rendered, the user retries."""
+        if batch.lora_path is None:
+            return
+        vlm = self.get_vlm()
+        prepare = getattr(vlm, "prepare_lora", None)
+        if not callable(prepare):
+            return
+        writer = batch.req.writer
+        try:
+            await prepare(batch.lora_path, wait_s=_ADAPTER_PREPARE_WAIT_S)
+        except AdapterLoadingError as exc:
+            raise WriterAdapterUnavailable(
+                writer, str(exc), code=ADAPTER_LOADING
+            ) from exc
+        except AdapterNotLoadedError as exc:
+            raise WriterAdapterUnavailable(writer, str(exc)) from exc
+        except (VlmError, OSError) as exc:
+            # Any other VLM trouble is the steps' to retry and fall back.
+            logger.warning("t2i batch: adapter not prepared: %s", exc)
 
     # ---- batch state as data ----------------------------------------------
 
@@ -1129,21 +1457,34 @@ class T2iRunner:
     def active_batches(self) -> List[Dict[str, Any]]:
         """Every registered batch, oldest first, as JSON-ready rows."""
         return [
-            {
-                "batch_id": b.id,
-                "mode": b.mode,
-                "state": b.phase,
-                "total_steps": b.total_steps,
-                "step": copy.deepcopy(b.step),
-                "images_total": b.total_images,
-                "images_done": b.images_done,
-                "images_failed": b.images_failed,
-                "seed": b.current_seed,
-                "next_seed": b.next_seed,
-                "started_at": b.started_at,
-            }
+            self._with_scorecard(
+                b,
+                {
+                    "batch_id": b.id,
+                    "mode": b.mode,
+                    "state": b.phase,
+                    "total_steps": b.total_steps,
+                    "step": self._public_step(b, b.step),
+                    "images_total": b.total_images,
+                    "images_done": b.images_done,
+                    "images_failed": b.images_failed,
+                    "seed": b.current_seed,
+                    "next_seed": b.next_seed,
+                    "started_at": b.started_at,
+                },
+            )
             for b in self._batches.values()
         ]
+
+    @staticmethod
+    def _with_scorecard(batch: _Batch, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``data`` plus ``scorecard_id`` for a scorecard batch (only then:
+        an ordinary batch's frames keep their documented shape). The
+        training window owns such a batch; the T2I dialog never adopts or
+        cancels it."""
+        if batch.req.scorecard_id is not None:
+            data["scorecard_id"] = batch.req.scorecard_id
+        return data
 
     # ---- the run: prompts, then jobs ------------------------------------------
 
@@ -1185,8 +1526,19 @@ class T2iRunner:
         model_id, unavailable = await self._usable_model(vlm)
         if model_id is None:
             return fall_back(unavailable)
-        composed = compose_guided_t2i_prompts(
-            profile, resolved_text, batch.content_mode, direction, angle, examples
+        lora_path = batch.lora_path
+        if lora_path is not None:
+            adapter_base = batch.adapter_base
+            if adapter_base != model_id:
+                return fall_back(
+                    f"writer {batch.req.writer} is built on {adapter_base}, the "
+                    f"writer runs {model_id} - used the resolved caption"
+                )
+        composed = self._for_adapter(
+            compose_guided_t2i_prompts(
+                profile, resolved_text, batch.content_mode, direction, angle, examples
+            ),
+            batch.adapter_categories,
         )
         notes = (
             [WARN_TASTE_NO_PREAMBLE] if examples and not composed.examples_used else []
@@ -1195,17 +1547,27 @@ class T2iRunner:
         for attempt in (1, 2):
             try:
                 prompt, negative = await self._vlm_prompt(
-                    vlm, model_id, profile, composed.system, composed.user
+                    vlm, model_id, profile, composed.system, composed.user, lora_path
                 )
                 return (
                     prompt,
                     negative,
                     notes,
-                    self._guided_writer(composed),
+                    (
+                        batch.req.writer
+                        if lora_path is not None
+                        else self._guided_writer(composed)
+                    ),
                     model_id,
                 )
             except asyncio.CancelledError:
                 raise
+            except AdapterNotLoadedError as exc:
+                # Retrying cannot load it (and would wait again): fall back.
+                return fall_back(
+                    f"writer {batch.req.writer} unavailable "
+                    f"({self._reason(exc)}) - used the resolved caption"
+                )
             except (VlmError, TimeoutError, RuntimeError) as exc:
                 failure = exc
                 logger.warning(
@@ -1234,7 +1596,8 @@ class T2iRunner:
             prompt, raw_negative = str(req.prompt), req.negative
             draft, writer_id, writer_model = None, WRITER_MANUAL, None
         blank = not isinstance(raw_negative, str) or not raw_negative.strip()
-        return _Step(
+        lineage = entry.get("lineage") if req.prompts is not None else None
+        step = _Step(
             index=index,
             caption=req.caption or "",
             aspect_ratio=aspect,
@@ -1252,6 +1615,13 @@ class T2iRunner:
             draft=draft,
             form_negative=raw_negative,
         )
+        if lineage is not None and draft is not None:
+            # Exactly what Generate Prompt (or the step it was handed back
+            # from, or the tile's row) recorded for these drafts.
+            step.resolved_caption = lineage["resolved_caption"]
+            step.lineage_direction = lineage["direction"]
+            step.categories = lineage["categories"]
+        return step
 
     async def _caption_context(self, batch: _Batch, index: int) -> _CaptionContext:
         """Draw (or take the named) caption for the caption of step
@@ -1324,7 +1694,9 @@ class T2iRunner:
             batch,
             context.resolved_text,
             direction.text if direction else None,
-            self._angle(variant),
+            # An adapter was trained without angles: its variants differ by
+            # sampling alone.
+            None if batch.lora_path is not None else self._angle(variant),
             tuple(context.examples),
         )
         return _Step(
@@ -1346,6 +1718,8 @@ class T2iRunner:
             variants=batch.variants_of(context.index),
             # What the writer produced is the draft; nobody edits it here.
             draft=prompt,
+            resolved_caption=context.resolved_text,
+            categories=list(batch.category_names),
         )
 
     def _announce_step(self, batch: _Batch, step: _Step) -> None:
@@ -1372,9 +1746,27 @@ class T2iRunner:
                 "writer_id": step.writer_id,
                 "writer_model": step.writer_model,
                 "draft": step.draft,
+                # What the drafts were written for, so a hand-back sends it
+                # back with them (None for a typed prompt).
+                "lineage": (
+                    {
+                        "resolved_caption": step.resolved_caption,
+                        "direction": self._lineage_direction(step),
+                        "categories": step.categories,
+                    }
+                    if step.draft is not None
+                    else None
+                ),
             }
         )
         self._show_step(batch)
+
+    @staticmethod
+    def _lineage_direction(step: _Step) -> Optional[str]:
+        """The direction the step's prompt was written with."""
+        if step.direction is not None:
+            return step.direction
+        return step.lineage_direction
 
     def _show_step(self, batch: _Batch) -> None:
         """Put the step being rendered on show (``batch_step``): its caption,
@@ -1388,8 +1780,21 @@ class T2iRunner:
         batch.shown = index
         batch.step = batch.steps[index]
         self._emit(
-            "t2i", "batch_step", {"batch_id": batch.id, **copy.deepcopy(batch.step)}
+            "t2i",
+            "batch_step",
+            {"batch_id": batch.id, **(self._public_step(batch, batch.step) or {})},
         )
+
+    @staticmethod
+    def _public_step(
+        batch: _Batch, step: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """A copy of ``step`` for the wire. A scorecard batch is judged
+        blind: its frames and listing never carry the prompt or the writer."""
+        if step is None:
+            return None
+        out = copy.deepcopy(step)
+        return blind_step(out) if batch.req.scorecard_id is not None else out
 
     def _set_phase(self, batch: _Batch, phase: str) -> None:
         if batch.phase != phase and batch.finished is None:
@@ -1419,6 +1824,13 @@ class T2iRunner:
                     caption == 0 and _supplies_first_step(batch.req)
                 ):
                     step = self._supplied_step(batch, index, variant)
+                    if step.draft is not None and step.resolved_caption is None:
+                        # No lineage came with the entry: rebuild it.
+                        resolved, direction = await self._supplied_lineage(batch, step)
+                        step.resolved_caption = resolved
+                        step.lineage_direction = direction
+                    if step.draft is not None and step.categories is None:
+                        step.categories = list(batch.category_names)
                 else:
                     if context is None or context.index != caption:
                         context = await self._caption_context(batch, index)
@@ -1428,7 +1840,7 @@ class T2iRunner:
         finally:
             batch.prompting = False
 
-    async def _unload_vlm(self, batch: _Batch) -> None:
+    async def _unload_vlm(self, batch: Optional[_Batch]) -> None:
         """Free the GPU for ComfyUI: shut down each distinct VLM client
         that has a model loaded, once -- except the prompt writer while
         another Random batch is still writing prompts with it. Only called
@@ -1484,10 +1896,14 @@ class T2iRunner:
             "variant_group": step.variant_group,
             "variant_index": step.variant_index,
             "draft": step.draft,
+            "resolved_caption": step.resolved_caption,
+            "direction": self._lineage_direction(step),
+            "categories": step.categories,
             # The Negative box as the dialog had it: Manual keeps what was
             # typed even if the workflow could not take it.
             "negative": step.form_negative if manual else step.negative,
             "category_ids": list(batch.req.category_ids),
+            "scorecard_id": batch.req.scorecard_id,
         }
         while len(self._job_meta) > _JOB_META_LIMIT:
             self._job_meta.pop(next(iter(self._job_meta)))
@@ -1529,7 +1945,35 @@ class T2iRunner:
             )
         )
         self._register_job(batch, job_id, step, seed)
+        if batch.req.scorecard_id is not None:
+            await self._record_scorecard_job(batch, job_id, step)
         return job_id
+
+    async def _record_scorecard_job(
+        self, batch: _Batch, job_id: int, step: _Step
+    ) -> None:
+        """Persist the job's writer lineage: after a restart the in-memory
+        snapshot is gone, and an image without its writer can never pair."""
+        assert batch.req.scorecard_id is not None
+        assert batch.req.scorecard_brief is not None
+        try:
+            await asyncio.to_thread(
+                self.db.add_scorecard_job,
+                job_id,
+                batch.id,
+                batch.req.scorecard_id,
+                int(batch.req.scorecard_brief),
+                step.writer_id,
+                step.writer_model,
+                step.variant_index,
+            )
+        except Exception:
+            logger.warning(
+                "could not record scorecard job %s of batch %s",
+                job_id,
+                batch.id,
+                exc_info=True,
+            )
 
     async def _submit_one(self, batch: _Batch, step: _Step, seed: int) -> int:
         """Submit one image. Called holding a window slot: on success the
@@ -1659,6 +2103,7 @@ class T2iRunner:
         batch.ingesting.clear()
         self._batches.pop(batch.id, None)
         self._finished[batch.id] = batch
+        batch.over.set()
         while len(self._finished) > _FINISHED_KEEP:
             self._finished.popitem(last=False)
         batch.picker = None  # let the caption index go
@@ -1724,6 +2169,27 @@ class T2iRunner:
         task = batch.task
         if task is not None and not task.done():
             await asyncio.wait({task})
+
+    async def wait_finished(self, batch_id: str) -> Dict[str, Any]:
+        """Wait for a batch's terminal frame (every image rendered, failed
+        or cancelled) and return ``{result, images_done, images_failed}``;
+        ``result`` is ``complete`` / ``cancelled`` / ``error``."""
+        batch = self._batches.get(batch_id) or self._finished.get(batch_id)
+        if batch is None:
+            raise T2iNotFoundError(f"No t2i batch {batch_id}")
+        await batch.over.wait()
+        return {
+            "result": batch.finished,
+            "images_done": batch.images_done,
+            "images_failed": batch.images_failed,
+        }
+
+    async def unload_vlms(self) -> None:
+        """Free the GPU for ComfyUI the way a Random batch does before it
+        renders (only with ``unload_vlm_during_generation`` on; a writer a
+        Random batch is still prompting with is left alone)."""
+        if self.unload_vlm_during_generation:
+            await self._unload_vlm(None)
 
     # ---- job events ---------------------------------------------------------------
 
@@ -1857,6 +2323,27 @@ class T2iRunner:
                 != normalize_prompt(str(rendered or ""))
             )
         render_s = render_seconds(job.get("started_at"), job.get("finished_at"))
+        scorecard_id = known.get("scorecard_id")
+        writer_id = known.get("writer_id")
+        writer_model = known.get("writer_model")
+        variant_index = known.get("variant_index")
+        if meta is None:
+            # After a restart the snapshot is gone, but a scorecard image
+            # must still be tagged (blind, never training data) and keep its
+            # writer, or its brief can never pair.
+            record = None
+            job_lookup = getattr(self.db, "scorecard_job", None)
+            if callable(job_lookup) and job.get("id") is not None:
+                record = await asyncio.to_thread(job_lookup, int(job["id"]))
+            if record is not None:
+                scorecard_id = record["scorecard_id"]
+                writer_id = record["writer_id"]
+                writer_model = record["writer_model"]
+                variant_index = record["variant_index"]
+            else:
+                lookup = getattr(self.db, "scorecard_id_for_batch", None)
+                if callable(lookup):
+                    scorecard_id = await asyncio.to_thread(lookup, batch_id)
         inserted: List[str] = []
         for entry in files:
             posix = to_posix_path(entry)
@@ -1882,12 +2369,16 @@ class T2iRunner:
                     render_s=render_s,
                     comfy_prompt_id=job.get("comfy_prompt_id"),
                     form_state=form,
-                    writer_id=known.get("writer_id"),
-                    writer_model=known.get("writer_model"),
+                    writer_id=writer_id,
+                    writer_model=writer_model,
                     variant_group=known.get("variant_group"),
-                    variant_index=known.get("variant_index"),
+                    variant_index=variant_index,
                     draft_prompt=draft,
                     edited=edited,
+                    resolved_caption=known.get("resolved_caption"),
+                    direction=known.get("direction"),
+                    prompt_categories=known.get("categories"),
+                    scorecard_id=scorecard_id,
                 )
             except sqlite3.IntegrityError:
                 logger.warning("t2i ingest: %s already has a row; skipped", posix)

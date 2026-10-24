@@ -38,6 +38,7 @@ from typing import (
 
 import httpx
 
+from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, gpu_reserved
 from metascan.core.vlm_models import VlmModelSpec, get_spec
 from metascan.utils.app_paths import get_data_dir
 from metascan.utils.llama_server import binary_path
@@ -84,6 +85,14 @@ def is_background_vlm_work() -> bool:
     return _BACKGROUND_WORK.get()
 
 
+# The clients (by id) the current task -- and tasks it created -- holds
+# (``VlmClient.hold``): a caller's own hold is not someone else's work, so
+# it never makes that caller wait for itself.
+_OWN_HOLDS: contextvars.ContextVar[Tuple[int, ...]] = contextvars.ContextVar(
+    "vlm_own_holds", default=()
+)
+
+
 _T = TypeVar("_T")
 
 
@@ -93,6 +102,23 @@ ProgressCb = Callable[[Dict[str, Any]], None]
 
 class VlmError(RuntimeError):
     """Raised when llama-server returns a non-2xx response or invalid body."""
+
+
+class AdapterNotLoadedError(VlmError):
+    """A request asked for a LoRA adapter this client's llama-server does not
+    (and will not) load -- it was removed from ``lora_paths``."""
+
+
+class AdapterLoadingError(AdapterNotLoadedError):
+    """A request asked for an adapter registered after the server spawned,
+    and the server stayed busy (requests in flight or waiting, a hold such
+    as a T2I Random batch prompting) for ``lora_wait_s``: it is never
+    restarted under that work. The restart happens at its next idle."""
+
+
+# How long a request for a newly registered adapter waits for the server to
+# go idle before it is refused (``AdapterLoadingError``).
+LORA_IDLE_WAIT_S = 60.0
 
 
 def _free_port() -> int:
@@ -110,8 +136,19 @@ class VlmClient:
         self,
         *,
         spawn_override: Optional[Callable[[str], str]] = None,
+        lora_paths: Sequence[Path] = (),
     ) -> None:
         self._spawn_override = spawn_override
+        # LoRA adapters (GGUF) the next llama-server spawn loads, in order:
+        # ``--lora <p>`` each, plus ``--lora-init-without-apply`` so a request
+        # without a ``lora`` field is the base model. VlmRoles sets it for
+        # the writer from the adapter registry. ``_loaded_lora_paths`` is
+        # what the running server was spawned with: a request's adapter
+        # position is its index there.
+        self.lora_paths: Tuple[Path, ...] = tuple(Path(p) for p in lora_paths)
+        self._loaded_lora_paths: Tuple[Path, ...] = ()
+        self.lora_wait_s = LORA_IDLE_WAIT_S
+        self._lora_restart_lock = asyncio.Lock()
         # The model the role(s) this client serves are configured for
         # (set by backend.services.vlm_roles.VlmRoles); pick_vlm_model
         # starts it when nothing is loaded. None: no role preference.
@@ -306,10 +343,15 @@ class VlmClient:
                 return
             await self._stop()
 
+        if gpu_reserved():
+            # Writer training holds the GPU: never load a model under it.
+            raise VlmError(GPU_BUSY_MESSAGE)
         if self.before_spawn is not None:
             await self.before_spawn(self)
         if self.retired:
             raise VlmError("client retired")
+        if gpu_reserved():
+            raise VlmError(GPU_BUSY_MESSAGE)
         if (
             _unless_stopped_since is not None
             and self._explicit_stops != _unless_stopped_since
@@ -326,6 +368,8 @@ class VlmClient:
         self._ready_seen = False
         self._set_state(STATE_SPAWNING)
 
+        # The adapter list this spawn loads (positions index into it).
+        self._loaded_lora_paths = tuple(self.lora_paths)
         if self._spawn_override is not None:
             self._base_url = self._spawn_override(model_id)
             self._proc = None
@@ -392,7 +436,108 @@ class VlmClient:
             "99",
         ]
         cmd += list(spec.extra_args)
+        if self.lora_paths:
+            # Every adapter is loaded at scale 0; a request picks one with
+            # ``"lora": [{"id": <position>, "scale": 1.0}]``.
+            for path in self.lora_paths:
+                cmd += ["--lora", str(path)]
+            cmd.append("--lora-init-without-apply")
         return cmd
+
+    # ---- LoRA adapters ---------------------------------------------------
+
+    @property
+    def loaded_lora_paths(self) -> Tuple[Path, ...]:
+        """The adapters the running (or last spawned) server loaded."""
+        return self._loaded_lora_paths
+
+    @property
+    def loras_stale(self) -> bool:
+        """True when the server was spawned with a different adapter list
+        than ``lora_paths`` now asks for (a restart would change it)."""
+        return tuple(self.lora_paths) != self._loaded_lora_paths
+
+    def lora_position(self, path: Path) -> Optional[int]:
+        """``path``'s ``id`` for a request to the running server, or None."""
+        try:
+            return self._loaded_lora_paths.index(Path(path))
+        except ValueError:
+            return None
+
+    async def restart_for_loras(self) -> bool:
+        """Stop a resident server spawned with a stale adapter list so its
+        next request brings it back with ``lora_paths`` (an eviction: the
+        model comes back on demand, nothing is reloaded speculatively). A
+        server that is not running just spawns with the new list next time.
+        The caller makes sure it is idle. True when it was stopped."""
+        if not self.loras_stale or self._state not in (
+            STATE_SPAWNING,
+            STATE_LOADING,
+            STATE_READY,
+        ):
+            return False
+        logger.info("Restarting VLM %s for its adapter list", self._model_id)
+        await self.evict()
+        return True
+
+    def _busy_for_restart(self) -> bool:
+        """Requests in flight or waiting for residency, a hold taken by
+        someone else (the caller's own hold does not count), or a load."""
+        others_holds = self._holds - _OWN_HOLDS.get().count(id(self))
+        return (
+            self._in_flight > 0
+            or self._residency_waiters > 0
+            or others_holds > 0
+            or self._is_loading()
+        )
+
+    async def prepare_lora(self, path: Path, wait_s: Optional[float] = None) -> None:
+        """Make sure the server that will answer loads ``path`` (see
+        ``_ensure_lora``), waiting at most ``wait_s`` (default
+        ``lora_wait_s``) for it to be idle; a T2I Random batch calls it
+        before it starts."""
+        await self._ensure_lora(path, wait_s)
+
+    def _lora_ready(self, path: Path) -> bool:
+        return path in self._loaded_lora_paths and not self.loras_stale
+
+    async def _ensure_lora(self, path: Path, wait_s: Optional[float] = None) -> None:
+        """Make sure the server that will answer loads ``path``.
+
+        An adapter registered after the server spawned restarts it with the
+        new list -- but only once nothing is in flight or waiting, no hold
+        is taken and nothing is loading: no request is ever evicted, and a
+        T2I Random batch's prompting hold is never broken for it. Busy for
+        ``lora_wait_s``: ``AdapterLoadingError`` (the pending restart still
+        happens at the next idle). An adapter no longer wanted (deleted)
+        raises ``AdapterNotLoadedError`` -- unless the running server still
+        has it, which serves until it restarts."""
+        path = Path(path)
+        if path in self._loaded_lora_paths and not self.loras_stale:
+            return
+        if path in self._loaded_lora_paths and self._is_resident():
+            return  # still loaded; the pending restart waits for idle
+        if path not in self.lora_paths:
+            raise AdapterNotLoadedError(f"adapter {path.parent.name} is not loaded")
+        deadline = time.monotonic() + (self.lora_wait_s if wait_s is None else wait_s)
+        while True:
+            if self._state not in (STATE_SPAWNING, STATE_LOADING, STATE_READY):
+                return  # the next spawn loads the current list
+            if self._lora_ready(path):
+                return  # another caller's restart already loaded it
+            if not self._busy_for_restart():
+                break
+            if time.monotonic() >= deadline:
+                raise AdapterLoadingError(
+                    f"adapter {path.parent.name} is not loaded yet: the writer "
+                    "is busy"
+                )
+            await asyncio.sleep(0.02)
+        # Single flight: two callers that saw the writer idle in the same
+        # tick restart it once (the second finds it stopped, or reloaded).
+        async with self._lora_restart_lock:
+            if path not in self._loaded_lora_paths:
+                await self.restart_for_loras()
 
     async def _wait_ready(self, timeout: float) -> None:
         try:
@@ -664,9 +809,11 @@ class VlmClient:
         waits for the hold to end instead of evicting between items.
         Interactive swaps still evict after their bounded wait."""
         self._holds += 1
+        token = _OWN_HOLDS.set(_OWN_HOLDS.get() + (id(self),))
         try:
             yield
         finally:
+            _OWN_HOLDS.reset(token)
             self._holds -= 1
             self._last_request_end = time.monotonic()
 
@@ -842,8 +989,21 @@ class VlmClient:
         max_tokens: int = 250,
         timeout: float = 120.0,
         grammar: Optional[str] = None,
+        lora_id: Optional[int] = None,
+        lora_path: Optional[Path] = None,
     ) -> str:
-        """Free-form text generation (see ``_generate_text_impl``)."""
+        """Free-form text generation (see ``_generate_text_impl``).
+
+        ``lora_id`` applies the adapter at that position of the running
+        server's ``--lora`` list; ``lora_path`` names the adapter by file and
+        is resolved to its position when the request runs (the server is
+        brought back with it first when it was added after the spawn).
+        Neither: the base model, with the request shape unchanged."""
+        if lora_id is not None and lora_path is not None:
+            raise ValueError("pass lora_id or lora_path, not both")
+        if lora_path is not None:
+            await self._ensure_lora(lora_path)
+
         return await self._resident_request(
             lambda: self._generate_text_impl(
                 system_prompt=system_prompt,
@@ -854,6 +1014,8 @@ class VlmClient:
                 max_tokens=max_tokens,
                 timeout=timeout,
                 grammar=grammar,
+                lora_id=lora_id,
+                lora_path=lora_path,
             )
         )
 
@@ -979,6 +1141,8 @@ class VlmClient:
         max_tokens: int = 250,
         timeout: float = 120.0,
         grammar: Optional[str] = None,
+        lora_id: Optional[int] = None,
+        lora_path: Optional[Path] = None,
     ) -> str:
         """Free-form text generation (image-grounded or text-only).
 
@@ -1042,10 +1206,24 @@ class VlmClient:
         }
         if grammar is not None:
             body["grammar"] = grammar
+        # The server that answers and the adapter's position in ITS --lora
+        # list are read together, right before the POST: the image encoding
+        # above awaited, and a restart may have happened meanwhile.
+        http = self._http
+        if http is None or self._state != STATE_READY:
+            raise VlmError(f"VlmClient not ready (state={self._state})")
+        if lora_path is not None:
+            lora_id = self.lora_position(lora_path)
+            if lora_id is None:
+                raise AdapterNotLoadedError(
+                    f"adapter {Path(lora_path).parent.name} is not loaded"
+                )
+        if lora_id is not None:
+            # Only an adapter request carries the field: a base request
+            # stays byte-identical to the pre-adapter shape.
+            body["lora"] = [{"id": int(lora_id), "scale": 1.0}]
         try:
-            r = await self._http.post(
-                "/v1/chat/completions", json=body, timeout=timeout
-            )
+            r = await http.post("/v1/chat/completions", json=body, timeout=timeout)
             r.raise_for_status()
             data = r.json()
             content = data["choices"][0]["message"]["content"]
@@ -1229,6 +1407,8 @@ class VlmClient:
 
 
 __all__ = [
+    "AdapterLoadingError",
+    "AdapterNotLoadedError",
     "VlmClient",
     "VlmError",
     "STATE_IDLE",

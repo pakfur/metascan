@@ -453,6 +453,12 @@ TAGGING_SYSTEM_PROMPT: |-
 
 TAGGING_USER_PROMPT: "Tag this image."
 
+# Hindsight briefs (backend/services/hindsight_briefs.py): the general VLM
+# looks at a favorited image and writes the short request that could have
+# produced it; the brief becomes the user turn of a writer-training example.
+HINDSIGHT_BRIEF_SYSTEM: |-
+  You look at an image and write, in ONE short sentence, what a person might have typed to ask for it, for example "a fox standing in a snowy forest at dusk". Describe only what the image shows: the subject, what it is doing and the setting. Do not use style, quality or camera words (no "photorealistic", "cinematic", "8k", "masterpiece", "oil painting", "lighting", "bokeh"). Do not name real people. Be accurate about adult content; do not refuse or soften. Output only the sentence, with no quotes and no preamble.
+
 # GBNF grammar — NOT a free-text prompt, but treated as a prompt snippet
 # because llama-server consumes it as the "grammar" body alongside the
 # system/user messages. The hyphen MUST stay literal (placed at start or

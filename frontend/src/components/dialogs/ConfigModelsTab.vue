@@ -8,6 +8,10 @@ import { useTasteStore } from '../../stores/taste'
 import { ApiError } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
 import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
+import { useTrainingStore, trainingErrorText } from '../../stores/training'
+import { useCategoriesStore } from '../../stores/categories'
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
+import { ratePct } from '../../types/writers'
 
 const taste = useTasteStore()
 const tasteStatus = computed(() => taste.status)
@@ -150,6 +154,12 @@ const diversityAsOf = computed(() => {
   return Number.isNaN(d.getTime()) ? raw : d.toLocaleDateString()
 })
 
+// Scorecard rows: each adapter vs the base writer on its blind scorecard.
+const scorecardRows = computed(() => writerStats.value?.scorecards ?? [])
+function scoreText(v: number | null): string {
+  return v === null ? '—' : v.toFixed(2)
+}
+
 function rateText(cell: WriterWindowStat | undefined): string {
   if (!cell || cell.rate === null) return '—'
   return `${Math.round(cell.rate * 100)}%`
@@ -176,13 +186,19 @@ onMounted(async () => {
   }
 })
 
-const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)']
+const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)', 'Writer training']
 
 const tierLabel = computed(() => TIER_LABEL[models.tier])
 const tierColor = computed(() => TIER_COLOR[models.tier])
 
 const grouped = computed<Record<string, ModelRow[]>>(() => {
-  const out: Record<string, ModelRow[]> = { Embedding: [], Upscaling: [], NLP: [], 'Tagging (VLM)': [] }
+  const out: Record<string, ModelRow[]> = {
+    Embedding: [],
+    Upscaling: [],
+    NLP: [],
+    'Tagging (VLM)': [],
+    'Writer training': [],
+  }
   for (const row of models.models) (out[row.group] ??= []).push(row)
   return out
 })
@@ -272,7 +288,9 @@ async function onDelete(row: ModelRow) {
   try {
     await models.removeCache(row.id)
   } catch (e) {
-    alert(e instanceof Error ? e.message : String(e))
+    // 409 training_uses_base (a paused / failed run still needs the base
+    // weights) and gpu_busy_training get their own text.
+    alert(trainingErrorText(e))
   }
 }
 
@@ -324,7 +342,32 @@ async function onTestHfToken() {
   }
 }
 
-const missingCount = computed(() => models.models.filter((m) => m.status === 'missing').length)
+// "Download all missing" skips the opt-in writer training assets.
+const missingCount = computed(
+  () => models.models.filter((m) => m.status === 'missing' && !m.writer_training).length,
+)
+
+// Writer LoRA training: the gate's reasons (CUDA, deps, base, converter)
+// shown under the group; downloads stay allowed on every machine.
+const writerTrainingGate = computed(() => models.gates['writer_training'] ?? null)
+
+// The adapters trained so far and the button that opens the training window
+// (which manages them: rename, delete, resume).
+const training = useTrainingStore()
+const categoriesStore = useCategoriesStore()
+function adapterScope(scope: string): string {
+  if (scope === 'all') return 'all'
+  return categoriesStore.categories.find((c) => String(c.id) === scope)?.name ?? `category ${scope}`
+}
+const writerAdapters = computed(() => [...training.adapters].sort((a, b) => b.id - a.id))
+function adapterAgreement(h: number | null): string {
+  return typeof h === 'number' ? `holdout ${Math.round(h * 100)}%` : ''
+}
+
+function canDelete(row: ModelRow): boolean {
+  if (row.writer_training) return row.status === 'available' || row.partial === true
+  return row.status === 'available'
+}
 
 // Banner: the currently-selected CLIP model's dim vs the index on disk.
 const indexDim = computed(() => {
@@ -453,7 +496,7 @@ async function onRetagLibrary() {
     const job = await startRetag({ scope: 'all_clip' })
     lastRetagTotal.value = job.total
   } catch (e) {
-    alert(`Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
+    alert(isGpuBusyTraining(e) ? GPU_BUSY_TEXT : `Re-tag failed: ${e instanceof Error ? e.message : String(e)}`)
   } finally {
     retagInFlight.value = false
   }
@@ -560,6 +603,15 @@ async function onRetagLibrary() {
           <div class="col name">
             <div class="name-line">{{ row.name }}</div>
             <div class="desc">{{ row.description }}</div>
+            <div v-if="row.writer_training && row.release" class="desc" data-testid="converter-release">
+              llama.cpp {{ row.release }}
+              <span v-if="row.release_mismatch" class="warn-inline">
+                — different from the server release ({{ row.server_release }}); download again to match.
+              </span>
+            </div>
+            <div v-if="row.writer_training && row.hint" class="desc" data-testid="writer-training-hint">
+              {{ row.hint }}
+            </div>
           </div>
           <div class="col status">
             <span class="chip" :style="{ color: statusLabel(row).color, borderColor: statusLabel(row).color }">
@@ -583,13 +635,16 @@ async function onRetagLibrary() {
           </div>
           <div class="col preload">
             <input
+              v-if="!row.writer_training"
               type="checkbox"
               :checked="row.preload_at_startup"
               @change="onTogglePreload(row, $event)"
             />
+            <span v-else class="muted">—</span>
           </div>
           <div class="col actions">
             <button
+              v-if="row.download_allowed !== false"
               class="btn-small"
               :disabled="row.status === 'available' || !!models.downloading[row.id] || !isModelDownloadable(row)"
               @click="onDownload(row)"
@@ -597,9 +652,9 @@ async function onRetagLibrary() {
               Download
             </button>
             <button
-              v-if="!row.id.startsWith('clip-')"
+              v-if="!row.id.startsWith('clip-') && row.managed !== false"
               class="btn-small btn-small-danger"
-              :disabled="row.status !== 'available'"
+              :disabled="!canDelete(row) || !!models.downloading[row.id]"
               @click="onDelete(row)"
             >
               Delete
@@ -642,6 +697,35 @@ async function onRetagLibrary() {
           </div>
         </div>
         <div v-if="grouped[group].length === 0" class="empty-msg">No models in this group.</div>
+      </div>
+      <div
+        v-if="group === 'Writer training' && writerTrainingGate && !writerTrainingGate.available"
+        class="muted writer-training-gate"
+        data-testid="writer-training-gate"
+      >
+        Prompt-writer training is not available yet:
+        <ul>
+          <li v-for="r in writerTrainingGate.reasons ?? [writerTrainingGate.reason]" :key="r">{{ r }}</li>
+        </ul>
+        Downloads work on any machine.
+      </div>
+      <div v-if="group === 'Writer training'" class="writer-adapters" data-testid="writer-adapters">
+        <div class="writer-adapters-head">
+          <span class="muted">Prompt-writer adapters ({{ writerAdapters.length }})</span>
+          <button class="btn-secondary" data-testid="open-training-window" @click="training.openWindow()">
+            Train prompt writer
+          </button>
+        </div>
+        <div v-if="training.chipText" class="muted">{{ training.chipText }} — GPU busy: training.</div>
+        <ul v-if="writerAdapters.length" class="writer-adapter-list">
+          <li v-for="a in writerAdapters" :key="a.id">
+            <b>{{ a.name }}</b>
+            <span class="chip chip-muted">{{ a.status }}</span>
+            <span class="muted">{{ adapterScope(a.scope) }}</span>
+            <span class="muted">{{ adapterAgreement(a.holdout_agreement) }}</span>
+          </li>
+        </ul>
+        <div v-else class="muted">No adapters yet.</div>
       </div>
     </section>
 
@@ -702,7 +786,8 @@ async function onRetagLibrary() {
       <div class="vlm-retag">
         <button
           class="btn-small"
-          :disabled="!models.isVlmReady || retagInFlight"
+          :disabled="!models.isVlmReady || retagInFlight || training.locked"
+          :title="training.locked ? GPU_BUSY_TEXT : ''"
           @click="onRetagLibrary"
         >
           {{ retagInFlight ? 'Re-tagging library…' : 'Re-tag library with VLM' }}
@@ -846,6 +931,36 @@ async function onRetagLibrary() {
         </div>
         <div v-else class="taste-hint">
           Favorite diversity appears after the next taste training run.
+        </div>
+        <div v-if="scorecardRows.length" class="writers-scroll" data-testid="writer-scorecards">
+          <table class="writers-table">
+            <thead>
+              <tr>
+                <th class="writer-col">Scorecard (blind, same seeds)</th>
+                <th title="Favorite rate of the base writer's images over judged pairs">Base fav</th>
+                <th title="Favorite rate of the adapter's images over judged pairs">Adapter fav</th>
+                <th title="Mean taste score: base vs adapter">Mean score</th>
+                <th title="Pairs whose two images both have a verdict (favorite or pass; seen alone does not count)">Judged</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in scorecardRows" :key="r.adapter_id">
+                <th class="writer-col" scope="row">
+                  {{ r.name ?? `adapter:${r.adapter_id}` }}
+                  <span v-if="r.status" class="writer-tag">{{ r.status }}</span>
+                </th>
+                <td><span class="rate">{{ ratePct(r.fav_rate_base) }}</span></td>
+                <td><span class="rate">{{ ratePct(r.fav_rate_adapter) }}</span></td>
+                <td>
+                  <span class="rate">{{ scoreText(r.mean_score_base) }} / {{ scoreText(r.mean_score_adapter) }}</span>
+                </td>
+                <td>
+                  <span class="rate">{{ r.n_judged }}</span>
+                  <span class="n-seen">of {{ r.n_pairs }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </template>
     </section>
@@ -1024,6 +1139,12 @@ section { margin-bottom: 14px; }
 }
 
 .warn-inline { color: #eab308; }
+.writer-training-gate { margin-top: 6px; font-size: 12px; }
+.writer-training-gate ul { margin: 4px 0; padding-left: 18px; }
+.writer-adapters { margin-top: 8px; font-size: 12px; }
+.writer-adapters-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.writer-adapter-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.writer-adapter-list li { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
 
 .gate-chip { margin-left: 4px; }
 .gate-good { color: #22c55e; border-color: #22c55e; }

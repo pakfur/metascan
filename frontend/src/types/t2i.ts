@@ -1,5 +1,6 @@
 import type { Media } from './media'
 import type { ThumbItem } from './jobs'
+import type { AdapterWriterId } from './writers'
 
 // Reused, not copied: a select's options plus a stored value that has since
 // left the config list (types/i2v.ts owns the one implementation).
@@ -256,13 +257,39 @@ export interface T2iImage {
   variant_index?: number | null
   draft_prompt?: string | null
   edited?: number | null
+  /** What the draft was written for (null on older rows and typed prompts). */
+  resolved_caption?: string | null
+  direction?: string | null
+  prompt_categories?: string[] | null
+  /** The writer-adapter scorecard the image was rendered for (null: none). */
+  scorecard_id?: string | null
+  /** The image was explicitly passed (a verdict, like is_favorite). */
+  passed?: boolean
+  /** Server's view at fetch time; the client re-derives it with t2iBlind. */
+  scorecard_blind?: boolean
+}
+
+/** What a blind scorecard tile and the viewer show instead of its details. */
+export const SCORECARD_BLIND_TEXT = 'Scorecard image — judge to reveal'
+
+/**
+ * A scorecard image with no explicit verdict yet (not favorited, not passed):
+ * its writer, variant and prompt stay hidden so base vs adapter is judged blind.
+ */
+export function t2iBlind(img: Pick<T2iImage, 'is_favorite'> & Partial<Pick<T2iImage, 'scorecard_id' | 'passed'>>): boolean {
+  return !!img.scorecard_id && !img.is_favorite && !img.passed
 }
 
 // ---- writers, variants, drafts ------------------------------------------------
 
-/** Who drafts the prompts a Generate Prompt (or a Random batch) writes. */
-export type T2iWriter = 'base' | 'base+taste'
+/**
+ * Who drafts the prompts a Generate Prompt (or a Random batch) writes: the base
+ * writer, the base writer shown favorite prompts, or a prompt-writer adapter
+ * (`adapter:<id>`, used without examples).
+ */
+export type T2iWriter = 'base' | 'base+taste' | AdapterWriterId
 
+/** The fixed entries of the Writer menu (adapters follow them). */
 export const T2I_WRITERS: { id: T2iWriter; label: string }[] = [
   { id: 'base', label: 'Base' },
   { id: 'base+taste', label: 'Base + taste' },
@@ -287,6 +314,17 @@ export interface T2iPromptDraft {
   angle: string | null
 }
 
+/**
+ * What a set of drafts was written for: the resolved caption the writer saw,
+ * its direction block and the CATEGORIES names. It rides with the drafts so
+ * the rendered images record exactly that, however far the seed has moved.
+ */
+export interface T2iDraftLineage {
+  resolved_caption: string
+  direction: string | null
+  categories: string[] | null
+}
+
 /** One variant's prompt as Generate sends it (BatchBody.prompts). */
 export interface T2iVariantPrompt {
   prompt: string
@@ -296,6 +334,10 @@ export interface T2iVariantPrompt {
   writer_id: string | null
   writer_model: string | null
   variant_index: number
+  /** The draft's lineage (T2iDraftLineage), absent for a typed prompt. */
+  resolved_caption?: string | null
+  direction?: string | null
+  categories?: string[] | null
 }
 
 /**
@@ -309,6 +351,8 @@ export interface T2iHeldDraft {
   draft: string
   text: string
   negative: string
+  /** What the draft was written for; null when unknown (older rows). */
+  lineage: T2iDraftLineage | null
 }
 
 /**
@@ -334,6 +378,8 @@ export interface T2iPromptResult {
   /** The caption direction the prompt was written with, if any. */
   direction: string | null
   direction_parts: string[]
+  /** The names of the request's category_ids (the drafts' lineage). */
+  categories?: string[]
   /** One per variant; drafts[0] is `prompt` / `negative`. */
   drafts: T2iPromptDraft[]
 }
@@ -412,6 +458,8 @@ export interface T2iBatchStep {
   writer_id: string | null
   writer_model: string | null
   draft: string | null
+  /** What the step's draft was written for (null: typed, or unknown). */
+  lineage?: T2iDraftLineage | null
 }
 
 /** One entry of GET /api/t2i/batches. */
@@ -430,6 +478,9 @@ export interface T2iBatchInfo {
   // The first unused seed after the whole run; null when the range ran out.
   next_seed: number | null
   started_at: string
+  // Set on a writer-adapter scorecard batch: the training window owns it, so
+  // the T2I dialog never adopts (or cancels) it. Its step is blind.
+  scorecard_id?: string | null
 }
 
 /** A batch the store is tracking: the server's snapshot plus the last per-image error. */
@@ -463,6 +514,7 @@ export interface T2iBatchStartedEvent {
   mode: T2iMode
   total_steps: number
   total_images: number
+  scorecard_id?: string | null
 }
 
 export interface T2iBatchStepEvent extends T2iBatchStep {
@@ -619,6 +671,19 @@ export function tileVariant(
 }
 
 export function toThumbItem(img: T2iImage, multi?: Set<string>): ThumbItem {
+  if (t2iBlind(img)) {
+    // Nothing that tells base from adapter: no writer, prompt or variant
+    // (the seed and size are the same for both images of a brief).
+    return {
+      id: img.id,
+      file_path: img.file_path,
+      is_favorite: img.is_favorite,
+      title: SCORECARD_BLIND_TEXT,
+      label: t2iImageDetails(img),
+      variant: null,
+      blind: true,
+    }
+  }
   return {
     id: img.id,
     file_path: img.file_path,

@@ -79,7 +79,7 @@ async function copyAll() {
     <template v-if="media">
       <div class="meta-header">
         <span class="meta-title">Details</span>
-        <button class="copy-all-btn" @click="copyAll" title="Copy all as JSON">
+        <button v-if="!media.scorecard_blind" class="copy-all-btn" @click="copyAll" title="Copy all as JSON">
           Copy All
         </button>
       </div>
@@ -109,7 +109,7 @@ async function copyAll() {
       </details>
 
       <!-- Tags (merged prompt + CLIP from the indices table; unrelated to AI metadata) -->
-      <details v-if="media.tags?.length" class="meta-section">
+      <details v-if="media.tags?.length && !media.scorecard_blind" class="meta-section">
         <summary class="section-title">Tags ({{ media.tags.length }})</summary>
         <div class="section-body">
           <div class="tags-list">
@@ -150,10 +150,15 @@ async function copyAll() {
 
       <CameraSection :media="media" />
       <LocationSection :media="media" />
-      <SavedPromptsSection />
+      <SavedPromptsSection v-if="!media.scorecard_blind" />
+
+      <div v-if="media.scorecard_blind" class="meta-section blind-note" data-testid="meta-scorecard-blind">
+        Scorecard image — judge to reveal. Its prompt and generation details stay hidden until
+        you favorite or pass it, so base vs adapter is judged blind.
+      </div>
 
       <!-- AI Generation -->
-      <details v-if="media.metadata_source" class="meta-section" open>
+      <details v-if="media.metadata_source && !media.scorecard_blind" class="meta-section" open>
         <summary class="section-title">AI Generation</summary>
         <div class="section-body">
           <MetadataField label="Source" :value="media.metadata_source" />
@@ -169,7 +174,7 @@ async function copyAll() {
       </details>
 
       <!-- LoRAs -->
-      <details v-if="media.loras?.length" class="meta-section">
+      <details v-if="media.loras?.length && !media.scorecard_blind" class="meta-section">
         <summary class="section-title">LoRAs ({{ media.loras.length }})</summary>
         <div class="section-body">
           <MetadataField

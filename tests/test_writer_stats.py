@@ -300,6 +300,7 @@ def test_writer_stats_route(client, db):
         "windows",
         "diversity",
         "collapse_warning",
+        "scorecards",
     }
     assert body["window_days"] == 14
     assert body["window_starts"] == STARTS
@@ -311,6 +312,7 @@ def test_writer_stats_route(client, db):
     }
     # Diversity collapsed, but there is no earlier rate to compare with.
     assert body["collapse_warning"] is False
+    assert body["scorecards"] == []
 
 
 def test_latest_diversity_is_the_newest_run(db):
@@ -445,3 +447,30 @@ def test_rates_are_per_writer_model(db):
     outcomes = {o["file_path"]: o for o in db.generation_outcomes()}
     assert outcomes["/g/m4.png"]["writer_model"] == "qwen3vl-4b"
     assert outcomes["/g/v.mp4"]["writer_model"] == "qwen3vl-8b"
+
+
+def test_scorecard_images_are_not_writer_stats(db):
+    # Scorecard renders have their own results rows (and are blind while
+    # unjudged): never counted in the writer dashboard, live or deleted.
+    _gen(db, "/g/ok.png", "base", LATEST, "pass")
+    for i, outcome in enumerate(["favorite", "favorite"]):
+        path = f"/g/sc{i}.png"
+        image_id = _gen(db, path, "adapter:7", LATEST, outcome)
+        with db.lock, db._get_connection() as conn:
+            conn.execute(
+                "UPDATE t2i_images SET scorecard_id = 'card' WHERE id = ?",
+                (image_id,),
+            )
+            conn.commit()
+    db.delete_media(Path("/g/sc1.png"))  # tombstone lineage carries it
+    _raw_tombstone(
+        db,
+        "/g/sc2.png",
+        '{"t2i": {"writer_id": "base", "created_at": "%s", "scorecard_id": "c"}}'
+        % LATEST,
+    )
+    paths = sorted(g["file_path"] for g in db.generation_outcomes())
+    assert paths == ["/g/ok.png"]
+    rows = db.writer_window_stats(14, 6, now=NOW)
+    assert {r["writer_id"] for r in rows} == {"base"}
+    assert _cell(_by(rows, "t2i", "base")["2026-10-10"]) == (1, 0, 0.0)

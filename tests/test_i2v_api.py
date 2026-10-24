@@ -61,7 +61,9 @@ class FakeRunner:
             raise self.prompt_error
         return self.prompt_result
 
-    async def write_prompt(self, source_path, idea, duration_s, template_id=None):
+    async def write_prompt(
+        self, source_path, idea, duration_s, template_id=None, writer="base"
+    ):
         text, warnings = await self.generate_prompt(
             source_path, idea, duration_s, template_id=template_id
         )

@@ -16,6 +16,7 @@ import {
   isCountEffective,
   multiVariantGroups,
   randomSeed,
+  SCORECARD_BLIND_TEXT,
   t2iImageToMedia,
   toThumbItem,
   withCurrentOption,
@@ -23,6 +24,18 @@ import {
   type T2iWriter,
 } from '../../types/t2i'
 import type { ThumbItem } from '../../types/jobs'
+import {
+  ADAPTER_LOADING,
+  ADAPTER_LOADING_TEXT,
+  ADAPTER_UNAVAILABLE,
+  adapterErrorCode,
+  adapterErrorWriter,
+  adapterMenuOptions,
+  builtinWriterLabel,
+  isAdapterWriterId,
+  servableAdapterIds,
+  writerName,
+} from '../../types/writers'
 import type { Media } from '../../types/media'
 import type { WorkflowPreset } from '../../types/storyboard'
 import { ApiError } from '../../api/client'
@@ -30,10 +43,13 @@ import { listPresets } from '../../api/comfy'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
 import { useTasteStore } from '../../stores/taste'
+import { useTrainingStore } from '../../stores/training'
 import { useFormAutosave } from '../../composables/useFormAutosave'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
 import { useWebSocket } from '../../composables/useWebSocket'
+import { useWriterPick } from '../../composables/useWriterPick'
+import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import {
   buildBatchRequest,
   defaultPresetFor,
@@ -66,6 +82,7 @@ const emit = defineEmits<{ close: [] }>()
 
 const store = useT2iStore()
 const taste = useTasteStore()
+const training = useTrainingStore()
 const foldersStore = useFoldersStore()
 const toast = useToast()
 
@@ -276,22 +293,12 @@ function writePref(key: string, value: string) {
     /* private mode: the choice lasts for this session */
   }
 }
-function storedWriter(): T2iWriter {
-  const v = readPref(WRITER_STORAGE_KEY)
-  return T2I_WRITERS.some((w) => w.id === v) ? (v as T2iWriter) : 'base'
-}
 function storedVariants(): number {
   const n = Number(readPref(VARIANTS_STORAGE_KEY))
   return Number.isInteger(n) && n >= 1 && n <= MAX_VARIANTS ? n : 1
 }
-const writer = ref<T2iWriter>(storedWriter())
 const variants = ref<number>(storedVariants())
 const variantChoices = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1)
-function setWriter(v: string) {
-  if (!T2I_WRITERS.some((w) => w.id === v)) return
-  writer.value = v as T2iWriter
-  writePref(WRITER_STORAGE_KEY, v)
-}
 function setVariants(v: string) {
   const n = Number(v)
   if (!Number.isInteger(n) || n < 1 || n > MAX_VARIANTS) return
@@ -305,6 +312,80 @@ function setVariants(v: string) {
 const { selected: categoryIds, refresh: refreshCategories } = useGenerationCategories(
   'metascan.t2i.categories.v1',
 )
+
+// Prompt-writer adapters after Base / Base + taste: the T2I ones scoped to
+// `all` or to a selected category, labelled with their favorite rate on the
+// blind scorecard (Base with its baseline rate); one with too few examples
+// for the selected model is listed disabled.
+const adapterOptions = computed(() =>
+  adapterMenuOptions(store.adapters, {
+    kind: 't2i',
+    categoryIds: categoryIds.value,
+    targetModel: form.model || null,
+    scorecards: training.scorecards,
+  }),
+)
+const builtinOptions = computed(() =>
+  T2I_WRITERS.map((w) => ({ id: w.id, label: builtinWriterLabel(w.id, w.label, training.scorecards) })),
+)
+useWebSocket('training', (event) => {
+  if (event === 'adapters_changed') {
+    writerPick.clearRefusal()
+    void store.loadAdapters()
+    training.scheduleScorecards()
+  } else if (event === 'scorecard_judged' || event === 'scorecard_complete') {
+    training.scheduleScorecards()
+  }
+})
+onMounted(() => {
+  training.loadScorecards().catch(() => {}) // labels only
+})
+
+// The Writer pick (see useWriterPick): the user's choice survives a transient
+// fallback to Base and comes back when its adapter is offered again; only a
+// deleted adapter drops it. Session-local, never part of the form, so a
+// fallback touches no image.
+const writerPick = useWriterPick<T2iWriter>({
+  storageKey: WRITER_STORAGE_KEY,
+  builtinIds: T2I_WRITERS.map((w) => w.id),
+  adapters: () => store.adapters,
+  adaptersLoaded: () => store.adaptersLoaded,
+  options: () => adapterOptions.value,
+})
+const writer = writerPick.writer
+const setWriter = writerPick.setWriter
+
+// True when `e` was an adapter refusal, after dealing with it: a refused
+// adapter falls back to Base (the pick is kept for when it returns); a new
+// one the busy writer has not loaded yet keeps the choice and says to try
+// again.
+function handledAdapterError(e: unknown): boolean {
+  const code = adapterErrorCode(e)
+  if (code === ADAPTER_LOADING) {
+    toast.show(ADAPTER_LOADING_TEXT, 'info', 6000)
+    return true
+  }
+  if (code === ADAPTER_UNAVAILABLE) {
+    // The 409 names the adapter: the Writer pick falls back only when it is
+    // the one refused; a held draft by it is dropped instead (the box keeps
+    // its text, which the next Generate sends as typed).
+    const refused = adapterErrorWriter(e) ?? writer.value
+    if (refused === writer.value && isAdapterWriterId(refused)) {
+      writerPick.refuse(refused)
+    } else if (store.drafts?.entries.some((d) => d.writer_id === refused)) {
+      store.discardDrafts()
+      const name = writerPick.nameOf(refused)
+      toast.show(
+        `The prompt's writer ${name} is no longer available; Generate again to send it as typed.`,
+        'warn',
+        6000,
+      )
+    }
+    void store.loadAdapters()
+    return true
+  }
+  return false
+}
 
 // The direction the prompt in the box was written with (Generate Prompt), or
 // the running step's while a Random batch has the boxes. Display only.
@@ -362,6 +443,7 @@ async function onGeneratePrompt() {
     directions: useDirections.value,
     variants: variants.value,
     writer: writer.value,
+    category_ids: [...categoryIds.value],
   }
   const target = store.selectedId
   generating.value = true
@@ -383,12 +465,32 @@ async function onGeneratePrompt() {
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
     // Every draft is held in the store for the caption it was written for;
     // the box shows variant 1.
-    store.setDrafts(draftSetFromResult(body.caption, r.drafts ?? []))
+    store.setDrafts(
+      draftSetFromResult(body.caption, r.drafts ?? [], {
+        resolved_caption: r.resolved_caption,
+        direction: r.direction,
+        categories: r.categories ?? [],
+      }),
+    )
     promptWarnings.value = r.warnings
     promptDirection.value = r.direction ? { text: r.direction, parts: r.direction_parts } : null
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
     resolvedOpen.value = true
   } catch (e) {
+    if (handledAdapterError(e)) return
+    if (isGpuBusyTraining(e)) {
+      toast.show(GPU_BUSY_TEXT, 'warn', 5000)
+      return
+    }
+    if (isUnknownCategoryError(e)) {
+      void refreshCategories()
+      toast.show(
+        'A chosen category no longer exists. It was removed from Categories; check them and Generate Prompt again.',
+        'warn',
+        6000,
+      )
+      return
+    }
     toast.show(
       e instanceof ApiError && e.status === 502
         ? `The prompt writer failed (${e.message}). Press Generate Prompt to try again.`
@@ -450,7 +552,7 @@ const draftLabel = computed(() => {
   const set = draftSet.value
   if (!set) return ''
   const entry = set.entries[set.current]
-  return `variant ${set.current + 1} of ${set.entries.length} · ${entry.writer_id}`
+  return `variant ${set.current + 1} of ${set.entries.length} · ${writerName(store.adapters, entry.writer_id)}`
 })
 // An explicit user action: what the boxes hold stays with the variant being
 // left, and the other variant's text (as last left) goes in.
@@ -585,6 +687,7 @@ const blocker = computed(() =>
 )
 
 function startErrorText(e: unknown): string {
+  if (isGpuBusyTraining(e)) return GPU_BUSY_TEXT
   if (e instanceof ApiError && e.status === 409) {
     return 'A Random batch is already running. Cancel it or wait for it to finish.'
   }
@@ -641,6 +744,7 @@ async function onGenerate() {
     )
   } catch (e) {
     supplyingFirstStep.value = false
+    if (handledAdapterError(e)) return
     toast.show(startErrorText(e), 'warn', 6000)
   } finally {
     submitting.value = false
@@ -687,6 +791,11 @@ function onSelectTile(item: ThumbItem) {
     toast.show('A Random batch is running: wait for it to finish before loading an image.', 'info')
     return
   }
+  if (item.blind) {
+    // Loading it would show its prompt (and who wrote it): judge it first.
+    toast.show(`${SCORECARD_BLIND_TEXT}: favorite or pass it first (double-click opens it).`, 'info')
+    return
+  }
   autosave.flush() // pending edits belong to the image being left
   const stored = store.selectImage(id)
   if (!stored) return
@@ -694,7 +803,7 @@ function onSelectTile(item: ThumbItem) {
   // Re-rendering a writer's prompt keeps its lineage (writer, model, draft):
   // the tile's draft rides along as a one-entry set, never as a typed prompt.
   const image = store.images.find((i) => i.id === id)
-  store.setDrafts(image ? draftSetFromImage(image, form) : null)
+  store.setDrafts(image ? draftSetFromImage(image, form, servableAdapterIds(store.adapters, 't2i')) : null)
   // The form now equals what the server holds, so loading must not echo back
   // as a save. An untouched Generate would render the same image again.
   autosave.markLoaded()
@@ -902,14 +1011,21 @@ onBeforeUnmount(() => {
                   @click="toggleResolved"
                 >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
                 <div class="writer-row">
-                  <label class="inline-pick" title="Who writes the prompts: base Qwen, or base Qwen shown your favorite prompts as examples">
+                  <label class="inline-pick" title="Who writes the prompts: base Qwen, base Qwen shown your favorite prompts as examples, or one of your trained writers (name · date · favorite rate)">
                     <span>Writer</span>
                     <select
                       :value="writer"
                       :disabled="randomLocked"
                       @change="setWriter(($event.target as HTMLSelectElement).value)"
                     >
-                      <option v-for="w in T2I_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
+                      <option v-for="w in builtinOptions" :key="w.id" :value="w.id">{{ w.label }}</option>
+                      <option
+                        v-for="a in adapterOptions"
+                        :key="a.id"
+                        :value="a.id"
+                        :disabled="a.disabled"
+                        :title="a.title"
+                      >{{ a.label }}</option>
                     </select>
                   </label>
                   <label class="inline-pick" title="How many different prompts are written for one caption; each renders the caption's same seeds">
@@ -1176,6 +1292,7 @@ onBeforeUnmount(() => {
       :allow-destructive="false"
       :allow-rating="true"
       :favorite-mirror="store.applyFavoriteFlag"
+      :judgment-mirror="store.applyJudgment"
       @close="viewerIndex = null"
     />
   </div>

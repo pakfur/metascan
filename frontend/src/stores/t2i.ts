@@ -3,6 +3,8 @@ import { computed, ref } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as t2iApi from '../api/t2i'
 import { setVerdict } from '../api/judgments'
+import { listWriterAdapters } from '../api/writers'
+import type { WriterAdapter } from '../types/writers'
 import { useJobTracker } from '../composables/useJobTracker'
 import { useToast } from '../composables/useToast'
 import { useFoldersStore } from './folders'
@@ -15,6 +17,7 @@ import {
   mergeImagePage,
   mergeOlderPage,
   sanitizeDraft,
+  t2iBlind,
   type CaptionCount,
   type CaptionFilter,
   type CaptionMeta,
@@ -24,6 +27,7 @@ import {
   type T2iBatchOutcome,
   type T2iBatchRequest,
   type T2iBatchStepEvent,
+  type T2iDraftLineage,
   type T2iBatchStep,
   type T2iConfig,
   type T2iDraftSet,
@@ -68,8 +72,23 @@ export const useT2iStore = defineStore('t2i', () => {
   const toast = useToast()
   const media = useMediaStore()
   const folders = useFoldersStore()
-  // Job chips: any ComfyUI job that carries a t2i_batch_id.
-  const tracker = useJobTracker({ match: (job) => !!job.t2i_batch_id })
+  // Writer-adapter scorecard batches (the server marks them with
+  // `scorecard_id`): the training window owns them, so this store never
+  // adopts them, never shows their jobs as chips and Cancel all never
+  // reaches them.
+  const scorecardBatchIds = new Set<string>()
+  function noteScorecardBatch(id: string): void {
+    scorecardBatchIds.add(id)
+    if (scorecardBatchIds.size > FINISHED_IDS_CAP) {
+      const oldest = scorecardBatchIds.values().next().value
+      if (oldest !== undefined) scorecardBatchIds.delete(oldest)
+    }
+  }
+  // Job chips: any ComfyUI job that carries a t2i_batch_id, except a
+  // scorecard batch's.
+  const tracker = useJobTracker({
+    match: (job) => !!job.t2i_batch_id && !scorecardBatchIds.has(job.t2i_batch_id),
+  })
 
   // ---- state ---------------------------------------------------------------
 
@@ -239,6 +258,25 @@ export const useT2iStore = defineStore('t2i', () => {
     if (images.value.length > paging.shown) shownPages.value += 1
   }
 
+  // Prompt-writer adapters for the Writer menu (GET /api/writers/adapters),
+  // refetched on the `training` channel's adapters_changed. A failed load
+  // keeps the last list; `adaptersLoaded` says whether one ever arrived (a
+  // selected adapter is only judged gone against a list that did).
+  const adapters = ref<WriterAdapter[]>([])
+  const adaptersLoaded = ref(false)
+  let adaptersSeq = 0
+  async function loadAdapters(): Promise<void> {
+    const seq = ++adaptersSeq
+    try {
+      const rows = await listWriterAdapters()
+      if (seq !== adaptersSeq) return
+      adapters.value = rows
+      adaptersLoaded.value = true
+    } catch {
+      // The menus keep what they had; a request naming a gone adapter 409s.
+    }
+  }
+
   /** Opening the dialog: a fresh session over whatever the server is still running. */
   async function open(): Promise<void> {
     imagesSeq += 1
@@ -260,6 +298,7 @@ export const useT2iStore = defineStore('t2i', () => {
     await Promise.all([
       loaded?.csv.available ? loadCaptionMeta() : Promise.resolve(null),
       reattach(),
+      loadAdapters(),
     ])
   }
 
@@ -279,6 +318,7 @@ export const useT2iStore = defineStore('t2i', () => {
     directions?: boolean
     variants?: number
     writer?: T2iWriter
+    category_ids?: number[]
   }): Promise<T2iPromptResult> {
     return t2iApi.generateT2iPrompt(body)
   }
@@ -411,6 +451,10 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   function applyBatchSnapshot(row: T2iBatchInfo): void {
+    if (row.scorecard_id) {
+      noteScorecardBatch(row.batch_id)
+      return
+    }
     if (finishedIds.has(row.batch_id)) return
     const existing = findBatch(row.batch_id)
     if (existing) {
@@ -469,11 +513,13 @@ export const useT2iStore = defineStore('t2i', () => {
    * chips, the image list).
    */
   async function reattach(): Promise<void> {
-    await Promise.all([
-      refreshBatches().catch((e) => console.warn('T2I: could not reload the running batches', e)),
-      tracker.refresh().catch((e) => console.warn('T2I: could not reload the running jobs', e)),
-      refreshImages(),
-    ])
+    // The batches first: they name the scorecard batches whose jobs the
+    // tracker must not adopt.
+    const batchesThenJobs = async (): Promise<void> => {
+      await refreshBatches().catch((e) => console.warn('T2I: could not reload the running batches', e))
+      await tracker.refresh().catch((e) => console.warn('T2I: could not reload the running jobs', e))
+    }
+    await Promise.all([batchesThenJobs(), refreshImages()])
   }
 
   // The next unused seed the server reported for a batch, asking once if no
@@ -560,6 +606,11 @@ export const useT2iStore = defineStore('t2i', () => {
   function onBatchStarted(d: Record<string, unknown>): void {
     const id = asStr(d.batch_id)
     if (!id || finishedIds.has(id)) return
+    if (d.scorecard_id) {
+      // Never adopted: its later frames find no batch here and are ignored.
+      noteScorecardBatch(id)
+      return
+    }
     const totalSteps = asNum(d.total_steps, 1)
     const totalImages = asNum(d.total_images, 0)
     const existing = findBatch(id)
@@ -585,6 +636,18 @@ export const useT2iStore = defineStore('t2i', () => {
     })
   }
 
+  // A frame's `lineage` (what the step's draft was written for), or null.
+  function asLineage(v: unknown): T2iDraftLineage | null {
+    if (!v || typeof v !== 'object') return null
+    const o = v as Record<string, unknown>
+    if (typeof o.resolved_caption !== 'string') return null
+    return {
+      resolved_caption: o.resolved_caption,
+      direction: typeof o.direction === 'string' ? o.direction : null,
+      categories: Array.isArray(o.categories) ? o.categories.map(String) : null,
+    }
+  }
+
   function onBatchStep(d: Record<string, unknown>): void {
     const batch = findBatch(asStr(d.batch_id))
     if (!batch) return
@@ -607,6 +670,7 @@ export const useT2iStore = defineStore('t2i', () => {
       writer_id: typeof d.writer_id === 'string' ? d.writer_id : null,
       writer_model: typeof d.writer_model === 'string' ? d.writer_model : null,
       draft: typeof d.draft === 'string' ? d.draft : null,
+      lineage: asLineage(d.lineage),
     }
     batch.step = step
     rememberStep(batch.batch_id, step)
@@ -720,6 +784,27 @@ export const useT2iStore = defineStore('t2i', () => {
    * viewer's F / X / ☆), so the strip's tile star matches. The library copy
    * is already handled by the viewer itself.
    */
+  /**
+   * Follow every judgment the result viewer gets back: the favorite AND the
+   * pass flag, so a scorecard tile leaves "judge to reveal" on either verdict.
+   */
+  function applyJudgment(path: string, state: { is_favorite: boolean; verdict: string | null }): void {
+    for (const image of images.value) {
+      if (!samePath(image.file_path, path)) continue
+      const wasBlind = t2iBlind(image)
+      if (image.is_favorite !== state.is_favorite) image.is_favorite = state.is_favorite
+      const passed = state.verdict === 'pass'
+      if (image.passed !== passed) image.passed = passed
+      refetchIfRevealed(image, wasBlind)
+    }
+  }
+
+  // A blind scorecard row came without its prompt and writer (the server
+  // strips them): once a verdict lifts the blind, fetch the full rows.
+  function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
+    if (wasBlind && !t2iBlind(image)) void refreshImages()
+  }
+
   function applyFavoriteFlag(path: string, favorite: boolean): void {
     for (const image of images.value) {
       if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
@@ -738,6 +823,7 @@ export const useT2iStore = defineStore('t2i', () => {
     const image = images.value.find((i) => i.id === id)
     if (!image) return
     const next = !image.is_favorite
+    const wasBlind = t2iBlind(image)
     image.is_favorite = next
     try {
       const state = await setVerdict(
@@ -746,7 +832,9 @@ export const useT2iStore = defineStore('t2i', () => {
         scoreShown === undefined ? {} : { scoreShown },
       )
       image.is_favorite = state.is_favorite
+      image.passed = state.verdict === 'pass'
       mirrorFavoriteToLibrary(image.file_path, state.is_favorite)
+      refetchIfRevealed(image, wasBlind)
     } catch (e) {
       image.is_favorite = !next
       throw e
@@ -837,6 +925,9 @@ export const useT2iStore = defineStore('t2i', () => {
 
   return {
     // state
+    adapters,
+    adaptersLoaded,
+    loadAdapters,
     config,
     configLoading,
     configError,
@@ -897,6 +988,7 @@ export const useT2iStore = defineStore('t2i', () => {
     saveFormState,
     toggleFavorite,
     applyFavoriteFlag,
+    applyJudgment,
     deleteImage,
     // draft
     loadDraft,

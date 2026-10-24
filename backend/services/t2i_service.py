@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
+from metascan.core.scorecard_blind import blind_t2i_row
 from metascan.core.t2i_form import form_state_for_row
 from metascan.utils.trash import remove_files_to_trash
 
@@ -19,12 +20,14 @@ class T2iService:
         """Generated images, newest first, each with a COMPLETE
         ``form_state``: the stored one, or one built from its as-rendered
         facts for an image ingested after a restart. The dialog sees one
-        shape."""
+        shape. A blind scorecard image (no verdict yet) carries neither its
+        prompt nor its writer (``scorecard_blind``)."""
         rows: List[Dict[str, Any]] = await asyncio.to_thread(
             self.db.list_t2i_images, limit, before_id
         )
         for row in rows:
             row["form_state"] = form_state_for_row(row)
+            blind_t2i_row(row)
         return rows
 
     async def list_paths(self) -> List[str]:
@@ -48,7 +51,7 @@ class T2iService:
             merged = {**form_state_for_row(row), **patch}
             self.db.set_t2i_image_form_state(image_id, merged)
             row["form_state"] = merged
-            return dict(row)
+            return dict(blind_t2i_row(dict(row, form_state=dict(merged))))
 
         return await asyncio.to_thread(_apply)
 

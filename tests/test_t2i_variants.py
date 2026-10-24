@@ -873,6 +873,9 @@ class TestVariantsApi(T2iApiCase):
                     "writer_id": "base",
                     "writer_model": None,
                     "variant_index": 0,
+                    "resolved_caption": None,
+                    "direction": None,
+                    "categories": None,
                 },
                 {
                     "prompt": "SYNTH b",
@@ -881,6 +884,9 @@ class TestVariantsApi(T2iApiCase):
                     "writer_id": None,
                     "writer_model": None,
                     "variant_index": 1,
+                    "resolved_caption": None,
+                    "direction": None,
+                    "categories": None,
                 },
             ],
         )

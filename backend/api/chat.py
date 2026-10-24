@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.api import vlm as vlm_api
+from backend.services.gpu_lock import GPU_FREE
 from metascan.core.vlm_client import STATE_READY, VlmClient, VlmError
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def _ndjson(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-@router.post("")
+@router.post("", dependencies=GPU_FREE)
 async def chat(body: ChatRequest) -> StreamingResponse:
     client = _require_ready_client()
 

@@ -13,6 +13,7 @@ import {
   type SeedPolicy,
   type T2iBatchRequest,
   type T2iBatchStep,
+  type T2iDraftLineage,
   type T2iDraftSet,
   type T2iPromptDraft,
   type T2iVariantPrompt,
@@ -24,6 +25,7 @@ import {
   type T2iLora,
   type T2iMode,
 } from '../types/t2i'
+import { isAdapterWriterId } from '../types/writers'
 
 /**
  * Every value the dialog's inputs hold. The first eleven are the editable copy
@@ -182,7 +184,11 @@ export interface BatchContext {
  * The drafts a Generate Prompt returned, as the store holds them: each
  * variant's text starts as its draft. The box shows variant 0.
  */
-export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T2iDraftSet | null {
+export function draftSetFromResult(
+  caption: string,
+  drafts: T2iPromptDraft[],
+  lineage: T2iDraftLineage | null = null,
+): T2iDraftSet | null {
   if (drafts.length === 0) return null
   return {
     caption,
@@ -196,6 +202,7 @@ export function draftSetFromResult(caption: string, drafts: T2iPromptDraft[]): T
         draft: d.prompt,
         text: d.prompt,
         negative: d.negative ?? '',
+        lineage,
       })),
     current: 0,
   }
@@ -227,12 +234,14 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
       draft: s.draft as string,
       text: s.prompt,
       negative: s.negative ?? '',
+      lineage: s.lineage ?? null,
     })),
     current: ordered.findIndex((s) => s.variant_index === shown.variant_index),
   }
 }
 
 /** Writers whose drafts a supplied prompt may name (judgments.DRAFT_WRITERS). */
+// The writers whose drafts a tile can hand back (plus any `adapter:<id>`).
 const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
 
 /**
@@ -243,11 +252,19 @@ const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
  * form as just loaded from the tile.
  */
 export function draftSetFromImage(
-  img: Pick<T2iImage, 'writer_id' | 'writer_model' | 'draft_prompt'>,
+  img: Pick<
+    T2iImage,
+    'writer_id' | 'writer_model' | 'draft_prompt' | 'resolved_caption' | 'direction' | 'prompt_categories'
+  >,
   f: Pick<T2iFields, 'caption' | 'prompt' | 'negative'>,
+  servableAdapters: readonly string[] = [],
 ): T2iDraftSet | null {
   const writerId = img.writer_id
-  if (img.draft_prompt == null || !writerId || !DRAFT_WRITERS.includes(writerId)) return null
+  if (img.draft_prompt == null || !writerId) return null
+  // An adapter's draft keeps its lineage only while that adapter can still
+  // serve (the server refuses a gone one); otherwise the text goes out typed.
+  const adapterOk = isAdapterWriterId(writerId) && servableAdapters.includes(writerId)
+  if (!DRAFT_WRITERS.includes(writerId) && !adapterOk) return null
   return {
     caption: f.caption,
     variants: 1,
@@ -259,6 +276,14 @@ export function draftSetFromImage(
         draft: img.draft_prompt,
         text: f.prompt,
         negative: f.negative,
+        lineage:
+          img.resolved_caption != null
+            ? {
+                resolved_caption: img.resolved_caption,
+                direction: img.direction ?? null,
+                categories: img.prompt_categories ?? null,
+              }
+            : null,
       },
     ],
     current: 0,
@@ -296,6 +321,15 @@ export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt
       writer_id: e.writer_id,
       writer_model: e.writer_model,
       variant_index: i,
+      // Exactly what the draft was written for, never rebuilt for the
+      // seed the box holds now.
+      ...(e.lineage
+        ? {
+            resolved_caption: e.lineage.resolved_caption,
+            direction: e.lineage.direction,
+            categories: e.lineage.categories,
+          }
+        : {}),
     }
   })
 }

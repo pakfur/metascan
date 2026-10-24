@@ -1804,6 +1804,7 @@ class TestManualBatchRun(BatchCase):
                     "writer_id": "manual",
                     "writer_model": None,
                     "draft": None,
+                    "lineage": None,
                 }
             ],
         )
@@ -2327,6 +2328,7 @@ class TestRandomBatchRun(BatchCase):
                 "direction",
                 "direction_parts",
                 "draft",
+                "lineage",
                 "negative",
                 "prompt",
                 "seed",

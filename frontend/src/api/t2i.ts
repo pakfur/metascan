@@ -56,6 +56,8 @@ export function generateT2iPrompt(body: {
   directions?: boolean
   variants?: number
   writer?: T2iWriter
+  /** The dialog's generation categories (an `all`-scope adapter names them). */
+  category_ids?: number[]
 }): Promise<T2iPromptResult> {
   return post('/t2i/prompt', body)
 }

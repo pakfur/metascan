@@ -17,9 +17,11 @@ import { downstreamFor, type DownstreamKind } from '../utils/storyboardDeps'
 import * as comfyApi from '../api/comfy'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useToast } from '../composables/useToast'
+import { errorText } from '../utils/gpuBusy'
 
+// "GPU busy: training" for a training-lock refusal (409 gpu_busy_training).
 function errMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return errorText(e)
 }
 
 export const useStoryboardStore = defineStore('storyboard', () => {
