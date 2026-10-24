@@ -459,8 +459,12 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
 # ---- writer LoRA training gate --------------------------------------------
 
 # bf16 LoRA on the 8B writer at 2048 tokens; DPO runs chosen, rejected and
-# the reference adapter's passes.
+# the reference adapter's passes. A "32 GB" card: vram_gb is GiB from
+# torch, and those cards report less than 32 (an RTX 5090 is 32607 MiB =
+# 31.8), so the check uses a floor below the nominal size while messages
+# name the nominal one. 24 GB cards (~23.6) stay below it.
 WRITER_TRAINING_MIN_VRAM_GB = 32.0
+WRITER_TRAINING_VRAM_FLOOR_GB = 30.0
 # Imported (for real) by the deps probe with the TRAINING interpreter.
 WRITER_TRAINING_DEPS: Tuple[str, ...] = (
     "peft",
@@ -672,7 +676,7 @@ def writer_training_reasons(
             f"Requires a CUDA GPU with {WRITER_TRAINING_MIN_VRAM_GB:.0f} GB VRAM; "
             "none detected."
         )
-    elif report.cuda.vram_gb < WRITER_TRAINING_MIN_VRAM_GB:
+    elif report.cuda.vram_gb < WRITER_TRAINING_VRAM_FLOOR_GB:
         reasons.append(
             f"Requires {WRITER_TRAINING_MIN_VRAM_GB:.0f} GB VRAM; "
             f"detected {report.cuda.vram_gb} GB."
