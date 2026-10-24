@@ -181,6 +181,9 @@ class TrainingStartRequest(BaseModel):
     overrides: Optional[Dict[str, Any]] = None
     start_from: Union[str, int] = "fresh"
     render_scorecard: bool = False
+    # VRAM-cap rehearsal (GiB): None = models.writer_train_vram_cap_gb,
+    # 0 = off, else 8..1024. Validated by the manager (422 invalid_vram_cap).
+    vram_cap_gb: Optional[Any] = None
 
 
 class TrainingRunRequest(BaseModel):
@@ -246,6 +249,7 @@ async def training_status(
         "gate": {**_gate_payload(gate), "checking": checking},
         "presets": resolved_presets(),
         "clamps": {k: list(v) for k, v in OVERRIDE_CLAMPS.items()},
+        "vram_cap": manager.vram_cap_info(),
     }
 
 
@@ -259,9 +263,20 @@ async def start_training(body: TrainingStartRequest) -> Dict[str, Any]:
             overrides=body.overrides,
             start_from=body.start_from,
             render_scorecard=body.render_scorecard,
+            vram_cap_gb=body.vram_cap_gb,
         )
     )
     return {"run_id": run_id, **manager.status()}
+
+
+@router.get("/training/profiles")
+async def training_profiles() -> Dict[str, Any]:
+    """The training profiles (VRAM, time, throughput, data shape; numbers
+    only): ``{schema, max_entries, profiles (newest first, no timeline),
+    current (the running or last attempt, with its timeline)}``. Read-only:
+    no GPU lock."""
+    result: Dict[str, Any] = await asyncio.to_thread(_manager().profiles)
+    return result
 
 
 @router.post("/training/pause")

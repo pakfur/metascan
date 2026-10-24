@@ -33,10 +33,13 @@ import gc
 import importlib
 import logging
 import math
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from metascan.workers import writer_train_profile as wp
 from metascan.workers import writer_train_worker as w
 
 logger = logging.getLogger("writer_train_worker")
@@ -71,6 +74,84 @@ def require_cuda(torch: Any) -> None:
         raise w.TrainWorkerError("writer training needs a CUDA GPU (none available)")
     if not torch.cuda.is_bf16_supported():
         raise w.TrainWorkerError("writer training needs a GPU with bf16 support")
+
+
+# ---- profile: memory, environment, VRAM cap -----------------------------
+
+
+class TorchMemoryProbe:
+    """torch's CUDA caching-allocator counters for device 0 (bytes); any
+    failure reads as None (a profile never breaks a run)."""
+
+    def __init__(self, torch: Any, device: int = 0) -> None:
+        self.torch = torch
+        self.device = device
+
+    def _call(self, name: str) -> Optional[float]:
+        try:
+            return float(getattr(self.torch.cuda, name)(self.device))
+        except Exception:
+            return None
+
+    def reset_peak(self) -> None:
+        try:
+            self.torch.cuda.reset_peak_memory_stats(self.device)
+        except Exception:
+            pass
+
+    def allocated(self) -> Optional[float]:
+        return self._call("memory_allocated")
+
+    def reserved(self) -> Optional[float]:
+        return self._call("memory_reserved")
+
+    def peak_allocated(self) -> Optional[float]:
+        return self._call("max_memory_allocated")
+
+    def peak_reserved(self) -> Optional[float]:
+        return self._call("max_memory_reserved")
+
+
+def _driver_version() -> Optional[str]:
+    """The NVIDIA driver version from ``nvidia-smi`` (a 5 s query), or None."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = (proc.stdout or "").strip().splitlines()
+    return lines[0].strip() if proc.returncode == 0 and lines else None
+
+
+def cuda_environment(torch: Any, device: int = 0) -> Dict[str, Any]:
+    props = torch.cuda.get_device_properties(device)
+    total = round(float(props.total_memory) / wp.GIB, 2)
+    return {
+        "gpu_name": str(props.name),
+        "total_vram_gib": total,
+        "nominal_vram_gb": wp.nominal_vram_gb(total),
+        "compute_capability": f"{props.major}.{props.minor}",
+        "cuda_runtime": getattr(getattr(torch, "version", None), "cuda", None),
+        "driver_version": _driver_version(),
+    }
+
+
+def apply_vram_cap(
+    torch: Any, cap_gb: Optional[float], total_gib: Optional[float]
+) -> Optional[float]:
+    """Limit this process to ``cap_gb`` (the rehearsal of a smaller card)
+    when it is below the card; returns the fraction set, or None."""
+    frac = wp.vram_cap_fraction(cap_gb, total_gib)
+    if frac is not None:
+        torch.cuda.set_per_process_memory_fraction(frac, 0)
+    return frac
 
 
 # ---- pure helpers ------------------------------------------------------
@@ -204,6 +285,32 @@ class RealBackend:
         self.is_vl = False
         self._adapter_src: Optional[str] = None
         self._loaded = False
+        self._ctx: Optional["w.StageContext"] = None
+
+    def setup(self, ctx: "w.StageContext") -> None:
+        """Before any model load: the deps, CUDA, the environment and the
+        memory probe for the profile, and the VRAM cap (it must be set
+        before the allocator grows)."""
+        self._ctx = ctx
+        if self.deps is None:
+            self.deps = import_deps()
+            require_cuda(self.deps.torch)
+            self.deps.transformers.set_seed(int(self.hp["seed"]))
+        torch = self.deps.torch
+        env = cuda_environment(torch)
+        ctx.profile.update_environment(**env)
+        frac = apply_vram_cap(torch, self.task.vram_cap_gb, env["total_vram_gib"])
+        if frac is not None:
+            logger.info(
+                "writer train: VRAM capped at %.1f GiB (rehearsal, %.3f of the card)",
+                self.task.vram_cap_gb,
+                frac,
+            )
+        ctx.profile.update_config(
+            vram_cap_applied=frac is not None,
+            vram_cap_fraction=None if frac is None else round(frac, 4),
+        )
+        ctx.profile.set_probe(TorchMemoryProbe(torch))
 
     # -- model --------------------------------------------------------------
 
@@ -245,6 +352,8 @@ class RealBackend:
         tf = self.deps.transformers
         base = self.task.base_dir
         logger.info("writer train: loading base model (bf16, CUDA)")
+        if self._ctx is not None:
+            self._ctx.load_begin()
         model = self._load_base()
         tok = tf.AutoTokenizer.from_pretrained(base)
         if not getattr(tok, "chat_template", None) and self.is_vl:
@@ -268,6 +377,16 @@ class RealBackend:
             )
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info("writer train: %d trainable LoRA parameter(s)", trainable)
+        if self._ctx is not None:
+            cfg = getattr(model, "config", None)
+            self._ctx.profile.update_config(
+                attn_implementation=getattr(cfg, "_attn_implementation", None)
+                or "sdpa",
+                lora_target_regex=(
+                    VL_TARGET_REGEX if self.is_vl else "|".join(LORA_TARGETS)
+                ),
+            )
+            self._ctx.load_end()
         self.model, self.tok = model, tok
         self._adapter_src = init_adapter
         self._loaded = True
@@ -317,13 +436,13 @@ class RealBackend:
     def _length(self, prompt: str, completion: str) -> int:
         return len(self.tok(prompt + completion, add_special_tokens=False)["input_ids"])
 
-    def _fits(self, ex: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
-        limit = int(self.hp["max_seq_len"])
+    def _longest(self, ex: Dict[str, Any], keys: Tuple[str, ...]) -> int:
+        """Tokens of system + user + the longest of ``keys``' completions."""
+        out = 0
         for k in keys:
             p, c = render_pair(self.tok, ex["system"], ex["user"], ex[k])
-            if self._length(p, c) > limit:
-                return False
-        return True
+            out = max(out, self._length(p, c))
+        return out
 
     def _filter(
         self,
@@ -332,9 +451,17 @@ class RealBackend:
         keys: Tuple[str, ...],
         kind: str,
     ) -> List[Dict[str, Any]]:
-        kept = [ex for ex in examples if self._fits(ex, keys)]
+        limit = int(self.hp["max_seq_len"])
+        kept: List[Dict[str, Any]] = []
+        lengths: List[int] = []
+        for ex in examples:
+            n = self._longest(ex, keys)
+            if n <= limit:
+                kept.append(ex)
+                lengths.append(n)
         dropped = len(examples) - len(kept)
         ctx.dropped[kind] = dropped
+        ctx.token_lengths(kind, lengths)  # numbers only
         if dropped:
             logger.warning(
                 "writer train: %d of %d %s example(s) longer than %d tokens left out",
