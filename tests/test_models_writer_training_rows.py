@@ -287,6 +287,20 @@ def test_gate_reasons_follow_downloads_and_deletes(client, events):
     assert ("training", "gate_changed", {}) in events
 
 
+def test_missing_asset_reasons_point_at_the_training_tab(client):
+    """The two assets are rows of Configuration → Training, and the reasons
+    render there verbatim: they must send the owner to that tab, not to Models."""
+    reasons = _gate_reasons(client)
+    base = next(r for r in reasons if "base weights not downloaded" in r)
+    converter = next(r for r in reasons if "LoRA converter not found" in r)
+    assert base.endswith("download them in Configuration → Training.")
+    assert (
+        "download it in Configuration → Training or set models.llama_cpp_dir"
+        in converter
+    )
+    assert not any("in Models" in r for r in reasons)
+
+
 # ---- base download -------------------------------------------------------------
 
 
