@@ -108,6 +108,12 @@ export function trainingErrorText(e: unknown): string {
       return 'No VLM is available to write briefs — install one in Models.'
     case 'scorecard_running':
       return 'A scorecard is already rendering — wait for it or cancel it.'
+    case 'scorecard_pending':
+      return typeof d.message === 'string' && d.message
+        ? d.message
+        : 'Some briefs are still rendering — try again when they finish.'
+    case 'shutting_down':
+      return 'The server is shutting down.'
     case 'scorecard_unavailable':
       return 'Scorecards are not set up on this server.'
     case 'adapter_unavailable':

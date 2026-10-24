@@ -168,7 +168,8 @@ the root CLAUDE.md still applies.
   (DELETE `/api/writers/adapters/{id}` calls it BEFORE removing files, for
   Windows' mapped-file lock) answers 409 `adapter_files_busy` at once when it
   returns False (a running or loading server still maps the GGUF) instead of
-  relying on the removal failing; a withdrawn id is forgotten once the
+  relying on the removal failing; a refused withdraw puts the id back, so the adapter
+  stays served and no restart is left pending; a withdrawn id is forgotten once the
   registry no longer lists it. A registry change leaves an idle writer
   `stopped` until its next request (user-visible: no model shown loaded). Tests: `tests/test_writer_adapter_serving.py` (the fake server's
   `--record` file logs argv and request bodies).

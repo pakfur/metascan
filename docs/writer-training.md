@@ -18,7 +18,7 @@ Three kinds of example, all from images only (I2V clips are never read):
 | **Edit** | A prompt you edited before rendering: your text is preferred to the writer's draft | DPO pair and SFT target |
 | **Hindsight** | A favorited image with a known prompt, plus a short "brief" the general VLM writes about the image | SFT |
 
-Scorecard images, `manual` prompts and the stock `fallback` text are never training targets. Deleted images still count (from their tombstone). About 10% of the preference groups are held out and never trained on; they give the **holdout agreement** (the share of held-out pairs where the adapter prefers your chosen prompt), shown next to the base model's number.
+Scorecard images, `manual` prompts and the stock `fallback` text are never training targets. Deleted images still count (from their tombstone). About 10% of the preference groups are held out and never trained on (a group is held by a stable hash, so it stays held as your data grows; with two or more groups at least one is held and never all); they give the **holdout agreement** (the share of held-out pairs where the adapter prefers your chosen prompt), shown next to the base model's number.
 
 **Readiness** is per scope (`All`, or one category): trainable at 100 or more preference and edit pairs, "enough new data" at 200 or more pairs since the newest adapter of that scope. The window shows both, and **Write briefs** fills in the hindsight briefs (a resumable background job: starting a training run cancels it, and it restarts by itself when the GPU is free).
 
@@ -83,7 +83,7 @@ Both downloads work on any machine; they are skipped by **Download all missing**
    | Thorough | 32 | 5e-5 | 3 |
 
    **Advanced** lets you override rank (4 to 64), learning rate (1e-6 to 5e-4), epochs (1 to 5) and the DPO learning rate (default 1e-5, same range). Values are clamped to those ranges and a warning shows when you differ from the preset.
-3. Choose **Fresh**, or **Continue** an existing ready or untested adapter (it trains on top of that adapter; its own rank wins).
+3. Choose **Fresh**, or **Continue** an existing ready or untested adapter (it trains on top of that adapter; its own rank wins). The run keeps its own copy of that adapter, so deleting the source later does not break Resume.
 4. Leave **Render scorecard briefs (blind)** on to start the scorecard when the run finishes.
 5. **Start**.
 
@@ -125,7 +125,8 @@ The scorecard answers "is this adapter actually better than the base writer for 
 - Render it from the training window (**render scorecard**; **resume** continues a partial one at the same seeds; **re-render** adds a fresh set). It needs the GPU free of training.
 - **Blind**: the scorecard images look like any other image in the grid and viewer, with no prompt, tags, writer or variant shown (the server strips them, not just the UI), until you give an explicit **favorite or pass**. Looking at an image without deciding does not reveal it. Clearing a verdict hides it again.
 - **Judged** means both images of a pair have an explicit verdict, favorite or pass; an image you only looked at (seen, no verdict) does not count, even though it is a negative label for the taste scorer. At **30 judged pairs** the adapter moves from **untested** to **ready** and stays ready. The window shows `n/30 judged`, and the Models tab Writers table shows the favorite rate of the base and of each adapter, the mean taste score, and judged pairs.
-- Scorecard images are real judgments for the taste scorer, but are never writer training data.
+- Scorecard images are real judgments for the taste scorer, but are never writer training data or part of the writer favorite-rate stats.
+- Each brief counts as one pair (its latest complete render). **Resume** skips briefs still rendering and says so if only those are left; a scorecard cannot start while the server is shutting down.
 
 A "ready" adapter that scores no better than the base is your call: delete it, or train again with more data.
 
