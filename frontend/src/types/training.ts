@@ -39,6 +39,8 @@ export interface TrainingProgress {
   peak_gib?: number | null
   /** The VRAM-cap rehearsal applied to this attempt (GiB), or null. */
   vram_cap_gb?: number | null
+  /** The card's total (GiB) when the requested cap was at or above it and so ignored; else null. */
+  vram_cap_ignored_total_gib?: number | null
 }
 
 export type RunState = 'running' | 'pausing' | 'cancelling' | 'starting' | string

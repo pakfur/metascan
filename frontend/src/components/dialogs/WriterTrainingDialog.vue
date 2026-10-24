@@ -398,7 +398,9 @@ const vramText = computed(() => {
 })
 const capText = computed(() => {
   const cap = progress.value?.vram_cap_gb
-  return typeof cap === 'number' ? `VRAM cap: ${cap} GB (rehearsal)` : null
+  if (typeof cap === 'number') return `VRAM cap: ${cap} GB (rehearsal)`
+  const total = progress.value?.vram_cap_ignored_total_gib
+  return typeof total === 'number' ? `VRAM cap ignored (card has ${total.toFixed(1)} GiB)` : null
 })
 
 const lastLoss = computed(() => {

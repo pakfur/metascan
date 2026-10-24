@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 HISTORY_NAME = "writer_training_profiles.json"
 LAST_PROFILE_NAME = "writer_training_last_profile.json"
+PREV_PROFILE_NAME = "profile.prev.json"  # the run's previous attempt
 HISTORY_SCHEMA = 1
 MAX_ENTRIES = 50
 
@@ -109,17 +110,22 @@ def _quarantine(path: Path, why: str) -> None:
         )
 
 
-def read_history(data_dir: Path) -> Dict[str, Any]:
-    """The history (``profiles`` newest last); a corrupt file is
-    quarantined and an empty history returned. Never raises."""
+class HistoryUnreadable(Exception):
+    """The history file exists but cannot be read (permissions, a lock):
+    it must not be replaced by a fresh one."""
+
+
+def _load_history(data_dir: Path) -> Dict[str, Any]:
+    """The history; a corrupt file is quarantined and an empty history
+    returned. Raises :class:`HistoryUnreadable` for a file that exists but
+    cannot be read."""
     path = history_path(data_dir)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return _empty()
     except OSError as exc:
-        logger.warning("writer training profiles: cannot read %s (%s)", path, exc)
-        return _empty()
+        raise HistoryUnreadable(f"cannot read {path} ({exc})") from exc
     try:
         data = json.loads(raw)
     except ValueError:
@@ -134,6 +140,17 @@ def read_history(data_dir: Path) -> Dict[str, Any]:
     return out
 
 
+def read_history(data_dir: Path) -> Dict[str, Any]:
+    """The history (``profiles`` newest last); a corrupt file is
+    quarantined and an empty history returned, an unreadable one is left
+    alone (WARNING) and reads empty. Never raises."""
+    try:
+        return _load_history(data_dir)
+    except HistoryUnreadable as exc:
+        logger.warning("writer training profiles: %s", exc)
+        return _empty()
+
+
 def append_profile(
     data_dir: Path,
     profile: Dict[str, Any],
@@ -143,14 +160,39 @@ def append_profile(
     max_entries: int = MAX_ENTRIES,
 ) -> None:
     """Add one attempt (its ``timeline`` dropped), keep the newest
-    ``max_entries`` and rewrite the file atomically."""
+    ``max_entries`` and rewrite the file atomically. An attempt already in
+    the history (same run id and ``attempt_id``) is not added again. A history
+    file that exists but cannot be read is never replaced: the entry is
+    dropped (WARNING) and the file left as it is."""
     entry = {k: v for k, v in profile.items() if k != "timeline"}
     entry["adapter_id"] = adapter_id
     entry["adapter_name"] = adapter_name
-    history = read_history(data_dir)
+    try:
+        history = _load_history(data_dir)
+    except HistoryUnreadable as exc:
+        logger.warning(
+            "writer training profiles: %s; this attempt is not recorded and "
+            "the file is left untouched",
+            exc,
+        )
+        return
+    key = _attempt_key(entry)
+    if key is not None and any(_attempt_key(p) == key for p in history["profiles"]):
+        logger.info("writer training profiles: attempt %s already recorded", key)
+        return
     profiles: List[Dict[str, Any]] = history["profiles"] + [entry]
     history["profiles"] = profiles[-max_entries:]
     write_json_durable(history_path(data_dir), history)
+
+
+def _attempt_key(entry: Dict[str, Any]) -> Optional[tuple]:
+    attempt = entry.get("attempt")
+    if not isinstance(attempt, dict):
+        return None
+    run_id, attempt_id = attempt.get("run_id"), attempt.get("attempt_id")
+    if run_id is None or attempt_id is None:
+        return None
+    return (run_id, attempt_id)
 
 
 def save_last_profile(data_dir: Path, profile: Dict[str, Any]) -> None:
@@ -174,13 +216,20 @@ def run_profile_path(run_dir: Path) -> Path:
 
 
 def record_attempt(
-    data_dir: Path, active: Any, *, verdict: str, exit_code: int
+    data_dir: Path,
+    active: Any,
+    *,
+    verdict: str,
+    exit_code: int,
+    ended_by: str = "server",
 ) -> None:
-    """The end of one attempt of ``active`` (the manager's ``_Active``):
+    """The end of one attempt of ``active`` (the manager's ``_Active``, or
+    anything with ``run_id`` / ``adapter_id`` / ``name`` / ``run_dir``):
     keep its full profile as the last one and add it to the history. A
-    profile the worker never closed (terminated on shutdown, killed) gets
-    the manager's ``verdict`` and ``ended_by: "server"``. A missing or
-    unreadable profile is skipped. Never raises."""
+    profile the worker never closed (terminated on shutdown, killed, or
+    found at startup after a hard stop) gets the manager's ``verdict`` and
+    ``ended_by`` (``"server"``, or ``"server_restart"`` from ``recover``).
+    A missing or unreadable profile is skipped. Never raises."""
     try:
         profile = read_profile(run_profile_path(active.run_dir))
         if profile is None:
@@ -192,7 +241,7 @@ def record_attempt(
         if attempt.get("outcome") is None:
             attempt["outcome"] = verdict
             attempt["exit_code"] = exit_code
-            attempt["ended_by"] = "server"
+            attempt["ended_by"] = ended_by
         if attempt.get("run_id") is None:
             attempt["run_id"] = active.run_id
         save_last_profile(data_dir, profile)
@@ -201,6 +250,21 @@ def record_attempt(
         )
     except Exception:
         logger.exception("Recording the writer training profile failed")
+
+
+def set_aside_run_profile(run_dir: Path) -> None:
+    """Before a worker spawns: the previous attempt's ``profile.json`` (if
+    any; already recorded) becomes ``profile.prev.json``, so a worker that
+    dies before writing its own leaves nothing to record twice. Never
+    raises."""
+    path = run_profile_path(run_dir)
+    try:
+        os.replace(path, path.with_name(PREV_PROFILE_NAME))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        # Recording dedupes on (run id, attempt_id), so this is not fatal.
+        logger.warning("writer training profiles: cannot set %s aside (%s)", path, exc)
 
 
 def profiles_payload(data_dir: Path, active_run_dir: Optional[Path]) -> Dict[str, Any]:

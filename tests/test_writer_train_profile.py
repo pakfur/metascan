@@ -10,6 +10,7 @@ uses. The profile is NUMBERS ONLY -- no prompt / brief / example text.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest import mock
@@ -108,6 +109,29 @@ class TestHelpers:
         assert not wp.is_oom_error(RuntimeError("shape mismatch"))
         assert not wp.is_oom_error(ValueError("CUDA out of memory"))
 
+    def test_is_oom_error_walks_the_cause_chain(self) -> None:
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        def chain(depth: int, implicit: bool = False) -> BaseException:
+            exc: BaseException = OutOfMemoryError("x")
+            for i in range(depth):
+                outer = ValueError(f"wrapper {i}")
+                if implicit:
+                    outer.__context__ = exc
+                else:
+                    outer.__cause__ = exc
+                exc = outer
+            return exc
+
+        assert wp.is_oom_error(chain(1))
+        assert wp.is_oom_error(chain(5))
+        assert wp.is_oom_error(chain(3, implicit=True))
+        assert not wp.is_oom_error(chain(6))  # deeper than 5 is not followed
+        loop = ValueError("loop")
+        loop.__cause__ = loop
+        assert not wp.is_oom_error(loop)
+
     def test_oom_message(self) -> None:
         assert wp.oom_message("dpo", 12, 30.512, 31.84) == (
             "Ran out of GPU memory during dpo at step 12 (peak 30.51 GiB of 31.84)."
@@ -199,6 +223,13 @@ class TestVramCapTask:
         cfg = _profile(task)["config"]
         assert cfg["vram_cap_gb"] == 40.0 and cfg["vram_cap_applied"] is False
         assert _progress(task)["vram_cap_gb"] is None
+        assert _progress(task)["vram_cap_ignored_total_gib"] == 31.84
+
+    def test_an_applied_cap_is_not_reported_ignored(self, tmp_path: Path) -> None:
+        task = _make_task(tmp_path)
+        task["vram_cap_gb"] = 24
+        assert _run(task, tmp_path) == w.EXIT_OK
+        assert _progress(task)["vram_cap_ignored_total_gib"] is None
 
     def test_no_cap(self, tmp_path: Path) -> None:
         task = _make_task(tmp_path)
@@ -393,6 +424,26 @@ class TestProfile:
         load = _stage(p, "load")
         assert load["completed"] is False
 
+    def test_a_wrapped_oom_is_an_oom(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        task = _make_task(
+            tmp_path,
+            fake={"oom_at": {"stage": "sft", "step": 2, "wrapped": True}},
+        )
+        with caplog.at_level(logging.DEBUG, logger=w.logger.name):
+            assert _run(task, tmp_path) == w.EXIT_ERROR
+        res = _result(task)
+        assert res["error_code"] == "oom"
+        assert res["error"].startswith("Ran out of GPU memory during sft at step 2")
+        assert _profile(task)["attempt"]["outcome"] == "oom"
+        frames = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and " at: " in r.getMessage()
+        ]
+        assert frames and ".py:" in frames[0]
+
     def test_progress_carries_live_memory(self, tmp_path: Path) -> None:
         task = _make_task(tmp_path)
         seen: List[Dict[str, Any]] = []
@@ -457,15 +508,30 @@ class TestProfile:
         {"fail_at": {"stage": "dpo", "step": 2}},
         {"oom_at": {"stage": "sft", "step": 2, "batch_tokens": 33}},
         {"signal_at": {"stage": "sft", "step": 3}},
+        {"oom_at": {"stage": "sft", "step": 2, "message": "SECRETS"}},
+        {"oom_at": {"stage": "dpo", "step": 2, "message": "SECRETS", "wrapped": True}},
+        {"oom_at": {"stage": "load", "message": "SECRETS"}},
     ],
 )
-def test_no_example_text_in_any_output(tmp_path: Path, fake: Optional[Dict]) -> None:
+def test_no_example_text_in_any_output(
+    tmp_path: Path, fake: Optional[Dict], caplog: pytest.LogCaptureFixture
+) -> None:
+    spec = (fake or {}).get("oom_at")
+    if isinstance(spec, dict) and spec.get("message") == "SECRETS":
+        # A library OOM whose message quotes training data.
+        fake = {"oom_at": {**spec, "message": f"CUDA out of memory: {SECRETS}"}}
     task = _make_task(tmp_path, fake=fake)
-    _run(task, tmp_path)
+    with caplog.at_level(logging.DEBUG, logger=w.logger.name):
+        _run(task, tmp_path)
     out = Path(task["out_dir"])
     blob = "".join(
         (out / name).read_text()
         for name in (wp.PROFILE_NAME, w.RESULT_NAME, w.PROGRESS_NAME)
     )
+    # Every other file the attempt produced too, and every log line.
+    for f in out.rglob("*"):
+        if f.is_file():
+            blob += f.read_text(errors="replace")
+    blob += caplog.text
     for s in SECRETS:
         assert s not in blob

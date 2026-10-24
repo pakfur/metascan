@@ -12,7 +12,8 @@ NUMBERS ONLY: no prompt, brief, example or completion text ever goes in
 Schema 1 (``PROFILE_SCHEMA``)::
 
     {"schema": 1,
-     "attempt": {"run_id", "started_at", "ended_at", "wall_s", "outcome",
+     "attempt": {"run_id", "attempt_id", "started_at", "ended_at", "wall_s",
+                 "outcome",
                  "exit_code", "resumed", "resumed_from_stage",
                  "resumed_from_step"},
      "environment": {"os", "os_release", "machine", "python", "gpu_name",
@@ -55,6 +56,7 @@ import math
 import os
 import platform
 import time
+import uuid
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -202,13 +204,31 @@ def base_environment() -> Dict[str, Any]:
     }
 
 
-def is_oom_error(exc: BaseException) -> bool:
-    """torch's ``OutOfMemoryError`` (by name: this module never imports
-    torch) or the older ``RuntimeError("CUDA out of memory ...")`` form.
-    The message is only inspected, never stored."""
+OOM_CHAIN_DEPTH = 5  # how many __cause__ / __context__ links are followed
+
+
+def _is_oom_one(exc: BaseException) -> bool:
     if any(c.__name__ == "OutOfMemoryError" for c in type(exc).__mro__):
         return True
     return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def is_oom_error(exc: BaseException) -> bool:
+    """torch's ``OutOfMemoryError`` (by name: this module never imports
+    torch) or the older ``RuntimeError("CUDA out of memory ...")`` form --
+    the exception itself or one up to ``OOM_CHAIN_DEPTH`` links down its
+    ``__cause__`` / ``__context__`` chain (a library that re-raises an OOM
+    wrapped). Messages are only inspected, never stored."""
+    cur: Optional[BaseException] = exc
+    seen = set()
+    for _ in range(OOM_CHAIN_DEPTH + 1):
+        if cur is None or id(cur) in seen:
+            return False
+        seen.add(id(cur))
+        if _is_oom_one(cur):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def oom_message(
@@ -341,6 +361,8 @@ class ProfileRecorder:
             "schema": PROFILE_SCHEMA,
             "attempt": {
                 "run_id": run_id if isinstance(run_id, int) else None,
+                # Unique per worker invocation: the history dedupes on it.
+                "attempt_id": uuid.uuid4().hex,
                 "started_at": _now_iso(),
                 "ended_at": None,
                 "wall_s": None,

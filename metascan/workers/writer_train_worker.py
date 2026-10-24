@@ -51,7 +51,9 @@ Outputs in ``out_dir``:
      "last_checkpoint_step": int | null,       # overall step
      "last_checkpoint_at": iso | null, "updated_at": iso,
      "alloc_gib": float | null, "peak_gib": float | null,  # this stage
-     "vram_cap_gb": float | null}              # the cap applied, if any
+     "vram_cap_gb": float | null,              # the cap applied, if any
+     "vram_cap_ignored_total_gib": float | null}  # card total when a cap
+                                               # >= the card was ignored
 
 * ``result.json``::
 
@@ -700,9 +702,19 @@ class StageContext:
                 "updated_at": _now_iso(),
                 **self.profile.memory_now(),
                 "vram_cap_gb": self._applied_cap(),
+                "vram_cap_ignored_total_gib": self._ignored_cap_total(),
             },
         )
         self._writes += 1
+
+    def _ignored_cap_total(self) -> Optional[float]:
+        """The card's total (GiB) when a cap was asked for but not applied
+        (at or above the card), so the window can say so; else None."""
+        cfg = self.profile.data["config"]
+        if cfg.get("vram_cap_gb") is None or cfg.get("vram_cap_applied"):
+            return None
+        total = self.profile.data["environment"].get("total_vram_gib")
+        return total if isinstance(total, (int, float)) else None
 
     def _applied_cap(self) -> Optional[float]:
         cfg = self.profile.data["config"]
@@ -1197,6 +1209,7 @@ def _execute(
                 step += 1
             message = profile.record_oom(stage, step)
             logger.error("writer train failed: %s", message)
+            _log_frames(type(e).__name__, e)
             result.update(status="error", error=message, error_code="oom")
         else:
             result.update(status="error", error=_report_failure(e))
@@ -1338,6 +1351,21 @@ def _run_stages(
     return EXIT_OK
 
 
+def _log_frames(name: str, e: BaseException) -> None:
+    """The traceback's file/line/function frames at DEBUG -- never a value
+    or a message (they could quote training data)."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    frames = traceback.extract_tb(e.__traceback__)
+    logger.debug(
+        "writer train %s at: %s",
+        name,
+        " <- ".join(
+            f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames)
+        ),
+    )
+
+
 def _report_failure(e: BaseException) -> str:
     """Log a failed run and return the ``result.json`` error text. A
     :class:`TrainWorkerError` is ours (written to never quote data) and
@@ -1349,15 +1377,7 @@ def _report_failure(e: BaseException) -> str:
         return str(e) or type(e).__name__
     name = type(e).__name__
     logger.error("writer train failed: unexpected %s", name)
-    if logger.isEnabledFor(logging.DEBUG):
-        frames = traceback.extract_tb(e.__traceback__)
-        logger.debug(
-            "writer train %s at: %s",
-            name,
-            " <- ".join(
-                f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames)
-            ),
-        )
+    _log_frames(name, e)
     return (
         f"unexpected {name} in the training worker (its message is not kept: "
         "it could quote training data)"

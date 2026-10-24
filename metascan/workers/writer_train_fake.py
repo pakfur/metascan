@@ -13,9 +13,12 @@ Knobs (``task.fake``, all optional)::
      "signal_at": {"stage", "step", "file": "pause.signal"},
                                            # drop a control file at that step
      "fail_at": {"stage", "step"},         # raise at that step
-     "oom_at": {"stage", "step", "batch_tokens"?},
+     "oom_at": {"stage", "step", "batch_tokens"?, "message"?, "wrapped"?},
                                            # raise an OutOfMemoryError there
-                                           # (stage "load": in the model load)
+                                           # (stage "load": in the model load);
+                                           # "message" replaces its text,
+                                           # "wrapped" re-raises it inside a
+                                           # RuntimeError (raise ... from)
      "total_vram_gib": float,              # the fake card, default 31.84
      "text_layers": int,                   # base text layers, default 36
      "gguf_layers": int,                   # layers the dummy GGUF carries
@@ -48,6 +51,18 @@ from metascan.workers import writer_train_worker as w
 FAKE_TOTAL_VRAM_GIB = 31.84
 FAKE_LOADED_GIB = 16.4
 _STAGE_EXTRA_GIB = {"sft": 3.0, "dpo": 6.5, "eval": 0.8, "convert": 0.0}
+
+
+def _raise_oom(spec: Dict[str, Any], default: str) -> None:
+    message = spec.get("message")
+    exc = OutOfMemoryError(message if isinstance(message, str) else default)
+    if not spec.get("wrapped"):
+        raise exc
+    try:
+        raise exc
+    except OutOfMemoryError as inner:
+        # A library wrapping the OOM: the outer type and text say nothing.
+        raise RuntimeError("backward pass failed") from inner
 
 
 class OutOfMemoryError(RuntimeError):
@@ -122,7 +137,7 @@ class FakeBackend:
         self.probe.set_gib(FAKE_LOADED_GIB + 0.6)  # load-time transient
         spec = self.knobs.get("oom_at")
         if isinstance(spec, dict) and spec.get("stage") == "load":
-            raise OutOfMemoryError("CUDA out of memory (fake load)")
+            _raise_oom(spec, "CUDA out of memory (fake load)")
         self.probe.set_gib(FAKE_LOADED_GIB)
         ctx.load_end()
         self._loaded = True
@@ -210,7 +225,7 @@ class FakeBackend:
             if oom:
                 ctx.note_batch_tokens(oom.get("batch_tokens"))
                 self.probe.set_gib(FAKE_LOADED_GIB + extra + 9.0)
-                raise OutOfMemoryError("CUDA out of memory (fake)")
+                _raise_oom(oom, "CUDA out of memory (fake)")
             self.probe.set_gib(FAKE_LOADED_GIB + extra)
             loss = round(2.0 / (1.0 + 0.1 * step), 4)
             if step % every == 0:
