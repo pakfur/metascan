@@ -13,6 +13,10 @@ Knobs (``task.fake``, all optional)::
      "signal_at": {"stage", "step", "file": "pause.signal"},
                                            # drop a control file at that step
      "fail_at": {"stage", "step"},         # raise at that step
+     "oom_at": {"stage", "step", "batch_tokens"?},
+                                           # raise an OutOfMemoryError there
+                                           # (stage "load": in the model load)
+     "total_vram_gib": float,              # the fake card, default 31.84
      "text_layers": int,                   # base text layers, default 36
      "gguf_layers": int,                   # layers the dummy GGUF carries
      "gguf_extra_names": [str],            # extra GGUF tensor names
@@ -21,6 +25,11 @@ Knobs (``task.fake``, all optional)::
 Length filter: an example "fits" when the whitespace-separated words of
 system + user + completion number at most ``max_seq_len`` (a stand-in for
 tokens); the rest are dropped and counted like the real backend does.
+
+Memory: a deterministic :class:`FakeMemoryProbe` (16.4 GiB after the
+model load, SFT ~ +3 GiB, DPO ~ +6.5 GiB) feeds the same profile recorder
+the real backend's torch probe does; the VRAM cap is recorded (never
+enforced). Token lengths are the word counts.
 
 Every executed step is appended to ``<out_dir>/fake_trace.txt`` as
 ``<stage>:<step>`` so tests can see what ran (and what a resume skipped).
@@ -33,7 +42,49 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from metascan.workers import writer_train_profile as wp
 from metascan.workers import writer_train_worker as w
+
+FAKE_TOTAL_VRAM_GIB = 31.84
+FAKE_LOADED_GIB = 16.4
+_STAGE_EXTRA_GIB = {"sft": 3.0, "dpo": 6.5, "eval": 0.8, "convert": 0.0}
+
+
+class OutOfMemoryError(RuntimeError):
+    """Named like ``torch.cuda.OutOfMemoryError`` (the worker detects it
+    by name)."""
+
+
+class FakeMemoryProbe:
+    """Allocator counters the fake sets by hand (bytes)."""
+
+    def __init__(self) -> None:
+        self._alloc = 0.0
+        self._reserved = 0.0
+        self._peak_alloc = 0.0
+        self._peak_reserved = 0.0
+
+    def set_gib(self, alloc_gib: float, headroom_gib: float = 1.25) -> None:
+        self._alloc = alloc_gib * wp.GIB
+        self._reserved = (alloc_gib + headroom_gib) * wp.GIB
+        self._peak_alloc = max(self._peak_alloc, self._alloc)
+        self._peak_reserved = max(self._peak_reserved, self._reserved)
+
+    def reset_peak(self) -> None:
+        self._peak_alloc = self._alloc
+        self._peak_reserved = self._reserved
+
+    def allocated(self) -> Optional[float]:
+        return self._alloc
+
+    def reserved(self) -> Optional[float]:
+        return self._reserved
+
+    def peak_allocated(self) -> Optional[float]:
+        return self._peak_alloc
+
+    def peak_reserved(self) -> Optional[float]:
+        return self._peak_reserved
 
 
 class FakeBackend:
@@ -42,6 +93,39 @@ class FakeBackend:
         self.knobs: Dict[str, Any] = dict(task.fake)
         self.sleep = float(self.knobs.get("step_sleep_s") or 0.0)
         self.trace = task.out_dir / "fake_trace.txt"
+        self.probe = FakeMemoryProbe()
+        self._loaded = False
+
+    def setup(self, ctx: "w.StageContext") -> None:
+        from metascan.workers.writer_train_backend import VL_TARGET_REGEX
+
+        total = float(self.knobs.get("total_vram_gib", FAKE_TOTAL_VRAM_GIB))
+        ctx.profile.update_environment(
+            gpu_name="Fake GPU (no CUDA)",
+            total_vram_gib=round(total, 2),
+            nominal_vram_gb=wp.nominal_vram_gb(total),
+            compute_capability="12.0",
+        )
+        frac = wp.vram_cap_fraction(self.task.vram_cap_gb, total)
+        ctx.profile.update_config(
+            attn_implementation="sdpa",
+            lora_target_regex=VL_TARGET_REGEX,
+            vram_cap_applied=frac is not None,
+            vram_cap_fraction=None if frac is None else round(frac, 4),
+        )
+        ctx.profile.set_probe(self.probe)
+
+    def _load(self, ctx: "w.StageContext") -> None:
+        if self._loaded:
+            return
+        ctx.load_begin()
+        self.probe.set_gib(FAKE_LOADED_GIB + 0.6)  # load-time transient
+        spec = self.knobs.get("oom_at")
+        if isinstance(spec, dict) and spec.get("stage") == "load":
+            raise OutOfMemoryError("CUDA out of memory (fake load)")
+        self.probe.set_gib(FAKE_LOADED_GIB)
+        ctx.load_end()
+        self._loaded = True
 
     # -- helpers --------------------------------------------------------
 
@@ -92,6 +176,17 @@ class FakeBackend:
     ) -> List[Dict[str, Any]]:
         kept = [ex for ex in examples if all(self._fits(ex, k) for k in keys)]
         ctx.dropped[kind] = len(examples) - len(kept)
+        if kind in ("sft", "dpo"):
+            ctx.token_lengths(
+                kind,
+                [
+                    max(
+                        len(f"{ex['system']} {ex['user']} {ex[k]}".split())
+                        for k in keys
+                    )
+                    for ex in kept
+                ],
+            )
         return kept
 
     def _loop(
@@ -110,6 +205,13 @@ class FakeBackend:
                 fh.write(f"{stage}:{step}\n")
             if self._match("fail_at", stage, step):
                 raise w.TrainWorkerError(f"fake failure at {stage} step {step}")
+            extra = _STAGE_EXTRA_GIB[stage] + 0.05 * (step % 7)
+            oom = self._match("oom_at", stage, step)
+            if oom:
+                ctx.note_batch_tokens(oom.get("batch_tokens"))
+                self.probe.set_gib(FAKE_LOADED_GIB + extra + 9.0)
+                raise OutOfMemoryError("CUDA out of memory (fake)")
+            self.probe.set_gib(FAKE_LOADED_GIB + extra)
             loss = round(2.0 / (1.0 + 0.1 * step), 4)
             if step % every == 0:
                 self._save_checkpoint(ctx, stage, step, loss)
@@ -139,6 +241,7 @@ class FakeBackend:
         resume_from: Optional[Path],
         save_to: Path,
     ) -> bool:
+        self._load(ctx)
         if not self._keep(ctx, examples, ("chosen",), "sft"):
             return False
         self._loop(ctx, "sft", resume_from)
@@ -153,6 +256,7 @@ class FakeBackend:
         resume_from: Optional[Path],
         save_to: Path,
     ) -> bool:
+        self._load(ctx)
         if not self._keep(ctx, examples, ("chosen", "rejected"), "dpo"):
             return False
         self._loop(ctx, "dpo", resume_from)
@@ -165,6 +269,7 @@ class FakeBackend:
         holdout: List[Dict[str, Any]],
         adapter_dir: Path,
     ) -> Tuple[Optional[float], Optional[float]]:
+        self._load(ctx)
         holdout = self._keep(ctx, holdout, ("chosen", "rejected"), "holdout")
         if not holdout:
             return None, None
@@ -175,11 +280,14 @@ class FakeBackend:
             longer = len(ex["chosen"]) > len(ex["rejected"])
             adapter += int(longer)
             base += int(not longer)
+            self.probe.set_gib(FAKE_LOADED_GIB + _STAGE_EXTRA_GIB["eval"])
             ctx.report("eval", i)
         n = len(holdout)
         return adapter / n, base / n
 
     def convert(self, ctx: "w.StageContext", peft_dir: Path, gguf_path: Path) -> str:
+        self.probe.set_gib(0.0, headroom_gib=0.0)  # the real one frees VRAM
+        self.probe.reset_peak()
         gguf_path.write_bytes(b"GGUF\x03\x00\x00\x00fake-lora")
         return str(self.knobs.get("converter_path") or "direct")
 

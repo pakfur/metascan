@@ -301,6 +301,9 @@ def _build_training_manager(
             "training", event, data
         ),
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
+        vram_cap=lambda: (load_app_config().get("models") or {}).get(
+            "writer_train_vram_cap_gb"
+        ),
         on_gpu_released=on_gpu_released,
         on_completed=on_completed,
     )

@@ -42,6 +42,7 @@ import asyncio
 import collections
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -76,6 +77,8 @@ from metascan.core.writer_adapters import (
     STATUS_TRAINING,
     adapter_dir,
 )
+from backend.services import training_profiles
+from metascan.workers import writer_train_profile as wprof
 from metascan.workers import writer_train_worker as ww
 from metascan.workers.writer_train_probe import TRL_CHECK, parse_trl_probe
 
@@ -157,6 +160,57 @@ def resolve_hyperparams(
     except ww.TrainWorkerError as exc:
         raise TrainingError(422, "invalid_hyperparams", message=str(exc)) from exc
     return hp
+
+
+def _valid_cap(value: Any) -> Optional[float]:
+    """A cap in GiB inside the worker's range, 0 / None = off; else raises
+    ``ValueError``."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("not a number")
+    v = float(value)
+    if not math.isfinite(v):
+        raise ValueError("not finite")
+    if v == 0:
+        return None
+    if not wprof.VRAM_CAP_MIN_GB <= v <= wprof.VRAM_CAP_MAX_GB:
+        raise ValueError("out of range")
+    return v
+
+
+def config_vram_cap(value: Any) -> Optional[float]:
+    """``models.writer_train_vram_cap_gb`` validated; a bad value is
+    ignored (logged), never fatal."""
+    try:
+        return _valid_cap(value)
+    except ValueError:
+        logger.warning(
+            "models.writer_train_vram_cap_gb=%r ignored (needs %g..%g GB, or 0/null)",
+            value,
+            wprof.VRAM_CAP_MIN_GB,
+            wprof.VRAM_CAP_MAX_GB,
+        )
+        return None
+
+
+def resolve_vram_cap(requested: Any, config_value: Any) -> Optional[float]:
+    """The VRAM-cap rehearsal of one run: ``requested`` None -> the config
+    default; 0 -> off (beats the config); else ``VRAM_CAP_MIN_GB`` ..
+    ``VRAM_CAP_MAX_GB`` GiB (422 ``invalid_vram_cap`` otherwise). The
+    worker applies it only below the card's real total; the gate still
+    checks the real card."""
+    if requested is None:
+        return config_vram_cap(config_value)
+    try:
+        return _valid_cap(requested)
+    except ValueError:
+        raise TrainingError(
+            422,
+            "invalid_vram_cap",
+            min=wprof.VRAM_CAP_MIN_GB,
+            max=wprof.VRAM_CAP_MAX_GB,
+        ) from None
 
 
 def scope_slug(scope: str, categories: Dict[int, str]) -> str:
@@ -409,6 +463,7 @@ class TrainingManager:
         probe: Optional[ProbeFn] = None,
         now: Optional[Callable[[], datetime]] = None,
         summary_ttl_s: float = 30.0,
+        vram_cap: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.db = db
         self.data_dir = Path(data_dir)
@@ -445,6 +500,8 @@ class TrainingManager:
         # One build per scope at a time: concurrent cold callers share it.
         self._summary_inflight: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
         self._summary_generation = 0
+        # models.writer_train_vram_cap_gb (raw; validated per run).
+        self._vram_cap = vram_cap or (lambda: None)
 
     # ---- GPU lock -------------------------------------------------------
 
@@ -689,6 +746,7 @@ class TrainingManager:
         init_adapter_dir: Optional[str],
         start_from: Any,
         render_scorecard: bool,
+        vram_cap_gb: Optional[float] = None,
     ) -> _Active:
         """Register the adapter (``training``) and the run, write the JSONL
         files and task.json. Synchronous."""
@@ -721,6 +779,7 @@ class TrainingManager:
             "start_from": "fresh" if init_adapter_dir is None else str(start_from),
             "render_scorecard": bool(render_scorecard),
             "data_cutoff": built.built_at,
+            "vram_cap_gb": vram_cap_gb,
         }
         run_id = self.db.create_training_run(
             adapter_id, status=RUN_RUNNING, options=options
@@ -755,6 +814,7 @@ class TrainingManager:
             "resume": False,
             "hyperparams": hyperparams,
             "init_adapter_dir": init_adapter_dir,
+            "vram_cap_gb": vram_cap_gb,
             "meta": {
                 "counts": built.counts.to_dict(),
                 "scope": built.scope,
@@ -796,13 +856,16 @@ class TrainingManager:
         overrides: Optional[Dict[str, Any]] = None,
         start_from: Any = "fresh",
         render_scorecard: bool = False,
+        vram_cap_gb: Any = None,
     ) -> int:
         """Start a fresh run; returns its id. Raises :class:`TrainingError`
         (409 ``already_training`` / ``gate_unavailable`` / ``not_ready`` /
-        ``gpu_busy``; 422 for bad input)."""
+        ``gpu_busy``; 422 for bad input). ``vram_cap_gb``: None = the
+        config's ``models.writer_train_vram_cap_gb``, 0 = off."""
         async with self._op_lock:
             self._refuse_if_running()
             hyperparams = resolve_hyperparams(effort, overrides)
+            cap = resolve_vram_cap(vram_cap_gb, self._config_cap())
             await self._require_gate()
             norm, _ = await asyncio.to_thread(self._normalize_scope, scope)
             init_dir = await asyncio.to_thread(self._init_adapter_dir, start_from, norm)
@@ -819,6 +882,7 @@ class TrainingManager:
                     init_dir,
                     start_from,
                     render_scorecard,
+                    cap,
                 )
                 self._active = active
                 self.invalidate_dataset_summary()
@@ -1141,8 +1205,26 @@ class TrainingManager:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _verdict(self, rc: int, result: Dict[str, Any]) -> str:
+        """The attempt's outcome as :meth:`_finish` will treat it."""
+        if rc == ww.EXIT_OK and result.get("status") == "ok":
+            return "completed"
+        if rc == ww.EXIT_CANCELLED:
+            return "cancelled"
+        if rc == ww.EXIT_PAUSED or self._closing:
+            return "paused"
+        return "oom" if result.get("error_code") == "oom" else "failed"
+
     async def _finish(self, active: _Active, rc: int) -> None:
         result = await asyncio.to_thread(self._read_result, active)
+        # Before any outcome handler: cancel / completion delete the run dir.
+        await asyncio.to_thread(
+            training_profiles.record_attempt,
+            self.data_dir,
+            active,
+            verdict=self._verdict(rc, result),
+            exit_code=rc,
+        )
         status = result.get("status")
         if rc == ww.EXIT_OK and status == "ok":
             await self._complete(active, result)
@@ -1371,6 +1453,31 @@ class TrainingManager:
             "gpu_locked": self._gpu_held,
             "run": run,
         }
+
+    def _config_cap(self) -> Any:
+        try:
+            return self._vram_cap()
+        except Exception:
+            logger.exception("Reading models.writer_train_vram_cap_gb failed")
+            return None
+
+    def vram_cap_info(self) -> Dict[str, Any]:
+        """The rehearsal knob for the window: the config default (validated)
+        and the choices."""
+        return {
+            "default": config_vram_cap(self._config_cap()),
+            "choices": list(wprof.VRAM_CAP_CHOICES),
+            "min": int(wprof.VRAM_CAP_MIN_GB),
+        }
+
+    def profiles(self) -> Dict[str, Any]:
+        """``GET /api/writers/training/profiles``: the bounded history
+        (newest first) and the current run's live profile, else the last
+        attempt's. Read-only, no GPU lock. Synchronous."""
+        active = self._active
+        return training_profiles.profiles_payload(
+            self.data_dir, active.run_dir if active is not None else None
+        )
 
     def resumable_runs(self) -> List[Dict[str, Any]]:
         """Paused / failed runs, newest first, with their adapter's name.

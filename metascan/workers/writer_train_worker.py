@@ -31,6 +31,9 @@ Task (JSON)::
      "converter": {"python": str, "script": str},   # required for real
      "init_adapter_dir": str | null,  # optional: continue an existing
                                       # PEFT adapter instead of a fresh one
+     "vram_cap_gb": float | null,     # optional VRAM-cap rehearsal (GiB,
+                                      # 8..1024; applied only below the
+                                      # card; not in the resume fingerprint)
      "meta": {...},              # optional, merged into meta.json
                                  # (e.g. {"counts": DatasetCounts.to_dict()})
      "fake": {...}}              # fake backend knobs (writer_train_fake)
@@ -46,7 +49,9 @@ Outputs in ``out_dir``:
      "loss": float | null, "holdout_agreement": float | null,
      "base_agreement": float | null, "eta_s": float | null,
      "last_checkpoint_step": int | null,       # overall step
-     "last_checkpoint_at": iso | null, "updated_at": iso}
+     "last_checkpoint_at": iso | null, "updated_at": iso,
+     "alloc_gib": float | null, "peak_gib": float | null,  # this stage
+     "vram_cap_gb": float | null}              # the cap applied, if any
 
 * ``result.json``::
 
@@ -54,6 +59,7 @@ Outputs in ``out_dir``:
      "adapter_dir": str | null, "gguf_path": str | null,
      "meta_path": str | null, "holdout_agreement": float | null,
      "base_agreement": float | null, "error": str | null,
+     "error_code": "oom" | null,               # oom: out of GPU memory
      "stage": str | null, "step": int | null,  # paused: where (stage-local)
      "resumed_from": {"stage", "step"} | null,
      "n_sft": int, "n_pref": int, "n_holdout": int,
@@ -98,6 +104,9 @@ Cancel deletes the checkpoints and partial outputs, consumes
 ``cancel.signal`` and exits 4. The parent should empty ``control_dir``
 before spawning a run.
 
+``profile.json``: the attempt's VRAM / time / data-shape profile, numbers
+only (schema in ``writer_train_profile``).
+
 Exit codes: 0 ok, 1 error (result.json carries it when ``out_dir`` is
 known), 2 usage, 3 paused, 4 cancelled.
 
@@ -120,6 +129,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
+
+from metascan.workers import writer_train_profile as wp
 
 logger = logging.getLogger("writer_train_worker")
 
@@ -304,6 +315,24 @@ class TrainTask:
     init_adapter_dir: Optional[str]
     meta: Dict[str, Any]
     fake: Dict[str, Any]
+    vram_cap_gb: Optional[float] = None
+
+
+def parse_vram_cap(value: Any) -> Optional[float]:
+    """``None`` or a GiB figure in ``[VRAM_CAP_MIN_GB, VRAM_CAP_MAX_GB]``."""
+    if value is None:
+        return None
+    lo, hi = wp.VRAM_CAP_MIN_GB, wp.VRAM_CAP_MAX_GB
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not lo <= float(value) <= hi
+    ):
+        raise TrainWorkerError(
+            f"task.vram_cap_gb must be null or a number in [{lo:g}, {hi:g}]"
+        )
+    return float(value)
 
 
 def _str_field(task: Mapping[str, Any], key: str, required: bool = True) -> str:
@@ -368,6 +397,7 @@ def parse_task(raw: Any) -> TrainTask:
         init_adapter_dir=init,
         meta=dict(meta),
         fake=dict(fake),
+        vram_cap_gb=parse_vram_cap(raw.get("vram_cap_gb")),
     )
 
 
@@ -554,8 +584,10 @@ class StageContext:
         control: Control,
         totals: Dict[str, int],
         progress_every: int,
+        profile: Optional[wp.ProfileRecorder] = None,
     ) -> None:
         self.out_dir = out_dir
+        self.profile = profile if profile is not None else wp.ProfileRecorder(None)
         self.control = control
         self.totals = totals
         self.progress_every = max(1, progress_every)
@@ -597,7 +629,26 @@ class StageContext:
         # The ETA clock starts at the first step reported after this (model
         # load and data preparation are not training speed).
         self._t0 = None
+        self.profile.stage_begin(stage, step)
         self.flush()
+
+    def end_stage(self, completed: bool = True, **extra: Any) -> None:
+        """The current stage is over (profile entry + write)."""
+        self.profile.set_dropped(self.dropped)
+        self.profile.stage_end(completed=completed, **extra)
+
+    # Profile hooks for the backends (numbers only).
+    def load_begin(self) -> None:
+        self.profile.load_begin()
+
+    def load_end(self) -> None:
+        self.profile.load_end()
+
+    def token_lengths(self, stage: str, lengths: Sequence[int]) -> None:
+        self.profile.set_token_lengths(stage, list(lengths))
+
+    def note_batch_tokens(self, n: Optional[int]) -> None:
+        self.profile.note_batch_tokens(n)
 
     def report(
         self, stage: str, step: int, loss: Optional[float] = None, force: bool = False
@@ -606,6 +657,7 @@ class StageContext:
         self.stage_step = int(step)
         if loss is not None:
             self.loss = float(loss)
+        self.profile.sample(stage, self.stage_step, loss)
         if self._t0 is None and stage in ("sft", "dpo"):
             self._t0 = (time.monotonic(), self.overall_step())
         if force or self.stage_step % self.progress_every == 0:
@@ -646,9 +698,16 @@ class StageContext:
                 "last_checkpoint_step": self.last_checkpoint_step,
                 "last_checkpoint_at": self.last_checkpoint_at,
                 "updated_at": _now_iso(),
+                **self.profile.memory_now(),
+                "vram_cap_gb": self._applied_cap(),
             },
         )
         self._writes += 1
+
+    def _applied_cap(self) -> Optional[float]:
+        cfg = self.profile.data["config"]
+        cap = cfg.get("vram_cap_gb")
+        return cap if cfg.get("vram_cap_applied") else None
 
 
 class Backend(Protocol):
@@ -684,6 +743,10 @@ class Backend(Protocol):
     def gguf_tensor_names(self, gguf_path: Path) -> List[str]: ...
 
     def expected_lora_tensors(self) -> int: ...
+
+    # Optional: ``setup(ctx)`` runs once before any stage (environment,
+    # memory probe, VRAM cap -- the real backend applies the cap before it
+    # loads the model).
 
 
 def make_backend(task: TrainTask) -> Backend:
@@ -869,6 +932,7 @@ def _blank_result() -> Dict[str, Any]:
         "holdout_agreement": None,
         "base_agreement": None,
         "error": None,
+        "error_code": None,
         "stage": None,
         "step": None,
         "resumed_from": None,
@@ -1003,15 +1067,68 @@ def _stop_check(ctx: StageContext, stage: str) -> None:
         raise Paused(stage, 0)
 
 
+def _profile_config(task: TrainTask) -> Dict[str, Any]:
+    hp = task.hyperparams
+    effort = task.meta.get("effort")
+    return {
+        "backend": task.backend,
+        "method": METHOD,
+        "preset": effort if effort in EFFORT_PRESETS else None,
+        "rank": hp["rank"],
+        "alpha": hp["lora_alpha"],
+        "dropout": hp["lora_dropout"],
+        "lr": hp["lr"],
+        "dpo_lr": hp["dpo_lr"],
+        "epochs": hp["epochs"],
+        "batch_size": hp["batch_size"],
+        "grad_accum": hp["grad_accum"],
+        "beta": hp["beta"],
+        "max_seq_len": hp["max_seq_len"],
+        "dtype": "bfloat16",
+        "gradient_checkpointing": True,
+        "attn_implementation": None,  # the backend records what it used
+        "lora_target_regex": None,
+        "vram_cap_gb": task.vram_cap_gb,
+        "vram_cap_applied": False,
+        "vram_cap_fraction": None,
+    }
+
+
+_OUTCOME = {
+    EXIT_OK: "completed",
+    EXIT_PAUSED: "paused",
+    EXIT_CANCELLED: "cancelled",
+}
+
+
 def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
     """Run (or resume) the task; returns ``(exit code, result)``. Errors
     after the task parsed come back as an error result carrying the stage,
-    step and counts reached."""
+    step and counts reached. Every attempt leaves ``profile.json``."""
+    profile = wp.ProfileRecorder(
+        task.out_dir / wp.PROFILE_NAME,
+        run_id=task.meta.get("run_id"),
+        resumed=task.resume,
+        config=_profile_config(task),
+    )
+    code, result = _execute(task, profile)
+    if result.get("error_code") == "oom":
+        outcome = "oom"
+    else:
+        outcome = _OUTCOME.get(code, "failed")
+    profile.finish(outcome, code)
+    return code, result
+
+
+def _execute(
+    task: TrainTask, profile: wp.ProfileRecorder
+) -> Tuple[int, Dict[str, Any]]:
     result = _blank_result()
     control = Control(task.control_dir)
     ctx: Optional[StageContext] = None
     try:
         task.out_dir.mkdir(parents=True, exist_ok=True)
+        profile.write()
         if control.check() == "cancel":
             _clean_cancelled(task)
             control.consume(CANCEL_SIGNAL)
@@ -1021,6 +1138,7 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
         result.update(
             n_sft=len(data.sft), n_pref=len(data.prefs), n_holdout=len(data.holdout)
         )
+        profile.set_counts(len(data.sft), len(data.prefs), len(data.holdout))
         logger.info(
             "writer train: %s backend, %d SFT, %d preference, %d holdout example(s)",
             task.backend,
@@ -1040,6 +1158,7 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
             control,
             dict(state.data.get("totals") or totals),
             progress_every,
+            profile,
         )
         ctx.dropped.update(state.data.get("dropped") or {})
         ctx.holdout_agreement = state.data.get("holdout_agreement")
@@ -1050,6 +1169,7 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
                 if ck is not None:
                     step = checkpoint_step(ck)
                     result["resumed_from"] = {"stage": state.stage, "step": step}
+                    profile.set_resumed_from(state.stage, step)
                     ctx.last_checkpoint_step = ctx._offset(state.stage) + step
             logger.info("writer train: resuming at stage %s", state.stage)
         code = _run_stages(task, data, state, ctx, result)
@@ -1067,7 +1187,19 @@ def execute(task: TrainTask) -> Tuple[int, Dict[str, Any]]:
         result.update(status="cancelled", stage=ctx.stage if ctx else None)
         return EXIT_CANCELLED, result
     except Exception as e:
-        result.update(status="error", error=_report_failure(e))
+        if wp.is_oom_error(e):
+            stage = ctx.stage if ctx is not None else "load"
+            # stage_step is the last step that finished: the failing one is next.
+            step = ctx.stage_step if ctx is not None else 0
+            if profile.loading:
+                stage, step = "load", 0
+            elif stage in ("sft", "dpo", "eval"):
+                step += 1
+            message = profile.record_oom(stage, step)
+            logger.error("writer train failed: %s", message)
+            result.update(status="error", error=message, error_code="oom")
+        else:
+            result.update(status="error", error=_report_failure(e))
         if ctx is not None:
             result.update(
                 stage=ctx.stage,
@@ -1086,6 +1218,9 @@ def _run_stages(
     result: Dict[str, Any],
 ) -> int:
     backend = make_backend(task)
+    setup = getattr(backend, "setup", None)
+    if callable(setup):
+        setup(ctx)
     peft_dir = task.out_dir / PEFT_DIRNAME
     gguf = task.out_dir / GGUF_NAME
     max_len = task.hyperparams["max_seq_len"]
@@ -1105,6 +1240,7 @@ def _run_stages(
                     "SFT skipped",
                     max_len,
                 )
+            ctx.end_stage()
         state.update(
             stage="dpo",
             sft_adapter_dir=sft_adapter,
@@ -1120,7 +1256,9 @@ def _run_stages(
         reference: Optional[str] = (
             "sft_adapter" if sft_adapter else ("init_adapter" if init else "base")
         )
-        if backend.train_dpo(ctx, data.prefs, init, ck, peft_dir):
+        trained = backend.train_dpo(ctx, data.prefs, init, ck, peft_dir)
+        ctx.end_stage()
+        if trained:
             logger.info("writer train: DPO done")
         else:
             why = (
@@ -1159,6 +1297,7 @@ def _run_stages(
         ctx.begin("eval", len(data.holdout))
         h, b = backend.evaluate(ctx, data.holdout, peft_dir)
         ctx.holdout_agreement, ctx.base_agreement = h, b
+        ctx.end_stage(holdout_agreement=h, base_agreement=b)
         logger.info(
             "writer train: holdout agreement %s (base %s) over %d pair(s)",
             "n/a" if h is None else f"{h:.3f}",
@@ -1177,6 +1316,7 @@ def _run_stages(
     )
     logger.info("writer train: GGUF adapter has %d LoRA tensor(s) (%s)", count, path)
     ctx.report("convert", 1, force=True)
+    ctx.end_stage()
 
     meta_path = _write_meta(task, data, state, peft_dir, path, count)
     try:
