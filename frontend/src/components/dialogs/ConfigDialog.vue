@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { fetchConfig, updateConfig } from '../../api/config'
 import ConfigModelsTab from './ConfigModelsTab.vue'
+import ConfigTrainingTab from './ConfigTrainingTab.vue'
 import ConfigI2VTab from './ConfigI2VTab.vue'
 import ConfigT2ITab from './ConfigT2ITab.vue'
 
@@ -14,7 +15,7 @@ interface DirEntry {
   search_subfolders: boolean
 }
 
-type TabKey = 'directories' | 'models' | 'i2v' | 't2i'
+type TabKey = 'directories' | 'models' | 'training' | 'i2v' | 't2i'
 
 const activeTab = ref<TabKey>('directories')
 
@@ -82,6 +83,13 @@ async function saveDirectories() {
           @click="activeTab = 'models'"
         >
           Models
+        </button>
+        <button
+          class="tab"
+          :class="{ active: activeTab === 'training' }"
+          @click="activeTab = 'training'"
+        >
+          Training
         </button>
         <button
           class="tab"
@@ -163,6 +171,13 @@ async function saveDirectories() {
 
       <div v-else-if="activeTab === 'models'" class="tab-panel">
         <ConfigModelsTab />
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="emit('close')">Close</button>
+        </div>
+      </div>
+
+      <div v-else-if="activeTab === 'training'" class="tab-panel">
+        <ConfigTrainingTab />
         <div class="dialog-actions">
           <button class="btn-secondary" @click="emit('close')">Close</button>
         </div>
