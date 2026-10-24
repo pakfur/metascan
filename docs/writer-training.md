@@ -107,6 +107,40 @@ Training owns the GPU, so Metascan stops everything else that would use it and r
 
 Real training has not yet been timed on the target hardware, so treat this as a rough guess to be corrected by your first runs: **Standard on an RTX 5090 is on the order of an hour for a few thousand examples**, Quick well under that, Thorough a few times longer. The window shows steps, an ETA (after the first steps), the loss curve and "checkpoint N min ago". Model loading and tokenizing happen before the first step.
 
+## Training profiles (VRAM and performance)
+
+Every training attempt (a start or a resume) records what it used, so runs can be tuned and so there is evidence for supporting 16 and 24 GB cards later. The record is **numbers only**: counts, token lengths, timings, memory, versions and settings. It never holds prompt, brief, example or completion text, so it is safe to share.
+
+**Where it lives**
+
+- `data/training/runs/<run_id>/out/profile.json`: the current attempt, rewritten atomically at the start, at the end of every stage, every 30 s during a stage and at exit (completed, paused, cancelled, failed or out of memory). It goes with the run directory (deleted when the run completes, is cancelled or its adapter is deleted).
+- `data/logs/writer_training_profiles.json`: the history, `{"schema": 1, "max_entries": 50, "profiles": [...]}`, oldest first. When an attempt ends the server adds its profile (without the timeline, with `adapter_id` and `adapter_name`), keeps the **newest 50** and rewrites the file atomically, so it stays at a few hundred KB. It is a capped document, not a growing log, and it survives adapter deletion. A corrupt file is renamed `writer_training_profiles.json.corrupt-<time>` and a fresh history starts.
+- `data/logs/writer_training_last_profile.json`: the full profile of the most recent attempt, timeline included.
+
+**What is recorded** (`"schema": 1`)
+
+| Section | Contents |
+|---|---|
+| `attempt` | `run_id`, start and end time (UTC), `wall_s`, `outcome` (`completed`, `paused`, `cancelled`, `failed`, `oom`), `exit_code`, `resumed`, `resumed_from_stage` / `resumed_from_step`. `ended_by: "server"` when the worker was stopped before it could write its exit. |
+| `environment` | OS, Python, GPU name, total VRAM (GiB as torch reports it) and the nominal size (`nominal_vram_gb`, e.g. 32), compute capability, CUDA runtime, driver version (from `nvidia-smi` when present), versions of torch, transformers, peft, trl, accelerate, datasets and bitsandbytes (`null` when not installed). |
+| `config` | rank, alpha, dropout, lr, dpo_lr, epochs, batch_size, grad_accum, beta, max_seq_len, dtype, gradient checkpointing, the attention implementation actually used, the LoRA target regex, the effort preset, `vram_cap_gb` / `vram_cap_applied` / `vram_cap_fraction`. |
+| `dataset` | Counts (SFT, preference pairs trained on, holdout), examples dropped as too long per stage, and token-length statistics of the examples actually trained per stage: `n`, `min`, `p50`, `p90`, `p95`, `p99`, `max` (system + request + answer; for DPO the longer of chosen and rejected). |
+| `stages` | One entry per stage run in the attempt (`load`, `sft`, `dpo`, `eval`, `convert`): `wall_s`, steps done, samples/s and tokens/s (an estimate: steps x batch x accumulation, times the mean trained length), peak allocated and peak reserved GiB (the peak is reset at each stage start), `allocated_after_load_gib` for `load`, first and last loss for SFT and DPO, holdout and base agreement for `eval`. `completed: false` marks a stage the attempt stopped in. |
+| `timeline` | Per stage, at most 200 samples of `{step, t_s, loss, alloc_gib, reserved_gib}`. When a stage fills them, every other sample is dropped and the sampling interval doubles, so a long stage keeps its whole shape (first and last step included). Only in `profile.json` and the last-profile file, not in the history. |
+| `oom` | For an out-of-memory failure: the stage and step, the token length of the failing batch when known, peak allocated / reserved, allocated and reserved at failure, total VRAM and the VRAM cap. |
+
+The training window shows the live `VRAM <now> / peak <peak> GiB` of the current stage, and the adapter list shows each adapter's peak VRAM (the attempt that completed it) and total training time. **Training profiles** under the adapter list downloads `GET /api/writers/training/profiles` (the history newest first plus the current or last attempt with its timeline) as `writer-training-profiles-<date>.json`.
+
+**Rehearsing a smaller card**
+
+Set **Advanced → Simulate VRAM cap (GB)** to 16, 20, 24 or 28 for one run (or `models.writer_train_vram_cap_gb` in `config.json` as the default; **Off** overrides the config). The worker limits its own GPU memory with `torch.cuda.set_per_process_memory_fraction(cap / total)` before loading the model, so a 32 GB card behaves like a smaller one; the run panel shows `VRAM cap: 24 GB (rehearsal)`. The cap is in the units the card reports (GiB, the number printed on the card); it must be at least 8 and is applied only when it is below the card's real memory (otherwise it is recorded with `vram_cap_applied: false`). It does not change the gate, which still checks the real card, and a resume may use a different cap (each attempt records its own).
+
+To report back: run Quick with the cap you want to test, then send the downloaded profiles JSON.
+
+**Reading an OOM entry**
+
+An attempt that runs out of GPU memory fails with "Ran out of GPU memory during `<stage>` at step `<n>` (peak `<x>` GiB of `<y>`)", where `<y>` is the cap when one was applied, else the card. Its profile has `outcome: "oom"` and an `oom` section: compare `peak_allocated_gib` with the cap, and `batch_tokens` (when known) with the `p99` / `max` token lengths of that stage. A run that fails near the longest examples needs a shorter `max_seq_len` or more memory; one that fails at the start of a stage needs a smaller base footprint. The failed run keeps its checkpoints and can be resumed (for example with the cap off).
+
 ## Using an adapter
 
 A finished adapter shows up in the **Writer** menu of the T2I dialog as `name · date · NN% fav`, where the rate is its favorite rate on its blind scorecard (left out until a scorecard image of it is judged), plus `· untested · n/30` (judged pairs) until the scorecard promotes it. **Base** shows `baseline · NN% fav`, the base writer's rate on the same scorecards. Training creates T2I adapters only, so the I2V dialog's Writer menu offers Base. Details:
@@ -149,6 +183,7 @@ A "ready" adapter that scores no better than the base is your call: delete it, o
 | Resume says `worker_alive` or `worker_unverifiable` | A training process from before a crash is still running; the message gives the PID |
 | Base weights delete refused (`training_uses_base`) | A running, paused or failed run uses them; cancel those runs first |
 | `adapter_loading` on a prompt | The writer is busy loading a new adapter; retry once the batch ends |
+| Training failed with "Ran out of GPU memory…" | The run needed more VRAM than the card (or the rehearsal cap); see [Reading an OOM entry](#training-profiles-vram-and-performance) and resume with the cap off |
 | Converter row shows a release mismatch | The adapter GGUF may not match your `llama-server`; rebuild or re-download so both come from a similar llama.cpp version |
 
 Developer rules for this subsystem are in [`.claude/rules/writer-training.md`](../.claude/rules/writer-training.md) and [`.claude/rules/vlm-llama.md`](../.claude/rules/vlm-llama.md).

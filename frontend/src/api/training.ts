@@ -3,6 +3,7 @@ import type {
   BriefsStatus,
   DatasetPreview,
   StartTrainingRequest,
+  TrainingProfiles,
   TrainingStatus,
 } from '../types/training'
 
@@ -58,4 +59,9 @@ export function fetchBriefsStatus(): Promise<BriefsStatus> {
 
 export function cancelBriefs(): Promise<{ status: string }> {
   return post<{ status: string }>('/writers/briefs/cancel')
+}
+
+/** Training profiles: the bounded history (newest first) + the current/last attempt with its timeline. Numbers only. */
+export function fetchTrainingProfiles(): Promise<TrainingProfiles> {
+  return get<TrainingProfiles>('/writers/training/profiles')
 }

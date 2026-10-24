@@ -7,12 +7,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, w
 import { useTrainingStore, trainingErrorText } from '../../stores/training'
 import { useCategoriesStore } from '../../stores/categories'
 import { anyViewerOpen } from '../../composables/useViewerPresence'
-import { fetchDatasetPreview } from '../../api/training'
+import { fetchDatasetPreview, fetchTrainingProfiles } from '../../api/training'
 import {
   DEFAULT_CLAMPS,
   OVERRIDE_KEYS,
   TRAINING_EFFORTS,
   clampOverride,
+  formatDuration,
   formatEta,
   type DatasetPreview,
   type Hyperparams,
@@ -235,6 +236,13 @@ function onOverrideBlur(k: OverrideKey) {
   overrides[k] = Number.isFinite(n) ? String(clampOverride(k, n, clamps.value)) : ''
 }
 
+// VRAM-cap rehearsal: '' = the config default, '0' = off, else GB.
+const vramCap = ref('')
+const capInfo = computed(() => status.value?.vram_cap ?? { default: null, choices: [16, 20, 24, 28], min: 8 })
+const capDefaultLabel = computed(() =>
+  capInfo.value.default ? `Default (config: ${capInfo.value.default} GB)` : 'Default (off)',
+)
+
 const resolved = computed<Hyperparams | null>(() => (preset.value ? { ...preset.value, ...parsedOverrides() } : null))
 const overridesDiffer = computed(() => {
   const p = preset.value
@@ -306,6 +314,7 @@ function onStart() {
       overrides: overridesDiffer.value ? parsedOverrides() : undefined,
       start_from: startFrom.value,
       render_scorecard: renderScorecard.value,
+      ...(vramCap.value === '' ? {} : { vram_cap_gb: Number(vramCap.value) }),
     }),
   )
 }
@@ -379,6 +388,19 @@ const sparkPath = computed(() => {
     })
     .join(' ')
 })
+function fmtGib(v: number | null | undefined): string {
+  return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(1) : '—'
+}
+const vramText = computed(() => {
+  const p = progress.value
+  if (!p || (typeof p.alloc_gib !== 'number' && typeof p.peak_gib !== 'number')) return null
+  return `VRAM ${fmtGib(p.alloc_gib)} / peak ${fmtGib(p.peak_gib)} GiB`
+})
+const capText = computed(() => {
+  const cap = progress.value?.vram_cap_gb
+  return typeof cap === 'number' ? `VRAM cap: ${cap} GB (rehearsal)` : null
+})
+
 const lastLoss = computed(() => {
   const l = progress.value?.loss
   return typeof l === 'number' ? l.toFixed(3) : null
@@ -474,12 +496,49 @@ function adapterNote(a: WriterAdapter): string {
   }
   const r = runByAdapter.value.get(a.id)
   if (a.status === 'paused' && r) return r.step !== null ? `step ${r.step}${r.total_steps ? ` / ${r.total_steps}` : ''}` : 'paused'
-  if (a.status === 'failed') return a.error ? a.error.slice(0, 60) : 'failed'
+  if (a.status === 'failed') {
+    if (!a.error) return 'failed'
+    return a.error.startsWith('Ran out of GPU memory') ? a.error : a.error.slice(0, 60)
+  }
   if (typeof a.holdout_agreement === 'number') {
     const base = typeof a.base_agreement === 'number' ? ` (base ${pctText(a.base_agreement)})` : ''
     return `holdout ${pctText(a.holdout_agreement)}${base}`
   }
   return ''
+}
+
+/** "peak 27.3 GiB · 1h 05m" from the training profiles (when recorded). */
+function profileText(a: WriterAdapter): string {
+  const st = training.profileStats.get(a.id)
+  if (!st) return ''
+  const parts: string[] = []
+  if (st.peak_gib !== null) parts.push(`peak ${st.peak_gib.toFixed(1)} GiB`)
+  const t = formatDuration(st.train_s)
+  if (t && st.train_s > 0) parts.push(t)
+  return parts.join(' · ')
+}
+
+// Download the profiles (numbers only, safe to share) as a JSON file.
+const profilesBusy = ref(false)
+async function onDownloadProfiles() {
+  profilesBusy.value = true
+  actionError.value = null
+  try {
+    const data = await fetchTrainingProfiles()
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `writer-training-profiles-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (e) {
+    actionError.value = trainingErrorText(e)
+  } finally {
+    profilesBusy.value = false
+  }
 }
 
 const renamingId = ref<number | null>(null)
@@ -656,6 +715,15 @@ function onRecheck() {
                 />
                 <span class="dim">{{ fmtClamp(k, clamps[k][0]) }}–{{ fmtClamp(k, clamps[k][1]) }}</span>
               </label>
+              <label class="adv-f">
+                <span>Simulate VRAM cap (GB)</span>
+                <select v-model="vramCap" class="sel" :disabled="training.runActive" data-testid="training-vram-cap">
+                  <option value="">{{ capDefaultLabel }}</option>
+                  <option value="0">Off</option>
+                  <option v-for="c in capInfo.choices" :key="c" :value="String(c)">{{ c }} GB</option>
+                </select>
+                <span class="dim" title="Limits this run's GPU memory to rehearse a smaller card; the 32 GB check still applies to the real card">rehearsal</span>
+              </label>
               <div v-if="overridesDiffer" class="warn adv-warn" data-testid="training-override-warning">
                 ⚠ Differs from the {{ effort }} preset. Untested settings can overfit or stall; the server clamps them into range.
               </div>
@@ -672,6 +740,11 @@ function onRecheck() {
                 (base {{ pctText(progress?.base_agreement) }})
                 · {{ checkpointAgo }}
                 <template v-if="formatEta(progress?.eta_s)"> · ~{{ formatEta(progress?.eta_s) }} left</template>
+              </div>
+              <div v-if="vramText || capText" class="dim" data-testid="training-vram">
+                <template v-if="vramText">{{ vramText }}</template>
+                <template v-if="vramText && capText"> · </template>
+                <template v-if="capText">{{ capText }}</template>
               </div>
               <div class="spark" :title="lastLoss ? `loss ${lastLoss}` : 'loss'">
                 <svg v-if="sparkPath" viewBox="0 0 100 40" preserveAspectRatio="none">
@@ -767,7 +840,10 @@ function onRecheck() {
                   </template>
                 </td>
                 <td><span class="st" :class="STATUS_CLASS[a.status] ?? ''">{{ a.status }}</span></td>
-                <td class="dim small note" :title="a.error ?? ''">{{ adapterNote(a) }}</td>
+                <td class="dim small note" :title="a.error ?? ''">
+                  {{ adapterNote(a) }}
+                  <div v-if="profileText(a)" class="small" :data-testid="`adapter-profile-${a.id}`">{{ profileText(a) }}</div>
+                </td>
                 <td class="dim nowrap" :title="scorecardTitle(a)" :data-testid="`adapter-fav-${a.id}`">
                   {{ scorecardFav(a) }}
                   <div v-if="judgedText(a)" class="small">{{ judgedText(a) }}</div>
@@ -817,6 +893,18 @@ function onRecheck() {
             base vs adapter, same seeds). Scorecard images hide their writer until you favorite or pass them;
             an untested adapter becomes ready at {{ readyPairs }} judged pairs (both images favorited or
             passed; seen alone does not count).
+          </div>
+          <div class="dim small foot">
+            <button
+              class="lnk"
+              :disabled="profilesBusy"
+              title="VRAM, time and data shape of recent training attempts (numbers only, no prompt text) as JSON"
+              data-testid="training-profiles-download"
+              @click="onDownloadProfiles"
+            >
+              Training profiles
+            </button>
+            (download: VRAM and timing of recent runs)
           </div>
         </section>
       </div>
