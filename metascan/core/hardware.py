@@ -508,10 +508,11 @@ class WriterTrainingPaths:
 
 
 _training_paths: Optional[WriterTrainingPaths] = None
-# Probe results per training interpreter: (deps_reason, trl_reason); "" = ok.
 # Probe results per training interpreter: python -> (deps_reason,
-# trl_reason, expires_at). "" = ok. A definitive answer never expires
-# (expires_at None); a probe that could not run is kept PROBE_FAILURE_TTL_S.
+# trl_reason, expires_at). "" = ok. Only a passing answer never expires
+# (expires_at None); anything else -- missing deps, an old TRL, a probe that
+# could not run -- is kept PROBE_FAILURE_TTL_S, so installing the deps while
+# the server runs is picked up without a restart.
 _training_probe_cache: Dict[str, Tuple[str, str, Optional[float]]] = {}
 PROBE_FAILURE_TTL_S = 60.0
 
@@ -530,19 +531,6 @@ def clear_writer_training_probe_cache(python: Optional[str] = None) -> None:
         _training_probe_cache.pop(python, None)
 
 
-# A probe that could not run (timeout, missing interpreter, crash) says
-# nothing definitive: it is reported but never cached.
-_PROBE_FAILURE_PREFIXES = (
-    "could not run",
-    "the training dependency probe failed",
-    "the TRL probe failed",
-)
-
-
-def _probe_failed(reason: str) -> bool:
-    return reason.startswith(_PROBE_FAILURE_PREFIXES)
-
-
 def cached_training_probe(python: str) -> Optional[Tuple[str, str]]:
     """The cached ``(deps_reason, trl_reason)`` for ``python``, or None
     when never probed or a cached failure has expired."""
@@ -559,17 +547,21 @@ def cached_training_probe(python: str) -> Optional[Tuple[str, str]]:
 
 
 def store_training_probe(python: str, deps: str, trl: str) -> None:
-    """Cache a probe result: definitive answers for good, probe failures
-    (timeouts, crashes) for ``PROBE_FAILURE_TTL_S`` only."""
+    """Cache a probe result: a pass for good, anything else (missing deps,
+    an old TRL, timeouts, crashes) for ``PROBE_FAILURE_TTL_S`` only."""
     import time
 
-    failed = _probe_failed(deps) or _probe_failed(trl)
-    expires = time.monotonic() + PROBE_FAILURE_TTL_S if failed else None
+    passed = not deps and not trl
+    expires = None if passed else time.monotonic() + PROBE_FAILURE_TTL_S
     _training_probe_cache[python] = (deps, trl, expires)
 
 
-def parse_deps_probe(returncode: Optional[int], stdout: str) -> str:
-    """The owner-facing reason from the deps probe's exit code + stdout."""
+def parse_deps_probe(
+    returncode: Optional[int], stdout: str, python: Optional[str] = None
+) -> str:
+    """The owner-facing reason from the deps probe's exit code + stdout.
+    ``python`` (the interpreter probed) is named in the missing-deps reason
+    with the exact install command, so a pip run into another venv shows."""
     lines = (stdout or "").strip().splitlines()
     try:
         info = json.loads(lines[-1]) if lines else None
@@ -578,10 +570,13 @@ def parse_deps_probe(returncode: Optional[int], stdout: str) -> str:
     if returncode != 0 or not isinstance(info, dict):
         return f"the training dependency probe failed (exit {returncode})"
     if info.get("missing"):
-        return (
-            "training dependencies not installed: "
-            f"{', '.join(info['missing'])} ({_DEPS_HINT})"
-        )
+        missing = ", ".join(info["missing"])
+        if python:
+            return (
+                f"training dependencies not installed for {python}: {missing} "
+                f'(run "{python}" -m {_DEPS_HINT})'
+            )
+        return f"training dependencies not installed: {missing} ({_DEPS_HINT})"
     if info.get("broken"):
         return f"training dependencies fail to import: {', '.join(info['broken'])}"
     return ""
@@ -616,7 +611,7 @@ def probe_training_deps(python: str, timeout: float = 300.0) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"could not run the training dependency probe: {e}"
-    return parse_deps_probe(proc.returncode, proc.stdout)
+    return parse_deps_probe(proc.returncode, proc.stdout, python)
 
 
 def _probe_trl(python: str) -> str:

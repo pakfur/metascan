@@ -112,8 +112,10 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   reports GiB and a 5090 shows 31.8), training deps, the TRL reference probe (skipped when the deps are
   missing), base weights (every shard listed by the index), converter script. The
   deps/TRL probe runs in a single-flight background subprocess per interpreter
-  (`gate.checking`); definitive answers are cached for the process, probe failures for
-  60 s; `GET /api/writers/training?recheck=1` clears the cache. `/api/models/status`
+  (`gate.checking`); only a passing answer is cached for the process, anything else
+  (missing deps, old TRL, probe failures) for 60 s, and every finished probe emits
+  `gate_changed` (the Models tab shows only cached results); the missing-deps reason
+  names the interpreter probed; `GET /api/writers/training?recheck=1` clears the cache. `/api/models/status`
   uses `probe=False` ("not checked yet") and never spawns. `GET .../training?dataset=0`
   is the light status (no dataset build, no `next_name`) the app uses on every WS
   (re)connect; the dataset summary is single-flight per scope with a 30 s cache.
