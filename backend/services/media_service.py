@@ -54,11 +54,13 @@ class MediaService:
         return await asyncio.to_thread(self.db.delete_media, path)
 
     async def set_favorite(self, file_path: str, is_favorite: bool) -> bool:
+        """★ only: the grade and its reasons are never touched."""
         return await asyncio.to_thread(
             self.db.set_favorite, Path(file_path), is_favorite
         )
 
     async def toggle_favorite(self, file_path: str) -> bool:
+        """Flip ★ only (see ``set_favorite``)."""
         return await asyncio.to_thread(self.db.toggle_favorite, Path(file_path))
 
     async def update_playback_speed(self, file_path: str, speed: float) -> bool:

@@ -15,12 +15,14 @@ const props = defineProps<{
   score: number | null
 }>()
 
-const verdict = computed(() => props.judgment?.verdict ?? null)
+// ★ favorite and the grade are independent: both can show at once.
+const favorite = computed(() => props.judgment?.favorite ?? false)
+const grade = computed(() => props.judgment?.grade ?? null)
 
 const reasonsHeader = computed(() => {
-  if (verdict.value === 'favorite') return 'loved for…'
-  if (verdict.value === 'pass') return 'missed on…'
-  return 'reasons (F or X first)'
+  if (grade.value === 'pass') return 'worked on…'
+  if (grade.value === 'fail') return 'missed on…'
+  return 'reasons (X first)'
 })
 
 function isOn(reason: Reason): boolean {
@@ -30,13 +32,14 @@ function isOn(reason: Reason): boolean {
 
 <template>
   <aside class="rating-rail">
-    <div v-if="sticky" class="sticky" title="Sticky category: added on every verdict (C, Shift+Enter)">
+    <div v-if="sticky" class="sticky" title="Sticky category: added on every grade (C, Shift+Enter)">
       📌 {{ sticky.name }}
     </div>
 
-    <span v-if="verdict === 'favorite'" class="verdict fav">★ Favorite</span>
-    <span v-else-if="verdict === 'pass'" class="verdict pass">✕ Pass</span>
-    <span v-else class="verdict none">No verdict</span>
+    <span v-if="favorite" class="marker fav">★ Favorite</span>
+    <span v-if="grade === 'pass'" class="marker grade-pass">✓ Pass</span>
+    <span v-else-if="grade === 'fail'" class="marker grade-fail">✗ Fail</span>
+    <span v-else class="marker none">No grade</span>
 
     <div v-if="score !== null" class="taste-score" title="Learned taste score (0–1)">
       taste {{ score.toFixed(2) }}
@@ -51,8 +54,8 @@ function isOn(reason: Reason): boolean {
       :key="reason"
       class="chip"
       :class="{
-        on: isOn(reason) && verdict === 'favorite',
-        neg: isOn(reason) && verdict === 'pass',
+        on: isOn(reason) && grade === 'pass',
+        neg: isOn(reason) && grade === 'fail',
       }"
     >
       <span class="k">{{ i + 1 }}</span>{{ reason }}
@@ -96,24 +99,29 @@ function isOn(reason: Reason): boolean {
   text-overflow: ellipsis;
 }
 
-.verdict {
+.marker {
   align-self: flex-start;
   padding: 3px 10px;
   border-radius: 12px;
   font-weight: 600;
 }
 
-.verdict.fav {
+.marker.fav {
   background: #c9a227;
   color: #111;
 }
 
-.verdict.pass {
-  background: #444;
-  color: #ccc;
+.marker.grade-pass {
+  background: #2f6f4f;
+  color: #fff;
 }
 
-.verdict.none {
+.marker.grade-fail {
+  background: #6f2f2f;
+  color: #fff;
+}
+
+.marker.none {
   border: 1px dashed #555;
   color: #888;
   font-weight: 400;

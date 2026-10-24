@@ -1,3 +1,4 @@
+import type { Grade } from './judgments'
 import type { Media } from './media'
 import type { ThumbItem } from './jobs'
 import type { AdapterWriterId } from './writers'
@@ -263,7 +264,9 @@ export interface T2iImage {
   prompt_categories?: string[] | null
   /** The writer-adapter scorecard the image was rendered for (null: none). */
   scorecard_id?: string | null
-  /** The image was explicitly passed (a verdict, like is_favorite). */
+  /** ✓ pass / ✗ fail, null when ungraded (independent of is_favorite). */
+  grade?: Grade | null
+  /** The legacy reject flag: the server keeps it equal to grade === 'fail'. */
   passed?: boolean
   /** Server's view at fetch time; the client re-derives it with t2iBlind. */
   scorecard_blind?: boolean

@@ -12,6 +12,8 @@ REASONS: Tuple[str, ...] = (
     "motion",
 )
 
+# The pre-grades favorite-or-reject verdict. Only the test-only
+# ``DatabaseManager.set_verdict`` shim still takes it.
 Verdict = Literal["favorite", "pass"]
 
 # Pass / fail grades (spec 2026-10-24-pass-fail-grades): the only training
@@ -27,9 +29,6 @@ EVENT_GRADE_CLEAR = "grade_clear"
 # "unpass" = reject withdrawn). They stay in the append-only log and are
 # never read as a grade.
 LEGACY_REJECT_EVENTS: Tuple[str, ...] = ("pass", "unpass")
-
-# Minimum gap between two reconfirm events on the same item.
-RECONFIRM_MIN_INTERVAL_S: int = 86_400
 
 # Dwell time before an item counts as seen. Mirrored in the frontend.
 SEEN_DWELL_MS: int = 1000
@@ -139,22 +138,29 @@ class CategoryRef:
 
 @dataclass
 class JudgmentState:
+    """One item's rating as the viewer shows it. ``favorite`` (★, view
+    only) and ``grade`` (✓ pass / ✗ fail / None, the training signal) are
+    independent; ``reasons`` describe the grade and are empty without one;
+    ``judged_at`` is when the grade was last set."""
+
     file_path: str
-    verdict: Optional[Verdict]
+    favorite: bool
+    grade: Optional[Grade]
     reasons: List[str] = field(default_factory=list)
     seen_at: Optional[str] = None
+    judged_at: Optional[str] = None
     confirmed_at: Optional[str] = None
-    is_favorite: bool = False
     categories: List[CategoryRef] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "file_path": self.file_path,
-            "verdict": self.verdict,
+            "favorite": self.favorite,
+            "grade": self.grade,
             "reasons": list(self.reasons),
             "seen_at": self.seen_at,
+            "judged_at": self.judged_at,
             "confirmed_at": self.confirmed_at,
-            "is_favorite": self.is_favorite,
             "categories": [
                 {"id": c.id, "name": c.name}
                 for c in sorted(self.categories, key=lambda c: c.name)

@@ -101,10 +101,10 @@ def test_delete_category_logs_off_for_each_item(db):
 def test_delete_category_keeps_judgments(db):
     db.save_media(_media("/p/a.png"))
     cid = db.create_category("Anime").id
-    db.set_verdict("/p/a.png", "favorite", sticky_category_id=cid)
+    db.set_grade("/p/a.png", "pass", sticky_category_id=cid)
     assert db.delete_category(cid) is True
     s = db.get_judgment("/p/a.png")
-    assert (s.verdict, s.categories) == ("favorite", [])
+    assert (s.grade, s.categories) == ("pass", [])
 
 
 def test_invalid_source_and_unknown_category(db):

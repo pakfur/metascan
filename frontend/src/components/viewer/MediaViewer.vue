@@ -16,10 +16,10 @@ import { useCategoriesStore } from '../../stores/categories'
 import { useTasteStore } from '../../stores/taste'
 import { useToast } from '../../composables/useToast'
 import { ApiError } from '../../api/client'
-import { fetchJudgment, markSeen, setVerdict, setReason } from '../../api/judgments'
+import { fetchJudgment, markSeen, setFavorite, setGrade, setReason } from '../../api/judgments'
 import { addItems, removeItems } from '../../api/categories'
 import { REASONS, SEEN_DWELL_MS } from '../../types/judgments'
-import type { CategoryRef, JudgmentState, Verdict } from '../../types/judgments'
+import type { CategoryRef, Grade, JudgmentState } from '../../types/judgments'
 
 // allowDestructive defaults to true so every existing (desktop library)
 // mount stays byte-identical. The storyboard candidate picker
@@ -41,7 +41,7 @@ import type { CategoryRef, JudgmentState, Verdict } from '../../types/judgments'
 // new generations is exactly where ratings matter most.
 //
 // favoriteMirror lets a mount whose mediaList is a local copy (T2I/I2V
-// keep their own is_favorite) follow every verdict the server returns, so
+// keep their own is_favorite) follow every ★ the server returns, so
 // the dialog's tile star stays correct. It is a plain callback prop, not
 // an emit, because responses can land after the viewer has closed.
 const props = withDefaults(
@@ -52,7 +52,7 @@ const props = withDefaults(
     allowRating?: boolean
     favoriteMirror?: (filePath: string, isFavorite: boolean) => void
     // Every judgment state the server returns (a T2I mount follows the
-    // pass flag too: it un-blinds scorecard tiles).
+    // grade too: it un-blinds scorecard tiles).
     judgmentMirror?: (filePath: string, state: JudgmentState) => void
   }>(),
   { allowDestructive: true, allowRating: false, favoriteMirror: undefined, judgmentMirror: undefined },
@@ -118,11 +118,11 @@ function goPrev() { navigate(-1) }
 // Taste rating (only when ratingEnabled). The viewer owns every
 // judgment request; RatingRail just displays `judgment`.
 //
-// Ordering: every request for one item (the initial GET, seen, verdicts,
+// Ordering: every request for one item (the initial GET, seen, ★, grades,
 // reasons, category toggles) runs on that item's promise chain, so the
 // server sees them in key-press order and responses come back in that
 // order. Each op reads the state the previous op returned (`lastKnown`),
-// which is what makes a fast `F` then `2` work before the first response
+// which is what makes a fast `X` then `2` work before the first response
 // has painted. Every response is tagged with the path it was for and only
 // paints the rail when that path is still the current item.
 // ---------------------------------------------------------------------
@@ -175,22 +175,24 @@ function receive(path: string, incoming: JudgmentState): void {
   refreshBlindDetails(path, state)
   // The server's flag is the truth whether or not this item is still on
   // screen, so the grid star follows even for a stale response.
-  mediaStore.applyFavoriteFlag(path, state.is_favorite)
-  props.favoriteMirror?.(path, state.is_favorite)
+  mediaStore.applyFavoriteFlag(path, state.favorite)
+  props.favoriteMirror?.(path, state.favorite)
   props.judgmentMirror?.(path, state)
   if (!unmounted && path === currentPath.value) judgment.value = state
 }
 
 // A scorecard image is judged blind: no writer, prompt or variant until it
-// has an explicit verdict (favorite or pass).
+// is rated. Mirrors the server's rule, which still lifts the blind on ★ or
+// ✗ (what the old favorite / reject verdict covered) until the scorecard
+// moves to grades.
 function isBlind(state: JudgmentState | null): boolean {
-  return !!state?.scorecard && state.verdict === null && !state.is_favorite
+  return !!state?.scorecard && !state.favorite && state.grade !== 'fail'
 }
 const scorecardBlind = computed(() => isBlind(judgment.value))
 
-// The library details panel shows the record as fetched: once a verdict
+// The library details panel shows the record as fetched: once a rating
 // lifts the blind, fetch it again so the prompt shows; once clearing the
-// verdict puts the image back to blind, fetch it again so the prompt hides.
+// rating puts the image back to blind, fetch it again so the prompt hides.
 function refreshBlindDetails(path: string, state: JudgmentState): void {
   if (!props.allowDestructive || unmounted) return
   const selected = mediaStore.selectedMedia
@@ -230,8 +232,8 @@ function errorCode(e: unknown): string | null {
 
 function onJudgmentError(path: string, e: unknown): void {
   const code = errorCode(e)
-  if (code === 'no_verdict') {
-    showHint(path, 'Press F or X first')
+  if (code === 'no_grade') {
+    showHint(path, 'Press X first')
     return
   }
   if (e instanceof ApiError && e.status === 404 && code === null) {
@@ -285,7 +287,7 @@ watch(
 
 function onVideoPlay(path: string): void {
   if (!ratingEnabled.value || path !== currentPath.value || seenSentForVisit) return
-  if (review.value) return // review mode: explicit verdicts only
+  if (review.value) return // review mode: explicit ratings only
   seenSentForVisit = true
   enqueue(path, () => markSeen(path))
 }
@@ -307,39 +309,45 @@ function shownScore(): number | undefined {
   return score === null ? undefined : Number(score.toFixed(2))
 }
 
-function verdictOpts(): { stickyCategoryId?: number } {
+function gradeOpts(): { stickyCategoryId?: number } {
   const id = categoriesStore.stickyId
   return id === null ? {} : { stickyCategoryId: id }
 }
 
-// F, X and the header star. The toggle reads the state the previous op on
-// this item left behind, so F F F alternates correctly even when typed
-// faster than the server answers.
-function toggleVerdict(target: Verdict): void {
+// Every toggle reads the state the previous op on this item left behind,
+// so X X X (or F F F) alternates correctly even when typed faster than the
+// server answers.
+
+// X: the key of the grade already set clears it. The sticky category
+// rides a grade, never a clear.
+function toggleGrade(target: Grade): void {
   const media = current.value
   if (!ratingEnabled.value || !media) return
   const path = media.file_path
-  const opts = verdictOpts()
+  const opts = gradeOpts()
   const scoreShown = shownScore()
   enqueue(path, (state) => {
-    const isTarget = state
-      ? state.verdict === target
-      : target === 'favorite' && media.is_favorite
-    return setVerdict(path, isTarget ? null : target, {
+    const isTarget = state?.grade === target
+    return setGrade(path, isTarget ? null : target, {
       ...(isTarget ? {} : opts),
       ...(scoreShown === undefined ? {} : { scoreShown }),
     })
   })
 }
 
+// F and the header star: ★ only -- never the grade, its reasons or the
+// scorecard, and no score is sent (★ is not a rating).
 function toggleFavorite(): void {
-  toggleVerdict('favorite')
+  const media = current.value
+  if (!ratingEnabled.value || !media) return
+  const path = media.file_path
+  enqueue(path, (state) => setFavorite(path, !(state ? state.favorite : media.is_favorite)))
 }
 
 // The header star follows the server's answer for the current item when
 // there is one: a T2I/I2V mediaList is a local copy whose is_favorite
 // never changes under the viewer.
-const starOn = computed(() => judgment.value?.is_favorite ?? current.value?.is_favorite ?? false)
+const starOn = computed(() => judgment.value?.favorite ?? current.value?.is_favorite ?? false)
 
 function toggleReason(index: number): void {
   const reason = REASONS[index]
@@ -347,8 +355,8 @@ function toggleReason(index: number): void {
   const path = currentPath.value
   const scoreShown = shownScore()
   enqueue(path, async (state) => {
-    if (!state?.verdict) {
-      showHint(path, 'Press F or X first')
+    if (!state?.grade) {
+      showHint(path, 'Press X first')
       return null
     }
     return setReason(path, reason, !state.reasons.includes(reason), scoreShown)
@@ -554,7 +562,7 @@ function onKeyDown(e: KeyboardEvent) {
         return
       case 'x':
       case 'X':
-        toggleVerdict('pass')
+        toggleGrade('fail')
         return
       case 'c':
       case 'C':
@@ -749,7 +757,7 @@ function formatSize(bytes: number): string {
               <tr><td>← →</td><td>Previous / Next</td></tr>
               <tr><td>Space</td><td>Play / Pause (video)</td></tr>
               <tr v-if="ratingEnabled"><td>F</td><td>Toggle favorite</td></tr>
-              <tr v-if="ratingEnabled"><td>X</td><td>Pass</td></tr>
+              <tr v-if="ratingEnabled"><td>X</td><td>Toggle ✗ Fail</td></tr>
               <tr v-if="ratingEnabled">
                 <td>1–6</td>
                 <td>Toggle reason (realism, composition, emotion, light, concept, motion)</td>

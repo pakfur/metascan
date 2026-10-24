@@ -1,4 +1,4 @@
-import type { JudgmentState, Reason, Verdict } from '../types/judgments'
+import type { Grade, JudgmentState, Reason } from '../types/judgments'
 import { get, post, patch } from './client'
 
 // Paths go through encodeURIComponent like api/media.ts; the backend routes
@@ -18,15 +18,22 @@ export function markSeen(filePath: string, scoreShown?: number): Promise<Judgmen
   return post<JudgmentState>('/judgments/seen', body)
 }
 
-export function setVerdict(
+// Grade ✓ / ✗, or clear it (null). Never touches ★; the sticky category
+// rides a grade.
+export function setGrade(
   filePath: string,
-  verdict: Verdict | null,
+  grade: Grade | null,
   opts: { scoreShown?: number; stickyCategoryId?: number } = {},
 ): Promise<JudgmentState> {
-  const body: Record<string, unknown> = { verdict }
+  const body: Record<string, unknown> = { grade }
   if (opts.scoreShown !== undefined) body.score_shown = opts.scoreShown
   if (opts.stickyCategoryId !== undefined) body.sticky_category_id = opts.stickyCategoryId
   return patch<JudgmentState>(judgmentPath(filePath), body)
+}
+
+// ★ only: never the grade, its reasons or the scorecard.
+export function setFavorite(filePath: string, on: boolean): Promise<JudgmentState> {
+  return patch<JudgmentState>(judgmentPath(filePath), { favorite: on })
 }
 
 export function setReason(

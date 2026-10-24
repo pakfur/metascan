@@ -2,7 +2,9 @@
 // REASONS[0], key 6 is REASONS[5].
 export const REASONS = ['realism', 'composition', 'emotion', 'light', 'concept', 'motion'] as const
 export type Reason = (typeof REASONS)[number]
-export type Verdict = 'favorite' | 'pass'
+// ✓ pass / ✗ fail: the training signal. Independent of ★ favorite (a view
+// marker only); neither ever sets or clears the other.
+export type Grade = 'pass' | 'fail'
 
 export interface CategoryRef {
   id: number
@@ -16,18 +18,21 @@ export interface Category extends CategoryRef {
 
 export interface JudgmentState {
   file_path: string
-  verdict: Verdict | null
+  favorite: boolean
+  grade: Grade | null
+  // What worked (✓) or missed (✗); always empty without a grade.
   reasons: Reason[]
   seen_at: string | null
+  // When the grade was last set.
+  judged_at: string | null
   confirmed_at: string | null
-  is_favorite: boolean
   categories: CategoryRef[]
   // Position of a T2I image in its generation batch. Only GET returns the
   // key (PATCH / seen responses omit it), so undefined means "unknown",
   // not "no batch"; null means the item has no batch.
   batch?: BatchPosition | null
   // A writer-adapter scorecard image (GET only, like `batch`): hidden as
-  // "judge to reveal" until it has a favorite / pass verdict. null: not one.
+  // "judge to reveal" while `blind`. null: not one.
   scorecard?: { id: string; blind: boolean } | null
 }
 

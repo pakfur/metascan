@@ -19,6 +19,17 @@ from metascan.core.media import Media
 T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
+# A seeded pre-grades rating as it reads now, (★ favorite, grade): the
+# ``set_verdict`` shim maps an old favorite to ★ + ✓ and an old pass (a
+# reject) to ✗ without ★.
+FAVORITE = (True, "pass")
+REJECT = (False, "fail")
+
+
+def _marks(state):
+    return (state.favorite, state.grade)
+
+
 def _media(path: str) -> Media:
     return Media(
         file_path=Path(path),
@@ -60,7 +71,7 @@ def test_apply_restores_reappeared_and_keeps_the_rest(db):
     db.save_media(_media("/p/a.png"))
     counts = ts.apply_pending_taste_snapshot(db, Path(db.db_path))
     assert counts == {"restored": 1, "missing": 1}
-    assert db.get_judgment("/p/a.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/p/a.png")) == FAVORITE
     left = json.loads(ts.snapshot_file_path(Path(db.db_path)).read_text())
     assert [j["file_path"] for j in left["judgments"]] == ["/p/b.png"]
     assert db.list_tombstones() == []
@@ -70,7 +81,7 @@ def test_apply_restores_reappeared_and_keeps_the_rest(db):
         "restored": 1,
         "missing": 0,
     }
-    assert db.get_judgment("/p/b.png").verdict == "pass"
+    assert _marks(db.get_judgment("/p/b.png")) == REJECT
     assert not ts.snapshot_file_path(Path(db.db_path)).exists()
 
 
@@ -134,7 +145,7 @@ def test_lifespan_helper_applies_and_never_raises(db, monkeypatch):
     _pending_snapshot(db)
     db.save_media(_media("/p/a.png"))
     asyncio.run(main_mod._apply_pending_taste_snapshot(db, Path(db.db_path)))
-    assert db.get_judgment("/p/a.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/p/a.png")) == FAVORITE
 
     def boom(*a, **k):
         raise RuntimeError("disk gone")
@@ -423,5 +434,7 @@ def test_real_export_shapes_validate_and_restore(db):
         db.get_media_categories("/r/cat.png"),
     )
     assert after == before
-    assert db.get_judgment("/r/bare.png").verdict == "favorite"
-    assert db.get_judgment("/r/pass.png").verdict == "pass"
+    # A ★ with no judgment row comes back as ★ alone: the restore never
+    # derives a grade.
+    assert _marks(db.get_judgment("/r/bare.png")) == (True, None)
+    assert _marks(db.get_judgment("/r/pass.png")) == REJECT

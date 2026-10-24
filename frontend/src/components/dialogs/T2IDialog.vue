@@ -816,11 +816,10 @@ function stopEditing() {
   store.clearSelection()
 }
 
+// ★ only: a favorite is not a rating, so no score goes with it.
 async function onFavorite(item: ThumbItem) {
-  // The score the tile is showing right now, as displayed (two decimals).
-  const scoreShown = item.score == null ? undefined : Number(item.score.toFixed(2))
   try {
-    await store.toggleFavorite(Number(item.id), scoreShown)
+    await store.toggleFavorite(Number(item.id))
   } catch (e) {
     toast.show(errMsg(e), 'warn')
   }

@@ -1,5 +1,6 @@
-"""Service layer for taste judgments (verdicts, reasons, seen) plus the
-FAISS-backed embedding lookup used to snapshot tombstones."""
+"""Service layer for taste judgments (★ favorite, the pass / fail grade,
+reasons, seen) plus the FAISS-backed embedding lookup used to snapshot
+tombstones."""
 
 import asyncio
 import logging
@@ -8,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.judgments import JudgmentState
+from metascan.core.judgments import Grade, JudgmentState
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
@@ -38,21 +39,25 @@ class JudgmentsService:
     ) -> Optional[JudgmentState]:
         return await asyncio.to_thread(self.db.mark_seen, path, None, score_shown)
 
-    async def set_verdict(
+    async def set_grade(
         self,
         path: str,
-        verdict: Optional[str],
+        grade: Optional[Grade],
         score_shown: Optional[float] = None,
         sticky_category_id: Optional[int] = None,
     ) -> Optional[JudgmentState]:
         return await asyncio.to_thread(
-            self.db.set_verdict,
+            self.db.set_grade,
             path,
-            verdict,
+            grade,
             score_shown,
             None,
             sticky_category_id,
         )
+
+    async def set_favorite(self, path: str, on: bool) -> Optional[JudgmentState]:
+        """★ only; never the grade, its reasons or the scorecard."""
+        return await asyncio.to_thread(self.db.set_favorite_state, path, on)
 
     async def set_reason(
         self,

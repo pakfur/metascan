@@ -16,6 +16,18 @@ from metascan.core.media import Media
 T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
+# A seeded pre-grades rating as it reads now, (★ favorite, grade): the
+# ``set_verdict`` shim maps an old favorite to ★ + ✓ and an old pass (a
+# reject) to ✗ without ★.
+FAVORITE = (True, "pass")
+REJECT = (False, "fail")
+UNRATED = (False, None)
+
+
+def _marks(state):
+    return (state.favorite, state.grade)
+
+
 def _media(path: str) -> Media:
     return Media(
         file_path=Path(path),
@@ -85,15 +97,15 @@ def test_full_clean_restores_taste_state_and_tombstones_the_rest(monkeypatch, db
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
 
     fav = db.get_judgment("/lib/fav.png")
-    assert (fav.verdict, fav.reasons, fav.confirmed_at) == (
-        "favorite",
+    assert (_marks(fav), fav.reasons, fav.confirmed_at) == (
+        FAVORITE,
         ["light"],
         T0.isoformat(),
     )
     passed = db.get_judgment("/lib/pass.png")
-    assert (passed.verdict, passed.reasons) == ("pass", ["concept"])
+    assert (_marks(passed), passed.reasons) == (REJECT, ["concept"])
     assert [c.name for c in passed.categories] == ["Landscape"]
-    assert db.get_judgment("/lib/new.png").verdict is None
+    assert _marks(db.get_judgment("/lib/new.png")) == UNRATED
     # No duplicate favorite / pass events from the restore.
     assert db.list_judgment_events() == events_before
     [t] = db.list_tombstones()
@@ -162,8 +174,8 @@ def test_full_clean_cancel_mid_scan_restores_what_came_back(monkeypatch, db):
         scan_api._cancel_requested = False
 
     fav = db.get_judgment("/lib/fav.png")
-    assert (fav.verdict, fav.reasons, fav.confirmed_at) == (
-        "favorite",
+    assert (_marks(fav), fav.reasons, fav.confirmed_at) == (
+        FAVORITE,
         ["light"],
         T0.isoformat(),
     )
@@ -176,9 +188,9 @@ def test_full_clean_cancel_mid_scan_restores_what_came_back(monkeypatch, db):
     _wire(monkeypatch, db, ["/lib/pass.png", "/lib/gone.png"])
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
     passed = db.get_judgment("/lib/pass.png")
-    assert (passed.verdict, passed.reasons) == ("pass", ["concept"])
+    assert (_marks(passed), passed.reasons) == (REJECT, ["concept"])
     assert [c.name for c in passed.categories] == ["Landscape"]
-    assert db.get_judgment("/lib/gone.png").verdict == "pass"
+    assert _marks(db.get_judgment("/lib/gone.png")) == REJECT
     assert db.list_judgment_events() == events_before
     assert db.list_tombstones() == []
     assert _pending(db) is None
@@ -200,7 +212,7 @@ def test_full_clean_scanner_error_restores_what_came_back(monkeypatch, db):
     events = _wire(monkeypatch, db, [], scanner_cls=HalfScanner)
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
 
-    assert db.get_judgment("/lib/fav.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE
     assert db.list_tombstones() == []
     assert _pending_paths(db) == ["/lib/gone.png", "/lib/pass.png"]
     assert ("scan", "error", {"message": "boom"}) in events
@@ -209,7 +221,7 @@ def test_full_clean_scanner_error_restores_what_came_back(monkeypatch, db):
 
     _wire(monkeypatch, db, ["/lib/pass.png", "/lib/gone.png"])
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
-    assert db.get_judgment("/lib/pass.png").verdict == "pass"
+    assert _marks(db.get_judgment("/lib/pass.png")) == REJECT
     assert _pending(db) is None
 
 
@@ -229,7 +241,7 @@ def test_full_clean_shutdown_leaves_pending_file_untouched(monkeypatch, db):
         asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
     assert _pending(db) is not None
     assert _pending_paths(db) == ["/lib/fav.png", "/lib/gone.png", "/lib/pass.png"]
-    assert db.get_judgment("/lib/fav.png").verdict is None  # not restored yet
+    assert _marks(db.get_judgment("/lib/fav.png")) == UNRATED  # not restored yet
     assert db.list_tombstones() == []
 
     # Next startup: the pending file is applied.
@@ -238,7 +250,7 @@ def test_full_clean_shutdown_leaves_pending_file_untouched(monkeypatch, db):
     db.save_media(_media("/lib/pass.png"))
     counts = apply_pending_taste_snapshot(db, Path(db.db_path))
     assert counts["restored"] == 2
-    assert db.get_judgment("/lib/fav.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE
     assert db.get_judgment("/lib/pass.png").reasons == ["concept"]
     assert _pending_paths(db) == ["/lib/gone.png"]
     assert db.list_tombstones() == []
@@ -272,7 +284,7 @@ def test_new_full_clean_merges_a_pending_file(monkeypatch, db):
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
 
     assert seen["paths"] == ["/lib/fav.png", "/lib/gone.png", "/lib/pass.png"]
-    assert db.get_judgment("/lib/fav.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE
     assert sorted(t["file_path"] for t in db.list_tombstones()) == [
         "/lib/gone.png",
         "/lib/pass.png",
@@ -306,7 +318,7 @@ def test_full_clean_aborts_without_deleting_when_snapshot_fails(monkeypatch, db)
     monkeypatch.setattr(db, "export_taste_state", boom)
     events = _wire(monkeypatch, db, [])
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
-    assert db.get_judgment("/lib/fav.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE
     assert any(e[1] == "error" for e in events)
 
 
@@ -344,7 +356,7 @@ def test_full_clean_aborts_when_pending_file_is_unreadable(monkeypatch, db):
     monkeypatch.setattr(Path, "read_text", real_read)
 
     assert json.loads(target.read_text(encoding="utf-8")) == old
-    assert db.get_judgment("/lib/fav.png").verdict == "favorite"  # not truncated
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE  # not truncated
     assert len(db.get_existing_file_paths()) == 3
     errors = [e for e in events if e[1] == "error"]
     assert len(errors) == 1

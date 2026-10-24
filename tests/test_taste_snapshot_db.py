@@ -21,6 +21,17 @@ T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 T1 = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 
+# A seeded pre-grades rating as it reads now, (★ favorite, grade): the
+# ``set_verdict`` shim maps an old favorite to ★ + ✓ and an old pass (a
+# reject) to ✗ without ★.
+FAVORITE = (True, "pass")
+REJECT = (False, "fail")
+
+
+def _marks(state):
+    return (state.favorite, state.grade)
+
+
 @pytest.fixture
 def db(tmp_path):
     mgr = DatabaseManager(tmp_path / "db")
@@ -114,12 +125,12 @@ def test_snapshot_truncate_rescan_restore_roundtrip(db):
     assert favs == [{"file_path": "/l/fav.png"}, {"file_path": "/l/gone.png"}]
     # No new events: the restore is a put-back, not a re-judgment.
     assert _rows(db, "SELECT * FROM judgment_events ORDER BY id") == events
-    # Judgment reads see the original verdicts, reasons and timestamps.
+    # Judgment reads see the original ★, grades, reasons and timestamps.
     fav = db.get_judgment("/l/fav.png")
-    assert fav.verdict == "favorite" and fav.reasons == ["realism", "light"]
+    assert _marks(fav) == FAVORITE and fav.reasons == ["realism", "light"]
     assert fav.confirmed_at == T0.isoformat()
     passed = db.get_judgment("/l/pass.png")
-    assert passed.verdict == "pass" and passed.reasons == ["composition"]
+    assert _marks(passed) == REJECT and passed.reasons == ["composition"]
     assert [c.name for c in passed.categories] == ["Anime", "Sci-Fi"]
     assert db.get_judgment("/l/seen.png").seen_at == T0.isoformat()
     assert before_gone  # sanity: the missing path really carried a judgment
@@ -187,7 +198,7 @@ def test_snapshot_survives_json_roundtrip(db):
     db.truncate_all_data()
     db.save_media(_media("/l/fav.png"))
     assert db.restore_taste_state(snapshot)["restored"] == 1
-    assert db.get_judgment("/l/fav.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/l/fav.png")) == FAVORITE
 
 
 # ----------------------------------------------------------------------
@@ -220,7 +231,7 @@ def test_restore_reports_the_unrestored_remainder(db):
         db.save_media(_media(p))
     again = db.restore_taste_state(json.loads(json.dumps(rem)))
     assert again["restored"] == 2 and again["missing"] == 1
-    assert db.get_judgment("/l/gone.png").verdict == "favorite"
+    assert _marks(db.get_judgment("/l/gone.png")) == FAVORITE
     assert db.get_judgment("/l/pass.png").reasons == ["composition"]
 
 
@@ -245,10 +256,9 @@ def test_restore_never_overwrites_a_newer_judgment(db):
 
     assert counts["restored"] == 2
     fav = db.get_judgment("/l/fav.png")
-    assert fav.verdict == "pass" and fav.confirmed_at == T1.isoformat()
-    assert fav.is_favorite is False
+    assert _marks(fav) == REJECT and fav.confirmed_at == T1.isoformat()
     passed = db.get_judgment("/l/pass.png")
-    assert passed.verdict == "favorite" and passed.reasons == []
+    assert _marks(passed) == FAVORITE and passed.reasons == []
     j2, l2, _ = _state(db)
     assert [j for j in j2] == newer[0]
     # Category links: the existing (newer) link is kept as-is, missing
@@ -265,7 +275,7 @@ def test_restore_never_overwrites_a_newer_judgment(db):
 
 def test_restore_fills_a_seen_only_row(db):
     """Just viewing a re-appeared item (seen-only row) is not a rating:
-    the snapshot verdict still comes back."""
+    the snapshot rating still comes back."""
     _seed(db)
     snapshot = db.export_taste_state()
     db.truncate_all_data()
@@ -275,7 +285,7 @@ def test_restore_fills_a_seen_only_row(db):
     db.restore_taste_state(snapshot)
 
     fav = db.get_judgment("/l/fav.png")
-    assert fav.verdict == "favorite" and fav.is_favorite is True
+    assert _marks(fav) == FAVORITE
     assert fav.reasons == ["realism", "light"]
     assert fav.confirmed_at == T0.isoformat()
     assert fav.seen_at == T0.isoformat()
