@@ -5,6 +5,7 @@ import {
   cancelBriefs,
   cancelTraining,
   fetchBriefsStatus,
+  fetchTrainingProfiles,
   fetchTrainingStatus,
   pauseTraining,
   resumeTraining,
@@ -23,10 +24,11 @@ import type {
   BriefsStatus,
   ResumableRun,
   StartTrainingRequest,
+  TrainingProfiles,
   TrainingProgress,
   TrainingStatus,
 } from '../types/training'
-import { formatEta, progressPct } from '../types/training'
+import { adapterProfileStats, formatEta, progressPct } from '../types/training'
 import type { ScorecardProgress, ScorecardSummary, WriterAdapter } from '../types/writers'
 import { GPU_BUSY_TEXT } from '../utils/gpuBusy'
 
@@ -88,6 +90,8 @@ export function trainingErrorText(e: unknown): string {
       return 'That category no longer exists.'
     case 'invalid_hyperparams':
       return `Invalid Advanced settings${typeof d.message === 'string' ? `: ${d.message}` : '.'}`
+    case 'invalid_vram_cap':
+      return `The VRAM cap must be between ${String(d.min ?? 8)} GB and the card's memory (or Off).`
     case 'invalid_effort':
       return 'Unknown effort preset.'
     case 'training_unavailable':
@@ -156,6 +160,9 @@ export const useTrainingStore = defineStore('training', () => {
   const scorecardRun = ref<ScorecardProgress | null>(null)
   /** The last scorecard outcome line, shown in the window. */
   const scorecardOutcome = ref<string | null>(null)
+  /** Training profiles (VRAM / time per attempt; numbers only), loaded while the window is open. */
+  const profiles = ref<TrainingProfiles | null>(null)
+  const profileStats = computed(() => adapterProfileStats(profiles.value?.profiles ?? []))
 
   const run = computed(() => status.value?.run ?? null)
   const runActive = computed(() => !!run.value && ACTIVE_STATES.has(run.value.state))
@@ -249,6 +256,12 @@ export const useTrainingStore = defineStore('training', () => {
     scorecardRun.value = data.running
   }
 
+  async function loadProfiles(): Promise<TrainingProfiles> {
+    const data = await fetchTrainingProfiles()
+    profiles.value = data
+    return data
+  }
+
   async function loadBriefs(): Promise<void> {
     briefs.value = await fetchBriefsStatus()
   }
@@ -261,6 +274,7 @@ export const useTrainingStore = defineStore('training', () => {
     quietly(load(), 'load the status')
     quietly(loadAdapters(), 'load the adapters')
     quietly(loadScorecards(), 'load the scorecards')
+    if (windowOpen.value) quietly(loadProfiles(), 'load the training profiles')
   }
 
   function setScope(next: string): void {
@@ -520,6 +534,9 @@ export const useTrainingStore = defineStore('training', () => {
     scorecards,
     scorecardRun,
     scorecardOutcome,
+    profiles,
+    profileStats,
+    loadProfiles,
     run,
     runActive,
     locked,

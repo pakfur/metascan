@@ -34,6 +34,11 @@ export interface TrainingProgress {
   last_checkpoint_step?: number | null
   last_checkpoint_at?: string | null
   updated_at?: string
+  /** GPU memory allocated now / peak of the current stage (GiB). */
+  alloc_gib?: number | null
+  peak_gib?: number | null
+  /** The VRAM-cap rehearsal applied to this attempt (GiB), or null. */
+  vram_cap_gb?: number | null
 }
 
 export type RunState = 'running' | 'pausing' | 'cancelling' | 'starting' | string
@@ -109,6 +114,14 @@ export interface TrainingStatus {
   gate: TrainingGate
   presets: Record<TrainingEffort, Hyperparams>
   clamps: Record<OverrideKey, [number, number]>
+  /** The VRAM-cap rehearsal knob: the config default (models.writer_train_vram_cap_gb) and choices. */
+  vram_cap?: VramCapInfo
+}
+
+export interface VramCapInfo {
+  default: number | null
+  choices: number[]
+  min: number
 }
 
 export interface StartTrainingRequest {
@@ -117,6 +130,87 @@ export interface StartTrainingRequest {
   overrides?: Overrides
   start_from: 'fresh' | number
   render_scorecard: boolean
+  /** Omitted: the config default; 0: off; else a cap in GB (rehearse a smaller card). */
+  vram_cap_gb?: number
+}
+
+/** One stage of a training attempt's profile (numbers only). */
+export interface ProfileStage {
+  name: 'load' | 'sft' | 'dpo' | 'eval' | 'convert' | string
+  completed: boolean
+  wall_s: number
+  steps_done: number
+  samples_per_s: number | null
+  tokens_per_s: number | null
+  peak_allocated_gib: number | null
+  peak_reserved_gib: number | null
+  [key: string]: unknown
+}
+
+/** One attempt's profile (worker profile.json, schema 1). Never holds example text. */
+export interface TrainingProfile {
+  schema: number
+  attempt: {
+    run_id: number | null
+    started_at: string
+    ended_at: string | null
+    wall_s: number | null
+    outcome: 'completed' | 'paused' | 'cancelled' | 'failed' | 'oom' | null
+    exit_code: number | null
+    resumed: boolean
+    resumed_from_step: number | null
+    [key: string]: unknown
+  }
+  environment: Record<string, unknown>
+  config: Record<string, unknown>
+  dataset: Record<string, unknown>
+  stages: ProfileStage[]
+  timeline?: Record<string, unknown[]>
+  oom: Record<string, unknown> | null
+  adapter_id?: number | null
+  adapter_name?: string | null
+}
+
+/** GET /api/writers/training/profiles */
+export interface TrainingProfiles {
+  schema: number
+  max_entries: number
+  /** Newest first, without timelines. */
+  profiles: TrainingProfile[]
+  /** The running attempt (live) or the last one, with its timeline. */
+  current: TrainingProfile | null
+}
+
+/** Per adapter: the peak VRAM of the attempt that completed it and the train time of all its attempts. */
+export interface AdapterProfileStats {
+  peak_gib: number | null
+  train_s: number
+}
+
+export function adapterProfileStats(profiles: TrainingProfile[]): Map<number, AdapterProfileStats> {
+  const out = new Map<number, AdapterProfileStats>()
+  for (const p of profiles) {
+    const id = p.adapter_id
+    if (typeof id !== 'number') continue
+    const cur = out.get(id) ?? { peak_gib: null, train_s: 0 }
+    cur.train_s += typeof p.attempt?.wall_s === 'number' ? p.attempt.wall_s : 0
+    if (p.attempt?.outcome === 'completed') {
+      const peaks = (p.stages ?? []).map((s) => s.peak_allocated_gib).filter((v): v is number => typeof v === 'number')
+      if (peaks.length) cur.peak_gib = Math.max(cur.peak_gib ?? 0, ...peaks)
+    }
+    out.set(id, cur)
+  }
+  return out
+}
+
+/** "1h 05m", "12m", "40s" (a duration, not an ETA). */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return ''
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
 /** GET /api/writers/briefs/status */

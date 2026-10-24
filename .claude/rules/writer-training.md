@@ -11,6 +11,7 @@ paths:
   - "metascan/core/writer_adapters.py"
   - "metascan/core/scorecard_blind.py"
   - "metascan/workers/writer_train_*.py"
+  - "backend/services/training_profiles.py"
   - "requirements-train.txt"
   - "data/taste/scorecard_briefs.txt"
   - "frontend/src/stores/training.ts"
@@ -35,7 +36,8 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `import_deps()`); `writer_train_fake.py` is the deterministic `FakeBackend` all server
   tests use (`backend="fake"`). Task file keys: `backend`, `base_dir`, `sft_path`,
   `pref_path`, `holdout_path`, `out_dir`, `checkpoint_dir`, `control_dir`, `data_root`,
-  `resume`, `hyperparams`, `converter {python, script}`, `init_adapter_dir`, `meta`.
+  `resume`, `hyperparams`, `converter {python, script}`, `init_adapter_dir`,
+  `vram_cap_gb`, `meta`.
   `out_dir` / `checkpoint_dir` must be strictly inside `data_root`; every delete goes
   through `safe_rmtree`. Hyperparams outside `CLAMPS` are an error in the worker (the
   manager clamps first); an unknown key is an error. The worker writes `progress.json`,
@@ -43,6 +45,35 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `step`/`total_steps` are overall (SFT + DPO). Drain BOTH stdout and stderr of the
   subprocess. Empty `control_dir` before every spawn. Resume needs the same JSONL files
   and hyperparams (sha256 fingerprint) or it errors.
+- **Training profiles.** Every worker invocation (one attempt) writes
+  `<out_dir>/profile.json` (`writer_train_profile.py`, stdlib, `"schema": 1`; bump it
+  for an incompatible change) at start, each stage end, every 30 s and at exit, through
+  `ProfileRecorder` on `ctx.profile` (`StageContext.begin` / `end_stage` / `report`,
+  `load_begin` / `load_end`, `token_lengths`, `note_batch_tokens`). NUMBERS ONLY: never
+  put prompt / brief / example / completion text (or an exception message) in it;
+  tests plant sentinels and grep profile, result, progress and history. Memory comes
+  from a `MemoryProbe` the backend installs in its optional `setup(ctx)` (real:
+  `TorchMemoryProbe`, the CUDA allocator counters, peak reset per stage; fake:
+  `FakeMemoryProbe`); a profile write failure is logged, never fatal. OOM is detected in
+  the worker by name (`writer_train_profile.is_oom_error`: `OutOfMemoryError` in the MRO
+  or `RuntimeError("... out of memory ...")`) -> `result.error_code = "oom"` and the
+  message "Ran out of GPU memory during <stage> at step <n> (peak <x> GiB of <y>)."
+  (the failing step = last finished + 1; `load` while loading). progress.json carries
+  `alloc_gib`, `peak_gib` (this stage) and `vram_cap_gb` (applied). The manager's
+  `_finish` calls `training_profiles.record_attempt` FIRST (completion / cancel delete
+  the run dir): the profile minus `timeline`, plus `adapter_id` / `adapter_name`, goes
+  into `<data_dir>/logs/writer_training_profiles.json` (newest 50, atomic tmp + fsync +
+  replace: a capped document, not a log stream, so `log_files.py` does not apply),
+  the full one into `writer_training_last_profile.json`; an outcome the worker never
+  wrote gets the manager's verdict + `ended_by: "server"`; a corrupt history is renamed
+  `.corrupt-<ts>` (WARNING). `GET /api/writers/training/profiles` is read-only (no GPU
+  lock). **VRAM cap rehearsal**: `models.writer_train_vram_cap_gb` (default) or
+  `vram_cap_gb` on `POST .../training/start` (0 = off, 8..1024 else 422
+  `invalid_vram_cap`; a bad config value is ignored) -> task key `vram_cap_gb` (not
+  hyperparams, not fingerprinted: a resume keeps the task's value, each attempt
+  records its own). The real backend calls `torch.cuda.set_per_process_memory_fraction
+  (cap / total)` in `setup` before any load, only when cap < the card's total GiB;
+  the gate still checks the real card.
 - **Training recipe (do not change casually).** SFT with `completion_only_loss`, then
   DPO whose reference is the SFT adapter loaded a second time (`ref_adapter_name`), not
   the bare base; `dpo_lr` default 1e-5 (SFT `lr` is the preset's). Presets: quick
