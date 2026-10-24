@@ -998,6 +998,7 @@ class TestImages(T2iApiCase):
                     "comfy_prompt_id",
                     "created_at",
                     "is_favorite",
+                    "grade",
                     "form_state",
                     "writer_id",
                     "variant_group",
@@ -1016,6 +1017,7 @@ class TestImages(T2iApiCase):
         )
         self.assertEqual(newest["file_name"], "b.png")
         self.assertEqual(newest["is_favorite"], False)
+        self.assertIsNone(newest["grade"])
         # Filled from the facts...
         self.assertEqual(
             newest["form_state"],

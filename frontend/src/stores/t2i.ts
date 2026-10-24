@@ -2,7 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useDebounceFn } from '@vueuse/core'
 import * as t2iApi from '../api/t2i'
-import { setVerdict } from '../api/judgments'
+import { setFavorite } from '../api/judgments'
+import type { JudgmentState } from '../types/judgments'
 import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
 import { useJobTracker } from '../composables/useJobTracker'
@@ -780,31 +781,38 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   /**
-   * Follow a favorite flag the server returned elsewhere (the result
-   * viewer's F / X / ☆), so the strip's tile star matches. The library copy
-   * is already handled by the viewer itself.
+   * Copy a judgment the server returned onto a tile: ★, the grade, and the
+   * legacy reject flag the server keeps equal to grade === 'fail' (the
+   * scorecard blind still reads it).
    */
+  function applyState(image: T2iImage, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
+    if (image.is_favorite !== state.favorite) image.is_favorite = state.favorite
+    if (image.grade !== state.grade) image.grade = state.grade
+    const passed = state.grade === 'fail'
+    if (image.passed !== passed) image.passed = passed
+  }
+
   /**
-   * Follow every judgment the result viewer gets back: the favorite AND the
-   * pass flag, so a scorecard tile leaves "judge to reveal" on either verdict.
+   * Follow every judgment the result viewer gets back (its F / X / ☆): ★
+   * AND the grade, so the tile star matches and a scorecard tile leaves
+   * "judge to reveal". The library copy is already handled by the viewer.
    */
-  function applyJudgment(path: string, state: { is_favorite: boolean; verdict: string | null }): void {
+  function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
     for (const image of images.value) {
       if (!samePath(image.file_path, path)) continue
       const wasBlind = t2iBlind(image)
-      if (image.is_favorite !== state.is_favorite) image.is_favorite = state.is_favorite
-      const passed = state.verdict === 'pass'
-      if (image.passed !== passed) image.passed = passed
+      applyState(image, state)
       refetchIfRevealed(image, wasBlind)
     }
   }
 
   // A blind scorecard row came without its prompt and writer (the server
-  // strips them): once a verdict lifts the blind, fetch the full rows.
+  // strips them): once a rating lifts the blind, fetch the full rows.
   function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
     if (wasBlind && !t2iBlind(image)) void refreshImages()
   }
 
+  // Follow a ★ the server returned elsewhere, so the strip's tile star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
     for (const image of images.value) {
       if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
@@ -814,26 +822,20 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   /**
-   * Optimistic; the library copy is updated too. Reverts and rethrows on failure.
-   * Goes through the judgments API like the viewer's F, so the rating log
-   * records `scoreShown` -- the taste score the tile displayed (two decimals),
-   * or nothing when the tile showed none. Unfavoriting clears the verdict.
+   * ★ only, through the judgments API like the viewer's F: no score is sent
+   * and nothing but ★ changes (the grade and its reasons stay). Optimistic;
+   * the library copy is updated too. Reverts and rethrows on failure.
    */
-  async function toggleFavorite(id: number, scoreShown?: number): Promise<void> {
+  async function toggleFavorite(id: number): Promise<void> {
     const image = images.value.find((i) => i.id === id)
     if (!image) return
     const next = !image.is_favorite
     const wasBlind = t2iBlind(image)
     image.is_favorite = next
     try {
-      const state = await setVerdict(
-        image.file_path,
-        next ? 'favorite' : null,
-        scoreShown === undefined ? {} : { scoreShown },
-      )
-      image.is_favorite = state.is_favorite
-      image.passed = state.verdict === 'pass'
-      mirrorFavoriteToLibrary(image.file_path, state.is_favorite)
+      const state = await setFavorite(image.file_path, next)
+      applyState(image, state)
+      mirrorFavoriteToLibrary(image.file_path, state.favorite)
       refetchIfRevealed(image, wasBlind)
     } catch (e) {
       image.is_favorite = !next

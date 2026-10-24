@@ -9,7 +9,6 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
-from backend.services.scorecard import notify_scorecard_judgment
 from metascan.core.scorecard_blind import blind_media_detail
 
 router = APIRouter(prefix="/api", tags=["media"])
@@ -86,10 +85,11 @@ async def update_media(
     body: dict,
     service: MediaService = Depends(_get_service),
 ):
-    """Update media fields (favorite, playback_speed)."""
+    """Update media fields (favorite, playback_speed). ``is_favorite`` is the
+    legacy ★ route: it sets ★ only -- never the grade or its reasons, and
+    never the scorecard check (★ is not a grade)."""
     if "is_favorite" in body:
         await service.set_favorite(file_path, body["is_favorite"])
-        await notify_scorecard_judgment(get_db(), file_path)
     if "playback_speed" in body:
         await service.update_playback_speed(file_path, body["playback_speed"])
     media = await service.get_media(file_path)

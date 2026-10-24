@@ -4,7 +4,7 @@ import type { Media } from '../types/media'
 import type { I2vDraft, I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVideo } from '../types/i2v'
 import { fetchI2vConfig, listI2vTemplates, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
-import { updateMedia } from '../api/media'
+import { setFavorite } from '../api/judgments'
 import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
 
@@ -178,19 +178,21 @@ export const useI2vStore = defineStore('i2v', () => {
     void refreshVideos()
   }
 
+  // ★ only: never the grade, its reasons or the scorecard.
   async function toggleFavorite(video: I2vVideo): Promise<void> {
     const nextVal = !video.is_favorite
     video.is_favorite = nextVal // optimistic
     try {
-      await updateMedia(video.file_path, { is_favorite: nextVal })
+      const state = await setFavorite(video.file_path, nextVal)
+      video.is_favorite = state.favorite
     } catch (e) {
       video.is_favorite = !nextVal
       throw e
     }
   }
 
-  // Follow a favorite flag the server returned from the result viewer's
-  // F / X / ☆ so the strip's star matches.
+  // Follow a ★ the server returned from the result viewer's F / ☆ so the
+  // strip's star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
     for (const v of videos.value) {
       if (norm(v.file_path) === norm(path) && v.is_favorite !== favorite) {

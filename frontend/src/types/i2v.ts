@@ -1,3 +1,4 @@
+import type { Grade } from './judgments'
 import type { AdapterWriterId } from './writers'
 /**
  * The EDITABLE copy of the dialog's form kept on each clip. Seeded from the
@@ -53,6 +54,8 @@ export interface I2vVideo {
   comfy_prompt_id: string | null
   created_at: string
   is_favorite: boolean
+  // ✓ pass / ✗ fail, null when ungraded (independent of is_favorite).
+  grade?: Grade | null
   // As-rendered facts, null for clips ingested before they were recorded.
   megapixels: number | null
   loras: { name: string; strength: number }[] | null

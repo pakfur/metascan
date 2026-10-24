@@ -20,9 +20,13 @@ from metascan.core.writer_adapters import parse_adapter_writer_id
 from metascan.core.judgments import (
     CATEGORY_NAME_MAX,
     CATEGORY_SOURCES,
+    EVENT_GRADE_CLEAR,
+    EVENT_GRADE_FAIL,
+    EVENT_GRADE_PASS,
+    GRADES,
     REASONS,
-    RECONFIRM_MIN_INTERVAL_S,
     CategoryRef,
+    Grade,
     JudgmentState,
     Verdict,
 )
@@ -4599,15 +4603,18 @@ class DatabaseManager:
 
     def list_i2v_videos(self, source_path: str) -> List[Dict[str, Any]]:
         """Videos generated from one source image, newest first, with
-        media.is_favorite merged in. Rows whose media row no longer
-        exists (deleted from the library) are pruned in the same call --
-        the JOIN is the referential integrity here, by design."""
+        media.is_favorite and the grade (None when ungraded) merged in.
+        Rows whose media row no longer exists (deleted from the library)
+        are pruned in the same call -- the JOIN is the referential
+        integrity here, by design."""
         posix = to_posix_path(source_path)
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT v.*, m.file_path AS media_path, m.is_favorite "
+                "SELECT v.*, m.file_path AS media_path, m.is_favorite, "
+                "j.grade AS judged_grade "
                 "FROM i2v_videos v "
                 "LEFT JOIN media m ON m.file_path = v.file_path "
+                "LEFT JOIN media_judgments j ON j.file_path = v.file_path "
                 "WHERE v.source_path = ? ORDER BY v.id DESC",
                 (posix,),
             ).fetchall()
@@ -4619,6 +4626,7 @@ class DatabaseManager:
                     stale.append(int(d["id"]))
                     continue
                 d["is_favorite"] = bool(d.get("is_favorite"))
+                d["grade"] = self._row_grade(d)
                 out.append(d)
             if stale:
                 conn.execute(
@@ -4746,15 +4754,22 @@ class DatabaseManager:
     # media LEFT JOIN: a NULL media_path marks a row whose media is gone.
     _T2I_IMAGE_SELECT: ClassVar[str] = (
         "SELECT t.*, m.file_path AS media_path, m.is_favorite, "
-        "j.passed AS judged_passed "
+        "j.passed AS judged_passed, j.grade AS judged_grade "
         "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path "
         "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
     )
 
     @staticmethod
+    def _row_grade(d: Dict[str, Any]) -> Optional[Grade]:
+        """Pop ``judged_grade`` off a list row: the stored grade, else None."""
+        grade = d.pop("judged_grade", None)
+        return grade if grade in GRADES else None
+
+    @staticmethod
     def _t2i_image_row(row: Any) -> Dict[str, Any]:
         """One _T2I_IMAGE_SELECT row as the API shape: native path plus
-        file_name, is_favorite as a bool, and the two JSON columns parsed.
+        file_name, is_favorite as a bool, the grade (None when ungraded),
+        and the JSON columns parsed.
         Unparseable or wrong-shape JSON reads as None so a single bad row
         can never break the dialog's strip."""
         import json as _json
@@ -4765,6 +4780,9 @@ class DatabaseManager:
         d["file_path"] = to_native_path(posix)
         d["file_name"] = posix.rsplit("/", 1)[-1]
         d["is_favorite"] = bool(d.get("is_favorite"))
+        d["grade"] = DatabaseManager._row_grade(d)
+        # The legacy reject flag (kept equal to grade == 'fail' until the
+        # column is dropped).
         d["passed"] = bool(d.pop("judged_passed", None))
         # A scorecard image with no explicit verdict yet: the dialog hides
         # its writer, variant and prompt until it is favorited or passed.
@@ -5640,34 +5658,36 @@ class DatabaseManager:
     def _read_judgment(
         self, conn: sqlite3.Connection, posix_path: str
     ) -> Optional[JudgmentState]:
+        """★ from ``media.is_favorite``, the grade and its reasons from
+        ``media_judgments.grade`` -- never from the legacy ``passed`` column
+        or any event. Reasons describe the grade: none without one."""
         media = conn.execute(
             "SELECT is_favorite FROM media WHERE file_path = ?", (posix_path,)
         ).fetchone()
         if media is None:
             return None
         row = conn.execute(
-            "SELECT passed, reasons, seen_at, confirmed_at "
+            "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
             "FROM media_judgments WHERE file_path = ?",
             (posix_path,),
         ).fetchone()
-        is_fav = bool(media["is_favorite"])
-        passed = bool(row["passed"]) if row is not None else False
-        verdict: Optional[Verdict] = (
-            "favorite" if is_fav else ("pass" if passed else None)
-        )
+        grade: Optional[Grade] = None
+        if row is not None and row["grade"] in GRADES:
+            grade = row["grade"]
         reasons: List[str] = []
-        if row is not None and verdict is not None:
+        if row is not None and grade is not None:
             try:
                 reasons = [r for r in json.loads(row["reasons"]) if r in REASONS]
             except (TypeError, ValueError):
                 reasons = []
         return JudgmentState(
             file_path=posix_path,
-            verdict=verdict,
+            favorite=bool(media["is_favorite"]),
+            grade=grade,
             reasons=reasons,
             seen_at=row["seen_at"] if row is not None else None,
+            judged_at=row["judged_at"] if row is not None else None,
             confirmed_at=row["confirmed_at"] if row is not None else None,
-            is_favorite=is_fav,
             categories=self._read_media_categories(conn, posix_path),
         )
 
@@ -5679,51 +5699,90 @@ class DatabaseManager:
             (posix_path,),
         )
 
-    def _apply_verdict(
+    _GRADE_EVENTS: ClassVar[Dict[Optional[str], str]] = {
+        "pass": EVENT_GRADE_PASS,
+        "fail": EVENT_GRADE_FAIL,
+        None: EVENT_GRADE_CLEAR,
+    }
+
+    @staticmethod
+    def _write_grade(
+        conn: sqlite3.Connection, posix_path: str, grade: Optional[Grade], ts: str
+    ) -> None:
+        """Store a new (or cleared) grade: the reasons go (they described
+        the other grade), ``judged_at = confirmed_at = ts``, ``seen_at`` if
+        unset. Interim until the legacy column is dropped: ``passed``
+        mirrors ``grade == 'fail'`` (the old reject) for the readers not
+        yet on grades. Caller holds the lock and commits."""
+        DatabaseManager._ensure_judgment_row(conn, posix_path)
+        conn.execute(
+            "UPDATE media_judgments SET grade = ?, passed = ?, reasons = '[]', "
+            "judged_at = ?, confirmed_at = ?, seen_at = COALESCE(seen_at, ?) "
+            "WHERE file_path = ?",
+            (grade, 1 if grade == "fail" else 0, ts, ts, ts, posix_path),
+        )
+
+    def _apply_grade(
         self,
         conn: sqlite3.Connection,
         posix_path: str,
-        verdict: Optional[Verdict],
+        grade: Optional[Grade],
         score_shown: Optional[float],
         now: Optional[datetime],
     ) -> Optional[JudgmentState]:
-        """Set the verdict and log events. Caller holds the lock and commits."""
+        """Set the grade; never touches ★. The same grade again refreshes
+        ``confirmed_at`` only (re-grading restarts the decay clock) and logs
+        nothing; a change or a clear logs ``grade_pass`` / ``grade_fail`` /
+        ``grade_clear`` with ``score_shown``. Clearing an ungraded item is
+        a no-op. Caller holds the lock and commits."""
         current = self._read_judgment(conn, posix_path)
         if current is None:
             return None
         ts = self._iso(now)
-        if verdict == current.verdict:
-            if verdict is not None:
-                self._ensure_judgment_row(conn, posix_path)
+        if grade == current.grade:
+            if grade is not None:
                 conn.execute(
                     "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
                     (ts, posix_path),
                 )
             return self._read_judgment(conn, posix_path)
+        self._log_judgment_event(
+            conn, posix_path, self._GRADE_EVENTS[grade], ts, score_shown
+        )
+        self._write_grade(conn, posix_path, grade, ts)
+        return self._read_judgment(conn, posix_path)
 
-        log = self._log_judgment_event
-        if current.verdict == "favorite":
-            log(conn, posix_path, "unfavorite", ts, score_shown)
-        elif current.verdict == "pass":
-            log(conn, posix_path, "unpass", ts, score_shown)
-        if verdict == "favorite":
-            log(conn, posix_path, "favorite", ts, score_shown)
-        elif verdict == "pass":
-            log(conn, posix_path, "pass", ts, score_shown)
-
+    def _apply_favorite(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        is_favorite: bool,
+        now: Optional[datetime],
+    ) -> bool:
+        """Set ★ only: ``media.is_favorite`` plus a ``favorite`` /
+        ``unfavorite`` event when it changes. Never touches the grade, its
+        reasons or any judgment timestamp; ★ is not a rating, so the event
+        carries no score. False when the media row is missing. Caller holds
+        the lock and commits."""
+        row = conn.execute(
+            "SELECT is_favorite FROM media WHERE file_path = ?", (posix_path,)
+        ).fetchone()
+        if row is None:
+            return False
+        if bool(row["is_favorite"]) == is_favorite:
+            return True
         conn.execute(
             "UPDATE media SET is_favorite = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE file_path = ?",
-            (1 if verdict == "favorite" else 0, posix_path),
+            (1 if is_favorite else 0, posix_path),
         )
-        self._ensure_judgment_row(conn, posix_path)
-        conn.execute(
-            "UPDATE media_judgments SET passed = ?, reasons = '[]', "
-            "judged_at = ?, confirmed_at = ?, seen_at = COALESCE(seen_at, ?) "
-            "WHERE file_path = ?",
-            (1 if verdict == "pass" else 0, ts, ts, ts, posix_path),
+        self._log_judgment_event(
+            conn,
+            posix_path,
+            "favorite" if is_favorite else "unfavorite",
+            self._iso(now),
         )
-        return self._read_judgment(conn, posix_path)
+        return True
 
     def get_judgment(self, file_path: str) -> Optional[JudgmentState]:
         posix_path = to_posix_path(file_path)
@@ -5906,6 +5965,104 @@ class DatabaseManager:
             conn.commit()
             return removed
 
+    def _sticky_category_name(
+        self, conn: sqlite3.Connection, sticky_category_id: Optional[int]
+    ) -> Optional[str]:
+        """The sticky category's name, None without one; ValueError
+        ``unknown_category`` for an id that does not exist."""
+        if sticky_category_id is None:
+            return None
+        cat = conn.execute(
+            "SELECT name FROM categories WHERE id = ?", (sticky_category_id,)
+        ).fetchone()
+        if cat is None:
+            raise ValueError("unknown_category")
+        return str(cat["name"])
+
+    def _link_sticky(
+        self,
+        conn: sqlite3.Connection,
+        posix_path: str,
+        state: JudgmentState,
+        sticky_category_id: Optional[int],
+        category_name: Optional[str],
+        score_shown: Optional[float],
+        now: Optional[datetime],
+    ) -> JudgmentState:
+        """Link the sticky category (source ``sticky``) after a grade; the
+        state re-read when the link is new. Caller holds the lock."""
+        if category_name is None or sticky_category_id is None:
+            return state
+        if self._link_category(
+            conn,
+            posix_path,
+            sticky_category_id,
+            category_name,
+            "sticky",
+            self._iso(now),
+            score_shown,
+        ):
+            reread = self._read_judgment(conn, posix_path)
+            if reread is not None:
+                return reread
+        return state
+
+    def set_grade(
+        self,
+        file_path: str,
+        grade: Optional[Grade],
+        score_shown: Optional[float] = None,
+        now: Optional[datetime] = None,
+        sticky_category_id: Optional[int] = None,
+    ) -> Optional[JudgmentState]:
+        """Grade an item ✓ ``pass`` / ✗ ``fail``, or clear it (None). See
+        ``_apply_grade``; ★ is never touched. The sticky category is linked
+        on a non-null grade only. None when the media row is missing;
+        ValueError ``unknown_grade`` / ``unknown_category``."""
+        if grade is not None and grade not in GRADES:
+            raise ValueError("unknown_grade")
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            category_name = (
+                self._sticky_category_name(conn, sticky_category_id)
+                if grade is not None
+                else None
+            )
+            state = self._apply_grade(conn, posix_path, grade, score_shown, now)
+            if state is None:
+                return None
+            state = self._link_sticky(
+                conn,
+                posix_path,
+                state,
+                sticky_category_id,
+                category_name,
+                score_shown,
+                now,
+            )
+            conn.commit()
+            return state
+
+    def set_favorite_state(
+        self, file_path: str, is_favorite: bool, now: Optional[datetime] = None
+    ) -> Optional[JudgmentState]:
+        """★ only (see ``_apply_favorite``); the judgment state after, None
+        when the media row is missing. Database errors propagate (the
+        judgments route); ``set_favorite`` is the legacy boolean form."""
+        posix_path = to_posix_path(file_path)
+        with self.lock, self._get_connection() as conn:
+            if not self._apply_favorite(conn, posix_path, is_favorite, now):
+                return None
+            conn.commit()
+            return self._read_judgment(conn, posix_path)
+
+    # A pre-grades verdict as the v6 migration maps it: (★, grade).
+    _VERDICT_AS_GRADE: ClassVar[Dict[Optional[str], Tuple[bool, Optional[Grade]]]] = {
+        "favorite": (True, "pass"),
+        "pass": (False, "fail"),
+        None: (False, None),
+    }
+
     def set_verdict(
         self,
         file_path: str,
@@ -5914,32 +6071,65 @@ class DatabaseManager:
         now: Optional[datetime] = None,
         sticky_category_id: Optional[int] = None,
     ) -> Optional[JudgmentState]:
+        """TEST-ONLY shim, removed with the legacy columns; production code
+        uses ``set_grade`` / ``set_favorite``. Seeds a pre-grades rating
+        the way the old verdict code wrote it and the v6 migration mapped
+        it: ``"favorite"`` -> ★ on + ✓ pass, ``"pass"`` (the old *reject*)
+        -> ★ off + ✗ fail, None -> ★ off and no grade. It logs the legacy
+        ``favorite`` / ``unfavorite`` / ``pass`` / ``unpass`` events the
+        old verdict logged, so tests of readers not yet on grades keep the
+        inputs they always had. The same verdict again refreshes
+        ``confirmed_at`` only."""
         posix_path = to_posix_path(file_path)
+        favorite, grade = self._VERDICT_AS_GRADE[verdict]
         with self.lock, self._get_connection() as conn:
-            category_name: Optional[str] = None
-            if verdict is not None and sticky_category_id is not None:
-                cat = conn.execute(
-                    "SELECT name FROM categories WHERE id = ?",
-                    (sticky_category_id,),
-                ).fetchone()
-                if cat is None:
-                    raise ValueError("unknown_category")
-                category_name = cat["name"]
-            state = self._apply_verdict(conn, posix_path, verdict, score_shown, now)
-            if state is None:
+            category_name = (
+                self._sticky_category_name(conn, sticky_category_id)
+                if verdict is not None
+                else None
+            )
+            current = self._read_judgment(conn, posix_path)
+            if current is None:
                 return None
-            if category_name is not None:
-                ts = self._iso(now)
-                if self._link_category(
-                    conn,
-                    posix_path,
-                    sticky_category_id or 0,
-                    category_name,
-                    "sticky",
-                    ts,
-                    score_shown,
-                ):
-                    state = self._read_judgment(conn, posix_path)
+            ts = self._iso(now)
+            if (current.favorite, current.grade) == (favorite, grade):
+                if verdict is not None:
+                    conn.execute(
+                        "UPDATE media_judgments SET confirmed_at = ? "
+                        "WHERE file_path = ?",
+                        (ts, posix_path),
+                    )
+            else:
+                was: Optional[str] = (
+                    "favorite"
+                    if current.favorite
+                    else ("pass" if current.grade == "fail" else None)
+                )
+                if was != verdict:
+                    log = self._log_judgment_event
+                    if was == "favorite":
+                        log(conn, posix_path, "unfavorite", ts, score_shown)
+                    elif was == "pass":
+                        log(conn, posix_path, "unpass", ts, score_shown)
+                    if verdict is not None:
+                        log(conn, posix_path, verdict, ts, score_shown)
+                conn.execute(
+                    "UPDATE media SET is_favorite = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE file_path = ?",
+                    (1 if favorite else 0, posix_path),
+                )
+                self._write_grade(conn, posix_path, grade, ts)
+            state = self._read_judgment(conn, posix_path)
+            assert state is not None
+            state = self._link_sticky(
+                conn,
+                posix_path,
+                state,
+                sticky_category_id,
+                category_name,
+                score_shown,
+                now,
+            )
             conn.commit()
             return state
 
@@ -5958,8 +6148,9 @@ class DatabaseManager:
             state = self._read_judgment(conn, posix_path)
             if state is None:
                 return None
-            if state.verdict is None:
-                raise ValueError("no_verdict")
+            # Reasons describe a grade (★ is not one).
+            if state.grade is None:
+                raise ValueError("no_grade")
             if (reason in state.reasons) == on:
                 return state
             reasons = set(state.reasons)
@@ -5991,49 +6182,26 @@ class DatabaseManager:
         now: Optional[datetime] = None,
         score_shown: Optional[float] = None,
     ) -> Optional[JudgmentState]:
-        """Record that the item was seen. ``score_shown`` is the taste score
-        on screen at dwell time; it goes on the ``seen`` (or ``reconfirm``)
-        event so a seen-only negative can be down-weighted like a verdict."""
+        """Record that the item was seen: ``seen_at`` and one ``seen`` event,
+        the first time only. Viewing teaches nothing, so a later view never
+        refreshes ``confirmed_at`` (there is no reconfirm). ``score_shown``
+        is the taste score on screen at dwell time, kept on the event."""
         posix_path = to_posix_path(file_path)
         with self.lock, self._get_connection() as conn:
             state = self._read_judgment(conn, posix_path)
             if state is None:
                 return None
-            ts = self._iso(now)
-            if state.seen_at is None:
-                self._ensure_judgment_row(conn, posix_path)
-                conn.execute(
-                    "UPDATE media_judgments SET seen_at = ? WHERE file_path = ?",
-                    (ts, posix_path),
-                )
-                self._log_judgment_event(conn, posix_path, "seen", ts, score_shown)
-            elif state.verdict is not None and self._reconfirm_due(
-                state.confirmed_at, now
-            ):
-                conn.execute(
-                    "UPDATE media_judgments SET confirmed_at = ? WHERE file_path = ?",
-                    (ts, posix_path),
-                )
-                self._log_judgment_event(conn, posix_path, "reconfirm", ts, score_shown)
-            else:
+            if state.seen_at is not None:
                 return state
+            ts = self._iso(now)
+            self._ensure_judgment_row(conn, posix_path)
+            conn.execute(
+                "UPDATE media_judgments SET seen_at = ? WHERE file_path = ?",
+                (ts, posix_path),
+            )
+            self._log_judgment_event(conn, posix_path, "seen", ts, score_shown)
             conn.commit()
             return self._read_judgment(conn, posix_path)
-
-    @staticmethod
-    def _reconfirm_due(confirmed_at: Optional[str], now: Optional[datetime]) -> bool:
-        if confirmed_at is None:
-            return True
-        try:
-            last = datetime.fromisoformat(confirmed_at)
-        except ValueError:
-            return True
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        return (current - last).total_seconds() >= RECONFIRM_MIN_INTERVAL_S
 
     def list_judgment_events(
         self, file_path: Optional[str] = None
@@ -7428,35 +7596,31 @@ class DatabaseManager:
         return int(pos["idx"]), int(pos["size"])
 
     def toggle_favorite(self, file_path: Path) -> bool:
+        """Flip ★ only (never the grade or its reasons); the new ★, False
+        when the media row is missing or the write failed (logged)."""
         try:
             posix_path = to_posix_path(file_path)
             with self.lock, self._get_connection() as conn:
-                state = self._read_judgment(conn, posix_path)
-                if state is None:
+                row = conn.execute(
+                    "SELECT is_favorite FROM media WHERE file_path = ?",
+                    (posix_path,),
+                ).fetchone()
+                if row is None:
                     return False
-                target: Optional[Verdict] = (
-                    None if state.verdict == "favorite" else "favorite"
-                )
-                self._apply_verdict(conn, posix_path, target, None, None)
+                target = not bool(row["is_favorite"])
+                self._apply_favorite(conn, posix_path, target, None)
                 conn.commit()
-                return target == "favorite"
+                return target
         except Exception as e:
             logger.error(f"Failed to toggle favorite for {file_path}: {e}")
             return False
 
     def set_favorite(self, file_path: Path, is_favorite: bool) -> bool:
+        """Set ★ only (``_apply_favorite``): logs ``favorite`` /
+        ``unfavorite``, never touches the grade or its reasons. False when
+        the media row is missing or the write failed (logged)."""
         try:
-            posix_path = to_posix_path(file_path)
-            with self.lock, self._get_connection() as conn:
-                state = self._read_judgment(conn, posix_path)
-                if state is None:
-                    return False
-                if is_favorite:
-                    self._apply_verdict(conn, posix_path, "favorite", None, None)
-                elif state.verdict == "favorite":
-                    self._apply_verdict(conn, posix_path, None, None, None)
-                conn.commit()
-                return True
+            return self.set_favorite_state(str(file_path), is_favorite) is not None
         except Exception as e:
             logger.error(f"Failed to set favorite for {file_path}: {e}")
             return False
@@ -7908,15 +8072,17 @@ class DatabaseManager:
     # scan takes this snapshot first and puts it back verbatim afterwards.
 
     def export_taste_state(self) -> Dict[str, Any]:
-        """Snapshot every media_judgments row, every media_categories link
-        (with its category name) and every ``is_favorite = 1`` path. Paths
-        are the stored POSIX form. Plain JSON-serialisable data."""
+        """Snapshot every media_judgments row (its grade included), every
+        media_categories link (with its category name) and every
+        ``is_favorite = 1`` path. Paths are the stored POSIX form. Plain
+        JSON-serialisable data."""
         with self.lock, self._get_connection() as conn:
             judgments = [
                 dict(r)
                 for r in conn.execute(
-                    "SELECT file_path, passed, reasons, seen_at, judged_at, "
-                    "confirmed_at FROM media_judgments ORDER BY file_path"
+                    "SELECT file_path, passed, grade, reasons, seen_at, "
+                    "judged_at, confirmed_at FROM media_judgments "
+                    "ORDER BY file_path"
                 ).fetchall()
             ]
             links = [
@@ -8070,20 +8236,24 @@ class DatabaseManager:
     ) -> None:
         """Write the snapshot judgment verbatim over an absent or seen-only
         row (keeping the live seen_at only when the snapshot has none) and
-        set ``is_favorite`` by raw UPDATE. Caller holds the lock."""
+        set ``is_favorite`` by raw UPDATE. The grade is copied as stored,
+        never derived: a snapshot row without a ``grade`` key (one taken
+        before grades) restores none. Caller holds the lock."""
         if j is not None:
             conn.execute(
-                "INSERT INTO media_judgments (file_path, passed, "
+                "INSERT INTO media_judgments (file_path, passed, grade, "
                 "reasons, seen_at, judged_at, confirmed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(file_path) DO UPDATE SET "
-                "passed = excluded.passed, reasons = excluded.reasons, "
+                "passed = excluded.passed, grade = excluded.grade, "
+                "reasons = excluded.reasons, "
                 "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
                 "judged_at = excluded.judged_at, "
                 "confirmed_at = excluded.confirmed_at",
                 (
                     path,
                     int(j["passed"]),
+                    j.get("grade"),
                     j["reasons"],
                     j["seen_at"],
                     j["judged_at"],

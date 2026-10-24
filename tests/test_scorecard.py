@@ -819,6 +819,15 @@ def api(tmp_path: Path) -> Any:
     lib.db.close()
 
 
+def _favorite_and_pass(client: Any, path: str) -> None:
+    """Through the routes, what a pre-grades favorite verdict became: ★ on
+    (no scorecard check) and ✓ pass (the check runs)."""
+    r = client.patch(f"/api/judgments/{path}", json={"favorite": True})
+    assert r.status_code == 200
+    r = client.patch(f"/api/judgments/{path}", json={"grade": "pass"})
+    assert r.status_code == 200
+
+
 def test_post_scorecard_route(api: Any) -> None:
     client, lib, stub = api
     r = client.post(
@@ -857,15 +866,14 @@ def test_results_routes_and_blind_payloads(api: Any) -> None:
     r = client.get(f"/api/judgments/{base}")
     assert r.json()["scorecard"] == {"id": lib.card, "blind": True}
     assert client.get(f"/api/media/{base}").json()["scorecard_blind"] is True
-    r = client.patch(f"/api/judgments/{base}", json={"verdict": "favorite"})
-    assert r.status_code == 200
+    _favorite_and_pass(client, base)
     assert client.get(f"/api/judgments/{base}").json()["scorecard"]["blind"] is False
     assert client.get(f"/api/media/{base}").json()["scorecard_blind"] is False
     client.post("/api/judgments/seen", json={"file_path": adapter})
     # Seen only: the pair is not judged yet.
     one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
     assert one["n_pairs"] == 1 and one["n_judged"] == 0
-    client.patch(f"/api/judgments/{adapter}", json={"verdict": "pass"})
+    client.patch(f"/api/judgments/{adapter}", json={"grade": "fail"})
 
     one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
     assert one["n_pairs"] == 1 and one["n_judged"] == 1
@@ -884,7 +892,7 @@ def test_results_routes_and_blind_payloads(api: Any) -> None:
     assert client.get(f"/api/media/{plain}").json()["scorecard_blind"] is False
 
 
-def test_a_verdict_through_the_routes_promotes_the_adapter(api: Any) -> None:
+def test_a_grade_through_the_routes_promotes_the_adapter(api: Any) -> None:
     client, lib, _ = api
     sent: List[Tuple[str, str, Dict[str, Any]]] = []
     pairs = [lib.pair(i) for i in range(30)]
@@ -896,13 +904,20 @@ def test_a_verdict_through_the_routes_promotes_the_adapter(api: Any) -> None:
             lib.db.set_verdict(base, "pass")
             lib.db.set_verdict(adapter, "pass")
         base, adapter = pairs[29]
-        client.patch(f"/api/judgments/{base}", json={"verdict": "pass"})
+        client.patch(f"/api/judgments/{base}", json={"grade": "fail"})
         assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
-        # Seen without a verdict never judges a scorecard image.
+        # Seen without a grade never judges a scorecard image.
         client.post("/api/judgments/seen", json={"file_path": adapter})
         assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
         assert [s for s in sent if s[1] == "adapters_changed"] == []
+        # ★ is not a grade: neither star route reaches the scorecard check.
+        checks = len([s for s in sent if s[1] == "scorecard_judged"])
+        assert checks == 1  # the base's grade above
         client.patch(f"/api/media/{adapter}", json={"is_favorite": True})
+        client.patch(f"/api/judgments/{adapter}", json={"favorite": False})
+        assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+        assert len([s for s in sent if s[1] == "scorecard_judged"]) == checks
+        client.patch(f"/api/judgments/{adapter}", json={"grade": "fail"})
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     assert ("training", "adapters_changed", {}) in sent
 
@@ -929,7 +944,7 @@ def test_media_detail_is_blind_until_a_verdict(api: Any) -> None:
     assert (detail["width"], detail["height"], detail["format"]) == (8, 8, "png")
     assert detail["file_path"]
     _assert_blind(detail)
-    client.patch(f"/api/judgments/{base}", json={"verdict": "pass"})
+    client.patch(f"/api/judgments/{base}", json={"grade": "fail"})
     detail = client.get(f"/api/media/{base}").json()
     assert detail["scorecard_blind"] is False
     assert detail["prompt"] == "SYNTH prompt"
@@ -974,7 +989,7 @@ def test_t2i_image_rows_are_blind_until_a_verdict(api: Any) -> None:
     assert patched.status_code == 200
     _assert_blind(patched.json())
     # After a verdict the next fetch is full.
-    client.patch(f"/api/judgments/{base}", json={"verdict": "favorite"})
+    _favorite_and_pass(client, base)
     rows = {
         os.path.normpath(r["file_path"]): r
         for r in client.get("/api/t2i/images").json()
