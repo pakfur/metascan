@@ -244,6 +244,14 @@ def _idempotent_add_column(
         raise
 
 
+# Format of the full-clean taste snapshot (``export_taste_state``): 2 = each
+# judgment row carries its ``grade``. A file without a ``version`` key was
+# written before grades, with the old meaning (``passed = 1`` a reject, a
+# favorite the positive); ``backend/services/taste_snapshot.py`` translates
+# it on load, and ``restore_taste_state`` only takes version 2.
+TASTE_SNAPSHOT_VERSION = 2
+
+
 class MigrationError(RuntimeError):
     """A schema migration could not run: none of its changes were made
     (``PRAGMA user_version`` is unchanged, the ratings are as they were)
@@ -3720,7 +3728,7 @@ class DatabaseManager:
         transaction and lock -- never takes the lock itself."""
         for path in posix_paths:
             judgment = conn.execute(
-                "SELECT passed, grade, reasons, seen_at, confirmed_at "
+                "SELECT grade, reasons, seen_at, confirmed_at "
                 "FROM media_judgments WHERE file_path = ?",
                 (path,),
             ).fetchone()
@@ -3768,7 +3776,9 @@ class DatabaseManager:
         t2i: Optional[sqlite3.Row],
         i2v: Optional[sqlite3.Row],
     ) -> None:
-        """Insert one media_tombstones row. Caller holds the lock."""
+        """Insert one media_tombstones row. ``judgment`` is a live
+        media_judgments row or a version-2 snapshot row (both carry
+        ``grade``). Caller holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
             if row is not None:
@@ -3787,6 +3797,9 @@ class DatabaseManager:
             except Exception as e:
                 logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
                 blob, model_key = None, None
+        # Copied as stored, never derived (a snapshot written before grades
+        # is translated before it gets here).
+        grade = judgment["grade"] if judgment is not None else None
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
             "is_favorite, passed, grade, reasons, categories, seen_at, "
@@ -3796,11 +3809,10 @@ class DatabaseManager:
                 path,
                 now,
                 1 if is_favorite else 0,
-                int(judgment["passed"]) if judgment is not None else 0,
-                # Copied as stored, never derived: a judgment without a
-                # grade key (a pre-v2 snapshot row) leaves the tombstone
-                # without a grade.
-                judgment.get("grade") if judgment is not None else None,
+                # Interim until the legacy column is dropped: mirrors
+                # grade == 'fail', as media_judgments.passed does.
+                1 if grade == "fail" else 0,
+                grade,
                 judgment["reasons"] if judgment is not None else "[]",
                 json.dumps(sorted(cat_names)),
                 judgment["seen_at"] if judgment is not None else None,
@@ -8072,17 +8084,17 @@ class DatabaseManager:
     # scan takes this snapshot first and puts it back verbatim afterwards.
 
     def export_taste_state(self) -> Dict[str, Any]:
-        """Snapshot every media_judgments row (its grade included), every
-        media_categories link (with its category name) and every
-        ``is_favorite = 1`` path. Paths are the stored POSIX form. Plain
-        JSON-serialisable data."""
+        """Snapshot (``version`` 2) every media_judgments row -- file_path,
+        grade, reasons, seen_at, judged_at, confirmed_at; no legacy
+        ``passed`` -- every media_categories link (with its category name)
+        and every ``is_favorite = 1`` path (★ only: it carries no grade).
+        Paths are the stored POSIX form. Plain JSON-serialisable data."""
         with self.lock, self._get_connection() as conn:
             judgments = [
                 dict(r)
                 for r in conn.execute(
-                    "SELECT file_path, passed, grade, reasons, seen_at, "
-                    "judged_at, confirmed_at FROM media_judgments "
-                    "ORDER BY file_path"
+                    "SELECT file_path, grade, reasons, seen_at, judged_at, "
+                    "confirmed_at FROM media_judgments ORDER BY file_path"
                 ).fetchall()
             ]
             links = [
@@ -8102,6 +8114,7 @@ class DatabaseManager:
                 ).fetchall()
             ]
         return {
+            "version": TASTE_SNAPSHOT_VERSION,
             "taken_at": self._iso(None),
             "judgments": judgments,
             "categories": links,
@@ -8111,16 +8124,22 @@ class DatabaseManager:
     def restore_taste_state(
         self, snapshot: Dict[str, Any], tombstone_missing: bool = False
     ) -> Dict[str, Any]:
-        """Put an ``export_taste_state`` snapshot back for every path whose
-        media row exists again: judgment rows and category links verbatim
-        (original timestamps; links only for categories that still exist)
-        and ``media.is_favorite`` by raw UPDATE. Logs **no** judgment_events
-        -- this is a put-back, not a re-judgment. Idempotent.
+        """Put a version-2 ``export_taste_state`` snapshot back for every
+        path whose media row exists again: judgment rows verbatim (the
+        grade as stored, never derived; original timestamps), category
+        links (only for categories that still exist) and ★ by raw UPDATE.
+        Logs **no** judgment_events -- this is a put-back, not a
+        re-judgment. Idempotent. A snapshot of any other version (one
+        written before grades must be translated first) is refused with
+        ValueError before anything is written.
 
-        Never overwrites newer data: a path that already carries a real
-        judgment (verdict, reasons or favorite -- the user re-rated it after
-        it re-appeared) keeps its row and ``is_favorite`` untouched; a
-        seen-only row is filled from the snapshot. Category links are
+        Never overwrites newer data: a path whose live row already carries
+        a grade, a reason or a ``judged_at`` (it was graded, or a grade
+        cleared, after it re-appeared) keeps that row; a seen-only row is
+        filled from the snapshot. ★ is not a grade, so neither blocks the
+        other: a ★ set after the item re-appeared never stops its grade
+        coming back, and the snapshot's ★ is put back beside a newer grade.
+        A restore only ever sets ★, never clears it. Category links are
         added with ON CONFLICT DO NOTHING.
 
         With ``tombstone_missing``, each snapshot path whose media row did
@@ -8128,7 +8147,14 @@ class DatabaseManager:
         (embedding via the installed lookup, else NULL; lineage from the
         surviving t2i/i2v row). Returns ``{restored, missing, tombstoned}``
         counted in paths plus ``remaining``: the snapshot narrowed to the
-        paths that were not restored (same shape, same ``taken_at``)."""
+        paths that were not restored (same shape and version, same
+        ``taken_at``)."""
+        version = snapshot.get("version")
+        if version != TASTE_SNAPSHOT_VERSION:
+            raise ValueError(
+                f"taste snapshot version {version!r} is not "
+                f"{TASTE_SNAPSHOT_VERSION}: translate an older one first"
+            )
         judgments: Dict[str, Dict[str, Any]] = {
             j["file_path"]: j for j in snapshot.get("judgments") or []
         }
@@ -8147,7 +8173,7 @@ class DatabaseManager:
             now = self._iso(None)
             for path in paths:
                 media_row = conn.execute(
-                    "SELECT is_favorite FROM media WHERE file_path = ?", (path,)
+                    "SELECT 1 FROM media WHERE file_path = ?", (path,)
                 ).fetchone()
                 path_links = links_by_path.get(path, [])
                 if media_row is None:
@@ -8175,10 +8201,14 @@ class DatabaseManager:
                         tombstoned += 1
                     continue
                 restored += 1
-                if not self._has_newer_judgment(conn, path, media_row):
-                    self._put_back_judgment(
-                        conn, path, judgments.get(path), path in favorites
+                if path in favorites:
+                    conn.execute(
+                        "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
+                        (path,),
                     )
+                j = judgments.get(path)
+                if j is not None and not self._has_newer_judgment(conn, path):
+                    self._put_back_judgment(conn, path, j)
                 for lk in path_links:
                     if int(lk["category_id"]) not in existing_cats:
                         continue
@@ -8192,6 +8222,10 @@ class DatabaseManager:
             conn.commit()
         keep = set(missing_paths)
         remaining = {
+            # Keeps the version even when no judgment row is left: a
+            # version-less file is read as written before grades, where a
+            # favorite means ✓.
+            "version": TASTE_SNAPSHOT_VERSION,
             "taken_at": snapshot.get("taken_at"),
             "judgments": [j for p, j in judgments.items() if p in keep],
             "categories": [
@@ -8207,64 +8241,53 @@ class DatabaseManager:
         }
 
     @staticmethod
-    def _has_newer_judgment(
-        conn: sqlite3.Connection, path: str, media_row: sqlite3.Row
-    ) -> bool:
+    def _has_newer_judgment(conn: sqlite3.Connection, path: str) -> bool:
         """True when the live row carries a rating the snapshot must not
-        overwrite: favorite, pass, any reason, or a recorded judgment."""
-        if int(media_row["is_favorite"] or 0):
-            return True
+        overwrite: a grade, any reason, or a ``judged_at`` (set by every
+        grade change, a clear included). ★ is not a rating: a ★ set after
+        the item re-appeared never blocks the put-back."""
         row = conn.execute(
-            "SELECT passed, reasons, judged_at FROM media_judgments "
+            "SELECT grade, reasons, judged_at FROM media_judgments "
             "WHERE file_path = ?",
             (path,),
         ).fetchone()
         if row is None:
             return False
         return bool(
-            int(row["passed"])
+            row["grade"] is not None
             or row["judged_at"] is not None
             or (row["reasons"] or "[]") != "[]"
         )
 
     @staticmethod
     def _put_back_judgment(
-        conn: sqlite3.Connection,
-        path: str,
-        j: Optional[Dict[str, Any]],
-        is_favorite: bool,
+        conn: sqlite3.Connection, path: str, j: Dict[str, Any]
     ) -> None:
-        """Write the snapshot judgment verbatim over an absent or seen-only
-        row (keeping the live seen_at only when the snapshot has none) and
-        set ``is_favorite`` by raw UPDATE. The grade is copied as stored,
-        never derived: a snapshot row without a ``grade`` key (one taken
-        before grades) restores none. Caller holds the lock."""
-        if j is not None:
-            conn.execute(
-                "INSERT INTO media_judgments (file_path, passed, grade, "
-                "reasons, seen_at, judged_at, confirmed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(file_path) DO UPDATE SET "
-                "passed = excluded.passed, grade = excluded.grade, "
-                "reasons = excluded.reasons, "
-                "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
-                "judged_at = excluded.judged_at, "
-                "confirmed_at = excluded.confirmed_at",
-                (
-                    path,
-                    int(j["passed"]),
-                    j.get("grade"),
-                    j["reasons"],
-                    j["seen_at"],
-                    j["judged_at"],
-                    j["confirmed_at"],
-                ),
-            )
-        if is_favorite:
-            conn.execute(
-                "UPDATE media SET is_favorite = 1 WHERE file_path = ?",
-                (path,),
-            )
+        """Write a version-2 snapshot judgment verbatim over an absent or
+        seen-only row, keeping the live seen_at only when the snapshot has
+        none. The grade is copied as stored, never derived. Interim until
+        the legacy column is dropped: ``passed`` mirrors ``grade ==
+        'fail'``, as ``_write_grade`` keeps it. Caller holds the lock."""
+        conn.execute(
+            "INSERT INTO media_judgments (file_path, passed, grade, "
+            "reasons, seen_at, judged_at, confirmed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(file_path) DO UPDATE SET "
+            "passed = excluded.passed, grade = excluded.grade, "
+            "reasons = excluded.reasons, "
+            "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
+            "judged_at = excluded.judged_at, "
+            "confirmed_at = excluded.confirmed_at",
+            (
+                path,
+                1 if j["grade"] == "fail" else 0,
+                j["grade"],
+                j["reasons"],
+                j["seen_at"],
+                j["judged_at"],
+                j["confirmed_at"],
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Folders (manual + smart)

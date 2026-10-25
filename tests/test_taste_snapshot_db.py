@@ -83,6 +83,35 @@ def _seed(db):
     return anime, scifi
 
 
+GRADE_PATHS = (
+    "/g/fail.png",
+    "/g/pass.png",
+    "/g/plain.png",
+    "/g/seen.png",
+    "/g/star.png",
+    "/g/star_pass.png",
+)
+
+
+def _seed_grades(db):
+    """Grade-era ratings, set through the grade and ★ APIs: ★ + ✓ with a
+    reason and a category, ✓ without ★, ✗ with a reason, ★ alone (no
+    judgment row: ★ is not a grade), seen-only, and an untouched item."""
+    for p in GRADE_PATHS:
+        db.save_media(_media(p))
+    portrait = db.create_category("Portrait")
+    db.set_favorite_state("/g/star_pass.png", True, now=T0)
+    db.set_grade("/g/star_pass.png", "pass", now=T0)
+    db.set_reason("/g/star_pass.png", "light", True, now=T0)
+    db.add_media_categories(["/g/star_pass.png"], portrait.id, "viewer")
+    db.set_grade("/g/pass.png", "pass", now=T1)
+    db.set_grade("/g/fail.png", "fail", now=T1)
+    db.set_reason("/g/fail.png", "composition", True, now=T1)
+    db.set_favorite_state("/g/star.png", True, now=T0)
+    db.mark_seen("/g/seen.png", now=T0)
+    return portrait
+
+
 def _state(db):
     return (
         _rows(db, "SELECT * FROM media_judgments ORDER BY file_path"),
@@ -136,6 +165,24 @@ def test_snapshot_truncate_rescan_restore_roundtrip(db):
     assert before_gone  # sanity: the missing path really carried a judgment
 
 
+@pytest.mark.parametrize("version", [None, 1, 3])
+def test_restore_refuses_a_snapshot_that_is_not_v2(db, version):
+    """A version-less snapshot carries the old meaning (a favorite is ✓):
+    put back as stored it would lose every grade, so the restore refuses
+    it -- and any unknown version -- before writing anything."""
+    _seed(db)
+    snapshot = db.export_taste_state()
+    db.truncate_all_data()
+    db.save_media(_media("/l/fav.png"))
+    old = {k: v for k, v in snapshot.items() if k != "version"}
+    if version is not None:
+        old["version"] = version
+    with pytest.raises(ValueError):
+        db.restore_taste_state(old, tombstone_missing=True)
+    assert _state(db) == ([], [], [])
+    assert db.list_tombstones() == []
+
+
 def test_restore_writes_one_tombstone_per_missing_path(db):
     _seed(db)
     snapshot = db.export_taste_state()
@@ -151,7 +198,7 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     assert counts == {"restored": 3, "missing": 1, "tombstoned": 1}
     [t] = db.list_tombstones()
     assert t["file_path"] == "/l/gone.png"
-    assert (t["is_favorite"], t["passed"]) == (1, 0)
+    assert (t["is_favorite"], t["grade"], t["passed"]) == (1, "pass", 0)
     assert json.loads(t["reasons"]) == ["emotion"]
     assert json.loads(t["categories"]) == ["Sci-Fi"]
     assert t["confirmed_at"] == T1.isoformat()
@@ -201,6 +248,78 @@ def test_snapshot_survives_json_roundtrip(db):
     assert _marks(db.get_judgment("/l/fav.png")) == FAVORITE
 
 
+def test_v2_snapshot_round_trips(db):
+    """The snapshot is version 2: each judgment row carries its grade and no
+    legacy reject flag, and putting it back restores every grade-era rating
+    exactly -- grades as stored, never derived (★ alone stays ★ alone) --
+    with no new events."""
+    portrait = _seed_grades(db)
+    before = _state(db)
+    events = _rows(db, "SELECT * FROM judgment_events ORDER BY id")
+
+    snapshot = json.loads(json.dumps(db.export_taste_state()))
+
+    assert snapshot["version"] == 2
+    t0, t1 = T0.isoformat(), T1.isoformat()
+    assert snapshot["judgments"] == [
+        {
+            "file_path": "/g/fail.png",
+            "grade": "fail",
+            "reasons": '["composition"]',
+            "seen_at": t1,
+            "judged_at": t1,
+            "confirmed_at": t1,
+        },
+        {
+            "file_path": "/g/pass.png",
+            "grade": "pass",
+            "reasons": "[]",
+            "seen_at": t1,
+            "judged_at": t1,
+            "confirmed_at": t1,
+        },
+        {
+            "file_path": "/g/seen.png",
+            "grade": None,
+            "reasons": "[]",
+            "seen_at": t0,
+            "judged_at": None,
+            "confirmed_at": None,
+        },
+        {
+            "file_path": "/g/star_pass.png",
+            "grade": "pass",
+            "reasons": '["light"]',
+            "seen_at": t0,
+            "judged_at": t0,
+            "confirmed_at": t0,
+        },
+    ]
+    assert snapshot["favorites"] == ["/g/star.png", "/g/star_pass.png"]
+    assert [
+        (lk["file_path"], lk["category_id"], lk["category_name"], lk["source"])
+        for lk in snapshot["categories"]
+    ] == [("/g/star_pass.png", portrait.id, "Portrait", "viewer")]
+
+    assert db.truncate_all_data() is True
+    for p in GRADE_PATHS:
+        db.save_media(_media(p))
+    counts = db.restore_taste_state(snapshot)
+
+    assert (counts["restored"], counts["missing"]) == (5, 0)
+    assert _state(db) == before
+    assert _rows(db, "SELECT * FROM judgment_events ORDER BY id") == events
+    assert {p: _marks(db.get_judgment(p)) for p in GRADE_PATHS} == {
+        "/g/fail.png": (False, "fail"),
+        "/g/pass.png": (False, "pass"),
+        "/g/plain.png": (False, None),
+        "/g/seen.png": (False, None),
+        "/g/star.png": (True, None),
+        "/g/star_pass.png": (True, "pass"),
+    }
+    assert db.get_judgment("/g/fail.png").reasons == ["composition"]
+
+
 # ----------------------------------------------------------------------
 # Pending restore: never overwrite newer data, report what is left
 # ----------------------------------------------------------------------
@@ -235,42 +354,89 @@ def test_restore_reports_the_unrestored_remainder(db):
     assert db.get_judgment("/l/pass.png").reasons == ["composition"]
 
 
-def test_restore_never_overwrites_a_newer_judgment(db):
-    anime, scifi = _seed(db)
+def test_restore_never_overwrites_a_newer_grade(db):
+    """A path graded after it re-appeared keeps its row: a new grade, a
+    cleared one (judged_at), or a grade with no judged_at (as v6 leaves a
+    starred seen-only row) -- and its newer category link. ★ is not a
+    grade: the snapshot's ★ is put back beside the newer grade (a restore
+    only ever sets ★), and a live ★ is never cleared."""
+    portrait = _seed_grades(db)
+    scenery = db.create_category("Scenery")
+    db.add_media_categories(["/g/star_pass.png"], scenery.id, "viewer")
     snapshot = db.export_taste_state()
     db.truncate_all_data()
-    for p in ("/l/fav.png", "/l/pass.png"):
+    for p in ("/g/star_pass.png", "/g/pass.png", "/g/fail.png", "/g/seen.png"):
         db.save_media(_media(p))
-    # The user re-rated both after they re-appeared, before the restore.
-    db.set_verdict("/l/fav.png", "pass", now=T1)
-    db.set_verdict("/l/pass.png", "favorite", now=T0)
-    db.add_media_categories(["/l/pass.png"], scifi.id, "bulk")
+    # Graded again after they re-appeared, before the restore.
+    db.set_grade("/g/star_pass.png", "fail", now=T1)
+    db.add_media_categories(["/g/star_pass.png"], portrait.id, "bulk")
+    db.set_grade("/g/pass.png", "fail", now=T0)
+    db.set_grade("/g/pass.png", None, now=T1)
+    db.set_grade("/g/fail.png", "pass", now=T0)
+    db.set_favorite_state("/g/fail.png", True, now=T0)
+    with db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO media_judgments (file_path, grade, seen_at) "
+            "VALUES (?, 'pass', ?)",
+            ("/g/seen.png", T1.isoformat()),
+        )
+        conn.commit()
     newer = _state(db)
-    newer_scifi_link = [
+    events = _rows(db, "SELECT * FROM judgment_events ORDER BY id")
+    newer_portrait_link = [
         lk
         for lk in newer[1]
-        if lk["file_path"] == "/l/pass.png" and lk["category_id"] == scifi.id
+        if lk["file_path"] == "/g/star_pass.png" and lk["category_id"] == portrait.id
     ]
 
     counts = db.restore_taste_state(snapshot)
 
-    assert counts["restored"] == 2
-    fav = db.get_judgment("/l/fav.png")
-    assert _marks(fav) == REJECT and fav.confirmed_at == T1.isoformat()
-    passed = db.get_judgment("/l/pass.png")
-    assert _marks(passed) == FAVORITE and passed.reasons == []
+    assert counts["restored"] == 4
     j2, l2, _ = _state(db)
-    assert [j for j in j2] == newer[0]
+    assert j2 == newer[0]  # every newer judgment row as it was
+    assert _rows(db, "SELECT * FROM judgment_events ORDER BY id") == events
+    star_pass = db.get_judgment("/g/star_pass.png")
+    assert _marks(star_pass) == (True, "fail")
+    assert (star_pass.reasons, star_pass.confirmed_at) == ([], T1.isoformat())
+    assert _marks(db.get_judgment("/g/pass.png")) == (False, None)
+    assert _marks(db.get_judgment("/g/fail.png")) == (True, "pass")
+    assert db.get_judgment("/g/fail.png").reasons == []
+    assert _marks(db.get_judgment("/g/seen.png")) == (False, "pass")
     # Category links: the existing (newer) link is kept as-is, missing
     # snapshot links are added.
-    scifi_now = [
+    portrait_now = [
         lk
         for lk in l2
-        if lk["file_path"] == "/l/pass.png" and lk["category_id"] == scifi.id
+        if lk["file_path"] == "/g/star_pass.png" and lk["category_id"] == portrait.id
     ]
-    assert scifi_now == newer_scifi_link
-    assert sorted(c.name for c in passed.categories) == ["Anime", "Sci-Fi"]
-    assert [c.name for c in fav.categories] == ["Anime"]
+    assert portrait_now == newer_portrait_link
+    assert [c.name for c in star_pass.categories] == ["Portrait", "Scenery"]
+
+
+def test_restore_puts_the_grade_back_under_a_newer_favorite(db):
+    """★ is not a grade: starring a re-appeared item before the restore
+    never blocks its snapshot grade and reasons, and that ★ stays (a
+    restore never clears ★)."""
+    _seed_grades(db)
+    snapshot = db.export_taste_state()
+    db.truncate_all_data()
+    for p in ("/g/pass.png", "/g/fail.png"):
+        db.save_media(_media(p))
+    db.set_favorite_state("/g/pass.png", True, now=T0)
+    db.set_favorite_state("/g/fail.png", True, now=T0)
+    events = _rows(db, "SELECT * FROM judgment_events ORDER BY id")
+
+    db.restore_taste_state(snapshot)
+
+    passed = db.get_judgment("/g/pass.png")
+    assert (_marks(passed), passed.judged_at) == ((True, "pass"), T1.isoformat())
+    failed = db.get_judgment("/g/fail.png")
+    assert (_marks(failed), failed.reasons, failed.confirmed_at) == (
+        (True, "fail"),
+        ["composition"],
+        T1.isoformat(),
+    )
+    assert _rows(db, "SELECT * FROM judgment_events ORDER BY id") == events
 
 
 def test_restore_fills_a_seen_only_row(db):

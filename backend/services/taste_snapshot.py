@@ -15,6 +15,13 @@ back yet, and it is only deleted once nothing is left in it.
   deletes) the file. It never tombstones.
 * A corrupt file is renamed to ``<name>.corrupt-<timestamp>`` and logged,
   so it is neither retried forever nor lost.
+
+Files carry ``"version": 2``: each judgment row has its ``grade`` (✓
+``pass`` / ✗ ``fail`` / null) and the favorites list is ★ only. A file
+without a version was written before grades and keeps its old meaning --
+``passed = 1`` is a reject, a favorite is ★ and the positive -- so on load
+:func:`upgrade_legacy_snapshot` translates it exactly as the v6 migration
+maps live ratings. Both shapes validate; any other version is quarantined.
 """
 
 import itertools
@@ -23,8 +30,12 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
+
+from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
+from metascan.core.judgments import GRADES
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +90,7 @@ def write_snapshot_file(data_dir: Path, snapshot: Dict[str, Any]) -> None:
 
 def _empty_like(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return {
+        "version": TASTE_SNAPSHOT_VERSION,
         "taken_at": snapshot.get("taken_at"),
         "judgments": [],
         "categories": [],
@@ -133,15 +145,27 @@ def _opt_str(v: Any) -> bool:
     return v is None or isinstance(v, str)
 
 
-def _valid_judgment(j: Any) -> bool:
-    return (
+def _valid_grade(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and v in GRADES)
+
+
+def _valid_judgment(j: Any, versioned: bool) -> bool:
+    """A version-2 row needs a valid ``grade``; a version-less row the
+    legacy reject flag ``passed``, plus a valid ``grade`` if it has one
+    (the interim export wrote both)."""
+    if not (
         isinstance(j, dict)
         and isinstance(j.get("file_path"), str)
-        and (_is_int(j.get("passed")) or isinstance(j.get("passed"), bool))
         and isinstance(j.get("reasons"), str)
         and all(
             k in j and _opt_str(j[k]) for k in ("seen_at", "judged_at", "confirmed_at")
         )
+    ):
+        return False
+    if versioned:
+        return "grade" in j and _valid_grade(j["grade"])
+    return (_is_int(j.get("passed")) or isinstance(j.get("passed"), bool)) and (
+        "grade" not in j or _valid_grade(j["grade"])
     )
 
 
@@ -161,15 +185,79 @@ def _valid_shape(snap: Any) -> bool:
     bad file is quarantined instead of failing every restore forever."""
     if not isinstance(snap, dict):
         return False
+    versioned = "version" in snap
+    if versioned and not (
+        _is_int(snap["version"]) and snap["version"] == TASTE_SNAPSHOT_VERSION
+    ):
+        return False
     lists = [snap.get(k, []) for k in ("judgments", "categories", "favorites")]
     if not all(isinstance(v, list) for v in lists):
         return False
     judgments, links, favorites = lists
     return (
-        all(_valid_judgment(j) for j in judgments)
+        all(_valid_judgment(j, versioned) for j in judgments)
         and all(_valid_link(lk) for lk in links)
         and all(isinstance(p, str) for p in favorites)
     )
+
+
+_JUDGMENT_KEYS = ("file_path", "reasons", "seen_at", "judged_at", "confirmed_at")
+
+
+def upgrade_legacy_snapshot(
+    snapshot: Dict[str, Any], now: Optional[datetime] = None
+) -> Dict[str, Any]:
+    """``snapshot`` as version 2 (a version-2 one is returned as is). Takes
+    a snapshot that passed validation.
+
+    A version-less file was written before grades, with the old meaning,
+    and is mapped the way the v6 migration maps live ratings: a favorite
+    gets ✓ (★ first, as v5 read a row that was both), else ``passed = 1``
+    (a reject) gets ✗, else no grade; a favorite with no judgment row gets
+    a ✓ row with seen_at / judged_at / confirmed_at = ``now`` (v6 dates the
+    row it creates for one the same way). Reasons and timestamps are kept.
+
+    A row that already carries a ``grade`` key (the interim export of the
+    grades work, still version-less) is taken as stored, and a file with
+    such rows creates no row for a bare favorite: there ★ is not a grade.
+    """
+    if snapshot.get("version") == TASTE_SNAPSHOT_VERSION:
+        return snapshot
+    rows = list(snapshot.get("judgments") or [])
+    favorites = list(snapshot.get("favorites") or [])
+    starred = set(favorites)
+    judgments: List[Dict[str, Any]] = []
+    for j in rows:
+        if "grade" in j:
+            grade = j["grade"]
+        elif j["file_path"] in starred:
+            grade = "pass"
+        elif j["passed"]:
+            grade = "fail"
+        else:
+            grade = None
+        judgments.append({**{k: j[k] for k in _JUDGMENT_KEYS}, "grade": grade})
+    if not any("grade" in j for j in rows):
+        ts = (now or datetime.now(timezone.utc)).isoformat()
+        rowed = {j["file_path"] for j in rows}
+        judgments += [
+            {
+                "file_path": p,
+                "grade": "pass",
+                "reasons": "[]",
+                "seen_at": ts,
+                "judged_at": ts,
+                "confirmed_at": ts,
+            }
+            for p in sorted(starred - rowed)
+        ]
+    return {
+        "version": TASTE_SNAPSHOT_VERSION,
+        "taken_at": snapshot.get("taken_at"),
+        "judgments": judgments,
+        "categories": list(snapshot.get("categories") or []),
+        "favorites": favorites,
+    }
 
 
 class PendingSnapshotUnreadable(OSError):
@@ -202,11 +290,13 @@ def _quarantine(target: Path, why: str) -> None:
 
 
 def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
-    """The pending snapshot, or None when there is none. A file that cannot
-    be parsed (or has the wrong shape / value types) is quarantined and None
-    returned. Raises :class:`PendingSnapshotUnreadable` when the file exists
-    but can't be read (locked, permissions -- it may well be valid) or
-    can't be quarantined; the file is left in place."""
+    """The pending snapshot as version 2 (one written before grades is
+    translated, :func:`upgrade_legacy_snapshot`), or None when there is
+    none. A file that cannot be parsed (or has the wrong shape / value
+    types / an unknown version) is quarantined and None returned. Raises
+    :class:`PendingSnapshotUnreadable` when the file exists but can't be
+    read (locked, permissions -- it may well be valid) or can't be
+    quarantined; the file is left in place."""
     target = snapshot_file_path(data_dir)
     try:
         raw = target.read_text(encoding="utf-8")
@@ -224,7 +314,7 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     if not _valid_shape(snap):
         _quarantine(target, "unexpected structure")
         return None
-    return cast(Dict[str, Any], snap)
+    return upgrade_legacy_snapshot(cast(Dict[str, Any], snap))
 
 
 def restore_and_persist(
@@ -266,7 +356,13 @@ def _apply_pending(db: Any, data_dir: Path) -> Dict[str, int]:
         return {"restored": 0, "missing": 0}
     try:
         counts = restore_and_persist(db, data_dir, snap, False)
-    except (TypeError, ValueError, KeyError, sqlite3.IntegrityError) as e:
+    except (
+        TypeError,
+        ValueError,
+        KeyError,
+        sqlite3.IntegrityError,
+        sqlite3.ProgrammingError,
+    ) as e:
         # The data itself is unusable (the restore rolled back): quarantine
         # it rather than fail -- and block every full clean -- forever.
         _quarantine(snapshot_file_path(data_dir), f"restore rejected it: {e!r}")
