@@ -209,7 +209,11 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     assert json.loads(t["categories"]) == ["Sci-Fi"]
     assert t["confirmed_at"] == T1.isoformat()
     assert t["judged_at"] == T1.isoformat()
-    assert db.get_tombstone_vectors(t["id"]) == {"clip-small": vec.tobytes()}
+    # The truncate took the item's embedding record with it: no evidence of
+    # whose row the index holds at the path, so none is read at restore
+    # (the backfill may later, under the guards for such tombstones).
+    assert db.get_tombstone_vectors(t["id"]) == {}
+    assert t["embedded_model"] is None
 
 
 def test_restore_without_tombstones_flag_writes_none(db):

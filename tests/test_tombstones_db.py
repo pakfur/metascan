@@ -39,6 +39,7 @@ def test_untouched_item_leaves_no_tombstone(db):
 
 def test_judged_item_tombstone_has_judgment_and_embedding(db):
     db.save_media(_media("/p/a.png"))
+    db.mark_embedded(["/p/a.png"], "clip-medium")  # its row is in the index
     db.set_grade("/p/a.png", "fail")
     db.set_reason("/p/a.png", "composition", True)
     vec = np.arange(32, dtype=np.float32)
@@ -57,6 +58,7 @@ def test_judged_item_tombstone_has_judgment_and_embedding(db):
 
 def test_lookup_failure_does_not_block_delete(db):
     db.save_media(_media("/p/a.png"))
+    db.mark_embedded(["/p/a.png"], "clip-medium")  # so the lookup runs
     db.set_favorite(Path("/p/a.png"), True)
     db.set_grade("/p/a.png", "pass")
     db.set_embedding_lookup(lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -68,6 +70,7 @@ def test_lookup_failure_does_not_block_delete(db):
 
 def test_lookup_none_leaves_embedding_null(db):
     db.save_media(_media("/p/a.png"))
+    db.mark_embedded(["/p/a.png"], "clip-medium")
     db.set_grade("/p/a.png", "pass")
     db.set_embedding_lookup(lambda p: None)
     db.delete_media(Path("/p/a.png"))

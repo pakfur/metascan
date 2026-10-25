@@ -248,8 +248,11 @@ def gpu_lock():
 async def test_reembeds_graded_tombstones_for_the_current_model(db, caplog):
     caplog.set_level(logging.INFO, logger=LOGGER)
     small = np.full(DIM, 1 / np.sqrt(DIM), dtype=np.float32)
-    # A ✓ image deleted while the index (CLIP "small") was in memory: its
-    # vector for "small" is captured at deletion, but the index is "large" now.
+    # A ✓ image embedded and deleted while the index (CLIP "small") was in
+    # memory: its vector for "small" is captured at deletion, but the index
+    # is "large" now.
+    db.save_media(media("/l/pass.png"))
+    db.mark_embedded(["/l/pass.png"], "small")
     db.set_embedding_lookup(lambda p: (small, "small"))
     t_pass = _delete_graded(db, "/l/pass.png", "pass")
     db.set_embedding_lookup(None)

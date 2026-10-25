@@ -317,7 +317,7 @@ def test_v6_maps_favorites_to_pass_and_rejects_to_fail(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="metascan.core.database_sqlite")
     DatabaseManager(tmp_path / "db")
 
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert _grades(db_file) == EXPECTED_GRADES  # /lib/plain.png: still no row
     # ★ is untouched: favorites stay favorites, nothing becomes one.
     assert _kept_state(db_file)["favorites"] == before["favorites"]
@@ -428,7 +428,7 @@ def test_v6_backfills_tombstone_scorecard_ids(tmp_path):
     finally:
         conn.close()
     DatabaseManager(tmp_path / "db")
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert dict(
         _query(db_file, "SELECT file_path, scorecard_id FROM media_tombstones")
     ) == {path: ("card-1" if path == "/gone/card.png" else None) for path in lineages}
@@ -503,13 +503,13 @@ def test_v6_skips_the_backup_with_nothing_to_migrate(tmp_path):
     )
     assert backup_before_v6(db_file, datetime.now(timezone.utc)) is None
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert _backups(db_dir) == []
     assert _query(db_file, "SELECT COUNT(*) FROM media_judgments") == [(0,)]
 
     # A brand-new database has nothing to migrate either.
     DatabaseManager(tmp_path / "fresh")
-    assert _user_version(tmp_path / "fresh" / "metascan.db") == 6
+    assert _user_version(tmp_path / "fresh" / "metascan.db") == 7
     assert _backups(tmp_path / "fresh") == []
 
 
@@ -579,7 +579,7 @@ def test_a_backup_cut_short_earlier_is_removed_first(tmp_path):
         path.write_bytes(b"half a backup")
 
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert [p for p in stale if p.exists()] == []
     assert all(p.read_bytes() == b"half a backup" for p in kept)
     new = [
@@ -643,7 +643,7 @@ def test_v6_refuses_without_disk_space(tmp_path, monkeypatch):
 
     # Space freed: the next start migrates.
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert _grades(db_file) == EXPECTED_GRADES
     assert len(_backups(db_dir)) == 1
 
@@ -666,7 +666,7 @@ def test_v6_refuses_when_the_backup_fails(tmp_path, monkeypatch):
     assert _backups(db_dir) == []  # the partial copy is removed
 
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
 
 
 def test_v6_failure_mid_transaction_leaves_v5(tmp_path):
@@ -700,7 +700,7 @@ def test_v6_failure_mid_transaction_leaves_v5(tmp_path):
     conn.commit()
     conn.close()
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert _grades(db_file) == EXPECTED_GRADES
     assert _tomb_grades(db_file) == EXPECTED_TOMB_GRADES
     [backup] = _backups(db_dir)
@@ -791,7 +791,7 @@ def test_v6_failure_after_the_version_write_leaves_v5(tmp_path, monkeypatch):
     assert _backups(db_dir) == []  # rolled back: its backup is removed
 
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
 
 
 # The child kills itself after every v6 statement, before the commit: no
@@ -830,7 +830,7 @@ def test_v6_killed_mid_transaction_leaves_v5(tmp_path):
     _assert_untouched_v5(db_file, before)
 
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert _grades(db_file) == EXPECTED_GRADES
     assert _tomb_grades(db_file) == EXPECTED_TOMB_GRADES
 

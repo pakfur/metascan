@@ -52,9 +52,9 @@ def test_lineage_columns_added(db):
             assert {"writer_id", "variant_group", "variant_index"} <= cols
 
 
-def test_user_version_is_6(db):
+def test_user_version_is_7(db):
     with db._get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 def test_migration_seeds_existing_favorites(tmp_path):

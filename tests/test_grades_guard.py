@@ -444,7 +444,7 @@ def test_v6_drops_legacy_columns(tmp_path):
         assert "passed" in _columns(db_file, table)
 
     db = DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     for table in ("media_judgments", "media_tombstones"):
         assert "passed" not in _columns(db_file, table)
         # The backup is the v5 database as it was, old columns included.
@@ -494,7 +494,7 @@ def test_an_old_sqlite_keeps_the_legacy_columns_unread(tmp_path, monkeypatch):
         m.setattr(database_sqlite, "_can_drop_columns", lambda: False)
         db = DatabaseManager(db_dir)
         DatabaseManager(db_dir)  # and every later open, too
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     for table in ("media_judgments", "media_tombstones"):
         assert "passed" in _columns(db_file, table)
     assert dict(_query(db_file, "SELECT file_path, grade FROM media_judgments")) == (
@@ -571,7 +571,7 @@ def test_a_failed_drop_keeps_the_legacy_columns_unread(tmp_path, caplog):
 
     caplog.set_level(logging.INFO, logger="metascan.core.database_sqlite")
     db = DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     for table in ("media_judgments", "media_tombstones"):
         assert "passed" in _columns(db_file, table)
     assert _query(db_file, "PRAGMA integrity_check") == [("ok",)]
@@ -613,7 +613,7 @@ def test_a_failed_drop_keeps_the_legacy_columns_unread(tmp_path, caplog):
     # Done once: the next start neither retries the drop nor warns again.
     caplog.clear()
     DatabaseManager(db_dir)
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     for table in ("media_judgments", "media_tombstones"):
         assert "passed" in _columns(db_file, table)

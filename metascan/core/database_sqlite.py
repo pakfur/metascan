@@ -1674,6 +1674,16 @@ class DatabaseManager:
             # ``t2i.scorecard_id`` (filled by _insert_tombstone, back-filled
             # by _migrate_to_v6): scorecard results find deleted scorecard
             # images by it instead of parsing every lineage.
+            # The evidence a FAISS row read by the tombstone's path is its
+            # own file's vector (a row holds the last file embedded at the
+            # path): embedded_model is the CLIP model the file was embedded
+            # with when it was deleted (its media_hashes row), '' when it
+            # never was, NULL on a tombstone written before the column (or
+            # restored from a full-clean snapshot: no evidence either way);
+            # path_rewritten is set by the embedding worker on every
+            # tombstone of each path whose row it appends or overwrites
+            # (mark_tombstone_paths_rewritten), after which the row is never
+            # read for them.
             for _col, _ddl in (
                 ("grade", _grade_ddl),
                 ("judged_at", "judged_at TEXT"),
@@ -1683,6 +1693,8 @@ class DatabaseManager:
                 ("model_name", "model_name TEXT"),
                 ("thumb_path", "thumb_path TEXT"),
                 ("scorecard_id", "scorecard_id TEXT"),
+                ("embedded_model", "embedded_model TEXT"),
+                ("path_rewritten", "path_rewritten INTEGER NOT NULL DEFAULT 0"),
             ):
                 _idempotent_add_column(
                     conn,
@@ -1691,7 +1703,7 @@ class DatabaseManager:
                     f"ALTER TABLE media_tombstones ADD COLUMN {_ddl}",
                 )
             # Partial indexes: only scorecard / archived tombstones are in
-            # them, so they stay tiny (every other lookup scans tombstones).
+            # them, so they stay tiny.
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_tombstones_scorecard "
                 "ON media_tombstones(scorecard_id) WHERE scorecard_id IS NOT NULL"
@@ -1700,8 +1712,8 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_tombstones_thumb "
                 "ON media_tombstones(thumb_path) WHERE thumb_path IS NOT NULL"
             )
-            # The newest tombstone of a path, read by the embedding worker
-            # every time it overwrites that path's FAISS row.
+            # Every tombstone of a path: the embedding worker stamps them
+            # (path_rewritten) for each path it embeds, in every save.
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_tombstones_path "
                 "ON media_tombstones(file_path)"
@@ -1710,9 +1722,10 @@ class DatabaseManager:
             # the FAISS index names it). No FK: tombstones are never deleted.
             # It replaces media_tombstones.embedding / embedding_model, which
             # _migrate_to_v6 copied here; nothing writes or reads those now.
-            # Filled at deletion (the in-memory index), by the by-path
-            # backfill once the index loads, and by the re-embedder from the
-            # archived thumbnail (backend/services/tombstone_reembed.py).
+            # Filled at deletion (the in-memory index) and by the by-path
+            # backfill once an index loads, both only with the evidence
+            # above, and by the re-embedder from the archived thumbnail
+            # (backend/services/tombstone_reembed.py).
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tombstone_vectors (
@@ -2395,7 +2408,58 @@ class DatabaseManager:
 
             if user_version < 6:
                 self._migrate_to_v6(conn)
+            if user_version < 7:
+                self._migrate_to_v7(conn)
             self._tombstone_fill = _legacy_tombstone_fill(conn)
+
+    def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
+        """user_version 6 -> 7: live files on a deleted file's path are
+        embedded again. ``conn`` must have nothing uncommitted.
+
+        ``FaissIndexManager.add`` used to keep a path's first vector, so a
+        file that landed on a deleted file's path kept the deleted file's
+        row while its ``media_hashes`` row said it was embedded, and no
+        incremental build looked at it again. Every live path that also has
+        a tombstone (it had another life) gets ``has_embedding = 0`` --
+        an unreadable file's -1 too, so it is retried -- and the next
+        incremental build re-embeds it, overwriting the row. It only resets
+        flags, so there is no backup; one transaction, the version re-read
+        under the write lock (a concurrent open migrates once). The count
+        line (never a path) is INFO, DEBUG when nothing was reset. A
+        failure rolls it back (still version 6) and raises
+        ``MigrationError``; the next open retries."""
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 7:
+                conn.rollback()  # another manager migrated meanwhile
+                return
+            reset = conn.execute(
+                "UPDATE media_hashes SET has_embedding = 0 "
+                "WHERE has_embedding != 0 "
+                "AND file_path IN (SELECT file_path FROM media_tombstones) "
+                "AND file_path IN (SELECT file_path FROM media)"
+            ).rowcount
+            conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                logger.exception("Rolling back the failed v7 migration raised")
+            raise MigrationError(
+                "Metascan could not upgrade its database to version 7 (files "
+                f"on a deleted file's path are embedded again): {exc}. Nothing "
+                "was changed and the database is still at version 6. To "
+                "retry, start Metascan again; if it fails the same way, "
+                "report this message."
+            ) from exc
+        logger.log(
+            logging.INFO if reset else logging.DEBUG,
+            "Database upgraded to version 7 (stale CLIP rows on reused paths): "
+            "%d live file(s) on a deleted file's path will be embedded again "
+            "by the next index build",
+            reset,
+        )
 
     def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
         """user_version 5 -> 6: today's ratings become pass / fail grades
@@ -4092,8 +4156,11 @@ class DatabaseManager:
         """Install the callable tombstones use to snapshot a deleted item's
         embedding: ``fn(native_path)`` returns ``(vector, model_key)`` or
         None; the vector is kept in ``tombstone_vectors`` under that model.
-        It runs while the DB lock is held, so it must be a fast in-memory
-        lookup. Default: no lookup (the tombstone gets no vector)."""
+        It is called only for a file its ``media_hashes`` row says was
+        embedded, and its answer is kept only when ``model_key`` is the
+        model the file was embedded with (``_insert_tombstone``). It runs
+        while the DB lock is held, so it must be a fast in-memory lookup.
+        Default: no lookup (the tombstone gets no vector)."""
         self._embedding_lookup = fn
 
     def _write_tombstones(
@@ -4114,7 +4181,10 @@ class DatabaseManager:
         row); for a ✓ library image (no T2I / I2V row, so no lineage) its
         metadata prompt and model names; and ``thumbs[path]``, the
         thumbnail the caller archived from the live file
-        (``training_archive``), relative to the data dir."""
+        (``training_archive``), relative to the data dir. Its
+        ``embedded_model`` comes from the ``media_hashes`` row (which
+        cascades away with the media row): the CLIP model the file was
+        embedded with, '' when it was not."""
         for path in posix_paths:
             judgment = conn.execute(
                 "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
@@ -4157,6 +4227,12 @@ class DatabaseManager:
                 and self._is_image_path(path)
             ):
                 prompt, model_names = self._library_prompt(conn, path)
+            hashes = conn.execute(
+                "SELECT clip_model, has_embedding FROM media_hashes "
+                "WHERE file_path = ?",
+                (path,),
+            ).fetchone()
+            embedded = hashes is not None and hashes["has_embedding"] == 1
             self._insert_tombstone(
                 conn,
                 path,
@@ -4171,6 +4247,7 @@ class DatabaseManager:
                 brief_model=brief["model"] if brief is not None else None,
                 prompt=prompt,
                 model_name=model_names,
+                embedded_model=(str(hashes["clip_model"] or "") if embedded else ""),
             )
 
     @staticmethod
@@ -4218,14 +4295,18 @@ class DatabaseManager:
         brief_model: Optional[str] = None,
         prompt: Optional[str] = None,
         model_name: Optional[str] = None,
+        embedded_model: Optional[str] = None,
     ) -> None:
         """Insert one media_tombstones row. ``judgment`` is a live
         media_judgments row or a version-2 snapshot row (both carry
         ``grade``); the keyword fields are stored as given (see
         ``_write_tombstones``), and ``scorecard_id`` comes from the T2I
-        lineage. The item's vector from the in-memory FAISS index (the
-        installed lookup) goes into ``tombstone_vectors`` under the CLIP
-        model it came from; the legacy single-vector columns are no longer
+        lineage. ``embedded_model`` is the evidence for reading the FAISS
+        index by this path: the CLIP model the file was embedded with, ''
+        when it never was, None when nothing is known (a snapshot restore).
+        Only when it names the in-memory index's model (the installed
+        lookup) is the item's vector there read, into ``tombstone_vectors``
+        under that model; the legacy single-vector columns are no longer
         written. Caller holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
@@ -4235,10 +4316,13 @@ class DatabaseManager:
                 break
         blob: Optional[bytes] = None
         model_key: Optional[str] = None
-        if self._embedding_lookup is not None:
+        if embedded_model and self._embedding_lookup is not None:
             try:
                 found = self._embedding_lookup(to_native_path(path))
-                if found is not None:
+                # The file's own row is in the index of the model it was
+                # embedded with; an index of another model is not known to
+                # hold it at this path.
+                if found is not None and found[1] == embedded_model:
                     vector, key = found
                     blob = np.asarray(vector).astype(np.float32).tobytes()
                     model_key = key
@@ -4255,9 +4339,9 @@ class DatabaseManager:
             "INSERT INTO media_tombstones (file_path, deleted_at, "
             "is_favorite, grade, reasons, categories, seen_at, "
             "judged_at, confirmed_at, lineage, "
-            "brief, brief_model, prompt, model_name, thumb_path, scorecard_id"
-            f"{fill_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            f"?, ?{', ?' * len(fill_values)})",
+            "brief, brief_model, prompt, model_name, thumb_path, scorecard_id, "
+            f"embedded_model{fill_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            f"?, ?, ?, ?, ?, ?, ?, ?{', ?' * len(fill_values)})",
             (
                 path,
                 now,
@@ -4275,6 +4359,7 @@ class DatabaseManager:
                 model_name,
                 thumb_path,
                 scorecard_id if isinstance(scorecard_id, str) else None,
+                embedded_model,
                 *fill_values,
             ),
         )
@@ -4286,42 +4371,60 @@ class DatabaseManager:
                 (cur.lastrowid, model_key, blob, now),
             )
 
-    def tombstones_for_vector_backfill(self) -> List[Tuple[int, str]]:
+    def tombstones_for_vector_backfill(self, model_key: str) -> List[Tuple[int, str]]:
         """``(id, posix file_path)`` of the tombstones that may take the
-        loaded FAISS index's vector for their path (a deleted file's vector
-        stays in the on-disk index until its CLIP model changes). Oldest
-        first.
+        vector a loaded FAISS index of CLIP model ``model_key`` holds at
+        their path. Oldest first.
 
-        The index keys a vector by path and never replaces one, so a vector
-        read by path may be another file's (Review Focus 5). Left out, so
-        they never get one by path:
+        A row there is the vector of the last file embedded at the path,
+        which after a delete may be another file's (Review Focus 5), so a
+        tombstone is listed only with evidence that the row is its own:
 
-        * a tombstone with a vector for any CLIP model. Every vector comes
-          from the index current at the deletion, a later backfill from it,
-          or a re-embed for it, so an index of another model was built
-          after the file was gone and holds at its path only another file;
-        * a tombstone with an archived thumbnail: the re-embedder computes
-          its vector from its own image;
-        * a path that a live media row holds now, or that another tombstone
-          shares: the path has had another life."""
+        * nothing has been embedded at the path since it was written
+          (``path_rewritten = 0``: the embedding worker stamps every
+          tombstone of each path it appends or overwrites), and
+        * its file was embedded with ``model_key`` when it was deleted
+          (``embedded_model``) and it has no vector for that model yet; or
+        * it predates that evidence (``embedded_model`` NULL: written before
+          the column, or restored from a full-clean snapshot) and passes the
+          old guards: no vector for any CLIP model (an index of another
+          model was built after the file was gone), no archived thumbnail
+          (the re-embedder computes its vector from its own image), and a
+          path that no live media row holds now and no other tombstone
+          shares (the path has had another life).
+
+        A tombstone whose file was never embedded (``embedded_model = ''``)
+        is never listed."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT t.id, t.file_path, t.thumb_path IS NOT NULL AS archived, "
+                "SELECT t.id, t.file_path, t.embedded_model, t.path_rewritten, "
+                "t.thumb_path IS NOT NULL AS archived, "
                 "EXISTS (SELECT 1 FROM media m WHERE m.file_path = t.file_path) "
                 "AS live, "
                 "EXISTS (SELECT 1 FROM tombstone_vectors v "
-                "WHERE v.tombstone_id = t.id) AS has_vector "
-                "FROM media_tombstones t ORDER BY t.id"
+                "WHERE v.tombstone_id = t.id) AS has_vector, "
+                "EXISTS (SELECT 1 FROM tombstone_vectors v "
+                "WHERE v.tombstone_id = t.id AND v.model_key = ?) AS has_model_vector "
+                "FROM media_tombstones t ORDER BY t.id",
+                (model_key,),
             ).fetchall()
         lives: Dict[str, int] = {}
         for r in rows:
             lives[r["file_path"]] = lives.get(r["file_path"], 0) + 1
-        return [
-            (int(r["id"]), str(r["file_path"]))
-            for r in rows
-            if not (r["has_vector"] or r["archived"] or r["live"])
-            and lives[r["file_path"]] == 1
-        ]
+
+        def eligible(r: sqlite3.Row) -> bool:
+            if r["path_rewritten"]:
+                return False
+            if r["embedded_model"] is not None:
+                return bool(
+                    r["embedded_model"] == model_key and not r["has_model_vector"]
+                )
+            return (
+                not (r["has_vector"] or r["archived"] or r["live"])
+                and lives[r["file_path"]] == 1
+            )
+
+        return [(int(r["id"]), str(r["file_path"])) for r in rows if eligible(r)]
 
     def tombstones_needing_vectors(self, model_key: str) -> List[Tuple[int, str]]:
         """``(id, thumb_path)`` of every graded image tombstone with an
@@ -4348,36 +4451,37 @@ class DatabaseManager:
             reverse=True,
         )
 
-    def adopt_replaced_vector(
-        self, file_path: str, model_key: str, embedding: bytes
-    ) -> bool:
-        """Give the vector the embedding worker is about to overwrite at
-        ``file_path`` (for CLIP model ``model_key``) to the newest tombstone
-        at that path, when that tombstone is a graded image with no vector
-        for the model yet. The worker is the only writer of the on-disk
-        index, so the row it overwrites was written for the file deleted
-        there; without this, an archive-less tombstone's by-path backfill
-        could later take the newer file's vector. True when one was stored."""
-        posix_path = to_posix_path(file_path)
-        if not self._is_image_path(posix_path):
-            return False
+    def mark_tombstone_paths_rewritten(
+        self, file_paths: Sequence[Union[str, Path]]
+    ) -> int:
+        """Stamp ``path_rewritten = 1`` on every tombstone at each of
+        ``file_paths`` (native or POSIX): the paths whose FAISS row the
+        embedding worker appended or overwrote, for any CLIP model and any
+        index (a fresh one after a CLIP switch too). From then on the row at
+        such a path is not known to be a tombstone's own -- it is the vector
+        of the last file embedded there -- so it is never read for them by
+        path (``tombstones_for_vector_backfill``). The worker calls this
+        before each index save; it commits before returning and raises on a
+        database error (the index must not be saved then). Returns how many
+        tombstones were newly stamped."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in file_paths))
+        if not posix:
+            return 0
+        stamped = 0
         with self.lock, self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT id, grade FROM media_tombstones INDEXED BY "
-                "idx_media_tombstones_path WHERE file_path = ? "
-                "ORDER BY id DESC LIMIT 1",
-                (posix_path,),
-            ).fetchone()
-            if row is None or row["grade"] not in GRADES:
-                return False
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO tombstone_vectors "
-                "(tombstone_id, model_key, embedding, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (row["id"], model_key, embedding, self._iso(None)),
-            )
+            for start in range(0, len(posix), 500):
+                end = start + 500
+                part = posix[start:end]
+                marks = ",".join("?" * len(part))
+                cur = conn.execute(
+                    "UPDATE media_tombstones INDEXED BY idx_media_tombstones_path "
+                    f"SET path_rewritten = 1 WHERE file_path IN ({marks}) "
+                    "AND path_rewritten = 0",
+                    part,
+                )
+                stamped += max(cur.rowcount, 0)
             conn.commit()
-            return bool(cur.rowcount == 1)
+        return stamped
 
     def add_tombstone_vectors(self, rows: Sequence[Tuple[int, str, bytes]]) -> int:
         """Store ``(tombstone id, CLIP model key, float32 vector bytes)`` rows
@@ -9018,8 +9122,11 @@ class DatabaseManager:
 
         With ``tombstone_missing``, each snapshot path whose media row did
         not come back gets one media_tombstones row built from the snapshot
-        (embedding via the installed lookup, else NULL; lineage from the
-        surviving t2i/i2v row). Returns ``{restored, missing, tombstoned}``
+        (lineage from the surviving t2i/i2v row). It gets no vector: the
+        truncate took the item's embedding record with it, so nothing says
+        whose row the FAISS index holds at the path; ``embedded_model``
+        stays NULL, which the by-path backfill treats as no evidence (the
+        old guards). Returns ``{restored, missing, tombstoned}``
         counted in paths plus ``remaining``: the snapshot narrowed to the
         paths that were not restored (same shape and version, same
         ``taken_at``)."""
