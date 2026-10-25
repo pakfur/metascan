@@ -319,20 +319,20 @@ def test_bad_grade_in_a_versionless_file_is_quarantined(db, grade):
     _assert_quarantined(db, {"judgments": [{**_V2_J, "passed": 1, "grade": grade}]})
 
 
-@pytest.mark.parametrize("version", [1, 3, "2", None, 2.5, True])
+@pytest.mark.parametrize("version", [1, 4, "2", "3", None, 2.5, True])
 def test_unknown_snapshot_version_is_quarantined(db, version):
-    """Only version 2 and version-less (pre-v2) files are understood; any
-    other version is set aside rather than read with a guessed meaning --
-    here with rows that would be valid in either known shape."""
+    """Only versions 2 and 3 and version-less (pre-v2) files are understood;
+    any other version is set aside rather than read with a guessed meaning
+    -- here with rows that would be valid in every known shape."""
     row = {**_V2_J, "passed": 1}
     assert ts._valid_shape(_v2(row)) and ts._valid_shape({"judgments": [row]})
     _assert_quarantined(db, {**_v2(row), "version": version})
 
 
 def test_v2_leftovers_never_gain_a_grade(db):
-    """A ★-only path left pending comes back ★ only: the rewritten file stays
-    version 2 even with no judgment row left in it, so it is never read as
-    a pre-grades file (whose favorites mean ✓)."""
+    """A ★-only path left pending comes back ★ only: the rewritten file
+    keeps its version even with no judgment row left in it, so it is never
+    read as a pre-grades file (whose favorites mean ✓)."""
     for p in ("/p/star.png", "/p/x.png"):
         db.save_media(_media(p))
     db.set_favorite_state("/p/star.png", True, now=T0)
@@ -705,9 +705,9 @@ def test_legacy_pending_snapshot_restores_with_old_meaning(tmp_path):
 
 
 def test_legacy_leftovers_stay_pending_with_their_old_meaning(db):
-    """What has not come back yet stays pending, rewritten as a v2 file that
-    already carries the old meaning -- so it means the same whenever it is
-    applied, or tombstoned by a later full clean."""
+    """What has not come back yet stays pending, rewritten as a current
+    (version 3) file that already carries the old meaning -- so it means the
+    same whenever it is applied, or tombstoned by a later full clean."""
     data_dir = Path(db.db_path)
     db.create_category("Landscape")
     target = ts.snapshot_file_path(data_dir)
@@ -721,7 +721,8 @@ def test_legacy_leftovers_stay_pending_with_their_old_meaning(db):
 
     assert _marks(db.get_judgment("/lib/fav.png")) == (True, "pass")
     left = json.loads(target.read_text(encoding="utf-8"))
-    assert left["version"] == 2
+    assert left["version"] == 3
+    assert (left["briefs"], left["library_prompts"]) == ([], [])
     assert {j["file_path"]: j["grade"] for j in left["judgments"]} == {
         "/lib/cleared.png": None,
         "/lib/fav_bare.png": "pass",
@@ -826,10 +827,12 @@ def test_upgrade_legacy_snapshot_translates_the_old_meaning():
 
     assert sorted(out["judgments"], key=lambda j: j["file_path"]) == expected_rows
     assert {k: v for k, v in out.items() if k != "judgments"} == {
-        "version": 2,
+        "version": 3,
         "taken_at": "t0",
         "categories": [link],
         "favorites": ["/b.png", "/d.png", "/e.png"],
+        "briefs": [],
+        "library_prompts": [],
     }
 
 
@@ -857,8 +860,10 @@ def test_upgrade_keeps_the_grades_a_versionless_file_already_has():
 
     assert sorted(out["judgments"], key=lambda j: j["file_path"]) == rows
     assert {k: v for k, v in out.items() if k != "judgments"} == {
-        "version": 2,
+        "version": 3,
         "taken_at": "t0",
         "categories": [],
         "favorites": ["/a.png", "/c.png"],
+        "briefs": [],
+        "library_prompts": [],
     }
