@@ -213,16 +213,14 @@ export const useMediaStore = defineStore('media', () => {
     }
   }
 
-  // Mirror grades the server already holds onto the local records (tile
-  // badges and the `grade` smart-folder rule read them): one pass over the
-  // list, in place. MediaViewer sends what it graded when it closes.
-  function applyGrades(grades: ReadonlyMap<string, Grade | null>): void {
-    if (grades.size === 0) return
-    for (const m of allMedia.value) {
-      if (!grades.has(m.file_path)) continue
-      const grade = grades.get(m.file_path) ?? null
-      if ((m.grade ?? null) !== grade) m.grade = grade
-    }
+  // Mirror a grade the server already holds (a judgments response) onto
+  // the local record: tile badges and the `grade` smart-folder rule read it.
+  // In place, like applyFavoriteFlag. MediaViewer sends every answer at once:
+  // it navigates its own copy of the list, so a grade that takes the image
+  // out of a grade-filtered folder never moves another image under it.
+  function applyGrade(filePath: string, grade: Grade | null): void {
+    const entry = allMedia.value.find((m) => m.file_path === filePath)
+    if (entry && (entry.grade ?? null) !== grade) entry.grade = grade
   }
 
   async function removeMedia(media: Media) {
@@ -264,7 +262,7 @@ export const useMediaStore = defineStore('media', () => {
     selectMedia,
     toggleFavorite,
     applyFavoriteFlag,
-    applyGrades,
+    applyGrade,
     removeMedia,
     setSortOrder,
     toggleShowHidden,
