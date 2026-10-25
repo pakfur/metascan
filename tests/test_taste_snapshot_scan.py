@@ -4,6 +4,8 @@ real temp DB and a fake scanner that re-saves a chosen set of paths."""
 
 import asyncio
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -701,3 +703,229 @@ def test_an_ordinary_scan_never_pauses_the_prune(monkeypatch, db):
     _wire(monkeypatch, db, [], scanner_cls=Scanner)
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
     assert seen["running"] is False
+
+
+# ----------------------------------------------------------------------
+# The lasting marker: a full clean stays unfinished, and the prune paused,
+# until a scan of every configured folder completes
+# ----------------------------------------------------------------------
+
+
+def _marker_exists(db):
+    # Path.exists is monkeypatched to True by _wire.
+    return os.path.exists(ts.full_clean_marker_path(Path(db.db_path)))
+
+
+def test_full_clean_writes_the_marker_before_truncating(monkeypatch, db):
+    _seed(db)
+    seen = {}
+    real_truncate = db.truncate_all_data
+
+    def spy_truncate():
+        seen["marker"] = _marker_exists(db)
+        seen["pending file"] = _pending(db) is not None
+        return real_truncate()
+
+    monkeypatch.setattr(db, "truncate_all_data", spy_truncate)
+    _wire(monkeypatch, db, ["/lib/fav.png", "/lib/reject.png", "/lib/gone.png"])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert seen == {"marker": True, "pending file": True}
+    assert not _marker_exists(db)  # the run completed
+
+
+def test_full_clean_aborts_when_the_marker_cannot_be_written(monkeypatch, db):
+    _seed(db)
+
+    def disk_full(data_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(scan_api, "write_full_clean_marker", disk_full)
+    events = _wire(monkeypatch, db, [])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert len(db.get_existing_file_paths()) == 3  # nothing was deleted
+    assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE
+    errors = [e for e in events if e[1] == "error"]
+    assert len(errors) == 1 and "disk full" in errors[0][2]["message"]
+    assert not any(e[1] == "phase_changed" for e in events)
+    assert not ts.is_full_clean_running()
+
+
+def test_a_full_clean_that_aborts_before_its_snapshot_leaves_no_marker(monkeypatch, db):
+    _seed(db)
+
+    def boom():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(db, "export_taste_state", boom)
+    _wire(monkeypatch, db, [])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert not _marker_exists(db)
+
+
+@pytest.mark.parametrize("later", ["ordinary scan", "full clean"])
+def test_a_cancelled_full_clean_keeps_unrated_lineage_until_a_scan_completes(
+    monkeypatch, db, later
+):
+    """The gap the pending file left: every rated path came back before the
+    cancel, so nothing is pending, but the unrated T2I images and I2V clips
+    were not rescanned yet. Their rows outlive every listing until a scan
+    of every folder completes; then the ones still gone are pruned."""
+    rated = "/lib/t2i/rated.png"
+    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    clip_back, clip_gone = "/lib/i2v/back.mp4", "/lib/i2v/gone.mp4"
+    _seed_generations(db, [rated, back, gone], [clip_back, clip_gone])
+    db.set_grade(rated, "pass", now=T0)
+    _wire_prune_guard(db)
+
+    class CancelAfterTheRatedImage:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            db.save_media(_media(rated))  # the first folder brings it back
+            scan_api._cancel_requested = True  # then the user cancels
+            return 1
+
+    _wire(monkeypatch, db, [], scanner_cls=CancelAfterTheRatedImage)
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [_DirCfg(), _DirCfg()])
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    finally:
+        scan_api._cancel_requested = False
+
+    assert _pending(db) is None  # nothing pending: the rated image is back
+    assert db.get_judgment(rated).grade == "pass"
+    assert not ts.is_full_clean_running()
+    assert [r["file_name"] for r in db.list_t2i_images()] == ["rated.png"]
+    assert db.list_i2v_videos(SRC) == []
+    assert _lineage_rows(db) == (3, 2)  # the unrated rows outlive the listing
+    assert _marker_exists(db)
+
+    # A later scan of every folder completes: what is on disk comes back
+    # with its lineage, the marker goes, and the rest is pruned.
+    _wire(monkeypatch, db, [rated, SRC, back, clip_back])
+    asyncio.run(
+        scan_api._run_scan(full_cleanup=False, full_clean=later == "full clean")
+    )
+    assert not _marker_exists(db)
+    images = db.list_t2i_images()
+    assert [r["file_name"] for r in images] == ["back.png", "rated.png"]
+    assert [_lineage(r, T2I_LINEAGE) for r in images] == [T2I_LINEAGE] * 2
+    [clip] = db.list_i2v_videos(SRC)
+    assert Path(clip["file_path"]).name == "back.mp4"
+    assert _lineage(clip, I2V_LINEAGE) == I2V_LINEAGE
+    assert _lineage_rows(db) == (2, 1)
+
+
+def test_a_shutdown_mid_full_clean_keeps_the_marker_across_a_restart(monkeypatch, db):
+    """An unrated library: its pending file is empty, and the next start
+    consumes it. The marker still keeps the rows of what was not rescanned."""
+    from backend.main import _install_lineage_prune_guard
+
+    back = "/lib/t2i/back.png"
+    clip = "/lib/i2v/back.mp4"
+    _seed_generations(db, [back], [clip])
+    _wire_prune_guard(db)
+
+    class ShutdownScanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            raise asyncio.CancelledError()
+
+    _wire(monkeypatch, db, [], scanner_cls=ShutdownScanner)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    # The next start: the same database in a new process, wired by the
+    # lifespan, which also applies (here: consumes) the pending file.
+    restarted = DatabaseManager(Path(db.db_path))
+    _install_lineage_prune_guard(restarted)
+    ts.apply_pending_taste_snapshot(restarted, Path(db.db_path))
+    assert _pending(restarted) is None
+    assert restarted.list_t2i_images() == []
+    assert restarted.list_i2v_videos(SRC) == []
+    assert _lineage_rows(restarted) == (1, 1)  # nothing pruned
+    assert _marker_exists(restarted)
+
+
+@pytest.mark.parametrize(
+    "ending", ["scanner fails", "cancelled", "cancelled in the last folder"]
+)
+def test_a_failed_or_cancelled_full_clean_keeps_the_marker(monkeypatch, db, ending):
+    _seed_generations(db, ["/lib/t2i/back.png"], [])
+    _wire_prune_guard(db)
+
+    class Scanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            if ending == "scanner fails":
+                raise RuntimeError("boom")
+            scan_api._cancel_requested = True
+            return 0
+
+    _wire(monkeypatch, db, [], scanner_cls=Scanner)
+    scan_api._cancel_requested = ending == "cancelled"  # before the first folder
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    finally:
+        scan_api._cancel_requested = False
+    assert _marker_exists(db)
+    assert db.list_t2i_images() == []
+    assert _lineage_rows(db) == (1, 0)
+
+
+def test_a_scan_that_misses_a_configured_folder_keeps_the_marker(monkeypatch, db):
+    """A folder it could not see (an unmounted drive) was not walked: its
+    files may come back, so the full clean is still unfinished."""
+    _seed_generations(db, ["/lib/t2i/back.png"], [])
+    ts.write_full_clean_marker(Path(db.db_path))
+
+    class Unmounted:
+        filepath = "/unmounted"
+        search_subfolders = True
+
+    _wire(monkeypatch, db, [])
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [_DirCfg(), Unmounted()])
+    monkeypatch.setattr(scan_api.Path, "exists", lambda self: str(self) != "/unmounted")
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert _marker_exists(db)
+
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [_DirCfg()])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert not _marker_exists(db)
+
+
+def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
+    monkeypatch, db, caplog
+):
+    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    _seed_generations(db, [back, gone], [])
+    _wire_prune_guard(db)
+    ts.write_full_clean_marker(Path(db.db_path))  # an unfinished full clean
+    assert db.delete_media(Path(gone))  # this one is gone for good
+    real_unlink = Path.unlink
+
+    def locked(self, *a, **k):
+        if self.name == ts.FULL_CLEAN_MARKER_FILENAME:
+            raise PermissionError("locked by another process")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    _wire(monkeypatch, db, [back])
+    with caplog.at_level(logging.ERROR, logger="backend.services.taste_snapshot"):
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert [r for r in caplog.records if "locked by another" in r.getMessage()]
+    assert _marker_exists(db)
+    assert [r["file_name"] for r in db.list_t2i_images()] == ["back.png"]
+    assert _lineage_rows(db) == (2, 0)  # still paused
+
+    # Once it can go, the next completed scan removes it.
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert not _marker_exists(db)
+    assert [r["file_name"] for r in db.list_t2i_images()] == ["back.png"]
+    assert _lineage_rows(db) == (1, 0)

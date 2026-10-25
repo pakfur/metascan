@@ -23,10 +23,12 @@ without a version was written before grades and keeps its old meaning --
 :func:`upgrade_legacy_snapshot` translates it exactly as the v6 migration
 maps live ratings. Both shapes validate; any other version is quarantined.
 
-While a full clean runs or its file exists, the T2I / I2V listings must not
-prune their lineage rows (:func:`lineage_prune_guard`): the rescan re-adds
-the media rows one by one, and a completed full clean reads the vanished
-items' lineage from those rows when it tombstones them.
+While a full clean runs, its file exists, or its lasting marker
+``<data dir>/full_clean_incomplete`` does (written before the truncate,
+removed only when a scan of every configured folder completes), the T2I /
+I2V listings must not prune their lineage rows (:func:`lineage_prune_guard`):
+the rescan re-adds the media rows one by one, and a completed full clean
+reads the vanished items' lineage from those rows when it tombstones them.
 """
 
 import itertools
@@ -71,8 +73,8 @@ def full_clean_running() -> Iterator[None]:
     """Mark a full clean as running in this process for the ``with`` block.
     The scan route wraps the whole run, from before its snapshot to after
     its restore; the mark goes however the block ends (an abort, an error,
-    a shutdown's CancelledError). The pending file outlives a run, this
-    mark does not."""
+    a shutdown's CancelledError). The marker and the pending file outlive a
+    run, this mark does not."""
     global _full_clean_runs
     with _full_clean_lock:
         _full_clean_runs += 1
@@ -87,29 +89,106 @@ def is_full_clean_running() -> bool:
     return _full_clean_runs > 0
 
 
-def pending_snapshot_exists(data_dir: Path) -> bool:
-    """Whether the pending file exists. Only a missing file is False: any
-    other error checking for it (permissions, a data dir that is not a
-    directory) is raised, so a caller that must fail safe can."""
+def _exists(path: Path) -> bool:
+    """Only a missing file is False: any other error checking for it
+    (permissions, a data dir that is not a directory) is raised, so a
+    caller that must fail safe can. Never ``Path.exists``, which reads some
+    of those errors as "missing"."""
     try:
-        os.stat(snapshot_file_path(data_dir))
+        os.stat(path)
     except FileNotFoundError:
+        return False
+    return True
+
+
+def pending_snapshot_exists(data_dir: Path) -> bool:
+    """Whether the pending file exists (see ``_exists``)."""
+    return _exists(snapshot_file_path(data_dir))
+
+
+# The lasting mark of an unfinished full clean. The pending file only lists
+# rated paths and goes as soon as they are all back (or empty, at once),
+# while the rescan may still be far from the unrated T2I / I2V files.
+FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
+
+_MARKER_TEXT = """\
+Metascan started a full clean & rescan at {started}, and no scan has
+finished since.
+
+While this file exists, the Text-to-Image and Image-to-Video lists keep the
+records (prompts, writers, variants) of generated images and clips that the
+rescan has not found again yet, instead of deleting them: they may still
+come back. Metascan deletes this file when a scan of every configured
+folder completes.
+
+To let the lists drop those records without scanning, delete this file;
+Metascan may keep running. A pending ratings file next to it
+({pending}) also holds them back while it lists ratings that have not come
+back.
+"""
+
+
+def full_clean_marker_path(data_dir: Path) -> Path:
+    return Path(data_dir) / FULL_CLEAN_MARKER_FILENAME
+
+
+def full_clean_marker_exists(data_dir: Path) -> bool:
+    """Whether the marker exists (see ``_exists``)."""
+    return _exists(full_clean_marker_path(data_dir))
+
+
+def write_full_clean_marker(data_dir: Path) -> None:
+    """Create (or refresh) the marker, durably: the full clean writes it
+    right before the truncate, after the pending file, and its data and
+    directory entry are fsynced first, so a crash after the truncate still
+    finds it. Raises OSError."""
+    target = full_clean_marker_path(data_dir)
+    text = _MARKER_TEXT.format(
+        started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        pending=TASTE_SNAPSHOT_FILENAME,
+    )
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    _fsync_dir(target.parent)
+
+
+def clear_full_clean_marker(data_dir: Path) -> bool:
+    """Remove the marker: only the scan route calls it, once a scan of every
+    configured folder has completed (every file still on disk has its media
+    row again). True when it is gone. A failed removal (OSError) is logged
+    and returns False: the marker stays, so the prune stays paused (fail
+    safe)."""
+    target = full_clean_marker_path(data_dir)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as e:
+        logger.error(
+            "Could not remove %s (%s): the T2I / I2V lists keep their records "
+            "of missing files until it is gone; delete it by hand to resume",
+            target,
+            e,
+        )
         return False
     return True
 
 
 def lineage_prune_guard(data_dir: Path) -> Callable[[], bool]:
     """The guard for ``DatabaseManager.set_lineage_prune_guard``: True --
-    no prune -- while a full clean runs in this process or its pending
-    file exists in ``data_dir``. The file is written (empty lists for a
-    library with no ratings) before the truncate and survives a crash or
-    a restart; a cancelled or failed full clean keeps it while entries are
-    unrestored, and a completed one deletes it only after tombstoning. The
-    mark covers the run itself. A failed check raises, which the database
-    counts as True. Runs under the DB lock: a stat, nothing else."""
+    no prune -- while a full clean runs in this process, its marker exists
+    in ``data_dir`` (written before the truncate; removed only once a scan
+    of every configured folder completes, so it outlives a cancel, an error
+    and a restart), or its pending file does (it holds the ratings that have
+    not come back). A failed check raises, which the database counts as
+    True. Runs under the DB lock: two stats, nothing else."""
 
     def paused() -> bool:
-        return is_full_clean_running() or pending_snapshot_exists(data_dir)
+        return (
+            is_full_clean_running()
+            or full_clean_marker_exists(data_dir)
+            or pending_snapshot_exists(data_dir)
+        )
 
     return paused
 

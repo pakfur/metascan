@@ -29,9 +29,9 @@ the root CLAUDE.md still applies.
   reach the tile live through `store.applyJudgment` (`judgmentMirror`). Clips
   keep collecting grades, but no consumer trains on video.
   `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily
-  prunes rows whose media is gone (never while a full clean runs or has
-  entries pending, `set_lineage_prune_guard`: CLAUDE.md, "Full clean &
-  rescan keeps ratings"); deleting the source image keeps the videos.
+  prunes rows whose media is gone (never until a full clean is finished,
+  `set_lineage_prune_guard`: CLAUDE.md, "Full clean & rescan keeps
+  ratings"); deleting the source image keeps the videos.
   Presets are kind `ref2v` tagged `minimax`/`i2va`
   (`_validate_minimax_i2va`: MS_FIRST_FRAME required, MS_DURATION /
   MS_LORA_STACK / MS_RESOLUTION warn-if-missing); the fast/quality slots
