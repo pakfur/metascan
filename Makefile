@@ -123,9 +123,11 @@ typecheck: check-venv  ## Run type checking with mypy
 .PHONY: quality
 quality: lint format-check typecheck  ## Run all Python quality checks (matches CI)
 
+# Build mode follows tsconfig.json's project references; a bare
+# `vue-tsc --noEmit` reads the root tsconfig ("files": []) and checks nothing.
 .PHONY: frontend-typecheck
 frontend-typecheck:  ## Type-check the Vue frontend
-	cd frontend && npx vue-tsc --noEmit
+	cd frontend && npx vue-tsc -b
 
 .PHONY: frontend-build
 frontend-build:  ## Build the Vue frontend for production
