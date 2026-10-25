@@ -526,6 +526,69 @@ def test_backup_never_overwrites_an_existing_backup(tmp_path):
         assert _legacy_state(bak) == _legacy_state(db_file)
 
 
+def test_a_backup_cut_short_earlier_is_removed_first(tmp_path):
+    """A start killed mid-backup leaves ``<backup>.partial`` (and maybe its
+    journal) behind; the next backup removes them before it starts. Whole
+    backups and other databases' files are never touched."""
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    stale = [
+        db_dir / "metascan.db.pre-v6-20261024-173005.bak.partial",
+        db_dir / "metascan.db.pre-v6-20261024-173005.bak.partial-journal",
+        db_dir / "metascan.db.pre-v6-20261024-173005-2.bak.partial",
+    ]
+    kept = [
+        db_dir / "metascan.db.pre-v6-20261023-080000.bak",  # an earlier whole one
+        db_dir / "other.db.pre-v6-20261024-173005.bak.partial",
+        db_dir / "notes.partial",
+    ]
+    for path in stale + kept:
+        path.write_bytes(b"half a backup")
+
+    DatabaseManager(db_dir)
+    assert _user_version(db_file) == 6
+    assert [p for p in stale if p.exists()] == []
+    assert all(p.read_bytes() == b"half a backup" for p in kept)
+    new = [
+        p
+        for p in db_dir.glob("metascan.db.pre-v6-*.bak")
+        if p.name != "metascan.db.pre-v6-20261023-080000.bak"
+    ]
+    assert len(new) == 1 and _user_version(new[0]) == 5
+
+
+def test_a_backup_in_progress_elsewhere_is_never_removed(tmp_path, monkeypatch):
+    """Two starts at once: a backup holds the database's write lock until
+    its copy is in place, so the other start waits instead of sweeping that
+    ``.partial`` away -- and gives up (still version 5) when it waits too
+    long."""
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    before = _legacy_state(db_file)
+    writing = db_dir / "metascan.db.pre-v6-20261024-173005.bak.partial"
+    writing.write_bytes(b"still being written")
+    other = sqlite3.connect(str(db_file))
+    other.execute("BEGIN IMMEDIATE")  # the other start, mid-backup
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(database_sqlite, "V6_BACKUP_LOCK_TIMEOUT_S", 0.05)
+            with pytest.raises(MigrationError) as err:
+                backup_before_v6(db_file, datetime.now(timezone.utc))
+        message = str(err.value)
+        assert "another Metascan" in message and "start Metascan again" in message
+        assert writing.read_bytes() == b"still being written"
+        assert [p.name for p in _backups(db_dir)] == [writing.name]
+    finally:
+        other.rollback()
+        other.close()
+    assert _user_version(db_file) == 5 and _legacy_state(db_file) == before
+
+    # Once it has let go, the next start sweeps what it left and backs up.
+    backup = backup_before_v6(db_file, datetime.now(timezone.utc))
+    assert backup is not None and not writing.exists()
+    assert [p.name for p in _backups(db_dir)] == [backup.name]
+
+
 # Patches below use monkeypatch.context(): a bare monkeypatch.undo() would
 # also undo conftest's isolated_app_paths and point the app at the real data.
 
@@ -591,11 +654,14 @@ def test_v6_failure_mid_transaction_leaves_v5(tmp_path):
         DatabaseManager(db_dir)
     message = str(err.value)
     assert "version 5" in message and "start Metascan again" in message
-    [backup] = _backups(db_dir)  # taken before the transaction...
-    assert str(backup) in message  # ...and named in the message
     _assert_untouched_v5(db_file, before)
+    # The backup was taken before the transaction; the rollback is confirmed,
+    # so the database still matches it and it is removed again: a cause that
+    # repeats on every start must not pile up full copies.
+    assert _backups(db_dir) == []
+    assert ".bak" not in message and "the backup" not in message
 
-    # The next start retries and migrates.
+    # The next start retries and migrates, with one backup.
     conn = sqlite3.connect(str(db_file))
     conn.execute("DROP TRIGGER fail_v6")
     conn.commit()
@@ -604,6 +670,74 @@ def test_v6_failure_mid_transaction_leaves_v5(tmp_path):
     assert _user_version(db_file) == 6
     assert _grades(db_file) == EXPECTED_GRADES
     assert _tomb_grades(db_file) == EXPECTED_TOMB_GRADES
+    [backup] = _backups(db_dir)
+    assert BAK_RE.match(backup.name) and _legacy_state(backup) == before
+
+
+def test_a_failure_that_repeats_never_piles_up_backups(tmp_path):
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "CREATE TRIGGER fail_v6 BEFORE UPDATE ON media_tombstones "
+        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+    )
+    conn.commit()
+    conn.close()
+    before = _legacy_state(db_file)
+    for _ in range(3):
+        with pytest.raises(MigrationError, match="injected failure"):
+            DatabaseManager(db_dir)
+        assert _backups(db_dir) == []
+    _assert_untouched_v5(db_file, before)
+
+
+def test_an_unconfirmed_rollback_keeps_the_backup(tmp_path, monkeypatch):
+    """When the rollback itself fails, the attempt's backup is the one copy
+    known to match the database as it was: it is kept and named."""
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    before = _legacy_state(db_file)
+
+    def lose_the_connection(conn: sqlite3.Connection) -> Dict[str, int]:
+        conn.close()  # SQLite discards the transaction; rollback() now raises
+        raise RuntimeError("counting failed")
+
+    with monkeypatch.context() as m:
+        m.setattr(DatabaseManager, "_v6_counts", staticmethod(lose_the_connection))
+        with pytest.raises(MigrationError, match="counting failed") as err:
+            DatabaseManager(db_dir)
+    message = str(err.value)
+    [backup] = _backups(db_dir)
+    assert BAK_RE.match(backup.name)
+    assert str(backup) in message and "keep the database and the backup" in message
+    assert _legacy_state(backup) == before
+    _assert_untouched_v5(db_file, before)
+
+
+def test_a_backup_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    before = _legacy_state(db_file)
+
+    def boom(conn: sqlite3.Connection) -> Dict[str, int]:
+        raise RuntimeError("counting failed")
+
+    real_unlink = Path.unlink
+
+    def stuck(self: Path, missing_ok: bool = False) -> None:
+        if ".pre-v6-" in self.name:
+            raise PermissionError(13, "Permission denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    with monkeypatch.context() as m:
+        m.setattr(DatabaseManager, "_v6_counts", staticmethod(boom))
+        m.setattr(Path, "unlink", stuck)
+        with pytest.raises(MigrationError, match="counting failed") as err:
+            DatabaseManager(db_dir)
+    [backup] = _backups(db_dir)
+    assert str(backup) in str(err.value)
+    _assert_untouched_v5(db_file, before)
 
 
 def test_v6_failure_after_the_version_write_leaves_v5(tmp_path, monkeypatch):
@@ -621,6 +755,7 @@ def test_v6_failure_after_the_version_write_leaves_v5(tmp_path, monkeypatch):
         with pytest.raises(MigrationError, match="counting failed"):
             DatabaseManager(db_dir)
     _assert_untouched_v5(db_file, before)
+    assert _backups(db_dir) == []  # rolled back: its backup is removed
 
     DatabaseManager(db_dir)
     assert _user_version(db_file) == 6
