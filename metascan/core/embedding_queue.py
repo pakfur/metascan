@@ -11,9 +11,11 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Deque
 
 from metascan.utils.app_paths import get_data_dir
 
@@ -27,6 +29,17 @@ WORKER_STALE_TIMEOUT = 120.0
 # after writing "cancelled", and a second worker started meanwhile would
 # write the same index (the FAISS index must have one writer).
 _FINAL_STATUSES = ("complete", "cancelled", "error")
+
+# The worker's stderr is drained line by line into the server log (a pipe
+# nobody reads holds 64 KB; a worker that wrote more would block forever and
+# leave the queue indexing until a restart). The last lines are kept for the
+# error message when it dies.
+STDERR_TAIL_LINES = 200
+
+# A worker that wrote its final status but has not exited after this long is
+# logged (WARNING), and again as long again while it stays: it holds every
+# later index build.
+FINAL_EXIT_WARN_S = 60.0
 
 
 class EmbeddingQueue:
@@ -52,6 +65,12 @@ class EmbeddingQueue:
         # A final status read while the worker was still running: reported
         # (and the queue cleaned up) once the process has exited.
         self._finished: Optional[Dict[str, Any]] = None
+        self._finished_at: float = 0.0
+        self._exit_warned_at: float = 0.0
+        # The last lines of the current (or last) worker's stderr, filled by
+        # the drain thread.
+        self._stderr_tail: Deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        self._stderr_thread: Optional[threading.Thread] = None
 
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
         self.on_complete: Optional[Callable[[int], None]] = None
@@ -160,12 +179,24 @@ class EmbeddingQueue:
         cmd = [sys.executable, str(worker_script), str(self._queue_dir)]
 
         try:
+            # stdout is unused (the worker reports through files); stderr is
+            # drained at once -- never a PIPE nobody reads.
             self._process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
+            self._stderr_tail = deque(maxlen=STDERR_TAIL_LINES)
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(self._process, self._stderr_tail),
+                name="embedding-worker-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
             logger.info(
                 f"Started embedding worker (PID={self._process.pid}, "
                 f"files={len(file_paths)}, model={clip_model_key})"
@@ -216,6 +247,8 @@ class EmbeddingQueue:
         if self._finished is not None:
             if process_exited:
                 self._finish(self._read_final_status() or self._finished)
+            else:
+                self._warn_if_the_exit_is_late()
             return
 
         progress_file = self._queue_dir / "progress_embedding.json"
@@ -322,6 +355,7 @@ class EmbeddingQueue:
                     self._finish(data)
                 else:
                     self._finished = data  # still finishing its last batch
+                    self._finished_at = self._exit_warned_at = time.time()
                 return
             elif status != "":
                 # Forward unknown statuses to the UI rather than silently
@@ -347,6 +381,50 @@ class EmbeddingQueue:
                 self._emit_error(error_msg)
                 self._cleanup()
 
+    def _warn_if_the_exit_is_late(self) -> None:
+        """Log a worker that wrote its final status but has not exited for
+        ``FINAL_EXIT_WARN_S`` (and again every as long): the queue keeps
+        indexing until it exits, holding every later build."""
+        now = time.time()
+        if now - self._exit_warned_at < FINAL_EXIT_WARN_S:
+            return
+        self._exit_warned_at = now
+        status = (self._finished or {}).get("status")
+        pid = getattr(self._process, "pid", None)
+        logger.warning(
+            "The embedding worker (PID=%s) wrote its final status %r %.0f s ago "
+            "and has not exited; new index builds wait for it",
+            pid,
+            status,
+            now - self._finished_at,
+        )
+
+    @staticmethod
+    def _drain_stderr(proc: "subprocess.Popen[str]", tail: Deque[str]) -> None:
+        """Read the worker's stderr line by line until it closes: each line
+        goes to the server log, the last ``STDERR_TAIL_LINES`` stay in
+        ``tail``. Runs on a daemon thread from the spawn on -- the pipe
+        buffer would otherwise fill (64 KB) and block the worker for good
+        (a full disk makes it log an error per file, and logging's own error
+        dumps go to stderr)."""
+        stream = proc.stderr
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                text = line.rstrip()
+                if not text:
+                    continue
+                tail.append(text)
+                logger.info("embedding_worker: %s", text)
+        except Exception:
+            logger.exception("embedding worker stderr drainer crashed")
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     def _read_final_status(self) -> Optional[Dict[str, Any]]:
         """The progress file when it holds a final status, else None."""
         try:
@@ -368,13 +446,12 @@ class EmbeddingQueue:
         self._cleanup()
 
     def _read_process_stderr(self) -> str:
-        """Read stderr from the subprocess (non-blocking best-effort)."""
-        if self._process is None or self._process.stderr is None:
-            return ""
-        try:
-            return self._process.stderr.read() or ""
-        except Exception:
-            return ""
+        """The last lines the worker wrote to stderr, once the drain has read
+        them (it ends when the exited worker's pipe closes; bounded wait)."""
+        thread = self._stderr_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        return "\n".join(self._stderr_tail)
 
     def get_last_progress(self) -> Dict[str, Any]:
         """Return the last progress data read from the worker."""
