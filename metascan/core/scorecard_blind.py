@@ -1,12 +1,13 @@
 """Server-side blinding of writer-adapter scorecard images.
 
 A scorecard image (``t2i_images.scorecard_id`` set) is judged blind until
-it has an explicit verdict (favorite or pass): base vs adapter must not be
-readable from anything the UI fetches. The UI hides those fields too; this
-is the defence in depth -- the payloads simply do not carry them. Kept is
-what a tile or the viewer needs to render the image (path, size, the seed
-and model, which both arms share) plus ``scorecard_id`` /
-``scorecard_blind``. After a verdict the next fetch is the full record.
+it has a grade (✓ pass or ✗ fail; ★ is no grade and never lifts it): base
+vs adapter must not be readable from anything the UI fetches. The UI hides
+those fields too; this is the defence in depth -- the payloads simply do
+not carry them. Kept is what a tile or the viewer needs to render the image
+(path, size, the seed and model, which both arms share) plus
+``scorecard_id`` / ``scorecard_blind``. After a grade the next fetch is the
+full record; clearing the grade makes it blind again.
 
 Pure functions over JSON-ready dicts; each mutates and returns its argument.
 """
@@ -67,7 +68,9 @@ def blind_t2i_row(row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
 
 
 def blind_step(step: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip a scorecard batch's step frame (always: it has no verdict)."""
+    """Strip a scorecard batch's step frame (always: a frame is never
+    graded, so it never reveals the writer -- a graded image is revealed
+    through its own row)."""
     for key in BLIND_STEP_FIELDS:
         if key in step:
             step[key] = None

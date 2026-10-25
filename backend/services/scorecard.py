@@ -9,28 +9,31 @@ Every image is tagged ``t2i_images.scorecard_id``. The order of the two
 within a brief is randomized (seeded by the scorecard id and the brief
 index) so position never gives the writer away, and the viewer / T2I tiles
 hide the writer, the variant and the prompt of a scorecard image until it
-has an explicit verdict (favorite or pass).
+has a grade (✓ pass or ✗ fail). ★ is no grade: it neither judges nor
+reveals an image (the writer would show before the grade).
 
-Results per adapter, over every scorecard of it, are computed from the
-images that are still live:
+Results per adapter, over every scorecard of it, are computed from its
+images -- live ones, and deleted ones that had a grade (from their
+tombstones; see ``DatabaseManager.scorecard_image_rows``), so deleting an
+image after grading it changes nothing:
 
 * a **pair** is a brief's batch holding a base image and an adapter image;
-* an image is **judged** only with an explicit verdict -- favorited or
-  passed -- the same rule that lifts the blind. Seen without a verdict is
-  an ordinary taste label elsewhere (0) but never judges a scorecard image;
-* ``n_judged`` counts pairs whose two images are both judged;
-  ``fav_rate_X`` = favorites among writer X's images of those pairs /
-  ``n_judged``; ``mean_score_X`` = the mean stored taste score of X's
-  scorecard images that have one (None if none).
+* an image is **judged** only with a grade -- the same rule that lifts the
+  blind. ★, a view or the pre-grades reject flag never judge one;
+* ``n_judged`` counts pairs whose two images are both graded;
+  ``pass_X`` = the ✓ among writer X's images of those pairs and
+  ``pass_rate_X`` = ``pass_X / n_judged``; ``mean_score_X`` = the mean
+  stored taste score of X's scorecard images that have one (None if none;
+  deleted images have none).
 
 An adapter goes ``untested -> ready`` once ``READY_PAIRS`` pairs are judged
-(checked on every judgment of a scorecard image and on the results GET; a
+(checked after every grade of a scorecard image and on the results GET; a
 ready adapter stays ready) and ``training adapters_changed`` is broadcast.
 
-Scorecard images are real generations: they count as judgments and taste
-labels like any other, but ``writer_dataset`` never uses them as writer
-training data. A deleted adapter's scorecard images stay (real media) and
-stay blind until judged -- nothing special-cases the deletion.
+Scorecard images are real generations: their grades are taste labels like
+any other, but ``writer_dataset`` never uses them as writer training data.
+A deleted adapter's scorecard images stay (real media) and stay blind
+until graded -- nothing special-cases the deletion.
 
 One run at a time; cancellable; it refuses (and stops) while writer
 training holds the GPU, and training refuses to start while it runs
@@ -53,7 +56,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from metascan.core.gpu_guard import GPU_BUSY_MESSAGE, GPU_BUSY_TRAINING, gpu_reserved
-from metascan.core.judgments import WRITER_BASE
+from metascan.core.judgments import GRADES, WRITER_BASE
 from metascan.core.t2i_characters import has_tokens
 from metascan.core.t2i_form import SEED_MAX
 from metascan.core.t2i_models import MODEL_PROFILES
@@ -165,8 +168,12 @@ def adapter_first(scorecard_id: str, index: int) -> bool:
 
 
 def _judged(row: Dict[str, Any]) -> bool:
-    """An explicit verdict (favorite or pass); seen-only never counts."""
-    return bool(row.get("is_favorite") or row.get("passed"))
+    """A grade (✓ pass or ✗ fail): ★ and views never judge an image."""
+    return row.get("grade") in GRADES
+
+
+def _is_pass(row: Dict[str, Any]) -> bool:
+    return row.get("grade") == "pass"
 
 
 def _mean(values: Iterable[Optional[float]]) -> Optional[float]:
@@ -219,18 +226,16 @@ def compute_results(rows: List[Dict[str, Any]], adapter_id: int) -> Dict[str, An
     pairs = _pairs(rows, adapter_id)
     judged = [(b, a) for b, a, _ in pairs if _judged(b) and _judged(a)]
     n = len(judged)
+    pass_base = sum(1 for b, _ in judged if _is_pass(b))
+    pass_adapter = sum(1 for _, a in judged if _is_pass(a))
     return {
         "adapter_id": adapter_id,
         "n_pairs": len(pairs),
         "n_judged": n,
-        "fav_base": sum(1 for b, _ in judged if b.get("is_favorite")),
-        "fav_adapter": sum(1 for _, a in judged if a.get("is_favorite")),
-        "fav_rate_base": (
-            sum(1 for b, _ in judged if b.get("is_favorite")) / n if n else None
-        ),
-        "fav_rate_adapter": (
-            sum(1 for _, a in judged if a.get("is_favorite")) / n if n else None
-        ),
+        "pass_base": pass_base,
+        "pass_adapter": pass_adapter,
+        "pass_rate_base": pass_base / n if n else None,
+        "pass_rate_adapter": pass_adapter / n if n else None,
         "mean_score_base": _mean(
             r.get("score") for r in rows if r.get("writer_id") == WRITER_BASE
         ),
@@ -265,7 +270,7 @@ async def evaluate_adapter(
 async def note_scorecard_judgment(
     db: Any, file_path: str, broadcast: Broadcast
 ) -> None:
-    """After any verdict of ``file_path``: when it is a scorecard
+    """After a grade change of ``file_path``: when it is a scorecard
     image, re-check its adapter's promotion (untested only) and announce
     ``scorecard_judged {adapter_id}`` (the training window refetches the
     results). Cheap for every other image (one indexed lookup); never
@@ -284,8 +289,8 @@ async def note_scorecard_judgment(
 
 
 async def notify_scorecard_judgment(db: Any, file_path: str) -> None:
-    """The verdict routes' hook: ``note_scorecard_judgment`` broadcasting on
-    WS ``training``. A seen without a verdict never calls it."""
+    """The grade route's hook: ``note_scorecard_judgment`` broadcasting on
+    WS ``training``. ★, reasons and seen never call it (none is a grade)."""
     from backend.ws.manager import ws_manager
 
     await note_scorecard_judgment(
@@ -318,8 +323,9 @@ def scorecard_summary(
 ) -> Dict[str, Any]:
     """Every live T2I adapter's scorecard result (``with_empty=False``:
     only those with a pair), its latest scorecard, the base writer pooled
-    over every judged pair, the brief count and ``running`` (the caller
-    reads ``ScorecardService.running()`` on the event loop: this runs in a
+    over every judged pair (``{n_judged, pass_rate, mean_score}``), the
+    brief count and ``running`` (the caller reads
+    ``ScorecardService.running()`` on the event loop: this runs in a
     worker thread and must not touch the asyncio task)."""
     rows = db.scorecard_image_rows()
     cards = db.list_scorecards()
@@ -341,21 +347,21 @@ def scorecard_summary(
         )
     # The base writer over every scorecard (deleted adapters' included).
     n_judged = 0
-    fav = 0
+    n_pass = 0
     by_adapter: Dict[int, List[Dict[str, Any]]] = {}
     for r in rows:
         by_adapter.setdefault(int(r["adapter_id"]), []).append(r)
     for aid, own in by_adapter.items():
         res = compute_results(own, aid)
         n_judged += res["n_judged"]
-        fav += res["fav_base"]
+        n_pass += res["pass_base"]
     return {
         "briefs": len(load_briefs(briefs_path)[0]),
         "ready_pairs": READY_PAIRS,
         "running": running,
         "base": {
             "n_judged": n_judged,
-            "fav_rate": fav / n_judged if n_judged else None,
+            "pass_rate": n_pass / n_judged if n_judged else None,
             "mean_score": _mean(
                 r.get("score") for r in rows if r.get("writer_id") == WRITER_BASE
             ),

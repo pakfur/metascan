@@ -373,7 +373,8 @@ def test_keys_on_a_hidden_scorecard_image_end_consistent(client, seeded):
     """Review Focus 3: P on a hidden (blind) scorecard image, then ★ during
     the grading, then X. Every grade PATCH runs the real scorecard check
     once, the ★ none; nothing sets ★ but the ★ itself, and the state, the
-    event log and the T2I row agree."""
+    event log and the T2I row agree. The grade reveals the image; ★ never
+    hides or reveals it."""
     from unittest import mock
 
     from backend.dependencies import get_db
@@ -400,10 +401,22 @@ def test_keys_on_a_hidden_scorecard_image_end_consistent(client, seeded):
     ):
         r = client.patch("/api/judgments//p/a.png", json={"grade": "pass"})
         assert (r.json()["grade"], r.json()["favorite"]) == ("pass", False)
+        assert (
+            client.get("/api/judgments//p/a.png").json()["scorecard"]["blind"] is False
+        )
         r = client.patch("/api/judgments//p/a.png", json={"favorite": True})
         assert (r.json()["grade"], r.json()["favorite"]) == ("pass", True)
         r = client.patch("/api/judgments//p/a.png", json={"grade": "fail"})
         assert (r.json()["grade"], r.json()["favorite"]) == ("fail", True)
+        assert (
+            client.get("/api/judgments//p/a.png").json()["scorecard"]["blind"] is False
+        )
+        # ★ alone on the partner: still hidden, and no scorecard check.
+        r = client.patch("/api/judgments//p/b.png", json={"favorite": True})
+        assert (r.json()["grade"], r.json()["favorite"]) == (None, True)
+        assert (
+            client.get("/api/judgments//p/b.png").json()["scorecard"]["blind"] is True
+        )
     judged = [s for s in sent if s[1] == "scorecard_judged"]
     assert judged == [("training", "scorecard_judged", {"adapter_id": adapter})] * 2
     assert _events("/p/a.png") == ["grade_pass", "favorite", "grade_fail"]

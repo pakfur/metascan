@@ -182,17 +182,16 @@ function receive(path: string, incoming: JudgmentState): void {
 }
 
 // A scorecard image is judged blind: no writer, prompt or variant until it
-// is rated. Mirrors the server's rule, which still lifts the blind on ★ or
-// ✗ (what the old favorite / reject verdict covered) until the scorecard
-// moves to grades.
+// has a grade (✓ or ✗). Mirrors the server's rule: ★ never reveals it, or
+// the writer would show before the grade.
 function isBlind(state: JudgmentState | null): boolean {
-  return !!state?.scorecard && !state.favorite && state.grade !== 'fail'
+  return !!state?.scorecard && !state.grade
 }
 const scorecardBlind = computed(() => isBlind(judgment.value))
 
-// The library details panel shows the record as fetched: once a rating
+// The library details panel shows the record as fetched: once a grade
 // lifts the blind, fetch it again so the prompt shows; once clearing the
-// rating puts the image back to blind, fetch it again so the prompt hides.
+// grade puts the image back to blind, fetch it again so the prompt hides.
 function refreshBlindDetails(path: string, state: JudgmentState): void {
   if (!props.allowDestructive || unmounted) return
   const selected = mediaStore.selectedMedia
@@ -662,7 +661,7 @@ function formatSize(bytes: number): string {
           </button>
           <span class="position-label">{{ positionLabel }}</span>
           <span v-if="scorecardBlind" class="blind-chip" data-testid="scorecard-blind">
-            Scorecard image — judge to reveal (F or X)
+            Scorecard image — judge to reveal (P or X)
           </span>
           <span v-if="undoData" class="undo-link" @click="undoData = null">
             File deleted.

@@ -282,8 +282,9 @@ class TasteService:
             "collapse_warning": collapse_warning(
                 diversity, windows, WRITER_WINDOW_DAYS
             ),
-            # Per adapter with a scorecard pair: base vs adapter favorite
-            # rate over judged pairs, mean taste score, n_judged.
+            # Per adapter with a scorecard pair: base vs adapter pass rate
+            # over judged (both images graded) pairs, mean taste score,
+            # n_judged.
             "scorecards": scorecards,
         }
 

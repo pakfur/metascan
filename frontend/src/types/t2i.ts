@@ -266,7 +266,7 @@ export interface T2iImage {
   scorecard_id?: string | null
   /** ✓ pass / ✗ fail, null when ungraded (independent of is_favorite). */
   grade?: Grade | null
-  /** The legacy reject flag: the server keeps it equal to grade === 'fail'. */
+  /** The legacy reject flag: the server keeps it equal to grade === 'fail' (nothing reads it). */
   passed?: boolean
   /** Server's view at fetch time; the client re-derives it with t2iBlind. */
   scorecard_blind?: boolean
@@ -276,19 +276,20 @@ export interface T2iImage {
 export const SCORECARD_BLIND_TEXT = 'Scorecard image — judge to reveal'
 
 /**
- * A scorecard image with no explicit verdict yet (not favorited, not passed):
- * its writer, variant and prompt stay hidden so base vs adapter is judged blind.
+ * A scorecard image with no grade yet (★ is no grade): its writer, variant and
+ * prompt stay hidden so base vs adapter is judged blind. ✓ or ✗ reveals it;
+ * clearing the grade hides it again.
  */
-export function t2iBlind(img: Pick<T2iImage, 'is_favorite'> & Partial<Pick<T2iImage, 'scorecard_id' | 'passed'>>): boolean {
-  return !!img.scorecard_id && !img.is_favorite && !img.passed
+export function t2iBlind(img: Partial<Pick<T2iImage, 'scorecard_id' | 'grade'>>): boolean {
+  return !!img.scorecard_id && !img.grade
 }
 
 // ---- writers, variants, drafts ------------------------------------------------
 
 /**
  * Who drafts the prompts a Generate Prompt (or a Random batch) writes: the base
- * writer, the base writer shown favorite prompts, or a prompt-writer adapter
- * (`adapter:<id>`, used without examples).
+ * writer, the base writer shown your passed (✓) prompts as examples, or a
+ * prompt-writer adapter (`adapter:<id>`, used without examples).
  */
 export type T2iWriter = 'base' | 'base+taste' | AdapterWriterId
 

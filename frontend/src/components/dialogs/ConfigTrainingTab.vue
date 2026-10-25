@@ -439,10 +439,10 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
             <thead>
               <tr>
                 <th class="writer-col">Scorecard (blind, same seeds)</th>
-                <th title="Favorite rate of the base writer's images over judged pairs">Base fav</th>
-                <th title="Favorite rate of the adapter's images over judged pairs">Adapter fav</th>
+                <th title="Pass rate (✓) of the base writer's images over judged pairs">Base pass</th>
+                <th title="Pass rate (✓) of the adapter's images over judged pairs">Adapter pass</th>
                 <th title="Mean taste score: base vs adapter">Mean score</th>
-                <th title="Pairs whose two images both have a verdict (favorite or pass; seen alone does not count)">Judged</th>
+                <th title="Pairs whose two images both have a grade, ✓ pass or ✗ fail (★ and a view alone do not count; deleted images still do)">Judged</th>
               </tr>
             </thead>
             <tbody>
@@ -451,8 +451,8 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
                   {{ r.name ?? `adapter:${r.adapter_id}` }}
                   <span v-if="r.status" class="writer-tag">{{ r.status }}</span>
                 </th>
-                <td><span class="rate">{{ ratePct(r.fav_rate_base) }}</span></td>
-                <td><span class="rate">{{ ratePct(r.fav_rate_adapter) }}</span></td>
+                <td><span class="rate">{{ ratePct(r.pass_rate_base) }}</span></td>
+                <td><span class="rate">{{ ratePct(r.pass_rate_adapter) }}</span></td>
                 <td>
                   <span class="rate">{{ scoreText(r.mean_score_base) }} / {{ scoreText(r.mean_score_adapter) }}</span>
                 </td>

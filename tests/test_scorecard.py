@@ -2,10 +2,11 @@
 
 A scorecard renders every developer-written brief twice -- once with the
 base writer, once with the adapter, same seed -- tagged ``scorecard_id``.
-The owner judges the images blind; the adapter goes ``untested -> ready``
-once 30 pairs are judged. The fakes are the T2I runner tests' (FakeVlm,
-FakeComfy) through the real runner; captions and prompts are synthetic or
-the committed briefs file.
+The owner grades the images blind (✓ pass / ✗ fail; ★ is no grade); the
+adapter goes ``untested -> ready`` once 30 pairs are judged, deleted
+images included. The fakes are the T2I runner tests' (FakeVlm, FakeComfy)
+through the real runner; captions and prompts are synthetic or the
+committed briefs file.
 """
 
 from __future__ import annotations
@@ -111,47 +112,52 @@ def _row(
     batch: str,
     writer: str,
     *,
-    fav: bool = False,
-    passed: bool = False,
-    seen: bool = False,
+    grade: Optional[str] = None,
     score: Optional[float] = None,
 ) -> Dict[str, Any]:
-    return {
-        "batch_id": batch,
-        "writer_id": writer,
-        "is_favorite": fav,
-        "passed": passed,
-        "seen_at": "2026-10-01T00:00:00+00:00" if seen else None,
-        "score": score,
-    }
+    return {"batch_id": batch, "writer_id": writer, "grade": grade, "score": score}
+
+
+# Every key of one adapter's result (compute_results).
+RESULT_KEYS = {
+    "adapter_id",
+    "n_pairs",
+    "n_judged",
+    "pass_base",
+    "pass_adapter",
+    "pass_rate_base",
+    "pass_rate_adapter",
+    "mean_score_base",
+    "mean_score_adapter",
+}
 
 
 def test_results_math() -> None:
     a = adapter_writer_id(7)
     rows = [
-        # pair 1: both judged, adapter favorited
-        _row("b1", "base", passed=True, score=0.2),
-        _row("b1", a, fav=True, score=0.8),
-        # pair 2: both judged, base favorited
-        _row("b2", "base", fav=True, score=0.6),
-        _row("b2", a, passed=True, score=0.4),
-        # pair 3: adapter only seen (no verdict) -> not a judged pair
-        _row("b3", "base", fav=True),
-        _row("b3", a, seen=True),
-        # pair 5: neither has an explicit verdict
-        _row("b5", "base", seen=True),
-        _row("b5", a, seen=True),
+        # pair 1: both graded, the adapter's passed
+        _row("b1", "base", grade="fail", score=0.2),
+        _row("b1", a, grade="pass", score=0.8),
+        # pair 2: both graded, the base's passed
+        _row("b2", "base", grade="pass", score=0.6),
+        _row("b2", a, grade="fail", score=0.4),
+        # pair 3: the adapter's image has no grade -> not a judged pair
+        _row("b3", "base", grade="pass"),
+        _row("b3", a),
+        # pair 5: neither image has a grade
+        _row("b5", "base"),
+        _row("b5", a),
         # an unpaired image (its partner never rendered)
-        _row("b4", a, fav=True, score=1.0),
+        _row("b4", a, grade="pass", score=1.0),
         # another adapter's image never counts
-        _row("b1", adapter_writer_id(8), fav=True, score=0.0),
+        _row("b1", adapter_writer_id(8), grade="pass", score=0.0),
     ]
     out = sc.compute_results(rows, 7)
     assert out["adapter_id"] == 7
     assert out["n_pairs"] == 4
     assert out["n_judged"] == 2
-    assert out["fav_rate_base"] == pytest.approx(0.5)
-    assert out["fav_rate_adapter"] == pytest.approx(0.5)
+    assert out["pass_rate_base"] == pytest.approx(0.5)
+    assert out["pass_rate_adapter"] == pytest.approx(0.5)
     assert out["mean_score_base"] == pytest.approx(0.4)
     assert out["mean_score_adapter"] == pytest.approx((0.8 + 0.4 + 1.0) / 3)
 
@@ -166,28 +172,28 @@ def test_a_brief_rendered_twice_counts_once_with_its_latest_batch() -> None:
         return {**_row(batch, writer, **kw), "scorecard_id": "c", "brief_index": index}
 
     rows = [
-        row("old", "base", 0, fav=True),
-        row("old", a, 0, fav=True),
-        row("b1", "base", 1, passed=True),
-        row("b1", a, 1, fav=True),
-        row("new", "base", 0, passed=True),
-        row("new", a, 0, passed=True),
+        row("old", "base", 0, grade="pass"),
+        row("old", a, 0, grade="pass"),
+        row("b1", "base", 1, grade="fail"),
+        row("b1", a, 1, grade="pass"),
+        row("new", "base", 0, grade="fail"),
+        row("new", a, 0, grade="fail"),
         # A later batch of brief 1 with only one image: the complete one stays.
-        row("half", a, 1, fav=True),
+        row("half", a, 1, grade="pass"),
         # Another scorecard's brief 0 is its own pair.
-        {**row("other", "base", 0, fav=True), "scorecard_id": "d"},
-        {**row("other", a, 0, fav=True), "scorecard_id": "d"},
+        {**row("other", "base", 0, grade="pass"), "scorecard_id": "d"},
+        {**row("other", a, 0, grade="pass"), "scorecard_id": "d"},
     ]
     out = sc.compute_results(rows, 7)
     assert (out["n_pairs"], out["n_judged"]) == (3, 3)
-    assert (out["fav_base"], out["fav_adapter"]) == (1, 2)
+    assert (out["pass_base"], out["pass_adapter"]) == (1, 2)
     assert sc._paired_briefs(rows, 7) == {0, 1}
 
 
 def test_results_with_nothing_judged_are_null() -> None:
     out = sc.compute_results([_row("b1", "base"), _row("b1", "adapter:7")], 7)
     assert out["n_pairs"] == 1 and out["n_judged"] == 0
-    assert out["fav_rate_base"] is None and out["fav_rate_adapter"] is None
+    assert out["pass_rate_base"] is None and out["pass_rate_adapter"] is None
     assert out["mean_score_base"] is None and out["mean_score_adapter"] is None
 
 
@@ -213,22 +219,31 @@ class _Lib:
         )
         self.n = 0
 
-    def image(self, writer: str, batch: str, scorecard: Optional[str]) -> str:
+    def image(
+        self,
+        writer: str,
+        batch: str,
+        scorecard: Optional[str],
+        *,
+        prompt: str = "SYNTH prompt",
+        group: str = "group-1",
+        index: Optional[int] = None,
+    ) -> str:
         self.n += 1
         path = str(self.root / f"img{self.n}.png")
-        self.db.save_media(_media(path, prompt="SYNTH prompt"))
+        self.db.save_media(_media(path, prompt=prompt))
         self.db.create_t2i_image(
             file_path=path,
             batch_id=batch,
             model="krea2",
             caption="A quiet harbour at dawn",
-            prompt_used="SYNTH prompt",
+            prompt_used=prompt,
             negative_used="SYNTH negative",
             seed=5,
             writer_id=writer,
             writer_model=BASE,
-            variant_group="group-1",
-            variant_index=self.n % 2,
+            variant_group=group,
+            variant_index=self.n % 2 if index is None else index,
             draft_prompt="SYNTH draft",
             edited=0,
             resolved_caption="A quiet harbour at dawn",
@@ -254,7 +269,7 @@ def lib(tmp_path: Path) -> Any:
     out.db.close()
 
 
-def test_blind_flag_on_t2i_rows_until_an_explicit_verdict(lib: Any) -> None:
+def test_blind_flag_on_t2i_rows_until_a_grade(lib: Any) -> None:
     base, adapter = lib.pair(0)
     plain = lib.image("base", "other", None)
     rows = {r["file_path"]: r for r in lib.db.list_t2i_images()}
@@ -262,19 +277,275 @@ def test_blind_flag_on_t2i_rows_until_an_explicit_verdict(lib: Any) -> None:
     assert rows[os.path.normpath(adapter)]["scorecard_blind"] is True
     assert rows[os.path.normpath(plain)]["scorecard_blind"] is False
     assert rows[os.path.normpath(base)]["scorecard_id"] == lib.card
-    # Seen only: neither judged nor un-blinded.
+    # Seen only: neither judged nor un-blinded. ✗ lifts the blind.
     lib.db.mark_seen(base)
-    lib.db.set_verdict(adapter, "pass")
+    lib.db.set_grade(adapter, "fail")
     rows = {r["file_path"]: r for r in lib.db.list_t2i_images()}
     assert rows[os.path.normpath(base)]["scorecard_blind"] is True
     assert rows[os.path.normpath(adapter)]["scorecard_blind"] is False
-    assert rows[os.path.normpath(adapter)]["passed"] is True
-    lib.db.set_verdict(base, "favorite")
+    assert rows[os.path.normpath(adapter)]["grade"] == "fail"
+    # ✓ lifts it as well.
+    lib.db.set_grade(base, "pass")
     rows = {r["file_path"]: r for r in lib.db.list_t2i_images()}
     assert rows[os.path.normpath(base)]["scorecard_blind"] is False
     info = lib.db.scorecard_for_path(base)
     assert info == {"scorecard_id": lib.card, "adapter_id": lib.adapter, "blind": False}
     assert lib.db.scorecard_for_path(plain) is None
+    # Clearing the grade hides it again.
+    lib.db.set_grade(base, None)
+    assert lib.db.scorecard_for_path(base)["blind"] is True
+
+
+def test_results_are_pass_rates(lib: Any) -> None:
+    """The rates are ✓ among each writer's images of the judged pairs; a
+    pair is judged when both its images have a grade. ★, a view and the
+    pre-grades reject flag judge nothing and pass nothing, even on a row
+    that carries them; ★ + ✗ is a fail."""
+    a = adapter_writer_id(7)
+    star = {"is_favorite": True, "seen_at": "2026-10-01T00:00:00+00:00"}
+    rows = [
+        _row("b1", "base", grade="pass"),
+        _row("b1", a, grade="pass"),
+        _row("b2", "base", grade="fail"),
+        _row("b2", a, grade="pass"),
+        {**_row("b3", "base", grade="fail"), **star},
+        _row("b3", a, grade="fail"),
+        _row("b4", "base", grade="fail"),
+        {**_row("b4", a, grade="fail"), **star},
+        _row("b5", "base", grade="pass"),
+        {**_row("b5", a), **star, "passed": True},
+    ]
+    out = sc.compute_results(rows, 7)
+    assert set(out) == RESULT_KEYS
+    assert (out["n_pairs"], out["n_judged"]) == (5, 4)
+    assert (out["pass_base"], out["pass_adapter"]) == (1, 2)
+    assert (out["pass_rate_base"], out["pass_rate_adapter"]) == (0.25, 0.5)
+
+    # The same marks through the database: one adapter's result, the
+    # summary's row and its base writer pooled over every judged pair.
+    marks = [("pass", "pass"), ("fail", "pass"), ("fail", "fail"), ("fail", "fail")]
+    pairs = [lib.pair(i) for i in range(5)]
+    for (base, adapter), (graded_base, graded_adapter) in zip(pairs, marks):
+        lib.db.set_grade(base, graded_base)
+        lib.db.set_grade(adapter, graded_adapter)
+    lib.db.set_favorite(pairs[2][0], True)
+    lib.db.set_favorite(pairs[3][1], True)
+    base, adapter = pairs[4]
+    lib.db.set_grade(base, "pass")
+    lib.db.set_favorite(adapter, True)
+    lib.db.mark_seen(adapter)
+    expected = {**out, "adapter_id": lib.adapter}
+    one = sc.adapter_scorecard(lib.db, lib.adapter)
+    assert set(one) == RESULT_KEYS | {"ready_pairs", "latest", "running"}
+    assert {k: one[k] for k in RESULT_KEYS} == expected
+    summary = sc.scorecard_summary(lib.db)
+    (row,) = summary["adapters"]
+    assert set(row) == RESULT_KEYS | {"name", "status", "latest"}
+    assert {k: row[k] for k in RESULT_KEYS} == expected
+    assert summary["base"] == {"n_judged": 4, "pass_rate": 0.25, "mean_score": None}
+
+
+async def test_favorite_neither_judges_nor_reveals(lib: Any) -> None:
+    """★ is no grade: starring (and viewing) both images of 30 pairs judges
+    no pair, promotes nothing and lifts no blind -- else the writer would
+    show before the grade. A grade does both, and un-starring a graded
+    image afterwards changes neither."""
+    sent: List[Tuple[str, Dict[str, Any]]] = []
+    pairs = [lib.pair(i) for i in range(30)]
+    for base, adapter in pairs:
+        for path in (base, adapter):
+            assert lib.db.set_favorite(path, True)
+            lib.db.mark_seen(path)
+            await sc.note_scorecard_judgment(
+                lib.db, path, lambda e, d: sent.append((e, d))
+            )
+    result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
+    assert (result["n_pairs"], result["n_judged"]) == (30, 0)
+    assert result["pass_rate_base"] is None and result["pass_rate_adapter"] is None
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
+    assert [s for s in sent if s[0] == "adapters_changed"] == []
+    rows = {r["file_path"]: r for r in lib.db.list_t2i_images(limit=100)}
+    for base, adapter in pairs:
+        for path in (base, adapter):
+            row = rows[os.path.normpath(path)]
+            assert (row["is_favorite"], row["scorecard_blind"]) == (True, True)
+            assert lib.db.scorecard_for_path(path)["blind"] is True
+    for base, adapter in pairs:
+        lib.db.set_grade(base, "fail")
+        lib.db.set_grade(adapter, "pass")
+        await sc.note_scorecard_judgment(
+            lib.db, adapter, lambda e, d: sent.append((e, d))
+        )
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
+    base, _adapter = pairs[0]
+    assert lib.db.set_favorite(base, False)
+    assert lib.db.scorecard_for_path(base)["blind"] is False
+    result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
+    assert result["n_judged"] == 30
+    assert (result["pass_rate_base"], result["pass_rate_adapter"]) == (0.0, 1.0)
+
+
+async def test_deleted_judged_images_still_count(lib: Any) -> None:
+    """Deleting a graded scorecard image changes nothing: its grade comes
+    from its tombstone and its writer, batch and brief from the lineage, so
+    the results, the promotion and a resume see it as before -- through
+    the library delete (it leaves the T2I row behind, pruned later) and
+    the T2I delete (the row goes with the file)."""
+    sent: List[Tuple[str, Dict[str, Any]]] = []
+    pairs = [lib.pair(i) for i in range(30)]
+    ids = {
+        os.path.normpath(r["file_path"]): int(r["id"])
+        for r in lib.db.list_t2i_images(limit=100)
+    }
+    # Unequal ✓ / ✗ per writer, so a lost or inverted grade moves a rate.
+    for i, (base, adapter) in enumerate(pairs):
+        lib.db.set_grade(base, "pass" if i % 3 == 0 else "fail")
+        if i < 29:
+            lib.db.set_grade(adapter, "pass" if i % 2 == 0 else "fail")
+    before = sc.adapter_scorecard(lib.db, lib.adapter)
+    assert (before["n_pairs"], before["n_judged"]) == (30, 29)
+    assert (before["pass_base"], before["pass_adapter"]) == (10, 15)
+
+    def t2i_delete(path: str) -> None:
+        deleted, purged = lib.db.delete_t2i_image(ids[os.path.normpath(path)])
+        assert deleted and purged
+
+    for base, adapter in pairs[0:3]:
+        assert lib.db.delete_media(Path(base)) and lib.db.delete_media(Path(adapter))
+    for base, adapter in pairs[3:6]:
+        t2i_delete(base)
+        t2i_delete(adapter)
+    assert lib.db.delete_media(Path(pairs[6][0]))
+    t2i_delete(pairs[7][1])
+    assert lib.db.delete_media(Path(pairs[29][0]))  # graded; its partner is not
+    lib.db.list_t2i_images(limit=100)  # prunes the rows library deletes left
+
+    def results() -> Dict[str, Any]:
+        out = sc.adapter_scorecard(lib.db, lib.adapter)
+        return {k: out[k] for k in RESULT_KEYS}
+
+    assert results() == {k: before[k] for k in RESULT_KEYS}
+    rows = lib.db.scorecard_image_rows(lib.adapter)
+    assert len(rows) == 60
+    assert len([r for r in rows if r["tombstone"]]) == 15
+    # Tombstones follow the same filters as live rows.
+    assert lib.db.scorecard_image_rows(lib.adapter + 1) == []
+    assert lib.db.scorecard_image_rows(None, "another-card") == []
+    for r in rows:
+        assert set(r) == {
+            "adapter_id",
+            "scorecard_id",
+            "batch_id",
+            "brief_index",
+            "writer_id",
+            "grade",
+            "score",
+            "tombstone",
+        }
+    # A resume sees every brief paired: no judged pair is rendered again.
+    card_rows = lib.db.scorecard_image_rows(None, lib.card)
+    assert sc._paired_briefs(card_rows, lib.adapter) == set(range(30))
+
+    # The 30th judged pair promotes the adapter, deleted images included.
+    lib.db.set_grade(pairs[29][1], "pass")
+    await sc.note_scorecard_judgment(
+        lib.db, pairs[29][1], lambda e, d: sent.append((e, d))
+    )
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
+    assert [s for s in sent if s[0] == "adapters_changed"] == [("adapters_changed", {})]
+    judged = results()
+    assert (judged["n_judged"], judged["pass_base"], judged["pass_adapter"]) == (
+        30,
+        10,
+        16,
+    )
+    # Deleting every image still in the library changes nothing either.
+    for path in [p for pair in pairs for p in pair]:
+        lib.db.delete_media(Path(path))
+    rows = lib.db.scorecard_image_rows(lib.adapter)
+    assert len(rows) == 60 and all(r["tombstone"] for r in rows)
+    assert results() == judged
+    await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: sent.append((e, d)))
+    assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
+    summary = sc.scorecard_summary(lib.db)
+    assert summary["base"]["n_judged"] == 30
+    assert summary["base"]["pass_rate"] == 10 / 30
+
+
+def test_a_deleted_ungraded_image_frees_its_brief(lib: Any) -> None:
+    """A deleted image that was never graded judged nothing and is left
+    out: its brief has no complete pair, so a resume renders it again (as
+    before tombstones counted) -- also when its partner is a deleted graded
+    image, which is no pair on its own."""
+    (b0, a0), (b1, a1), _pair2 = [lib.pair(i) for i in range(3)]
+    lib.db.set_grade(b0, "pass")
+    lib.db.set_grade(b1, "pass")
+    lib.db.set_favorite(a1, True)  # ★ and a view are no grade
+    lib.db.mark_seen(a1)
+    for path in (a0, b1, a1):
+        assert lib.db.delete_media(Path(path))
+    rows = lib.db.scorecard_image_rows(None, lib.card)
+    assert sc._paired_briefs(rows, lib.adapter) == {2}
+    assert [r["tombstone"] for r in rows].count(True) == 1  # b1
+    out = sc.compute_results(rows, lib.adapter)
+    assert (out["n_pairs"], out["n_judged"]) == (1, 0)
+
+
+def test_a_brief_counts_its_latest_batch_when_an_older_one_was_deleted(
+    lib: Any,
+) -> None:
+    """Deleted images keep their place in image order, so a brief rendered
+    twice still counts its latest batch when the older batch was graded
+    and deleted."""
+    old_base, old_adapter = lib.pair(0)
+    lib.db.add_scorecard_batch("batch-0-again", lib.card, 0)
+    newer = [
+        lib.image("base", "batch-0-again", lib.card),
+        lib.image(adapter_writer_id(lib.adapter), "batch-0-again", lib.card),
+    ]
+    for path in (old_base, old_adapter):
+        lib.db.set_grade(path, "pass")
+        assert lib.db.delete_media(Path(path))
+    for path in newer:
+        lib.db.set_grade(path, "fail")
+    rows = lib.db.scorecard_image_rows(lib.adapter)
+    assert [r["tombstone"] for r in rows] == [True, True, False, False]
+    out = sc.compute_results(rows, lib.adapter)
+    assert (out["n_pairs"], out["n_judged"]) == (1, 1)
+    assert (out["pass_base"], out["pass_adapter"]) == (0, 0)
+
+
+def test_a_live_image_beats_its_tombstone(lib: Any) -> None:
+    """A path that holds a live T2I image again (the file restored from
+    the trash and rescanned while its T2I row was still there) counts once,
+    as the live row: ungraded and blind until graded again; graded and
+    deleted again, its newest tombstone counts. With no live T2I row at the
+    path (the T2I delete dropped it), the tombstone keeps counting."""
+    (base, adapter), (b1, a1) = lib.pair(0), lib.pair(1)
+    for path, grade in ((base, "pass"), (adapter, "fail"), (b1, "pass"), (a1, "pass")):
+        lib.db.set_grade(path, grade)
+    ids = {
+        os.path.normpath(r["file_path"]): int(r["id"]) for r in lib.db.list_t2i_images()
+    }
+    assert lib.db.delete_media(Path(base))
+    assert lib.db.delete_t2i_image(ids[os.path.normpath(a1)])[0]
+
+    def result() -> Dict[str, Any]:
+        return sc.compute_results(lib.db.scorecard_image_rows(lib.adapter), lib.adapter)
+
+    assert (result()["n_pairs"], result()["n_judged"]) == (2, 2)
+    lib.db.save_media(_media(base, prompt="SYNTH prompt"))
+    lib.db.save_media(_media(a1, prompt="SYNTH prompt"))
+    rows = lib.db.scorecard_image_rows(lib.adapter)
+    assert len(rows) == 4
+    assert [r["tombstone"] for r in rows] == [False, False, False, True]
+    assert (result()["n_pairs"], result()["n_judged"]) == (2, 1)
+    assert lib.db.scorecard_for_path(base)["blind"] is True
+    assert lib.db.scorecard_for_path(a1) is None  # a plain library image now
+    lib.db.set_grade(base, "fail")
+    assert lib.db.delete_media(Path(base))
+    out = result()
+    assert (out["n_pairs"], out["n_judged"], out["pass_base"]) == (2, 2, 1)
 
 
 async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
@@ -283,21 +554,21 @@ async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
     sent: List[Tuple[str, Dict[str, Any]]] = []
     pairs = [lib.pair(i) for i in range(31)]
     for i, (base, adapter) in enumerate(pairs[:29]):
-        lib.db.set_verdict(base, "pass")
-        lib.db.set_verdict(adapter, "favorite" if i % 2 else "pass")
+        lib.db.set_grade(base, "fail")
+        lib.db.set_grade(adapter, "pass" if i % 2 else "fail")
         await sc.note_scorecard_judgment(
             lib.db, adapter, lambda e, d: sent.append((e, d))
         )
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
     assert [s for s in sent if s[0] != "scorecard_judged"] == []
     base, adapter = pairs[29]
-    lib.db.set_verdict(base, "favorite")
+    lib.db.set_grade(base, "pass")
     await sc.note_scorecard_judgment(lib.db, base, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
-    lib.db.mark_seen(adapter)  # seen without a verdict: NOT judged
+    lib.db.mark_seen(adapter)  # seen without a grade: NOT judged
     await sc.note_scorecard_judgment(lib.db, adapter, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
-    lib.db.set_verdict(adapter, "pass")  # the explicit verdict: pair 30 is judged
+    lib.db.set_grade(adapter, "fail")  # the grade: pair 30 is judged
     await sc.note_scorecard_judgment(lib.db, adapter, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     changed = [s for s in sent if s[0] == "adapters_changed"]
@@ -305,8 +576,8 @@ async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
     # Every scorecard judgment is announced (the window refetches results).
     assert ("scorecard_judged", {"adapter_id": lib.adapter}) in sent
     assert len([s for s in sent if s[0] == "scorecard_judged"]) == 32
-    # Ready stays ready (and is not re-announced) even when verdicts go.
-    lib.db.set_verdict(base, None)
+    # Ready stays ready (and is not re-announced) even when grades go.
+    lib.db.set_grade(base, None)
     await sc.note_scorecard_judgment(lib.db, base, lambda e, d: sent.append((e, d)))
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     assert [s for s in sent if s[0] == "adapters_changed"] == changed
@@ -316,16 +587,16 @@ async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
 
 async def test_a_non_scorecard_judgment_is_ignored(lib: Any) -> None:
     plain = lib.image("base", "other", None)
-    lib.db.set_verdict(plain, "favorite")
+    lib.db.set_grade(plain, "pass")
     with mock.patch.object(sc, "evaluate_adapter") as evaluate:
         await sc.note_scorecard_judgment(lib.db, plain, lambda e, d: None)
     evaluate.assert_not_called()
 
 
 async def test_seen_only_pairs_never_count_as_judged(lib: Any) -> None:
-    """Ruling: a scorecard image is judged only by an explicit verdict
-    (favorite or pass), like the blind lift; seen-only stays a taste label
-    elsewhere but never counts toward n_judged or promotion."""
+    """Ruling: a scorecard image is judged only by a grade, like the blind
+    lift; a view teaches nothing and never counts toward n_judged or
+    promotion."""
     sent: List[Tuple[str, Dict[str, Any]]] = []
     pairs = [lib.pair(i) for i in range(30)]
     for base, adapter in pairs:
@@ -336,19 +607,19 @@ async def test_seen_only_pairs_never_count_as_judged(lib: Any) -> None:
         )
     result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
     assert (result["n_pairs"], result["n_judged"]) == (30, 0)
-    assert result["fav_rate_base"] is None and result["fav_rate_adapter"] is None
+    assert result["pass_rate_base"] is None and result["pass_rate_adapter"] is None
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
     assert [s for s in sent if s[0] == "adapters_changed"] == []
     for base, adapter in pairs:
-        lib.db.set_verdict(base, "pass")
-        lib.db.set_verdict(adapter, "favorite")
+        lib.db.set_grade(base, "fail")
+        lib.db.set_grade(adapter, "pass")
         await sc.note_scorecard_judgment(
             lib.db, adapter, lambda e, d: sent.append((e, d))
         )
     assert lib.db.get_writer_adapter(lib.adapter)["status"] == "ready"
     result = await sc.evaluate_adapter(lib.db, lib.adapter, lambda e, d: None)
     assert result["n_judged"] == 30
-    assert (result["fav_rate_base"], result["fav_rate_adapter"]) == (0.0, 1.0)
+    assert (result["pass_rate_base"], result["pass_rate_adapter"]) == (0.0, 1.0)
 
 
 def test_summary_takes_the_running_state_from_its_caller(lib: Any) -> None:
@@ -366,11 +637,30 @@ def test_summary_takes_the_running_state_from_its_caller(lib: Any) -> None:
         assert other["running"] is None
 
 
-def test_scorecard_images_never_become_training_data(lib: Any) -> None:
+@pytest.mark.parametrize("tagged", [True, False], ids=["scorecard", "control"])
+def test_scorecard_images_never_become_training_data(lib: Any, tagged: bool) -> None:
+    """Scorecard pairs that would otherwise train the writer -- a ✓ variant
+    against a ✗ one with another prompt, and a briefed ✓ (hindsight) -- give
+    no example. The control is the same images without the scorecard tag:
+    it gets both kinds, so the exclusion is what removes them."""
+    card = lib.card if tagged else None
     for i in range(3):
-        base, adapter = lib.pair(i)
-        lib.db.set_verdict(adapter, "favorite")
-        lib.db.mark_seen(base)
+        batch, group = f"batch-{i}", f"group-{i}"
+        if tagged:
+            lib.db.add_scorecard_batch(batch, lib.card, i)
+        base = lib.image(
+            "base", batch, card, prompt=f"SYNTH base {i}", group=group, index=0
+        )
+        adapter = lib.image(
+            adapter_writer_id(lib.adapter),
+            batch,
+            card,
+            prompt=f"SYNTH adapter {i}",
+            group=group,
+            index=1,
+        )
+        lib.db.set_grade(base, "fail")
+        lib.db.set_grade(adapter, "pass")
         lib.db.set_hindsight_brief(adapter, "A quiet harbour", "qwen3vl-8b")
     sft, prefs, counts = build_examples(
         lib.db,
@@ -379,8 +669,14 @@ def test_scorecard_images_never_become_training_data(lib: Any) -> None:
         datetime.now(timezone.utc) + timedelta(days=1),
         content_mode="default",
     )
-    assert sft == [] and prefs == []
-    assert counts.pref_pairs == 0 and counts.hindsight == 0
+    if tagged:
+        assert sft == [] and prefs == []
+        assert counts.pref_pairs == 0 and counts.hindsight == 0
+    else:
+        assert (counts.pref_pairs, counts.hindsight) == (3, 3)
+        assert sorted((p.chosen, p.rejected) for p in prefs) == [
+            (f"SYNTH adapter {i}", f"SYNTH base {i}") for i in range(3)
+        ]
 
 
 # ---- the run through the real runner ---------------------------------------------
@@ -669,7 +965,7 @@ class TestScorecardRun(ScorecardCase):
         # ... so the brief pairs and counts in the results.
         self.assertEqual(self.db.get_scorecard(card)["done"], 1)
         for r in rows:
-            self.db.set_verdict(r["file_path"], "pass")
+            self.db.set_grade(r["file_path"], "fail")
         result = await sc.evaluate_adapter(self.db, self.adapter, lambda e, d: None)
         self.assertEqual((result["n_pairs"], result["n_judged"]), (1, 1))
 
@@ -819,12 +1115,8 @@ def api(tmp_path: Path) -> Any:
     lib.db.close()
 
 
-def _favorite_and_pass(client: Any, path: str) -> None:
-    """Through the routes, what a pre-grades favorite verdict became: ★ on
-    (no scorecard check) and ✓ pass (the check runs)."""
-    r = client.patch(f"/api/judgments/{path}", json={"favorite": True})
-    assert r.status_code == 200
-    r = client.patch(f"/api/judgments/{path}", json={"grade": "pass"})
+def _grade(client: Any, path: str, grade: Optional[str]) -> None:
+    r = client.patch(f"/api/judgments/{path}", json={"grade": grade})
     assert r.status_code == 200
 
 
@@ -866,18 +1158,19 @@ def test_results_routes_and_blind_payloads(api: Any) -> None:
     r = client.get(f"/api/judgments/{base}")
     assert r.json()["scorecard"] == {"id": lib.card, "blind": True}
     assert client.get(f"/api/media/{base}").json()["scorecard_blind"] is True
-    _favorite_and_pass(client, base)
+    _grade(client, base, "pass")
     assert client.get(f"/api/judgments/{base}").json()["scorecard"]["blind"] is False
     assert client.get(f"/api/media/{base}").json()["scorecard_blind"] is False
     client.post("/api/judgments/seen", json={"file_path": adapter})
     # Seen only: the pair is not judged yet.
     one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
     assert one["n_pairs"] == 1 and one["n_judged"] == 0
-    client.patch(f"/api/judgments/{adapter}", json={"grade": "fail"})
+    _grade(client, adapter, "fail")
 
     one = client.get(f"/api/writers/adapters/{lib.adapter}/scorecard").json()
     assert one["n_pairs"] == 1 and one["n_judged"] == 1
-    assert one["fav_rate_base"] == 1.0 and one["fav_rate_adapter"] == 0.0
+    assert (one["pass_base"], one["pass_adapter"]) == (1, 0)
+    assert one["pass_rate_base"] == 1.0 and one["pass_rate_adapter"] == 0.0
     assert one["ready_pairs"] == 30
     assert one["latest"]["id"] == lib.card
     everything = client.get("/api/writers/scorecards").json()
@@ -885,8 +1178,8 @@ def test_results_routes_and_blind_payloads(api: Any) -> None:
     assert everything["running"] is None
     (row,) = everything["adapters"]
     assert row["adapter_id"] == lib.adapter and row["name"] == "taste-all-v1"
-    assert everything["base"]["n_judged"] == 1
-    assert everything["base"]["fav_rate"] == 1.0
+    assert row["pass_rate_adapter"] == 0.0
+    assert everything["base"] == {"n_judged": 1, "pass_rate": 1.0, "mean_score": None}
     plain = lib.image("base", "x", None)
     assert client.get(f"/api/judgments/{plain}").json()["scorecard"] is None
     assert client.get(f"/api/media/{plain}").json()["scorecard_blind"] is False
@@ -901,8 +1194,8 @@ def test_a_grade_through_the_routes_promotes_the_adapter(api: Any) -> None:
         side_effect=lambda c, e, d: sent.append((c, e, d)),
     ):
         for base, adapter in pairs[:29]:
-            lib.db.set_verdict(base, "pass")
-            lib.db.set_verdict(adapter, "pass")
+            lib.db.set_grade(base, "fail")
+            lib.db.set_grade(adapter, "pass")
         base, adapter = pairs[29]
         client.patch(f"/api/judgments/{base}", json={"grade": "fail"})
         assert lib.db.get_writer_adapter(lib.adapter)["status"] == "untested"
@@ -931,7 +1224,68 @@ def _assert_blind(blob: Any) -> None:
         assert needle not in text, needle
 
 
-def test_media_detail_is_blind_until_a_verdict(api: Any) -> None:
+def test_blind_payloads_lift_on_grade_only(api: Any) -> None:
+    """Through the routes: neither ★ route reveals a scorecard image -- the
+    judgment, the media detail and the T2I row stay blind -- a grade does,
+    clearing it hides the image again (★ still on), ✗ reveals it as ✓
+    does, and un-starring a graded image keeps it revealed."""
+    client, lib, _ = api
+    base, _adapter = lib.pair(0)
+    lib.db.add_tag_indices(base, ["harbour"], source="clip")
+
+    def payloads() -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        judgment = client.get(f"/api/judgments/{base}").json()
+        detail = client.get(f"/api/media/{base}").json()
+        rows = {
+            os.path.normpath(r["file_path"]): r
+            for r in client.get("/api/t2i/images").json()
+        }
+        return judgment, detail, rows[os.path.normpath(base)]
+
+    def assert_hidden() -> None:
+        judgment, detail, row = payloads()
+        assert judgment["scorecard"] == {"id": lib.card, "blind": True}
+        assert detail["scorecard_blind"] is True
+        assert detail["prompt"] is None and detail["tags"] == []
+        assert row["scorecard_blind"] is True
+        assert row["prompt_used"] is None and row["writer_id"] is None
+        for blob in (judgment, detail, row):
+            _assert_blind(blob)
+
+    def assert_shown() -> None:
+        judgment, detail, row = payloads()
+        assert judgment["scorecard"] == {"id": lib.card, "blind": False}
+        assert detail["scorecard_blind"] is False
+        assert detail["prompt"] == "SYNTH prompt"
+        assert [t["name"] for t in detail["tags"]] == ["harbour"]
+        assert row["scorecard_blind"] is False
+        assert row["prompt_used"] == "SYNTH prompt" and row["writer_id"] == "base"
+
+    assert_hidden()
+    r = client.patch(f"/api/judgments/{base}", json={"favorite": True})
+    assert r.status_code == 200 and r.json()["favorite"] is True
+    assert_hidden()
+    assert (
+        client.patch(f"/api/media/{base}", json={"is_favorite": False}).status_code
+        == 200
+    )
+    assert (
+        client.patch(f"/api/media/{base}", json={"is_favorite": True}).status_code
+        == 200
+    )
+    assert_hidden()
+    _grade(client, base, "pass")
+    assert_shown()
+    _grade(client, base, None)
+    assert_hidden()
+    _grade(client, base, "fail")
+    assert_shown()
+    r = client.patch(f"/api/judgments/{base}", json={"favorite": False})
+    assert r.status_code == 200 and r.json()["grade"] == "fail"
+    assert_shown()
+
+
+def test_media_detail_is_blind_until_a_grade(api: Any) -> None:
     client, lib, _ = api
     base, _adapter = lib.pair(0)
     lib.db.add_tag_indices(base, ["harbour"], source="clip")
@@ -951,7 +1305,7 @@ def test_media_detail_is_blind_until_a_verdict(api: Any) -> None:
     assert [t["name"] for t in detail["tags"]] == ["harbour"]
 
 
-def test_t2i_image_rows_are_blind_until_a_verdict(api: Any) -> None:
+def test_t2i_image_rows_are_blind_until_a_grade(api: Any) -> None:
     client, lib, _ = api
     base, adapter = lib.pair(0)
     plain = lib.image("base", "other", None)
@@ -988,8 +1342,8 @@ def test_t2i_image_rows_are_blind_until_a_verdict(api: Any) -> None:
     patched = client.patch(f"/api/t2i/images/{image_id}", json={"seed": 9})
     assert patched.status_code == 200
     _assert_blind(patched.json())
-    # After a verdict the next fetch is full.
-    _favorite_and_pass(client, base)
+    # After a grade the next fetch is full.
+    _grade(client, base, "pass")
     rows = {
         os.path.normpath(r["file_path"]): r
         for r in client.get("/api/t2i/images").json()
@@ -1006,8 +1360,8 @@ def test_writer_stats_carry_scorecard_rows(lib: Any) -> None:
     from backend.services.taste_service import TasteService
 
     base, adapter = lib.pair(0)
-    lib.db.set_verdict(base, "pass")
-    lib.db.set_verdict(adapter, "favorite")
+    lib.db.set_grade(base, "fail")
+    lib.db.set_grade(adapter, "pass")
 
     class _Runner:
         training = False
@@ -1019,7 +1373,7 @@ def test_writer_stats_carry_scorecard_rows(lib: Any) -> None:
     (row,) = out["scorecards"]
     assert row["adapter_id"] == lib.adapter
     assert row["name"] == "taste-all-v1"
-    assert (row["n_judged"], row["fav_rate_base"], row["fav_rate_adapter"]) == (
+    assert (row["n_judged"], row["pass_rate_base"], row["pass_rate_adapter"]) == (
         1,
         0.0,
         1.0,

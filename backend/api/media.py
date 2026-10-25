@@ -59,8 +59,9 @@ async def get_media(
     detail = {
         **service.media_to_dict(media),
         "tags": tags,
-        # A scorecard image without a favorite / pass yet: the details panel
-        # shows "judge to reveal", and the record carries no prompt or tags.
+        # A scorecard image without a grade yet (★ is none): the details
+        # panel shows "judge to reveal", and the record carries no prompt or
+        # tags.
         "scorecard_id": scorecard["scorecard_id"] if scorecard else None,
         "scorecard_blind": bool(scorecard and scorecard["blind"]),
     }
