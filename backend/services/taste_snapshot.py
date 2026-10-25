@@ -574,11 +574,13 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
 def pending_snapshot_paths(data_dir: Path) -> Set[str]:
     """The paths the pending file holds ratings for, read without side
     effects: nothing is quarantined or raised, and a missing, unreadable or
-    invalid file holds none. For checks that must change nothing; the full
-    clean itself loads the file with :func:`load_pending_snapshot`."""
+    invalid file holds none -- one the parser cannot read too (not UTF-8,
+    not JSON, or nested deeper than it goes, as :func:`load_pending_snapshot`
+    reads them). For checks that must change nothing; the full clean itself
+    loads the file with :func:`load_pending_snapshot`."""
     try:
         snap = json.loads(snapshot_file_path(data_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return set()
     return snapshot_paths(snap) if _valid_shape(snap) else set()
 
