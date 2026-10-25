@@ -1,5 +1,6 @@
-"""The T2I / I2V listings never prune lineage while a full clean is pending
-(CLAUDE.md, "Full clean & rescan keeps ratings").
+"""The T2I / I2V listings never prune lineage until a full clean is finished
+(CLAUDE.md, "Full clean & rescan keeps ratings"): while one runs, while its
+pending file exists, and while its lasting marker does.
 
 ``list_t2i_images`` / ``list_i2v_videos`` delete the lineage rows whose
 media row is gone. A full clean empties ``media`` and the rescan re-adds it
@@ -11,6 +12,8 @@ images without their lineage. The scan-route cases are in
 ``test_taste_snapshot_scan.py``."""
 
 import logging
+import os
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -234,6 +237,65 @@ def test_a_running_full_clean_pauses_the_prune_until_it_ends(tmp_path):
     assert guard() is False
 
 
+def test_the_marker_alone_pauses_the_prune(tmp_path):
+    """The lasting marker of an unfinished full clean: it outlives the run
+    and the pending file, and only clear_full_clean_marker (a scan of every
+    folder completed) removes it."""
+    guard = ts.lineage_prune_guard(tmp_path)
+    ts.write_full_clean_marker(tmp_path)
+    assert ts.full_clean_marker_exists(tmp_path) is True
+    assert ts.pending_snapshot_exists(tmp_path) is False
+    assert guard() is True
+    assert ts.clear_full_clean_marker(tmp_path) is True
+    assert ts.full_clean_marker_exists(tmp_path) is False
+    assert guard() is False
+    assert ts.clear_full_clean_marker(tmp_path) is True  # already gone: fine
+
+
+def test_the_marker_is_durable_once_written(tmp_path, monkeypatch):
+    """Written before the truncate, so its data and its directory entry are
+    fsynced before write_full_clean_marker returns."""
+    synced: List[bool] = []
+    real_fsync = os.fsync
+
+    def spy_fsync(fd: int) -> None:
+        synced.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(ts.os, "fsync", spy_fsync)
+    ts.write_full_clean_marker(tmp_path)
+    assert synced[0] is False  # the file
+    if os.name != "nt":
+        assert synced[1] is True  # its directory entry
+
+
+def test_the_marker_says_how_to_resume_the_prune(tmp_path):
+    ts.write_full_clean_marker(tmp_path)
+    text = ts.full_clean_marker_path(tmp_path).read_text(encoding="utf-8")
+    assert ts.full_clean_marker_path(tmp_path).name == "full_clean_incomplete"
+    assert "delete this file" in text.lower()
+
+
+def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
+    tmp_path, monkeypatch, caplog
+):
+    ts.write_full_clean_marker(tmp_path)
+    real_unlink = Path.unlink
+
+    def locked(self: Path, *a: Any, **k: Any) -> None:
+        if self.name == ts.FULL_CLEAN_MARKER_FILENAME:
+            raise PermissionError("locked by another process")
+        real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    with caplog.at_level(logging.ERROR, logger="backend.services.taste_snapshot"):
+        assert ts.clear_full_clean_marker(tmp_path) is False
+    assert ts.full_clean_marker_exists(tmp_path) is True
+    assert ts.lineage_prune_guard(tmp_path)() is True  # fail safe
+    [logged] = [r for r in caplog.records if "locked by another" in r.getMessage()]
+    assert logged.levelno == logging.ERROR
+
+
 def test_a_pending_file_that_cannot_be_checked_pauses_the_prune(db, tmp_path):
     """Only a missing file means "nothing pending": any other stat error
     (here a data dir that is a file) is raised, and the database counts a
@@ -264,11 +326,16 @@ def test_the_lifespan_installs_the_guard():
         assert _names(db) == (["out2.png"], ["clip2.mp4"])
         assert _rows(db) == (2, 2)
         ts.snapshot_file_path(data_dir).unlink()
+        # A full clean never followed by a completed scan.
+        ts.write_full_clean_marker(data_dir)
+        _list(db)
+        assert _rows(db) == (2, 2)
+        assert ts.clear_full_clean_marker(data_dir)
         with ts.full_clean_running():  # a full clean is running
             _list(db)
             assert _rows(db) == (2, 2)
         _list(db)
-        assert _rows(db) == (1, 1)  # neither: the prune is back
+        assert _rows(db) == (1, 1)  # none of the three: the prune is back
 
 
 def test_installing_the_guard_never_stops_the_startup(caplog):

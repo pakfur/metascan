@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -18,10 +18,12 @@ from backend.services.taste_snapshot import TASTE_SNAPSHOT_FILENAME  # noqa: F40
 from backend.services.taste_snapshot import (
     PendingSnapshotUnreadable,
     apply_pending_taste_snapshot,
+    clear_full_clean_marker,
     full_clean_running,
     merge_pending_into_snapshot,
     restore_and_persist,
     snapshot_file_path,
+    write_full_clean_marker,
     write_snapshot_file,
 )
 from metascan.core.scanner import Scanner
@@ -128,13 +130,42 @@ async def cancel_scan():
 async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
     """Run the scan in a background task with WebSocket progress updates.
 
-    A full clean is marked as running (``full_clean_running``) from before
-    its snapshot to after its restore, however it ends. With its pending
-    file that keeps the T2I / I2V listings from pruning lineage rows while
-    the rescan re-adds the media rows one by one
-    (``taste_snapshot.lineage_prune_guard``)."""
+    The T2I / I2V listings must not prune lineage rows while the rescan of
+    a full clean re-adds the media rows one by one
+    (``taste_snapshot.lineage_prune_guard``). A full clean is marked as
+    running (``full_clean_running``) from before its snapshot to after its
+    restore, however it ends; it writes the lasting marker before the
+    truncate, and only a scan of every configured folder that completes --
+    this one, or any later one -- removes it."""
     with full_clean_running() if full_clean else nullcontext():
         await _scan(full_cleanup, full_clean)
+
+
+async def _mark_full_clean_unfinished(data_dir: Optional[Path]) -> bool:
+    """Write the full-clean marker (``write_full_clean_marker``, fsynced)
+    right before the truncate. False -- the full clean must stop before it
+    deletes anything -- when it cannot be written."""
+    try:
+        if data_dir is None:
+            raise RuntimeError("database has no data directory")
+        await asyncio.to_thread(write_full_clean_marker, data_dir)
+    except Exception as err:
+        logger.error(
+            f"Full clean aborted: could not write the full-clean marker: {err}",
+            exc_info=True,
+        )
+        await ws_manager.broadcast(
+            "scan",
+            "error",
+            {
+                "message": (
+                    "Full clean aborted: could not record that it started, so "
+                    f"nothing was deleted ({err})"
+                )
+            },
+        )
+        return False
+    return True
 
 
 async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
@@ -195,6 +226,12 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 {"message": f"Full clean aborted (taste snapshot failed): {snap_err}"},
             )
             return
+        # The lasting marker, next to the pending file: until a scan of
+        # every configured folder completes, the T2I / I2V lists must not
+        # prune a lineage row the rescan may still bring back -- even once
+        # nothing is pending any more.
+        if not await _mark_full_clean_unfinished(data_dir):
+            return
         await asyncio.to_thread(db.truncate_all_data)
         await ws_manager.broadcast(
             "scan",
@@ -247,6 +284,21 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         except Exception as e:
             logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
+    async def _every_folder_scanned() -> None:
+        """A scan of every configured folder completed: each file still on
+        disk has its media row again, so the T2I / I2V lists may prune again.
+        The only place the full-clean marker is removed; a failure keeps it
+        (and the pause) and is logged. Never raises."""
+        if data_dir is None:
+            return
+        try:
+            await asyncio.to_thread(clear_full_clean_marker, data_dir)
+        except Exception as e:
+            logger.error(f"Removing the full-clean marker failed: {e}", exc_info=True)
+
+    # Configured folders this run could not see (and so did not walk).
+    missing_folders: List[str] = []
+
     try:
         total_processed = 0
         total_dirs = len(directories)
@@ -260,6 +312,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
 
             dir_path = Path(dir_config.filepath)
             if not dir_path.exists():
+                missing_folders.append(dir_config.filepath)
                 continue
 
             await ws_manager.broadcast(
@@ -308,6 +361,10 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         # normally -- it must not tombstone what wasn't re-imported yet.
         await _restore_taste_from_snapshot(completed=not _cancel_requested)
         await _apply_pending()
+        # Not after a cancel (one in the last folder lands here too), and not
+        # when a configured folder was missing: its files were not walked.
+        if not _cancel_requested and not missing_folders:
+            await _every_folder_scanned()
 
         # Auto-trigger embedding build when:
         #   - the scan was not cancelled,
