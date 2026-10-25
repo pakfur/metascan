@@ -13,7 +13,7 @@ python run_server.py  # Same, without make
 cd frontend
 npm run dev           # Development server with HMR
 npm run build         # Production build (vue-tsc + vite)
-npx vue-tsc --noEmit  # Type check only
+npx vue-tsc -b        # Type check only
 
 # Quality
 make test             # Run Python tests
@@ -33,7 +33,7 @@ flake8 metascan/ backend/ tests/
 mypy metascan/
 
 # Frontend
-cd frontend && npx vue-tsc --noEmit
+cd frontend && npx vue-tsc -b
 ```
 
 ## Project Rules
@@ -53,7 +53,7 @@ pytest --cov=metascan
 pytest tests/test_prompt_tokenizer.py
 
 # Frontend type checking
-cd frontend && npx vue-tsc --noEmit
+cd frontend && npx vue-tsc -b
 
 # Frontend production build verification
 cd frontend && npm run build
@@ -66,7 +66,7 @@ The pytest suite covers core modules, async service wrappers, hardware probes/ga
 `.github/workflows/python-package.yml` runs two parallel jobs:
 
 1. **backend** — install deps, `flake8`, `black --check`, `mypy`, `pytest`.
-2. **frontend** — `npm ci`, `vue-tsc --noEmit`, `npm run build`.
+2. **frontend** — `npm ci`, `vue-tsc -b`, `npm run build`.
 
 `make quality test` locally matches the CI backend job exactly.
 
