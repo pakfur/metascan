@@ -90,6 +90,20 @@ def _ratings(db, path: Path):
     return (j.favorite, j.grade, j.reasons, [c.name for c in j.categories])
 
 
+# What a scan's complete event says of the generated output when all of it
+# that is still on disk came back.
+NOTHING_HELD_BACK = {
+    "unreachable_output": [],
+    "unreadable_output": [],
+    "unreadable_output_count": 0,
+    "output_check_failed": False,
+}
+
+
+def _generated_output(complete: dict) -> dict:
+    return {k: complete[k] for k in NOTHING_HELD_BACK}
+
+
 def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_completes(
     monkeypatch, tmp_path, db
 ):
@@ -166,6 +180,8 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
     assert not [e for e in events if e[0] == "error"]
     [complete] = [data for event, data in events if event == "complete"]
     assert complete["missing_folders"] == [str(drive)]
+    # The generated render came back: nothing held the clean back there.
+    assert _generated_output(complete) == NOTHING_HELD_BACK
     # Incomplete: nothing tombstoned (not even the really deleted gone.png),
     # the marker kept, the lineage row never pruned.
     assert db.list_tombstones() == []
@@ -233,6 +249,7 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
     assert not [e for e in events if e[0] == "error"]
     [complete] = [data for event, data in events if event == "complete"]
     assert complete["missing_folders"] == []
+    assert _generated_output(complete) == NOTHING_HELD_BACK
     assert set(db.get_existing_file_paths()) == {str(here), str(away), str(gen)}
     assert _ratings(db, here) == (True, "pass", [], [])
     assert _ratings(db, away) == (False, "pass", ["light"], ["Night"])
