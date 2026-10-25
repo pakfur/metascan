@@ -134,9 +134,10 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
 
     await ws_manager.broadcast("scan", "started", {"full_clean": full_clean})
 
-    # Snapshot the taste state (judgments, category links, favorites)
-    # before any destructive operation: truncating media cascades away
-    # media_judgments and media_categories. The snapshot is written to
+    # Snapshot the taste state (judgments, category links, favorites,
+    # hindsight briefs, ✓ library prompts) before any destructive
+    # operation: truncating media cascades away media_judgments,
+    # media_categories and hindsight_briefs. The snapshot is written to
     # disk as *pending state* (backend/services/taste_snapshot.py) before
     # the truncate; if either step fails the full clean is aborted before
     # anything is deleted. Leftovers of an earlier interrupted full clean

@@ -16,12 +16,18 @@ back yet, and it is only deleted once nothing is left in it.
 * A corrupt file is renamed to ``<name>.corrupt-<timestamp>`` and logged,
   so it is neither retried forever nor lost.
 
-Files carry ``"version": 2``: each judgment row has its ``grade`` (✓
-``pass`` / ✗ ``fail`` / null) and the favorites list is ★ only. A file
-without a version was written before grades and keeps its old meaning --
-``passed = 1`` is a reject, a favorite is ★ and the positive -- so on load
-:func:`upgrade_legacy_snapshot` translates it exactly as the v6 migration
-maps live ratings. Both shapes validate; any other version is quarantined.
+Files carry ``"version": 3``: each judgment row has its ``grade`` (✓
+``pass`` / ✗ ``fail`` / null), the favorites list is ★ only, ``briefs``
+holds every hindsight brief and ``library_prompts`` each ✓ library image's
+metadata prompt and model names -- what a completed full clean keeps on the
+tombstone of a path that did not come back, as a delete keeps them. A
+version-2 file (grades, neither list) reads as version 3 with no briefs and
+no prompts. A file without a version was written before grades and keeps
+its old meaning -- ``passed = 1`` is a reject, a favorite is ★ and the
+positive -- so on load :func:`upgrade_legacy_snapshot` translates it exactly
+as the v6 migration maps live ratings. All three shapes validate; any other
+version is quarantined. Briefs and prompts are training text: nothing here
+logs them (counts only).
 """
 
 import itertools
@@ -32,7 +38,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Set, cast
 
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
 from metascan.core.judgments import GRADES
@@ -41,17 +47,29 @@ logger = logging.getLogger(__name__)
 
 TASTE_SNAPSHOT_FILENAME = "taste_snapshot_before_full_clean.json"
 
+# The versioned pending files this module reads: 2 (grades; no briefs or
+# library prompts) and the current one. A file without a version is the
+# pre-grades form.
+_READABLE_VERSIONS = (2, TASTE_SNAPSHOT_VERSION)
+
+# A snapshot's lists of per-path rows (``favorites`` is a list of paths).
+_ROW_LISTS = ("judgments", "categories", "briefs", "library_prompts")
+
 
 def snapshot_file_path(data_dir: Path) -> Path:
     return Path(data_dir) / TASTE_SNAPSHOT_FILENAME
 
 
 def _is_empty(snapshot: Dict[str, Any]) -> bool:
-    return not (
-        snapshot.get("judgments")
-        or snapshot.get("categories")
-        or snapshot.get("favorites")
-    )
+    return not (snapshot.get("favorites") or any(snapshot.get(k) for k in _ROW_LISTS))
+
+
+def _snapshot_paths(snapshot: Dict[str, Any]) -> Set[str]:
+    """Every path ``snapshot`` holds an entry for."""
+    paths = set(snapshot.get("favorites") or [])
+    for key in _ROW_LISTS:
+        paths.update(e["file_path"] for e in snapshot.get(key) or [])
+    return paths
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -95,6 +113,8 @@ def _empty_like(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "judgments": [],
         "categories": [],
         "favorites": [],
+        "briefs": [],
+        "library_prompts": [],
     }
 
 
@@ -150,8 +170,8 @@ def _valid_grade(v: Any) -> bool:
 
 
 def _valid_judgment(j: Any, versioned: bool) -> bool:
-    """A version-2 row needs a valid ``grade``; a version-less row the
-    legacy reject flag ``passed``, plus a valid ``grade`` if it has one
+    """A versioned row (2 or 3) needs a valid ``grade``; a version-less row
+    the legacy reject flag ``passed``, plus a valid ``grade`` if it has one
     (the interim export wrote both)."""
     if not (
         isinstance(j, dict)
@@ -180,6 +200,38 @@ def _valid_link(lk: Any) -> bool:
     )
 
 
+def _valid_brief(b: Any) -> bool:
+    """A ``hindsight_briefs`` row: every column is NOT NULL text."""
+    return isinstance(b, dict) and all(
+        isinstance(b.get(k), str) for k in ("file_path", "brief", "model", "created_at")
+    )
+
+
+def _valid_model_name(v: Any) -> bool:
+    """None, or a list of names as the JSON text a tombstone's
+    ``model_name`` stores (``_library_prompt``)."""
+    if v is None:
+        return True
+    if not isinstance(v, str):
+        return False
+    try:
+        names = json.loads(v)
+    except ValueError:
+        return False
+    return isinstance(names, list) and all(isinstance(n, str) for n in names)
+
+
+def _valid_library_prompt(lp: Any) -> bool:
+    return (
+        isinstance(lp, dict)
+        and isinstance(lp.get("file_path"), str)
+        and "prompt" in lp
+        and _opt_str(lp["prompt"])
+        and "model_name" in lp
+        and _valid_model_name(lp["model_name"])
+    )
+
+
 def _valid_shape(snap: Any) -> bool:
     """Structure *and* value types ``restore_taste_state`` relies on, so a
     bad file is quarantined instead of failing every restore forever."""
@@ -187,17 +239,27 @@ def _valid_shape(snap: Any) -> bool:
         return False
     versioned = "version" in snap
     if versioned and not (
-        _is_int(snap["version"]) and snap["version"] == TASTE_SNAPSHOT_VERSION
+        _is_int(snap["version"]) and snap["version"] in _READABLE_VERSIONS
     ):
         return False
     lists = [snap.get(k, []) for k in ("judgments", "categories", "favorites")]
     if not all(isinstance(v, list) for v in lists):
         return False
     judgments, links, favorites = lists
-    return (
+    if not (
         all(_valid_judgment(j, versioned) for j in judgments)
         and all(_valid_link(lk) for lk in links)
         and all(isinstance(p, str) for p in favorites)
+    ):
+        return False
+    if snap.get("version") != TASTE_SNAPSHOT_VERSION:
+        return True  # an older shape has neither list: read as none
+    briefs, prompts = snap.get("briefs", []), snap.get("library_prompts", [])
+    return (
+        isinstance(briefs, list)
+        and isinstance(prompts, list)
+        and all(_valid_brief(b) for b in briefs)
+        and all(_valid_library_prompt(lp) for lp in prompts)
     )
 
 
@@ -207,8 +269,11 @@ _JUDGMENT_KEYS = ("file_path", "reasons", "seen_at", "judged_at", "confirmed_at"
 def upgrade_legacy_snapshot(
     snapshot: Dict[str, Any], now: Optional[datetime] = None
 ) -> Dict[str, Any]:
-    """``snapshot`` as version 2 (a version-2 one is returned as is). Takes
-    a snapshot that passed validation.
+    """``snapshot`` as the current version, 3 (a version-3 one is returned
+    as is). Takes a snapshot that passed validation.
+
+    A version-2 file already has its grades and no briefs or library
+    prompts: its rows are kept, and it gets both lists empty.
 
     A version-less file was written before grades, with the old meaning,
     and is mapped the way the v6 migration maps live ratings: a favorite
@@ -223,6 +288,8 @@ def upgrade_legacy_snapshot(
     """
     if snapshot.get("version") == TASTE_SNAPSHOT_VERSION:
         return snapshot
+    if "version" in snapshot:  # 2: the rows already carry their grades
+        return _as_current(snapshot, list(snapshot.get("judgments") or []))
     rows = list(snapshot.get("judgments") or [])
     favorites = list(snapshot.get("favorites") or [])
     starred = set(favorites)
@@ -251,12 +318,23 @@ def upgrade_legacy_snapshot(
             }
             for p in sorted(starred - rowed)
         ]
+    return _as_current(snapshot, judgments)
+
+
+def _as_current(
+    snapshot: Dict[str, Any], judgments: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """An older ``snapshot`` in the current shape, with ``judgments`` as its
+    rows. Neither older shape has briefs or library prompts: it was written
+    before a snapshot kept them."""
     return {
         "version": TASTE_SNAPSHOT_VERSION,
         "taken_at": snapshot.get("taken_at"),
         "judgments": judgments,
         "categories": list(snapshot.get("categories") or []),
-        "favorites": favorites,
+        "favorites": list(snapshot.get("favorites") or []),
+        "briefs": [],
+        "library_prompts": [],
     }
 
 
@@ -290,13 +368,13 @@ def _quarantine(target: Path, why: str) -> None:
 
 
 def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
-    """The pending snapshot as version 2 (one written before grades is
-    translated, :func:`upgrade_legacy_snapshot`), or None when there is
-    none. A file that cannot be parsed (or has the wrong shape / value
-    types / an unknown version) is quarantined and None returned. Raises
-    :class:`PendingSnapshotUnreadable` when the file exists but can't be
-    read (locked, permissions -- it may well be valid) or can't be
-    quarantined; the file is left in place."""
+    """The pending snapshot as version 3 (a version-2 one, or one written
+    before grades, is translated: :func:`upgrade_legacy_snapshot`), or None
+    when there is none. A file that cannot be parsed (or has the wrong
+    shape / value types / an unknown version) is quarantined and None
+    returned. Raises :class:`PendingSnapshotUnreadable` when the file
+    exists but can't be read (locked, permissions -- it may well be valid)
+    or can't be quarantined; the file is left in place."""
     target = snapshot_file_path(data_dir)
     try:
         raw = target.read_text(encoding="utf-8")
@@ -379,27 +457,20 @@ def _apply_pending(db: Any, data_dir: Path) -> Dict[str, int]:
 def merge_pending_into_snapshot(
     data_dir: Path, snapshot: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Return ``snapshot`` plus every pending entry whose path the fresh
-    snapshot does not already cover (the fresh one is newer). Call after
+    """Return ``snapshot`` plus every pending entry -- briefs and library
+    prompts included -- whose path the fresh snapshot does not already
+    cover (the fresh one is newer). Call after
     :func:`apply_pending_taste_snapshot` so the leftovers are exactly the
     paths that are not in the DB."""
     pending = load_pending_snapshot(data_dir)
     if pending is None:
         return snapshot
-    fresh_paths = (
-        {j["file_path"] for j in snapshot.get("judgments") or []}
-        | {lk["file_path"] for lk in snapshot.get("categories") or []}
-        | set(snapshot.get("favorites") or [])
-    )
+    fresh_paths = _snapshot_paths(snapshot)
     merged = dict(snapshot)
-    merged["judgments"] = list(snapshot.get("judgments") or []) + [
-        j for j in pending.get("judgments") or [] if j["file_path"] not in fresh_paths
-    ]
-    merged["categories"] = list(snapshot.get("categories") or []) + [
-        lk
-        for lk in pending.get("categories") or []
-        if lk["file_path"] not in fresh_paths
-    ]
+    for key in _ROW_LISTS:
+        merged[key] = list(snapshot.get(key) or []) + [
+            e for e in pending.get(key) or [] if e["file_path"] not in fresh_paths
+        ]
     merged["favorites"] = sorted(
         set(snapshot.get("favorites") or [])
         | {p for p in pending.get("favorites") or [] if p not in fresh_paths}
