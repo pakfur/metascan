@@ -2,9 +2,11 @@
 import { computed } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import type { ThumbItem } from '../../types/jobs'
+import GradeBadge from '../thumbnails/GradeBadge.vue'
 
-// One image tile: thumbnail, hover overlays (favourite, delete) and a label
-// underneath. It only reports what the user did; ThumbGrid adds the item.
+// One image tile: thumbnail, hover overlays (favourite, delete), a read-only
+// ✓ / ✗ grade badge and a label underneath. It only reports what the user
+// did; ThumbGrid adds the item. The star is ★ only, never a grade.
 const props = defineProps<{ item: ThumbItem; selected?: boolean; top?: boolean }>()
 
 // "v2 · 0.82": the prompt variant the image came from, then the taste score;
@@ -18,7 +20,9 @@ const badge = computed(() => {
 const badgeTitle = computed(() => {
   const parts: string[] = []
   if (props.item.variant != null) parts.push(`prompt variant ${props.item.variant}`)
-  if (props.item.score != null) parts.push(`taste score ${props.item.score.toFixed(2)}`)
+  if (props.item.score != null) {
+    parts.push(`taste score ${props.item.score.toFixed(2)}: chance you'd pass this`)
+  }
   return parts.join(' · ')
 })
 const emit = defineEmits<{
@@ -55,6 +59,7 @@ function onImgError(e: Event) {
       <img :src="thumbnailUrl(item.file_path)" alt="" loading="lazy" decoding="async" @error="onImgError" />
       <span v-if="badge" class="score-badge" :title="badgeTitle">{{ badge }}</span>
       <span v-if="item.blind" class="blind-badge" :title="item.title">judge to reveal</span>
+      <GradeBadge v-else-if="item.grade" class="grade-corner" :grade="item.grade" />
       <button
         type="button"
         class="overlay star"
@@ -131,6 +136,13 @@ function onImgError(e: Event) {
   line-height: 1.5;
   /* Hoverable for its tooltip; a click still reaches the tile under it. */
   cursor: pointer;
+}
+
+/* The blind badge's corner: a blind tile has no grade, so they never meet. */
+.grade-corner {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
 }
 
 .blind-badge {

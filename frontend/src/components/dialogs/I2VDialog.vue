@@ -35,6 +35,7 @@ import { isUnknownCategoryError, useGenerationCategories } from '../../composabl
 import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
 import MediaViewer from '../viewer/MediaViewer.vue'
+import GradeBadge from '../thumbnails/GradeBadge.vue'
 import CategorySelect from '../generation/CategorySelect.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
 import TextEditPopup from '../storyboard/TextEditPopup.vue'
@@ -699,6 +700,8 @@ async function onDeleteVideo(v: I2vVideo) {
   }
 }
 
+// The tile star is ★ only (never the grade); the ✓ / ✗ badge is read-only
+// and grading happens in the viewer (P / X).
 async function onToggleFavorite(v: I2vVideo) {
   try {
     await store.toggleFavorite(v)
@@ -1047,6 +1050,7 @@ function jobLabel(chip: {
               @click.stop="onToggleFavorite(v)"
             >★</button>
             <button class="overlay del" title="Delete" @click.stop="onDeleteVideo(v)">✕</button>
+            <GradeBadge v-if="v.grade" class="grade-corner" :grade="v.grade" />
           </div>
           <div class="tile-meta">
             <span class="tile-meta-quality" :title="videoDetails[idx].quality">
@@ -1069,6 +1073,7 @@ function jobLabel(chip: {
       :allow-destructive="false"
       :allow-rating="true"
       :favorite-mirror="store.applyFavoriteFlag"
+      :judgment-mirror="store.applyJudgment"
       @close="viewerIndex = null"
     />
   </div>
@@ -1275,6 +1280,7 @@ function jobLabel(chip: {
 .tile .star { top: 4px; left: 4px; }
 .tile .star.active { opacity: 1; color: gold; }
 .tile .del { top: 4px; right: 4px; }
+.tile .grade-corner { position: absolute; right: 4px; bottom: 4px; }
 .tile-job { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #666; }
 .tile-job.failed { border-color: #c33; color: #c33; }
 .strip-empty { color: #888; align-self: center; font-size: 13px; }

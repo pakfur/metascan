@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { Media } from '../types/media'
+import type { Grade } from '../types/judgments'
 import type { ActiveFilters } from '../types/filters'
 import { fetchAllMedia, fetchMediaDetails, updateMedia, deleteMedia } from '../api/media'
 import { applyFilters } from '../api/filters'
@@ -176,10 +177,13 @@ export const useMediaStore = defineStore('media', () => {
     }
   }
 
+  // ★ only: the legacy media PATCH never touches the grade or its reasons.
   async function toggleFavorite(media: Media) {
     const updated = await updateMedia(media.file_path, { is_favorite: !media.is_favorite })
     const idx = allMedia.value.findIndex((m) => m.file_path === media.file_path)
-    if (idx >= 0) allMedia.value[idx] = updated
+    // Merged over the row, not swapped in: the PATCH answer is a summary row
+    // (grade included) but carries no `hidden`, which the grid filters on.
+    if (idx >= 0) allMedia.value[idx] = { ...allMedia.value[idx], ...updated }
     // `updated` is a summary — it lacks prompt/tags/etc. Only mirror the
     // flipped flag onto the current detail record so we don't blow away the
     // AI fields we just loaded for the panel.
@@ -190,8 +194,8 @@ export const useMediaStore = defineStore('media', () => {
   }
 
   // Mirror a favorite flag the server already holds (e.g. from a judgments
-  // verdict response) onto the local records. In-place, like the T2I
-  // store's mirror, so the viewer's current item keeps its identity.
+  // response) onto the local records. In-place, like the T2I store's
+  // mirror, so the viewer's current item keeps its identity.
   function applyFavoriteFlag(filePath: string, isFavorite: boolean): void {
     const entry = allMedia.value.find((m) => m.file_path === filePath)
     if (entry && entry.is_favorite !== isFavorite) entry.is_favorite = isFavorite
@@ -206,6 +210,18 @@ export const useMediaStore = defineStore('media', () => {
       if (isFavorite) next.add(filePath)
       else next.delete(filePath)
       favoritePaths.value = next
+    }
+  }
+
+  // Mirror grades the server already holds onto the local records (tile
+  // badges and the `grade` smart-folder rule read them): one pass over the
+  // list, in place. MediaViewer sends what it graded when it closes.
+  function applyGrades(grades: ReadonlyMap<string, Grade | null>): void {
+    if (grades.size === 0) return
+    for (const m of allMedia.value) {
+      if (!grades.has(m.file_path)) continue
+      const grade = grades.get(m.file_path) ?? null
+      if ((m.grade ?? null) !== grade) m.grade = grade
     }
   }
 
@@ -248,6 +264,7 @@ export const useMediaStore = defineStore('media', () => {
     selectMedia,
     toggleFavorite,
     applyFavoriteFlag,
+    applyGrades,
     removeMedia,
     setSortOrder,
     toggleShowHidden,

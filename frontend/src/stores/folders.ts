@@ -141,6 +141,12 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
       const v = Boolean(value)
       return op === 'is' ? m.is_favorite === v : m.is_favorite !== v
     }
+    case 'grade': {
+      // 'pass' (✓) / 'fail' (✗) / 'none' (ungraded), off the summary's
+      // `grade`; ★ plays no part. Videos carry grades too.
+      const grade = m.grade ?? 'none'
+      return op === 'is' ? grade === value : grade !== value
+    }
     case 'type': {
       const kind = m.is_video ? 'video' : 'image'
       return op === 'is' ? kind === value : kind !== value
@@ -836,6 +842,19 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
     ops: ['is', 'is_not'],
     value: 'bool',
     defaultValue: () => true,
+  },
+  // ✓ / ✗ / ungraded. Defaults to ✗ Fail: "all ✗" is the folder the owner
+  // deletes failures from.
+  grade: {
+    label: 'Grade',
+    ops: ['is', 'is_not'],
+    value: 'select',
+    options: [
+      ['pass', '✓ Pass'],
+      ['fail', '✗ Fail'],
+      ['none', 'No grade'],
+    ],
+    defaultValue: () => 'fail',
   },
   type: {
     label: 'Type',

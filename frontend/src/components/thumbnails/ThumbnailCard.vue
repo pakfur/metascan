@@ -4,6 +4,7 @@ import type { Media } from '../../types/media'
 import { thumbnailUrl } from '../../api/client'
 import { useMediaStore } from '../../stores/media'
 import { fileName } from '../../utils/path'
+import GradeBadge from './GradeBadge.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -42,6 +43,8 @@ onBeforeUnmount(() => {
   if (el) el.removeAttribute('src')
 })
 
+// ★ only (the legacy media PATCH): never the grade. The ✓ / ✗ corner badge
+// is read-only; grading happens in the viewer (P / X).
 function onFavoriteClick(e: MouseEvent) {
   e.stopPropagation()
   mediaStore.toggleFavorite(props.media)
@@ -89,8 +92,14 @@ function onImgError(e: Event) {
       {{ displayName }}
     </div>
 
-    <div v-if="media.similarity_score != null" class="similarity-badge">
-      {{ (media.similarity_score * 100).toFixed(0) }}%
+    <div
+      v-if="media.grade || media.similarity_score != null"
+      class="corner-badges"
+    >
+      <div v-if="media.similarity_score != null" class="similarity-badge">
+        {{ (media.similarity_score * 100).toFixed(0) }}%
+      </div>
+      <GradeBadge v-if="media.grade" :grade="media.grade" />
     </div>
   </div>
 </template>
@@ -215,10 +224,18 @@ function onImgError(e: Event) {
   border-radius: 4px;
 }
 
-.similarity-badge {
+/* Bottom-right: the similarity score, then the ✓ / ✗ grade in the corner. */
+.corner-badges {
   position: absolute;
   bottom: 4px;
   right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.similarity-badge {
   background: rgba(0, 0, 0, 0.7);
   color: #4ade80;
   font-size: 11px;

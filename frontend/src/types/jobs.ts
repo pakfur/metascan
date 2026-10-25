@@ -1,3 +1,5 @@
+import type { Grade } from './judgments'
+
 /**
  * Neutral types for the generation UI pieces in components/generation/ and
  * composables/useJobTracker.ts. T2I is the first user; I2V keeps its own
@@ -43,6 +45,9 @@ export interface ThumbItem {
   id: number | string
   file_path: string
   is_favorite: boolean
+  // ✓ pass / ✗ fail: a read-only corner badge (grading happens in the
+  // viewer); absent/null = ungraded.
+  grade?: Grade | null
   title: string
   label: string
   // Learned taste score (0..1); absent/null = unscored (and always for videos).

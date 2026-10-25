@@ -96,7 +96,10 @@ async def update_media(
     media = await service.get_media(file_path)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
-    return service.media_to_summary_dict(media)
+    # A summary row like the list's, grade included: the grid replaces its
+    # row with this answer.
+    grade = await service.get_grade(file_path)
+    return service.media_to_summary_dict(media, grade=grade)
 
 
 @router.get("/stream/{file_path:path}")

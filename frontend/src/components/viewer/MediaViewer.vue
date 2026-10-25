@@ -29,9 +29,9 @@ import type { CategoryRef, Grade, JudgmentState } from '../../types/judgments'
 // toggle, and the library-metadata-panel selectMedia leak all need to be
 // off there.
 //
-// allowRating turns the taste-rating surface (the rail, F/X, 1–6, C, the
-// header star and seen tracking) on for a non-destructive mount. Rating is
-// enabled when allowRating OR allowDestructive is true -- i.e. it
+// allowRating turns the taste-rating surface (the rail, F / P / X, 1–6, C,
+// R, the header star and seen tracking) on for a non-destructive mount.
+// Rating is enabled when allowRating OR allowDestructive is true -- i.e. it
 // effectively defaults to allowDestructive (Vue casts an absent boolean
 // prop to false, so a true "undefined = inherit" default isn't
 // expressible), and every existing mount is unchanged. The T2I and I2V
@@ -72,11 +72,11 @@ const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const showHelp = ref(false)
 const undoData = ref<{ media: Media; index: number } | null>(null)
 
-// Review mode (R, rating only): navigation walks the scorer's
-// least-certain images instead of mediaList. The state is this viewer's
-// own; closing the viewer simply drops it. `returnPath` / `returnIndex`
-// remember where the original list was so leaving review puts the owner
-// back on the item they were rating.
+// Review mode (R, rating only): navigation walks the scorer's ungraded
+// images, least certain (score nearest 0.5) first, instead of mediaList.
+// The state is this viewer's own; closing the viewer simply drops it.
+// `returnPath` / `returnIndex` remember where the original list was so
+// leaving review puts the owner back on the item they were rating.
 interface ReviewState {
   list: Media[]
   returnPath: string | null
@@ -122,7 +122,7 @@ function goPrev() { navigate(-1) }
 // reasons, category toggles) runs on that item's promise chain, so the
 // server sees them in key-press order and responses come back in that
 // order. Each op reads the state the previous op returned (`lastKnown`),
-// which is what makes a fast `X` then `2` work before the first response
+// which is what makes a fast `P` then `2` work before the first response
 // has painted. Every response is tagged with the path it was for and only
 // paints the rail when that path is still the current item.
 // ---------------------------------------------------------------------
@@ -137,6 +137,14 @@ const lastKnown = new Map<string, JudgmentState>()
 const chains = new Map<string, Promise<void>>()
 let seenTimer: ReturnType<typeof setTimeout> | null = null
 let hintTimer: ReturnType<typeof setTimeout> | null = null
+// Grades reach the library list (tile badges, the `grade` smart-folder
+// rule) when the viewer closes, not on every key. The library mount
+// navigates mediaStore.scopedMedia live, so a grade that took the current
+// item out of a grade-filtered smart folder would slide the next image
+// under the index: a quick second key (X after P, a reason) would then
+// grade an image the owner never looked at. The grid is hidden behind the
+// viewer anyway. A response that lands after close goes straight through.
+const pendingGrades = new Map<string, Grade | null>()
 // Video seen fires once per visit; reset on every item change.
 let seenSentForVisit = false
 let unmounted = false
@@ -176,6 +184,8 @@ function receive(path: string, incoming: JudgmentState): void {
   // The server's flag is the truth whether or not this item is still on
   // screen, so the grid star follows even for a stale response.
   mediaStore.applyFavoriteFlag(path, state.favorite)
+  if (unmounted) mediaStore.applyGrades(new Map([[path, state.grade]]))
+  else pendingGrades.set(path, state.grade)
   props.favoriteMirror?.(path, state.favorite)
   props.judgmentMirror?.(path, state)
   if (!unmounted && path === currentPath.value) judgment.value = state
@@ -232,7 +242,7 @@ function errorCode(e: unknown): string | null {
 function onJudgmentError(path: string, e: unknown): void {
   const code = errorCode(e)
   if (code === 'no_grade') {
-    showHint(path, 'Press X first')
+    showHint(path, 'Press P or X first')
     return
   }
   if (e instanceof ApiError && e.status === 404 && code === null) {
@@ -268,8 +278,9 @@ watch(
     }
     if (!ratingEnabled.value || !path) return
     enqueue(path, () => fetchJudgment(path))
-    // Review mode records only explicit F / X / reasons / categories:
-    // arrowing past an item there is not a "seen and not favorited" vote.
+    // Review mode records only explicit keys (F / P / X / 1–6 / C), so it
+    // runs no seen dwell, as before. Seen trains nothing either way: it is
+    // the rail's "● seen" chip, never a label.
     if (!current.value?.is_video && !review.value) {
       seenTimer = setTimeout(() => {
         seenTimer = null
@@ -314,11 +325,13 @@ function gradeOpts(): { stickyCategoryId?: number } {
 }
 
 // Every toggle reads the state the previous op on this item left behind,
-// so X X X (or F F F) alternates correctly even when typed faster than the
+// so X X X (or P X P, or F F F) ends right even when typed faster than the
 // server answers.
 
-// X: the key of the grade already set clears it. The sticky category
-// rides a grade, never a clear.
+// P (✓) / X (✗) and the rail's buttons: the key of the grade already set
+// clears it; the other key switches it (the server clears the reasons, which
+// described the old grade). The sticky category rides a grade, never a
+// clear.
 function toggleGrade(target: Grade): void {
   const media = current.value
   if (!ratingEnabled.value || !media) return
@@ -334,8 +347,8 @@ function toggleGrade(target: Grade): void {
   })
 }
 
-// F and the header star: ★ only -- never the grade, its reasons or the
-// scorecard, and no score is sent (★ is not a rating).
+// F, the header star and the rail's ★: ★ only -- never the grade, its
+// reasons or the scorecard, and no score is sent (★ is not a rating).
 function toggleFavorite(): void {
   const media = current.value
   if (!ratingEnabled.value || !media) return
@@ -355,7 +368,7 @@ function toggleReason(index: number): void {
   const scoreShown = shownScore()
   enqueue(path, async (state) => {
     if (!state?.grade) {
-      showHint(path, 'Press X first')
+      showHint(path, 'Press P or X first')
       return null
     }
     return setReason(path, reason, !state.reasons.includes(reason), scoreShown)
@@ -389,7 +402,7 @@ async function toggleReview(): Promise<void> {
     .map((p) => byPath.get(p))
     .filter((m): m is Media => m !== undefined)
   if (!list.length) {
-    if (startPath) showHint(startPath, 'Nothing to review — rate more or retrain')
+    if (startPath) showHint(startPath, 'Nothing to review — grade more or retrain')
     return
   }
   review.value = { list, returnPath: startPath, returnIndex: currentIndex.value }
@@ -547,9 +560,9 @@ function onKeyDown(e: KeyboardEvent) {
 
   // Rating keys: only with the rail mounted, never with a modifier held.
   if (ratingEnabled.value && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    // A held F / X / 1–6 / C must not toggle over and over (auto-repeat);
-    // held arrows and volume keys still repeat below.
-    if (e.repeat && /^[fFxXcCrR1-6]$/.test(e.key)) return
+    // A held F / P / X / 1–6 / C / R must not toggle over and over
+    // (auto-repeat); held arrows and volume keys still repeat below.
+    if (e.repeat && /^[fFpPxXcCrR1-6]$/.test(e.key)) return
     if (e.key >= '1' && e.key <= '6' && e.key.length === 1) {
       toggleReason(Number(e.key) - 1)
       return
@@ -558,6 +571,10 @@ function onKeyDown(e: KeyboardEvent) {
       case 'f':
       case 'F':
         toggleFavorite()
+        return
+      case 'p':
+      case 'P':
+        toggleGrade('pass')
         return
       case 'x':
       case 'X':
@@ -635,6 +652,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   if (seenTimer) clearTimeout(seenTimer)
   if (hintTimer) clearTimeout(hintTimer)
+  mediaStore.applyGrades(pendingGrades)
+  pendingGrades.clear()
 })
 
 function formatSize(bytes: number): string {
@@ -655,7 +674,7 @@ function formatSize(bytes: number): string {
             class="fav-btn"
             :class="{ active: starOn }"
             @click="toggleFavorite"
-            :title="starOn ? 'Remove favorite' : 'Add favorite'"
+            :title="starOn ? 'Remove ★ favorite (F)' : 'Add ★ favorite (F)'"
           >
             {{ starOn ? '★' : '☆' }}
           </button>
@@ -724,6 +743,8 @@ function formatSize(bytes: number): string {
           :hint="hint"
           :sticky="stickyCategory"
           :score="railScore"
+          @favorite="toggleFavorite"
+          @grade="toggleGrade"
         >
           <CategoryPicker
             v-if="pickerOpen"
@@ -755,14 +776,18 @@ function formatSize(bytes: number): string {
               <tr><td>Esc</td><td>Close viewer</td></tr>
               <tr><td>← →</td><td>Previous / Next</td></tr>
               <tr><td>Space</td><td>Play / Pause (video)</td></tr>
-              <tr v-if="ratingEnabled"><td>F</td><td>Toggle favorite</td></tr>
+              <tr v-if="ratingEnabled"><td>F</td><td>Toggle ★ Favorite</td></tr>
+              <tr v-if="ratingEnabled"><td>P</td><td>Toggle ✓ Pass</td></tr>
               <tr v-if="ratingEnabled"><td>X</td><td>Toggle ✗ Fail</td></tr>
               <tr v-if="ratingEnabled">
                 <td>1–6</td>
-                <td>Toggle reason (realism, composition, emotion, light, concept, motion)</td>
+                <td>
+                  Toggle reason (realism, composition, emotion, light, concept, motion)
+                  — press P or X first
+                </td>
               </tr>
               <tr v-if="ratingEnabled"><td>C</td><td>Categories (Shift+Enter: sticky)</td></tr>
-              <tr v-if="ratingEnabled"><td>R</td><td>Review least-certain</td></tr>
+              <tr v-if="ratingEnabled"><td>R</td><td>Review ungraded, least certain first</td></tr>
               <tr v-if="allowDestructive"><td>Ctrl+D</td><td>Delete file</td></tr>
               <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
               <tr><td>M</td><td>Mute / Unmute (video)</td></tr>

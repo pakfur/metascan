@@ -677,11 +677,13 @@ export function tileVariant(
 export function toThumbItem(img: T2iImage, multi?: Set<string>): ThumbItem {
   if (t2iBlind(img)) {
     // Nothing that tells base from adapter: no writer, prompt or variant
-    // (the seed and size are the same for both images of a brief).
+    // (the seed and size are the same for both images of a brief). Blind
+    // means ungraded, so there is no grade badge either.
     return {
       id: img.id,
       file_path: img.file_path,
       is_favorite: img.is_favorite,
+      grade: null,
       title: SCORECARD_BLIND_TEXT,
       label: t2iImageDetails(img),
       variant: null,
@@ -692,6 +694,7 @@ export function toThumbItem(img: T2iImage, multi?: Set<string>): ThumbItem {
     id: img.id,
     file_path: img.file_path,
     is_favorite: img.is_favorite,
+    grade: img.grade ?? null,
     title: t2iImageTitle(img),
     label: t2iImageDetails(img),
     variant: multi ? tileVariant(img, multi) : null,
