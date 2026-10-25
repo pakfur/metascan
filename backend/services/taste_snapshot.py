@@ -22,6 +22,11 @@ without a version was written before grades and keeps its old meaning --
 ``passed = 1`` is a reject, a favorite is ★ and the positive -- so on load
 :func:`upgrade_legacy_snapshot` translates it exactly as the v6 migration
 maps live ratings. Both shapes validate; any other version is quarantined.
+
+While a full clean runs or its file exists, the T2I / I2V listings must not
+prune their lineage rows (:func:`lineage_prune_guard`): the rescan re-adds
+the media rows one by one, and a completed full clean reads the vanished
+items' lineage from those rows when it tombstones them.
 """
 
 import itertools
@@ -29,10 +34,12 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, cast
 
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
 from metascan.core.judgments import GRADES
@@ -44,6 +51,67 @@ TASTE_SNAPSHOT_FILENAME = "taste_snapshot_before_full_clean.json"
 
 def snapshot_file_path(data_dir: Path) -> Path:
     return Path(data_dir) / TASTE_SNAPSHOT_FILENAME
+
+
+# ---- the lineage prune pause ---------------------------------------------------
+#
+# ``list_t2i_images`` / ``list_i2v_videos`` delete the lineage rows whose
+# media row is gone. A full clean empties ``media`` and the rescan re-adds
+# it file by file, so until the rescan reaches a file its lineage row looks
+# dangling: one listing (the T2I dialog opening, a WebSocket reconnect)
+# would wipe the lot. The lifespan installs lineage_prune_guard on the
+# database (``DatabaseManager.set_lineage_prune_guard``).
+
+_full_clean_runs = 0
+_full_clean_lock = threading.Lock()
+
+
+@contextmanager
+def full_clean_running() -> Iterator[None]:
+    """Mark a full clean as running in this process for the ``with`` block.
+    The scan route wraps the whole run, from before its snapshot to after
+    its restore; the mark goes however the block ends (an abort, an error,
+    a shutdown's CancelledError). The pending file outlives a run, this
+    mark does not."""
+    global _full_clean_runs
+    with _full_clean_lock:
+        _full_clean_runs += 1
+    try:
+        yield
+    finally:
+        with _full_clean_lock:
+            _full_clean_runs -= 1
+
+
+def is_full_clean_running() -> bool:
+    return _full_clean_runs > 0
+
+
+def pending_snapshot_exists(data_dir: Path) -> bool:
+    """Whether the pending file exists. Only a missing file is False: any
+    other error checking for it (permissions, a data dir that is not a
+    directory) is raised, so a caller that must fail safe can."""
+    try:
+        os.stat(snapshot_file_path(data_dir))
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def lineage_prune_guard(data_dir: Path) -> Callable[[], bool]:
+    """The guard for ``DatabaseManager.set_lineage_prune_guard``: True --
+    no prune -- while a full clean runs in this process or its pending
+    file exists in ``data_dir``. The file is written (empty lists for a
+    library with no ratings) before the truncate and survives a crash or
+    a restart; a cancelled or failed full clean keeps it while entries are
+    unrestored, and a completed one deletes it only after tombstoning. The
+    mark covers the run itself. A failed check raises, which the database
+    counts as True. Runs under the DB lock: a stat, nothing else."""
+
+    def paused() -> bool:
+        return is_full_clean_running() or pending_snapshot_exists(data_dir)
+
+    return paused
 
 
 def _is_empty(snapshot: Dict[str, Any]) -> bool:

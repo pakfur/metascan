@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,7 @@ from backend.services.taste_snapshot import TASTE_SNAPSHOT_FILENAME  # noqa: F40
 from backend.services.taste_snapshot import (
     PendingSnapshotUnreadable,
     apply_pending_taste_snapshot,
+    full_clean_running,
     merge_pending_into_snapshot,
     restore_and_persist,
     snapshot_file_path,
@@ -123,8 +125,20 @@ async def cancel_scan():
     return {"status": "cancelling"}
 
 
-async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # noqa: C901
-    """Run the scan in a background task with WebSocket progress updates."""
+async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
+    """Run the scan in a background task with WebSocket progress updates.
+
+    A full clean is marked as running (``full_clean_running``) from before
+    its snapshot to after its restore, however it ends. With its pending
+    file that keeps the T2I / I2V listings from pruning lineage rows while
+    the rescan re-adds the media rows one by one
+    (``taste_snapshot.lineage_prune_guard``)."""
+    with full_clean_running() if full_clean else nullcontext():
+        await _scan(full_cleanup, full_clean)
+
+
+async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
+    """The scan itself; see ``_run_scan``."""
     db = get_db()
     thumbnail_cache = get_thumbnail_cache()
     config = load_app_config()
