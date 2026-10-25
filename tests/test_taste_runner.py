@@ -54,8 +54,9 @@ def _build(tmp_path: Path, n_pos: int, n_neg: int, indexed=None):
         db.save_media(_media(path))
         db.set_grade(path, grade)
     gone_vec = _vec(rng, direction, 1.0)
-    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
+    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY, float("inf")))
     db.save_media(_media("/l/gone.png"))
+    db.mark_embedded(["/l/gone.png"], MODEL_KEY)
     db.set_grade("/l/gone.png", "pass")
     db.delete_media(Path("/l/gone.png"))
     db.set_embedding_lookup(None)
@@ -484,7 +485,8 @@ async def test_diversity_computed_on_train(setup):
         db, db.create_t2i_image(file_path="/l/gen_gone.png"), "2026-10-16 10:00:00"
     )
     db.set_grade("/l/gen_gone.png", "pass")
-    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
+    db.mark_embedded(["/l/gen_gone.png"], MODEL_KEY)
+    db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY, float("inf")))
     db.delete_media(Path("/l/gen_gone.png"))
     db.set_embedding_lookup(None)
 
@@ -568,8 +570,11 @@ async def test_worker_never_borrows_a_vector_by_path(tmp_path):
         # A ✓ image deleted while its vector existed only for another CLIP
         # model; a new, ungraded file now lives at the same path and has a
         # vector in the index -- a ✗-looking one.
-        db.set_embedding_lookup(lambda p: (np.ones(64, dtype=np.float32), "large"))
+        db.set_embedding_lookup(
+            lambda p: (np.ones(64, dtype=np.float32), "large", float("inf"))
+        )
         db.save_media(_media("/l/reused.png"))
+        db.mark_embedded(["/l/reused.png"], "large")
         db.set_grade("/l/reused.png", "pass")
         db.delete_media(Path("/l/reused.png"))
         db.set_embedding_lookup(None)
@@ -654,7 +659,10 @@ async def test_diversity_never_borrows_a_vector_by_path(setup):
     image_id = db.create_t2i_image(file_path="/l/gen_reused.png")
     _set_created(db, image_id, "2026-10-16 10:00:00")
     db.set_grade("/l/gen_reused.png", "pass")
-    db.set_embedding_lookup(lambda p: (np.ones(64, dtype=np.float32), "large"))
+    db.mark_embedded(["/l/gen_reused.png"], "large")
+    db.set_embedding_lookup(
+        lambda p: (np.ones(64, dtype=np.float32), "large", float("inf"))
+    )
     assert db.delete_t2i_image(image_id)[0]  # the lineage row goes too
     db.set_embedding_lookup(None)
     db.save_media(_media("/l/gen_reused.png"))

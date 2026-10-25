@@ -666,7 +666,7 @@ def test_legacy_pending_snapshot_restores_with_old_meaning(tmp_path):
     started = datetime.now(timezone.utc)
 
     db = DatabaseManager(db_dir)  # startup: migrations first...
-    assert _user_version(db_file) == 6
+    assert _user_version(db_file) == 7
     asyncio.run(main_mod._apply_pending_taste_snapshot(db, db_dir))  # ...then this
 
     assert {p: _marks(db.get_judgment(p)) for p in LEGACY_PATHS} == {

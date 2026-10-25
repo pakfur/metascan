@@ -71,11 +71,21 @@ class JudgmentsService:
         )
 
 
-def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]:
-    """Return ``(vector, model_key)`` for a file from the in-memory FAISS
-    index, or None: what a tombstone keeps in ``tombstone_vectors`` under
-    ``model_key`` when the file is deleted. Runs under the DB lock, so it
-    never loads the index from disk: an unloaded index yields None."""
+def faiss_embedding_lookup(
+    native_path: str,
+) -> Optional[Tuple[np.ndarray, str, float]]:
+    """Return ``(vector, model_key, loaded_at)`` for a file from the
+    in-memory FAISS index -- its row, its CLIP model and when that index was
+    loaded from disk -- or None: what a tombstone keeps in
+    ``tombstone_vectors`` under ``model_key`` when the file is deleted. The
+    database calls it only for a file its ``media_hashes`` row says was
+    embedded, and keeps the answer only when ``model_key`` is the model it
+    was embedded with and the index was loaded after the file was marked
+    (``db._insert_tombstone``): the evidence that the row is the file's own.
+    The in-memory index is replaced only after an embedding run completes,
+    so it can be older than the marks; one not loaded from disk
+    (``loaded_at`` None) yields None. Runs under the DB lock, so it never
+    loads the index from disk: an unloaded index yields None."""
     try:
         from backend.api import similarity
 
@@ -85,12 +95,13 @@ def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]
         if fm is None or not fm.is_loaded:
             return None
         model_key = fm.meta.get("model_key")
-        if not model_key:
+        loaded_at = getattr(fm, "loaded_at", None)
+        if not model_key or loaded_at is None:
             return None
         for key in (native_path, to_posix_path(native_path)):
             vec = fm.get_embedding(key)
             if vec is not None:
-                return vec, str(model_key)
+                return vec, str(model_key), float(loaded_at)
     except Exception:
         logger.warning("embedding lookup failed for %s", native_path, exc_info=True)
     return None
@@ -117,24 +128,27 @@ def backfill_tombstone_embeddings(db: DatabaseManager, fm: Any) -> int:
     the index itself.
 
     Tombstones written while the index wasn't in memory have no vector; a
-    deleted file's vector stays in the on-disk index until its CLIP model
-    changes, so once it loads we can still recover them, into
-    ``tombstone_vectors`` under the index's model. The index is read by
-    path, so only tombstones whose path can still be their own are
-    (Review Focus 5; ``db.tombstones_for_vector_backfill``): never one that
-    already has a vector for any model (it was deleted before an index of
-    another model was built), one with an archived thumbnail (the
-    re-embedder computes its vector from its own image), or a path a live
-    media row holds or another tombstone shares. The DB listing and each
-    write batch take the lock briefly; every FAISS read happens outside it.
-    Returns the number filled."""
+    deleted file's row stays in the on-disk index until another file is
+    embedded at its path or the CLIP model changes, so once the index loads
+    we can still recover them, into ``tombstone_vectors`` under the index's
+    model. The row at a path is the vector of the last file embedded there,
+    so only tombstones with evidence that it is their own are read (Review
+    Focus 5; ``db.tombstones_for_vector_backfill``): nothing embedded at
+    the path since the delete, and the file embedded with this model before
+    ``fm`` was loaded (``fm.loaded_at``) -- or, for a tombstone without
+    that evidence, the old guards (no vector for any model, no archived
+    thumbnail, a path no live media row or other tombstone holds). The DB
+    listing and each write batch take the lock briefly; every FAISS read
+    happens outside it. Returns the number filled."""
     if fm is None or not getattr(fm, "is_loaded", False):
         return 0
     model_key = (getattr(fm, "meta", None) or {}).get("model_key")
     if not model_key:
         return 0
     model_key = str(model_key)
-    missing = db.tombstones_for_vector_backfill()
+    missing = db.tombstones_for_vector_backfill(
+        model_key, getattr(fm, "loaded_at", None)
+    )
     if not missing:
         return 0
     filled = 0

@@ -221,9 +221,10 @@ def test_batch_pairs_are_pass_vs_fail(db):
 
 def test_tombstone_rows_carry_embedding(db):
     vec = np.ones(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (vec, "clip-large"))
+    db.set_embedding_lookup(lambda p: (vec, "clip-large", float("inf")))
     db.save_media(_media("/l/gone.png"))
     db.save_media(_media("/l/gone.mp4"))
+    db.mark_embedded(["/l/gone.png", "/l/gone.mp4"], "clip-large")
     db.create_t2i_image(file_path="/l/gone.png", batch_id="b9")
     db.set_grade("/l/gone.png", "pass", now=T0)
     db.set_grade("/l/gone.mp4", "pass", now=T0)
