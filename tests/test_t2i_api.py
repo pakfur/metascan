@@ -1303,10 +1303,15 @@ class TestAppWiring(unittest.TestCase):
         from backend.main import create_app
 
         app = create_app()
+        # app.routes is a route tree, not a flat list: since FastAPI 0.137
+        # an included router is one entry there, its routes not copied in.
+        # The OpenAPI schema walks the tree (no T2I route is hidden from it).
+        operations = {"get", "put", "post", "delete", "options", "head", "patch"}
         registered = {
-            (method, route.path)
-            for route in app.routes
-            for method in getattr(route, "methods", None) or ()
+            (method.upper(), path)
+            for path, item in app.openapi()["paths"].items()
+            for method in item
+            if method in operations
         }
         expected = {
             ("GET", "/api/t2i/config"),
