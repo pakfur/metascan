@@ -22,6 +22,7 @@ from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
 from backend.api.categories import checked_category_ids
+from backend.api.errors import trash_failed_error
 from backend.dependencies import get_db
 from backend.services.t2i_service import T2iService
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
@@ -465,7 +466,11 @@ async def update_image_form_state(
 
 @router.delete("/images/{image_id}")
 async def delete_image(image_id: int) -> Dict[str, str]:
-    if not await _service().delete_image(image_id):
+    try:
+        deleted = await _service().delete_image(image_id)
+    except OSError as exc:  # trash_file: neither trashed nor deleted
+        raise trash_failed_error(f"Deleting T2I image {image_id}", exc) from None
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"No t2i image {image_id}")
     return {"status": "deleted"}
 

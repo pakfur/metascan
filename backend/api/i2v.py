@@ -19,6 +19,7 @@ from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
 from backend.api.categories import checked_category_ids
+from backend.api.errors import trash_failed_error
 from backend.dependencies import get_db
 from backend.services.i2v_service import I2vService
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
@@ -338,7 +339,10 @@ async def update_video_form_state(
 
 @router.delete("/videos/{video_id}")
 async def delete_video(video_id: int) -> Dict[str, str]:
-    deleted = await _service().delete_video(video_id)
+    try:
+        deleted = await _service().delete_video(video_id)
+    except OSError as exc:  # trash_file: neither trashed nor deleted
+        raise trash_failed_error(f"Deleting I2V clip {video_id}", exc) from None
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No i2v video {video_id}")
     return {"status": "deleted"}
