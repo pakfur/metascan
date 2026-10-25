@@ -266,8 +266,6 @@ export interface T2iImage {
   scorecard_id?: string | null
   /** ✓ pass / ✗ fail, null when ungraded (independent of is_favorite). */
   grade?: Grade | null
-  /** The legacy reject flag: the server keeps it equal to grade === 'fail' (nothing reads it). */
-  passed?: boolean
   /** Server's view at fetch time; the client re-derives it with t2iBlind. */
   scorecard_blind?: boolean
 }

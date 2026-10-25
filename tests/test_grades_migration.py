@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
 from metascan.core import database_sqlite
 from metascan.core.database_sqlite import (
@@ -234,23 +233,39 @@ def _user_version(db_file: Path) -> int:
     return int(_query(db_file, "PRAGMA user_version")[0][0])
 
 
-def _legacy_state(db_file: Path) -> Dict[str, List[tuple]]:
-    """Every pre-v6 column of the rating tables: what v6 must never change."""
+def _kept_state(db_file: Path) -> Dict[str, List[tuple]]:
+    """Every pre-v6 column of the rating tables that v6 keeps: what it must
+    never change."""
     return {
         "favorites": _query(
             db_file, "SELECT file_path, is_favorite FROM media ORDER BY file_path"
         ),
         "judgments": _query(
             db_file,
-            "SELECT file_path, passed, reasons, seen_at, judged_at, confirmed_at "
+            "SELECT file_path, reasons, seen_at, judged_at, confirmed_at "
             "FROM media_judgments ORDER BY file_path",
         ),
         "events": _query(db_file, "SELECT * FROM judgment_events ORDER BY id"),
         "tombstones": _query(
             db_file,
-            "SELECT id, file_path, deleted_at, is_favorite, passed, reasons, "
+            "SELECT id, file_path, deleted_at, is_favorite, reasons, "
             "categories, seen_at, confirmed_at, embedding, embedding_model, "
             "lineage FROM media_tombstones ORDER BY id",
+        ),
+    }
+
+
+def _legacy_state(db_file: Path) -> Dict[str, List[tuple]]:
+    """The whole v5 rating state: what v6 keeps plus the old reject flags
+    (``passed``) it drops once it has read them. A failed upgrade, and the
+    backup, leave all of it as it was."""
+    return {
+        **_kept_state(db_file),
+        "rejects": _query(
+            db_file, "SELECT file_path, passed FROM media_judgments ORDER BY 1"
+        ),
+        "tomb_rejects": _query(
+            db_file, "SELECT id, passed FROM media_tombstones ORDER BY id"
         ),
     }
 
@@ -266,7 +281,7 @@ def _tomb_grades(db_file: Path) -> Dict[str, Optional[str]]:
 def _v6_state(db_file: Path) -> Dict[str, List[tuple]]:
     """Everything the migration writes, plus everything it must not."""
     return {
-        **_legacy_state(db_file),
+        **_kept_state(db_file),
         "grades": sorted(_grades(db_file).items()),
         "judgment_rows": _query(
             db_file, "SELECT * FROM media_judgments ORDER BY file_path"
@@ -298,23 +313,16 @@ def _assert_untouched_v5(db_file: Path, before: Dict[str, List[tuple]]) -> None:
 
 def test_v6_maps_favorites_to_pass_and_rejects_to_fail(tmp_path, caplog):
     db_file = _build_v5_db(tmp_path / "db")
-    before = _legacy_state(db_file)
+    before = _kept_state(db_file)
     caplog.set_level(logging.INFO, logger="metascan.core.database_sqlite")
     DatabaseManager(tmp_path / "db")
 
     assert _user_version(db_file) == 6
     assert _grades(db_file) == EXPECTED_GRADES  # /lib/plain.png: still no row
     # ★ is untouched: favorites stay favorites, nothing becomes one.
-    assert _legacy_state(db_file)["favorites"] == before["favorites"]
-    # The old passed column (= reject) is kept as it was, for now.
-    assert dict(_query(db_file, "SELECT file_path, passed FROM media_judgments")) == {
-        "/lib/fav.png": 0,
-        "/lib/fav_bare.png": 0,
-        "/lib/reject.png": 1,
-        "/lib/seen.png": 0,
-        "/lib/cleared.png": 0,
-        "/lib/both.png": 1,
-    }
+    assert _kept_state(db_file)["favorites"] == before["favorites"]
+    # The old reject flags were read, then dropped (tests/test_grades_guard.py).
+    dropped = 2 if database_sqlite._can_drop_columns() else 0
     # One INFO line with the counts, and no file paths in it.
     [line] = [
         r.getMessage()
@@ -326,6 +334,7 @@ def test_v6_maps_favorites_to_pass_and_rejects_to_fail(tmp_path, caplog):
     assert "rejects -> fail 1" in line
     assert "tombstones -> pass 3 / fail 1" in line
     assert "tombstone vectors copied 3" in line
+    assert f"old reject columns dropped {dropped}" in line
     assert "/lib/" not in line and "/gone/" not in line
 
 
@@ -337,11 +346,11 @@ def test_v6_creates_a_judgment_row_for_a_rowless_favorite(tmp_path):
 
     [row] = _query(
         db_file,
-        "SELECT grade, passed, reasons, seen_at, judged_at, confirmed_at "
+        "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
         "FROM media_judgments WHERE file_path = '/lib/fav_bare.png'",
     )
-    grade, passed, reasons, seen_at, judged_at, confirmed_at = row
-    assert (grade, passed, reasons) == ("pass", 0, "[]")
+    grade, reasons, seen_at, judged_at, confirmed_at = row
+    assert (grade, reasons) == ("pass", "[]")
     assert seen_at == judged_at == confirmed_at
     assert t0 <= datetime.fromisoformat(judged_at) <= t1
     # One migration time for everything the migration stamps.
@@ -357,11 +366,11 @@ def test_v6_creates_a_judgment_row_for_a_rowless_favorite(tmp_path):
 
 def test_v6_keeps_timestamps_reasons_and_writes_no_events(tmp_path):
     db_file = _build_v5_db(tmp_path / "db")
-    before = _legacy_state(db_file)
+    before = _kept_state(db_file)
     DatabaseManager(tmp_path / "db")
-    after = _legacy_state(db_file)
+    after = _kept_state(db_file)
 
-    # Every pre-existing judgment row: passed, reasons, seen_at, judged_at,
+    # Every pre-existing judgment row: reasons, seen_at, judged_at,
     # confirmed_at exactly as they were (decay clocks keep running).
     old_paths = {r[0] for r in before["judgments"]}
     assert [r for r in after["judgments"] if r[0] in old_paths] == before["judgments"]
@@ -376,12 +385,12 @@ def test_v6_keeps_timestamps_reasons_and_writes_no_events(tmp_path):
 
 def test_v6_maps_tombstones(tmp_path):
     db_file = _build_v5_db(tmp_path / "db")
-    before = _legacy_state(db_file)
+    before = _kept_state(db_file)
     DatabaseManager(tmp_path / "db")
 
     assert _tomb_grades(db_file) == EXPECTED_TOMB_GRADES
-    # is_favorite (view info), passed, reasons, timestamps, embedding: as-is.
-    assert _legacy_state(db_file)["tombstones"] == before["tombstones"]
+    # is_favorite (view info), reasons, timestamps, embedding: as-is.
+    assert _kept_state(db_file)["tombstones"] == before["tombstones"]
     # The columns later tasks fill start empty.
     assert _query(
         db_file,
@@ -760,6 +769,10 @@ def test_grade_constants():
 
 
 def test_lifespan_stops_on_migration_error(monkeypatch, caplog):
+    # Imported here: other test modules import this one's v5 fixture, and
+    # fastapi.testclient warns (httpx deprecation) on import.
+    from fastapi.testclient import TestClient
+
     from backend import dependencies
     from backend.main import create_app
     from metascan.utils.app_paths import get_data_dir

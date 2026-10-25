@@ -1,4 +1,5 @@
-"""The two on-disk pieces writer LoRA training needs, as Models-tab rows:
+"""The two on-disk pieces writer LoRA training needs, as rows of the
+Configuration dialog's Training tab (served by ``/api/models/status``):
 
 * ``writer-train-base``: the writer model's HF safetensors weights
   (``models.writer_train_repo``, default the 8B spec's ``hf_train_repo``)

@@ -38,13 +38,15 @@ def test_untouched_item_leaves_no_tombstone(db):
 
 def test_judged_item_tombstone_has_judgment_and_embedding(db):
     db.save_media(_media("/p/a.png"))
-    db.set_verdict("/p/a.png", "pass")
+    db.set_grade("/p/a.png", "fail")
     db.set_reason("/p/a.png", "composition", True)
     vec = np.arange(32, dtype=np.float32)
     db.set_embedding_lookup(lambda p: (vec, "clip-medium"))
     db.delete_media(Path("/p/a.png"))
     [t] = db.list_tombstones()
-    assert (t["passed"], json.loads(t["reasons"])) == (1, ["composition"])
+    assert (t["grade"], json.loads(t["reasons"])) == ("fail", ["composition"])
+    # The pre-grades reject flag is not a column any more.
+    assert "passed" not in t
     # The vector is kept per CLIP model, under the model it came from; the
     # legacy single-vector columns stay empty.
     assert db.get_tombstone_vectors(t["id"]) == {"clip-medium": vec.tobytes()}
@@ -54,17 +56,18 @@ def test_judged_item_tombstone_has_judgment_and_embedding(db):
 
 def test_lookup_failure_does_not_block_delete(db):
     db.save_media(_media("/p/a.png"))
-    db.set_verdict("/p/a.png", "favorite")
+    db.set_favorite(Path("/p/a.png"), True)
+    db.set_grade("/p/a.png", "pass")
     db.set_embedding_lookup(lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
     assert db.delete_media(Path("/p/a.png")) is True
     [t] = db.list_tombstones()
     assert db.get_tombstone_vectors(t["id"]) == {}
-    assert t["is_favorite"] == 1 and t["passed"] == 0
+    assert (t["is_favorite"], t["grade"]) == (1, "pass")
 
 
 def test_lookup_none_leaves_embedding_null(db):
     db.save_media(_media("/p/a.png"))
-    db.set_verdict("/p/a.png", "favorite")
+    db.set_grade("/p/a.png", "pass")
     db.set_embedding_lookup(lambda p: None)
     db.delete_media(Path("/p/a.png"))
     assert db.get_tombstone_vectors(db.list_tombstones()[0]["id"]) == {}
@@ -115,7 +118,7 @@ def test_i2v_source_image_is_not_tombstoned(db):
 def test_batch_delete_tombstones_only_judged(db):
     for n in ("a", "b", "c"):
         db.save_media(_media(f"/p/{n}.png"))
-    db.set_verdict("/p/b.png", "favorite")
+    db.set_grade("/p/b.png", "pass")
     n = db.delete_media_batch([Path(f"/p/{x}.png") for x in "abc"])
     assert n == 3
     [t] = db.list_tombstones()
@@ -130,7 +133,7 @@ def test_storyboard_purge_released_path_has_no_tombstone(db):
     pa = db.create_panel(sc, action="a", sort_order=0)
     beat_id = db.create_beat(pa, action="a beat")
     db.save_media(_media("/p/gen.png"))
-    db.set_verdict("/p/gen.png", "favorite")
+    db.set_grade("/p/gen.png", "pass")
     image_id = db.create_t2i_image(file_path="/p/gen.png", writer_id="base")
     db.create_beat_image(beat_id, file_path="/p/gen.png")
     deleted, purged = db.delete_t2i_image(image_id)
@@ -141,7 +144,7 @@ def test_storyboard_purge_released_path_has_no_tombstone(db):
 
 def test_purged_path_is_tombstoned(db):
     db.save_media(_media("/p/gen.png"))
-    db.set_verdict("/p/gen.png", "pass")
+    db.set_grade("/p/gen.png", "fail")
     image_id = db.create_t2i_image(file_path="/p/gen.png", writer_id="base")
     deleted, purged = db.delete_t2i_image(image_id)
     assert deleted is True and len(purged) == 1

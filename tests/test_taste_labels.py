@@ -71,9 +71,9 @@ def _migrated(
             (1 if favorite else 0, path),
         )
         conn.execute(
-            "INSERT INTO media_judgments (file_path, passed, grade, reasons, "
-            "seen_at, judged_at, confirmed_at) VALUES (?, ?, ?, '[]', ?, ?, ?)",
-            (path, 1 if grade == "fail" else 0, grade, ts, ts, ts),
+            "INSERT INTO media_judgments (file_path, grade, reasons, "
+            "seen_at, judged_at, confirmed_at) VALUES (?, ?, '[]', ?, ?, ?)",
+            (path, grade, ts, ts, ts),
         )
         conn.executemany(
             "INSERT INTO judgment_events (file_path, event, score_shown, "
@@ -165,6 +165,30 @@ def test_regrading_resets_the_clock(db):
     assert old == pytest.approx(0.25, rel=1e-3)
     db.set_grade("/l/a.png", "pass", now=T0)
     assert _labels(db).rows[0].weight == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("grade", ["pass", "fail"])
+def test_a_star_toggle_changes_no_label_input(db, grade):
+    # ★ is a view marker: starring and un-starring a graded image later on
+    # leaves its decay clock (confirmed_at), its score_shown halving and so
+    # its label and weight exactly as they were.
+    db.save_media(_media("/l/a.png"))
+    db.set_grade("/l/a.png", grade, score_shown=0.6, now=T0 - timedelta(days=90))
+    before = db.get_judgment("/l/a.png")
+    (label,) = _labels(db).rows
+    for i, on in enumerate((True, False, True)):
+        db.set_favorite_state("/l/a.png", on, now=T0 - timedelta(days=30 - i))
+    after = db.get_judgment("/l/a.png")
+    assert after.favorite is True
+    assert (after.grade, after.judged_at, after.confirmed_at, after.seen_at) == (
+        before.grade,
+        before.judged_at,
+        before.confirmed_at,
+        before.seen_at,
+    )
+    (row,) = _labels(db).rows
+    assert (row.label, row.weight) == (label.label, label.weight)
+    assert row.weight == pytest.approx(0.5 * decay_weight(before.confirmed_at, T0, 180))
 
 
 def test_seen_score_never_weights_a_grade(db):

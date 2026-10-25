@@ -21,15 +21,20 @@ from tests.test_grades_migration import _build_v5_db
 T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
-# A seeded pre-grades rating as it reads now, (★ favorite, grade): the
-# ``set_verdict`` shim maps an old favorite to ★ + ✓ and an old pass (a
-# reject) to ✗ without ★.
+# A seeded rating as (★ favorite, grade): ★ with ✓, what a pre-grades
+# favorite became, and ✗ without ★, what an old reject became.
 FAVORITE = (True, "pass")
 REJECT = (False, "fail")
 
 
 def _marks(state):
     return (state.favorite, state.grade)
+
+
+def _favorite(db, path, now):
+    """★ + ✓: a favorite that was also graded pass."""
+    db.set_favorite_state(path, True, now=now)
+    db.set_grade(path, "pass", now=now)
 
 
 def _media(path: str) -> Media:
@@ -54,8 +59,8 @@ def db(tmp_path):
 def _pending_snapshot(db):
     for p in ("/p/a.png", "/p/b.png"):
         db.save_media(_media(p))
-    db.set_verdict("/p/a.png", "favorite", now=T0)
-    db.set_verdict("/p/b.png", "pass", now=T0)
+    _favorite(db, "/p/a.png", T0)
+    db.set_grade("/p/b.png", "fail", now=T0)
     snap = db.export_taste_state()
     db.truncate_all_data()
     ts.write_snapshot_file(Path(db.db_path), snap)
@@ -118,7 +123,7 @@ def test_corrupt_file_is_renamed_and_logged(db, caplog, payload):
 def test_merge_adds_pending_leftovers_to_a_new_snapshot(db):
     _pending_snapshot(db)
     db.save_media(_media("/p/c.png"))
-    db.set_verdict("/p/c.png", "favorite", now=T0)
+    _favorite(db, "/p/c.png", T0)
     fresh = db.export_taste_state()
     merged = ts.merge_pending_into_snapshot(Path(db.db_path), fresh)
     assert sorted(j["file_path"] for j in merged["judgments"]) == [
@@ -132,7 +137,7 @@ def test_merge_adds_pending_leftovers_to_a_new_snapshot(db):
 def test_merge_never_lets_a_pending_entry_shadow_the_fresh_one(db):
     snap = _pending_snapshot(db)
     db.save_media(_media("/p/a.png"))
-    db.set_verdict("/p/a.png", "pass", now=T0)  # newer than the pending one
+    db.set_grade("/p/a.png", "fail", now=T0)  # newer than the pending one
     fresh = db.export_taste_state()
     merged = ts.merge_pending_into_snapshot(Path(db.db_path), fresh)
     a = [j for j in merged["judgments"] if j["file_path"] == "/p/a.png"]
@@ -483,18 +488,18 @@ def test_corrupt_file_that_cannot_be_renamed_is_signalled(db, monkeypatch):
 def test_real_export_shapes_validate_and_restore(db):
     """Every shape export_taste_state really produces must pass the strict
     validator: seen-only rows (NULL judged_at / confirmed_at), favorites
-    with reasons, passes, migration-seeded favorites, a favorite with no
+    with reasons, rejects, migration-seeded favorites, a favorite with no
     judgment row, ✓ without ★, ★ beside ✗, and category links of every
     source."""
-    names = ("seen", "fav", "pass", "mig", "bare", "cat", "graded", "star_fail")
+    names = ("seen", "fav", "reject", "mig", "bare", "cat", "graded", "star_fail")
     paths = [f"/r/{n}.png" for n in names]
     for p in paths:
         db.save_media(_media(p))
     cat = db.create_category("Portrait")
     db.mark_seen("/r/seen.png", now=T0)
-    db.set_verdict("/r/fav.png", "favorite", now=T0)
+    _favorite(db, "/r/fav.png", T0)
     db.set_reason("/r/fav.png", "light", True, now=T0)
-    db.set_verdict("/r/pass.png", "pass", now=T0)
+    db.set_grade("/r/reject.png", "fail", now=T0)
     db.set_grade("/r/graded.png", "pass", now=T0)
     db.set_favorite_state("/r/star_fail.png", True, now=T0)
     db.set_grade("/r/star_fail.png", "fail", now=T0)
@@ -507,8 +512,8 @@ def test_real_export_shapes_validate_and_restore(db):
             "UPDATE media SET is_favorite = 1 WHERE file_path = ?", ("/r/mig.png",)
         )
         conn.execute(
-            "INSERT INTO media_judgments (file_path, passed, reasons, seen_at, "
-            "judged_at, confirmed_at) VALUES (?, 0, '[]', ?, ?, ?)",
+            "INSERT INTO media_judgments (file_path, reasons, seen_at, "
+            "judged_at, confirmed_at) VALUES (?, '[]', ?, ?, ?)",
             ("/r/mig.png", "2026-01-01 00:00:00", "2026-01-01 00:00:00", None),
         )
         # Legacy favorite with no judgment row at all.
@@ -559,7 +564,7 @@ def test_real_export_shapes_validate_and_restore(db):
     # A ★ with no judgment row comes back as ★ alone: the restore never
     # derives a grade.
     assert _marks(db.get_judgment("/r/bare.png")) == (True, None)
-    assert _marks(db.get_judgment("/r/pass.png")) == REJECT
+    assert _marks(db.get_judgment("/r/reject.png")) == REJECT
     assert _marks(db.get_judgment("/r/graded.png")) == (False, "pass")
     star_fail = db.get_judgment("/r/star_fail.png")
     assert (_marks(star_fail), star_fail.reasons) == ((True, "fail"), ["concept"])

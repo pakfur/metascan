@@ -12,10 +12,6 @@ REASONS: Tuple[str, ...] = (
     "motion",
 )
 
-# The pre-grades favorite-or-reject verdict. Only the test-only
-# ``DatabaseManager.set_verdict`` shim still takes it.
-Verdict = Literal["favorite", "pass"]
-
 # Pass / fail grades (spec 2026-10-24-pass-fail-grades): the only training
 # signal, independent of ★ favorite. Stored in ``grade`` columns (NULL = no
 # grade). Never reuse the words pass / passed / unpass / verdict for the new

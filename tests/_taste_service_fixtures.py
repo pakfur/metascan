@@ -76,9 +76,9 @@ def seed_migrated(
         db.save_media(media(p))
     with db.lock, db._get_connection() as conn:
         conn.executemany(
-            "INSERT INTO media_judgments (file_path, passed, grade, reasons, "
-            "seen_at, judged_at, confirmed_at) VALUES (?, ?, ?, '[]', ?, ?, ?)",
-            [(p, 1 if g == "fail" else 0, g, ts, ts, ts) for p, g in rows],
+            "INSERT INTO media_judgments (file_path, grade, reasons, "
+            "seen_at, judged_at, confirmed_at) VALUES (?, ?, '[]', ?, ?, ?)",
+            [(p, g, ts, ts, ts) for p, g in rows],
         )
         conn.commit()
 

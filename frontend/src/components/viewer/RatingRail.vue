@@ -42,14 +42,16 @@ function isOn(reason: Reason): boolean {
       📌 {{ sticky.name }}
     </div>
 
-    <!-- mousedown.prevent: a click must not move focus off the viewer, or
-         the next key press would land on the button. -->
+    <!-- mousedown.prevent + tabindex -1: a click must not move focus off
+         the viewer, or the next key press would land on the button; the
+         keys F / P / X are the keyboard path. -->
     <button
       type="button"
       class="marker toggle fav"
       :class="{ on: favorite }"
       :aria-pressed="favorite"
       title="★ Favorite (F): to look at again. Never trains anything."
+      tabindex="-1"
       @mousedown.prevent
       @click="emit('favorite')"
     >
@@ -62,6 +64,7 @@ function isOn(reason: Reason): boolean {
         :class="{ on: grade === 'pass' }"
         :aria-pressed="grade === 'pass'"
         title="✓ Pass (P): the prompt did what you wanted. Press again to clear."
+        tabindex="-1"
         @mousedown.prevent
         @click="emit('grade', 'pass')"
       >
@@ -73,6 +76,7 @@ function isOn(reason: Reason): boolean {
         :class="{ on: grade === 'fail' }"
         :aria-pressed="grade === 'fail'"
         title="✗ Fail (X): it didn't. Press again to clear."
+        tabindex="-1"
         @mousedown.prevent
         @click="emit('grade', 'fail')"
       >

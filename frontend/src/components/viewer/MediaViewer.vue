@@ -669,10 +669,15 @@ function formatSize(bytes: number): string {
       <!-- Header -->
       <div class="viewer-header">
         <div class="header-left">
+          <!-- mousedown.prevent + tabindex -1: a click must not leave focus
+               on the star (the next Enter would toggle ★ again); F is the
+               keyboard path. -->
           <button
             v-if="ratingEnabled"
             class="fav-btn"
             :class="{ active: starOn }"
+            tabindex="-1"
+            @mousedown.prevent
             @click="toggleFavorite"
             :title="starOn ? 'Remove ★ favorite (F)' : 'Add ★ favorite (F)'"
           >

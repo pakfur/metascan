@@ -40,7 +40,6 @@ from metascan.core.judgments import (
     CategoryRef,
     Grade,
     JudgmentState,
-    Verdict,
 )
 from metascan.core.prompt_tokenizer import PromptTokenizer
 
@@ -301,6 +300,33 @@ class MigrationError(RuntimeError):
 # the database plus a margin for the migration's own writes.
 V6_BACKUP_SPACE_FACTOR = 1.2
 
+# ALTER TABLE ... DROP COLUMN arrived in SQLite 3.35.0; 3.35.5 fixed defects
+# in it that could corrupt the database file. Older, v6 leaves the pre-grades
+# reject columns where they are (see _legacy_tombstone_fill).
+DROP_COLUMN_MIN_SQLITE = (3, 35, 5)
+
+
+def _can_drop_columns() -> bool:
+    """True when the SQLite this process runs can drop a column safely."""
+    return sqlite3.sqlite_version_info >= DROP_COLUMN_MIN_SQLITE
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _legacy_tombstone_fill(conn: sqlite3.Connection) -> Tuple[str, Tuple[int, ...]]:
+    """``(columns, values)`` a new media_tombstones row must add on a
+    database whose v6 upgrade could not drop the pre-grades reject flag
+    (an SQLite older than ``DROP_COLUMN_MIN_SQLITE``): ``passed`` is NOT
+    NULL with no default there, so it gets the constant 0 -- a placeholder
+    that means nothing and that nothing reads. ``("", ())`` once the column
+    is gone, as on every database upgraded by a newer SQLite and every new
+    one. (media_judgments' copy has a default, so nothing writes it.)"""
+    if _has_column(conn, "media_tombstones", "passed"):
+        return ", passed", (0,)
+    return "", ()
+
 
 def _free_disk_bytes(directory: Path) -> int:
     """Free bytes on the drive holding ``directory``."""
@@ -489,6 +515,8 @@ class DatabaseManager:
         self._embedding_lookup: Optional[Callable[[str], Optional[Tuple[Any, str]]]] = (
             None
         )
+        # What a new tombstone row must still fill; set by _init_database.
+        self._tombstone_fill: Tuple[str, Tuple[int, ...]] = ("", ())
 
         # Lazy-initialize prompt tokenizer (deferred until first use)
         self._prompt_tokenizer: Optional[PromptTokenizer] = None
@@ -1482,13 +1510,15 @@ class DatabaseManager:
             )
             # Taste-rating capture. media_judgments cascades with its media
             # row; judgment_events and media_tombstones deliberately carry
-            # no FK so the history outlives a deleted file.
+            # no FK so the history outlives a deleted file. A database made
+            # before v6 also has a ``passed`` column (the old *reject* flag)
+            # on media_judgments and media_tombstones: _migrate_to_v6 maps
+            # it to grades and drops it, so a new table never gets it.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS media_judgments (
                     file_path TEXT PRIMARY KEY
                         REFERENCES media(file_path) ON DELETE CASCADE,
-                    passed INTEGER NOT NULL DEFAULT 0,
                     reasons TEXT NOT NULL DEFAULT '[]',
                     seen_at TEXT,
                     judged_at TEXT,
@@ -1520,7 +1550,6 @@ class DatabaseManager:
                     file_path TEXT NOT NULL,
                     deleted_at TEXT NOT NULL,
                     is_favorite INTEGER NOT NULL,
-                    passed INTEGER NOT NULL,
                     reasons TEXT NOT NULL,
                     categories TEXT NOT NULL DEFAULT '[]',
                     seen_at TEXT,
@@ -1533,11 +1562,10 @@ class DatabaseManager:
             )
             # Pass / fail grades (filled from the old ratings once, by
             # _migrate_to_v6): grade is 'pass' / 'fail' / NULL (no grade),
-            # the only training signal. The old ``passed`` columns mean
-            # *reject* and are kept, unread by grade code, until they are
-            # dropped. A tombstone also keeps what a deleted graded item
-            # still teaches: its hindsight brief and the model that wrote
-            # it, a library item's prompt and model name, and an archived
+            # the only training signal; ★ (media.is_favorite) is never one.
+            # A tombstone also keeps what a deleted graded item still
+            # teaches: its hindsight brief and the model that wrote it, a
+            # library item's prompt and model name, and an archived
             # thumbnail (thumb_path, relative to the data dir).
             _grade_ddl = "grade TEXT CHECK (grade IN ('pass', 'fail'))"
             _idempotent_add_column(
@@ -2253,13 +2281,14 @@ class DatabaseManager:
             if user_version < 5:
                 # Taste-rating capture: every existing favorite becomes a
                 # confirmed judgment so the new tables start consistent
-                # with media.is_favorite.
+                # with media.is_favorite. (Not a reject: a table made before
+                # v6 defaults its old ``passed`` flag to 0; v6 then makes the
+                # row ✓.)
                 now = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     "INSERT INTO media_judgments "
-                    "(file_path, passed, reasons, seen_at, judged_at, "
-                    "confirmed_at) "
-                    "SELECT file_path, 0, '[]', ?, ?, ? FROM media "
+                    "(file_path, reasons, seen_at, judged_at, confirmed_at) "
+                    "SELECT file_path, '[]', ?, ?, ? FROM media "
                     "WHERE is_favorite = 1 "
                     "ON CONFLICT(file_path) DO NOTHING",
                     (now, now, now),
@@ -2279,6 +2308,7 @@ class DatabaseManager:
 
             if user_version < 6:
                 self._migrate_to_v6(conn)
+            self._tombstone_fill = _legacy_tombstone_fill(conn)
 
     def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
         """user_version 5 -> 6: today's ratings become pass / fail grades
@@ -2296,41 +2326,58 @@ class DatabaseManager:
         scorecard results select deleted images by). Where an item is
         both favorite and passed, ★
         wins, as v5 read it (``_read_judgment``, the taste labels).
-        Reasons, seen_at / judged_at / confirmed_at, ``passed`` and
-        ``is_favorite`` are not touched, and no event is written: a
-        synthetic event would become the newest verdict event, erase its
-        score_shown halving and trip the retrain count at once.
+        Reasons, seen_at / judged_at / confirmed_at and ``is_favorite``
+        are not touched, and no event is written: a synthetic event would
+        become the newest verdict event, erase its score_shown halving and
+        trip the retrain count at once. Then both ``passed`` columns are
+        dropped, so nothing can read the old reject flag as a grade again
+        -- on an SQLite older than ``DROP_COLUMN_MIN_SQLITE`` they stay,
+        never read (``_legacy_tombstone_fill``); the backup keeps them
+        either way. A table made by this code never had the column (a
+        database older than v5 upgraded now): it has no reject to map.
 
-        On any failure none of this is written (user_version stays 5) and
-        ``MigrationError`` is raised; the next open retries. Concurrent
-        managers are safe: the version is re-read under the write lock."""
+        On any failure none of this is written (user_version stays 5, the
+        columns are back) and ``MigrationError`` is raised; the next open
+        retries. Concurrent managers are safe: the version is re-read
+        under the write lock."""
         now = datetime.now(timezone.utc)
         backup = backup_before_v6(self.db_file, now)
         ts = now.isoformat()
+        can_drop = _can_drop_columns()
+        legacy: List[str] = []
         try:
             conn.execute("BEGIN IMMEDIATE")
             if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 6:
                 conn.rollback()  # another manager migrated meanwhile
                 return
+            legacy = [
+                table
+                for table in ("media_judgments", "media_tombstones")
+                if _has_column(conn, table, "passed")
+            ]
+
+            def reject(table: str) -> str:
+                return "WHEN passed != 0 THEN 'fail' " if table in legacy else ""
+
             # Favorites are read from the covering summary index (the
             # ``data`` blob sits before ``is_favorite`` in the row).
             conn.execute(
                 "UPDATE media_judgments SET grade = CASE "
                 "WHEN file_path IN "
                 "(SELECT file_path FROM media WHERE is_favorite != 0) "
-                "THEN 'pass' WHEN passed != 0 THEN 'fail' ELSE NULL END"
+                f"THEN 'pass' {reject('media_judgments')}ELSE NULL END"
             )
             created = conn.execute(
-                "INSERT INTO media_judgments (file_path, passed, reasons, "
+                "INSERT INTO media_judgments (file_path, reasons, "
                 "seen_at, judged_at, confirmed_at, grade) "
-                "SELECT file_path, 0, '[]', ?, ?, ?, 'pass' FROM media "
+                "SELECT file_path, '[]', ?, ?, ?, 'pass' FROM media "
                 "WHERE is_favorite != 0 ON CONFLICT(file_path) DO NOTHING",
                 (ts, ts, ts),
             ).rowcount
             conn.execute(
                 "UPDATE media_tombstones SET grade = CASE "
                 "WHEN is_favorite != 0 THEN 'pass' "
-                "WHEN passed != 0 THEN 'fail' ELSE NULL END"
+                f"{reject('media_tombstones')}ELSE NULL END"
             )
             # The scorecard of each deleted T2I image, from its lineage (new
             # tombstones get it at deletion). The CASE keeps json_type off
@@ -2349,6 +2396,10 @@ class DatabaseManager:
                 "WHERE embedding IS NOT NULL AND embedding_model IS NOT NULL",
                 (ts,),
             ).rowcount
+            # The old reject flag has been read for the last time.
+            if can_drop:
+                for table in legacy:
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN passed")
             conn.execute("PRAGMA user_version = 6")
             counts = self._v6_counts(conn)
             conn.commit()
@@ -2372,14 +2423,24 @@ class DatabaseManager:
         logger.info(
             "Database upgraded to version 6 (pass/fail grades): favorites -> "
             "pass %d (judgment rows created %d), rejects -> fail %d, "
-            "tombstones -> pass %d / fail %d, tombstone vectors copied %d",
+            "tombstones -> pass %d / fail %d, tombstone vectors copied %d, "
+            "old reject columns dropped %d",
             counts["pass"],
             created,
             counts["fail"],
             counts["tomb_pass"],
             counts["tomb_fail"],
             vectors,
+            len(legacy) if can_drop else 0,
         )
+        if legacy and not can_drop:
+            logger.info(
+                "SQLite %s cannot drop a column safely (%s or newer can): the "
+                "old reject columns stay in %s, never read",
+                sqlite3.sqlite_version,
+                ".".join(str(n) for n in DROP_COLUMN_MIN_SQLITE),
+                ", ".join(legacy),
+            )
 
     @staticmethod
     def _v6_counts(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -4055,19 +4116,19 @@ class DatabaseManager:
         # is translated before it gets here).
         grade = judgment["grade"] if judgment is not None else None
         scorecard_id = ((lineage or {}).get("t2i") or {}).get("scorecard_id")
+        # Empty unless an old SQLite kept a NOT NULL legacy column.
+        fill_columns, fill_values = self._tombstone_fill
         cur = conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
-            "is_favorite, passed, grade, reasons, categories, seen_at, "
+            "is_favorite, grade, reasons, categories, seen_at, "
             "judged_at, confirmed_at, lineage, "
-            "brief, brief_model, prompt, model_name, thumb_path, scorecard_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "brief, brief_model, prompt, model_name, thumb_path, scorecard_id"
+            f"{fill_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            f"?, ?{', ?' * len(fill_values)})",
             (
                 path,
                 now,
                 1 if is_favorite else 0,
-                # Interim until the legacy column is dropped: mirrors
-                # grade == 'fail', as media_judgments.passed does.
-                1 if grade == "fail" else 0,
                 grade,
                 judgment["reasons"] if judgment is not None else "[]",
                 json.dumps(sorted(cat_names)),
@@ -4081,6 +4142,7 @@ class DatabaseManager:
                 model_name,
                 thumb_path,
                 scorecard_id if isinstance(scorecard_id, str) else None,
+                *fill_values,
             ),
         )
         if blob is not None and model_key:
@@ -5183,7 +5245,7 @@ class DatabaseManager:
     # media LEFT JOIN: a NULL media_path marks a row whose media is gone.
     _T2I_IMAGE_SELECT: ClassVar[str] = (
         "SELECT t.*, m.file_path AS media_path, m.is_favorite, "
-        "j.passed AS judged_passed, j.grade AS judged_grade "
+        "j.grade AS judged_grade "
         "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path "
         "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
     )
@@ -5210,9 +5272,6 @@ class DatabaseManager:
         d["file_name"] = posix.rsplit("/", 1)[-1]
         d["is_favorite"] = bool(d.get("is_favorite"))
         d["grade"] = DatabaseManager._row_grade(d)
-        # The legacy reject flag (kept equal to grade == 'fail' until the
-        # column is dropped).
-        d["passed"] = bool(d.pop("judged_passed", None))
         # A scorecard image with no grade yet: the dialog hides its writer,
         # variant and prompt until it is graded ✓ or ✗. ★ never reveals it
         # (the writer would show before the grade).
@@ -5527,8 +5586,7 @@ class DatabaseManager:
     # is not a media column, and a LEFT JOIN probes media_judgments once per
     # media row (measured on 12K files / 4K graded: the whole call +18 %,
     # vs +6 % for this ~1 ms read; on 50K files +26 % vs +6 %), while the
-    # media read keeps its covering-index plan untouched. Never the legacy
-    # ``passed`` column (the old reject flag).
+    # media read keeps its covering-index plan untouched.
     _SUMMARY_GRADES_SQL: ClassVar[str] = (
         "SELECT file_path, grade FROM media_judgments "
         "WHERE grade IN ('pass', 'fail')"
@@ -5599,17 +5657,14 @@ class DatabaseManager:
 
     def get_grade(self, file_path: str) -> Optional[Grade]:
         """One item's grade (✓ ``pass`` / ✗ ``fail``), None when ungraded or
-        unknown -- from ``media_judgments.grade`` only, never the legacy
-        ``passed`` flag. For a single summary row (the ★ PATCH response)."""
-        try:
-            with self._get_connection() as conn:
-                row = conn.execute(
-                    "SELECT grade FROM media_judgments WHERE file_path = ?",
-                    (to_posix_path(file_path),),
-                ).fetchone()
-        except Exception as e:
-            logger.error(f"Failed to get the grade of {file_path}: {e}")
-            return None
+        unknown -- from ``media_judgments.grade``. For a single summary row
+        (the ★ PATCH response). A failed read raises: it is not "no
+        grade", and answering None would clear the item's badge."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT grade FROM media_judgments WHERE file_path = ?",
+                (to_posix_path(file_path),),
+            ).fetchone()
         grade = row["grade"] if row is not None else None
         return grade if grade in GRADES else None
 
@@ -6208,15 +6263,13 @@ class DatabaseManager:
     ) -> None:
         """Store a new (or cleared) grade: the reasons go (they described
         the other grade), ``judged_at = confirmed_at = ts``, ``seen_at`` if
-        unset. Interim until the legacy column is dropped: ``passed``
-        mirrors ``grade == 'fail'`` (the old reject) for the readers not
-        yet on grades. Caller holds the lock and commits."""
+        unset. Caller holds the lock and commits."""
         DatabaseManager._ensure_judgment_row(conn, posix_path)
         conn.execute(
-            "UPDATE media_judgments SET grade = ?, passed = ?, reasons = '[]', "
+            "UPDATE media_judgments SET grade = ?, reasons = '[]', "
             "judged_at = ?, confirmed_at = ?, seen_at = COALESCE(seen_at, ?) "
             "WHERE file_path = ?",
-            (grade, 1 if grade == "fail" else 0, ts, ts, ts, posix_path),
+            (grade, ts, ts, ts, posix_path),
         )
 
     def _apply_grade(
@@ -6553,83 +6606,6 @@ class DatabaseManager:
             conn.commit()
             return self._read_judgment(conn, posix_path)
 
-    # A pre-grades verdict as the v6 migration maps it: (★, grade).
-    _VERDICT_AS_GRADE: ClassVar[Dict[Optional[str], Tuple[bool, Optional[Grade]]]] = {
-        "favorite": (True, "pass"),
-        "pass": (False, "fail"),
-        None: (False, None),
-    }
-
-    def set_verdict(
-        self,
-        file_path: str,
-        verdict: Optional[Verdict],
-        score_shown: Optional[float] = None,
-        now: Optional[datetime] = None,
-        sticky_category_id: Optional[int] = None,
-    ) -> Optional[JudgmentState]:
-        """TEST-ONLY shim, removed with the legacy columns; production code
-        uses ``set_grade`` / ``set_favorite``. Seeds a pre-grades rating
-        the way the old verdict code wrote it and the v6 migration mapped
-        it: ``"favorite"`` -> ★ on + ✓ pass, ``"pass"`` (the old *reject*)
-        -> ★ off + ✗ fail, None -> ★ off and no grade. It logs the legacy
-        ``favorite`` / ``unfavorite`` / ``pass`` / ``unpass`` events the
-        old verdict logged, so tests of readers not yet on grades keep the
-        inputs they always had. The same verdict again refreshes
-        ``confirmed_at`` only."""
-        posix_path = to_posix_path(file_path)
-        favorite, grade = self._VERDICT_AS_GRADE[verdict]
-        with self.lock, self._get_connection() as conn:
-            category_name = (
-                self._sticky_category_name(conn, sticky_category_id)
-                if verdict is not None
-                else None
-            )
-            current = self._read_judgment(conn, posix_path)
-            if current is None:
-                return None
-            ts = self._iso(now)
-            if (current.favorite, current.grade) == (favorite, grade):
-                if verdict is not None:
-                    conn.execute(
-                        "UPDATE media_judgments SET confirmed_at = ? "
-                        "WHERE file_path = ?",
-                        (ts, posix_path),
-                    )
-            else:
-                was: Optional[str] = (
-                    "favorite"
-                    if current.favorite
-                    else ("pass" if current.grade == "fail" else None)
-                )
-                if was != verdict:
-                    log = self._log_judgment_event
-                    if was == "favorite":
-                        log(conn, posix_path, "unfavorite", ts, score_shown)
-                    elif was == "pass":
-                        log(conn, posix_path, "unpass", ts, score_shown)
-                    if verdict is not None:
-                        log(conn, posix_path, verdict, ts, score_shown)
-                conn.execute(
-                    "UPDATE media SET is_favorite = ?, "
-                    "updated_at = CURRENT_TIMESTAMP WHERE file_path = ?",
-                    (1 if favorite else 0, posix_path),
-                )
-                self._write_grade(conn, posix_path, grade, ts)
-            state = self._read_judgment(conn, posix_path)
-            assert state is not None
-            state = self._link_sticky(
-                conn,
-                posix_path,
-                state,
-                sticky_category_id,
-                category_name,
-                score_shown,
-                now,
-            )
-            conn.commit()
-            return state
-
     def set_reason(
         self,
         file_path: str,
@@ -6839,8 +6815,10 @@ class DatabaseManager:
         from metascan.core.taste_labels import GRADE_EVENT_KINDS, LEGACY_GRADE_EVENTS
 
         params = {f"ev_grade_{i}": kind for i, kind in enumerate(GRADE_EVENT_KINDS)}
-        params["ev_legacy_pass"] = LEGACY_GRADE_EVENTS["pass"]
-        params["ev_legacy_fail"] = LEGACY_GRADE_EVENTS["fail"]
+        # Named by role: the old event that set a ✓ (a favorite) and the one
+        # that set a ✗ (the old reject, logged as "pass").
+        params["ev_legacy_favorite"] = LEGACY_GRADE_EVENTS["pass"]
+        params["ev_legacy_reject"] = LEGACY_GRADE_EVENTS["fail"]
         is_grade_event = "e.event IN (%s)" % ", ".join(
             f":ev_grade_{i}" for i in range(len(GRADE_EVENT_KINDS))
         )
@@ -6849,8 +6827,8 @@ class DatabaseManager:
             f"CASE WHEN {grade} IS NULL THEN NULL ELSE ("
             "SELECT e.score_shown FROM judgment_events e "
             f"WHERE e.file_path = {path}{bound} AND ({is_grade_event} OR ("
-            f"e.event = CASE {grade} WHEN 'pass' THEN :ev_legacy_pass "
-            "WHEN 'fail' THEN :ev_legacy_fail END "
+            f"e.event = CASE {grade} WHEN 'pass' THEN :ev_legacy_favorite "
+            "WHEN 'fail' THEN :ev_legacy_reject END "
             f"AND e.created_at <= {legacy_until})) "
             f"ORDER BY {is_grade_event} DESC, e.id DESC LIMIT 1) END"
         )
@@ -8997,22 +8975,20 @@ class DatabaseManager:
     ) -> None:
         """Write a version-2 snapshot judgment verbatim over an absent or
         seen-only row, keeping the live seen_at only when the snapshot has
-        none. The grade is copied as stored, never derived. Interim until
-        the legacy column is dropped: ``passed`` mirrors ``grade ==
-        'fail'``, as ``_write_grade`` keeps it. Caller holds the lock."""
+        none. The grade is copied as stored, never derived. Caller holds
+        the lock."""
         conn.execute(
-            "INSERT INTO media_judgments (file_path, passed, grade, "
+            "INSERT INTO media_judgments (file_path, grade, "
             "reasons, seen_at, judged_at, confirmed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(file_path) DO UPDATE SET "
-            "passed = excluded.passed, grade = excluded.grade, "
+            "grade = excluded.grade, "
             "reasons = excluded.reasons, "
             "seen_at = COALESCE(excluded.seen_at, media_judgments.seen_at), "
             "judged_at = excluded.judged_at, "
             "confirmed_at = excluded.confirmed_at",
             (
                 path,
-                1 if j["grade"] == "fail" else 0,
                 j["grade"],
                 j["reasons"],
                 j["seen_at"],
