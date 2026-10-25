@@ -7,12 +7,14 @@ was not in memory) the re-embedder computes one from the image's archived
 thumbnail through the live CLIP worker -- a fake one here: no test starts a
 real CLIP model. It never uses the GPU while writer training holds the lock,
 a generation is in flight or an index build runs; it stops between images
-when one starts and resumes on its own once it is over.
+when one starts and resumes on its own once it is over. A CLIP error never
+makes it give up on an image (only a gone archive does).
 
 Invented images in an isolated temp DB (the shared taste-service fixtures)."""
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ import pytest
 from PIL import Image
 
 from backend.services.tombstone_reembed import (
+    MAX_CONSECUTIVE_ERRORS,
     TombstoneReembedder,
     reembed_blocked,
     reembed_model_key,
@@ -99,6 +102,17 @@ def _delete_graded(
     return max(t["id"] for t in db.list_tombstones() if t["file_path"] == path)
 
 
+LOGGER = "backend.services.tombstone_reembed"
+
+
+def _warnings(caplog) -> List[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == LOGGER and r.levelno >= logging.WARNING
+    ]
+
+
 def _vectors(db: DatabaseManager, tomb_id: int) -> Dict[str, np.ndarray]:
     return {
         model: np.frombuffer(blob, dtype=np.float32)
@@ -134,6 +148,9 @@ class FakeClip:
         self.starts: List[Tuple[str, str]] = []
         self.encoded: List[str] = []
         self.unreadable: set = set()
+        # Every image fails, as when the worker runs out of GPU memory: it
+        # answers ok:false, which the client raises as InferenceError.
+        self.failing = False
         # Runs inside encode_image, before it answers (e.g. a T2I batch or
         # writer training starting while an image is being encoded).
         self.during_encode: Optional[Callable[[str], None]] = None
@@ -158,7 +175,7 @@ class FakeClip:
         await asyncio.sleep(0)
         if self.state != "ready":
             raise RuntimeError("worker shut down")
-        if path in self.unreadable:
+        if self.failing or path in self.unreadable:
             raise InferenceError("compute_image_embedding returned None")
         return _vector_of(path)
 
@@ -223,7 +240,8 @@ def gpu_lock():
 # ---- the re-embedder --------------------------------------------------------
 
 
-async def test_reembeds_graded_tombstones_for_the_current_model(db):
+async def test_reembeds_graded_tombstones_for_the_current_model(db, caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER)
     small = np.full(DIM, 1 / np.sqrt(DIM), dtype=np.float32)
     # A ✓ image deleted while the index (CLIP "small") was in memory: its
     # vector for "small" is captured at deletion, but the index is "large" now.
@@ -268,6 +286,7 @@ async def test_reembeds_graded_tombstones_for_the_current_model(db):
     assert env.done == [2]
     assert env.progress[0] == {"running": True, "done": 0, "total": 2}
     assert env.progress[-1] is None
+    assert _warnings(caplog) == []  # nothing skipped: no WARNING
 
     # Nothing left: a second notify starts nothing and marks nothing.
     r.notify()
@@ -444,7 +463,13 @@ async def test_status_reports_the_reembed_progress(service, db):
     await r.aclose()
 
 
-async def test_skips_unreadable_archives_and_a_changed_clip_model(db):
+async def test_skips_unreadable_archives_and_a_changed_clip_model(db, caplog):
+    """An archive that is gone is skipped until the server restarts; an
+    image CLIP fails on is skipped for that pass only -- the worker reports
+    any failure that way (an out-of-memory too), so it is never a reason to
+    give up on the image. A pass that skipped anything ends with one
+    WARNING giving the counts."""
+    caplog.set_level(logging.INFO, logger=LOGGER)
     gone = _delete_graded(db, "/l/gone.png", "pass")
     Path(_archive_of(db, gone)).unlink()  # the archive was removed by hand
     bad = _delete_graded(db, "/l/bad.png", "fail")
@@ -454,13 +479,23 @@ async def test_skips_unreadable_archives_and_a_changed_clip_model(db):
     r = env.reembedder()
     r.notify()
     await r.wait_idle()
-    assert set(env.clip.encoded) == {_archive_of(db, bad), _archive_of(db, ok)}
+    # Newest first; the gone archive is never sent to CLIP.
+    assert env.clip.encoded == [_archive_of(db, ok), _archive_of(db, bad)]
     assert db.get_tombstone_vectors(ok) and r.status() is None
     assert env.done == [1]
-    # A failed image is not retried on every notify.
+    (warning,) = _warnings(caplog)
+    assert "Re-embedded 1 of 3" in warning
+    assert "1 could not be encoded" in warning
+    assert "1 archived thumbnail(s) gone" in warning
+    # The next pass tries the image CLIP failed on again, never the gone one.
+    caplog.clear()
     r.notify()
     await r.wait_idle()
-    assert len(env.clip.encoded) == 2
+    assert env.clip.encoded == [_archive_of(db, x) for x in (ok, bad, bad)]
+    assert db.get_tombstone_vectors(bad) == {} and db.get_tombstone_vectors(gone) == {}
+    assert env.done == [1]
+    (warning,) = _warnings(caplog)
+    assert "Re-embedded 0 of 1" in warning and "1 could not be encoded" in warning
 
     # The CLIP model is switched while it runs (Similarity Settings reloads
     # the worker): a vector from the other model is never stored as "large".
@@ -470,10 +505,116 @@ async def test_skips_unreadable_archives_and_a_changed_clip_model(db):
         env.clip.model_key = "medium"
 
     env.clip.during_encode = switched
+    caplog.clear()
     r.notify()
     await r.wait_idle()
     assert all(db.get_tombstone_vectors(t) == {} for t in more)
     assert r.status() is None
+    (warning,) = _warnings(caplog)
+    assert "stopped: the CLIP model changed" in warning
+    await r.aclose()
+
+
+async def test_clip_errors_in_a_row_stop_the_pass_without_blacklisting(db, caplog):
+    """A CUDA out-of-memory reaches the client as an InferenceError for every
+    image. After MAX_CONSECUTIVE_ERRORS in a row the pass ends -- one
+    WARNING, nothing given up on -- and it tries again on its own."""
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    ids = [_delete_graded(db, f"/l/o{i}.png", "pass") for i in range(8)]
+    env = Env(db)
+    env.clip.failing = True
+    r = env.reembedder()
+    r.notify()
+    await r.wait_idle()
+    assert len(env.clip.encoded) == MAX_CONSECUTIVE_ERRORS
+    assert r.status() is None and env.done == []
+    assert all(db.get_tombstone_vectors(t) == {} for t in ids)
+    (warning,) = _warnings(caplog)
+    assert f"{MAX_CONSECUTIVE_ERRORS} CLIP errors in a row" in warning
+    assert "Re-embedded 0 of 8" in warning
+    assert f"{MAX_CONSECUTIVE_ERRORS} could not be encoded" in warning
+    # CLIP recovers: its own next try takes every image, the failed ones too.
+    env.clip.failing = False
+    await _until(lambda: all(db.get_tombstone_vectors(t) for t in ids))
+    await _until(lambda: r.status() is None)
+    assert env.done == [8]
+    await r.aclose()
+
+
+async def test_images_clip_failed_on_go_last_and_never_hold_up_the_rest(db):
+    good = [_delete_graded(db, f"/l/good{i}.png", "fail") for i in range(3)]
+    # Newer, so tried first: as many unreadable ones as end a pass.
+    bad = [
+        _delete_graded(db, f"/l/bad{i}.png", "pass")
+        for i in range(MAX_CONSECUTIVE_ERRORS)
+    ]
+    env = Env(db)
+    env.clip.unreadable.update(_archive_of(db, t) for t in bad)
+    r = env.reembedder()
+    r.notify()
+    await r.wait_idle()
+    assert env.clip.encoded == [_archive_of(db, t) for t in reversed(bad)]
+    assert all(db.get_tombstone_vectors(t) == {} for t in good)
+    # The next try takes the images that have not failed first.
+    await _until(lambda: all(db.get_tombstone_vectors(t) for t in good))
+    first = len(bad)
+    assert env.clip.encoded[first : first + len(good)] == [
+        _archive_of(db, t) for t in reversed(good)
+    ]
+    assert all(db.get_tombstone_vectors(t) == {} for t in bad)
+    await _until(lambda: env.done == [3])
+    await r.aclose()
+
+
+async def test_scattered_clip_errors_do_not_stop_the_pass(db, caplog):
+    """Only errors IN A ROW mean CLIP is failing: unreadable images between
+    good ones are skipped and the pass runs to its end."""
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    good, bad = [], []
+    for i in range(MAX_CONSECUTIVE_ERRORS):
+        good.append(_delete_graded(db, f"/l/good{i}.png", "pass"))
+        bad.append(_delete_graded(db, f"/l/bad{i}.png", "fail"))
+    env = Env(db)
+    env.clip.unreadable.update(_archive_of(db, t) for t in bad)
+    r = env.reembedder()
+    r.notify()
+    await r.wait_idle()
+    assert len(env.clip.encoded) == 2 * MAX_CONSECUTIVE_ERRORS
+    assert all(db.get_tombstone_vectors(t) for t in good)
+    assert env.done == [MAX_CONSECUTIVE_ERRORS] and r.status() is None
+    (warning,) = _warnings(caplog)
+    assert "in a row" not in warning
+    assert f"{MAX_CONSECUTIVE_ERRORS} could not be encoded" in warning
+    await r.aclose()
+
+
+async def test_a_clip_error_skips_the_image_for_the_rest_of_the_pass(db):
+    """A pass that pauses for the GPU and resumes does not try an image it
+    already got a CLIP error for; the next pass does."""
+    good = [_delete_graded(db, f"/l/g{i}.png", "pass") for i in range(2)]
+    bad = _delete_graded(db, "/l/bad.png", "fail")  # newest: tried first
+    env = Env(db)
+    env.clip.unreadable.add(_archive_of(db, bad))
+
+    def batch_starts(path: str) -> None:
+        if path == _archive_of(db, bad):
+            env.t2i.batches = ["b1"]
+
+    env.clip.during_encode = batch_starts
+    r = env.reembedder()
+    r.notify()
+    await r.wait_idle()
+    assert env.clip.encoded == [_archive_of(db, bad)]
+    assert r.status() == {"running": False, "done": 1, "total": 3}
+    env.clip.during_encode = None
+    env.t2i.batches = []
+    await _until(lambda: r.status() is None)  # resumed by its own retry
+    assert env.clip.encoded == [_archive_of(db, t) for t in (bad, *reversed(good))]
+    assert all(db.get_tombstone_vectors(t) for t in good)
+    assert env.done == [2]
+    r.notify()
+    await r.wait_idle()
+    assert env.clip.encoded[-1] == _archive_of(db, bad)  # the next pass
     await r.aclose()
 
 

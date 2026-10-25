@@ -6,12 +6,12 @@ A deleted graded image (a tombstone) keeps one CLIP vector per CLIP model in
 ``tombstone_vectors``; the taste scorer and the ✓ pass diversity read only
 the one for the FAISS index's model. A tombstone gets it at deletion (from
 the in-memory index), from the by-path backfill once the index loads
-(``judgments_service.backfill_tombstone_embeddings``) or from here: after a
-CLIP switch -- or when it was deleted with the index out of memory and its
-path cannot be trusted -- the vector is computed from the image's archived
-thumbnail (``training_archive``; never from its old path, which may hold
-another file now) through the live CLIP inference worker's ``encode_image``,
-which has no FAISS or DB side effects.
+(``judgments_service.backfill_tombstone_embeddings``; never for a tombstone
+with an archived thumbnail) or from here: after a CLIP switch -- or when it
+was deleted with the index out of memory -- the vector is computed from the
+image's archived thumbnail (``training_archive``; never from its old path,
+which may hold another file now) through the live CLIP inference worker's
+``encode_image``, which has no FAISS or DB side effects.
 
 Rules
 -----
@@ -32,10 +32,19 @@ Rules
 * Single-flight and debounced: ``notify()`` (from any thread) schedules a
   run ``delay_s`` later; a notify during a run makes it look again after.
   The lifespan notifies once at startup and after every embedding run.
-* Resumable: every run lists what is still missing. An image whose archive
-  is gone or that CLIP cannot read is skipped until the server restarts. A
-  CLIP failure (it did not start, it stopped while not blocked, its model
-  changed) ends the pass; the next notify tries again.
+* Resumable: every run lists what is still missing.
+* Only an archive that is gone (or not an archive path) is skipped until
+  the server restarts. A CLIP error for an image (``InferenceError``: the
+  worker reports any failure this way, a CUDA out-of-memory included)
+  skips it for the rest of the pass only; images that failed before go to
+  the back of the queue, so a few unreadable ones never hold up the rest.
+  ``MAX_CONSECUTIVE_ERRORS`` errors in a row end the pass, and it tries
+  again on its own after ``retry_s``, doubling up to ``MAX_ERROR_RETRY_S``
+  while it keeps failing. A pass that skipped anything ends with one
+  WARNING giving the counts.
+* Any other CLIP failure (it did not start, it stopped while not blocked --
+  an explicit stop is the user's -- or its model changed) ends the pass;
+  the next notify tries again.
 * When a pass ends with vectors added, ``on_done(n_added)`` -- the lifespan
   marks the taste scorer due (``TasteService.mark_due("reembed")``).
 * ``status()`` is ``{running, done, total}`` while a pass is unfinished
@@ -43,7 +52,8 @@ Rules
   gets it on every change (at most once a second, plus every start, pause
   and end) and None when the pass ends.
 * The CLIP worker stays loaded afterwards, as after a search.
-* Only counts and model keys are logged at INFO (no paths, no captions).
+* Only counts and model keys are logged at INFO / WARNING (no paths, no
+  captions).
 """
 
 from __future__ import annotations
@@ -51,14 +61,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     AbstractSet,
     Any,
     Callable,
     Dict,
+    FrozenSet,
     List,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -77,12 +89,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_DELAY_S = 15.0
 RETRY_S = 30.0
 PROGRESS_EVERY_S = 1.0
+# CLIP errors in a row that end a pass (CLIP itself is failing, e.g. out of
+# GPU memory), and the longest wait before it tries again.
+MAX_CONSECUTIVE_ERRORS = 5
+MAX_ERROR_RETRY_S = 900.0
 
 Status = Dict[str, Union[int, bool]]
 
 # _run_pass outcomes.
 _DONE = "done"
 _PAUSED = "paused"
+_FAILING = "failing"
 _ABORTED = "aborted"
 _CLOSED = "closed"
 
@@ -121,6 +138,12 @@ class _Pass:
     done: int = 0
     added: int = 0
     running: bool = False
+    # Images CLIP failed on in this pass: not tried again until the next.
+    skipped: Set[int] = field(default_factory=set)
+    # CLIP errors since the last image it encoded.
+    errors: int = 0
+    # Images whose archived thumbnail is gone.
+    missing: int = 0
 
 
 class TombstoneReembedder:
@@ -162,9 +185,14 @@ class TombstoneReembedder:
         self._dirty = False
         self._closed = False
         self._pass: Optional[_Pass] = None
-        # (tombstone id, model key) whose archive is gone or that CLIP could
-        # not encode: skipped until the server restarts.
+        # (tombstone id, model key) whose archived thumbnail is gone: skipped
+        # until the server restarts. Nothing else is ever given up on.
         self._failed: Set[Tuple[int, str]] = set()
+        # (tombstone id, model key) -> CLIP errors so far: those images are
+        # tried after the others (cleared when one is encoded).
+        self._attempts: Dict[Tuple[int, str], int] = {}
+        # The wait before trying again after CLIP errors in a row.
+        self._error_retry_s = self.retry_s
         self._last_emit = 0.0
 
     # -- public ---------------------------------------------------------
@@ -233,12 +261,12 @@ class TombstoneReembedder:
         if self._task is None or self._task.done():
             self._task = loop.create_task(self._run(), name="tombstone-reembed")
 
-    def _schedule_retry(self) -> None:
+    def _schedule_retry(self, delay: float) -> None:
         self._cancel_retry()
         if self._closed:
             return
         loop = asyncio.get_running_loop()
-        self._retry = loop.call_later(self.retry_s, self._arm, 0.0)
+        self._retry = loop.call_later(delay, self._arm, 0.0)
 
     def _cancel_retry(self) -> None:
         handle, self._retry = self._retry, None
@@ -264,7 +292,14 @@ class TombstoneReembedder:
                 outcome = _ABORTED
             if outcome == _PAUSED:
                 # Resume on the next notify: ours, after retry_s.
-                self._schedule_retry()
+                self._schedule_retry(self.retry_s)
+                return
+            if outcome == _FAILING:
+                # CLIP keeps failing: try again later, waiting longer each
+                # time (a notify meanwhile does not hurry it).
+                delay = self._error_retry_s
+                self._error_retry_s = min(delay * 2, MAX_ERROR_RETRY_S)
+                self._schedule_retry(delay)
                 return
             if outcome == _CLOSED or not self._dirty:
                 return
@@ -301,20 +336,25 @@ class TombstoneReembedder:
     def _pending(
         self,
         model_key: str,
-        attempted: AbstractSet[int],
+        skip: AbstractSet[int],
         failed: AbstractSet[Tuple[int, str]],
+        attempts: Mapping[Tuple[int, str], int],
     ) -> List[Tuple[int, str]]:
-        """Blocking (worker thread): what still needs a vector for the model."""
-        return [
+        """Blocking (worker thread): what still needs a vector for the model,
+        leaving out ``skip`` (handled in this run or skipped in this pass)
+        and gone archives; images CLIP failed on before come last."""
+        rows = [
             (tomb_id, thumb)
             for tomb_id, thumb in self._db.tombstones_needing_vectors(model_key)
-            if tomb_id not in attempted and (tomb_id, model_key) not in failed
+            if tomb_id not in skip and (tomb_id, model_key) not in failed
         ]
+        # Stable: newest first within each group.
+        return sorted(rows, key=lambda row: attempts.get((row[0], model_key), 0))
 
     async def _run_pass(self) -> str:
         """Re-embed what is missing for the current model until nothing is
-        (done), the GPU is wanted elsewhere (paused) or CLIP fails
-        (aborted)."""
+        (done), the GPU is wanted elsewhere (paused), CLIP keeps failing
+        (failing) or CLIP stops (aborted)."""
         current = self._pass
         if current is not None and not current.running and self._is_blocked():
             return _PAUSED  # still waiting for the GPU: no need to list
@@ -322,13 +362,17 @@ class TombstoneReembedder:
         if model_key is None:
             self._end_pass()
             return _DONE
-        # Tombstones handled in this run (vector stored, or failed): an image
-        # that came back without a vector is not tried twice in one run.
+        # Tombstones handled in this run (vector stored, or skipped): an
+        # image that came back without a vector is not tried twice in one run.
         attempted: Set[int] = set()
         client: Any = None
         while not self._closed:
             pending = await asyncio.to_thread(
-                self._pending, model_key, frozenset(attempted), frozenset(self._failed)
+                self._pending,
+                model_key,
+                self._not_again(model_key, attempted),
+                frozenset(self._failed),
+                dict(self._attempts),
             )
             p = self._track(model_key, len(pending))
             if p is None:
@@ -346,6 +390,14 @@ class TombstoneReembedder:
             if outcome is not None:
                 return outcome
         return _CLOSED
+
+    def _not_again(self, model_key: str, attempted: Set[int]) -> FrozenSet[int]:
+        """The images not to list again: handled in this run, or skipped in
+        this pass (a CLIP error) when the pass is for ``model_key``."""
+        p = self._pass
+        if p is not None and p.model_key == model_key:
+            return frozenset(attempted | p.skipped)
+        return frozenset(attempted)
 
     def _track(self, model_key: str, n_pending: int) -> Optional[_Pass]:
         """The pass for ``model_key`` with ``n_pending`` images still to do:
@@ -424,16 +476,19 @@ class TombstoneReembedder:
         on, else the run's outcome."""
         path = await asyncio.to_thread(resolve_thumb, Path(self._db.db_path), thumb)
         if path is None:
-            self._skip(p, tomb_id, "its archived thumbnail is gone")
+            # Gone for good (or not an archive path): until the restart.
+            self._failed.add((tomb_id, p.model_key))
+            logger.debug("Tombstone %d: its archived thumbnail is gone", tomb_id)
+            p.missing += 1
+            p.done += 1
+            self._emit()
             return None
         try:
             vec = await client.encode_image(str(path))
         except asyncio.CancelledError:
             raise
         except InferenceError as exc:
-            # The worker answered: this image cannot be read.
-            self._skip(p, tomb_id, f"CLIP could not encode it ({exc})")
-            return None
+            return self._encode_failed(p, tomb_id, exc)
         except Exception as exc:
             # The worker went away (training unloaded it, a stop, a crash)
             # or did not answer. Not this image's fault: it is redone later.
@@ -457,14 +512,31 @@ class TombstoneReembedder:
         )
         p.added += int(added)
         p.done += 1
+        p.errors = 0
+        self._attempts.pop((tomb_id, p.model_key), None)
+        self._error_retry_s = self.retry_s
         self._emit()
         return None
 
-    def _skip(self, p: _Pass, tomb_id: int, why: str) -> None:
-        self._failed.add((tomb_id, p.model_key))
-        logger.debug("Not re-embedding tombstone %d: %s", tomb_id, why)
+    def _encode_failed(
+        self, p: _Pass, tomb_id: int, exc: InferenceError
+    ) -> Optional[str]:
+        """CLIP answered with an error for this image. The worker reports any
+        failure so (a CUDA out-of-memory too), so the image is never given
+        up on: it is skipped for the rest of this pass and tried again on
+        the next one, after the images that have not failed. Errors in a row
+        mean CLIP itself is failing: the pass ends (``_FAILING``)."""
+        key = (tomb_id, p.model_key)
+        self._attempts[key] = self._attempts.get(key, 0) + 1
+        p.skipped.add(tomb_id)
+        p.errors += 1
         p.done += 1
+        logger.debug("Tombstone %d: CLIP could not encode it (%s)", tomb_id, exc)
         self._emit()
+        if p.errors < MAX_CONSECUTIVE_ERRORS:
+            return None
+        self._end_pass(stopped=f"{p.errors} CLIP errors in a row, it tries again later")
+        return _FAILING
 
     def _pause(self) -> str:
         p = self._pass
@@ -480,29 +552,37 @@ class TombstoneReembedder:
         return _PAUSED
 
     def _abort(self, why: str) -> str:
-        p = self._pass
-        if p is not None:
-            logger.warning(
-                "Re-embedding deleted images stopped at %d / %d: %s",
-                p.done,
-                p.total,
-                why,
-            )
-        else:
+        if self._pass is None:
             logger.warning("Re-embedding deleted images stopped: %s", why)
-        self._end_pass()
+        self._end_pass(stopped=why)
         return _ABORTED
 
-    def _end_pass(self) -> None:
+    def _end_pass(self, stopped: Optional[str] = None) -> None:
+        """End the pass: one log line (a WARNING with the counts when it
+        stopped early or skipped any image), None to ``on_progress``, and
+        ``on_done`` when it added vectors."""
         p, self._pass = self._pass, None
         if p is None:
             return
-        logger.info(
-            "Re-embedded %d of %d deleted image(s) for CLIP model %s",
-            p.added,
-            p.total,
-            p.model_key,
-        )
+        if stopped or p.skipped or p.missing:
+            logger.warning(
+                "Re-embedded %d of %d deleted image(s) for CLIP model %s%s: "
+                "%d could not be encoded (tried again on the next pass), "
+                "%d archived thumbnail(s) gone",
+                p.added,
+                p.total,
+                p.model_key,
+                f" (stopped: {stopped})" if stopped else "",
+                len(p.skipped),
+                p.missing,
+            )
+        else:
+            logger.info(
+                "Re-embedded %d of %d deleted image(s) for CLIP model %s",
+                p.added,
+                p.total,
+                p.model_key,
+            )
         self._emit(force=True)
         if p.added > 0:
             try:

@@ -1,7 +1,9 @@
 """Tombstones written while the FAISS index wasn't loaded get their CLIP
 vector backfilled once it loads (final-review item 2), into
 ``tombstone_vectors`` under the index's CLIP model -- and never from a path
-that may hold another file's vector now (Review Focus 5)."""
+that may hold another file's vector now (Review Focus 5): not for a
+tombstone that already has a vector for any model, one with an archived
+thumbnail, or a path with another life."""
 
 from datetime import datetime
 from pathlib import Path
@@ -58,18 +60,18 @@ def _vector(db, tomb_id, model):
     return None if blob is None else np.frombuffer(blob, dtype=np.float32)
 
 
-def test_backfill_listing_and_per_model_add(db):
+def test_backfill_lists_only_tombstones_without_any_vector(db):
     a = _graded_delete(db, "/p/a.png")
     b = _graded_delete(db, "/p/b.png", "fail")
-    assert db.tombstones_for_vector_backfill("clip-x") == [
+    assert db.tombstones_for_vector_backfill() == [
         (a, "/p/a.png"),
         (b, "/p/b.png"),
     ]
     vec = np.ones(32, dtype=np.float32)
     assert db.add_tombstone_vectors([(a, "clip-x", vec.tobytes())]) == 1
-    assert db.tombstones_for_vector_backfill("clip-x") == [(b, "/p/b.png")]
-    # Per model: "a" still needs one for another CLIP model.
-    assert [t for t, _ in db.tombstones_for_vector_backfill("clip-y")] == [a, b]
+    # A vector for any CLIP model takes it off the list, whatever the index's
+    # model is: it was deleted before an index of another model was built.
+    assert db.tombstones_for_vector_backfill() == [(b, "/p/b.png")]
 
 
 def test_delete_time_vector_is_kept_per_model_and_never_overwritten(db):
@@ -112,16 +114,60 @@ def test_backfill_fills_missing_vectors_from_native_or_posix_key(db):
 
     filled = judgments_service.backfill_tombstone_embeddings(db, fm)
 
-    assert filled == 3
+    assert filled == 2
     assert np.array_equal(_vector(db, a, "clip-medium"), va)
     assert np.array_equal(_vector(db, b, "clip-medium"), vb)
-    # A vector for another CLIP model does not count: the index's is added.
-    assert np.array_equal(_vector(db, small_only, "clip-medium"), vs)
-    assert np.array_equal(_vector(db, small_only, "clip-small"), have)
     assert db.get_tombstone_vectors(nothere) == {}
-    # The row that already had a vector for this model is not even looked up.
+    # A tombstone with a vector -- for this model or another -- is not even
+    # looked up: the "medium" index's vector at its path is another file's.
     assert np.array_equal(_vector(db, already, "clip-medium"), have)
-    assert "/p/already.png" not in fm.calls
+    assert set(db.get_tombstone_vectors(small_only)) == {"clip-small"}
+    assert np.array_equal(_vector(db, small_only, "clip-small"), have)
+    for key in ("/p/already.png", "/p/small_only.png"):
+        assert key not in fm.calls and to_native_path(key) not in fm.calls
+
+
+def test_backfill_never_borrows_across_models(db):
+    """Review Focus 5 after a CLIP switch: an image deleted under the "small"
+    index (its vector captured then), and a "medium" index built afterwards
+    from the files live at that time -- so a vector at the deleted image's
+    path can only be another file's (here one deleted again with no trace:
+    never graded, no category, no lineage)."""
+    small = np.arange(32, dtype=np.float32)
+    db.set_embedding_lookup(lambda p: (small, "clip-small"))
+    t = _graded_delete(db, "/p/switched.png")
+    db.set_embedding_lookup(None)
+    db.save_media(_media("/p/switched.png"))  # another file, same name
+    assert db.delete_media(Path("/p/switched.png"))  # leaves no tombstone
+    assert [x["id"] for x in db.list_tombstones()] == [t]
+    other = np.full(32, 9.0, dtype=np.float32)
+    fm = FakeFaiss({"/p/switched.png": other}, model_key="clip-medium")
+
+    assert judgments_service.backfill_tombstone_embeddings(db, fm) == 0
+
+    assert db.get_tombstone_vectors(t) == {"clip-small": small.tobytes()}
+    assert fm.calls == []
+
+
+def test_backfill_leaves_archived_tombstones_to_the_reembedder(db):
+    """A deleted graded image with an archived thumbnail gets its vector
+    from its own image (the re-embedder), never by its old path."""
+    from metascan.core.training_archive import archive_dir
+
+    db.save_media(_media("/p/kept.png"))
+    db.set_grade("/p/kept.png", "pass")
+    root = archive_dir(Path(db.db_path))
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "0123456789abcdef0123456789abcdef.jpg").write_bytes(b"jpeg")
+    thumb = "archive/thumbs/0123456789abcdef0123456789abcdef.jpg"
+    assert db.delete_media(Path("/p/kept.png"), thumb)
+    (t,) = [x["id"] for x in db.list_tombstones()]
+    fm = FakeFaiss({"/p/kept.png": np.ones(32, dtype=np.float32)})
+
+    assert db.tombstones_for_vector_backfill() == []
+    assert judgments_service.backfill_tombstone_embeddings(db, fm) == 0
+    assert db.get_tombstone_vectors(t) == {} and fm.calls == []
+    assert db.tombstones_needing_vectors("clip-medium") == [(t, thumb)]
 
 
 def test_backfill_skips_a_reused_path(db):
@@ -154,7 +200,7 @@ def test_backfill_skips_a_reused_path(db):
     )
     for t in (reused, twice_old, twice_new):
         assert db.get_tombstone_vectors(t) == {}
-    assert [t for t, _ in db.tombstones_for_vector_backfill("clip-medium")] == []
+    assert [t for t, _ in db.tombstones_for_vector_backfill()] == []
     # The skipped paths are not even read from the index.
     assert all(k not in fm.calls for k in ("/p/reused.png", "/p/twice.png"))
     assert all(
