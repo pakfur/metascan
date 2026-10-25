@@ -109,7 +109,82 @@ def test_full_clean_restores_taste_state_and_tombstones_the_rest(monkeypatch, db
     # No duplicate favorite / pass events from the restore.
     assert db.list_judgment_events() == events_before
     [t] = db.list_tombstones()
-    assert t["file_path"] == "/lib/gone.png" and t["passed"] == 1
+    assert (t["file_path"], t["grade"], t["passed"]) == ("/lib/gone.png", "fail", 1)
+
+
+def _tombstone_marks(db):
+    return {
+        t["file_path"]: (t["is_favorite"], t["grade"], t["passed"])
+        for t in db.list_tombstones()
+    }
+
+
+def test_full_clean_tombstones_each_missing_path_with_its_grade(monkeypatch, db):
+    """A completed full clean tombstones every path that did not come back
+    with its grade as it was: ✓ without ★ keeps ✓, ✗ keeps ✗, and a ★ alone
+    stays a ★ with no grade (★ is not a grade)."""
+    for p in ("/lib/graded.png", "/lib/failed.png", "/lib/starred.png"):
+        db.save_media(_media(p))
+    db.set_grade("/lib/graded.png", "pass", now=T0)
+    db.set_grade("/lib/failed.png", "fail", now=T0)
+    db.set_reason("/lib/failed.png", "light", True, now=T0)
+    db.set_favorite_state("/lib/starred.png", True, now=T0)
+    _wire(monkeypatch, db, [])
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    assert _tombstone_marks(db) == {
+        "/lib/graded.png": (0, "pass", 0),
+        "/lib/failed.png": (0, "fail", 1),
+        "/lib/starred.png": (1, None, 0),
+    }
+    [failed] = [t for t in db.list_tombstones() if t["file_path"] == "/lib/failed.png"]
+    assert json.loads(failed["reasons"]) == ["light"]
+    assert _pending(db) is None
+
+
+def test_full_clean_tombstones_pre_grades_leftovers_with_their_old_meaning(
+    monkeypatch, db
+):
+    """Leftovers of a full clean interrupted before grades ride along into
+    the next one and, when it completes, are tombstoned with their old
+    meaning: a reject is ✗, a favorite (with or without a row) ★ + ✓."""
+    target = Path(db.db_path) / scan_api.TASTE_SNAPSHOT_FILENAME
+
+    def legacy_row(path, passed):
+        return {
+            "file_path": path,
+            "passed": passed,
+            "reasons": "[]",
+            "seen_at": "2026-03-01T10:00:00+00:00",
+            "judged_at": "2026-03-02T11:00:00+00:00",
+            "confirmed_at": "2026-03-02T11:00:00+00:00",
+        }
+
+    target.write_text(
+        json.dumps(
+            {
+                "taken_at": "2026-03-10T08:00:00+00:00",
+                "judgments": [
+                    legacy_row("/old/fav.png", 0),
+                    legacy_row("/old/reject.png", 1),
+                ],
+                "categories": [],
+                "favorites": ["/old/bare.png", "/old/fav.png"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _wire(monkeypatch, db, [])
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    assert _tombstone_marks(db) == {
+        "/old/bare.png": (1, "pass", 0),
+        "/old/fav.png": (1, "pass", 0),
+        "/old/reject.png": (0, "fail", 1),
+    }
+    assert _pending(db) is None
 
 
 def _pending(db):
