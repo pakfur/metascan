@@ -130,17 +130,25 @@ FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
 
 _MARKER_TEXT = """\
 Metascan started a full clean & rescan at {started}. It is unfinished until
-a scan walks every configured folder to the end.
+a scan walks every configured folder to the end and brings back every
+generated image and clip still on disk, with no generated-output folder
+missing or unreadable.
 
 While this file exists, the Text-to-Image and Image-to-Video lists keep the
 records (prompts, writers, variants) of generated images and clips whose
 library entry is missing, instead of deleting them: the rescan may still
-bring them back. Metascan deletes this file itself when a scan of every
-configured folder completes.
+bring them back. Metascan deletes this file itself when such a scan
+completes.
+
+If a generated-output folder is gone for good, recreate it (empty is fine)
+and run Full clean & rescan: its missing images then count as deleted, and
+the ones the library had a rating, a view or a category for are recorded as
+deleted with their history.
 
 To let the lists drop those records without scanning, delete this file;
 Metascan may keep running. A full clean that is still running, or a pending
-ratings file next to it ({pending}), also holds them back.
+ratings file next to it ({pending}), also holds them back: while that file
+is there, deleting this one alone is not enough.
 """
 
 
