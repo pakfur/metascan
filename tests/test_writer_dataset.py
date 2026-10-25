@@ -1,13 +1,17 @@
 """The prompt-writer training dataset builder (taste learning project 4):
 preference pairs from variant groups, edit pairs, hindsight examples,
 category scope, holdout and readiness -- synthetic rows in an isolated
-temp DB, a temp prompt store."""
+temp DB, a temp prompt store.
+
+Only grades train the writer (spec 2026-10-24-pass-fail-grades): ✓
+``pass`` and ✗ ``fail``. ★ favorites and views are seeded explicitly
+(``favorite=`` / ``seen=``) where a test shows they change nothing."""
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 
@@ -20,6 +24,7 @@ from metascan.core.writer_dataset import (
     SftExample,
     build_examples,
     caption_resolver,
+    hindsight_candidates,
     holdout_key,
     preview,
     preview_mix,
@@ -81,7 +86,9 @@ def _img(
     db: DatabaseManager,
     path: str,
     *,
-    outcome: Optional[str] = None,
+    grade: Optional[str] = None,
+    favorite: bool = False,
+    seen: bool = False,
     writer: Optional[str] = "base",
     group: Optional[str] = "g1",
     index: int = 0,
@@ -96,6 +103,9 @@ def _img(
     direction: Optional[str] = None,
     prompt_seed: Optional[int] = None,
 ) -> None:
+    """A T2I image. ``grade`` is ✓ ``"pass"`` / ✗ ``"fail"`` (set at
+    ``NOW``); ``favorite`` stars it and ``seen`` views it at ``NOW``, which
+    are never training labels."""
     db.save_media(_media(path))
     image_id = db.create_t2i_image(
         file_path=path,
@@ -119,10 +129,49 @@ def _img(
             (created_at, image_id),
         )
         conn.commit()
-    if outcome == "seen":
+    if seen:
         db.mark_seen(path, NOW)
-    elif outcome in ("favorite", "pass"):
-        db.set_verdict(path, outcome, None, NOW)
+    if favorite:
+        assert db.set_favorite(Path(path), True)
+    if grade is not None:
+        assert db.set_grade(path, grade, None, NOW) is not None
+
+
+def _library(
+    db: DatabaseManager,
+    path: str,
+    *,
+    grade: Optional[str] = None,
+    favorite: bool = False,
+    model_name: str = "krea2_dev.safetensors",
+) -> None:
+    """A library image (no T2I row) with a metadata prompt, a model name
+    and a hindsight brief."""
+    db.save_media(_media(path))
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "UPDATE media SET data = json_set(data, '$.prompt', ?) "
+            "WHERE file_path = ?",
+            (f"LIB PROMPT {path}", path),
+        )
+        conn.execute(
+            "INSERT INTO indices (index_type, index_key, file_path) "
+            "VALUES ('model', ?, ?)",
+            (model_name, path),
+        )
+        conn.commit()
+    if favorite:
+        assert db.set_favorite(Path(path), True)
+    if grade is not None:
+        assert db.set_grade(path, grade, None, NOW) is not None
+    db.set_hindsight_brief(path, f"brief {path}", "qwen3vl-8b")
+
+
+def _delete_generations(db: DatabaseManager) -> None:
+    """Delete every T2I image: the dataset reads them from tombstones."""
+    for row in db.list_t2i_images():
+        assert db.delete_media(Path(row["file_path"]))
+    assert db.list_t2i_images() == []
 
 
 def _build(db, scope, store, now, **kw):
@@ -134,9 +183,13 @@ def _key(model="krea2", description="a red fox in snow"):
     return holdout_key(model, description)
 
 
-def _pair_group(db, group="g1", fav="/g/fav.png", seen="/g/seen.png", **kw):
-    _img(db, fav, outcome="favorite", group=group, index=0, prompt="WINNER", **kw)
-    _img(db, seen, outcome="seen", group=group, index=1, prompt="LOSER", **kw)
+def _pairs(prefs: List[PrefExample]) -> List[tuple]:
+    return sorted((p.chosen, p.rejected) for p in prefs if p.source == "variant")
+
+
+def _pair_group(db, group="g1", win="/g/win.png", lose="/g/lose.png", **kw):
+    _img(db, win, grade="pass", group=group, index=0, prompt="WINNER", **kw)
+    _img(db, lose, grade="fail", group=group, index=1, prompt="LOSER", **kw)
 
 
 def test_variant_group_yields_one_pair_in_order(db, store):
@@ -160,31 +213,84 @@ def test_variant_group_yields_one_pair_in_order(db, store):
     assert sft == []  # nothing edited, no hindsight briefs
 
 
-def test_unseen_variant_and_all_favorite_groups_make_no_pair(db, store):
-    _img(db, "/g/a.png", outcome="favorite", index=0, prompt="A")
-    _img(db, "/g/b.png", outcome=None, index=1, prompt="B")  # never seen
-    _img(db, "/h/a.png", outcome="favorite", group="g2", index=0, prompt="C")
-    _img(db, "/h/b.png", outcome="favorite", group="g2", index=1, prompt="D")
+def test_ungraded_variant_and_all_passed_groups_make_no_pair(db, store):
+    _img(db, "/g/a.png", grade="pass", index=0, prompt="A")
+    _img(db, "/g/b.png", index=1, prompt="B")  # never graded
+    _img(db, "/h/a.png", grade="pass", group="g2", index=0, prompt="C")
+    _img(db, "/h/b.png", grade="pass", group="g2", index=1, prompt="D")
     _, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == []
 
 
-def test_variant_with_a_favorite_seed_is_a_winner(db, store):
-    # Two seeds of variant 0: one favorite, one passed -> still the winner.
-    _img(db, "/g/a1.png", outcome="pass", index=0, prompt="WIN")
-    _img(db, "/g/a2.png", outcome="favorite", index=0, prompt="WIN")
-    _img(db, "/g/b1.png", outcome="pass", index=1, prompt="LOSE")
-    _img(db, "/g/b2.png", outcome="seen", index=1, prompt="LOSE")
+def test_variant_with_a_passed_seed_is_a_winner(db, store):
+    # Two seeds of variant 0: one ✓, one ✗ -> still the winner.
+    _img(db, "/g/a1.png", grade="fail", index=0, prompt="WIN")
+    _img(db, "/g/a2.png", grade="pass", index=0, prompt="WIN")
+    _img(db, "/g/b1.png", grade="fail", index=1, prompt="LOSE")
+    _img(db, "/g/b2.png", grade="fail", index=1, prompt="LOSE")
     _, prefs, _ = _build(db, "all", store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WIN", "LOSE")]
 
 
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+def test_loser_needs_every_image_failed(db, store, deleted):
+    # Only a variant whose every image is ✗ loses. One ungraded seed, a
+    # view alone, no grade at all or a cleared grade: neither winner nor
+    # loser -- live or read back from the tombstones.
+    _img(db, "/v/win.png", grade="pass", index=0, prompt="WIN")
+    _img(db, "/v/all1.png", grade="fail", index=1, prompt="ALL-FAILED")
+    _img(db, "/v/all2.png", grade="fail", index=1, prompt="ALL-FAILED")
+    _img(db, "/v/half1.png", grade="fail", index=2, prompt="HALF-FAILED")
+    _img(db, "/v/half2.png", seen=True, index=2, prompt="HALF-FAILED")
+    _img(db, "/v/seen.png", seen=True, index=3, prompt="SEEN-ONLY")
+    _img(db, "/v/none.png", index=4, prompt="UNGRADED")
+    _img(db, "/v/clr.png", grade="fail", index=5, prompt="CLEARED")
+    assert db.set_grade("/v/clr.png", None, None, NOW) is not None
+    if deleted:
+        _delete_generations(db)
+    _, prefs, counts = _build(db, "all", store, NOW)
+    assert _pairs(prefs) == [("WIN", "ALL-FAILED")]
+    assert counts.pref_pairs == 1
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+def test_favorite_alone_makes_no_winner(db, store, deleted):
+    # ★ is a view marker: a ★-only variant is no winner, ★ next to ✗ is
+    # still a loser, and ✓ wins whether or not it is ★ too.
+    _img(db, "/a/star.png", favorite=True, group="ga", prompt="STAR-ONLY")
+    _img(db, "/a/fail.png", grade="fail", group="ga", index=1, prompt="FAILED")
+    _img(db, "/b/pass.png", grade="pass", group="gb", prompt="PASSED")
+    _img(
+        db,
+        "/b/starfail.png",
+        grade="fail",
+        favorite=True,
+        group="gb",
+        index=1,
+        prompt="STAR-FAILED",
+    )
+    _img(
+        db,
+        "/c/starpass.png",
+        grade="pass",
+        favorite=True,
+        group="gc",
+        prompt="STAR-PASSED",
+    )
+    _img(db, "/c/fail.png", grade="fail", group="gc", index=1, prompt="FAILED-TOO")
+    if deleted:
+        _delete_generations(db)
+    _, prefs, _ = _build(db, "all", store, NOW)
+    assert _pairs(prefs) == [("PASSED", "STAR-FAILED"), ("STAR-PASSED", "FAILED-TOO")]
+
+
 def test_manual_writer_excluded_everywhere(db, store):
-    _img(db, "/g/fav.png", outcome="favorite", writer="manual", prompt="MAN")
-    _img(db, "/g/seen.png", outcome="seen", index=1, prompt="LOSER")
+    _img(db, "/g/win.png", grade="pass", writer="manual", prompt="MAN")
+    _img(db, "/g/lose.png", grade="fail", index=1, prompt="LOSER")
     _img(
         db,
         "/m/edit.png",
+        grade="pass",
         writer="manual",
         group=None,
         prompt="EDITED",
@@ -201,6 +307,7 @@ def test_scorecard_images_excluded(db, store):
     _img(
         db,
         "/s/edit.png",
+        grade="pass",
         group=None,
         prompt="EDITED",
         draft="DRAFT",
@@ -212,9 +319,9 @@ def test_scorecard_images_excluded(db, store):
 
 
 def test_scorecard_loser_drops_only_itself(db, store):
-    _img(db, "/g/fav.png", outcome="favorite", index=0, prompt="WIN")
-    _img(db, "/g/sc.png", outcome="seen", index=1, prompt="SC", scorecard="x")
-    _img(db, "/g/ok.png", outcome="seen", index=2, prompt="OK")
+    _img(db, "/g/win.png", grade="pass", index=0, prompt="WIN")
+    _img(db, "/g/sc.png", grade="fail", index=1, prompt="SC", scorecard="x")
+    _img(db, "/g/ok.png", grade="fail", index=2, prompt="OK")
     _, prefs, _ = _build(db, "all", store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WIN", "OK")]
 
@@ -226,7 +333,7 @@ def test_videos_are_not_training_data(db, store):
     db.create_i2v_video(
         source_path="/v/src.png", file_path="/v/clip.mp4", writer_id="base"
     )
-    db.set_verdict("/v/clip.mp4", "favorite", None, NOW)
+    assert db.set_grade("/v/clip.mp4", "pass", None, NOW) is not None
     _, prefs, counts = _build(db, "all", store, NOW)
     assert len(prefs) == 1 and counts.pref_pairs == 1
 
@@ -235,6 +342,7 @@ def test_edit_pairs(db, store):
     _img(
         db,
         "/e/1.png",
+        grade="pass",
         group=None,
         prompt="EDITED TEXT",
         draft="DRAFT TEXT",
@@ -242,8 +350,16 @@ def test_edit_pairs(db, store):
         model="qwen",
     )
     # Whitespace-only difference is not an edit, nor is edited=0.
-    _img(db, "/e/2.png", group=None, prompt="same  text", draft="same text", edited=1)
-    _img(db, "/e/3.png", group=None, prompt="X", draft="Y", edited=0)
+    _img(
+        db,
+        "/e/2.png",
+        grade="pass",
+        group=None,
+        prompt="same  text",
+        draft="same text",
+        edited=1,
+    )
+    _img(db, "/e/3.png", grade="pass", group=None, prompt="X", draft="Y", edited=0)
     sft, prefs, counts = _build(db, "all", store, NOW)
     assert counts.edit_pairs == 1
     edit_prefs = [p for p in prefs if p.source == "edit"]
@@ -257,9 +373,33 @@ def test_edit_pairs(db, store):
 
 def test_edit_pair_counted_once_per_variant(db, store):
     for i in range(3):  # three seeds of one edited variant
-        _img(db, f"/e/{i}.png", prompt="EDITED", draft="DRAFT", edited=1)
+        _img(db, f"/e/{i}.png", grade="pass", prompt="EDITED", draft="DRAFT", edited=1)
     _, prefs, counts = _build(db, "all", store, NOW)
     assert counts.edit_pairs == 1 and len(prefs) == 1
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "deleted"])
+def test_edit_counts_only_with_a_pass(db, store, deleted):
+    # Editing a draft is an experiment until one of the edited renders is
+    # ✓: an ungraded, viewed, ★-only or all-✗ edit teaches nothing.
+    def edit(path, text, **kw):
+        _img(db, path, group=None, prompt=text, draft="DRAFT", edited=1, **kw)
+
+    edit("/e/p1.png", "EDIT-PASSED", grade="fail")
+    edit("/e/p2.png", "EDIT-PASSED", grade="pass")  # one ✓ seed is enough
+    edit("/e/seen.png", "EDIT-SEEN", seen=True)
+    edit("/e/none.png", "EDIT-UNGRADED")
+    edit("/e/star.png", "EDIT-STAR", favorite=True)
+    edit("/e/f1.png", "EDIT-FAILED", grade="fail")
+    edit("/e/f2.png", "EDIT-FAILED", grade="fail", favorite=True)
+    if deleted:
+        _delete_generations(db)
+    sft, prefs, counts = _build(db, "all", store, NOW)
+    assert counts.edit_pairs == 1
+    assert [(p.chosen, p.rejected, p.source) for p in prefs] == [
+        ("EDIT-PASSED", "DRAFT", "edit")
+    ]
+    assert [(s.chosen, s.source) for s in sft] == [("EDIT-PASSED", "edit")]
 
 
 def test_content_mode_appends_directive(db, store):
@@ -269,17 +409,17 @@ def test_content_mode_appends_directive(db, store):
 
 
 def test_category_scope_filters_and_all_scope_names_categories(db, store):
-    _pair_group(db, group="g1", fav="/a/fav.png", seen="/a/seen.png")
+    _pair_group(db, group="g1", win="/a/win.png", lose="/a/lose.png")
     _pair_group(
-        db, group="g2", fav="/b/fav.png", seen="/b/seen.png", caption="a blue boat"
+        db, group="g2", win="/b/win.png", lose="/b/lose.png", caption="a blue boat"
     )
     cat = db.create_category("Landscapes")
     other = db.create_category("Portraits")
-    db.add_media_categories(["/a/fav.png", "/a/seen.png"], cat.id, "generation")
-    db.add_media_categories(["/b/seen.png"], other.id, "generation")
+    db.add_media_categories(["/a/win.png", "/a/lose.png"], cat.id, "generation")
+    db.add_media_categories(["/b/lose.png"], other.id, "generation")
     # A viewer-added category filters a scope but is not in the line.
     viewer = db.create_category("Later")
-    db.add_media_categories(["/a/fav.png"], viewer.id, "viewer")
+    db.add_media_categories(["/a/win.png"], viewer.id, "viewer")
     g1, g2 = _key(), _key(description="a blue boat")
 
     _, prefs, counts = _build(db, str(cat.id), store, NOW)
@@ -313,32 +453,32 @@ def test_unknown_scope_raises(db, store):
 def test_deleted_generations_count_via_tombstones(db, store):
     _pair_group(db)
     cat = db.create_category("Landscapes")
-    db.add_media_categories(["/g/fav.png"], cat.id, "viewer")
-    assert db.delete_media(Path("/g/seen.png"))
-    assert db.delete_media(Path("/g/fav.png"))
+    db.add_media_categories(["/g/win.png"], cat.id, "viewer")
+    assert db.delete_media(Path("/g/lose.png"))
+    assert db.delete_media(Path("/g/win.png"))
     _, prefs, _ = _build(db, str(cat.id), store, NOW)
     assert [(p.chosen, p.rejected) for p in prefs] == [("WINNER", "LOSER")]
 
 
 def test_unknown_target_model_and_blank_caption_skipped(db, store):
     _pair_group(db, group="g1", model="mystery")
-    _pair_group(db, group="g2", fav="/b/f.png", seen="/b/s.png", caption="  ")
+    _pair_group(db, group="g2", win="/b/w.png", lose="/b/l.png", caption="  ")
     _, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == []
 
 
 def test_hindsight_examples(db, store):
-    _img(db, "/h/fav.png", outcome="favorite", group=None, prompt="THE PROMPT")
-    _img(db, "/h/seen.png", outcome="seen", group=None, prompt="NOT FAV")
+    _img(db, "/h/pass.png", grade="pass", group=None, prompt="THE PROMPT")
+    _img(db, "/h/seen.png", seen=True, group=None, prompt="NOT PASSED")
     _img(
         db,
         "/h/man.png",
-        outcome="favorite",
+        grade="pass",
         group=None,
         writer="manual",
         prompt="MANUAL",
     )
-    db.set_hindsight_brief("/h/fav.png", "a fox in the snow", "qwen3vl-8b")
+    db.set_hindsight_brief("/h/pass.png", "a fox in the snow", "qwen3vl-8b")
     db.set_hindsight_brief("/h/seen.png", "something", "qwen3vl-8b")
     db.set_hindsight_brief("/h/man.png", "manual brief", "qwen3vl-8b")
     sft, prefs, counts = _build(db, "all", store, NOW)
@@ -353,26 +493,71 @@ def test_hindsight_examples(db, store):
     assert ex.user.startswith("DESCRIPTION:\na fox in the snow")
 
 
-def test_hindsight_library_item_needs_a_known_family(db, store):
-    for path, model_name in (
-        ("/lib/a.png", "krea2_dev.safetensors"),
-        ("/lib/b.png", "mystery"),
+def test_hindsight_uses_passed_images(db, store):
+    # A ✓ image (T2I or library) with a brief is a hindsight target; ★,
+    # ✗ (★ or not) and a view alone are not.
+    for path, kw in (
+        ("/h/pass.png", {"grade": "pass"}),
+        ("/h/star.png", {"favorite": True}),
+        ("/h/starfail.png", {"grade": "fail", "favorite": True}),
+        ("/h/fail.png", {"grade": "fail"}),
+        ("/h/seen.png", {"seen": True}),
     ):
-        db.save_media(_media(path))
-        with db.lock, db._get_connection() as conn:
-            conn.execute(
-                "UPDATE media SET data = json_set(data, '$.prompt', ?) "
-                "WHERE file_path = ?",
-                (f"LIB PROMPT {path}", path),
-            )
-            conn.execute(
-                "INSERT INTO indices (index_type, index_key, file_path) "
-                "VALUES ('model', ?, ?)",
-                (model_name, path),
-            )
-            conn.commit()
-        db.set_verdict(path, "favorite", None, NOW)
+        _img(db, path, group=None, prompt=f"PROMPT {path}", **kw)
         db.set_hindsight_brief(path, f"brief {path}", "qwen3vl-8b")
+    _library(db, "/lib/pass.png", grade="pass")
+    _library(db, "/lib/starpass.png", grade="pass", favorite=True)
+    _library(db, "/lib/star.png", favorite=True)
+    _library(db, "/lib/fail.png", grade="fail", favorite=True)
+    sft, prefs, counts = _build(db, "all", store, NOW)
+    assert prefs == []
+    assert sorted(s.chosen for s in sft if s.source == "hindsight") == [
+        "LIB PROMPT /lib/pass.png",
+        "LIB PROMPT /lib/starpass.png",
+        "PROMPT /h/pass.png",
+    ]
+    assert counts.hindsight == 3
+
+
+def test_hindsight_candidates_need_a_pass_whatever_else_a_row_says():
+    # The rule reads the grade alone: a row that (wrongly) still carried a
+    # ★ or a view, or no grade, is no candidate; a ✓ one is.
+    def gen(path, **kw):
+        return {
+            "file_path": path,
+            "live": True,
+            "model": "krea2",
+            "prompt_used": f"P {path}",
+            "writer_id": "base",
+            "scorecard_id": None,
+            **kw,
+        }
+
+    def lib(**kw):
+        return {"prompt": "LIB", "model_names": ["krea2_dev"], **kw}
+
+    raw = {
+        "generations": [
+            gen("/g/pass.png", grade="pass"),
+            gen("/g/star.png", grade=None, is_favorite=True),
+            gen("/g/seen.png", seen_at="2026-10-23 12:00:00"),
+            gen("/g/fail.png", grade="fail", is_favorite=True),
+            gen("/g/odd.png", grade="passed"),
+            gen("/g/gone.png", grade="pass", live=False),
+        ],
+        "library": {
+            "/l/pass.png": lib(grade="pass"),
+            "/l/star.png": lib(grade=None, is_favorite=True),
+            "/l/fail.png": lib(grade="fail"),
+            "/l/none.png": lib(),
+        },
+    }
+    assert hindsight_candidates(raw) == ["/g/pass.png", "/l/pass.png"]
+
+
+def test_hindsight_library_item_needs_a_known_family(db, store):
+    _library(db, "/lib/a.png", grade="pass")
+    _library(db, "/lib/b.png", grade="pass", model_name="mystery")
     sft, _, counts = _build(db, "all", store, NOW)
     assert [(s.chosen, s.target_model) for s in sft] == [
         ("LIB PROMPT /lib/a.png", "krea2")
@@ -382,8 +567,17 @@ def test_hindsight_library_item_needs_a_known_family(db, store):
 
 def test_counts_per_target_model_and_span(db, store):
     _pair_group(db, group="g1")
-    _pair_group(db, group="g2", fav="/b/f.png", seen="/b/s.png", model="sd")
-    _img(db, "/e/1.png", group=None, prompt="E", draft="D", edited=1, model="sd")
+    _pair_group(db, group="g2", win="/b/w.png", lose="/b/l.png", model="sd")
+    _img(
+        db,
+        "/e/1.png",
+        grade="pass",
+        group=None,
+        prompt="E",
+        draft="D",
+        edited=1,
+        model="sd",
+    )
     _, _, counts = _build(db, "all", store, NOW)
     assert counts.by_target_model == {"krea2": 1, "sd": 2}
     assert counts.pref_pairs == 2 and counts.edit_pairs == 1
@@ -396,12 +590,12 @@ def test_counts_per_target_model_and_span(db, store):
 
 
 def test_new_since_last_uses_the_newest_ready_adapter_of_the_scope(db, store):
-    _img(db, "/o/f.png", group="old", prompt="W1", created_at=T0)
-    _img(db, "/o/s.png", group="old", index=1, prompt="L1", created_at=T0)
-    # Judge the old group before the cutoff.
+    _img(db, "/o/w.png", group="old", prompt="W1", created_at=T0)
+    _img(db, "/o/l.png", group="old", index=1, prompt="L1", created_at=T0)
+    # Grade the old group before the cutoff.
     old = datetime(2026, 10, 2, tzinfo=timezone.utc)
-    db.set_verdict("/o/f.png", "favorite", None, old)
-    db.mark_seen("/o/s.png", old)
+    assert db.set_grade("/o/w.png", "pass", None, old) is not None
+    assert db.set_grade("/o/l.png", "fail", None, old) is not None
     _pair_group(db, group="new", created_at=T1)
     aid = db.create_writer_adapter(
         "taste-all-v1",
@@ -427,6 +621,61 @@ def test_new_since_last_uses_the_newest_ready_adapter_of_the_scope(db, store):
     _, _, counts = _build(db, "all", store, NOW)
     assert counts.pref_pairs == 2
     assert counts.new_since_last == 1
+
+
+LATER = NOW + timedelta(hours=1)
+
+
+def _utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _snapshot(db, store):
+    """Every example with its as_of, and the counts, built after LATER."""
+    sft, prefs, counts = _build(db, "all", store, LATER + timedelta(hours=1))
+    examples = [(e.to_dict(), e.as_of) for e in list(prefs) + list(sft)]
+    return examples, counts.to_dict()
+
+
+def test_favorites_and_views_change_no_example(db, store):
+    # ★ and views are no training input: starring and viewing every image
+    # after it was graded changes no example, no as_of and no "new" count
+    # (the readiness a run is offered on).
+    _img(db, "/w/1.png", grade="pass", prompt="WIN")
+    _img(db, "/w/2.png", prompt="WIN")  # an ungraded seed of the winner
+    _img(db, "/l/1.png", grade="fail", index=1, prompt="LOSE")
+    _img(db, "/e/1.png", grade="pass", group=None, prompt="EDIT", draft="D", edited=1)
+    _img(db, "/e/2.png", group=None, prompt="EDIT", draft="D", edited=1)
+    _img(db, "/h/1.png", grade="pass", group=None, prompt="HIND", caption="a hare")
+    db.set_hindsight_brief("/h/1.png", "a hare at night", "qwen3vl-8b")
+    # The last adapter's data cutoff lies between the grades and the views.
+    db.create_writer_adapter(
+        "taste-all-v1",
+        "all",
+        "t2i",
+        "qwen3vl-8b",
+        status="ready",
+        data_cutoff=(NOW + timedelta(minutes=30)).isoformat(),
+    )
+    before = _snapshot(db, store)
+    assert before[1]["pref_pairs"] == 1 and before[1]["edit_pairs"] == 1
+    assert before[1]["hindsight"] == 1 and before[1]["new_since_last"] == 0
+    for path in ("/w/1.png", "/w/2.png", "/l/1.png", "/e/1.png", "/e/2.png"):
+        assert db.set_favorite(Path(path), True)
+        db.mark_seen(path, LATER)
+    assert db.set_favorite(Path("/h/1.png"), True)
+    assert _snapshot(db, store) == before
+
+
+def test_deleting_keeps_an_examples_time(db, store):
+    # Pressing ✓ again only reconfirms (no label change); deleting the image
+    # afterwards must not move the example's as_of to that reconfirm.
+    _pair_group(db)
+    assert db.set_grade("/g/win.png", "pass", None, LATER) is not None
+    before = _snapshot(db, store)
+    assert [as_of for _, as_of in before[0]] == [_utc(NOW)]
+    _delete_generations(db)
+    assert _snapshot(db, store) == before
 
 
 def test_split_holdout_is_seeded_disjoint_and_by_group():
@@ -572,8 +821,16 @@ def test_readiness():
 
 def test_nothing_logged_with_example_text(db, store, caplog):
     _pair_group(db)
-    _img(db, "/e/1.png", group=None, prompt="EDITED", draft="DRAFT", edited=1)
-    db.set_hindsight_brief("/g/fav.png", "SECRET-BRIEF", "qwen3vl-8b")
+    _img(
+        db,
+        "/e/1.png",
+        grade="pass",
+        group=None,
+        prompt="EDITED",
+        draft="DRAFT",
+        edited=1,
+    )
+    db.set_hindsight_brief("/g/win.png", "SECRET-BRIEF", "qwen3vl-8b")
     with caplog.at_level(logging.DEBUG):
         sft, prefs, _ = _build(db, "all", store, NOW)
         preview(prefs)
@@ -615,8 +872,8 @@ def test_stored_resolved_caption_and_direction_are_the_turn(db, store):
 
 
 def test_sides_with_different_directions_make_no_pair(db, store):
-    _img(db, "/g/a.png", outcome="favorite", prompt="A", direction="one")
-    _img(db, "/g/b.png", outcome="seen", index=1, prompt="B", direction="two")
+    _img(db, "/g/a.png", grade="pass", prompt="A", direction="one")
+    _img(db, "/g/b.png", grade="fail", index=1, prompt="B", direction="two")
     _, prefs, _ = _build(db, "all", store, NOW)
     assert prefs == []
 
@@ -630,7 +887,7 @@ def test_old_rows_with_tokens_are_re_resolved_or_skipped(db, store):
 
     _pair_group(db, group="g1", caption="__X__ fox", prompt_seed=7)
     _pair_group(
-        db, group="g2", fav="/b/f.png", seen="/b/s.png", caption="__X__ owl"
+        db, group="g2", win="/b/w.png", lose="/b/l.png", caption="__X__ owl"
     )  # tokens, no prompt seed: skipped
     _, prefs, _ = _build(db, "all", store, NOW, resolve=resolve)
     assert [p.user.split("\n")[1] for p in prefs] == ["resolved 7"]
@@ -651,13 +908,13 @@ def test_caption_resolver_resolves_like_the_runner():
 
 def test_fallback_is_never_a_target(db, store):
     # Fallback winner: no pair. Fallback loser: a pair.
-    _img(db, "/f/w.png", outcome="favorite", writer="fallback", prompt="FB")
-    _img(db, "/f/l.png", outcome="seen", index=1, prompt="L")
-    _img(db, "/k/w.png", outcome="favorite", group="g2", prompt="W")
+    _img(db, "/f/w.png", grade="pass", writer="fallback", prompt="FB")
+    _img(db, "/f/l.png", grade="fail", index=1, prompt="L")
+    _img(db, "/k/w.png", grade="pass", group="g2", prompt="W")
     _img(
         db,
         "/k/l.png",
-        outcome="seen",
+        grade="fail",
         group="g2",
         index=1,
         writer="fallback",
@@ -667,6 +924,7 @@ def test_fallback_is_never_a_target(db, store):
     _img(
         db,
         "/e/1.png",
+        grade="pass",
         group=None,
         writer="fallback",
         prompt="MINE",
@@ -674,11 +932,11 @@ def test_fallback_is_never_a_target(db, store):
         edited=1,
         caption="an edit",
     )
-    # A favorited fallback image is not a hindsight target.
+    # A ✓ fallback image is not a hindsight target.
     _img(
         db,
         "/h/1.png",
-        outcome="favorite",
+        grade="pass",
         group=None,
         writer="fallback",
         prompt="FBH",
@@ -694,18 +952,18 @@ def test_fallback_is_never_a_target(db, store):
 
 def test_holdout_groups_by_model_and_description(db, store):
     # The same caption generated in two batches is one holdout group.
-    _pair_group(db, group="b1", fav="/1/f.png", seen="/1/s.png")
-    _pair_group(db, group="b2", fav="/2/f.png", seen="/2/s.png")
+    _pair_group(db, group="b1", win="/1/w.png", lose="/1/l.png")
+    _pair_group(db, group="b2", win="/2/w.png", lose="/2/l.png")
     for i in range(3):
         _pair_group(
             db,
             group=f"o{i}",
-            fav=f"/o{i}/f.png",
-            seen=f"/o{i}/s.png",
+            win=f"/o{i}/w.png",
+            lose=f"/o{i}/l.png",
             caption=f"other {i}",
         )
-    # A hindsight example of a favorite in the shared caption joins its group.
-    db.set_hindsight_brief("/1/f.png", "a brief", "qwen3vl-8b")
+    # A hindsight example of a ✓ image in the shared caption joins its group.
+    db.set_hindsight_brief("/1/w.png", "a brief", "qwen3vl-8b")
     sft, prefs, _ = _build(db, "all", store, NOW)
     assert len({p.group for p in prefs}) == 4
     hint = next(s for s in sft if s.source == "hindsight")
@@ -739,9 +997,9 @@ def test_malformed_tombstones_warn_with_a_count_only(db, store, caplog):
 
 def test_tombstones_carry_resolved_caption_and_direction(db, store):
     _pair_group(db, resolved="a resolved fox", direction="calm")
-    db.delete_media(Path("/g/fav.png"))
-    db.delete_media(Path("/g/seen.png"))
-    (t,) = [x for x in db.list_tombstones() if x["file_path"] == "/g/fav.png"]
+    db.delete_media(Path("/g/win.png"))
+    db.delete_media(Path("/g/lose.png"))
+    (t,) = [x for x in db.list_tombstones() if x["file_path"] == "/g/win.png"]
     assert t["lineage"]["t2i"]["resolved_caption"] == "a resolved fox"
     assert t["lineage"]["t2i"]["direction"] == "calm"
     _, prefs, _ = _build(db, "all", store, NOW)

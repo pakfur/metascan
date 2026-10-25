@@ -1,11 +1,12 @@
 """Hindsight briefs job (taste learning project 4).
 
-For every favorited generated image with a known prompt (and a known
-target-model family -- the rule lives in
-``writer_dataset.hindsight_candidates``) the GENERAL-role VLM looks at the
-image and writes a one-sentence "what someone might have asked for" brief.
-The brief is the user turn of a hindsight training example (brief -> the
-prompt that produced the image); it is cached in ``hindsight_briefs``.
+For every ✓ image (graded pass -- ★ favorites and views never count) with a
+known prompt and a known target-model family, and no brief yet (the rule
+lives in ``writer_dataset.hindsight_candidates``), the GENERAL-role VLM
+looks at the image and writes a one-sentence "what someone might have asked
+for" brief. The brief is the user turn of a hindsight training example
+(brief -> the prompt that produced the image); it is cached in
+``hindsight_briefs``.
 
 Rules
 -----

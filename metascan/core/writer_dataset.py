@@ -1,31 +1,39 @@
 """Training data for the prompt-writer LoRA (taste learning project 4).
 
-Turns the owner's generation lineage and judgments into three example kinds
+Turns the owner's generation lineage and grades into three example kinds
 for fine-tuning the 8B writer. Everything is built locally and NEVER logged
 (counts only); the window's preview is the one place example text leaves
 this module.
+
+Labels
+------
+Only an image's grade trains the writer (spec 2026-10-24-pass-fail-grades):
+✓ ``pass`` ("the prompt did what I wanted") and ✗ ``fail``. A ★ favorite, a
+view (``seen_at``) or the absence of a grade teaches nothing, so the raw
+rows (``DatabaseManager.writer_dataset_raw``) do not even carry them.
 
 Example kinds
 -------------
 * **Variant preference pairs** (``PrefExample``, ``source="variant"``):
   within a T2I ``variant_group`` (one caption, one target model, one set of
   seeds, several prompts), a *winner* variant -- at least one of its images
-  is a favorite -- against a *loser* variant -- every one of its images was
-  seen or passed and none is a favorite. Every winner x loser combination
-  is a pair (``chosen`` = the winner's rendered prompt, ``rejected`` = the
-  loser's). A variant with an unseen image is neither.
+  is ✓ -- against a *loser* variant -- every one of its images is ✗. Every
+  winner x loser combination is a pair (``chosen`` = the winner's rendered
+  prompt, ``rejected`` = the loser's). Any other variant (one ungraded
+  image is enough, viewed or not) is neither.
 * **Edit pairs** (``source="edit"``): a rendered prompt with ``edited = 1``
-  whose whitespace-normalized text differs from its draft. ``chosen`` = the
-  rendered (edited) prompt, ``rejected`` = the writer's draft. Each edit
+  whose whitespace-normalized text differs from its draft, once at least one
+  image of it is ✓ (an edit with no ✓ render was an experiment). ``chosen``
+  = the rendered (edited) prompt, ``rejected`` = the writer's draft. Each edit
   yields one ``PrefExample`` (DPO) AND one ``SftExample`` (SFT target),
   counted once (``edit_pairs``). Several seeds of one edited variant are one
   edit (deduplicated on target model + description + direction + both
-  normalized texts).
-* **Hindsight examples** (``SftExample``, ``source="hindsight"``): a
-  favorited image with a known prompt and a cached ``hindsight_briefs``
-  brief. User turn = the brief (no direction), target = the prompt that
-  produced the image. A T2I image's target model is its ``model`` column; a
-  library item (no T2I row) needs a metadata prompt and a model name that
+  normalized texts); one ✓ among them makes it count.
+* **Hindsight examples** (``SftExample``, ``source="hindsight"``): a live ✓
+  image with a known prompt and a cached ``hindsight_briefs`` brief. User
+  turn = the brief (no direction), target = the prompt that produced the
+  image. A T2I image's target model is its ``model`` column; a library item
+  (no T2I row) needs a metadata prompt and a model name that
   ``taste_examples.matches_model_family`` places in exactly one
   ``MODEL_PROFILES`` family (none or several: left out).
 
@@ -50,7 +58,7 @@ Inclusion rules (all kinds)
   disagree on model, description or direction, is skipped.
 * Deleted generations count: a path with no live media row is read from its
   newest ``media_tombstones`` row whose lineage carries the ``t2i`` row
-  (judgment state and category NAMES as at deletion; a category scope
+  (grade, ``judged_at`` and category NAMES as at deletion; a category scope
   matches them by the category's current name). A live row always wins. A
   deleted image has no brief (the table cascades), so no hindsight.
   Malformed tombstones are skipped with one WARNING carrying the count.
@@ -58,10 +66,11 @@ Inclusion rules (all kinds)
   examples whose images (the union over both variants of a pair, every seed
   of an edit, the one hindsight image) carry that category, from any link
   source.
-* An example's ``as_of`` is the newest of its images' ``created_at``,
-  ``judged_at`` and ``seen_at`` (for a library item: its ``judged_at`` and
-  ``seen_at``; never the brief's own time, which says nothing about the
-  owner's taste), as UTC ISO-8601. Examples with ``as_of`` after ``now`` are
+* An example's ``as_of`` is the newest of its images' ``created_at`` and
+  ``judged_at`` (when the grade was last set or cleared; for a library item
+  its ``judged_at`` alone), as UTC ISO-8601 -- never a view, a ★ or the
+  brief's own time, which say nothing about the owner's taste, so browsing
+  never makes old data "new". Examples with ``as_of`` after ``now`` are
   left out, so a run that records ``data_cutoff = now`` (or
   ``counts.date_span[1]``) counts everything later as new.
 
@@ -162,7 +171,12 @@ from typing import (
     Union,
 )
 
-from metascan.core.judgments import WRITER_FALLBACK, WRITER_MANUAL, normalize_prompt
+from metascan.core.judgments import (
+    GRADES,
+    WRITER_FALLBACK,
+    WRITER_MANUAL,
+    normalize_prompt,
+)
 from metascan.core.prompt_store import PromptStore
 from metascan.core.t2i_characters import Library, has_tokens, resolve_caption
 from metascan.core.t2i_models import MODEL_PROFILES, T2iModelProfile, effective_identity
@@ -296,8 +310,11 @@ def _newest(values: Iterable[Any]) -> str:
     return max(stamps) if stamps else ""
 
 
-def _seen(row: Dict[str, Any]) -> bool:
-    return bool(row.get("is_favorite") or row.get("passed") or row.get("seen_at"))
+def _grade(row: Mapping[str, Any]) -> Optional[str]:
+    """The image's grade, ✓ ``"pass"`` / ✗ ``"fail"``, else None: the only
+    label there is (★ favorites and views never train the writer)."""
+    grade = row.get("grade")
+    return grade if grade in GRADES else None
 
 
 def _blank(text: Any) -> bool:
@@ -318,7 +335,8 @@ def _usable(row: Dict[str, Any]) -> bool:
 
 
 def _row_stamps(row: Dict[str, Any]) -> List[Any]:
-    return [row.get("created_at"), row.get("judged_at"), row.get("seen_at")]
+    """The times that can make an example new: made, and graded / cleared."""
+    return [row.get("created_at"), row.get("judged_at")]
 
 
 def _direction(row: Dict[str, Any]) -> Optional[str]:
@@ -373,9 +391,9 @@ def _hindsight_target(
     """Whether ``path`` may be a hindsight target, and its parts:
     ``(profile, prompt, source row, timestamp stamps, group description)``.
     The ONE place the rule lives -- the dataset builder and the briefs job
-    (which decides what to write a brief for) both call it. Favorited,
-    live, image, not manual / fallback / scorecard, a known prompt and
-    exactly one target-model family."""
+    (which decides what to write a brief for) both call it. ✓ (grade
+    ``pass``; ★ is no grade), live, image, not manual / fallback /
+    scorecard, a known prompt and exactly one target-model family."""
     if not is_image_path(path):
         return None
     gen = by_path.get(path)
@@ -383,7 +401,7 @@ def _hindsight_target(
     if gen is not None:
         if (
             not gen.get("live")
-            or not gen.get("is_favorite")
+            or _grade(gen) != "pass"
             or not _usable(gen)
             or gen.get("writer_id") == WRITER_FALLBACK
         ):
@@ -395,7 +413,7 @@ def _hindsight_target(
         stamps: List[Any] = _row_stamps(gen)
     else:
         lib = (raw.get("library") or {}).get(path)
-        if lib is None:
+        if lib is None or _grade(lib) != "pass":
             return None
         families = [
             pid
@@ -405,7 +423,7 @@ def _hindsight_target(
         profile = MODEL_PROFILES[families[0]] if len(families) == 1 else None
         prompt = lib.get("prompt")
         source_row = lib
-        stamps = [lib.get("judged_at"), lib.get("seen_at")]
+        stamps = [lib.get("judged_at")]
     if profile is None or _blank(prompt):
         return None
     return profile, prompt, source_row, stamps, group_text
@@ -532,11 +550,12 @@ def examples_from_raw(
             prompts = {r.get("prompt_used") for r in rows}
             if len(prompts) != 1 or _blank(next(iter(prompts))):
                 continue
-            if any(r.get("is_favorite") for r in rows):
+            grades = [_grade(r) for r in rows]
+            if "pass" in grades:
                 # A fallback prompt is never a target.
                 if rows[0].get("writer_id") != WRITER_FALLBACK:
                     winners.append(rows)
-            elif all(_seen(r) for r in rows):
+            elif all(g == "fail" for g in grades):
                 losers.append(rows)
         for win in winners:
             for lose in losers:
@@ -593,6 +612,8 @@ def examples_from_raw(
     n_edit = 0
     for key in sorted(edits):
         rows = edits[key]
+        if not any(_grade(r) == "pass" for r in rows):
+            continue  # no render of it is ✓: an experiment, not a signal
         head = rows[0]
         profile = _profile(head["model"])
         assert profile is not None

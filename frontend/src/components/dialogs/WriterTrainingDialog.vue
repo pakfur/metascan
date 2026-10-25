@@ -617,7 +617,7 @@ function onRecheck() {
             </div>
             <div class="kv"><span>Variant preference pairs</span><span>{{ fmtInt(counts?.pref_pairs) }}</span></div>
             <div class="kv"><span>Your edits of drafts</span><span>{{ fmtInt(counts?.edit_pairs) }}</span></div>
-            <div class="kv"><span>Hindsight briefs (favorites)</span><span>{{ fmtInt(counts?.hindsight) }}</span></div>
+            <div class="kv"><span>Hindsight briefs (passed)</span><span>{{ fmtInt(counts?.hindsight) }}</span></div>
             <div class="kv">
               <span>New since the last adapter</span>
               <span>+{{ fmtInt(counts?.new_since_last) }} <span class="dim">pairs</span></span>

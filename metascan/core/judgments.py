@@ -35,7 +35,8 @@ SEEN_DWELL_MS: int = 1000
 
 # Lineage writer ids on generated media.
 WRITER_BASE = "base"
-# The base writer with up to TASTE_EXAMPLES_K favorite prompts as examples.
+# The base writer with up to TASTE_EXAMPLES_K ✓ prompts (graded pass) as
+# examples.
 WRITER_BASE_TASTE = "base+taste"
 WRITER_FALLBACK = "fallback"
 WRITER_MANUAL = "manual"
