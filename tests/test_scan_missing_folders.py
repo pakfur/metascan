@@ -1,12 +1,16 @@
-"""A configured scan folder that is missing (an unmounted drive, say) is
-never read as "every file in it was deleted": a Full clean & rescan is
-refused or ends incomplete, and the ordinary stale cleanup leaves the
-folder's rows alone. Real temp folders and a real temp DB; the scanner is
-faked and re-saves the rows the test chooses."""
+"""A configured scan folder whose files can't be seen -- missing (an
+unplugged drive), unreadable, or empty while the library has images from it
+(the mount point of a drive that is not mounted) -- is never read as "every
+file in it was deleted": a Full clean & rescan is refused or ends
+incomplete, and the ordinary stale cleanup leaves the folder's rows alone.
+Real temp folders and a real temp DB; the scanner is faked and re-saves the
+rows the test chooses."""
 
 import asyncio
+import errno
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from backend.api import scan as scan_api
+from backend.config import DirectoryConfig
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 
@@ -206,9 +211,12 @@ def test_full_clean_is_refused_with_409_naming_the_missing_folder(
     assert detail["code"] == "scan_folders_missing"
     assert detail["folders"] == [str(gone)]
     message = detail["message"]
-    assert str(gone) in message
-    assert "reconnect the drive" in message.lower()
-    assert "remove the folder from the scan list" in message.lower()
+    assert f"{gone} is missing" in message
+    # Reconnecting comes first; removing the folder is the last resort, and
+    # the message says what it costs.
+    assert message.index("Reconnect its drive") < message.index("Remove the folder")
+    assert "only if it is gone for good" in message
+    assert "its images' ratings are then dropped from the library" in message
     assert started == []
     _assert_nothing_changed(db, p)
 
@@ -241,9 +249,10 @@ def test_the_refusal_names_every_missing_folder_once_in_config_order(
     assert err is not None and err.status_code == 409
     assert err.detail["folders"] == [str(first), str(second)]
     message = err.detail["message"]
-    assert "2 scan folders are missing" in message
-    assert str(first) in message and str(second) in message
-    assert "remove the folders from the scan list" in message
+    assert "2 scan folders can't be scanned" in message
+    assert f"{first} (missing)" in message and f"{second} (missing)" in message
+    assert message.index("Reconnect") < message.index("Remove a folder")
+    assert "only if it is gone for good" in message
 
 
 def test_an_ordinary_scan_is_not_refused_by_a_missing_folder(monkeypatch, db, tmp_path):
@@ -318,7 +327,8 @@ def test_a_folder_gone_mid_run_leaves_the_full_clean_incomplete(
 
     # The drive is back: the next full clean restores b's ratings, and now
     # that it completes, tombstones only the file that really is gone.
-    b.mkdir()
+    _touch(b / "pass.png")
+    _touch(b / "sub" / "fail.png")
     reimport = {str(a): [p["kept"]], str(b): [p["pass"], p["fail"]]}
 
     def scan_all(directory):
@@ -431,4 +441,465 @@ def test_stale_cleanup_leaves_a_missing_folders_rows_alone(
     [complete] = _completes(events)
     assert complete["stale_removed"] == 2
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(str(lib) in m and "2 rows" in m for m in warnings), warnings
+    assert any(
+        str(lib) in m and "is missing" in m and "left 2 row(s)" in m for m in warnings
+    ), warnings
+
+
+# ---------------------------------------------------------------------------
+# 4. A folder that is there but shows nothing: the empty mount point of a
+#    drive that is not mounted, or a folder the server may not list
+# ---------------------------------------------------------------------------
+
+
+def _seed_with_empty_mount_point(db, tmp_path):
+    """``lib`` holds a file; ``mnt`` is an empty directory -- the mount point
+    of a drive that is not mounted (fstab, NFS, SMB) -- while the library
+    still has rated images from it."""
+    lib, mnt = tmp_path / "lib", tmp_path / "mnt_drive"
+    mnt.mkdir()
+    p = {
+        "here": _touch(lib / "here.png"),
+        "m1": str(mnt / "m1.png"),
+        "m2": str(mnt / "sub" / "m2.png"),
+    }
+    for path in p.values():
+        db.save_media(_media(path))
+    db.set_favorite_state(p["m1"], True, now=T0)
+    db.set_grade(p["m1"], "pass", now=T0)
+    db.set_grade(p["m2"], "fail", now=T0)
+    db.set_reason(p["m2"], "light", True, now=T0)
+    return lib, mnt, p
+
+
+def _assert_mount_point_untouched(db, p):
+    assert sorted(db.get_existing_file_paths()) == sorted(p.values())
+    assert _marks(db.get_judgment(p["m1"])) == FAVORITE
+    m2 = db.get_judgment(p["m2"])
+    assert (_marks(m2), m2.reasons) == (FAIL, ["light"])
+    assert db.list_tombstones() == []
+
+
+def test_full_clean_is_refused_while_a_scan_folder_is_an_empty_mount_point(
+    monkeypatch, db, tmp_path
+):
+    lib, mnt, p = _seed_with_empty_mount_point(db, tmp_path)
+    events, scanned = _wire(monkeypatch, db, [lib, mnt])
+
+    err = _start(full_clean=True)
+
+    assert err is not None and err.status_code == 409
+    assert err.detail["code"] == "scan_folders_missing"
+    assert err.detail["folders"] == [str(mnt)]
+    message = err.detail["message"]
+    assert f"{mnt} is empty" in message and "Is its drive mounted?" in message
+    assert "only if it is gone for good" in message
+    assert scanned == [] and events == []
+    _assert_mount_point_untouched(db, p)
+    assert _pending(db) is None
+
+
+def test_the_scan_task_refuses_a_full_clean_with_an_empty_mount_point(
+    monkeypatch, db, tmp_path
+):
+    lib, mnt, p = _seed_with_empty_mount_point(db, tmp_path)
+    events, scanned = _wire(monkeypatch, db, [lib, mnt])
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    [error] = [data for _, event, data in events if event == "error"]
+    assert error["folders"] == [str(mnt)] and f"{mnt} is empty" in error["message"]
+    assert not any(event == "phase_changed" for _, event, _ in events)
+    assert scanned == []
+    _assert_mount_point_untouched(db, p)
+    assert _pending(db) is None
+
+
+def test_stale_cleanup_leaves_an_empty_mount_points_rows_alone(
+    monkeypatch, db, tmp_path, caplog
+):
+    lib, mnt, p = _seed_with_empty_mount_point(db, tmp_path)
+    events, scanned = _wire(monkeypatch, db, [lib, mnt])
+
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        assert _start(full_cleanup=True) is None
+
+    assert scanned == [str(lib)]  # nothing to scan in it either
+    _assert_mount_point_untouched(db, p)
+    [complete] = _completes(events)
+    assert (complete["stale_removed"], complete["missing_folders"]) == (0, [str(mnt)])
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        str(mnt) in m and "is empty" in m and "left 2 row(s)" in m for m in warnings
+    ), warnings
+
+
+def test_an_empty_scan_folder_the_library_has_nothing_from_blocks_nothing(
+    monkeypatch, db, tmp_path
+):
+    """A folder just added to the scan list, nothing in it yet: empty, but
+    nothing says a drive is missing."""
+    a, b, p = _seed_two_folders(db, tmp_path)
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    reimport = {str(a): [p["kept"]], str(b): [p["pass"], p["fail"]], str(fresh): []}
+
+    def scan(directory):
+        for path in reimport[directory]:
+            db.save_media(_media(path))
+        return len(reimport[directory])
+
+    events, scanned = _wire(monkeypatch, db, [a, b, fresh], scan)
+    assert _start(full_clean=True, full_cleanup=True) is None
+
+    assert scanned == [str(a), str(b), str(fresh)]
+    [complete] = _completes(events)
+    assert complete["missing_folders"] == []
+    [t] = db.list_tombstones()
+    assert t["file_path"] == p["deleted"]
+    assert _pending(db) is None
+
+
+def test_a_full_clean_is_refused_when_pending_ratings_point_into_an_empty_folder(
+    monkeypatch, db, tmp_path
+):
+    """An earlier full clean ran while b's drive was away: b's ratings are
+    pending and no row of b is left. b's mount point is back, empty -- the
+    drive is still not mounted -- so the pending file is the only evidence."""
+    a, b, p = _seed_two_folders(db, tmp_path)
+
+    def scan(directory):
+        db.save_media(_media(p["kept"]))
+        shutil.rmtree(b)
+        return 1
+
+    _wire(monkeypatch, db, [a, b], scan)
+    assert _start(full_clean=True) is None
+    pending_before = _pending(db)
+    assert _pending_paths(db) == sorted([p["deleted"], p["pass"], p["fail"]])
+    assert sorted(db.get_existing_file_paths()) == [p["kept"]]  # none of b
+
+    b.mkdir()
+    events, scanned = _wire(monkeypatch, db, [a, b])
+    err = _start(full_clean=True)
+
+    assert err is not None and err.detail["folders"] == [str(b)]
+    assert f"{b} is empty" in err.detail["message"]
+    assert scanned == [] and events == []
+    assert _pending(db) == pending_before
+    assert db.list_tombstones() == []
+
+
+def _unlistable(folder: Path) -> None:
+    """Take read permission off ``folder`` (0o300: it can be entered but not
+    listed, and rglob then silently finds nothing in it), or skip the test
+    where that doesn't stop listing (root, Windows)."""
+    os.chmod(folder, 0o300)
+    try:
+        os.listdir(folder)
+    except PermissionError:
+        return
+    os.chmod(folder, 0o755)
+    pytest.skip("permissions don't stop listing a folder here")
+
+
+def test_full_clean_is_refused_while_a_scan_folder_cannot_be_listed(
+    monkeypatch, db, tmp_path
+):
+    lib, locked = tmp_path / "lib", tmp_path / "locked"
+    p = {
+        "here": _touch(lib / "here.png"),
+        "l1": _touch(locked / "l1.png"),
+        "l2": _touch(locked / "sub" / "l2.png"),
+    }
+    for path in p.values():
+        db.save_media(_media(path))
+    db.set_grade(p["l1"], "pass", now=T0)
+    db.set_grade(p["l2"], "fail", now=T0)
+    events, scanned = _wire(monkeypatch, db, [lib, locked])
+
+    _unlistable(locked)
+    try:
+        err = _start(full_clean=True)
+    finally:
+        os.chmod(locked, 0o755)
+
+    assert err is not None and err.status_code == 409
+    assert err.detail["folders"] == [str(locked)]
+    assert f"{locked} can't be read" in err.detail["message"]
+    assert scanned == [] and events == []
+    assert sorted(db.get_existing_file_paths()) == sorted(p.values())
+    assert db.list_tombstones() == [] and _pending(db) is None
+
+
+def test_a_folder_emptied_mid_run_leaves_the_full_clean_incomplete(
+    monkeypatch, db, tmp_path
+):
+    """b's drive is unmounted during a's scan and only its empty mount
+    point is left: nothing comes back from b, and nothing of it may be
+    tombstoned."""
+    a, b, p = _seed_two_folders(db, tmp_path)
+
+    def scan(directory):
+        if directory == str(a):
+            db.save_media(_media(p["kept"]))
+            for child in b.iterdir():
+                shutil.rmtree(child) if child.is_dir() else child.unlink()
+            return 1
+        return 0  # b holds nothing to import
+
+    events, scanned = _wire(monkeypatch, db, [a, b], scan)
+    assert _start(full_clean=True) is None
+
+    assert scanned == [str(a)]
+    assert _marks(db.get_judgment(p["kept"])) == FAVORITE
+    assert db.list_tombstones() == []
+    assert _pending_paths(db) == sorted([p["deleted"], p["pass"], p["fail"]])
+    [complete] = _completes(events)
+    assert complete["missing_folders"] == [str(b)]
+
+
+# ---------------------------------------------------------------------------
+# 5. Folders that go away (or fail) at a folder's turn, during its scan or
+#    before the cleanup
+# ---------------------------------------------------------------------------
+
+
+def _three_folders(db, tmp_path):
+    """Folders a, b, c with one image each; b's is ✓, c's is ✗."""
+    folders = [tmp_path / n for n in "abc"]
+    p = {f.name: _touch(f / "x.png") for f in folders}
+    for path in p.values():
+        db.save_media(_media(path))
+    db.set_grade(p["b"], "pass", now=T0)
+    db.set_grade(p["c"], "fail", now=T0)
+    return folders, p
+
+
+def _stat_fails(monkeypatch, folder: Path) -> None:
+    """From now on stat()-ing ``folder`` itself fails with EIO, the way a
+    dead network share answers."""
+    real_exists = Path.exists
+
+    def exists(self, *args, **kwargs):
+        if os.fspath(self) == os.fspath(folder):
+            raise OSError(errno.EIO, "Input/output error", os.fspath(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+
+def _errors(events):
+    return [data for _, event, data in events if event == "error"]
+
+
+def test_a_folder_missing_at_its_turn_but_back_by_the_end_leaves_it_incomplete(
+    monkeypatch, db, tmp_path
+):
+    """b is unplugged during a's scan and plugged back in during c's: only
+    the check at b's own turn knows b was never scanned."""
+    (a, b, c), p = _three_folders(db, tmp_path)
+
+    def scan(directory):
+        if directory == str(a):
+            shutil.rmtree(b)  # unplugged
+        if directory == str(c):
+            _touch(b / "x.png")  # plugged back in
+        db.save_media(_media(Path(directory) / "x.png"))
+        return 1
+
+    events, scanned = _wire(monkeypatch, db, [a, b, c], scan)
+    assert _start(full_clean=True) is None
+
+    assert scanned == [str(a), str(c)]
+    assert db.list_tombstones() == []
+    assert _pending_paths(db) == [p["b"]]
+    assert _marks(db.get_judgment(p["c"])) == FAIL
+    [complete] = _completes(events)
+    assert complete["missing_folders"] == [str(b)]
+
+
+def test_the_scanners_folder_gone_race_skips_that_folder_and_scans_the_rest(
+    monkeypatch, db, tmp_path
+):
+    """b goes between the check at its turn and the scanner's own check,
+    which raises ValueError("Directory does not exist"): c is still scanned
+    and the run ends incomplete instead of failing."""
+    (a, b, c), p = _three_folders(db, tmp_path)
+
+    def scan(directory):
+        if directory == str(b):
+            shutil.rmtree(b)
+            raise ValueError(f"Directory does not exist: {directory}")
+        db.save_media(_media(Path(directory) / "x.png"))
+        return 1
+
+    events, scanned = _wire(monkeypatch, db, [a, b, c], scan)
+    assert _start(full_clean=True) is None
+
+    assert scanned == [str(a), str(b), str(c)]
+    assert _errors(events) == []
+    [complete] = _completes(events)
+    assert complete["missing_folders"] == [str(b)]
+    assert db.list_tombstones() == []
+    assert _pending_paths(db) == [p["b"]]
+    assert _marks(db.get_judgment(p["c"])) == FAIL
+
+
+def test_a_scanner_error_for_a_folder_that_is_there_still_fails_the_run(
+    monkeypatch, db, tmp_path
+):
+    a, b, p = _seed_two_folders(db, tmp_path)
+
+    def scan(directory):
+        raise ValueError("bad media")
+
+    events, scanned = _wire(monkeypatch, db, [a, b], scan)
+    assert _start(full_clean=True) is None
+
+    assert scanned == [str(a)]
+    assert _errors(events) == [{"message": "bad media"}]
+    assert db.list_tombstones() == []
+    assert _pending_paths(db) == sorted(p.values())
+
+
+def test_a_folder_whose_stat_fails_at_its_turn_is_skipped_and_the_rest_scanned(
+    monkeypatch, db, tmp_path
+):
+    (a, b, c), p = _three_folders(db, tmp_path)
+    events, scanned = _wire(monkeypatch, db, [a, b, c], lambda directory: 0)
+    _stat_fails(monkeypatch, b)
+
+    assert _start(full_cleanup=False) is None
+
+    assert scanned == [str(a), str(c)]
+    assert _errors(events) == []
+    [complete] = _completes(events)
+    assert complete["missing_folders"] == [str(b)]
+
+
+def test_a_folder_lost_after_its_turn_is_reported_by_the_stale_cleanup(
+    monkeypatch, db, tmp_path
+):
+    """b is scanned, then its drive goes during c's scan: the cleanup leaves
+    b's rows alone and is the one that reports b."""
+    (a, b, c), p = _three_folders(db, tmp_path)
+
+    def scan(directory):
+        if directory == str(c):
+            shutil.rmtree(b)
+        return 0
+
+    events, scanned = _wire(monkeypatch, db, [a, b, c], scan)
+    assert _start(full_cleanup=True) is None
+
+    assert scanned == [str(a), str(b), str(c)]
+    assert p["b"] in db.get_existing_file_paths()
+    assert _marks(db.get_judgment(p["b"])) == PASS
+    [complete] = _completes(events)
+    assert (complete["stale_removed"], complete["missing_folders"]) == (0, [str(b)])
+
+
+def test_stale_cleanup_leaves_the_rows_of_a_folder_whose_stat_fails_alone(
+    monkeypatch, db, tmp_path, caplog
+):
+    (a, b, c), p = _three_folders(db, tmp_path)
+
+    def scan(directory):
+        if directory == str(c):
+            shutil.rmtree(b)  # the share holding b drops ...
+            _stat_fails(monkeypatch, b)  # ... and stat()-ing it now fails
+        return 0
+
+    events, scanned = _wire(monkeypatch, db, [a, b, c], scan)
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        assert _start(full_cleanup=True) is None
+
+    assert _errors(events) == []
+    assert p["b"] in db.get_existing_file_paths()
+    [complete] = _completes(events)
+    assert complete["stale_removed"] == 0
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(b) in m and "Stale cleanup" in m for m in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# 6. The stale cleanup's own order: per-file pass, folder check, re-stat
+# ---------------------------------------------------------------------------
+
+
+def _dirs(*folders):
+    return [DirectoryConfig(filepath=str(f)) for f in folders]
+
+
+def _drive_away_while_read(paths, folder, away, back):
+    """``paths`` as the per-file pass reads them, with ``folder``'s drive
+    unplugged from the first read on and, with ``back``, plugged in again
+    once the last one has been read (before the folder check)."""
+    folder.rename(away)
+    yield from paths
+    if back:
+        away.rename(folder)
+
+
+def _cleanup_case(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _touch(a / "here.png")
+    on_b = [_touch(b / "x.png"), _touch(b / "sub" / "y.png")]
+    gone = str(a / "deleted.png")  # really deleted, under a folder that is there
+    return a, b, on_b, gone
+
+
+def test_stale_cleanup_checks_the_folders_after_the_per_file_pass(tmp_path):
+    """A drive unplugged as the pass begins is seen as missing."""
+    a, b, on_b, gone = _cleanup_case(tmp_path)
+    paths = _drive_away_while_read([gone, *on_b], b, tmp_path / "away", back=False)
+
+    result = scan_api._stale_paths_to_clean(paths, _dirs(a, b))
+
+    assert result[0] == [Path(gone)]
+    assert result[1] == {str(b): 2}
+
+
+def test_stale_cleanup_restats_what_it_would_delete(tmp_path):
+    """A drive away during the pass but back before the folder check: its
+    files are there again, so none of them is deleted."""
+    a, b, on_b, gone = _cleanup_case(tmp_path)
+    paths = _drive_away_while_read([gone, *on_b], b, tmp_path / "away", back=True)
+
+    result = scan_api._stale_paths_to_clean(paths, _dirs(a, b))
+
+    assert result[0] == [Path(gone)]
+    assert result[1] == {}
+
+
+def test_a_mount_point_inside_a_scan_folder_is_covered_once_it_is_listed_too(
+    monkeypatch, db, tmp_path, caplog
+):
+    """Only scan folders themselves are checked, so the docs tell the user
+    to add a drive mounted inside one to the scan list as well. Then its
+    empty mount point protects its rows like any other."""
+    lib = tmp_path / "lib"
+    drive = lib / "drive"  # the drive's mount point, inside lib, not mounted
+    drive.mkdir(parents=True)
+    p = {
+        "here": _touch(lib / "here.png"),
+        "d1": str(drive / "d1.png"),
+        "d2": str(drive / "sub" / "d2.png"),
+    }
+    for path in p.values():
+        db.save_media(_media(path))
+    db.set_grade(p["d1"], "pass", now=T0)
+    db.set_grade(p["d2"], "fail", now=T0)
+    events, scanned = _wire(monkeypatch, db, [lib, drive])
+
+    err = _start(full_clean=True)
+    assert err is not None and err.detail["folders"] == [str(drive)]
+
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        assert _start(full_cleanup=True) is None
+    assert scanned == [str(lib)]
+    assert sorted(db.get_existing_file_paths()) == sorted(p.values())
+    assert db.list_tombstones() == []
+    [complete] = _completes(events)
+    assert (complete["stale_removed"], complete["missing_folders"]) == (0, [str(drive)])

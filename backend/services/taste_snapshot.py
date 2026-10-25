@@ -32,7 +32,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Set, cast
 
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
 from metascan.core.judgments import GRADES
@@ -315,6 +315,28 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
         _quarantine(target, "unexpected structure")
         return None
     return upgrade_legacy_snapshot(cast(Dict[str, Any], snap))
+
+
+def snapshot_paths(snapshot: Dict[str, Any]) -> Set[str]:
+    """Every path ``snapshot`` holds something for (a judgment row, a
+    category link or ★), in the stored POSIX form."""
+    return (
+        {j["file_path"] for j in snapshot.get("judgments") or []}
+        | {lk["file_path"] for lk in snapshot.get("categories") or []}
+        | set(snapshot.get("favorites") or [])
+    )
+
+
+def pending_snapshot_paths(data_dir: Path) -> Set[str]:
+    """The paths the pending file holds ratings for, read without side
+    effects: nothing is quarantined or raised, and a missing, unreadable or
+    invalid file holds none. For checks that must change nothing; the full
+    clean itself loads the file with :func:`load_pending_snapshot`."""
+    try:
+        snap = json.loads(snapshot_file_path(data_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return snapshot_paths(snap) if _valid_shape(snap) else set()
 
 
 def restore_and_persist(

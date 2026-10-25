@@ -90,6 +90,9 @@ def _wire(monkeypatch, db, rescanned, scanner_cls=None):
     monkeypatch.setattr(scan_api, "load_app_config", lambda: {})
     monkeypatch.setattr(scan_api, "get_directories", lambda c: [_DirCfg()])
     monkeypatch.setattr(scan_api.Path, "exists", lambda self: True)
+    # "/lib" is not a real folder: report it there and listable (the
+    # missing-folder rules have their own tests, test_scan_missing_folders).
+    monkeypatch.setattr(scan_api, "_probe_folder", lambda path: scan_api.PRESENT)
     monkeypatch.setattr(scan_api.ws_manager, "broadcast", fake_broadcast)
     return events
 

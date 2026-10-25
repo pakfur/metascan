@@ -107,6 +107,11 @@ const embedSubLabel = computed(() => {
   return ''
 })
 
+const oneMissing = computed(() => scanStore.missingFolders.length === 1)
+const missingImagesOf = computed(() => (oneMissing.value ? 'its images' : 'their images'))
+const folderWord = computed(() => (oneMissing.value ? 'folder' : 'folders'))
+const missingPronoun = computed(() => (oneMissing.value ? 'it' : 'them'))
+
 function handleClose() {
   scanStore.reset()
   scanStore.resetEmbedding()
@@ -264,6 +269,19 @@ function handleClose() {
             <span class="stat-label">Embeddings built</span>
           </div>
         </div>
+        <div v-if="scanStore.missingFolders.length" class="missing-note">
+          <p>Not fully scanned (missing, unreadable, or empty: is the drive connected and mounted?):</p>
+          <ul>
+            <li v-for="folder in scanStore.missingFolders" :key="folder" :title="folder">
+              {{ folder }}
+            </li>
+          </ul>
+          <p v-if="scanStore.runWasFullClean">
+            The ratings of {{ missingImagesOf }} are kept and wait: they come back
+            when a scan finds the {{ folderWord }} again.
+          </p>
+          <p v-else>Nothing from {{ missingPronoun }} was removed from the library.</p>
+        </div>
         <div class="dialog-actions">
           <button class="btn-secondary" @click="handleClose">Close</button>
         </div>
@@ -378,6 +396,15 @@ h3 { margin: 0 0 12px; font-size: 18px; color: var(--text-color); }
 .stat-label { font-size: 12px; color: var(--text-color-secondary); }
 
 .error-msg { color: var(--danger-color, #d33); font-size: 14px; margin-bottom: 16px; }
+
+.missing-note {
+  border-left: 3px solid var(--warn, #e0a030); background: var(--surface-ground);
+  border-radius: 6px; padding: 8px 12px; font-size: 13px; color: var(--text-color);
+}
+.missing-note p { margin: 0 0 4px; }
+.missing-note p:last-child { margin: 4px 0 0; color: var(--text-color-secondary); }
+.missing-note ul { margin: 0; padding-left: 18px; }
+.missing-note li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .dialog-actions { display: flex; gap: 10px; margin-top: 16px; }
 .btn-primary, .btn-secondary, .btn-danger {
