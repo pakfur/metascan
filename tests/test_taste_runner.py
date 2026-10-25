@@ -528,7 +528,7 @@ async def test_worker_diversity_failure_does_not_fail_training(setup, monkeypatc
     monkeypatch.setattr(
         tr,
         "_diversity_task",
-        lambda db, now: {
+        lambda db, now, vector_model: {
             "window_starts": ["2026-10-10"],
             "items": [
                 {
@@ -654,7 +654,7 @@ async def test_diversity_never_borrows_a_vector_by_path(setup):
     db.save_media(_media("/l/gen_reused.png"))
     (gone,) = [
         g
-        for g in db.generation_outcomes(include_embeddings=True)
+        for g in db.generation_outcomes(vector_model=MODEL_KEY)
         if g["file_path"] == "/l/gen_reused.png"
     ]
     assert gone["tombstone"] is True and gone["grade"] == "pass"

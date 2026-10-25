@@ -44,12 +44,11 @@ def test_judged_item_tombstone_has_judgment_and_embedding(db):
     db.set_embedding_lookup(lambda p: (vec, "clip-medium"))
     db.delete_media(Path("/p/a.png"))
     [t] = db.list_tombstones()
-    assert (t["passed"], json.loads(t["reasons"]), t["embedding_model"]) == (
-        1,
-        ["composition"],
-        "clip-medium",
-    )
-    assert np.array_equal(np.frombuffer(t["embedding"], dtype=np.float32), vec)
+    assert (t["passed"], json.loads(t["reasons"])) == (1, ["composition"])
+    # The vector is kept per CLIP model, under the model it came from; the
+    # legacy single-vector columns stay empty.
+    assert db.get_tombstone_vectors(t["id"]) == {"clip-medium": vec.tobytes()}
+    assert t["embedding"] is None and t["embedding_model"] is None
     assert db.list_judgment_events("/p/a.png")  # event log survives the delete
 
 
@@ -59,7 +58,7 @@ def test_lookup_failure_does_not_block_delete(db):
     db.set_embedding_lookup(lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
     assert db.delete_media(Path("/p/a.png")) is True
     [t] = db.list_tombstones()
-    assert t["embedding"] is None and t["embedding_model"] is None
+    assert db.get_tombstone_vectors(t["id"]) == {}
     assert t["is_favorite"] == 1 and t["passed"] == 0
 
 
@@ -68,7 +67,7 @@ def test_lookup_none_leaves_embedding_null(db):
     db.set_verdict("/p/a.png", "favorite")
     db.set_embedding_lookup(lambda p: None)
     db.delete_media(Path("/p/a.png"))
-    assert db.list_tombstones()[0]["embedding"] is None
+    assert db.get_tombstone_vectors(db.list_tombstones()[0]["id"]) == {}
 
 
 def test_t2i_delete_writes_one_tombstone_with_lineage(db):

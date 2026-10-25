@@ -5,7 +5,7 @@ import type { ModelRow } from '../../api/models'
 import { useTasteStore } from '../../stores/taste'
 import { ApiError } from '../../api/client'
 import { useWebSocket } from '../../composables/useWebSocket'
-import type { TasteWsEvent, WriterWindowStat } from '../../types/taste'
+import type { TasteReembedEvent, TasteWsEvent, WriterWindowStat } from '../../types/taste'
 import { useTrainingStore, trainingErrorText } from '../../stores/training'
 import { useCategoriesStore } from '../../stores/categories'
 import { ratePct } from '../../types/writers'
@@ -90,6 +90,8 @@ const tasteAuc = computed(() => {
   const auc = tasteStatus.value?.active_model?.holdout_auc
   return typeof auc === 'number' ? auc.toFixed(2) : 'n/a'
 })
+// Deleted graded images getting vectors for the current CLIP model.
+const tasteReembed = computed(() => tasteStatus.value?.reembed ?? null)
 
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
@@ -148,13 +150,19 @@ async function loadWriterStats() {
   }
 }
 
-// Diversity is computed by training runs: refresh when one ends.
-useWebSocket('taste', (event) => {
+// Diversity is computed by training runs: refresh when one ends. Re-embed
+// progress patches the status; when the pass ends (null) the status is
+// reloaded, since what the scorer is missing may have changed.
+useWebSocket('taste', (event, data) => {
   if (
     event === ('training_complete' satisfies TasteWsEvent) ||
     event === ('training_failed' satisfies TasteWsEvent)
   ) {
     void loadWriterStats()
+  } else if (event === ('reembed_progress' satisfies TasteWsEvent)) {
+    const reembed = (data as unknown as TasteReembedEvent).reembed ?? null
+    taste.setReembed(reembed)
+    if (reembed === null) void loadTasteStatus()
   }
 })
 
@@ -325,6 +333,13 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
       </div>
       <div v-if="tasteStatus && (tasteStatus.new_events ?? 0) > 0" class="taste-new">
         {{ plural(tasteStatus.new_events ?? 0, 'new rating', 'new ratings') }} since last training.
+      </div>
+      <div v-if="tasteReembed" class="taste-reembed">
+        <i v-if="tasteReembed.running" class="pi pi-spin pi-spinner" />
+        re-embedding deleted images, {{ tasteReembed.done }} / {{ tasteReembed.total }}
+        <span v-if="!tasteReembed.running" class="taste-hint">
+          (paused while the GPU is busy: writer training, a generation or an index build)
+        </span>
       </div>
       <div class="taste-actions">
         <button
@@ -577,6 +592,7 @@ section { margin-bottom: 14px; }
 .taste-block { display: flex; flex-direction: column; gap: 6px; }
 .taste-actions { display: flex; align-items: center; gap: 10px; }
 .taste-spinner { display: inline-flex; align-items: center; gap: 6px; }
+.taste-reembed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .taste-hint { color: var(--text-color-secondary); font-size: 12px; }
 .writers-block { display: flex; flex-direction: column; gap: 6px; }
 .writers-refresh { margin-left: auto; }

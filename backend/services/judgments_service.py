@@ -73,8 +73,9 @@ class JudgmentsService:
 
 def faiss_embedding_lookup(native_path: str) -> Optional[Tuple[np.ndarray, str]]:
     """Return ``(vector, model_key)`` for a file from the in-memory FAISS
-    index, or None. Runs under the DB lock, so it never loads the index
-    from disk: an unloaded index yields None."""
+    index, or None: what a tombstone keeps in ``tombstone_vectors`` under
+    ``model_key`` when the file is deleted. Runs under the DB lock, so it
+    never loads the index from disk: an unloaded index yields None."""
     try:
         from backend.api import similarity
 
@@ -112,37 +113,45 @@ def _read_vector(fm: Any, posix_path: str) -> Optional[np.ndarray]:
 
 
 def backfill_tombstone_embeddings(db: DatabaseManager, fm: Any) -> int:
-    """Fill NULL tombstone embeddings from a loaded FAISS manager.
+    """Give tombstones a vector for a loaded FAISS manager's CLIP model from
+    the index itself.
 
-    Tombstones written while the index wasn't in memory get NULL vectors;
+    Tombstones written while the index wasn't in memory have no vector;
     deleted items stay in the on-disk index until a full rebuild, so once
-    it loads we can still recover them. The DB listing and each write
-    batch take the lock briefly; every FAISS read happens outside it.
-    Only rows still NULL are written. Returns the number filled."""
+    it loads we can still recover them, into ``tombstone_vectors`` under
+    the index's model. The index is read by path, so a path that holds a
+    live media row now -- or that another tombstone shares -- is skipped:
+    its vector may be another file's (Review Focus 5;
+    ``db.tombstones_for_vector_backfill``). Those get theirs from the
+    archived thumbnail (``tombstone_reembed``). The DB listing and each
+    write batch take the lock briefly; every FAISS read happens outside it.
+    A vector already stored for the model is kept. Returns the number
+    filled."""
     if fm is None or not getattr(fm, "is_loaded", False):
         return 0
     model_key = (getattr(fm, "meta", None) or {}).get("model_key")
     if not model_key:
         return 0
-    missing = db.tombstones_missing_embedding()
+    model_key = str(model_key)
+    missing = db.tombstones_for_vector_backfill(model_key)
     if not missing:
         return 0
     filled = 0
-    batch: List[Tuple[int, bytes, str]] = []
+    batch: List[Tuple[int, str, bytes]] = []
     for tomb_id, posix_path in missing:
         vec = _read_vector(fm, posix_path)
         if vec is None:
             continue
-        batch.append(
-            (tomb_id, np.asarray(vec).astype(np.float32).tobytes(), str(model_key))
-        )
+        batch.append((tomb_id, model_key, np.asarray(vec).astype(np.float32).tobytes()))
         if len(batch) >= _BACKFILL_BATCH:
-            filled += db.set_tombstone_embeddings(batch)
+            filled += db.add_tombstone_vectors(batch)
             batch = []
-    filled += db.set_tombstone_embeddings(batch)
+    filled += db.add_tombstone_vectors(batch)
     logger.info(
-        "Tombstone embedding backfill: filled %d of %d tombstones missing a vector",
+        "Tombstone embedding backfill: filled %d of %d tombstones missing a "
+        "vector for CLIP model %s",
         filled,
         len(missing),
+        model_key,
     )
     return filled

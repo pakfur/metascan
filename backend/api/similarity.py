@@ -162,15 +162,25 @@ def set_inference_client(client: InferenceClient) -> None:
     _inference_client = client
 
 
+def clip_worker_settings() -> Tuple[str, str]:
+    """``(model_key, device)`` the live CLIP inference worker runs with:
+    the configured ``similarity.clip_model`` / ``device``. Searches start
+    the worker with these, and so does the tombstone re-embedder, so
+    neither restarts the other's worker. Blocking (reads config.json)."""
+    sim_cfg = load_app_config().get("similarity", {}) or {}
+    return (
+        str(sim_cfg.get("clip_model") or "small"),
+        str(sim_cfg.get("device") or "auto"),
+    )
+
+
 async def _ensure_worker_ready(client: InferenceClient) -> None:
     """Belt-and-suspenders: make sure the worker is spawned with the
     currently-configured CLIP model before a search endpoint tries to use
     it. Without this, a search that arrives before the (optional) startup
     preload finishes would just block on ``_wait_ready`` forever because
     nothing else triggers a spawn."""
-    sim_cfg = load_app_config().get("similarity", {}) or {}
-    model_key = str(sim_cfg.get("clip_model") or "small")
-    device = str(sim_cfg.get("device") or "auto")
+    model_key, device = clip_worker_settings()
     try:
         await client.ensure_started(model_key=model_key, device=device)
     except Exception:

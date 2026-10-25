@@ -17,6 +17,16 @@ export interface TasteMissing {
   negatives: number
 }
 
+// Deleted graded images being given CLIP vectors for the current model from
+// their archived thumbnails (after a CLIP switch, or deleted while the index
+// was not loaded). `running` is false while it waits for the GPU (writer
+// training, a generation or an index build); it resumes on its own.
+export interface TasteReembed {
+  running: boolean
+  done: number
+  total: number
+}
+
 export interface TasteStatus {
   active_model: TasteModelInfo | null
   stale: boolean
@@ -33,6 +43,8 @@ export interface TasteStatus {
   missing_reason: 'labels' | 'vectors' | null
   auto_retrain: boolean
   last_error: string | null
+  // null when no re-embed pass is under way.
+  reembed: TasteReembed | null
 }
 
 export interface TasteScoresResponse {
@@ -46,6 +58,12 @@ export type TasteWsEvent =
   | 'training_complete'
   | 'training_failed'
   | 'scores_updated'
+  | 'reembed_progress'
+
+// `reembed_progress` payload: the status's `reembed`, null when a pass ends.
+export interface TasteReembedEvent {
+  reembed: TasteReembed | null
+}
 
 // GET /api/taste/writer-stats: pass rate (✓ out of ✓ + ✗) among GRADED
 // generations per writer per 14-day window (by generation date, UTC), plus

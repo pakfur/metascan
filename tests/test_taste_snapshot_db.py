@@ -203,8 +203,7 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     assert json.loads(t["categories"]) == ["Sci-Fi"]
     assert t["confirmed_at"] == T1.isoformat()
     assert t["judged_at"] == T1.isoformat()
-    assert t["embedding_model"] == "clip-small"
-    assert np.array_equal(np.frombuffer(t["embedding"], dtype=np.float32), vec)
+    assert db.get_tombstone_vectors(t["id"]) == {"clip-small": vec.tobytes()}
 
 
 def test_restore_without_tombstones_flag_writes_none(db):

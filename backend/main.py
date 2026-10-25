@@ -51,6 +51,11 @@ from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
 from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import apply_pending_taste_snapshot
+from backend.services.tombstone_reembed import (
+    TombstoneReembedder,
+    reembed_blocked,
+    reembed_model_key,
+)
 from backend.ws.manager import ws_manager
 from metascan.core.inference_client import InferenceClient
 from metascan.core.prompt_store import get_prompt_store
@@ -362,6 +367,76 @@ async def _uninstall_training(manager: TrainingManager) -> None:
     set_gpu_reservation(None)
 
 
+def _build_reembedder(
+    *,
+    client: InferenceClient,
+    taste_runner: TasteRunner,
+    taste_service: TasteService,
+    t2i_runner: Any,
+    comfy_client: Any,
+) -> TombstoneReembedder:
+    """Wire the tombstone re-embedder (backend/services/tombstone_reembed.py)
+    to the live services.
+
+    Deleted graded images need a CLIP vector for the index's model (the
+    scorer and the pass diversity read no other): after a CLIP switch, or
+    when one was deleted with the index out of memory, it is computed from
+    the archived thumbnail through the live CLIP worker, only while no
+    writer training, generation or index build wants the GPU. New vectors
+    make the scorer due for a retrain; progress is the taste status's
+    ``reembed`` and the ``taste`` channel's ``reembed_progress``."""
+
+    def model_key() -> Optional[str]:
+        # Both read files: the re-embedder calls this in a worker thread.
+        return reembed_model_key(
+            taste_runner.index_model_key(), similarity.clip_worker_settings()[0]
+        )
+
+    reembedder = TombstoneReembedder(
+        get_db(),
+        client_factory=lambda: client,
+        model_key_provider=model_key,
+        blocked=lambda: reembed_blocked(
+            t2i_runner, comfy_client, similarity.is_indexing
+        ),
+        on_done=lambda n_added: taste_service.mark_due("reembed"),
+        device_provider=lambda: similarity.clip_worker_settings()[1],
+        on_progress=lambda progress: ws_manager.broadcast_sync(
+            "taste", "reembed_progress", {"reembed": progress}
+        ),
+    )
+    taste_service.set_reembed_status(reembedder.status)
+    return reembedder
+
+
+def _after_embedding_run(
+    taste_service: TasteService, reembedder: TombstoneReembedder
+) -> Callable[[], None]:
+    """The embedding-complete hook: rescore with the taste scorer, then look
+    for deleted images missing a vector for the (maybe new) index. It runs
+    on the embedding poller's worker thread, so both only schedule work;
+    a failed first never skips the second."""
+
+    def hook() -> None:
+        try:
+            taste_service.schedule_rescore_threadsafe()
+        except Exception:
+            logger.exception("Scheduling the taste rescore failed")
+        reembedder.notify()
+
+    return hook
+
+
+async def _close_reembedder(
+    reembedder: TombstoneReembedder, taste_service: TasteService
+) -> None:
+    try:
+        await reembedder.aclose()
+    except Exception:
+        logger.exception("Tombstone re-embedder shutdown raised")
+    taste_service.set_reembed_status(None)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Until now the server logged to the console only, so anything that
@@ -595,20 +670,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # queue writes; the service retrains in the background and rescores
     # new images after every embedding run (the hook fires on a worker
     # thread and only posts onto this loop).
+    taste_runner = TasteRunner(
+        get_db(),
+        index_dir=similarity.embedding_index_dir(),
+        work_dir=get_data_dir() / "taste",
+    )
     taste_service = TasteService(
         get_db(),
-        TasteRunner(
-            get_db(),
-            index_dir=similarity.embedding_index_dir(),
-            work_dir=get_data_dir() / "taste",
-        ),
+        taste_runner,
         get_config=lambda: get_taste_config(load_app_config()),
         is_indexing=similarity.is_indexing,
     )
     taste_service.attach_loop(asyncio.get_running_loop())
     taste_api.set_taste_service(taste_service)
-    similarity.set_embedding_complete_hook(taste_service.schedule_rescore_threadsafe)
+    # Deleted graded images missing a vector for the index's CLIP model get
+    # one from their archived thumbnail when the GPU is free.
+    reembedder = _build_reembedder(
+        client=client,
+        taste_runner=taste_runner,
+        taste_service=taste_service,
+        t2i_runner=t2i_runner,
+        comfy_client=comfy_client,
+    )
+    similarity.set_embedding_complete_hook(
+        _after_embedding_run(taste_service, reembedder)
+    )
     taste_service.start_retrain_loop()
+    # Once at startup: tombstones still without a vector for the model.
+    reembedder.notify()
 
     # Fresh T2I images need CLIP vectors before they can be scored: build
     # the index incrementally 15 s after the last ingest, once no
@@ -635,7 +724,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
-        # Pause the training worker first (its checkpoint resumes later).
+        # The re-embedder before training lets go of the GPU lock: its
+        # pending retry must not start CLIP in the middle of the shutdown.
+        await _close_reembedder(reembedder, taste_service)
+        # Then pause the training worker, before every other service (its
+        # checkpoint resumes later).
         await _uninstall_training(training_manager)
         # A running scorecard is interrupted (its missing briefs render on
         # the next start); before the T2I runner and ComfyUI go.

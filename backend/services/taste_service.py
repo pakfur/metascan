@@ -102,6 +102,12 @@ class TasteService:
         # Inputs of the last automatic run that did not produce a model;
         # the loop does not retry the same inputs every tick.
         self._failed_auto_inputs: Optional[Tuple[Any, ...]] = None
+        # Why the active model is due for a retrain whatever the event count
+        # (``mark_due``); cleared when a training run starts.
+        self._due_reasons: Set[str] = set()
+        # The tombstone re-embedder's progress (``TombstoneReembedder.status``),
+        # installed by the lifespan; reported as ``status()["reembed"]``.
+        self._reembed_status: Optional[Callable[[], Optional[Dict[str, Any]]]] = None
         self._rescoring = False
         self._rescore_pending = False
         self._closed = False
@@ -170,6 +176,38 @@ class TasteService:
             self._train_task is not None and not self._train_task.done()
         )
 
+    def mark_due(self, reason: str) -> None:
+        """Make the next auto-retrain check treat the model as due, without
+        waiting for ``RETRAIN_MIN_EVENTS`` new grades (still idle-gated, and
+        only when the labels suffice): the inputs changed under it -- e.g.
+        ``"reembed"``, deleted images got vectors for the current CLIP
+        model. A failed run's inputs and a "vectors" shortfall are
+        forgotten, as after an embedding run. The mark holds until a
+        training run starts (that run sees the new vectors). Call on the
+        server loop."""
+        self._due_reasons.add(str(reason))
+        self._failed_auto_inputs = None
+        self._vector_missing = None
+        logger.info("Taste scorer due for retraining (%s)", reason)
+
+    def set_reembed_status(
+        self, source: Optional[Callable[[], Optional[Dict[str, Any]]]]
+    ) -> None:
+        """Install (or clear) what ``status()["reembed"]`` reports: the
+        tombstone re-embedder's ``{running, done, total}`` or None."""
+        self._reembed_status = source
+
+    def _reembed(self) -> Optional[Dict[str, Any]]:
+        source = self._reembed_status
+        if source is None:
+            return None
+        try:
+            progress = source()
+        except Exception:
+            logger.debug("reading the re-embed progress failed", exc_info=True)
+            return None
+        return dict(progress) if progress else None
+
     async def _usable_model(self) -> Optional[Dict[str, Any]]:
         """The active model, or None when there is none or it is stale."""
         model: Optional[Dict[str, Any]] = await asyncio.to_thread(
@@ -230,6 +268,10 @@ class TasteService:
             "missing_reason": missing_reason,
             "auto_retrain": await self._auto_retrain(),
             "last_error": last_error,
+            # Deleted graded images being given vectors for the current CLIP
+            # model: {running, done, total}, running False while paused for
+            # the GPU; None when there is nothing to do.
+            "reembed": self._reembed(),
         }
 
     async def scores(self, file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -311,6 +353,7 @@ class TasteService:
             raise TrainConflict("already_training")
         # This run sees every vector there is now.
         self._embedding_ran = False
+        self._due_reasons.clear()
         self._train_task = asyncio.create_task(self._run_training(auto_inputs))
 
     async def _run_training(self, auto_inputs: Optional[Tuple[Any, ...]]) -> None:
@@ -381,12 +424,14 @@ class TasteService:
         )
         under_vectored = self._embedding_ran and self._under_vectored(model)
         outdated = self._labels_outdated(model)
+        marked = sorted(self._due_reasons)
         count, newest = await asyncio.to_thread(self._events_since, model)
-        # No model yet, or one trained under older label rules: train as
-        # soon as the labels suffice (checked below), without waiting for
-        # RETRAIN_MIN_EVENTS grade events (grades the v6 migration made
-        # from the old ratings have none).
-        due = model is None or stale or under_vectored or outdated
+        # No model yet, one trained under older label rules, or one marked
+        # due (new tombstone vectors): train as soon as the labels suffice
+        # (checked below), without waiting for RETRAIN_MIN_EVENTS grade
+        # events (grades the v6 migration made from the old ratings have
+        # none).
+        due = model is None or stale or under_vectored or outdated or bool(marked)
         if not due and count < RETRAIN_MIN_EVENTS:
             return False
         if newest is not None:
@@ -410,11 +455,12 @@ class TasteService:
             return False
         logger.info(
             "Auto-retraining the taste scorer (%d new events, stale=%s, "
-            "under_vectored=%s, labels_outdated=%s)",
+            "under_vectored=%s, labels_outdated=%s, marked=%s)",
             count,
             stale,
             under_vectored,
             outdated,
+            ",".join(marked) or "-",
         )
         return True
 

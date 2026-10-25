@@ -66,6 +66,8 @@ def test_status_without_model(client):
     assert body["auto_retrain"] is True
     assert body["last_error"] is None
     assert body["labels_outdated"] is False
+    # No deleted images being re-embedded for the CLIP model.
+    assert body["reembed"] is None
 
 
 def test_status_with_model(client, db, fake_runner):
