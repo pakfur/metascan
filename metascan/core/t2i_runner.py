@@ -706,7 +706,7 @@ class T2iRunner:
         # Snippet lists for caption directions; None turns directions off.
         self.directions = directions
         self.library = library
-        # Favorite prompts for the "base+taste" writer; None means guidance
+        # ✓ prompts for the "base+taste" writer; None means guidance
         # is unavailable (a step warning says so and the writer is "base").
         self.taste_examples = taste_examples
         self.output_root = Path(output_root)
@@ -1004,7 +1004,7 @@ class T2iRunner:
         without one; its variants differ by sampling), and an ``all``-scope
         adapter gets a ``CATEGORIES`` line naming ``category_ids`` -- the
         user turn it was trained on.
-        ``writer = base+taste`` adds the owner's favorite prompts as examples
+        ``writer = base+taste`` adds the owner's ✓ prompts as examples
         (fetched once for all variants); when none can be had the drafts are
         ``base`` and a warning says why. ``writer = adapter:<id>`` writes
         with that adapter applied, without examples (409 when it cannot be

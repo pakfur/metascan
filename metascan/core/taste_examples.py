@@ -4,10 +4,10 @@
   prompt store: variant ``k`` (k >= 1) of a caption leads with angle ``k-1``.
 * :func:`matches_model_family` decides whether a library item's metadata
   model names belong to a ``MODEL_PROFILES`` entry, so the "base+taste" writer
-  only shows the VLM favorite prompts written in the target model's dialect.
+  only shows the VLM ✓ prompts written in the target model's dialect.
 * :func:`truncate_example` bounds one example's length.
 
-Model-family rule (used by ``DatabaseManager.favorite_prompt_candidates``):
+Model-family rule (used by ``DatabaseManager.pass_prompt_candidates``):
 an item rendered by the T2I dialog (a ``t2i_images`` row with a ``model``)
 matches only when that column equals the profile id. Any other item matches
 when one of its metadata model names (lower-cased) contains one of the

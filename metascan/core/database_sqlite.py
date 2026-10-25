@@ -244,6 +244,30 @@ def _idempotent_add_column(
         raise
 
 
+def _index_columns(ddl: str) -> List[str]:
+    """The column names of a ``CREATE INDEX ... ON table(a, b)`` statement."""
+    start, end = ddl.find("(") + 1, ddl.rfind(")")
+    return [part.split()[0] for part in ddl[start:end].split(",") if part.strip()]
+
+
+def _ensure_index(
+    conn: sqlite3.Connection, name: str, table: str, columns: Sequence[str]
+) -> None:
+    """``CREATE INDEX IF NOT EXISTS name ON table(columns)``, first dropping
+    an index of that name built on other columns (one that gained a column
+    since, e.g. to keep covering a query), so it is rebuilt as declared.
+    ``DROP ... IF EXISTS``: two inits may race here (see
+    ``_idempotent_add_column``)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (name,),
+    ).fetchone()
+    if row is not None and _index_columns(str(row[0] or "")) != list(columns):
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+        logger.info("Rebuilding index %s on %s(%s)", name, table, ", ".join(columns))
+    conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({', '.join(columns)})")
+
+
 # Format of the full-clean taste snapshot (``export_taste_state``): 2 = each
 # judgment row carries its ``grade``. A file without a ``version`` key was
 # written before grades, with the old meaning (``passed = 1`` a reject, a
@@ -1510,9 +1534,15 @@ class DatabaseManager:
                 "grade",
                 f"ALTER TABLE media_judgments ADD COLUMN {_grade_ddl}",
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_media_judgments_grade "
-                "ON media_judgments(grade)"
+            # (grade, file_path) covers every "which paths are ✓" read --
+            # pass_prompt_candidates (per guided write) and the hindsight
+            # briefs job -- from the index alone (CLAUDE.md's covering-index
+            # rule). An index built before file_path joined it is rebuilt.
+            _ensure_index(
+                conn,
+                "idx_media_judgments_grade",
+                "media_judgments",
+                ("grade", "file_path"),
             )
             # judged_at is the deleted judgment row's (when its grade was
             # last set; NULL on tombstones written before the column): the
@@ -6258,19 +6288,29 @@ class DatabaseManager:
 
         return is_image_path(path)
 
-    def favorite_prompt_candidates(
+    # The ✓ images among a list of paths, answered from the (grade,
+    # file_path) index alone (covering: no table row, and never the media
+    # table, whose data blob sits before every column).
+    _PASS_PATHS_SQL: ClassVar[str] = (
+        "SELECT file_path FROM media_judgments "
+        "INDEXED BY idx_media_judgments_grade "
+        "WHERE grade = 'pass' AND file_path IN ({marks})"
+    )
+
+    def pass_prompt_candidates(
         self, paths: List[str], model_id: Optional[str] = None
     ) -> Dict[str, str]:
-        """``{posix_path: prompt}`` for the favorited images among ``paths``
-        whose prompt is known: ``t2i_images.prompt_used`` first, else the
-        library metadata prompt. Videos and blank prompts are left out.
+        """``{posix_path: prompt}`` for the ✓ images (grade ``pass``; ★ and
+        views never count) among ``paths`` whose prompt is known:
+        ``t2i_images.prompt_used`` first, else the library metadata prompt.
+        Videos and blank prompts are left out.
 
         With ``model_id`` (a ``MODEL_PROFILES`` id) only items of that model
         family are kept; the rule is ``taste_examples.matches_model_family``'s
-        module docstring. Cheap by construction: ``is_favorite`` is read from
-        the covering summary index (the ``data`` blob sits before it in the
-        row), and ``data`` is opened only for favorited library items that
-        have no T2I prompt. Callers pass a bounded list (a FAISS top-k)."""
+        module docstring. Cheap by construction: the grades come from the
+        covering ``idx_media_judgments_grade`` (``_PASS_PATHS_SQL``), and
+        ``data`` is opened only for ✓ library items that have no T2I
+        prompt. Callers pass a bounded list (a FAISS top-k)."""
         from metascan.core.taste_examples import matches_model_family
 
         wanted = list(
@@ -6286,29 +6326,26 @@ class DatabaseManager:
             for start in range(0, len(wanted), chunk):
                 part = wanted[start : start + chunk]
                 marks = ",".join("?" * len(part))
-                favorites = [
+                pass_paths = [
                     r["file_path"]
                     for r in conn.execute(
-                        "SELECT file_path FROM media "
-                        "INDEXED BY idx_media_summary_added "
-                        f"WHERE is_favorite = 1 AND file_path IN ({marks})",
-                        part,
+                        self._PASS_PATHS_SQL.format(marks=marks), part
                     )
                 ]
-                if not favorites:
+                if not pass_paths:
                     continue
-                fmarks = ",".join("?" * len(favorites))
+                fmarks = ",".join("?" * len(pass_paths))
                 t2i: Dict[str, Tuple[Optional[str], Optional[str]]] = {
                     r["file_path"]: (r["model"], r["prompt_used"])
                     for r in conn.execute(
                         "SELECT file_path, model, prompt_used FROM t2i_images "
                         f"WHERE file_path IN ({fmarks})",
-                        favorites,
+                        pass_paths,
                     )
                 }
                 # Metadata model names, only where no T2I row names the model.
                 models: Dict[str, List[str]] = {}
-                unnamed = [p for p in favorites if not t2i.get(p, (None, None))[0]]
+                unnamed = [p for p in pass_paths if not t2i.get(p, (None, None))[0]]
                 if model_id is not None and unnamed:
                     umarks = ",".join("?" * len(unnamed))
                     for r in conn.execute(
@@ -6326,7 +6363,7 @@ class DatabaseManager:
                         return t2i_model == model_id
                     return matches_model_family(models.get(path, []), model_id)
 
-                kept = [p for p in favorites if family_ok(p)]
+                kept = [p for p in pass_paths if family_ok(p)]
                 need = [
                     p for p in kept if not (t2i.get(p, (None, None))[1] or "").strip()
                 ]
@@ -7429,14 +7466,16 @@ class DatabaseManager:
 
     def writer_dataset_raw(self, candidates: bool = False) -> Dict[str, Any]:
         """Raw rows for ``writer_dataset.build_examples`` (no filtering
-        beyond shape; the rules live there):
+        beyond shape; the rules live there). Grades are the only label, so
+        no row carries ★, a view time or the pre-grades reject flag:
 
         * ``categories``: ``{id: name}``.
         * ``generations``: one dict per T2I image -- live rows (JOINed to
           media) and, for paths no longer live, the newest tombstone whose
           lineage carries a ``t2i`` row. Keys: ``file_path``, ``live``, the
-          lineage columns (``_DATASET_LINEAGE_COLS``), ``is_favorite``,
-          ``passed``, ``seen_at``, ``judged_at`` (a tombstone's
+          lineage columns (``_DATASET_LINEAGE_COLS``), ``grade`` (``'pass'``
+          / ``'fail'`` / None), ``judged_at`` (when the grade was last set
+          or cleared; a tombstone from before tombstones kept it gives its
           ``confirmed_at``), ``category_ids`` and ``category_names`` (every
           link source), ``prompt_categories`` (the stored names the prompt
           was written for, parsed; None when absent) and
@@ -7444,12 +7483,12 @@ class DatabaseManager:
           ``source = 'generation'`` links; a tombstone's stored names).
           Malformed tombstones are skipped with one WARNING (count only).
         * ``briefs``: ``{path: {brief, model, created_at}}``.
-        * ``library``: favorited images that have a brief but no live T2I
-          row (with ``candidates=True``: every favorited image without a
-          live T2I row, briefed or not -- what the hindsight-briefs job
-          selects from): ``{path: {prompt, model_names, judged_at, seen_at,
-          category_ids, category_names, generation_categories}}`` (prompt
-          from the metadata blob).
+        * ``library``: ✓ images that have a brief but no live T2I row (with
+          ``candidates=True``: every ✓ image without a live T2I row,
+          briefed or not -- what the hindsight-briefs job selects from):
+          ``{path: {prompt, model_names, grade, judged_at, category_ids,
+          category_names, generation_categories}}`` (prompt from the
+          metadata blob, read for those paths only).
         """
         cols = self._DATASET_LINEAGE_COLS
         with self.lock, self._get_connection() as conn:
@@ -7475,17 +7514,17 @@ class DatabaseManager:
 
             generations: Dict[str, Dict[str, Any]] = {}
             select = ", ".join(f"g.{c}" for c in cols)
+            # No media column is read: the JOIN only proves the image is
+            # live (answered from media's primary-key index).
             for r in conn.execute(
-                f"SELECT g.file_path, {select}, m.is_favorite, j.passed, "
-                "j.seen_at, j.judged_at FROM t2i_images g "
+                f"SELECT g.file_path, {select}, j.grade, j.judged_at "
+                "FROM t2i_images g "
                 "JOIN media m ON m.file_path = g.file_path "
                 "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
             ):
                 d = dict(r)
                 d["live"] = True
                 d["prompt_categories"] = self._name_list(d["prompt_categories"])
-                d["is_favorite"] = bool(d["is_favorite"])
-                d["passed"] = bool(d["passed"])
                 ids = links.get(d["file_path"], [])
                 d["category_ids"] = list(ids)
                 d["category_names"] = names_of(ids)
@@ -7493,9 +7532,13 @@ class DatabaseManager:
                 generations[d["file_path"]] = d
             live = set(generations)
             malformed = 0
+            # judged_at as the live row had it, so deleting an image never
+            # moves its example's as_of; a tombstone written before the
+            # column has only confirmed_at.
             for r in conn.execute(
-                "SELECT id, file_path, is_favorite, passed, seen_at, "
-                "confirmed_at, categories, lineage FROM media_tombstones "
+                "SELECT id, file_path, grade, "
+                "COALESCE(judged_at, confirmed_at) AS judged_at, "
+                "categories, lineage FROM media_tombstones "
                 "WHERE lineage IS NOT NULL AND json_valid(lineage) "
                 "AND json_type(lineage, '$.t2i') = 'object' ORDER BY id"
             ):
@@ -7516,10 +7559,8 @@ class DatabaseManager:
                 for c in cols:
                     d[c] = gen.get(c)
                 d["prompt_categories"] = self._name_list(d["prompt_categories"])
-                d["is_favorite"] = bool(r["is_favorite"])
-                d["passed"] = bool(r["passed"])
-                d["seen_at"] = r["seen_at"]
-                d["judged_at"] = r["confirmed_at"]
+                d["grade"] = r["grade"]
+                d["judged_at"] = r["judged_at"]
                 d["category_names"] = [str(n) for n in names]
                 d["category_ids"] = [
                     by_name[str(n).lower()] for n in names if str(n).lower() in by_name
@@ -7541,23 +7582,28 @@ class DatabaseManager:
             }
             library: Dict[str, Dict[str, Any]] = {}
             if candidates:
+                # ✓ images (a judgment row implies a live media row: FK),
+                # from the (grade, file_path) index.
                 others = [
                     r["file_path"]
                     for r in conn.execute(
-                        "SELECT file_path FROM media WHERE is_favorite = 1"
+                        "SELECT file_path FROM media_judgments WHERE grade = 'pass'"
                     )
-                    if r["file_path"] not in live
                 ]
             else:
-                others = [p for p in briefs if p not in live]
+                others = list(briefs)
+            # Images without a live T2I row only; the data blob is opened
+            # for the ✓ ones among them alone.
+            others = [p for p in others if p not in live and self._is_image_path(p)]
             for start in range(0, len(others), 500):
                 part = others[start : start + 500]
                 marks = ",".join("?" * len(part))
                 for r in conn.execute(
-                    "SELECT m.file_path, json_extract(m.data, '$.prompt') AS prompt, "
-                    "j.seen_at, j.judged_at FROM media m "
-                    "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
-                    f"WHERE m.is_favorite = 1 AND m.file_path IN ({marks})",
+                    "SELECT j.file_path, j.grade, j.judged_at, "
+                    "json_extract(m.data, '$.prompt') AS prompt "
+                    "FROM media_judgments j "
+                    "JOIN media m ON m.file_path = j.file_path "
+                    f"WHERE j.grade = 'pass' AND j.file_path IN ({marks})",
                     part,
                 ):
                     ids = links.get(r["file_path"], [])
@@ -7566,7 +7612,7 @@ class DatabaseManager:
                         "generation_categories": names_of(gen_ids),
                         "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
                         "model_names": [],
-                        "seen_at": r["seen_at"],
+                        "grade": r["grade"],
                         "judged_at": r["judged_at"],
                         "category_ids": list(ids),
                         "category_names": [

@@ -48,7 +48,7 @@ export function fetchDatasetPreview(scope = 'all'): Promise<DatasetPreview> {
   return get<DatasetPreview>(`/writers/dataset/preview?scope=${encodeURIComponent(scope)}`)
 }
 
-/** Write hindsight briefs for favorites without one (202; progress on WS). */
+/** Write hindsight briefs for ✓ images without one (202; progress on WS). */
 export function runBriefs(): Promise<{ status: string }> {
   return post<{ status: string }>('/writers/briefs/run')
 }

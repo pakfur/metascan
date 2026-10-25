@@ -54,15 +54,24 @@ def _add(
     *,
     prompt: Optional[str] = None,
     model: Any = (),
-    favorite: bool = True,
+    grade: Optional[str] = "pass",
+    favorite: bool = False,
+    seen: bool = False,
     t2i_model: Optional[str] = None,
     prompt_used: Optional[str] = None,
 ) -> None:
+    """A library item, ✓ by default (``grade=None`` leaves it ungraded);
+    ``favorite`` / ``seen`` star and view it, which never makes an
+    example."""
     db.save_media(_media(path, prompt, model))
     if t2i_model is not None or prompt_used is not None:
         db.create_t2i_image(file_path=path, model=t2i_model, prompt_used=prompt_used)
+    if seen:
+        assert db.mark_seen(path) is not None
     if favorite:
         assert db.set_favorite(Path(path), True)
+    if grade is not None:
+        assert db.set_grade(path, grade) is not None
 
 
 class FakeIndex:
@@ -135,9 +144,9 @@ def db(tmp_path: Path) -> DatabaseManager:
 LONG = "SYNTH-LONG " + "word " * 300
 
 RANKED = [
-    "/lib/notfav.png",  # best match, but not a favorite
-    "/lib/clip.mp4",  # favorited video
-    "/lib/noprompt.png",  # favorited, no known prompt
+    "/lib/notpass.png",  # best match, but ★ only (no grade)
+    "/lib/clip.mp4",  # ✓ video
+    "/lib/noprompt.png",  # ✓, no known prompt
     "/lib/t2i_a.png",  # t2i prompt wins over the metadata prompt
     "/lib/lib_b.png",  # library metadata prompt
     "/lib/long.png",  # truncated
@@ -149,10 +158,11 @@ RANKED = [
 def svc_fake_index(db: DatabaseManager) -> Tuple[TasteExamplesService, FakeIndex]:
     _add(
         db,
-        "/lib/notfav.png",
-        prompt="SYNTH-NOTFAV",
+        "/lib/notpass.png",
+        prompt="SYNTH-NOTPASS",
         model=["krea2_dev"],
-        favorite=False,
+        grade=None,
+        favorite=True,
     )
     _add(db, "/lib/clip.mp4", prompt="SYNTH-VIDEO", model=["krea2_dev"])
     _add(db, "/lib/noprompt.png", prompt=None, model=["krea2_dev"])
@@ -229,9 +239,9 @@ def test_model_family_matching() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_favorite_prompt_candidates(db: DatabaseManager) -> None:
+def test_pass_prompt_candidates(db: DatabaseManager) -> None:
     _add(db, "/lib/a.png", prompt="SYNTH-A", model=["krea2_dev"])
-    _add(db, "/lib/b.png", prompt="SYNTH-B", model=["flux1"], favorite=False)
+    _add(db, "/lib/b.png", prompt="SYNTH-B", model=["flux1"], grade=None)
     _add(db, "/lib/c.png", prompt="  ", model=["krea2_dev"])
     _add(
         db, "/lib/d.png", prompt="SYNTH-D-META", t2i_model="qwen", prompt_used="SYNTH-D"
@@ -239,17 +249,108 @@ def test_favorite_prompt_candidates(db: DatabaseManager) -> None:
     _add(db, "/lib/e.webm", prompt="SYNTH-E", model=["krea2_dev"])
     paths = ["/lib/a.png", "/lib/b.png", "/lib/c.png", "/lib/d.png", "/lib/e.webm"]
     paths.append("/lib/missing.png")
-    assert db.favorite_prompt_candidates(paths) == {
+    assert db.pass_prompt_candidates(paths) == {
         "/lib/a.png": "SYNTH-A",
         "/lib/d.png": "SYNTH-D",
     }
-    assert db.favorite_prompt_candidates(paths, model_id="krea2") == {
+    assert db.pass_prompt_candidates(paths, model_id="krea2") == {
         "/lib/a.png": "SYNTH-A"
     }
-    assert db.favorite_prompt_candidates(paths, model_id="qwen") == {
+    assert db.pass_prompt_candidates(paths, model_id="qwen") == {
         "/lib/d.png": "SYNTH-D"
     }
-    assert db.favorite_prompt_candidates([]) == {}
+    assert db.pass_prompt_candidates([]) == {}
+
+
+async def test_examples_are_passed_prompts(db: DatabaseManager) -> None:
+    # Only a ✓ image's prompt guides the writer: ★ alone, ✗ (★ or not), a
+    # view alone and no grade at all never do.
+    krea = ["krea2_dev"]
+    _add(
+        db, "/lib/star.png", prompt="SYNTH-STAR", model=krea, grade=None, favorite=True
+    )
+    _add(
+        db,
+        "/lib/starfail.png",
+        prompt="SYNTH-STARFAIL",
+        model=krea,
+        grade="fail",
+        favorite=True,
+    )
+    _add(db, "/lib/fail.png", prompt="SYNTH-FAIL", model=krea, grade="fail")
+    _add(db, "/lib/seen.png", prompt="SYNTH-SEEN", model=krea, grade=None, seen=True)
+    _add(db, "/lib/none.png", prompt="SYNTH-NONE", model=krea, grade=None)
+    _add(db, "/lib/cleared.png", prompt="SYNTH-CLEARED", model=krea)
+    assert db.set_grade("/lib/cleared.png", None) is not None
+    _add(db, "/lib/pass.png", prompt="SYNTH-PASS", model=krea)
+    _add(db, "/lib/starpass.png", prompt="SYNTH-STARPASS", model=krea, favorite=True)
+    _add(db, "/lib/t2i.png", t2i_model="krea2", prompt_used="SYNTH-T2I-PASS")
+    _add(
+        db,
+        "/lib/t2ifail.png",
+        t2i_model="krea2",
+        prompt_used="SYNTH-T2I-FAIL",
+        grade="fail",
+    )
+    ranked = [
+        "/lib/star.png",
+        "/lib/starfail.png",
+        "/lib/fail.png",
+        "/lib/seen.png",
+        "/lib/none.png",
+        "/lib/cleared.png",
+        "/lib/pass.png",
+        "/lib/t2ifail.png",
+        "/lib/starpass.png",
+        "/lib/t2i.png",
+    ]
+    assert db.pass_prompt_candidates(ranked) == {
+        "/lib/pass.png": "SYNTH-PASS",
+        "/lib/starpass.png": "SYNTH-STARPASS",
+        "/lib/t2i.png": "SYNTH-T2I-PASS",
+    }
+    examples, warning = await _svc(db, FakeIndex(ranked), FakeClient()).examples_for(
+        CAPTION, "krea2"
+    )
+    assert warning is None
+    assert examples == ["SYNTH-PASS", "SYNTH-STARPASS", "SYNTH-T2I-PASS"]
+
+
+def _grade_index_sql(db: DatabaseManager) -> str:
+    with db._get_connection() as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'idx_media_judgments_grade'"
+        ).fetchone()
+    assert row is not None
+    return str(row["sql"])
+
+
+def test_pass_candidates_come_from_a_covering_index(db: DatabaseManager) -> None:
+    # The media table is never read to find the ✓ paths (its data blob sits
+    # before every column): the (grade, file_path) index answers it alone.
+    assert "file_path" in _grade_index_sql(db)
+    sql = DatabaseManager._PASS_PATHS_SQL.format(marks="?, ?")
+    with db._get_connection() as conn:
+        plan = " | ".join(
+            r["detail"]
+            for r in conn.execute("EXPLAIN QUERY PLAN " + sql, ["/a.png", "/b.png"])
+        )
+    assert "COVERING INDEX idx_media_judgments_grade" in plan, plan
+    assert "media_judgments" in plan and " media " not in f" {plan} ", plan
+
+
+def test_an_older_grade_index_is_rebuilt_with_the_path(tmp_path: Path) -> None:
+    first = DatabaseManager(tmp_path / "db")
+    _add(first, "/lib/a.png", prompt="SYNTH-A", model=["krea2_dev"])
+    with first._get_connection() as conn:
+        conn.execute("DROP INDEX idx_media_judgments_grade")
+        conn.execute("CREATE INDEX idx_media_judgments_grade ON media_judgments(grade)")
+        conn.commit()
+    assert "file_path" not in _grade_index_sql(first)
+    again = DatabaseManager(tmp_path / "db")
+    assert "file_path" in _grade_index_sql(again)
+    assert again.pass_prompt_candidates(["/lib/a.png"]) == {"/lib/a.png": "SYNTH-A"}
 
 
 # --------------------------------------------------------------------------
@@ -257,7 +358,7 @@ def test_favorite_prompt_candidates(db: DatabaseManager) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_examples_from_favorites_only(svc_fake_index: Any) -> None:
+async def test_examples_from_passed_images_only(svc_fake_index: Any) -> None:
     svc, index = svc_fake_index
     examples, warning = await svc.examples_for(CAPTION, "krea2")
     assert warning is None
@@ -268,7 +369,7 @@ async def test_examples_from_favorites_only(svc_fake_index: Any) -> None:
     assert examples[2].startswith("SYNTH-LONG word")
     assert len(examples[2]) <= TASTE_EXAMPLE_MAX_CHARS
     joined = "\n".join(examples)
-    for excluded in ("SYNTH-NOTFAV", "SYNTH-VIDEO", "SYNTH-META-A", "SYNTH-LIB-C"):
+    for excluded in ("SYNTH-NOTPASS", "SYNTH-VIDEO", "SYNTH-META-A", "SYNTH-LIB-C"):
         assert excluded not in joined
 
     two, _ = await svc.examples_for(CAPTION, "krea2", k=2)
@@ -289,12 +390,13 @@ async def test_duplicate_prompts_count_once(db: DatabaseManager) -> None:
 
 async def test_examples_model_family_filter(svc_fake_index: Any) -> None:
     svc, _ = svc_fake_index
-    # Nothing in the fixture is a Qwen-Image favorite.
+    # Nothing in the fixture is a ✓ Qwen-Image image.
     examples, warning = await svc.examples_for(CAPTION, "qwen")
     assert examples == []
-    assert warning is not None
-    assert warning.startswith("taste guidance unavailable: ")
-    assert "favorite" in warning
+    assert warning == (
+        "taste guidance unavailable: "
+        "no passed images with a known prompt match this caption"
+    )
 
 
 async def test_no_index_or_clip_degrades(db: DatabaseManager) -> None:
@@ -383,7 +485,7 @@ async def test_unexpected_error_degrades_without_prompt_text(
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(db, "favorite_prompt_candidates", _boom)
+    monkeypatch.setattr(db, "pass_prompt_candidates", _boom)
     caplog.set_level(logging.DEBUG)
     examples, warning = await _svc(
         db, FakeIndex(["/lib/a.png"]), FakeClient()

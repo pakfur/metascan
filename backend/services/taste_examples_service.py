@@ -1,14 +1,15 @@
 """Taste guidance for the T2I prompt writer ("base+taste").
 
 :meth:`TasteExamplesService.examples_for` finds up to ``k`` of the owner's
-own favorite prompts whose images sit closest, by CLIP, to a caption: the
-caption is encoded with the live inference worker (one bounded call, only
-when it is already READY -- a guided write never starts CLIP) and
-searched against the **in-memory** FAISS index only — the index is never
-loaded from disk under a request (``similarity._get_faiss_manager`` would).
+own ✓ prompts (images graded pass; ★ favorites and views never count) whose
+images sit closest, by CLIP, to a caption: the caption is encoded with the
+live inference worker (one bounded call, only when it is already READY -- a
+guided write never starts CLIP) and searched against the **in-memory**
+FAISS index only — the index is never loaded from disk under a request
+(``similarity._get_faiss_manager`` would).
 
 Every failure — no index, CLIP unavailable or slow, an index built with a
-different CLIP model, no matching favorite — yields ``([], warning)``; this
+different CLIP model, no matching ✓ image — yields ``([], warning)``; this
 never raises, so a guided write degrades to the unguided ``base`` writer.
 Captions, prompts and examples are never logged at INFO or above.
 """
@@ -83,7 +84,7 @@ class TasteExamplesService:
     async def examples_for(
         self, caption: str, target_model: str, k: int = TASTE_EXAMPLES_K
     ) -> Tuple[List[str], Optional[str]]:
-        """``(examples, warning)``: up to ``k`` favorite prompts (each at most
+        """``(examples, warning)``: up to ``k`` ✓ prompts (each at most
         ``TASTE_EXAMPLE_MAX_CHARS``) for ``caption``, best match first, or
         ``([], "taste guidance unavailable: <why>")``."""
         try:
@@ -100,7 +101,7 @@ class TasteExamplesService:
             )
             return [], f"{WARNING_PREFIX}internal error"
         if not examples:
-            reason = "no favorited images with a known prompt match this caption"
+            reason = "no passed images with a known prompt match this caption"
             logger.debug("%s%s", WARNING_PREFIX, reason)
             return [], f"{WARNING_PREFIX}{reason}"
         logger.debug("taste examples: %d for model %s", len(examples), target_model)
@@ -129,7 +130,7 @@ class TasteExamplesService:
         if not ranked:
             return []
         prompts = await asyncio.to_thread(
-            self.db.favorite_prompt_candidates, ranked, target_model
+            self.db.pass_prompt_candidates, ranked, target_model
         )
         if not prompts:
             return []

@@ -39,8 +39,7 @@ def store(tmp_path):
     return PromptStore(p)
 
 
-def _fav(db, tmp_path, name, *, writer="base", model="krea2", prompt="P", fav=True):
-    f = tmp_path / name
+def _save(db, f: Path) -> str:
     f.write_bytes(b"x")
     path = str(f)
     db.save_media(
@@ -54,6 +53,33 @@ def _fav(db, tmp_path, name, *, writer="base", model="krea2", prompt="P", fav=Tr
             modified_at=datetime.now(),
         )
     )
+    return path
+
+
+def _mark(db, path, *, grade, favorite=False, seen=False):
+    """✓ / ✗ ``grade`` (None: none); ★ and views never make a candidate."""
+    if seen:
+        assert db.mark_seen(path, NOW) is not None
+    if favorite:
+        assert db.set_favorite(Path(path), True)
+    if grade is not None:
+        assert db.set_grade(path, grade, None, NOW) is not None
+
+
+def _gen(
+    db,
+    tmp_path,
+    name,
+    *,
+    writer="base",
+    model="krea2",
+    prompt="P",
+    grade="pass",
+    favorite=False,
+    seen=False,
+):
+    """A T2I image, ✓ unless told otherwise."""
+    path = _save(db, tmp_path / name)
     db.create_t2i_image(
         file_path=path,
         model=model,
@@ -62,8 +88,25 @@ def _fav(db, tmp_path, name, *, writer="base", model="krea2", prompt="P", fav=Tr
         writer_id=writer,
         writer_model="qwen3vl-8b",
     )
-    if fav:
-        db.set_verdict(path, "favorite", None, NOW)
+    _mark(db, path, grade=grade, favorite=favorite, seen=seen)
+
+
+def _library(db, tmp_path, name, *, grade="pass", favorite=False):
+    """A library image (no T2I row) with a prompt and a known model family."""
+    path = _save(db, tmp_path / name)
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "UPDATE media SET data = json_set(data, '$.prompt', 'LIB') "
+            "WHERE file_path = ?",
+            (path,),
+        )
+        conn.execute(
+            "INSERT INTO indices (index_type, index_key, file_path) "
+            "VALUES ('model', 'krea2_dev.safetensors', ?)",
+            (path,),
+        )
+        conn.commit()
+    _mark(db, path, grade=grade, favorite=favorite)
 
 
 class FakeClient:
@@ -128,12 +171,12 @@ def test_clean_brief():
 
 
 def test_writes_briefs_for_eligible_images_only(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
-    _fav(db, tmp_path, "b.png")
-    _fav(db, tmp_path, "notfav.png", fav=False)
-    _fav(db, tmp_path, "man.png", writer="manual")
-    _fav(db, tmp_path, "fb.png", writer="fallback")
-    _fav(db, tmp_path, "unk.png", model="mystery")
+    _gen(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "b.png")
+    _gen(db, tmp_path, "ungraded.png", grade=None)
+    _gen(db, tmp_path, "man.png", writer="manual")
+    _gen(db, tmp_path, "fb.png", writer="fallback")
+    _gen(db, tmp_path, "unk.png", model="mystery")
     client, events = FakeClient(), []
     job = _job(db, store, client, events)
     asyncio.run(_run(job))
@@ -152,9 +195,41 @@ def test_writes_briefs_for_eligible_images_only(db, store, tmp_path):
     assert job.status()["running"] is False
 
 
+def test_briefs_job_picks_passed_images_without_a_brief(db, store, tmp_path):
+    # The job briefs every ✓ image (T2I or library, ★ or not) that has no
+    # brief yet; ★ alone, ✗ (★ or not) and a view alone are no candidates.
+    _gen(db, tmp_path, "pass.png")
+    _gen(db, tmp_path, "starpass.png", favorite=True)
+    _gen(db, tmp_path, "briefed.png")
+    db.set_hindsight_brief(str(tmp_path / "briefed.png"), "existing", "m")
+    _gen(db, tmp_path, "star.png", grade=None, favorite=True)
+    _gen(db, tmp_path, "fail.png", grade="fail")
+    _gen(db, tmp_path, "starfail.png", grade="fail", favorite=True)
+    _gen(db, tmp_path, "seen.png", grade=None, seen=True)
+    _library(db, tmp_path, "lib_pass.png")
+    _library(db, tmp_path, "lib_star.png", grade=None, favorite=True)
+    _library(db, tmp_path, "lib_fail.png", grade="fail")
+    client, events = FakeClient(), []
+    asyncio.run(_run(_job(db, store, client, events)))
+    assert sorted(c["image_path"].name for c in client.calls) == [
+        "lib_pass.png",
+        "pass.png",
+        "starpass.png",
+    ]
+    progress = [d for _, ev, d in events if ev == "briefs_progress"]
+    assert progress[0] == {"done": 1, "total": 4}
+    assert progress[-1] == {"done": 4, "total": 4}
+    assert sorted(Path(p).name for p in db.get_hindsight_briefs()) == [
+        "briefed.png",
+        "lib_pass.png",
+        "pass.png",
+        "starpass.png",
+    ]
+
+
 def test_resumable_skips_briefed(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
-    _fav(db, tmp_path, "b.png")
+    _gen(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "b.png")
     db.set_hindsight_brief(str(tmp_path / "a.png"), "existing", "m")
     client, events = FakeClient(), []
     asyncio.run(_run(_job(db, store, client, events)))
@@ -170,7 +245,7 @@ def test_resumable_skips_briefed(db, store, tmp_path):
 
 
 def test_nothing_pending_finishes_without_vlm(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     db.set_hindsight_brief(str(tmp_path / "a.png"), "x", "m")
     client, events = FakeClient(), []
     asyncio.run(_run(_job(db, store, client, events)))
@@ -180,7 +255,7 @@ def test_nothing_pending_finishes_without_vlm(db, store, tmp_path):
 
 def test_cancel_keeps_finished_briefs(db, store, tmp_path):
     for n in "abcd":
-        _fav(db, tmp_path, f"{n}.png")
+        _gen(db, tmp_path, f"{n}.png")
     client, events = FakeClient(), []
     job = _job(db, store, client, events)
     client.on_call = lambda i: job.cancel() if i == 2 else None
@@ -197,7 +272,7 @@ def test_cancel_keeps_finished_briefs(db, store, tmp_path):
 
 
 def test_only_one_job_at_a_time(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     client, events = FakeClient(), []
     job = _job(db, store, client, events)
 
@@ -212,7 +287,7 @@ def test_only_one_job_at_a_time(db, store, tmp_path):
 
 
 def test_waits_while_generation_is_busy(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     client, events = FakeClient(), []
     busy = {"n": 3}
 
@@ -227,7 +302,7 @@ def test_waits_while_generation_is_busy(db, store, tmp_path):
 
 
 def test_no_vlm_call_while_blocked_and_start_refused(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     client, events = FakeClient(), []
     gate = {"blocked": True}
     job = _job(db, store, client, events, blocked=lambda: gate["blocked"])
@@ -242,14 +317,18 @@ def test_no_vlm_call_while_blocked_and_start_refused(db, store, tmp_path):
 
     gate["blocked"] = False
     for n in "bcde":
-        _fav(db, tmp_path, f"{n}.png")
+        _gen(db, tmp_path, f"{n}.png")
     client.replies = lambda i, p: "a scene."
     client.delay = 0.03
 
     async def go():
         job.start()
-        while len(client.calls) < 1:
+        # Bounded: a job that finds no candidate must fail here, not hang.
+        for _ in range(2000):
+            if client.calls:
+                break
             await asyncio.sleep(0.005)
+        assert client.calls, "the job never asked the VLM"
         gate["blocked"] = True
         await asyncio.sleep(0.05)  # let any in-flight image finish
         frozen = len(client.calls)
@@ -267,7 +346,7 @@ def test_no_vlm_call_while_blocked_and_start_refused(db, store, tmp_path):
 
 def test_explicit_unload_mid_run_ends_job_without_restart(db, store, tmp_path):
     for n in "abc":
-        _fav(db, tmp_path, f"{n}.png")
+        _gen(db, tmp_path, f"{n}.png")
     client, events = FakeClient(), []
 
     def replies(i, path):
@@ -288,7 +367,7 @@ def test_explicit_unload_mid_run_ends_job_without_restart(db, store, tmp_path):
 def test_unload_before_start_is_not_overridden_after_wait(db, store, tmp_path):
     # A render unloads the VLM while we wait: the wait re-snapshots, so the
     # job restarts it (the render's own unload is behind us).
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     client, events = FakeClient(), []
     state = {"n": 2}
 
@@ -305,7 +384,7 @@ def test_unload_before_start_is_not_overridden_after_wait(db, store, tmp_path):
 
 def test_failures_skip_and_repeat_failures_abort(db, store, tmp_path):
     for n in "abcdefgh":
-        _fav(db, tmp_path, f"{n}.png")
+        _gen(db, tmp_path, f"{n}.png")
     client, events = FakeClient(), []
     client.replies = lambda i, path: "" if i == 1 else RuntimeError("boom")
     asyncio.run(_run(_job(db, store, client, events)))
@@ -323,7 +402,7 @@ def test_failures_skip_and_repeat_failures_abort(db, store, tmp_path):
 
 
 def test_brief_text_is_never_logged_at_info(db, store, tmp_path, caplog):
-    _fav(db, tmp_path, "a.png", prompt="SECRET-PROMPT")
+    _gen(db, tmp_path, "a.png", prompt="SECRET-PROMPT")
     client, events = FakeClient(), []
     client.replies = lambda i, p: "SECRET-BRIEF text."
     with caplog.at_level(logging.INFO):
@@ -332,33 +411,7 @@ def test_brief_text_is_never_logged_at_info(db, store, tmp_path, caplog):
 
 
 def test_library_item_with_known_family_is_a_candidate(db, store, tmp_path):
-    f = tmp_path / "lib.png"
-    f.write_bytes(b"x")
-    path = str(f)
-    db.save_media(
-        Media(
-            file_path=f,
-            file_size=1,
-            width=1,
-            height=1,
-            format="png",
-            created_at=datetime.now(),
-            modified_at=datetime.now(),
-        )
-    )
-    with db.lock, db._get_connection() as conn:
-        conn.execute(
-            "UPDATE media SET data = json_set(data, '$.prompt', 'LIB') "
-            "WHERE file_path = ?",
-            (path,),
-        )
-        conn.execute(
-            "INSERT INTO indices (index_type, index_key, file_path) "
-            "VALUES ('model', 'krea2_dev.safetensors', ?)",
-            (path,),
-        )
-        conn.commit()
-    db.set_verdict(path, "favorite", None, NOW)
+    _library(db, tmp_path, "lib.png")
     client, events = FakeClient(), []
     asyncio.run(_run(_job(db, store, client, events)))
     assert len(db.get_hindsight_briefs()) == 1
@@ -393,7 +446,7 @@ def api(db, store, tmp_path):
 
 def test_routes_run_status_cancel(db, api, tmp_path):
     c, job, client, events = api
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     assert c.get("/api/writers/briefs/status").json()["running"] is False
     assert c.post("/api/writers/briefs/cancel").json() == {"status": "idle"}
     resp = c.post("/api/writers/briefs/run")
@@ -461,8 +514,8 @@ def test_clean_brief_rejects_the_prompt_example():
 
 def test_junk_and_echoed_example_are_not_stored(db, store, tmp_path):
     store._prompts["HINDSIGHT_BRIEF_SYSTEM"] = 'e.g. "a fox in snow".'
-    _fav(db, tmp_path, "a.png")
-    _fav(db, tmp_path, "b.png")
+    _gen(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "b.png")
     client, events = FakeClient(), []
     client.replies = lambda i, p: "A fox in snow." if i == 1 else "Here is it:"
     asyncio.run(_run(_job(db, store, client, events)))
@@ -471,7 +524,7 @@ def test_junk_and_echoed_example_are_not_stored(db, store, tmp_path):
 
 
 def test_aclose_records_result_and_propagates_outer_cancel(db, store, tmp_path):
-    _fav(db, tmp_path, "a.png")
+    _gen(db, tmp_path, "a.png")
     client, events = FakeClient(), []
     job = _job(db, store, client, events, generation_busy=lambda: True)
 

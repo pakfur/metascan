@@ -88,9 +88,10 @@ class ParityCase(_T2iBase):
             paths.append(path)
         return paths
 
-    def judge(self, favorite: str, seen: str) -> None:
-        self.db.set_verdict(favorite, "favorite")
-        self.db.mark_seen(seen)
+    def judge(self, winner: str, loser: str) -> None:
+        """✓ the winner's image, ✗ the loser's (grades are the only label)."""
+        self.assertIsNotNone(self.db.set_grade(winner, "pass"))
+        self.assertIsNotNone(self.db.set_grade(loser, "fail"))
 
     def build(self, scope: str = "all") -> Any:
         return build_examples(
@@ -464,6 +465,11 @@ class TestLineageTravelsWithDrafts(LineageCase):
             )
         )
         await self.render_all()
+        # An edit trains only once one of its renders is ✓.
+        _, _, counts = self.build()
+        self.assertEqual(counts.edit_pairs, 0)
+        (edited,) = [r for r in self.db.list_t2i_images() if r["edited"]]
+        self.assertIsNotNone(self.db.set_grade(edited["file_path"], "pass"))
         sft, prefs, counts = self.build()
         self.assertEqual(counts.edit_pairs, 1)
         (edit,) = [p for p in prefs if p.source == "edit"]

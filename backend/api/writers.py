@@ -146,8 +146,8 @@ async def _delete_locked(adapter_id: int) -> None:
 
 @router.post("/briefs/run", status_code=202)
 async def run_briefs() -> Dict[str, Any]:
-    """Write a hindsight brief for every favorited generated image that has
-    none yet (resumable). 202; progress arrives on WS ``training``."""
+    """Write a hindsight brief for every ✓ (graded pass) image that has none
+    yet (resumable). 202; progress arrives on WS ``training``."""
     from backend.services.hindsight_briefs import BriefsJobError, get_briefs_job
 
     job = get_briefs_job()
