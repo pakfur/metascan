@@ -767,6 +767,8 @@ function formatSize(bytes: number): string {
         <RatingRail
           v-if="ratingEnabled"
           :judgment="railJudgment"
+          :fallback-favorite="current?.is_favorite ?? false"
+          :fallback-grade="current?.grade ?? null"
           :hint="hint"
           :sticky="stickyCategory"
           :score="railScore"
