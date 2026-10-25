@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional, Sequence
 from metascan.core.comfy_bindings import BindingError, resolve_bindings
 from metascan.core.i2v_form import form_state_for_row
 from metascan.core.i2v_templates import load_i2v_templates, summarize_i2v_template
+from metascan.core.training_archive import delete_generated
 
-from metascan.utils.trash import remove_files_to_trash
+from metascan.utils.trash import trash_file
 
 
 class I2vService:
@@ -89,7 +90,21 @@ class I2vService:
         return out
 
     async def delete_video(self, video_id: int) -> bool:
-        deleted, purged = await asyncio.to_thread(self.db.delete_i2v_video, video_id)
-        if deleted and purged:
-            await asyncio.to_thread(remove_files_to_trash, purged)
-        return deleted
+        """Delete one generated clip: the file goes to the OS trash (or is
+        unlinked) before the rows (``training_archive.delete_generated``;
+        a clip is a video, so nothing is archived). A file a storyboard
+        still uses is released, never trashed. A failed trash raises and
+        keeps the rows; False for an unknown clip."""
+
+        def run() -> bool:
+            row = self.db.get_i2v_video(video_id)
+            if row is None:
+                return False
+            return delete_generated(
+                self.db,
+                row["file_path"],
+                trash_file,
+                lambda thumbs: self.db.delete_i2v_video(video_id, thumbs),
+            )
+
+        return await asyncio.to_thread(run)

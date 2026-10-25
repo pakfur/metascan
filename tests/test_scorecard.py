@@ -548,6 +548,59 @@ def test_a_live_image_beats_its_tombstone(lib: Any) -> None:
     assert (out["n_pairs"], out["n_judged"], out["pass_base"]) == (2, 2, 1)
 
 
+def test_scorecard_tombstones_are_found_by_their_column(
+    lib: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ruling 15: a deleted scorecard image's tombstone records its
+    scorecard (``media_tombstones.scorecard_id``, indexed), and the results
+    select tombstones by it in SQL -- adapter and scorecard filters
+    included -- so a scorecard grade never parses another tombstone's
+    lineage under the DB lock."""
+    base, adapter = lib.pair(0)
+    plain = lib.image("base", "other", None)
+    for path, grade in ((base, "pass"), (adapter, "fail"), (plain, "pass")):
+        lib.db.set_grade(path, grade)
+        assert lib.db.delete_media(Path(path))
+    tombs = {t["file_path"]: t["scorecard_id"] for t in lib.db.list_tombstones()}
+    assert tombs == {base: lib.card, adapter: lib.card, plain: None}
+    with lib.db.lock, lib.db._get_connection() as conn:
+        # Not JSON and not a scorecard tombstone: never read.
+        conn.execute(
+            "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
+            "passed, reasons, grade, lineage) "
+            "VALUES ('/x/odd.png', 'now', 0, 0, '[]', 'pass', 'not json')"
+        )
+        # A scorecard tombstone whose lineage lost its image id: skipped,
+        # one WARNING carrying the count only.
+        conn.execute(
+            "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
+            "passed, reasons, grade, lineage, scorecard_id) "
+            "VALUES ('/x/broken.png', 'now', 0, 0, '[]', 'pass', ?, ?)",
+            (json.dumps({"t2i": {"writer_id": "base"}}), lib.card),
+        )
+        conn.commit()
+    with caplog.at_level(logging.WARNING):
+        rows = lib.db.scorecard_image_rows(lib.adapter)
+    assert [(r["tombstone"], r["grade"]) for r in rows] == [
+        (True, "pass"),
+        (True, "fail"),
+    ]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
+        "scorecard results: 1 tombstone(s) with a malformed lineage skipped"
+    ]
+    assert lib.db.scorecard_image_rows(lib.adapter + 1) == []
+    assert lib.db.scorecard_image_rows(None, "another-card") == []
+    assert len(lib.db.scorecard_image_rows(None, lib.card)) == 2
+    for args in ((None, None), (lib.adapter, None), (None, lib.card)):
+        sql, params = lib.db._scorecard_tombstones_sql(*args)
+        assert "json" not in sql.lower()
+        with lib.db.lock, lib.db._get_connection() as conn:
+            plan = " ".join(
+                str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)
+            )
+        assert "idx_media_tombstones_scorecard" in plan, plan
+
+
 async def test_untested_becomes_ready_at_30_judged_pairs_and_broadcasts(
     lib: Any,
 ) -> None:

@@ -5,7 +5,19 @@ import re
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Sequence, Set, Tuple, ClassVar, Callable
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 from contextlib import contextmanager
 import logging
 from datetime import datetime, timezone
@@ -1547,7 +1559,12 @@ class DatabaseManager:
             # judged_at is the deleted judgment row's (when its grade was
             # last set; NULL on tombstones written before the column): the
             # taste scorer bounds a migrated grade's legacy score_shown
-            # event by it, as it does for a live row.
+            # event by it, as it does for a live row. model_name holds a ✓
+            # library image's metadata model names (a JSON list, as its
+            # ``indices`` rows had them). scorecard_id is the lineage's
+            # ``t2i.scorecard_id`` (filled by _insert_tombstone, back-filled
+            # by _migrate_to_v6): scorecard results find deleted scorecard
+            # images by it instead of parsing every lineage.
             for _col, _ddl in (
                 ("grade", _grade_ddl),
                 ("judged_at", "judged_at TEXT"),
@@ -1556,6 +1573,7 @@ class DatabaseManager:
                 ("prompt", "prompt TEXT"),
                 ("model_name", "model_name TEXT"),
                 ("thumb_path", "thumb_path TEXT"),
+                ("scorecard_id", "scorecard_id TEXT"),
             ):
                 _idempotent_add_column(
                     conn,
@@ -1563,6 +1581,16 @@ class DatabaseManager:
                     _col,
                     f"ALTER TABLE media_tombstones ADD COLUMN {_ddl}",
                 )
+            # Partial indexes: only scorecard / archived tombstones are in
+            # them, so they stay tiny (every other lookup scans tombstones).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_tombstones_scorecard "
+                "ON media_tombstones(scorecard_id) WHERE scorecard_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_tombstones_thumb "
+                "ON media_tombstones(thumb_path) WHERE thumb_path IS NOT NULL"
+            )
             # A deleted item's CLIP vector, one per CLIP model (model_key as
             # the FAISS index names it). No FK: tombstones are never deleted.
             conn.execute(
@@ -1822,9 +1850,10 @@ class DatabaseManager:
                     _col,
                     f"ALTER TABLE t2i_images ADD COLUMN {_col} TEXT",
                 )
-            # The general VLM's short brief of a favorited image: the user
-            # turn of a writer-training "hindsight" example. Cascades with
-            # its media row (a deleted image yields no hindsight example).
+            # The general VLM's short brief of a ✓ image: the user turn of a
+            # writer-training "hindsight" example. Cascades with its media
+            # row; a delete first copies it onto the tombstone
+            # (media_tombstones.brief), which keeps the example.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS hindsight_briefs (
@@ -2257,7 +2286,10 @@ class DatabaseManager:
         ``passed = 1`` -- a *reject* -- gets 'fail'; every other row NULL
         (seen-only rows stay seen-only). Tombstones the same way. Every
         tombstone embedding is copied into ``tombstone_vectors`` under its
-        ``embedding_model``. Where an item is both favorite and passed, ★
+        ``embedding_model``, and every tombstone of a scorecard image gets
+        its lineage's ``t2i.scorecard_id`` in ``scorecard_id`` (what the
+        scorecard results select deleted images by). Where an item is
+        both favorite and passed, ★
         wins, as v5 read it (``_read_judgment``, the taste labels).
         Reasons, seen_at / judged_at / confirmed_at, ``passed`` and
         ``is_favorite`` are not touched, and no event is written: a
@@ -2294,6 +2326,16 @@ class DatabaseManager:
                 "UPDATE media_tombstones SET grade = CASE "
                 "WHEN is_favorite != 0 THEN 'pass' "
                 "WHEN passed != 0 THEN 'fail' ELSE NULL END"
+            )
+            # The scorecard of each deleted T2I image, from its lineage (new
+            # tombstones get it at deletion). The CASE keeps json_type off
+            # a lineage that is not JSON; a non-text id is no scorecard.
+            conn.execute(
+                "UPDATE media_tombstones "
+                "SET scorecard_id = json_extract(lineage, '$.t2i.scorecard_id') "
+                "WHERE lineage IS NOT NULL AND scorecard_id IS NULL "
+                "AND (CASE WHEN json_valid(lineage) "
+                "THEN json_type(lineage, '$.t2i.scorecard_id') END) = 'text'"
             )
             vectors = conn.execute(
                 "INSERT OR IGNORE INTO tombstone_vectors "
@@ -3708,8 +3750,25 @@ class DatabaseManager:
         )
         return purged
 
+    @staticmethod
+    def _still_referenced(conn: sqlite3.Connection, path: str) -> bool:
+        """Whether a beat image, panel video, subject or scene reference
+        still holds ``path`` (stored POSIX) -- the purge survival rule."""
+        return any(
+            conn.execute(sql, (path,)).fetchone() is not None
+            for sql in (
+                "SELECT 1 FROM beat_images WHERE file_path = ? LIMIT 1",
+                "SELECT 1 FROM panel_videos WHERE file_path = ? LIMIT 1",
+                "SELECT 1 FROM storyboard_subjects WHERE reference_path = ? LIMIT 1",
+                "SELECT 1 FROM scenes WHERE reference_path = ? LIMIT 1",
+            )
+        )
+
     def _purge_media_rows(
-        self, conn: sqlite3.Connection, posix_paths: List[str]
+        self,
+        conn: sqlite3.Connection,
+        posix_paths: List[str],
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> List[str]:
         """Delete the media rows behind purged beat images; return the
         native-format paths actually deleted (the caller removes those
@@ -3723,40 +3782,29 @@ class DatabaseManager:
         beat's image row or null the subject's/scene's reference -- it is
         unhidden instead, the same release-into-the-library semantics as
         a non-purge delete. Deleting a media row cascades its indices
-        and folder_items rows.
+        and folder_items rows. ``thumbs`` (``{posix path: archived
+        thumbnail}``) goes onto the tombstones (``_write_tombstones``).
         """
         deleted: List[str] = []
         for path in posix_paths:
-            still_referenced = (
-                conn.execute(
-                    "SELECT 1 FROM beat_images WHERE file_path = ? LIMIT 1",
-                    (path,),
-                ).fetchone()
-                is not None
-                or conn.execute(
-                    "SELECT 1 FROM panel_videos WHERE file_path = ? LIMIT 1",
-                    (path,),
-                ).fetchone()
-                is not None
-                or conn.execute(
-                    "SELECT 1 FROM storyboard_subjects "
-                    "WHERE reference_path = ? LIMIT 1",
-                    (path,),
-                ).fetchone()
-                is not None
-                or conn.execute(
-                    "SELECT 1 FROM scenes WHERE reference_path = ? LIMIT 1",
-                    (path,),
-                ).fetchone()
-                is not None
-            )
-            if still_referenced:
+            if self._still_referenced(conn, path):
                 conn.execute("UPDATE media SET hidden = 0 WHERE file_path = ?", (path,))
             else:
-                self._write_tombstones(conn, [path], self._iso(None))
+                self._write_tombstones(conn, [path], self._iso(None), thumbs)
                 conn.execute("DELETE FROM media WHERE file_path = ?", (path,))
                 deleted.append(to_native_path(path))
         return deleted
+
+    def purgeable_paths(self, file_paths: Sequence[Union[str, Path]]) -> List[str]:
+        """The paths among ``file_paths`` that ``_purge_media_rows`` would
+        delete right now (nothing in a storyboard holds them), native
+        format, in order. The T2I / I2V deletes trash exactly these before
+        their DB delete (a released file stays on disk)."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in file_paths))
+        with self.lock, self._get_connection() as conn:
+            return [
+                to_native_path(p) for p in posix if not self._still_referenced(conn, p)
+            ]
 
     def set_embedding_lookup(
         self, fn: Optional[Callable[[str], Optional[Tuple[Any, str]]]]
@@ -3768,12 +3816,24 @@ class DatabaseManager:
         self._embedding_lookup = fn
 
     def _write_tombstones(
-        self, conn: sqlite3.Connection, posix_paths: List[str], now: str
+        self,
+        conn: sqlite3.Connection,
+        posix_paths: List[str],
+        now: str,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> None:
         """Record a media_tombstones row for each path that carries training
         signal (a judgment, a category link, or a generated-image/video
         row). Must run before the media DELETE, inside the caller's
-        transaction and lock -- never takes the lock itself."""
+        transaction and lock -- never takes the lock itself.
+
+        The row also keeps what a deleted graded image still teaches (spec
+        "Deleting keeps the signal"): its hindsight brief and the model
+        that wrote it (``hindsight_briefs`` cascades away with the media
+        row); for a ✓ library image (no T2I / I2V row, so no lineage) its
+        metadata prompt and model names; and ``thumbs[path]``, the
+        thumbnail the caller archived from the live file
+        (``training_archive``), relative to the data dir."""
         for path in posix_paths:
             judgment = conn.execute(
                 "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
@@ -3802,6 +3862,20 @@ class DatabaseManager:
             ).fetchone()
             if media is None:
                 continue
+            brief = conn.execute(
+                "SELECT brief, model FROM hindsight_briefs WHERE file_path = ?",
+                (path,),
+            ).fetchone()
+            prompt: Optional[str] = None
+            model_names: Optional[str] = None
+            if (
+                judgment is not None
+                and judgment["grade"] == "pass"
+                and t2i is None
+                and i2v is None
+                and self._is_image_path(path)
+            ):
+                prompt, model_names = self._library_prompt(conn, path)
             self._insert_tombstone(
                 conn,
                 path,
@@ -3811,7 +3885,42 @@ class DatabaseManager:
                 cat_names,
                 t2i,
                 i2v,
+                thumb_path=(thumbs or {}).get(path),
+                brief=brief["brief"] if brief is not None else None,
+                brief_model=brief["model"] if brief is not None else None,
+                prompt=prompt,
+                model_name=model_names,
             )
+
+    @staticmethod
+    def _library_prompt(
+        conn: sqlite3.Connection, path: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """``(metadata prompt, model names as a JSON list)`` of a library
+        image -- what library hindsight reads (``writer_dataset_raw``) --
+        each None when absent. A ``data`` blob that is not JSON reads as
+        no prompt: it never blocks the delete."""
+        try:
+            row = conn.execute(
+                "SELECT json_extract(data, '$.prompt') AS prompt FROM media "
+                "WHERE file_path = ?",
+                (path,),
+            ).fetchone()
+        except sqlite3.OperationalError:  # malformed JSON
+            row = None
+        prompt = row["prompt"] if row is not None else None
+        names = [
+            str(r["index_key"])
+            for r in conn.execute(
+                "SELECT index_key FROM indices WHERE file_path = ? "
+                "AND index_type = 'model' ORDER BY index_key",
+                (path,),
+            )
+        ]
+        return (
+            prompt if isinstance(prompt, str) else None,
+            json.dumps(names) if names else None,
+        )
 
     def _insert_tombstone(
         self,
@@ -3823,10 +3932,18 @@ class DatabaseManager:
         cat_names: List[str],
         t2i: Optional[sqlite3.Row],
         i2v: Optional[sqlite3.Row],
+        *,
+        thumb_path: Optional[str] = None,
+        brief: Optional[str] = None,
+        brief_model: Optional[str] = None,
+        prompt: Optional[str] = None,
+        model_name: Optional[str] = None,
     ) -> None:
         """Insert one media_tombstones row. ``judgment`` is a live
         media_judgments row or a version-2 snapshot row (both carry
-        ``grade``). Caller holds the lock."""
+        ``grade``); the keyword fields are stored as given (see
+        ``_write_tombstones``), and ``scorecard_id`` comes from the T2I
+        lineage. Caller holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
             if row is not None:
@@ -3848,11 +3965,13 @@ class DatabaseManager:
         # Copied as stored, never derived (a snapshot written before grades
         # is translated before it gets here).
         grade = judgment["grade"] if judgment is not None else None
+        scorecard_id = ((lineage or {}).get("t2i") or {}).get("scorecard_id")
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
             "is_favorite, passed, grade, reasons, categories, seen_at, "
-            "judged_at, confirmed_at, embedding, embedding_model, lineage) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "judged_at, confirmed_at, embedding, embedding_model, lineage, "
+            "brief, brief_model, prompt, model_name, thumb_path, scorecard_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 now,
@@ -3869,6 +3988,12 @@ class DatabaseManager:
                 blob,
                 model_key,
                 json.dumps(lineage, default=str) if lineage else None,
+                brief,
+                brief_model,
+                prompt,
+                model_name,
+                thumb_path,
+                scorecard_id if isinstance(scorecard_id, str) else None,
             ),
         )
 
@@ -3912,6 +4037,65 @@ class DatabaseManager:
             d["lineage"] = json.loads(d["lineage"]) if d["lineage"] else None
             out.append(d)
         return out
+
+    def graded_image_paths(self, file_paths: Sequence[Union[str, Path]]) -> List[str]:
+        """The graded (✓ or ✗) images among ``file_paths``, as stored POSIX
+        paths in input order: what a delete archives a thumbnail of
+        (``training_archive``; videos never are)."""
+        wanted = [
+            p
+            for p in dict.fromkeys(to_posix_path(fp) for fp in file_paths)
+            if self._is_image_path(p)
+        ]
+        if not wanted:
+            return []
+        graded: Set[str] = set()
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(wanted), 500):
+                end = start + 500
+                part = wanted[start:end]
+                marks = ",".join("?" * len(part))
+                graded.update(
+                    r["file_path"]
+                    for r in conn.execute(
+                        "SELECT file_path FROM media_judgments "
+                        f"WHERE grade IS NOT NULL AND file_path IN ({marks})",
+                        part,
+                    )
+                )
+        return [p for p in wanted if p in graded]
+
+    def tombstone_thumbs_in_use(self, thumb_paths: Sequence[str]) -> Set[str]:
+        """The archived thumbnails among ``thumb_paths`` a tombstone points
+        at (an index search)."""
+        wanted = list(dict.fromkeys(thumb_paths))
+        used: Set[str] = set()
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(wanted), 500):
+                end = start + 500
+                part = wanted[start:end]
+                marks = ",".join("?" * len(part))
+                used.update(
+                    r["thumb_path"]
+                    for r in conn.execute(
+                        "SELECT thumb_path FROM media_tombstones "
+                        f"WHERE thumb_path IN ({marks})",
+                        part,
+                    )
+                )
+        return used
+
+    def set_tombstone_brief(self, tombstone_id: int, brief: str, model: str) -> bool:
+        """Store (or replace) the hindsight brief of a deleted image -- the
+        briefs job writes it from the image's archived thumbnail. False
+        when there is no such tombstone."""
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE media_tombstones SET brief = ?, brief_model = ? WHERE id = ?",
+                (brief, model, tombstone_id),
+            )
+            conn.commit()
+            return int(cur.rowcount) > 0
 
     def _panel_ids_for_storyboard(
         self, conn: sqlite3.Connection, storyboard_id: int
@@ -4711,10 +4895,13 @@ class DatabaseManager:
             ).fetchall()
             return [to_native_path(str(r["source_path"])) for r in rows]
 
-    def delete_i2v_video(self, video_id: int) -> Tuple[bool, List[str]]:
+    def delete_i2v_video(
+        self, video_id: int, thumbs: Optional[Mapping[str, str]] = None
+    ) -> Tuple[bool, List[str]]:
         """Delete one generated clip completely: its i2v_videos row, then
-        its media row via _purge_media_rows' survival rules. Returns
-        (deleted, purged_native_paths) for the caller to trash."""
+        its media row via _purge_media_rows' survival rules (``thumbs`` as
+        there; a clip is a video, so callers have none). Returns (deleted,
+        purged_native_paths): the files the media rows went with."""
         with self.lock, self._get_connection() as conn:
             row = conn.execute(
                 "SELECT file_path FROM i2v_videos WHERE id = ?", (video_id,)
@@ -4722,7 +4909,9 @@ class DatabaseManager:
             if row is None:
                 return False, []
             # Purge first so the tombstone can still read the lineage row.
-            deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            deleted_files = self._purge_media_rows(
+                conn, [str(row["file_path"])], thumbs
+            )
             conn.execute("DELETE FROM i2v_videos WHERE id = ?", (video_id,))
             conn.commit()
             return True, deleted_files
@@ -4947,12 +5136,15 @@ class DatabaseManager:
             ).fetchall()
             return [to_native_path(str(r["file_path"])) for r in rows]
 
-    def delete_t2i_image(self, image_id: int) -> Tuple[bool, List[str]]:
+    def delete_t2i_image(
+        self, image_id: int, thumbs: Optional[Mapping[str, str]] = None
+    ) -> Tuple[bool, List[str]]:
         """Delete one generated image completely: its t2i_images row, then
         its media row (indices and folder_items cascade) via
         _purge_media_rows' survival rules -- a file a storyboard still
-        references is released, not purged. Returns (deleted,
-        purged_native_paths) for the caller to trash."""
+        references is released, not purged; ``thumbs`` (``{posix path:
+        archived thumbnail}``) goes onto the tombstone. Returns (deleted,
+        purged_native_paths): the files the media rows went with."""
         with self.lock, self._get_connection() as conn:
             row = conn.execute(
                 "SELECT file_path FROM t2i_images WHERE id = ?", (image_id,)
@@ -4960,7 +5152,9 @@ class DatabaseManager:
             if row is None:
                 return False, []
             # Purge first so the tombstone can still read the lineage row.
-            deleted_files = self._purge_media_rows(conn, [str(row["file_path"])])
+            deleted_files = self._purge_media_rows(
+                conn, [str(row["file_path"])], thumbs
+            )
             conn.execute("DELETE FROM t2i_images WHERE id = ?", (image_id,))
             conn.commit()
             return True, deleted_files
@@ -5220,14 +5414,24 @@ class DatabaseManager:
             logger.error(f"Failed to get media with details {file_path}: {e}")
             return None
 
-    def delete_media(self, file_path: Path) -> bool:
+    def delete_media(self, file_path: Path, thumb_path: Optional[str] = None) -> bool:
+        """Delete one media row (indices etc. cascade), tombstoning it first
+        when it carries training signal; ``thumb_path`` is the thumbnail
+        the caller archived from the live file (``training_archive``), kept
+        on the tombstone. False when there was no row or the delete failed
+        (logged)."""
         try:
             with self.lock:
                 with self._get_connection() as conn:
                     # Convert to POSIX format for database lookup
                     posix_path = to_posix_path(file_path)
                     # Delete from media table (indices will cascade delete)
-                    self._write_tombstones(conn, [posix_path], self._iso(None))
+                    self._write_tombstones(
+                        conn,
+                        [posix_path],
+                        self._iso(None),
+                        {posix_path: thumb_path} if thumb_path else None,
+                    )
                     cursor = conn.execute(
                         "DELETE FROM media WHERE file_path = ?", (posix_path,)
                     )
@@ -5237,11 +5441,17 @@ class DatabaseManager:
             logger.error(f"Failed to delete media {file_path}: {e}")
             return False
 
-    def delete_media_batch(self, file_paths: List[Path]) -> int:
+    def delete_media_batch(
+        self,
+        file_paths: List[Path],
+        thumbs: Optional[Mapping[str, str]] = None,
+    ) -> int:
         """Delete multiple media items in a single transaction.
 
         This is much faster than calling delete_media() repeatedly because
         it uses a single commit for all deletes instead of one per item.
+        ``thumbs`` maps a stored POSIX path to its archived thumbnail (the
+        stale-file cleanup has none: its files are gone).
 
         Returns the number of items successfully deleted.
         """
@@ -5257,6 +5467,7 @@ class DatabaseManager:
                         conn,
                         list(dict.fromkeys(t[0] for t in path_tuples)),
                         self._iso(None),
+                        thumbs,
                     )
                     conn.executemany(
                         "DELETE FROM media WHERE file_path = ?", path_tuples
@@ -7088,8 +7299,9 @@ class DatabaseManager:
         ``score`` (None when unscored) and ``tombstone``.
 
         Live images come from ``t2i_images`` JOINed to media. A deleted
-        image that had a grade comes from its tombstone: that grade, and
-        the writer, batch and scorecard of its lineage (the brief and the
+        image that had a grade comes from its tombstone, found by its
+        ``scorecard_id`` column (``_scorecard_tombstones_sql``): that
+        grade, the writer and batch of its lineage (the brief and the
         adapter through ``scorecard_batches`` / ``scorecards``, which are
         never deleted); it has no score (``taste_scores`` cascade). So
         deleting a judged image changes no result, promotion or resume. A
@@ -7117,58 +7329,83 @@ class DatabaseManager:
             args.append(scorecard_id)
         with self.lock, self._get_connection() as conn:
             live = [dict(r) for r in conn.execute(sql, args)]
-            deleted = self._graded_scorecard_tombstones(conn)
+            deleted = self._graded_scorecard_tombstones(conn, adapter_id, scorecard_id)
         ordered: List[Tuple[int, Dict[str, Any]]] = []
         for r in live:
             image_id = int(r.pop("image_id"))
             r["grade"] = r["grade"] if r["grade"] in GRADES else None
             r["tombstone"] = False
             ordered.append((image_id, r))
-        for image_id, row in deleted:
-            if adapter_id is not None and row["adapter_id"] != adapter_id:
-                continue
-            if scorecard_id is not None and row["scorecard_id"] != scorecard_id:
-                continue
-            ordered.append((image_id, row))
+        ordered.extend(deleted)
         ordered.sort(key=lambda pair: pair[0])
         return [row for _, row in ordered]
 
+    @staticmethod
+    def _scorecard_tombstones_sql(
+        adapter_id: Optional[int] = None, scorecard_id: Optional[str] = None
+    ) -> Tuple[str, List[Any]]:
+        """The tombstones of deleted scorecard images (of one adapter, one
+        scorecard, or all) whose path holds no live T2I image: selected by
+        ``media_tombstones.scorecard_id`` (its partial index) and the
+        scorecards table alone -- no lineage is read in SQL, so a scorecard
+        grade never parses other tombstones under the DB lock. Unordered:
+        an ``ORDER BY id`` makes SQLite scan the table in rowid order
+        instead (the caller sorts the few rows)."""
+        sql = (
+            "SELECT x.id, x.file_path, x.grade, x.scorecard_id, x.lineage, "
+            "c.adapter_id "
+            "FROM media_tombstones x JOIN scorecards c ON c.id = x.scorecard_id "
+            "WHERE x.scorecard_id IS NOT NULL"
+        )
+        args: List[Any] = []
+        if adapter_id is not None:
+            sql += " AND c.adapter_id = ?"
+            args.append(adapter_id)
+        if scorecard_id is not None:
+            sql += " AND x.scorecard_id = ?"
+            args.append(scorecard_id)
+        sql += (
+            " AND NOT EXISTS (SELECT 1 FROM t2i_images t "
+            "JOIN media m ON m.file_path = t.file_path "
+            "WHERE t.file_path = x.file_path)"
+        )
+        return sql, args
+
     def _graded_scorecard_tombstones(
-        self, conn: sqlite3.Connection
+        self,
+        conn: sqlite3.Connection,
+        adapter_id: Optional[int] = None,
+        scorecard_id: Optional[str] = None,
     ) -> List[Tuple[int, Dict[str, Any]]]:
         """``(t2i image id, scorecard_image_rows row)`` for every deleted
-        scorecard image that had a grade, read from the newest tombstone of
-        each path with no live T2I row (see ``scorecard_image_rows``).
-        Caller holds the lock."""
-        # The CASE keeps json_extract off a lineage that is not JSON.
-        tombs = conn.execute(
-            "SELECT x.file_path, x.grade, x.lineage FROM media_tombstones x "
-            "WHERE x.lineage IS NOT NULL AND (CASE WHEN json_valid(x.lineage) "
-            "THEN json_extract(x.lineage, '$.t2i.scorecard_id') END) "
-            "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM t2i_images t "
-            "JOIN media m ON m.file_path = t.file_path "
-            "WHERE t.file_path = x.file_path) ORDER BY x.id"
-        ).fetchall()
+        scorecard image (of ``adapter_id`` / ``scorecard_id`` when given)
+        that had a grade, read from the newest tombstone of each path with
+        no live T2I row (see ``scorecard_image_rows``); only those rows'
+        lineages are parsed (image id, batch, writer). Caller holds the
+        lock."""
+        sql, args = self._scorecard_tombstones_sql(adapter_id, scorecard_id)
+        tombs = sorted(conn.execute(sql, args).fetchall(), key=lambda r: int(r["id"]))
         if not tombs:
             return []
-        adapters = {
-            str(r["id"]): int(r["adapter_id"])
-            for r in conn.execute("SELECT id, adapter_id FROM scorecards")
-        }
+        cards = sorted({str(r["scorecard_id"]) for r in tombs})
+        marks = ",".join("?" * len(cards))
         briefs = {
             str(r["batch_id"]): int(r["brief_index"])
-            for r in conn.execute("SELECT batch_id, brief_index FROM scorecard_batches")
+            for r in conn.execute(
+                "SELECT batch_id, brief_index FROM scorecard_batches "
+                f"WHERE scorecard_id IN ({marks})",
+                cards,
+            )
         }
         newest: Dict[str, Tuple[int, Dict[str, Any]]] = {}
         malformed = 0
         for r in tombs:
             try:
-                gen = json.loads(r["lineage"])["t2i"]
+                gen = json.loads(r["lineage"] or "null")["t2i"]
             except (ValueError, KeyError, TypeError):
                 gen = None
             image_id = gen.get("id") if isinstance(gen, dict) else None
-            card = gen.get("scorecard_id") if isinstance(gen, dict) else None
-            if not isinstance(image_id, int) or not isinstance(card, str):
+            if not isinstance(gen, dict) or not isinstance(image_id, int):
                 malformed += 1
                 continue
             batch = gen.get("batch_id")
@@ -7176,8 +7413,8 @@ class DatabaseManager:
             newest[str(r["file_path"])] = (
                 image_id,
                 {
-                    "adapter_id": adapters.get(card),
-                    "scorecard_id": card,
+                    "adapter_id": int(r["adapter_id"]),
+                    "scorecard_id": str(r["scorecard_id"]),
                     "batch_id": batch,
                     "brief_index": (
                         briefs.get(batch) if isinstance(batch, str) else None
@@ -7193,11 +7430,11 @@ class DatabaseManager:
                 "scorecard results: %d tombstone(s) with a malformed lineage skipped",
                 malformed,
             )
-        # Never graded (it judged nothing), or of an unknown scorecard.
+        # Never graded: it judged nothing.
         return [
             (image_id, row)
             for image_id, row in newest.values()
-            if row["grade"] is not None and row["adapter_id"] is not None
+            if row["grade"] is not None
         ]
 
     def scorecard_for_path(self, file_path: str) -> Optional[Dict[str, Any]]:
@@ -7568,15 +7805,23 @@ class DatabaseManager:
           link source), ``prompt_categories`` (the stored names the prompt
           was written for, parsed; None when absent) and
           ``generation_categories`` (names of the
-          ``source = 'generation'`` links; a tombstone's stored names).
+          ``source = 'generation'`` links; a tombstone's stored names). A
+          tombstone row also carries ``tombstone_id``, its own ``brief``
+          and ``thumb_path`` (the archived thumbnail) and ``path_live``
+          (another live file -- no T2I row -- holds the path now).
           Malformed tombstones are skipped with one WARNING (count only).
-        * ``briefs``: ``{path: {brief, model, created_at}}``.
-        * ``library``: ✓ images that have a brief but no live T2I row (with
-          ``candidates=True``: every ✓ image without a live T2I row,
-          briefed or not -- what the hindsight-briefs job selects from):
-          ``{path: {prompt, model_names, grade, judged_at, category_ids,
-          category_names, generation_categories}}`` (prompt from the
-          metadata blob, read for those paths only).
+        * ``briefs``: ``{path: {brief, model, created_at}}`` of live images
+          (``hindsight_briefs``; a deleted image's brief is on its row).
+        * ``library``: ``{path: {live, prompt, model_names, grade,
+          judged_at, category_ids, category_names,
+          generation_categories}}``. Live (``live`` True): ✓ images that
+          have a brief but no live T2I row (with ``candidates=True``: every
+          ✓ image without a live T2I row, briefed or not -- what the
+          hindsight-briefs job selects from), prompt from the metadata blob
+          (read for those paths only). Deleted (``live`` False, plus
+          ``tombstone_id``, ``brief``, ``thumb_path``): for each image path
+          no live file holds, its newest tombstone without lineage (any
+          grade: the newest wins), with the prompt and model names it kept.
         """
         cols = self._DATASET_LINEAGE_COLS
         with self.lock, self._get_connection() as conn:
@@ -7624,11 +7869,13 @@ class DatabaseManager:
             # moves its example's as_of; a tombstone written before the
             # column has only confirmed_at.
             for r in conn.execute(
-                "SELECT id, file_path, grade, "
-                "COALESCE(judged_at, confirmed_at) AS judged_at, "
-                "categories, lineage FROM media_tombstones "
-                "WHERE lineage IS NOT NULL AND json_valid(lineage) "
-                "AND json_type(lineage, '$.t2i') = 'object' ORDER BY id"
+                "SELECT x.id, x.file_path, x.grade, "
+                "COALESCE(x.judged_at, x.confirmed_at) AS judged_at, "
+                "x.categories, x.lineage, x.brief, x.thumb_path, "
+                "EXISTS (SELECT 1 FROM media m WHERE m.file_path = x.file_path) "
+                "AS path_live FROM media_tombstones x "
+                "WHERE x.lineage IS NOT NULL AND json_valid(x.lineage) "
+                "AND json_type(x.lineage, '$.t2i') = 'object' ORDER BY x.id"
             ):
                 if r["file_path"] in live:
                     continue
@@ -7655,6 +7902,10 @@ class DatabaseManager:
                 ]
                 # Tombstones keep no link source: their stored names stand in.
                 d["generation_categories"] = list(d["category_names"])
+                d["tombstone_id"] = int(r["id"])
+                d["brief"] = r["brief"]
+                d["thumb_path"] = r["thumb_path"]
+                d["path_live"] = bool(r["path_live"])
                 # Newest tombstone wins (ORDER BY id).
                 generations[r["file_path"]] = d
 
@@ -7697,6 +7948,7 @@ class DatabaseManager:
                     ids = links.get(r["file_path"], [])
                     gen_ids = generated.get(r["file_path"], [])
                     library[r["file_path"]] = {
+                        "live": True,
                         "generation_categories": names_of(gen_ids),
                         "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
                         "model_names": [],
@@ -7717,6 +7969,10 @@ class DatabaseManager:
                     part,
                 ):
                     library[r["file_path"]]["model_names"].append(r["index_key"])
+            deleted, bad = self._deleted_library_rows(conn, by_name)
+            malformed += bad
+            # No clash: a deleted row's path has no media row at all.
+            library.update(deleted)
         if malformed:
             logger.warning(
                 "writer dataset: skipped %d malformed tombstone(s)", malformed
@@ -7727,6 +7983,52 @@ class DatabaseManager:
             "briefs": briefs,
             "library": library,
         }
+
+    @classmethod
+    def _deleted_library_rows(
+        cls, conn: sqlite3.Connection, by_name: Mapping[str, int]
+    ) -> Tuple[Dict[str, Dict[str, Any]], int]:
+        """``({path: deleted library row}, malformed count)`` for
+        ``writer_dataset_raw``: the newest tombstone without lineage of
+        each image path that no live file holds, any grade. Caller holds
+        the lock."""
+        rows: Dict[str, Dict[str, Any]] = {}
+        malformed = 0
+        for r in conn.execute(
+            "SELECT x.id, x.file_path, x.grade, "
+            "COALESCE(x.judged_at, x.confirmed_at) AS judged_at, x.categories, "
+            "x.prompt, x.model_name, x.brief, x.thumb_path "
+            "FROM media_tombstones x WHERE x.lineage IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM media m WHERE m.file_path = x.file_path) "
+            "ORDER BY x.id"
+        ):
+            if not cls._is_image_path(r["file_path"]):
+                continue
+            names = cls._name_list(r["categories"])
+            if names is None:
+                malformed += 1
+                continue
+            # Newest tombstone wins (ORDER BY id).
+            rows[r["file_path"]] = {
+                "live": False,
+                "tombstone_id": int(r["id"]),
+                "prompt": r["prompt"] if isinstance(r["prompt"], str) else None,
+                "model_names": cls._name_list(r["model_name"]) or [],
+                "grade": r["grade"],
+                "judged_at": r["judged_at"],
+                "category_names": names,
+                "category_ids": [
+                    by_name[n.lower()] for n in names if n.lower() in by_name
+                ],
+                # The CATEGORIES line names generation links only, which a
+                # library image (no T2I row) practically never has; its
+                # stored names are the owner's own, so none stand in (a
+                # deleted generation's do).
+                "generation_categories": [],
+                "brief": r["brief"],
+                "thumb_path": r["thumb_path"],
+            }
+        return rows, malformed
 
     def record_taste_diversity(
         self, rows: List[Dict[str, Any]], computed_at: str

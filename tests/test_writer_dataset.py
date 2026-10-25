@@ -24,6 +24,8 @@ from metascan.core.writer_dataset import (
     SftExample,
     build_examples,
     caption_resolver,
+    examples_from_raw,
+    hindsight_brief_targets,
     hindsight_candidates,
     holdout_key,
     preview,
@@ -534,7 +536,7 @@ def test_hindsight_candidates_need_a_pass_whatever_else_a_row_says():
         }
 
     def lib(**kw):
-        return {"prompt": "LIB", "model_names": ["krea2_dev"], **kw}
+        return {"prompt": "LIB", "model_names": ["krea2_dev"], "live": True, **kw}
 
     raw = {
         "generations": [
@@ -553,6 +555,128 @@ def test_hindsight_candidates_need_a_pass_whatever_else_a_row_says():
         },
     }
     assert hindsight_candidates(raw) == ["/g/pass.png", "/l/pass.png"]
+
+
+def test_dataset_uses_tombstoned_pass_hindsight(db, store):
+    # Deleting a briefed ✓ image (T2I or library) keeps its hindsight
+    # example exactly: the tombstone keeps the brief, the T2I lineage or the
+    # library prompt and model names, the grade time and the categories.
+    _img(
+        db,
+        "/h/gen.png",
+        grade="pass",
+        group=None,
+        prompt="T2I PROMPT",
+        caption="a hare",
+    )
+    db.set_hindsight_brief("/h/gen.png", "a hare at night", "qwen3vl-8b")
+    _library(db, "/lib/pass.png", grade="pass")
+    # As the T2I ingest tags a generation, and the owner a library image.
+    cat = db.create_category("Night")
+    db.add_media_categories(["/h/gen.png"], cat.id, "generation")
+    db.add_media_categories(["/lib/pass.png"], cat.id, "viewer")
+    # ✗ and ungraded never are, deleted or not.
+    _img(db, "/h/fail.png", grade="fail", group=None, prompt="FAILED")
+    db.set_hindsight_brief("/h/fail.png", "a failed brief", "qwen3vl-8b")
+    _library(db, "/lib/fail.png", grade="fail")
+    _library(db, "/lib/none.png")
+
+    def hindsight(scope="all"):
+        sft, _, counts = _build(db, scope, store, LATER)
+        return counts.hindsight, sorted(
+            (e.chosen, e.user, e.target_model, e.group, e.as_of)
+            for e in sft
+            if e.source == "hindsight"
+        )
+
+    before = hindsight()
+    before_scoped = hindsight(str(cat.id))
+    assert before[0] == 2
+    assert [chosen for chosen, *_ in before[1]] == [
+        "LIB PROMPT /lib/pass.png",
+        "T2I PROMPT",
+    ]
+    # The generation's CATEGORIES line (scope all) survives deletion too.
+    assert "CATEGORIES: Night" in before[1][1][1]
+    assert before_scoped[0] == 2
+    for path in (
+        "/h/gen.png",
+        "/h/fail.png",
+        "/lib/pass.png",
+        "/lib/fail.png",
+        "/lib/none.png",
+    ):
+        assert db.delete_media(Path(path))
+    assert db.get_hindsight_briefs() == {}
+    assert hindsight() == before
+    assert hindsight(str(cat.id)) == before_scoped
+
+
+def test_a_live_file_owns_its_path_for_hindsight(db, store):
+    # A new file at a deleted image's path is another image: hindsight pairs
+    # each brief with its own image's prompt, and the deleted one steps
+    # aside while a live file holds the path.
+    _img(db, "/h/p.png", grade="pass", group=None, prompt="OLD T2I PROMPT")
+    db.set_hindsight_brief("/h/p.png", "the old brief", "qwen3vl-8b")
+    _delete_generations(db)  # the T2I row goes too: a new file is a library image
+    _library(db, "/h/p.png", grade="pass")  # briefed "brief /h/p.png"
+    sft, _, _ = _build(db, "all", store, LATER)
+    assert [(s.chosen, s.user.split("\n")[1]) for s in sft] == [
+        ("LIB PROMPT /h/p.png", "brief /h/p.png")
+    ]
+    raw = db.writer_dataset_raw(candidates=True)
+    assert hindsight_candidates(raw) == ["/h/p.png"]
+    # Ungraded, the live file is no target, and the old one still steps aside.
+    assert db.set_grade("/h/p.png", None) is not None
+    sft, _, _ = _build(db, "all", store, LATER)
+    assert sft == []
+    # Gone again: the newest tombstone of the path (ungraded) wins.
+    assert db.delete_media(Path("/h/p.png"))
+    sft, _, _ = _build(db, "all", store, LATER)
+    assert sft == []
+
+
+def test_a_brief_always_comes_from_its_own_row(store):
+    # Rows the DB never produces together (a live brief at a deleted row's
+    # path, a brief key on a live row) still never mix: a deleted row's
+    # example uses its own brief, a live row's the live one only.
+    def gen(path, **kw):
+        return {
+            "file_path": path,
+            "model": "krea2",
+            "caption": f"caption {path}",
+            "prompt_used": f"PROMPT {path}",
+            "writer_id": "base",
+            "scorecard_id": None,
+            "grade": "pass",
+            "judged_at": "2026-10-23 12:00:00",
+            "created_at": "2026-10-01 09:00:00",
+            **kw,
+        }
+
+    raw = {
+        "categories": {},
+        "generations": [
+            gen("/g/gone.png", live=False, tombstone_id=4, brief="OWN BRIEF"),
+            gen("/g/live.png", live=True, brief="STRAY BRIEF"),
+        ],
+        "briefs": {
+            "/g/gone.png": {"brief": "OTHER IMAGE BRIEF"},
+            "/g/live.png": {"brief": "LIVE BRIEF"},
+        },
+        "library": {},
+    }
+    sft, _, _ = examples_from_raw(raw, "all", store, NOW, content_mode="default")
+    assert sorted((s.chosen, s.user.split("\n")[1]) for s in sft) == [
+        ("PROMPT /g/gone.png", "OWN BRIEF"),
+        ("PROMPT /g/live.png", "LIVE BRIEF"),
+    ]
+    assert [
+        (t.path, t.briefed, t.tombstone_id) for t in hindsight_brief_targets(raw)
+    ] == [
+        ("/g/gone.png", True, 4),
+        ("/g/live.png", True, None),
+    ]
 
 
 def test_hindsight_library_item_needs_a_known_family(db, store):

@@ -170,3 +170,148 @@ def test_categorized_only_item_tombstoned_with_names(db):
     db.add_media_categories(["/p/a.png"], cid, "bulk")
     db.delete_media(Path("/p/a.png"))
     assert json.loads(db.list_tombstones()[0]["categories"]) == ["Anime"]
+
+
+# ---- deleting keeps the signal (grades spec, items 1-4) ----------------------
+
+
+def _library_image(db, path: str, prompt: str, models) -> None:
+    """A library image (no T2I row) with a metadata prompt and model names."""
+    db.save_media(_media(path))
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "UPDATE media SET data = json_set(data, '$.prompt', ?) "
+            "WHERE file_path = ?",
+            (prompt, path),
+        )
+        conn.executemany(
+            "INSERT INTO indices (index_type, index_key, file_path) "
+            "VALUES ('model', ?, ?)",
+            [(m, path) for m in models],
+        )
+        conn.commit()
+
+
+def test_deleted_pass_keeps_its_brief_and_library_prompt(db):
+    # A ✓ library image: brief, its model, the metadata prompt and model
+    # names (what hindsight needs) and the archived thumbnail's path.
+    _library_image(db, "/p/lib.png", "SYNTH library prompt", ["t5xxl", "krea2_dev"])
+    db.set_grade("/p/lib.png", "pass")
+    db.set_hindsight_brief("/p/lib.png", "a fox in the snow", "qwen3vl-4b")
+    # A ✓ T2I image: its brief; the lineage already carries its prompt.
+    db.save_media(_media("/p/gen.png"))
+    image_id = db.create_t2i_image(
+        file_path="/p/gen.png", model="krea2", prompt_used="SYNTH t2i", writer_id="base"
+    )
+    db.set_grade("/p/gen.png", "pass")
+    db.set_hindsight_brief("/p/gen.png", "a hare at night", "qwen3vl-4b")
+    # ✗ (briefed while ✓) and seen-only library images: the brief stays with
+    # the image, the prompt is kept for ✓ only.
+    _library_image(db, "/p/fail.png", "SYNTH failed prompt", ["krea2_dev"])
+    db.set_grade("/p/fail.png", "pass")
+    db.set_hindsight_brief("/p/fail.png", "a cat on a sofa", "qwen3vl-4b")
+    db.set_grade("/p/fail.png", "fail")
+    _library_image(db, "/p/seen.png", "SYNTH seen prompt", ["krea2_dev"])
+    db.mark_seen("/p/seen.png")
+
+    assert db.delete_media(Path("/p/lib.png"), "archive/thumbs/aaa.jpg") is True
+    assert db.delete_t2i_image(image_id, {"/p/gen.png": "archive/thumbs/bbb.jpg"})[0]
+    assert (
+        db.delete_media_batch(
+            [Path("/p/fail.png"), Path("/p/seen.png")],
+            {"/p/fail.png": "archive/thumbs/ccc.jpg"},
+        )
+        == 2
+    )
+    tombs = {t["file_path"]: t for t in db.list_tombstones()}
+    lib = tombs["/p/lib.png"]
+    assert (
+        lib["grade"],
+        lib["brief"],
+        lib["brief_model"],
+        lib["prompt"],
+        json.loads(lib["model_name"]),
+        lib["thumb_path"],
+    ) == (
+        "pass",
+        "a fox in the snow",
+        "qwen3vl-4b",
+        "SYNTH library prompt",
+        ["krea2_dev", "t5xxl"],
+        "archive/thumbs/aaa.jpg",
+    )
+    gen = tombs["/p/gen.png"]
+    assert (gen["brief"], gen["brief_model"], gen["thumb_path"]) == (
+        "a hare at night",
+        "qwen3vl-4b",
+        "archive/thumbs/bbb.jpg",
+    )
+    assert gen["prompt"] is None and gen["model_name"] is None
+    assert gen["lineage"]["t2i"]["prompt_used"] == "SYNTH t2i"
+    failed = tombs["/p/fail.png"]
+    assert (failed["grade"], failed["brief"], failed["thumb_path"]) == (
+        "fail",
+        "a cat on a sofa",
+        "archive/thumbs/ccc.jpg",
+    )
+    assert failed["prompt"] is None and failed["model_name"] is None
+    seen = tombs["/p/seen.png"]
+    assert (seen["grade"], seen["brief"], seen["prompt"], seen["thumb_path"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    # The briefs table cascaded with the media rows: the tombstones keep them.
+    assert db.get_hindsight_briefs() == {}
+
+
+def test_stale_cleanup_keeps_everything_but_the_thumbnail(db):
+    _library_image(db, "/p/lib.png", "SYNTH library prompt", ["krea2_dev"])
+    db.set_grade("/p/lib.png", "pass")
+    db.set_hindsight_brief("/p/lib.png", "a fox in the snow", "qwen3vl-4b")
+    assert db.delete_media_batch([Path("/p/lib.png")]) == 1
+    [t] = db.list_tombstones()
+    assert (t["grade"], t["brief"], t["prompt"], t["thumb_path"]) == (
+        "pass",
+        "a fox in the snow",
+        "SYNTH library prompt",
+        None,
+    )
+
+
+def test_a_library_prompt_that_is_not_json_never_blocks_the_delete(db):
+    db.save_media(_media("/p/odd.png"))
+    with db.lock, db._get_connection() as conn:
+        conn.execute("UPDATE media SET data = '{oops' WHERE file_path = '/p/odd.png'")
+        conn.commit()
+    db.set_grade("/p/odd.png", "pass")
+    assert db.delete_media(Path("/p/odd.png")) is True
+    [t] = db.list_tombstones()
+    assert (t["grade"], t["prompt"]) == ("pass", None)
+
+
+def test_set_tombstone_brief(db):
+    db.save_media(_media("/p/a.png"))
+    db.set_grade("/p/a.png", "pass")
+    db.delete_media(Path("/p/a.png"))
+    [t] = db.list_tombstones()
+    assert db.set_tombstone_brief(t["id"], "a quiet harbour", "qwen3vl-4b") is True
+    [t] = db.list_tombstones()
+    assert (t["brief"], t["brief_model"]) == ("a quiet harbour", "qwen3vl-4b")
+    assert db.set_tombstone_brief(t["id"] + 1, "nothing", "qwen3vl-4b") is False
+
+
+def test_tombstone_records_its_scorecard_id(db):
+    for name, card in (("card", "card-1"), ("plain", None)):
+        db.save_media(_media(f"/p/{name}.png"))
+        db.create_t2i_image(
+            file_path=f"/p/{name}.png", writer_id="base", scorecard_id=card
+        )
+        db.set_grade(f"/p/{name}.png", "pass")
+        db.delete_media(Path(f"/p/{name}.png"))
+    db.save_media(_media("/p/lib.png"))
+    db.set_grade("/p/lib.png", "fail")
+    db.delete_media(Path("/p/lib.png"))
+    got = {t["file_path"]: t["scorecard_id"] for t in db.list_tombstones()}
+    assert got == {"/p/card.png": "card-1", "/p/plain.png": None, "/p/lib.png": None}

@@ -391,6 +391,48 @@ def test_v6_maps_tombstones(tmp_path):
     ) == [(0,)]
 
 
+def test_v6_backfills_tombstone_scorecard_ids(tmp_path):
+    """Ruling 15: the upgrade records each existing tombstone's scorecard
+    (from its T2I lineage) in ``scorecard_id``, the column the scorecard
+    results select deleted images by; tombstones written later get it at
+    deletion. Anything else -- no T2I lineage, no scorecard, a lineage that
+    is not JSON, a scorecard id that is not text -- stays NULL."""
+    db_file = _build_v5_db(tmp_path / "db", live={})
+    lineages = {
+        "/gone/card.png": json.dumps(
+            {"t2i": {"id": 7, "scorecard_id": "card-1", "batch_id": "b-1"}}
+        ),
+        "/gone/plain.png": json.dumps({"t2i": {"id": 8, "scorecard_id": None}}),
+        "/gone/clip.mp4": json.dumps({"i2v": {"id": 3, "writer_id": "w"}}),
+        "/gone/odd.png": "not json",
+        "/gone/number.png": json.dumps({"t2i": {"id": 9, "scorecard_id": 5}}),
+        "/gone/lib.png": None,
+    }
+    conn = sqlite3.connect(str(db_file))
+    try:
+        conn.executemany(
+            "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
+            "passed, reasons, lineage) VALUES (?, ?, 0, 1, '[]', ?)",
+            [(path, T_DELETED, lineage) for path, lineage in lineages.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    DatabaseManager(tmp_path / "db")
+    assert _user_version(db_file) == 6
+    assert dict(
+        _query(db_file, "SELECT file_path, scorecard_id FROM media_tombstones")
+    ) == {path: ("card-1" if path == "/gone/card.png" else None) for path in lineages}
+    assert dict(_query(db_file, "SELECT file_path, lineage FROM media_tombstones")) == (
+        lineages
+    )
+    # Idempotent: a second open leaves the column alone.
+    DatabaseManager(tmp_path / "db")
+    assert _query(
+        db_file, "SELECT COUNT(*) FROM media_tombstones WHERE scorecard_id IS NOT NULL"
+    ) == [(1,)]
+
+
 def test_v6_copies_tombstone_embeddings_to_tombstone_vectors(tmp_path):
     db_file = _build_v5_db(tmp_path / "db")
     DatabaseManager(tmp_path / "db")
