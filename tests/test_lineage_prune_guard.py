@@ -13,14 +13,17 @@ images without their lineage. The scan-route cases are in
 
 import logging
 import os
+import sqlite3
 import stat
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import pytest
 
 from backend.services import taste_snapshot as ts
+from metascan.core import database_sqlite
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION, DatabaseManager
 from metascan.core.media import Media
 
@@ -188,8 +191,34 @@ def test_a_guard_that_raises_pauses_the_prune(db, caplog):
         assert _names(db) == (["out2.png"], ["clip2.mp4"])
     assert _rows(db) == (2, 2)  # never prune when unsure
     logged = [r for r in caplog.records if "cannot stat" in r.getMessage()]
-    assert len(logged) == 2  # one per listing
-    assert {r.levelno for r in logged} == {logging.DEBUG}
+    # One per listing: a WARNING first, then DEBUG (see the next test).
+    assert [r.levelno for r in logged] == [logging.WARNING, logging.DEBUG]
+
+
+def test_a_guard_that_keeps_failing_warns_once_per_interval(db, caplog, monkeypatch):
+    def broken() -> bool:
+        raise OSError("cannot stat the marker")
+
+    db.set_lineage_prune_guard(broken)
+    _delete_first_files(db)
+
+    def warnings() -> int:
+        return len(
+            [
+                r
+                for r in caplog.records
+                if r.levelno == logging.WARNING and "cannot stat" in r.getMessage()
+            ]
+        )
+
+    with caplog.at_level(logging.DEBUG, logger="metascan.core.database_sqlite"):
+        for _ in range(3):
+            _list(db)
+        assert warnings() == 1  # every listing asks the guard; one WARNING
+        monkeypatch.setattr(database_sqlite, "PRUNE_GUARD_WARN_INTERVAL_S", 0.0)
+        db.list_t2i_images()  # the interval has passed: one more
+    assert warnings() == 2
+    assert _rows(db) == (2, 2)
 
 
 def test_the_guard_is_read_under_the_db_lock(db):
@@ -272,8 +301,13 @@ def test_the_marker_is_durable_once_written(tmp_path, monkeypatch):
 def test_the_marker_says_how_to_resume_the_prune(tmp_path):
     ts.write_full_clean_marker(tmp_path)
     text = ts.full_clean_marker_path(tmp_path).read_text(encoding="utf-8")
+    flat = " ".join(text.split()).lower()
     assert ts.full_clean_marker_path(tmp_path).name == "full_clean_incomplete"
-    assert "delete this file" in text.lower()
+    assert "delete this file" in flat
+    # A scan may have completed since with a folder missing: the marker
+    # never claims that no scan finished.
+    assert "no scan has finished" not in flat
+    assert "every configured folder" in flat
 
 
 def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
@@ -338,9 +372,121 @@ def test_the_lifespan_installs_the_guard():
         assert _rows(db) == (1, 1)  # none of the three: the prune is back
 
 
+def test_a_guard_that_cannot_be_installed_falls_back_to_never_pruning(
+    db, monkeypatch, caplog
+):
+    from backend import main as main_mod
+
+    def broken(data_dir: Path) -> Callable[[], bool]:
+        raise OSError("data dir unreadable")
+
+    monkeypatch.setattr(main_mod, "lineage_prune_guard", broken)
+    with caplog.at_level(logging.ERROR, logger="backend.main"):
+        main_mod._install_lineage_prune_guard(db)
+    assert [r for r in caplog.records if "lineage prune guard" in r.getMessage()]
+    _delete_first_files(db)
+    _list(db)
+    assert _rows(db) == (2, 2)  # fail safe: nothing is pruned
+
+
 def test_installing_the_guard_never_stops_the_startup(caplog):
     from backend.main import _install_lineage_prune_guard
 
     with caplog.at_level(logging.ERROR, logger="backend.main"):
         _install_lineage_prune_guard(object())  # no db_path, no setter
     assert [r for r in caplog.records if "lineage prune guard" in r.getMessage()]
+
+
+# ---- a paused listing is one query ----------------------------------------------
+
+
+def _traced_selects(db: DatabaseManager, monkeypatch: Any) -> List[str]:
+    """Every SELECT the database runs from now on (a connection trace)."""
+    statements: List[str] = []
+    real = db._get_connection
+
+    @contextmanager
+    def traced() -> Iterator[sqlite3.Connection]:
+        with real() as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    monkeypatch.setattr(db, "_get_connection", traced)
+    return statements
+
+
+def _pages(db: DatabaseManager, size: int) -> List[List[int]]:
+    pages: List[List[int]] = []
+    before: Optional[int] = None
+    while True:
+        page = db.list_t2i_images(limit=size, before_id=before)
+        pages.append([int(r["id"]) for r in page])
+        if len(page) < size:
+            return pages
+        before = int(page[-1]["id"])
+
+
+def test_a_paused_listing_skips_the_dangling_rows_in_one_query(tmp_path, monkeypatch):
+    """Mid full clean nearly every row dangles. The refill loop asked for
+    ``limit - len(out)`` rows per query -- one per round trip near a full
+    page, all under the DB lock (1.25 s for 50k dangling rows behind 59
+    live ones, in the review). Paused, nothing may be pruned, so one query
+    with the limit and the cursor answers each page: the same rows and the
+    same pages, and every row is still there."""
+    db = DatabaseManager(tmp_path / "db")
+    # 2,000 old rows whose files did not come back, then 300 newer rows of
+    # which every fifth did: 60 live, with dangling rows between them.
+    paths = [f"/lib/t2i/old{i}.png" for i in range(2000)] + [
+        f"/lib/t2i/new{i}.png" for i in range(300)
+    ]
+    with db.lock, db._get_connection() as conn:
+        conn.executemany(
+            "INSERT INTO t2i_images (file_path, prompt_used) VALUES (?, ?)",
+            [(p, "a prompt") for p in paths],
+        )
+        conn.commit()
+    live = [f"/lib/t2i/new{i}.png" for i in range(0, 300, 5)]
+    for p in live:
+        db.save_media(_media(p))
+    with db._get_connection() as conn:
+        live_ids = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT id FROM t2i_images WHERE file_path LIKE '/lib/t2i/new%' "
+                "ORDER BY id DESC"
+            )
+            if (int(r[0]) - 2001) % 5 == 0
+        ]
+    assert len(live_ids) == 60
+    expected = [live_ids[0:25], live_ids[25:50], live_ids[50:60]]
+
+    db.set_lineage_prune_guard(lambda: True)
+    selects = _traced_selects(db, monkeypatch)
+    paused_pages = _pages(db, 25)
+    t2i_reads = [s for s in selects if "FROM t2i_images" in s]
+    assert paused_pages == expected
+    assert len(t2i_reads) == len(paused_pages)  # one query per page
+    near_full = db.list_t2i_images(limit=61)  # 60 live, then 2,240 dangling
+    assert [int(r["id"]) for r in near_full] == live_ids
+    assert len([s for s in selects if "FROM t2i_images" in s]) == len(t2i_reads) + 1
+    with db._get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM t2i_images").fetchone()[0] == 2300
+
+    # Unpaused, the same pages -- and now the dangling rows are pruned.
+    db.set_lineage_prune_guard(None)
+    assert _pages(db, 25) == expected
+    with db._get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM t2i_images").fetchone()[0] == 60
+
+
+def test_generated_paths_without_media(db):
+    """The T2I images and I2V clips whose media row is missing: what a full
+    clean re-ingests from disk after its folder walk."""
+    _delete_first_files(db)
+    assert sorted(db.generated_paths_without_media()) == sorted(
+        [os.path.normpath(T2I[0]), os.path.normpath(CLIPS[0])]
+    )
+    assert db.truncate_all_data()
+    assert sorted(db.generated_paths_without_media()) == sorted(
+        os.path.normpath(p) for p in (*T2I, *CLIPS)
+    )

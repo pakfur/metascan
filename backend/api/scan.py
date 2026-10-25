@@ -5,7 +5,7 @@ import logging
 import os
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from backend.services.taste_snapshot import (
     PendingSnapshotUnreadable,
     apply_pending_taste_snapshot,
     clear_full_clean_marker,
+    full_clean_marker_exists,
     full_clean_running,
     merge_pending_into_snapshot,
     restore_and_persist,
@@ -134,17 +135,18 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
     a full clean re-adds the media rows one by one
     (``taste_snapshot.lineage_prune_guard``). A full clean is marked as
     running (``full_clean_running``) from before its snapshot to after its
-    restore, however it ends; it writes the lasting marker before the
-    truncate, and only a scan of every configured folder that completes --
-    this one, or any later one -- removes it."""
+    restore, however it ends. It writes the lasting marker first, and only
+    a scan that walks every configured folder to the end (and re-ingests
+    the generated output still on disk) -- this one, or any later one --
+    removes it."""
     with full_clean_running() if full_clean else nullcontext():
         await _scan(full_cleanup, full_clean)
 
 
 async def _mark_full_clean_unfinished(data_dir: Optional[Path]) -> bool:
-    """Write the full-clean marker (``write_full_clean_marker``, fsynced)
-    right before the truncate. False -- the full clean must stop before it
-    deletes anything -- when it cannot be written."""
+    """Write the full-clean marker (``write_full_clean_marker``, fsynced),
+    the first thing a full clean does. False -- the full clean must stop
+    before it writes or deletes anything -- when it cannot be written."""
     try:
         if data_dir is None:
             raise RuntimeError("database has no data directory")
@@ -166,6 +168,54 @@ async def _mark_full_clean_unfinished(data_dir: Optional[Path]) -> bool:
         )
         return False
     return True
+
+
+def _full_clean_unfinished(data_dir: Path, full_clean: bool) -> bool:
+    """This run is a full clean, or the marker of an earlier one exists (a
+    marker that can't be checked counts as existing: fail safe)."""
+    if full_clean:
+        return True
+    try:
+        return full_clean_marker_exists(data_dir)
+    except OSError:
+        return True
+
+
+def _ingest_generated_file(scanner: Any, path: str) -> str:
+    """Re-ingest one generated file: ``"reingested"``, ``"gone"`` (no longer
+    on disk) or ``"unreadable"``."""
+    if not os.path.isfile(path):
+        return "gone"
+    try:
+        media = scanner.ingest_file(Path(path))
+    except Exception as e:
+        # The type only: counts, never paths, leave the re-ingest.
+        logger.debug("Re-ingesting a generated file failed (%s)", type(e).__name__)
+        return "unreadable"
+    return "unreadable" if media is None else "reingested"
+
+
+def _reingest_generated_files(
+    db: Any,
+    scanner: Any,
+    data_dir: Path,
+    full_clean: bool,
+    cancelled: Callable[[], bool],
+) -> Tuple[int, int, int]:
+    """Re-ingest (``Scanner.ingest_file``) the T2I images and I2V clips whose
+    media row is missing but whose file is still on disk -- only while a full
+    clean is unfinished (``_full_clean_unfinished``). Outside one a dangling
+    row means a deleted file, and nothing is done. Returns ``(re-ingested,
+    no longer on disk, unreadable)``; stops at a cancel. Runs in a worker
+    thread."""
+    if not _full_clean_unfinished(data_dir, full_clean):
+        return 0, 0, 0
+    counts = {"reingested": 0, "gone": 0, "unreadable": 0}
+    for path in db.generated_paths_without_media():
+        if cancelled():
+            break
+        counts[_ingest_generated_file(scanner, path)] += 1
+    return counts["reingested"], counts["gone"], counts["unreadable"]
 
 
 async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
@@ -190,6 +240,14 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
     data_dir = _data_dir(db)
     taste_snapshot: Optional[Dict[str, Any]] = None
     if full_clean:
+        # The lasting marker comes first, before the pending file is applied
+        # or written: until a scan of every configured folder completes, the
+        # T2I / I2V lists must not prune a lineage row the rescan may still
+        # bring back -- even once nothing is pending any more. A marker that
+        # can't be written stops the clean with nothing written at all (a
+        # snapshot left behind could later put back what the user changed).
+        if not await _mark_full_clean_unfinished(data_dir):
+            return
         try:
             if data_dir is None:
                 raise RuntimeError("database has no data directory")
@@ -225,12 +283,6 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "error",
                 {"message": f"Full clean aborted (taste snapshot failed): {snap_err}"},
             )
-            return
-        # The lasting marker, next to the pending file: until a scan of
-        # every configured folder completes, the T2I / I2V lists must not
-        # prune a lineage row the rescan may still bring back -- even once
-        # nothing is pending any more.
-        if not await _mark_full_clean_unfinished(data_dir):
             return
         await asyncio.to_thread(db.truncate_all_data)
         await ws_manager.broadcast(
@@ -284,11 +336,43 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         except Exception as e:
             logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
+    async def _reingest_generated_output() -> None:
+        """T2I / I2V output enters the library through ComfyClient's ingest,
+        under the ComfyUI output root, which is usually outside every scan
+        folder: a full clean's folder walk never brings it back. While a
+        full clean is unfinished (this one, or the marker of an earlier
+        one), re-ingest the generated files whose media row is missing but
+        that are still on disk, so the restore puts their ratings back and
+        their lineage stays attached. Counts only in the log. Never
+        raises."""
+        if data_dir is None:
+            return
+        try:
+            counts = await asyncio.to_thread(
+                _reingest_generated_files,
+                db,
+                scanner,
+                data_dir,
+                full_clean,
+                lambda: _cancel_requested,
+            )
+        except Exception as e:
+            logger.error(f"Re-ingesting generated output failed: {e}", exc_info=True)
+            return
+        if any(counts):
+            logger.info(
+                "Full clean: re-ingested %d generated images / clips from "
+                "outside the scan folders; %d no longer on disk, %d unreadable",
+                *counts,
+            )
+
     async def _every_folder_scanned() -> None:
-        """A scan of every configured folder completed: each file still on
-        disk has its media row again, so the T2I / I2V lists may prune again.
-        The only place the full-clean marker is removed; a failure keeps it
-        (and the pause) and is logged. Never raises."""
+        """A scan walked every configured folder to the end (and re-ingested
+        the generated output still on disk): every file still on disk in a
+        configured folder, and every T2I / I2V output still on disk, has its
+        media row again, so the T2I / I2V lists may prune again. The only
+        place the full-clean marker is removed; a failure keeps it (and the
+        pause) and is logged. Never raises."""
         if data_dir is None:
             return
         try:
@@ -296,8 +380,10 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         except Exception as e:
             logger.error(f"Removing the full-clean marker failed: {e}", exc_info=True)
 
-    # Configured folders this run could not see (and so did not walk).
+    # Configured folders this run could not see (and so did not walk), and
+    # how many it walked.
     missing_folders: List[str] = []
+    walked_folders = 0
 
     try:
         total_processed = 0
@@ -342,6 +428,10 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 False,  # not full_scan - skip existing
             )
             total_processed += processed
+            walked_folders += 1
+
+        if not _cancel_requested:
+            await _reingest_generated_output()
 
         # Stale cleanup
         stale_count = 0
@@ -361,9 +451,10 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         # normally -- it must not tombstone what wasn't re-imported yet.
         await _restore_taste_from_snapshot(completed=not _cancel_requested)
         await _apply_pending()
-        # Not after a cancel (one in the last folder lands here too), and not
-        # when a configured folder was missing: its files were not walked.
-        if not _cancel_requested and not missing_folders:
+        # Not after a cancel (one in the last folder lands here too), not
+        # when a configured folder was missing (its files were not walked),
+        # and not when there was no folder to walk at all.
+        if not _cancel_requested and not missing_folders and walked_folders:
             await _every_folder_scanned()
 
         # Auto-trigger embedding build when:

@@ -112,19 +112,18 @@ def pending_snapshot_exists(data_dir: Path) -> bool:
 FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
 
 _MARKER_TEXT = """\
-Metascan started a full clean & rescan at {started}, and no scan has
-finished since.
+Metascan started a full clean & rescan at {started}. It is unfinished until
+a scan walks every configured folder to the end.
 
 While this file exists, the Text-to-Image and Image-to-Video lists keep the
-records (prompts, writers, variants) of generated images and clips that the
-rescan has not found again yet, instead of deleting them: they may still
-come back. Metascan deletes this file when a scan of every configured
-folder completes.
+records (prompts, writers, variants) of generated images and clips whose
+library entry is missing, instead of deleting them: the rescan may still
+bring them back. Metascan deletes this file itself when a scan of every
+configured folder completes.
 
 To let the lists drop those records without scanning, delete this file;
-Metascan may keep running. A pending ratings file next to it
-({pending}) also holds them back while it lists ratings that have not come
-back.
+Metascan may keep running. A full clean that is still running, or a pending
+ratings file next to it ({pending}), also holds them back.
 """
 
 
@@ -138,10 +137,11 @@ def full_clean_marker_exists(data_dir: Path) -> bool:
 
 
 def write_full_clean_marker(data_dir: Path) -> None:
-    """Create (or refresh) the marker, durably: the full clean writes it
-    right before the truncate, after the pending file, and its data and
-    directory entry are fsynced first, so a crash after the truncate still
-    finds it. Raises OSError."""
+    """Create (or refresh) the marker, durably: a full clean writes it before
+    anything else -- before it applies or writes the pending file, and so
+    before the truncate -- with its data and directory entry fsynced, so a
+    crash after the truncate still finds it, and a marker that can't be
+    written stops the clean with nothing written. Raises OSError."""
     target = full_clean_marker_path(data_dir)
     text = _MARKER_TEXT.format(
         started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -155,18 +155,20 @@ def write_full_clean_marker(data_dir: Path) -> None:
 
 
 def clear_full_clean_marker(data_dir: Path) -> bool:
-    """Remove the marker: only the scan route calls it, once a scan of every
-    configured folder has completed (every file still on disk has its media
-    row again). True when it is gone. A failed removal (OSError) is logged
-    and returns False: the marker stays, so the prune stays paused (fail
-    safe)."""
+    """Remove the marker: only the scan route calls it, once a scan has walked
+    every configured folder to the end and re-ingested the generated output
+    still on disk -- every file still on disk in a configured folder, and
+    every T2I / I2V output still on disk, has its media row again. True when
+    it is gone. A failed removal (OSError) is logged and returns False: the
+    marker stays, so the prune stays paused (fail safe)."""
     target = full_clean_marker_path(data_dir)
     try:
         target.unlink(missing_ok=True)
     except OSError as e:
         logger.error(
             "Could not remove %s (%s): the T2I / I2V lists keep their records "
-            "of missing files until it is gone; delete it by hand to resume",
+            "of missing files until it is gone; delete it by hand to resume "
+            "(a running full clean or a pending ratings file still holds them)",
             target,
             e,
         )

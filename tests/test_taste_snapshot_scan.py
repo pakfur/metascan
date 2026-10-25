@@ -750,16 +750,57 @@ def test_full_clean_aborts_when_the_marker_cannot_be_written(monkeypatch, db):
     assert not ts.is_full_clean_running()
 
 
-def test_a_full_clean_that_aborts_before_its_snapshot_leaves_no_marker(monkeypatch, db):
+def test_a_full_clean_that_aborts_after_its_marker_deletes_nothing(monkeypatch, db):
+    """The marker is written first; a snapshot that fails after it stops the
+    full clean before the truncate. The marker stays (fail safe) until a scan
+    of every folder completes."""
     _seed(db)
+    real_export = db.export_taste_state
 
     def boom():
         raise RuntimeError("disk full")
 
     monkeypatch.setattr(db, "export_taste_state", boom)
+    events = _wire(monkeypatch, db, [])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert len(db.get_existing_file_paths()) == 3  # nothing was deleted
+    assert any(e[1] == "error" for e in events)
+    assert _marker_exists(db)
+
+    monkeypatch.setattr(db, "export_taste_state", real_export)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert not _marker_exists(db)
+
+
+def test_a_full_clean_that_cannot_write_its_marker_leaves_nothing_pending(
+    monkeypatch, db
+):
+    """From the review's marker_abort_demo: with the marker written after the
+    snapshot, a marker failure left a full snapshot of live paths pending,
+    and the next apply put back a ★ and a category the user had removed
+    since. The marker now comes first, so nothing is written at all."""
+    db.save_media(_media("/lib/a.png"))
+    db.set_favorite_state("/lib/a.png", True, now=T0)
+    cat = db.create_category("Landscape")
+    db.add_media_categories(["/lib/a.png"], cat.id, "viewer")
+
+    def disk_full(data_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(scan_api, "write_full_clean_marker", disk_full)
     _wire(monkeypatch, db, [])
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
-    assert not _marker_exists(db)
+    assert _pending(db) is None
+    assert len(db.get_existing_file_paths()) == 1
+
+    # The user un-stars the image and removes its category afterwards ...
+    db.set_favorite_state("/lib/a.png", False, now=T0)
+    db.remove_media_categories(["/lib/a.png"], cat.id)
+    # ... and the next start (or the end of the next scan) applies.
+    ts.apply_pending_taste_snapshot(db, Path(db.db_path))
+    state = db.get_judgment("/lib/a.png")
+    assert state.favorite is False
+    assert state.categories == []
 
 
 @pytest.mark.parametrize("later", ["ordinary scan", "full clean"])
@@ -929,3 +970,124 @@ def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
     assert not _marker_exists(db)
     assert [r["file_name"] for r in db.list_t2i_images()] == ["back.png"]
     assert _lineage_rows(db) == (1, 0)
+
+
+def test_a_scan_with_no_configured_folder_keeps_the_marker(monkeypatch, db):
+    """Nothing was walked, so nothing came back: the full clean is still
+    unfinished."""
+    ts.write_full_clean_marker(Path(db.db_path))
+    _wire(monkeypatch, db, [])
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [])
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert _marker_exists(db)
+
+
+# ----------------------------------------------------------------------
+# Generated output lives outside the scan folders: a full clean re-ingests it
+# ----------------------------------------------------------------------
+
+
+def _png(path):
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (16, 16), (200, 30, 30)).save(path)
+    return path
+
+
+def test_full_clean_keeps_generated_output_outside_the_scan_folders(
+    monkeypatch, tmp_path, db, caplog
+):
+    """T2I / I2V output enters the library through ComfyClient's ingest, under
+    <comfy output root>/t2i and /i2v/<stem>/ -- usually outside every scan
+    folder, so the folder walk never brings it back. After the walk a full
+    clean re-ingests (Scanner.ingest_file) the generated files still on disk:
+    they stay in the library with their lineage and grades. One gone from
+    disk is still tombstoned with its lineage. Real files, real Scanner."""
+    from metascan.core.scanner import Scanner
+
+    library = tmp_path / "library"
+    photo = _png(library / "photo.png")
+    out = tmp_path / "comfy_output" / "t2i"
+    kept, unrated, gone = (
+        _png(out / "kept.png"),
+        _png(out / "unrated.png"),
+        _png(out / "gone.png"),
+    )
+    scanner = Scanner(db)
+    scanner.scan_directory(str(library))
+    for n, path in enumerate((kept, unrated, gone)):  # what ComfyClient does
+        assert scanner.ingest_file(path) is not None
+        db.create_t2i_image(file_path=str(path), variant_index=n, **T2I_LINEAGE)
+    db.set_grade(str(kept), "pass", now=T0)
+    db.set_grade(str(gone), "fail", now=T0)
+    db.set_grade(str(photo), "pass", now=T0)
+    gone.unlink()  # deleted on disk behind the library's back
+    _wire_prune_guard(db)
+
+    class Library:
+        filepath = str(library)
+        search_subfolders = True
+
+    async def quiet(*a, **k):
+        pass
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: db)
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: None)
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: {})
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [Library()])
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", quiet)
+    with caplog.at_level(logging.INFO, logger="backend.api.scan"):
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    in_library = db.get_existing_file_paths()
+    assert {str(photo), str(kept), str(unrated)} <= in_library
+    assert str(gone) not in in_library
+    images = db.list_t2i_images()
+    assert [r["file_name"] for r in images] == ["unrated.png", "kept.png"]
+    assert [_lineage(r, T2I_LINEAGE) for r in images] == [T2I_LINEAGE] * 2
+    assert [r["grade"] for r in images] == [None, "pass"]  # ratings put back
+    assert db.get_judgment(str(photo)).grade == "pass"
+    [t] = db.list_tombstones()
+    assert (t["file_path"], t["grade"]) == (str(gone), "fail")
+    assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert _pending(db) is None and not _marker_exists(db)
+    assert _lineage_rows(db) == (2, 0)  # the vanished row is pruned now
+    # Counts only in the log, never a path.
+    logged = [r.getMessage() for r in caplog.records if "re-ingested" in r.getMessage()]
+    assert logged and all("kept.png" not in m and "unrated" not in m for m in logged)
+
+
+def test_full_clean_reingests_i2v_clips_outside_the_scan_folders(
+    monkeypatch, tmp_path, db
+):
+    clip = tmp_path / "comfy_output" / "i2v" / "src" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"a clip")
+    db.save_media(_media(SRC))
+    db.save_media(_media(str(clip)))
+    db.create_i2v_video(source_path=SRC, file_path=str(clip), **I2V_LINEAGE)
+    db.set_grade(str(clip), "fail", now=T0)
+    _wire_prune_guard(db)
+    ingested = []
+
+    class Scanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            db.save_media(_media(SRC))  # the source image is in the library
+            return 1
+
+        def ingest_file(self, path):
+            ingested.append(Path(path).name)
+            db.save_media(_media(str(path)))
+            return object()
+
+    _wire(monkeypatch, db, [], scanner_cls=Scanner)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert ingested == ["clip.mp4"]
+    [row] = db.list_i2v_videos(SRC)
+    assert _lineage(row, I2V_LINEAGE) == I2V_LINEAGE
+    assert row["grade"] == "fail"
+    assert db.list_tombstones() == []
