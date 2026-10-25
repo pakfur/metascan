@@ -269,7 +269,7 @@ def test_diversity_uses_passed_generations(db):
     assert db.delete_t2i_image(gone_star)[0]
     db.set_embedding_lookup(None)
 
-    task = _diversity_task(db, NOW)
+    task = _diversity_task(db, NOW, "small")
     assert task["window_starts"] == STARTS
     items = {i["file_path"]: i for i in task["items"]}
     assert sorted(items) == [
@@ -289,6 +289,11 @@ def test_diversity_uses_passed_generations(db):
     deleted = items["/g/gone_pass.png"]
     assert deleted["tombstone"] is True and deleted["embedding_model"] == "small"
     assert base64.b64decode(deleted["embedding"]) == vec.tobytes()
+    # Only the vector for the index's CLIP model rides along.
+    other = {i["file_path"]: i for i in _diversity_task(db, NOW, "large")["items"]}[
+        "/g/gone_pass.png"
+    ]
+    assert other["embedding"] is None and other["embedding_model"] is None
 
 
 def _div(*values: Optional[float]) -> List[Dict[str, Any]]:

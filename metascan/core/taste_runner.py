@@ -81,15 +81,18 @@ def _write_json(path: Path, doc: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
+def _diversity_task(
+    db: Any, now: datetime, vector_model: Optional[str]
+) -> Dict[str, Any]:
     """The worker's ``diversity`` input: every ✓ pass T2I generation (live
     or deleted; ★ and views choose nothing) in the last ``WRITER_WINDOWS``
-    windows with its window (tombstoned ones carry their stored vector, and
-    only that). A row must say whether it is a tombstone (KeyError when it
-    does not). Blocking."""
+    windows with its window (tombstoned ones carry their stored vector for
+    ``vector_model`` -- the index's CLIP model -- and only that, so one
+    re-embedded after a CLIP switch counts again). A row must say whether
+    it is a tombstone (KeyError when it does not). Blocking."""
     starts = window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS)
     items: List[Dict[str, Any]] = []
-    for g in db.generation_outcomes(since=starts[0], include_embeddings=True):
+    for g in db.generation_outcomes(since=starts[0], vector_model=vector_model):
         if g["kind"] != "t2i" or g["grade"] != "pass":
             continue
         start = window_for(g["created_at"], starts, WRITER_WINDOW_DAYS)
@@ -141,6 +144,14 @@ class TasteRunner:
         except (OSError, ValueError):
             return None
         return meta if isinstance(meta, dict) else None
+
+    def index_model_key(self) -> Optional[str]:
+        """The CLIP model the index on disk was built with (``index_meta.json``
+        ``model_key``), or None without a readable index: the model whose
+        tombstone vectors training reads, and the one deleted images are
+        re-embedded for. Blocking."""
+        key = str((self._index_meta() or {}).get("model_key") or "")
+        return key or None
 
     def is_stale(self, model: Dict[str, Any]) -> bool:
         """True when the index on disk was built with a different CLIP model
@@ -295,11 +306,14 @@ class TasteRunner:
     ) -> Dict[str, Any]:
         now = now or datetime.now(timezone.utc)
 
-        def _snapshot() -> Tuple[Dict[str, Any], LabelSet]:
-            raw = self.db.taste_training_raw()
-            return raw, build_label_set(raw, now, half_life_days)
+        def _snapshot() -> Tuple[Dict[str, Any], LabelSet, Optional[str]]:
+            # A deleted image's vector is its own, for the index's model (the
+            # worker drops one for any other model or dimension).
+            vector_model = self.index_model_key()
+            raw = self.db.taste_training_raw(vector_model)
+            return raw, build_label_set(raw, now, half_life_days), vector_model
 
-        raw, ls = await asyncio.to_thread(_snapshot)
+        raw, ls, vector_model = await asyncio.to_thread(_snapshot)
         missing = missing_for_training(ls.n_pos, ls.n_neg)
         if missing is not None:
             return {
@@ -319,7 +333,9 @@ class TasteRunner:
                 await asyncio.to_thread(_write_json, labels_path, _labels_doc(ls))
                 diversity: Optional[Dict[str, Any]] = None
                 try:
-                    diversity = await asyncio.to_thread(_diversity_task, self.db, now)
+                    diversity = await asyncio.to_thread(
+                        _diversity_task, self.db, now, vector_model
+                    )
                 except Exception:
                     # A dashboard metric: never worth failing training over.
                     logger.warning(

@@ -1593,6 +1593,11 @@ class DatabaseManager:
             )
             # A deleted item's CLIP vector, one per CLIP model (model_key as
             # the FAISS index names it). No FK: tombstones are never deleted.
+            # It replaces media_tombstones.embedding / embedding_model, which
+            # _migrate_to_v6 copied here; nothing writes or reads those now.
+            # Filled at deletion (the in-memory index), by the by-path
+            # backfill once the index loads, and by the re-embedder from the
+            # archived thumbnail (backend/services/tombstone_reembed.py).
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tombstone_vectors (
@@ -3891,8 +3896,9 @@ class DatabaseManager:
     ) -> None:
         """Install the callable tombstones use to snapshot a deleted item's
         embedding: ``fn(native_path)`` returns ``(vector, model_key)`` or
-        None. It runs while the DB lock is held, so it must be a fast
-        in-memory lookup. Default: no lookup (embedding columns stay NULL)."""
+        None; the vector is kept in ``tombstone_vectors`` under that model.
+        It runs while the DB lock is held, so it must be a fast in-memory
+        lookup. Default: no lookup (the tombstone gets no vector)."""
         self._embedding_lookup = fn
 
     def _write_tombstones(
@@ -4023,7 +4029,10 @@ class DatabaseManager:
         media_judgments row or a version-2 snapshot row (both carry
         ``grade``); the keyword fields are stored as given (see
         ``_write_tombstones``), and ``scorecard_id`` comes from the T2I
-        lineage. Caller holds the lock."""
+        lineage. The item's vector from the in-memory FAISS index (the
+        installed lookup) goes into ``tombstone_vectors`` under the CLIP
+        model it came from; the legacy single-vector columns are no longer
+        written. Caller holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
             if row is not None:
@@ -4046,12 +4055,12 @@ class DatabaseManager:
         # is translated before it gets here).
         grade = judgment["grade"] if judgment is not None else None
         scorecard_id = ((lineage or {}).get("t2i") or {}).get("scorecard_id")
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
             "is_favorite, passed, grade, reasons, categories, seen_at, "
-            "judged_at, confirmed_at, embedding, embedding_model, lineage, "
+            "judged_at, confirmed_at, lineage, "
             "brief, brief_model, prompt, model_name, thumb_path, scorecard_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 now,
@@ -4065,8 +4074,6 @@ class DatabaseManager:
                 judgment["seen_at"] if judgment is not None else None,
                 judgment["judged_at"] if judgment is not None else None,
                 judgment["confirmed_at"] if judgment is not None else None,
-                blob,
-                model_key,
                 json.dumps(lineage, default=str) if lineage else None,
                 brief,
                 brief_model,
@@ -4076,37 +4083,102 @@ class DatabaseManager:
                 scorecard_id if isinstance(scorecard_id, str) else None,
             ),
         )
+        if blob is not None and model_key:
+            conn.execute(
+                "INSERT OR IGNORE INTO tombstone_vectors "
+                "(tombstone_id, model_key, embedding, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (cur.lastrowid, model_key, blob, now),
+            )
 
-    def tombstones_missing_embedding(self) -> List[Tuple[int, str]]:
-        """``(id, posix file_path)`` for every tombstone whose embedding is
-        NULL -- written while the FAISS index wasn't loaded in memory."""
+    def tombstones_for_vector_backfill(self, model_key: str) -> List[Tuple[int, str]]:
+        """``(id, posix file_path)`` of the tombstones with no vector for CLIP
+        model ``model_key`` that may take the FAISS index's vector for their
+        path (deleted items stay in the on-disk index until a full rebuild).
+
+        The index keys a vector by path and never replaces one, so once a
+        path has held another file the vector it gives may be that file's
+        (Review Focus 5). Left out, so they never get a vector by path: a
+        tombstone whose path a live media row holds now, and one that shares
+        its path with another tombstone (another life of the path). Their
+        vectors come from the archived thumbnail instead (the re-embedder).
+        Oldest first."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT id, file_path FROM media_tombstones "
-                "WHERE embedding IS NULL ORDER BY id"
+                "SELECT t.id, t.file_path, "
+                "EXISTS (SELECT 1 FROM media m WHERE m.file_path = t.file_path) "
+                "AS live, "
+                "EXISTS (SELECT 1 FROM tombstone_vectors v "
+                "WHERE v.tombstone_id = t.id AND v.model_key = ?) AS has_vector "
+                "FROM media_tombstones t ORDER BY t.id",
+                (model_key,),
             ).fetchall()
-        return [(int(r["id"]), str(r["file_path"])) for r in rows]
+        lives: Dict[str, int] = {}
+        for r in rows:
+            lives[r["file_path"]] = lives.get(r["file_path"], 0) + 1
+        return [
+            (int(r["id"]), str(r["file_path"]))
+            for r in rows
+            if not r["has_vector"] and not r["live"] and lives[r["file_path"]] == 1
+        ]
 
-    def set_tombstone_embeddings(self, rows: List[Tuple[int, bytes, str]]) -> int:
-        """Fill ``(id, float32 vector bytes, model_key)`` into tombstones in
-        one transaction. Only rows whose embedding is still NULL are
-        written; returns how many were."""
+    def tombstones_needing_vectors(self, model_key: str) -> List[Tuple[int, str]]:
+        """``(id, thumb_path)`` of every graded image tombstone with an
+        archived thumbnail and no vector for CLIP model ``model_key``: what
+        the re-embedder computes from the archive (never from the item's old
+        path, which may hold another file now). Newest first: recent grades
+        weigh most in training."""
+        # No ORDER BY: with one, SQLite scans every tombstone in rowid order
+        # instead of searching the small partial thumb index (sorted below).
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT t.id, t.file_path, t.thumb_path FROM media_tombstones t "
+                "WHERE t.thumb_path IS NOT NULL AND t.grade IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM tombstone_vectors v "
+                "WHERE v.tombstone_id = t.id AND v.model_key = ?)",
+                (model_key,),
+            ).fetchall()
+        return sorted(
+            (
+                (int(r["id"]), str(r["thumb_path"]))
+                for r in rows
+                if self._is_image_path(r["file_path"])
+            ),
+            reverse=True,
+        )
+
+    def add_tombstone_vectors(self, rows: Sequence[Tuple[int, str, bytes]]) -> int:
+        """Store ``(tombstone id, CLIP model key, float32 vector bytes)`` rows
+        in ``tombstone_vectors``, in one transaction. A tombstone keeps the
+        vector it already has for a model (INSERT OR IGNORE), and an id with
+        no tombstone gets none. Returns how many were added."""
         if not rows:
             return 0
-        filled = 0
+        now = self._iso(None)
+        added = 0
         with self.lock, self._get_connection() as conn:
-            for tomb_id, blob, model_key in rows:
+            for tomb_id, model_key, blob in rows:
                 cur = conn.execute(
-                    "UPDATE media_tombstones SET embedding = ?, embedding_model = ? "
-                    "WHERE id = ? AND embedding IS NULL",
-                    (blob, model_key, tomb_id),
+                    "INSERT OR IGNORE INTO tombstone_vectors "
+                    "(tombstone_id, model_key, embedding, created_at) "
+                    "SELECT id, ?, ?, ? FROM media_tombstones WHERE id = ?",
+                    (model_key, blob, now, tomb_id),
                 )
-                filled += max(cur.rowcount, 0)
+                added += max(cur.rowcount, 0)
             conn.commit()
-        return filled
+        return added
 
-    def set_tombstone_embedding(self, tomb_id: int, blob: bytes, model_key: str) -> int:
-        return self.set_tombstone_embeddings([(tomb_id, blob, model_key)])
+    def get_tombstone_vectors(self, tombstone_id: int) -> Dict[str, bytes]:
+        """``{CLIP model key: float32 vector bytes}`` stored for a tombstone."""
+        with self.lock, self._get_connection() as conn:
+            return {
+                str(r["model_key"]): bytes(r["embedding"])
+                for r in conn.execute(
+                    "SELECT model_key, embedding FROM tombstone_vectors "
+                    "WHERE tombstone_id = ?",
+                    (tombstone_id,),
+                )
+            }
 
     def list_tombstones(self) -> List[Dict[str, Any]]:
         with self.lock, self._get_connection() as conn:
@@ -6729,13 +6801,17 @@ class DatabaseManager:
         )
         return sql, params
 
-    def taste_training_raw(self) -> Dict[str, Any]:
+    def taste_training_raw(self, vector_model: Optional[str] = None) -> Dict[str, Any]:
         """Raw rows for ``taste_labels.build_label_set``: every live image
         (a training run scores them all) and every graded image tombstone;
         videos are never training data. A row carries its ``grade``, the
         ``judged_at`` / ``confirmed_at`` the decay clock reads, and
         ``grade_score_shown`` (``_grade_score_sql``); never ★, views or
-        the legacy ``passed``."""
+        the legacy ``passed``. A tombstone row's ``embedding`` /
+        ``embedding_model`` is its ``tombstone_vectors`` row for CLIP model
+        ``vector_model`` (the FAISS index's), else None: a vector for any
+        other model -- and the legacy single-vector columns -- is never
+        read. None (no index) gives no tombstone a vector."""
         live_score, params = self._grade_score_sql(
             "m.file_path", "j.grade", "j.judged_at"
         )
@@ -6771,10 +6847,13 @@ class DatabaseManager:
             tombstones: List[Dict[str, Any]] = []
             for r in conn.execute(
                 "SELECT t.id, t.file_path, t.deleted_at, t.grade, t.judged_at, "
-                "t.confirmed_at, t.embedding, t.embedding_model, t.categories, "
+                "t.confirmed_at, v.embedding AS embedding, "
+                "v.model_key AS embedding_model, t.categories, "
                 f"t.lineage, {tomb_score} AS grade_score_shown "
-                "FROM media_tombstones t WHERE t.grade IS NOT NULL ORDER BY t.id",
-                params,
+                "FROM media_tombstones t LEFT JOIN tombstone_vectors v "
+                "ON v.tombstone_id = t.id AND v.model_key = :vector_model "
+                "WHERE t.grade IS NOT NULL ORDER BY t.id",
+                {**params, "vector_model": vector_model},
             ):
                 if not self._is_image_path(r["file_path"]):
                     continue
@@ -6988,7 +7067,7 @@ class DatabaseManager:
     _GENERATION_TABLES = (("t2i", "t2i_images"), ("i2v", "i2v_videos"))
 
     def generation_outcomes(
-        self, since: Optional[str] = None, include_embeddings: bool = False
+        self, since: Optional[str] = None, vector_model: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
         writer_model, created_at, grade, tombstone, embedding,
@@ -7001,10 +7080,12 @@ class DatabaseManager:
         a tombstone.
         Scorecard images (``t2i_images.scorecard_id`` set, live or in the
         tombstone lineage) are left out: their results have their own rows.
-        ``since`` (an ISO date) drops older generations. ``embedding`` is
-        the tombstone's vector bytes (live rows: None) when
-        ``include_embeddings``; a deleted row has no other vector (its path
-        may hold another file now)."""
+        ``since`` (an ISO date) drops older generations. With
+        ``vector_model`` (the FAISS index's CLIP model) a deleted row's
+        ``embedding`` / ``embedding_model`` is its ``tombstone_vectors`` row
+        for that model -- vector bytes and the model key -- else None; live
+        rows always None. A deleted row has no other vector (its path may
+        hold another file now)."""
         out: Dict[Tuple[str, str], Dict[str, Any]] = {}
         with self.lock, self._get_connection() as conn:
             for kind, table in self._GENERATION_TABLES:
@@ -7039,21 +7120,32 @@ class DatabaseManager:
                         "embedding_model": None,
                     }
             live = set(out)
-            cols = "id, file_path, grade, lineage"
-            if include_embeddings:
-                cols += ", embedding, embedding_model"
-            sql = f"SELECT {cols} FROM media_tombstones WHERE lineage IS NOT NULL"
-            params = []
+            if vector_model is None:
+                sql = (
+                    "SELECT t.id, t.file_path, t.grade, t.lineage, "
+                    "NULL AS embedding FROM media_tombstones t "
+                    "WHERE t.lineage IS NOT NULL"
+                )
+                params = []
+            else:
+                sql = (
+                    "SELECT t.id, t.file_path, t.grade, t.lineage, "
+                    "v.embedding AS embedding FROM media_tombstones t "
+                    "LEFT JOIN tombstone_vectors v "
+                    "ON v.tombstone_id = t.id AND v.model_key = ? "
+                    "WHERE t.lineage IS NOT NULL"
+                )
+                params = [vector_model]
             if since is not None:
                 # Filter in SQL: most tombstones are library deletes or old
                 # generations, not worth parsing under the lock.
                 sql += (
-                    " AND json_valid(lineage) AND ("
-                    "json_extract(lineage, '$.t2i.created_at') >= ? "
-                    "OR json_extract(lineage, '$.i2v.created_at') >= ?)"
+                    " AND json_valid(t.lineage) AND ("
+                    "json_extract(t.lineage, '$.t2i.created_at') >= ? "
+                    "OR json_extract(t.lineage, '$.i2v.created_at') >= ?)"
                 )
-                params = [since, since]
-            for r in conn.execute(sql + " ORDER BY id", params):
+                params += [since, since]
+            for r in conn.execute(sql + " ORDER BY t.id", params):
                 try:
                     lineage = json.loads(r["lineage"])
                 except ValueError:
@@ -7089,9 +7181,9 @@ class DatabaseManager:
                         "created_at": str(created_at),
                         "grade": r["grade"],
                         "tombstone": True,
-                        "embedding": (r["embedding"] if include_embeddings else None),
+                        "embedding": r["embedding"],
                         "embedding_model": (
-                            r["embedding_model"] if include_embeddings else None
+                            vector_model if r["embedding"] is not None else None
                         ),
                     }
         return list(out.values())

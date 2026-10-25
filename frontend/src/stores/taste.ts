@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef, computed } from 'vue'
-import type { TasteStatus, WriterStats } from '../types/taste'
+import type { TasteReembed, TasteStatus, WriterStats } from '../types/taste'
 import {
   fetchTasteStatus,
   startTasteTraining,
@@ -29,11 +29,25 @@ export const useTasteStore = defineStore('taste', () => {
   }
 
   let statusToken = 0
+  // Bumped by every `reembed_progress` frame: a frame that lands while a
+  // status load is in flight is newer than that load's `reembed`.
+  let reembedFrames = 0
   async function loadStatus(): Promise<void> {
     const token = ++statusToken
+    const framesAtStart = reembedFrames
     const data = await fetchTasteStatus()
     if (token !== statusToken) return
-    status.value = data
+    status.value =
+      framesAtStart === reembedFrames || !status.value
+        ? data
+        : { ...data, reembed: status.value.reembed }
+  }
+
+  // A `reembed_progress` frame: patch the status in place (frames come up to
+  // once a second during a pass; a full status load per frame is wasteful).
+  function setReembed(reembed: TasteReembed | null): void {
+    reembedFrames++
+    if (status.value) status.value = { ...status.value, reembed }
   }
 
   // Throws ApiError on 409 (detail.code already_training / not_enough_data).
@@ -71,6 +85,7 @@ export const useTasteStore = defineStore('taste', () => {
     load,
     loadStatus,
     loadWriterStats,
+    setReembed,
     train,
     scoreOf,
     reviewQueue,

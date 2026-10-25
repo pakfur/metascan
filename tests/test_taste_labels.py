@@ -44,8 +44,8 @@ def _media(path: str) -> Media:
     )
 
 
-def _labels(db, now=T0, half_life=180):
-    return build_label_set(db.taste_training_raw(), now, half_life)
+def _labels(db, now=T0, half_life=180, vector_model=None):
+    return build_label_set(db.taste_training_raw(vector_model), now, half_life)
 
 
 # (event, score_shown, created_at)
@@ -205,7 +205,10 @@ def test_tombstone_rows_carry_embedding(db):
     db.set_grade("/l/gone.mp4", "pass", now=T0)
     db.delete_media(Path("/l/gone.png"))
     db.delete_media(Path("/l/gone.mp4"))
-    ls = _labels(db)
+    # Rows carry the vector stored for the index's CLIP model only.
+    assert _labels(db).rows[0].embedding is None
+    assert _labels(db, vector_model="clip-small").rows[0].embedding is None
+    ls = _labels(db, vector_model="clip-large")
     assert len(ls.rows) == 1
     r = ls.rows[0]
     tomb_id = db.list_tombstones()[0]["id"]

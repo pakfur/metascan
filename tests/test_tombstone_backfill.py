@@ -1,5 +1,7 @@
 """Tombstones written while the FAISS index wasn't loaded get their CLIP
-vector backfilled once it loads (final-review item 2)."""
+vector backfilled once it loads (final-review item 2), into
+``tombstone_vectors`` under the index's CLIP model -- and never from a path
+that may hold another file's vector now (Review Focus 5)."""
 
 from datetime import datetime
 from pathlib import Path
@@ -44,73 +46,125 @@ class FakeFaiss:
         return self.vectors.get(key)
 
 
-def _judged_delete(db, path, verdict="favorite"):
+def _graded_delete(db, path, grade="pass") -> int:
     db.save_media(_media(path))
-    db.set_verdict(path, verdict)
+    db.set_grade(path, grade)
     db.delete_media(Path(path))
+    return max(t["id"] for t in db.list_tombstones() if t["file_path"] == path)
 
 
-def test_missing_embedding_listing_and_batch_set(db):
-    _judged_delete(db, "/p/a.png")
-    _judged_delete(db, "/p/b.png", "pass")
-    rows = db.tombstones_missing_embedding()
-    assert [p for _, p in rows] == ["/p/a.png", "/p/b.png"]
+def _vector(db, tomb_id, model):
+    blob = db.get_tombstone_vectors(tomb_id).get(model)
+    return None if blob is None else np.frombuffer(blob, dtype=np.float32)
+
+
+def test_backfill_listing_and_per_model_add(db):
+    a = _graded_delete(db, "/p/a.png")
+    b = _graded_delete(db, "/p/b.png", "fail")
+    assert db.tombstones_for_vector_backfill("clip-x") == [
+        (a, "/p/a.png"),
+        (b, "/p/b.png"),
+    ]
     vec = np.ones(32, dtype=np.float32)
-    assert db.set_tombstone_embeddings([(rows[0][0], vec.tobytes(), "clip-x")]) == 1
-    assert [p for _, p in db.tombstones_missing_embedding()] == ["/p/b.png"]
+    assert db.add_tombstone_vectors([(a, "clip-x", vec.tobytes())]) == 1
+    assert db.tombstones_for_vector_backfill("clip-x") == [(b, "/p/b.png")]
+    # Per model: "a" still needs one for another CLIP model.
+    assert [t for t, _ in db.tombstones_for_vector_backfill("clip-y")] == [a, b]
 
 
-def test_set_never_overwrites_an_existing_embedding(db):
+def test_delete_time_vector_is_kept_per_model_and_never_overwritten(db):
     vec = np.arange(32, dtype=np.float32)
     db.set_embedding_lookup(lambda p: (vec, "clip-small"))
-    _judged_delete(db, "/p/a.png")
-    [t] = db.list_tombstones()
-    other = np.zeros(32, dtype=np.float32).tobytes()
-    assert db.set_tombstone_embedding(t["id"], other, "clip-large") == 0
-    [t2] = db.list_tombstones()
-    assert t2["embedding_model"] == "clip-small"
-    assert np.array_equal(np.frombuffer(t2["embedding"], dtype=np.float32), vec)
-
-
-def test_backfill_fills_only_null_rows_from_native_or_posix_key(db):
-    have = np.arange(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (have, "clip-small"))
-    _judged_delete(db, "/p/already.png")
+    t = _graded_delete(db, "/p/a.png")
     db.set_embedding_lookup(None)
-    _judged_delete(db, "/p/a.png")
-    _judged_delete(db, "/p/b.png", "pass")
-    _judged_delete(db, "/p/nothere.png")
+    (row,) = db.list_tombstones()
+    # The legacy single-vector columns are no longer written.
+    assert row["embedding"] is None and row["embedding_model"] is None
+    other = np.zeros(32, dtype=np.float32).tobytes()
+    assert db.add_tombstone_vectors([(t, "clip-small", other)]) == 0
+    assert np.array_equal(_vector(db, t, "clip-small"), vec)
+    assert db.add_tombstone_vectors([(t, "clip-large", other)]) == 1
+    assert set(db.get_tombstone_vectors(t)) == {"clip-small", "clip-large"}
+
+
+def test_backfill_fills_missing_vectors_from_native_or_posix_key(db):
+    have = np.arange(32, dtype=np.float32)
+    db.set_embedding_lookup(lambda p: (have, "clip-medium"))
+    already = _graded_delete(db, "/p/already.png")
+    db.set_embedding_lookup(lambda p: (have, "clip-small"))
+    small_only = _graded_delete(db, "/p/small_only.png")
+    db.set_embedding_lookup(None)
+    a = _graded_delete(db, "/p/a.png")
+    b = _graded_delete(db, "/p/b.png", "fail")
+    nothere = _graded_delete(db, "/p/nothere.png")
 
     va = np.full(32, 1.0, dtype=np.float32)
     vb = np.full(32, 2.0, dtype=np.float32)
+    vs = np.full(32, 3.0, dtype=np.float32)
     fm = FakeFaiss(
         {
             to_native_path("/p/a.png"): va,  # native key
             "/p/b.png": vb,  # posix key
+            "/p/small_only.png": vs,
             "/p/already.png": np.zeros(32, dtype=np.float32),
         }
     )
 
     filled = judgments_service.backfill_tombstone_embeddings(db, fm)
 
-    assert filled == 2
-    by_path = {t["file_path"]: t for t in db.list_tombstones()}
-    assert np.array_equal(
-        np.frombuffer(by_path["/p/a.png"]["embedding"], dtype=np.float32), va
-    )
-    assert np.array_equal(
-        np.frombuffer(by_path["/p/b.png"]["embedding"], dtype=np.float32), vb
-    )
-    assert by_path["/p/a.png"]["embedding_model"] == "clip-medium"
-    assert by_path["/p/nothere.png"]["embedding"] is None
-    # The row that already had a vector is not even looked up.
-    assert by_path["/p/already.png"]["embedding_model"] == "clip-small"
+    assert filled == 3
+    assert np.array_equal(_vector(db, a, "clip-medium"), va)
+    assert np.array_equal(_vector(db, b, "clip-medium"), vb)
+    # A vector for another CLIP model does not count: the index's is added.
+    assert np.array_equal(_vector(db, small_only, "clip-medium"), vs)
+    assert np.array_equal(_vector(db, small_only, "clip-small"), have)
+    assert db.get_tombstone_vectors(nothere) == {}
+    # The row that already had a vector for this model is not even looked up.
+    assert np.array_equal(_vector(db, already, "clip-medium"), have)
     assert "/p/already.png" not in fm.calls
+
+
+def test_backfill_skips_a_reused_path(db):
+    """Review Focus 5: the index keys a vector by path (and never replaces
+    one), so a path that held another file after the deletion may give the
+    tombstone that file's vector. Such tombstones get none by path (the
+    re-embedder computes theirs from the archived thumbnail)."""
+    # A ✓ image deleted while the index was not in memory; a new file lives
+    # at its path now.
+    reused = _graded_delete(db, "/p/reused.png")
+    db.save_media(_media("/p/reused.png"))
+    # A ✗ image whose path was reused by a file that was deleted as well:
+    # two lives of one path, and nothing says whose vector the index holds.
+    twice_old = _graded_delete(db, "/p/twice.png", "fail")
+    twice_new = _graded_delete(db, "/p/twice.png", "pass")
+    # An ordinary deletion: one life, nothing at the path now.
+    plain = _graded_delete(db, "/p/plain.png")
+    fm = FakeFaiss(
+        {
+            "/p/reused.png": np.full(32, 1.0, dtype=np.float32),
+            "/p/twice.png": np.full(32, 2.0, dtype=np.float32),
+            "/p/plain.png": np.full(32, 3.0, dtype=np.float32),
+        }
+    )
+
+    assert judgments_service.backfill_tombstone_embeddings(db, fm) == 1
+
+    assert np.array_equal(
+        _vector(db, plain, "clip-medium"), np.full(32, 3.0, dtype=np.float32)
+    )
+    for t in (reused, twice_old, twice_new):
+        assert db.get_tombstone_vectors(t) == {}
+    assert [t for t, _ in db.tombstones_for_vector_backfill("clip-medium")] == []
+    # The skipped paths are not even read from the index.
+    assert all(k not in fm.calls for k in ("/p/reused.png", "/p/twice.png"))
+    assert all(
+        to_native_path(k) not in fm.calls for k in ("/p/reused.png", "/p/twice.png")
+    )
 
 
 def test_backfill_noop_when_index_not_loaded_or_no_model_key(db):
     db.set_embedding_lookup(None)
-    _judged_delete(db, "/p/a.png")
+    t = _graded_delete(db, "/p/a.png")
     v = {"/p/a.png": np.ones(32, dtype=np.float32)}
     assert (
         judgments_service.backfill_tombstone_embeddings(db, FakeFaiss(v, loaded=False))
@@ -122,12 +176,12 @@ def test_backfill_noop_when_index_not_loaded_or_no_model_key(db):
         )
         == 0
     )
-    assert db.list_tombstones()[0]["embedding"] is None
+    assert db.get_tombstone_vectors(t) == {}
 
 
 def test_backfill_reads_faiss_outside_the_db_lock(db):
     db.set_embedding_lookup(None)
-    _judged_delete(db, "/p/a.png")
+    _graded_delete(db, "/p/a.png")
 
     class LockCheckingFaiss(FakeFaiss):
         def get_embedding(self, key):
