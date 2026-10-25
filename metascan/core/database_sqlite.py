@@ -1514,8 +1514,13 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_judgments_grade "
                 "ON media_judgments(grade)"
             )
+            # judged_at is the deleted judgment row's (when its grade was
+            # last set; NULL on tombstones written before the column): the
+            # taste scorer bounds a migrated grade's legacy score_shown
+            # event by it, as it does for a live row.
             for _col, _ddl in (
                 ("grade", _grade_ddl),
+                ("judged_at", "judged_at TEXT"),
                 ("brief", "brief TEXT"),
                 ("brief_model", "brief_model TEXT"),
                 ("prompt", "prompt TEXT"),
@@ -1588,7 +1593,8 @@ class DatabaseManager:
                     half_life_days REAL NOT NULL,
                     params_path TEXT NOT NULL,
                     error TEXT,
-                    n_no_vector INTEGER NOT NULL DEFAULT 0
+                    n_no_vector INTEGER NOT NULL DEFAULT 0,
+                    labels_version INTEGER NOT NULL DEFAULT 1
                 )
                 """
             )
@@ -1604,6 +1610,17 @@ class DatabaseManager:
                     "n_no_vector",
                     "ALTER TABLE taste_models ADD COLUMN "
                     "n_no_vector INTEGER NOT NULL DEFAULT 0",
+                )
+            # The label rules a model was trained under (taste_runner's
+            # LABELS_VERSION; 1 = favorites and views, before grades). The
+            # service treats an active model of an older version as due.
+            if "labels_version" not in _taste_cols:
+                _idempotent_add_column(
+                    conn,
+                    "taste_models",
+                    "labels_version",
+                    "ALTER TABLE taste_models ADD COLUMN "
+                    "labels_version INTEGER NOT NULL DEFAULT 1",
                 )
             conn.execute(
                 """
@@ -3728,7 +3745,7 @@ class DatabaseManager:
         transaction and lock -- never takes the lock itself."""
         for path in posix_paths:
             judgment = conn.execute(
-                "SELECT grade, reasons, seen_at, confirmed_at "
+                "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
                 "FROM media_judgments WHERE file_path = ?",
                 (path,),
             ).fetchone()
@@ -3803,8 +3820,8 @@ class DatabaseManager:
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, "
             "is_favorite, passed, grade, reasons, categories, seen_at, "
-            "confirmed_at, embedding, embedding_model, lineage) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "judged_at, confirmed_at, embedding, embedding_model, lineage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 now,
@@ -3816,6 +3833,7 @@ class DatabaseManager:
                 judgment["reasons"] if judgment is not None else "[]",
                 json.dumps(sorted(cat_names)),
                 judgment["seen_at"] if judgment is not None else None,
+                judgment["judged_at"] if judgment is not None else None,
                 judgment["confirmed_at"] if judgment is not None else None,
                 blob,
                 model_key,
@@ -6330,22 +6348,57 @@ class DatabaseManager:
                         out[p] = metadata[p]
         return out
 
-    def taste_training_raw(self) -> Dict[str, Any]:
-        """Raw rows for ``taste_labels.build_label_set``: live images and
-        tombstoned images only (videos are never training data)."""
-        verdict_kinds = ("favorite", "unfavorite", "pass", "unpass")
-        marks = ",".join("?" * len(verdict_kinds))
-        score_sql = (
-            "(SELECT e.score_shown FROM judgment_events e "
-            f"WHERE e.file_path = {{col}} AND e.event IN ({marks}) "
-            "ORDER BY e.id DESC LIMIT 1)"
+    @staticmethod
+    def _grade_score_sql(
+        path: str, grade: str, legacy_until: str, until: Optional[str] = None
+    ) -> Tuple[str, Dict[str, str]]:
+        """``(sql, named params)``: an expression for the ``score_shown``
+        that applies to the grade in column ``grade`` of the item at
+        ``path`` -- that of its newest grade event; for a grade the v6
+        migration made from an old verdict (no grade event) that of the
+        newest legacy event that set it, at or before ``legacy_until``
+        (``LEGACY_GRADE_EVENTS`` in taste_labels: a favorite for ✓, the old
+        reject "pass" for ✗). Later favorite / unfavorite events are view
+        events and never match. NULL without a grade or a score. ``until``
+        bounds every event (a tombstone ignores what happened at its path
+        after the delete)."""
+        from metascan.core.taste_labels import GRADE_EVENT_KINDS, LEGACY_GRADE_EVENTS
+
+        params = {f"ev_grade_{i}": kind for i, kind in enumerate(GRADE_EVENT_KINDS)}
+        params["ev_legacy_pass"] = LEGACY_GRADE_EVENTS["pass"]
+        params["ev_legacy_fail"] = LEGACY_GRADE_EVENTS["fail"]
+        is_grade_event = "e.event IN (%s)" % ", ".join(
+            f":ev_grade_{i}" for i in range(len(GRADE_EVENT_KINDS))
         )
-        # The score on screen when the item first counted as seen (labels
-        # down-weight a seen-only negative that carried one).
-        seen_sql = (
-            "(SELECT e.score_shown FROM judgment_events e "
-            "WHERE e.file_path = {col} AND e.event = 'seen' "
-            "ORDER BY e.id DESC LIMIT 1)"
+        bound = f" AND e.created_at <= {until}" if until else ""
+        sql = (
+            f"CASE WHEN {grade} IS NULL THEN NULL ELSE ("
+            "SELECT e.score_shown FROM judgment_events e "
+            f"WHERE e.file_path = {path}{bound} AND ({is_grade_event} OR ("
+            f"e.event = CASE {grade} WHEN 'pass' THEN :ev_legacy_pass "
+            "WHEN 'fail' THEN :ev_legacy_fail END "
+            f"AND e.created_at <= {legacy_until})) "
+            f"ORDER BY {is_grade_event} DESC, e.id DESC LIMIT 1) END"
+        )
+        return sql, params
+
+    def taste_training_raw(self) -> Dict[str, Any]:
+        """Raw rows for ``taste_labels.build_label_set``: every live image
+        (a training run scores them all) and every graded image tombstone;
+        videos are never training data. A row carries its ``grade``, the
+        ``judged_at`` / ``confirmed_at`` the decay clock reads, and
+        ``grade_score_shown`` (``_grade_score_sql``); never ★, views or
+        the legacy ``passed``."""
+        live_score, params = self._grade_score_sql(
+            "m.file_path", "j.grade", "j.judged_at"
+        )
+        # A tombstone's judged_at is NULL when it was written before the
+        # column: everything before such a delete predates grades.
+        tomb_score, _ = self._grade_score_sql(
+            "t.file_path",
+            "t.grade",
+            "COALESCE(t.judged_at, t.deleted_at)",
+            until="t.deleted_at",
         )
         with self.lock, self._get_connection() as conn:
             cats: Dict[str, List[str]] = {}
@@ -6356,47 +6409,29 @@ class DatabaseManager:
                 cats.setdefault(r["p"], []).append(r["n"])
             media: List[Dict[str, Any]] = []
             for r in conn.execute(
-                "SELECT m.file_path, m.is_favorite, j.passed, j.seen_at, "
-                "j.judged_at, j.confirmed_at, "
-                + score_sql.format(col="m.file_path")
-                + " AS last_verdict_score_shown, "
-                + seen_sql.format(col="m.file_path")
-                + " AS seen_score_shown, t.batch_id AS t2i_batch_id "
+                "SELECT m.file_path, j.grade, j.judged_at, j.confirmed_at, "
+                f"{live_score} AS grade_score_shown, t.batch_id AS t2i_batch_id "
                 "FROM media m "
                 "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
                 "LEFT JOIN t2i_images t ON t.file_path = m.file_path",
-                verdict_kinds,
+                params,
             ):
                 if not self._is_image_path(r["file_path"]):
                     continue
                 d = dict(r)
-                d["is_favorite"] = bool(d["is_favorite"])
-                d["passed"] = bool(d["passed"])
                 d["categories"] = cats.get(d["file_path"], [])
                 media.append(d)
             tombstones: List[Dict[str, Any]] = []
             for r in conn.execute(
-                "SELECT id, file_path, deleted_at, is_favorite, passed, seen_at, "
-                "confirmed_at, embedding, embedding_model, categories, lineage, "
-                + score_sql.format(col="media_tombstones.file_path").replace(
-                    "ORDER BY e.id DESC",
-                    "AND e.created_at <= media_tombstones.deleted_at "
-                    "ORDER BY e.id DESC",
-                )
-                + " AS last_verdict_score_shown, "
-                + seen_sql.format(col="media_tombstones.file_path").replace(
-                    "ORDER BY e.id DESC",
-                    "AND e.created_at <= media_tombstones.deleted_at "
-                    "ORDER BY e.id DESC",
-                )
-                + " AS seen_score_shown FROM media_tombstones ORDER BY id",
-                verdict_kinds,
+                "SELECT t.id, t.file_path, t.deleted_at, t.grade, t.judged_at, "
+                "t.confirmed_at, t.embedding, t.embedding_model, t.categories, "
+                f"t.lineage, {tomb_score} AS grade_score_shown "
+                "FROM media_tombstones t WHERE t.grade IS NOT NULL ORDER BY t.id",
+                params,
             ):
                 if not self._is_image_path(r["file_path"]):
                     continue
                 d = dict(r)
-                d["is_favorite"] = bool(d["is_favorite"])
-                d["passed"] = bool(d["passed"])
                 d["categories"] = json.loads(d["categories"] or "[]")
                 lineage = json.loads(d.pop("lineage") or "null") or {}
                 d["batch_id"] = (lineage.get("t2i") or {}).get("batch_id")
@@ -6426,43 +6461,38 @@ class DatabaseManager:
 
     def taste_label_counts_raw(self) -> Dict[str, Any]:
         """The slim shape of ``taste_training_raw`` that
-        ``taste_labels.count_labels`` needs: labeled live images only (an
-        unlabeled live row shadows no tombstone, so dropping it changes no
-        count) and every image tombstone, without embeddings, categories or
+        ``taste_labels.count_labels`` needs: graded live images and graded
+        image tombstones only (an ungraded row is no label and hides none,
+        so dropping it changes no count), without embeddings, categories or
         score_shown. Cheap enough to poll."""
         with self.lock, self._get_connection() as conn:
-            media: List[Dict[str, Any]] = []
-            for r in conn.execute(
-                "SELECT m.file_path, m.is_favorite, j.passed, j.seen_at, "
-                "j.judged_at, j.confirmed_at FROM media m "
-                "LEFT JOIN media_judgments j ON j.file_path = m.file_path "
-                "WHERE m.is_favorite = 1 OR j.passed = 1 "
-                "OR j.seen_at IS NOT NULL"
-            ):
-                if not self._is_image_path(r["file_path"]):
-                    continue
-                d = dict(r)
-                d["is_favorite"] = bool(d["is_favorite"])
-                d["passed"] = bool(d["passed"])
-                media.append(d)
-            tombstones: List[Dict[str, Any]] = []
-            for r in conn.execute(
-                "SELECT id, file_path, is_favorite, passed, seen_at, "
-                "confirmed_at FROM media_tombstones ORDER BY id"
-            ):
-                if not self._is_image_path(r["file_path"]):
-                    continue
-                d = dict(r)
-                d["is_favorite"] = bool(d["is_favorite"])
-                d["passed"] = bool(d["passed"])
-                tombstones.append(d)
+            media = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT m.file_path, j.grade, j.judged_at, j.confirmed_at "
+                    "FROM media_judgments j "
+                    "JOIN media m ON m.file_path = j.file_path "
+                    "WHERE j.grade IS NOT NULL"
+                )
+                if self._is_image_path(r["file_path"])
+            ]
+            tombstones = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, file_path, grade, judged_at, confirmed_at "
+                    "FROM media_tombstones WHERE grade IS NOT NULL ORDER BY id"
+                )
+                if self._is_image_path(r["file_path"])
+            ]
         return {"media": media, "tombstones": tombstones}
 
     def count_training_events_since(
         self, since: Optional[str]
     ) -> Tuple[int, Optional[str]]:
-        """``(count, newest created_at)`` of judgment events that change
-        labels (not ``seen`` / ``reconfirm``) logged after ``since``."""
+        """``(count, newest created_at)`` of the judgment events that change
+        a taste label or model input (``taste_labels.TRAINING_EVENT_KINDS``:
+        grades, reasons, categories -- never ★, seen or the pre-grades
+        verdict events) on images, logged after ``since``."""
         from metascan.core.taste_labels import TRAINING_EVENT_KINDS
 
         marks = ",".join("?" * len(TRAINING_EVENT_KINDS))
@@ -6474,7 +6504,16 @@ class DatabaseManager:
         if since is not None:
             sql += " AND created_at > ?"
             params.append(since)
+        # Images only, by the test every other taste read uses (the scorer
+        # never labels or scores a video); after the cheap terms.
+        sql += " AND is_image_path(file_path)"
         with self.lock, self._get_connection() as conn:
+            conn.create_function(
+                "is_image_path",
+                1,
+                lambda p: p is not None and self._is_image_path(p),
+                deterministic=True,
+            )
             row = conn.execute(sql, params).fetchone()
         return int(row["n"]), row["newest"]
 
@@ -6487,10 +6526,14 @@ class DatabaseManager:
     def record_taste_model(self, row: Dict[str, Any]) -> int:
         """Insert ``row`` as the active model and retire the previous one.
         ``row["status"] == "failed"`` records a failed training run instead
-        and leaves the current active model in place."""
+        and leaves the current active model in place. ``row`` must carry
+        ``labels_version`` (KeyError otherwise)."""
         status = row.get("status") or "active"
         if status not in ("active", "failed"):
             raise ValueError(f"cannot record a taste model as {status!r}")
+        # Every model says which label rules it was trained under; there
+        # is deliberately no default (an old one would make it look due).
+        labels_version = int(row["labels_version"])
         with self.lock, self._get_connection() as conn:
             if status == "active":
                 conn.execute(
@@ -6500,8 +6543,9 @@ class DatabaseManager:
             cur = conn.execute(
                 "INSERT INTO taste_models (created_at, labels_as_of, status, "
                 "embedding_model, dim, categories, n_pos, n_neg, n_pairs, "
-                "holdout_auc, half_life_days, params_path, error, n_no_vector) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "holdout_auc, half_life_days, params_path, error, n_no_vector, "
+                "labels_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["created_at"],
                     row["labels_as_of"],
@@ -6517,6 +6561,7 @@ class DatabaseManager:
                     row["params_path"],
                     row.get("error"),
                     int(row.get("n_no_vector") or 0),
+                    labels_version,
                 ),
             )
             conn.commit()
@@ -6580,15 +6625,14 @@ class DatabaseManager:
             return int(head["model_id"]), out
 
     def taste_review_queue(self, limit: int = 200) -> List[str]:
-        """Scored images with no verdict and never seen, the most uncertain
-        (score nearest 0.5) first, ties by path. Posix paths."""
+        """Scored images with no grade (seen, ★ or untouched alike: none of
+        those is a grade), the most uncertain (score nearest 0.5) first,
+        ties by path. Posix paths; only images are ever scored."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
                 "SELECT s.file_path FROM taste_scores s "
-                "JOIN media m ON m.file_path = s.file_path "
                 "LEFT JOIN media_judgments j ON j.file_path = s.file_path "
-                "WHERE m.is_favorite = 0 AND COALESCE(j.passed, 0) = 0 "
-                "AND j.seen_at IS NULL "
+                "WHERE j.grade IS NULL "
                 "ORDER BY ABS(s.score - 0.5), s.file_path LIMIT ?",
                 (int(limit),),
             ).fetchall()
@@ -6600,16 +6644,18 @@ class DatabaseManager:
         self, since: Optional[str] = None, include_embeddings: bool = False
     ) -> List[Dict[str, Any]]:
         """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
-        writer_model, created_at, seen, favorite, embedding, embedding_model}``. ``seen``
-        is a ``seen_at`` or a verdict. Live generations come from the
-        lineage tables JOINed to media; deleted ones from the newest
-        tombstone whose lineage carries the generation row (so deleting
-        passes does not inflate a rate), unless the path is live again.
+        writer_model, created_at, seen, favorite, tombstone, embedding,
+        embedding_model}``. ``seen`` is a ``seen_at`` or a verdict. Live
+        generations come from the lineage tables JOINed to media; deleted
+        ones (``tombstone`` True) from the newest tombstone whose lineage
+        carries the generation row (so deleting passes does not inflate a
+        rate), unless the path is live again.
         Scorecard images (``t2i_images.scorecard_id`` set, live or in the
         tombstone lineage) are left out: their results have their own rows.
         ``since`` (an ISO date) drops older generations. ``embedding`` is
         the tombstone's vector bytes (live rows: None) when
-        ``include_embeddings``."""
+        ``include_embeddings``; a deleted row has no other vector (its path
+        may hold another file now)."""
         out: Dict[Tuple[str, str], Dict[str, Any]] = {}
         with self.lock, self._get_connection() as conn:
             for kind, table in self._GENERATION_TABLES:
@@ -6641,6 +6687,7 @@ class DatabaseManager:
                         "seen": favorite
                         or bool(r["passed"])
                         or r["seen_at"] is not None,
+                        "tombstone": False,
                         "embedding": None,
                         "embedding_model": None,
                     }
@@ -6698,6 +6745,7 @@ class DatabaseManager:
                         "seen": favorite
                         or bool(r["passed"])
                         or r["seen_at"] is not None,
+                        "tombstone": True,
                         "embedding": (r["embedding"] if include_embeddings else None),
                         "embedding_model": (
                             r["embedding_model"] if include_embeddings else None

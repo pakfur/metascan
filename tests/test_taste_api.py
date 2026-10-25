@@ -65,6 +65,7 @@ def test_status_without_model(client):
     assert body["missing_reason"] == "labels"
     assert body["auto_retrain"] is True
     assert body["last_error"] is None
+    assert body["labels_outdated"] is False
 
 
 def test_status_with_model(client, db, fake_runner):
@@ -83,9 +84,18 @@ def test_status_with_model(client, db, fake_runner):
         "embedding_model",
         "half_life_days",
     }
+    # 40 grade events; the model was trained on the current labels.
     assert body["new_events"] == 40 and body["missing"] is None
+    assert body["labels_outdated"] is False
     fake_runner.stale = True
     assert client.get("/api/taste/status").json()["stale"] is True
+
+
+def test_status_says_when_the_model_predates_grades(client, db):
+    db.record_taste_model(model_row(labels_version=1))
+    body = client.get("/api/taste/status").json()
+    assert body["labels_outdated"] is True
+    assert body["stale"] is False
 
 
 def test_status_last_error_from_failed_row(client, db):
@@ -106,7 +116,7 @@ def test_train_conflict(client, fake_runner):
 
 
 def test_not_enough_data_409(client, db, fake_runner):
-    seed_labels(db, n_fav=5, n_pass=30)
+    seed_labels(db, n_pos=5, n_neg=30)
     r = client.post("/api/taste/train")
     assert r.status_code == 409
     assert r.json()["detail"] == {
@@ -170,7 +180,7 @@ def test_scores_empty_without_model(client):
 # ---------------------------------------------------------------- review queue
 
 
-def test_review_queue_order(client, db):
+def test_review_queue_is_ungraded_images(client, db):
     _scores(
         db,
         {
@@ -178,24 +188,36 @@ def test_review_queue_order(client, db):
             "/q/near.png": 0.45,
             "/q/mid.png": 0.6,
             "/q/far_lo.png": 0.1,
-            "/q/judged.png": 0.5,
-            "/q/seen.png": 0.5,
-            "/q/fav.png": 0.5,
+            "/q/seen.png": 0.52,
+            "/q/star.png": 0.42,
+            "/q/cleared.png": 0.7,
+            "/q/ok.png": 0.5,
+            "/q/bad.png": 0.5,
+            "/q/star_bad.png": 0.5,
         },
     )
-    db.set_verdict("/q/judged.png", "pass")
+    # Views and ★ are not grades: those images still want one.
     db.mark_seen("/q/seen.png")
-    db.set_verdict("/q/fav.png", "favorite")
+    db.set_favorite_state("/q/star.png", True)
+    db.set_grade("/q/cleared.png", "pass")
+    db.set_grade("/q/cleared.png", None)
+    db.set_grade("/q/ok.png", "pass")
+    db.set_grade("/q/bad.png", "fail")
+    db.set_favorite_state("/q/star_bad.png", True)
+    db.set_grade("/q/star_bad.png", "fail")
     body = client.get("/api/taste/review-queue").json()
     assert body["paths"] == [
+        "/q/seen.png",
         "/q/near.png",
+        "/q/star.png",
         "/q/mid.png",
+        "/q/cleared.png",
         "/q/far_hi.png",
         "/q/far_lo.png",
     ]
     assert client.get("/api/taste/review-queue?limit=2").json()["paths"] == [
+        "/q/seen.png",
         "/q/near.png",
-        "/q/mid.png",
     ]
 
 

@@ -9,7 +9,8 @@ Task (written by ``metascan.core.taste_runner.TasteRunner``)::
      "model_path": str | null, "out_dir": str, "image_paths": [str],
      "image_categories": {path: [name, ...]},   # optional
      "diversity": {"window_starts": [iso date], "items": [{file_path,
-                   window_start, embedding: b64 | null, embedding_model}]}}
+                   window_start, tombstone, embedding: b64 | null,
+                   embedding_model}]}}
                    # optional, train mode: favorite diversity per window
 
 Writes ``<out_dir>/taste_result.json`` and exits 0, or writes
@@ -18,6 +19,12 @@ Writes ``<out_dir>/taste_result.json`` and exits 0, or writes
 Reads the FAISS index read-only (the embedding worker may replace it via
 tmp+rename underneath us; we read each file once). numpy + faiss only --
 never torch / open_clip.
+
+A deleted image (a label row or diversity item marked ``tombstone``) gets
+only the vector stored with it, for the index's CLIP model. It never takes
+the index's vector for its old path: that path may hold another file now.
+Only a row explicitly marked live (``tombstone: false``) is looked up by
+path; when unsure, the row has no vector.
 """
 
 import base64
@@ -44,7 +51,9 @@ from metascan.core.taste_model import (
 from metascan.core.taste_labels import missing_for_training
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
-LABELS_VERSION = 1
+# Must equal ``metascan.core.taste_runner.LABELS_VERSION`` (2: ✓ / ✗ grade
+# labels, rows say whether they are tombstones).
+LABELS_VERSION = 2
 RESULT_NAME = "taste_result.json"
 _RECONSTRUCT_CHUNK = 4096
 
@@ -103,6 +112,21 @@ class _Index:
         return out
 
 
+def _stored_vector(item: Dict[str, Any], index: _Index) -> Optional[np.ndarray]:
+    """The vector stored with ``item`` when it is for the index's CLIP model
+    and dimension, else None."""
+    emb = item.get("embedding")
+    if not emb or item.get("embedding_model") != index.model_key:
+        return None
+    v = np.frombuffer(base64.b64decode(emb), dtype=np.float32)
+    return v if v.size == index.dim else None
+
+
+def _may_read_path(item: Dict[str, Any]) -> bool:
+    """True only for an item marked live: its path is its own file."""
+    return item.get("tombstone") is False
+
+
 def _training_matrix(labels: Dict[str, Any], index: _Index) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -111,19 +135,20 @@ def _training_matrix(labels: Dict[str, Any], index: _Index) -> Tuple[
     List[Tuple[int, int, float]],
     int,
 ]:
-    """Resolve each label row to a vector (tombstone embedding when its model
-    matches, else the index); rows with no vector are dropped (their count
-    is the last element) and the pairs remapped to the surviving rows."""
+    """Resolve each label row to a vector -- its stored embedding when that
+    is for the index's model, else (live rows only) the index's vector for
+    its path; rows with no vector are dropped (their count is the last
+    element) and the pairs remapped to the surviving rows."""
     rows = labels["rows"]
     vecs: List[Optional[np.ndarray]] = [None] * len(rows)
     need: List[Tuple[int, int]] = []
     for i, r in enumerate(rows):
-        emb = r.get("embedding")
-        if emb and r.get("embedding_model") == index.model_key:
-            v = np.frombuffer(base64.b64decode(emb), dtype=np.float32)
-            if v.size == index.dim:
-                vecs[i] = v
-                continue
+        stored = _stored_vector(r, index)
+        if stored is not None:
+            vecs[i] = stored
+            continue
+        if not _may_read_path(r):
+            continue
         idx = index.id_for(r["file_path"])
         if idx is not None:
             need.append((i, idx))
@@ -243,8 +268,8 @@ def _diversity(spec: Dict[str, Any], index: _Index) -> List[Dict[str, Any]]:
     """Mean pairwise cosine distance between the favorited images of each
     window: ``[{window_start, n, mean_distance}]`` in ``window_starts``
     order. ``n`` counts items with a vector (stored embedding when its
-    model matches the index, else the index); ``mean_distance`` is None
-    when ``n < 2``."""
+    model matches the index, else -- live items only -- the index);
+    ``mean_distance`` is None when ``n < 2``."""
     by_window: Dict[str, List[np.ndarray]] = {
         str(s): [] for s in spec.get("window_starts") or []
     }
@@ -253,12 +278,12 @@ def _diversity(spec: Dict[str, Any], index: _Index) -> List[Dict[str, Any]]:
         start = str(item.get("window_start"))
         if start not in by_window:
             continue
-        emb = item.get("embedding")
-        if emb and item.get("embedding_model") == index.model_key:
-            v = np.frombuffer(base64.b64decode(emb), dtype=np.float32)
-            if v.size == index.dim:
-                by_window[start].append(v)
-                continue
+        stored = _stored_vector(item, index)
+        if stored is not None:
+            by_window[start].append(stored)
+            continue
+        if not _may_read_path(item):
+            continue
         idx = index.id_for(str(item.get("file_path")))
         if idx is not None:
             need.append((start, idx))
