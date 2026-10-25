@@ -85,7 +85,7 @@ For local development with all dev tools:
    make quality
 
    # Check frontend types
-   cd frontend && npx vue-tsc --noEmit
+   cd frontend && npx vue-tsc -b
    ```
 
 ## Environment Variables
