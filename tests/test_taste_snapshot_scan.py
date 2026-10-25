@@ -2167,3 +2167,15 @@ def test_relative_output_folders_and_files_are_shown_absolute(
         rest = shown.replace(clips_root, "").replace(renders_root, "")
         assert "drive/comfy" not in rest and "renders/" not in rest
     assert db.list_tombstones() == [] and _marker_exists(db)
+
+
+def test_an_output_root_spelled_two_ways_is_listed_once(monkeypatch, tmp_path):
+    """The complete event lists each unreachable root once, however the
+    configuration spells it -- here once relative, once absolute -- since
+    what it shows is absolute."""
+    monkeypatch.chdir(tmp_path)
+    report = scan_api.ReingestReport(
+        unreachable={"out": scan_api.MISSING, str(tmp_path / "out"): scan_api.MISSING}
+    )
+    fields = scan_api._generated_output_fields(report)
+    assert fields["unreachable_output"] == [str(tmp_path / "out")]
