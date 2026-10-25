@@ -177,8 +177,14 @@ class Scanner:
         Optional[int],
     ]:
         """Open a still image once. Returns ((width, height, format),
-        photo_exif, orientation_tag). Pixel decode is skipped unless EXIF
-        orientation requires it — keeps the AI-gen PNG hot path fast.
+        photo_exif, orientation_tag). A PNG with no eXIf chunk before its
+        image data (an AI render) is decoded here, once, on purpose:
+        Pillow's PNG getexif() loads the image to look for one after it, and
+        that decode is what turns away a PNG whose image data is cut short
+        or corrupt, so keep it. The extractors decode only a PNG with text
+        or EXIF after its image data (``metascan/utils/png_chunks.py``).
+        Other formats are decoded only when an EXIF orientation needs
+        exif_transpose.
         """
         if file_path.suffix.lower() in {".mp4", ".webm", ".mov"}:
             return (None, None, None), None, None

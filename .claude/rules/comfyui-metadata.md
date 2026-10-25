@@ -1,6 +1,9 @@
 ---
 paths:
   - "metascan/extractors/**"
+  - "metascan/utils/png_chunks.py"
+  - "metascan/core/scanner.py"
+  - "tests/test_png_chunks.py"
   - "tests/test_comfyui_extractor.py"
   - "tests/test_comfyui_video_extractor.py"
   - "test_extractor_harness.py"
@@ -12,6 +15,31 @@ paths:
 Moved out of the root CLAUDE.md so it loads only when you work with the files above;
 the root CLAUDE.md still applies.
 
+- **The metadata extractors decode a PNG only when it has text or EXIF after
+  its image data: read its text and EXIF through
+  `metascan/utils/png_chunks.py`, never `img.text` / `img.getexif()`.**
+  Pillow decodes the whole image for either (`PngImageFile.text` /
+  `getexif()` call `load()` to look for chunks after the image data);
+  `_get_exif_metadata` did that three times per import (the Fooocus check,
+  the ComfyUI check and the ComfyUI extract), about 65 ms per 1 MP image and
+  260 ms per 4 MP. `png_text(img)` returns the text Pillow parsed at open
+  (`PngStream.im_text`, which `img.text` is built from: `img.info` loses a
+  tEXt "exif" and a text key a later chunk of another kind reuses) and
+  `png_exif(img)` the EXIF before the image data (Pillow's
+  format-independent `Image.Image.getexif`). Both fall back to the decoding
+  reads when `metadata_after_data(img.filename)` finds a tEXt / zTXt / iTXt
+  / eXIf after the first IDAT (a walk over the chunk headers, remembered per
+  file version: path, size, mtime, ctime and inode; a failed read is not
+  remembered), for an image not opened from a path, and if this Pillow keeps
+  the parsed text elsewhere. **The scanner's one decode stays**:
+  `Scanner._read_image_info_and_exif`'s `getexif()` decodes a PNG with no
+  eXIf before its image data, and that decode alone decides whether such a
+  PNG imports (one with an early eXIf is not decoded, and imports when its
+  pixels are damaged, as before). Don't replace it with a cheaper check:
+  none agrees with the decoder (Pillow never checks an IDAT chunk's CRC and
+  stops once every row is out, while a stream can keep every CRC and still
+  not decode), and `test_a_png_imports_exactly_when_pillow_can_decode_it`
+  pins it. `tests/test_png_chunks.py` counts Pillow's decodes.
 - **Video metadata is read from the API-format `prompt` container tag, and
   the graph shape varies by model.** `ComfyUIVideoExtractor`
   (`metascan/extractors/comfyui_video.py`) dispatches handlers on
