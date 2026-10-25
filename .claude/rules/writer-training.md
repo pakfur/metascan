@@ -103,7 +103,7 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   ungraded or seen-only image keeps it from losing); an edit counts only when one of its
   renders is ✓; hindsight takes ✓ images with a known prompt and a brief, live or
   deleted (a path a completed full clean tombstoned counts as deleted: its tombstone
-  carries the snapshot's brief and, for a library image, prompt and model names; root
+  carries the snapshot's brief and, for a ✓ library image, prompt and model names; root
   CLAUDE.md, "Full clean & rescan"). Hindsight is one source row per path
   (`_hindsight_source`: a live T2I row, else a live library image, else the newest
   deleted row while no live file holds the path) and a brief always comes from its own

@@ -257,10 +257,12 @@ counts a grade, a favorite, reasons or `judged_at` as newer data.
 > (no archived thumbnail to brief it again from: it was never deleted
 > through the app). Version 3 also carries every hindsight brief (`briefs`)
 > and each ✓ library image's metadata prompt and model names
-> (`library_prompts`, as a delete's tombstone keeps them): the tombstones a
-> completed full clean writes match a delete's, minus the thumbnail, and a
-> path that comes back gets its brief back unless it has one again. A
-> version-2 file reads as version 3 with neither.
+> (`library_prompts`, as a delete's tombstone keeps them): for a path a
+> delete would tombstone, the tombstone a completed full clean writes
+> matches the delete's, minus the thumbnail (the rescan did not find the
+> file); a ★-only or brief-only path, which a delete never tombstones, gets
+> one with no grade. A path that comes back gets its brief back unless it
+> has one again. A version-2 file reads as version 3 with neither.
 
 ## Taste scorer
 
