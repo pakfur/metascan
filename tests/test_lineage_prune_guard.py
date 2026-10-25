@@ -314,6 +314,18 @@ def _marker_text(data_dir: Path) -> str:
     return ts.full_clean_marker_path(data_dir).read_text(encoding="utf-8")
 
 
+def _flat(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def _noted(data_dir: Path, written: str) -> str:
+    """The block the last note left after the marker's text, which it
+    leaves as written."""
+    text = _marker_text(data_dir)
+    assert text.startswith(written)
+    return text.removeprefix(written)
+
+
 def test_the_marker_names_the_output_roots_the_last_scan_could_not_reach(tmp_path):
     """A scan that could not reach a generated-output root names it in the
     marker, with the way out; the next scan's findings replace that list,
@@ -321,29 +333,125 @@ def test_the_marker_names_the_output_roots_the_last_scan_could_not_reach(tmp_pat
     ts.write_full_clean_marker(tmp_path)
     written = _marker_text(tmp_path)
 
-    ts.note_unreachable_output(
+    ts.note_generated_output(
         tmp_path, {"/mnt/d/comfy/t2i": "missing", "/mnt/e/clips": "can't be read"}
     )
-    text = _marker_text(tmp_path)
-    assert text.startswith(written)
-    assert "/mnt/d/comfy/t2i (missing)" in text
-    assert "/mnt/e/clips (can't be read)" in text
-    flat = " ".join(text.split()).lower()
-    assert "recreate it (empty is fine)" in flat and "full clean & rescan" in flat
+    block = _noted(tmp_path, written)
+    assert "/mnt/d/comfy/t2i (missing)" in block
+    assert "/mnt/e/clips (can't be read)" in block
+    # The block's own advice: the marker's text has the way out too.
+    flat = _flat(block)
+    assert "reconnect or mount the drive and run a scan" in flat
+    assert "recreate it (empty is fine) and run full clean & rescan" in flat
 
-    ts.note_unreachable_output(tmp_path, {"/mnt/e/clips": "missing"})
-    text = _marker_text(tmp_path)
-    assert text.startswith(written)
-    assert "/mnt/d/comfy/t2i" not in text and "/mnt/e/clips (missing)" in text
+    ts.note_generated_output(tmp_path, {"/mnt/e/clips": "missing"})
+    block = _noted(tmp_path, written)
+    assert "/mnt/d/comfy/t2i" not in block and "/mnt/e/clips (missing)" in block
 
-    ts.note_unreachable_output(tmp_path, {})
+    ts.note_generated_output(tmp_path, {})
     assert _marker_text(tmp_path) == written
 
 
-def test_naming_unreachable_output_never_creates_the_marker(tmp_path):
-    """Deleted by hand while a scan ran (to let the lists prune): naming the
-    roots that scan could not reach does not bring it back."""
-    ts.note_unreachable_output(tmp_path, {"/mnt/d/comfy/t2i": "missing"})
+def test_the_marker_counts_the_generated_files_the_last_scan_could_not_import(
+    tmp_path,
+):
+    """Files on disk the last scan could not read or import: how many, and
+    the output folders that hold them (a file under none is said to be
+    outside them), with the way out -- never a file's path, which the note
+    is not even given. The next scan's findings replace it."""
+    ts.write_full_clean_marker(tmp_path)
+    written = _marker_text(tmp_path)
+
+    ts.note_generated_output(tmp_path, {}, 3, ["/mnt/d/comfy/t2i", None])
+    block = _noted(tmp_path, written)
+    flat = _flat(block)
+    assert (
+        "could not read or import 3 generated images or clips that are on disk"
+    ) in flat
+    assert "  in /mnt/d/comfy/t2i\n" in block
+    assert "  outside the configured output folders\n" in block
+    for advice in (
+        "a file still on disk is never recorded as deleted",
+        "its ratings are kept, pending",
+        "the scan's done step lists the files",
+        "delete each one, or move it out of the output folder (or repair it), "
+        "then run full clean & rescan",
+        "a file that only failed this time (a busy disk) comes back by itself "
+        "at the next scan",
+    ):
+        assert advice in flat
+
+    ts.note_generated_output(tmp_path, {"/mnt/e/clips": "missing"}, 1, ["/mnt/e/out"])
+    block = _noted(tmp_path, written)
+    assert "1 generated image or clip that is on disk" in _flat(block)
+    assert "/mnt/d/comfy/t2i" not in block and "outside the configured" not in block
+    # Both said, the folders it could not reach first.
+    assert block.index("/mnt/e/clips (missing)") < block.index("  in /mnt/e/out\n")
+
+    ts.note_generated_output(tmp_path, {})
+    assert _marker_text(tmp_path) == written
+
+
+def test_the_marker_says_when_the_check_itself_failed(tmp_path):
+    """The re-ingest step raised: nothing about the generated output is
+    known. The marker says the check failed, naming the error by its type
+    alone, and that the next scan tries again; it replaces what an earlier
+    scan said."""
+    ts.write_full_clean_marker(tmp_path)
+    written = _marker_text(tmp_path)
+    ts.note_generated_output(tmp_path, {"/mnt/d/comfy/t2i": "missing"})
+
+    ts.note_generated_output(tmp_path, {}, check_failed="OperationalError")
+    block = _noted(tmp_path, written)
+    flat = _flat(block)
+    assert "the last scan could not check the generated output (operationalerror;" in (
+        flat
+    )
+    assert "none of them is recorded as deleted. the next scan tries again." in flat
+    assert "/mnt/d/comfy/t2i" not in block
+
+    ts.note_generated_output(tmp_path, {})
+    assert _marker_text(tmp_path) == written
+
+
+# The block the build before this one appended, as it wrote it.
+OLDER_BLOCK = """
+The last scan could not reach these generated-output folders:
+  /mnt/d/comfy/t2i (missing)
+Their images and clips may still be there, so their ratings are kept,
+pending, and none of them is recorded as deleted. Reconnect or mount the
+drive and run a scan. If a folder is gone for good, recreate it (empty is
+fine) and run Full clean & rescan.
+"""
+
+
+def test_a_note_replaces_the_block_an_older_build_wrote(tmp_path):
+    """A marker left by the build before, whose block named unreachable
+    folders only: a note replaces that block too, and one with nothing to
+    say leaves the text as written. Every section starts with the same
+    words, and the marker's text never starts a line with them."""
+    ts.write_full_clean_marker(tmp_path)
+    written = _marker_text(tmp_path)
+    assert "\n" + ts._LAST_SCAN_COULD_NOT not in written
+    marker = ts.full_clean_marker_path(tmp_path)
+
+    marker.write_text(written + OLDER_BLOCK, encoding="utf-8")
+    ts.note_generated_output(tmp_path, {}, 2, ["/mnt/e/out"])
+    block = _noted(tmp_path, written)
+    assert "/mnt/d/comfy/t2i" not in block and "  in /mnt/e/out\n" in block
+    assert block.startswith("\n" + ts._LAST_SCAN_COULD_NOT)
+
+    marker.write_text(written + OLDER_BLOCK, encoding="utf-8")
+    ts.note_generated_output(tmp_path, {})
+    assert _marker_text(tmp_path) == written
+
+
+def test_noting_the_generated_output_never_creates_the_marker(tmp_path):
+    """Deleted by hand while a scan ran (to let the lists prune): noting what
+    that scan could not bring back does not bring it back."""
+    assert ts.note_generated_output(tmp_path, {"/mnt/d/comfy/t2i": "missing"}) is False
+    assert ts.note_generated_output(tmp_path, {}, 1, [None]) is False
+    assert ts.note_generated_output(tmp_path, {}, check_failed="OSError") is False
     assert ts.full_clean_marker_exists(tmp_path) is False
 
 

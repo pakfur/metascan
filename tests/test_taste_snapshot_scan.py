@@ -1280,12 +1280,41 @@ def test_a_generated_file_that_fails_to_ingest_keeps_the_full_clean_unfinished(
     _all_back(db, files)
 
 
+def _capture(monkeypatch):
+    """Record every scan event as (event, data)."""
+    events = []
+
+    async def broadcast(channel, event, data=None):
+        events.append((event, data))
+
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", broadcast)
+    return events
+
+
+def _marker_text(db):
+    return ts.full_clean_marker_path(Path(db.db_path)).read_text(encoding="utf-8")
+
+
+def _marker_block(db):
+    """What the last scan said after the marker's text ("" for nothing)."""
+    head, start, rest = _marker_text(db).partition("\n" + ts._LAST_SCAN_COULD_NOT)
+    return start + rest
+
+
+def _flat(text):
+    return " ".join(text.split()).lower()
+
+
 def test_a_failed_reingest_step_keeps_the_full_clean_unfinished(
     monkeypatch, tmp_path, db, caplog
 ):
     """P4. The step itself fails: nothing came back, so nothing may be
-    tombstoned or pruned. The log names the exception type only."""
+    tombstoned or pruned. The log names the exception type only, and so do
+    the complete event (output_check_failed, nothing listed: nothing about
+    the output is known) and the marker (the check failed, by its type;
+    the next scan tries again)."""
     files = _generated_library(monkeypatch, tmp_path, db)
+    events = _capture(monkeypatch)
     real = db.generated_paths_without_media
 
     def boom():
@@ -1300,10 +1329,25 @@ def test_a_failed_reingest_step_keeps_the_full_clean_unfinished(
         r.getMessage() for r in caplog.records if r.name == "backend.api.scan"
     )
     assert "RuntimeError" in messages and "/secret/path" not in messages
+    [complete] = [data for event, data in events if event == "complete"]
+    assert complete["output_check_failed"] is True
+    assert (
+        complete["unreachable_output"],
+        complete["unreadable_output"],
+        complete["unreadable_output_count"],
+    ) == ([], [], 0)
+    block = _marker_block(db)
+    assert "could not check the generated output (RuntimeError;" in block
+    assert "the next scan tries again" in _flat(block)
+    assert "/secret/path" not in _marker_text(db)
+    assert "disk I/O" not in _marker_text(db)
 
     monkeypatch.setattr(db, "generated_paths_without_media", real)
+    events.clear()
     _run(full_clean=False)
     _all_back(db, files)
+    [complete] = [data for event, data in events if event == "complete"]
+    assert complete["output_check_failed"] is False
 
 
 def test_an_unmounted_output_folder_keeps_the_full_clean_unfinished(
@@ -1689,8 +1733,10 @@ def test_a_render_that_cannot_be_read_holds_the_full_clean_back(
 ):
     """Its root is there but the render can't be stat-ed (its dated folder
     may not be entered): it may well exist, so it is not gone -- the full
-    clean stays unfinished, the root is not named (it is there), and once
-    the folder can be read again the next full clean brings it back."""
+    clean stays unfinished, the root is not named as unreachable (it is
+    there) but as the folder holding a file that could not be read, the
+    file is listed, and once the folder can be read again the next full
+    clean brings it back."""
     config, gone, root, [render] = _rendered_library(tmp_path, db, 1)
     day = render.parent
     os.chmod(day, 0)
@@ -1706,6 +1752,9 @@ def test_a_render_that_cannot_be_read_holds_the_full_clean_back(
         os.chmod(day, 0o755)
 
     assert complete["unreachable_output"] == []
+    assert complete["unreadable_output"] == [str(render)]
+    assert complete["unreadable_output_count"] == 1
+    assert f"  in {root}\n" in _marker_block(db)
     assert db.list_tombstones() == []
     assert _marker_exists(db)
     assert _pending_paths(db) == sorted([str(gone), str(render)])
@@ -1738,3 +1787,228 @@ def test_the_deepest_output_root_that_holds_a_file_decides(monkeypatch, tmp_path
     assert db.list_tombstones() == []
     assert _marker_exists(db)
     assert _pending_paths(db) == sorted([str(gone), clip])
+
+
+# ----------------------------------------------------------------------
+# A generated file on disk that can't be imported keeps a full clean
+# unfinished, and is listed until it is dealt with (final review: one such
+# file held every later full clean back, and nothing said which file)
+# ----------------------------------------------------------------------
+
+
+def _scanner_failing_on(paths, failure="returns None"):
+    """The real Scanner, except that ``paths`` can't be imported: their
+    ingest returns None (a file it can't read as media) or raises, with the
+    path in the error's text -- which must never reach a log."""
+    from metascan.core.scanner import Scanner
+
+    failing = {str(p) for p in paths}
+
+    class FailsToImport(Scanner):
+        def ingest_file(self, path):
+            if str(path) in failing:
+                if failure == "raises":
+                    raise OSError(f"database is locked while saving {path}")
+                return None
+            return super().ingest_file(path)
+
+    return FailsToImport
+
+
+@pytest.mark.parametrize("failure", ["returns None", "raises"])
+def test_a_generated_file_that_cannot_be_imported_is_listed_until_dealt_with(
+    monkeypatch, tmp_path, db, caplog, failure
+):
+    """A ✓ T2I render with its lineage row is on disk, but the scanner can't
+    import it (its ingest returns None, or raises). The full clean stays
+    unfinished -- nothing tombstoned, not even the deleted library image,
+    the ✓ pending, the lineage row and the marker kept -- and now says
+    which file: the complete event lists it, absolute, and counts it; the
+    marker counts it and names its output folder, with the way out, never
+    its path; and no log line, at any level, carries the path. The way out:
+    delete it and run Full clean & rescan. That clean completes, records
+    the render as deleted with its ✓ and its lineage, and finishes."""
+    config, gone, root, [render] = _rendered_library(tmp_path, db, 1)
+
+    with caplog.at_level(logging.DEBUG):
+        complete = _route_full_clean(
+            monkeypatch, db, config, _scanner_failing_on([render], failure)
+        )
+
+    assert complete["unreadable_output"] == [str(render)]
+    assert complete["unreadable_output_count"] == 1
+    assert complete["output_check_failed"] is False
+    assert complete["unreachable_output"] == []
+    # Unfinished: nothing tombstoned, the ✓ pending, the lineage row and
+    # the marker kept.
+    assert db.list_tombstones() == []
+    assert _marker_exists(db)
+    assert _pending_paths(db) == sorted([str(gone), str(render)])
+    [pending] = [j for j in _pending(db)["judgments"] if j["file_path"] == str(render)]
+    assert pending["grade"] == "pass"
+    assert str(render) not in db.get_existing_file_paths()
+    db.list_t2i_images()
+    assert _lineage_rows(db) == (1, 0)
+    # The marker counts it and names the output folder holding it, with the
+    # way out; never the file.
+    block = _marker_block(db)
+    flat = _flat(block)
+    assert "could not read or import 1 generated image or clip that is on disk" in flat
+    assert f"  in {root}\n" in block
+    assert (
+        "delete each one, or move it out of the output folder (or repair it), "
+        "then run full clean & rescan"
+    ) in flat
+    assert str(render) not in _marker_text(db)
+    assert render.name not in _marker_text(db)
+    # The WARNING names the folder and says where the files are listed.
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    [warning] = [w for w in warnings if "could not be read or re-imported" in w]
+    assert f"1 generated images / clips on disk (in {root})" in warning
+    assert "Done view lists the files" in warning
+    # No log line at any level has the file's path (or its name).
+    logged = caplog.text + "".join(r.getMessage() for r in caplog.records)
+    assert str(render) not in logged and render.name not in logged
+
+    render.unlink()  # the way out: delete it
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreadable_output"] == []
+    assert complete["unreadable_output_count"] == 0
+    assert not _marker_exists(db) and _pending(db) is None
+    tombs = {t["file_path"]: t for t in db.list_tombstones()}
+    assert sorted(tombs) == sorted([str(gone), str(render)])
+    assert tombs[str(render)]["grade"] == "pass"
+    assert _lineage(tombs[str(render)]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+
+
+def test_a_file_that_keeps_failing_is_never_recorded_as_deleted(
+    monkeypatch, tmp_path, db
+):
+    """No retry-to-gone: however many full cleans fail to import a file that
+    is on disk, it stays listed and pending, never tombstoned -- it may be
+    a passing failure, and a tombstone would leave a rated file on disk
+    outside the library for good."""
+    config, gone, root, [render] = _rendered_library(tmp_path, db, 1)
+    for _ in range(3):
+        complete = _route_full_clean(
+            monkeypatch, db, config, _scanner_failing_on([render])
+        )
+        assert complete["unreadable_output"] == [str(render)]
+        assert db.list_tombstones() == []
+        assert str(render) in _pending_paths(db)
+        assert _marker_exists(db)
+
+
+def test_the_complete_event_lists_the_first_fifty_failed_files_and_counts_all(
+    monkeypatch, tmp_path, db, caplog
+):
+    """More failed files than the event lists: the first
+    UNREADABLE_OUTPUT_LIMIT in path order -- whatever order the library
+    hands them over in -- and every one counted, in the event, the WARNING
+    and the marker. These are no images at all (bytes the scanner can't
+    read as media): the real Scanner returns None for each."""
+    import random
+
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    out = tmp_path / "comfy"
+    config["comfy"] = {"output_root": str(out)}
+    day = out / "t2i" / "2026-01-01"
+    day.mkdir(parents=True)
+    n = scan_api.UNREADABLE_OUTPUT_LIMIT + 3
+    renders = []
+    for i in range(n):
+        path = day / f"t2i_{i:03d}.png"
+        path.write_bytes(b"not an image")
+        db.create_t2i_image(file_path=str(path), **T2I_LINEAGE)
+        renders.append(str(path))
+    listed = db.generated_paths_without_media
+    shuffled = random.Random(7).sample(listed(), n)
+    assert shuffled != sorted(shuffled)
+    monkeypatch.setattr(db, "generated_paths_without_media", lambda: list(shuffled))
+
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        complete = _route_full_clean(monkeypatch, db, config)
+
+    limit = scan_api.UNREADABLE_OUTPUT_LIMIT
+    assert limit == 50
+    assert complete["unreadable_output"] == sorted(renders)[:limit]
+    assert complete["unreadable_output_count"] == n
+    flat = _flat(_marker_block(db))
+    assert f"could not read or import {n} generated images or clips" in flat
+    assert any(
+        r.getMessage().startswith(f"{n} generated images / clips on disk")
+        for r in caplog.records
+    )
+    assert db.list_tombstones() == [] and _marker_exists(db)
+
+
+def test_a_cancel_during_the_reingest_reports_no_failed_file(monkeypatch, tmp_path, db):
+    """A cancel stops the re-ingest between files. What it found so far is
+    partial, so -- as for the output roots -- the complete event lists no
+    failed file and the marker is left as it is; the clean stays
+    unfinished."""
+    config, gone, root, renders = _rendered_library(tmp_path, db, 2)
+    failing = _scanner_failing_on(renders)
+
+    class CancelsAtTheFirstFailure(failing):
+        def ingest_file(self, path):
+            media = super().ingest_file(path)
+            if media is None:
+                scan_api._cancel_requested = True
+            return media
+
+    complete = _route_full_clean(monkeypatch, db, config, CancelsAtTheFirstFailure)
+
+    assert (
+        complete["unreachable_output"],
+        complete["unreadable_output"],
+        complete["unreadable_output_count"],
+        complete["output_check_failed"],
+    ) == ([], [], 0, False)
+    assert _marker_block(db) == ""
+    assert db.list_tombstones() == [] and _marker_exists(db)
+
+
+def test_relative_output_folders_and_files_are_shown_absolute(
+    monkeypatch, tmp_path, db, caplog
+):
+    """The default I2V output root is relative (data/storyboards/i2v, from
+    comfy.output_root), and so are the clips below it. The scan shows them
+    absolute, joined to the server's working directory: an unreachable
+    root in the WARNING, the marker and the complete event, and a failed
+    file and the folder holding it likewise."""
+    monkeypatch.chdir(tmp_path)
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    config["comfy"] = {"output_root": "drive/comfy"}  # its drive is not mounted
+    config["t2i"] = {"output_root": "renders"}  # relative too, and there
+    clip = "drive/comfy/i2v/cat/clip.mp4"
+    db.save_media(_media(clip))
+    db.create_i2v_video(source_path=str(keep), file_path=clip, **I2V_LINEAGE)
+    db.set_grade(clip, "pass", now=T0)
+    render = "renders/2026-01-01/t2i_1.png"
+    _png(tmp_path / render)
+    db.create_t2i_image(file_path=render, **T2I_LINEAGE)
+
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        complete = _route_full_clean(
+            monkeypatch, db, config, _scanner_failing_on([render])
+        )
+
+    clips_root = str(tmp_path / "drive" / "comfy" / "i2v")
+    renders_root = str(tmp_path / "renders")
+    assert complete["unreachable_output"] == [clips_root]
+    assert complete["unreadable_output"] == [str(tmp_path / render)]
+    block = _marker_block(db)
+    assert f"  {clips_root} (missing)\n" in block
+    assert f"  in {renders_root}\n" in block
+    warnings = " ".join(
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    )
+    assert f"{clips_root} (missing)" in warnings
+    assert f"(in {renders_root})" in warnings
+    # Never the relative form on its own.
+    for shown in (block, warnings, json.dumps(complete)):
+        rest = shown.replace(clips_root, "").replace(renders_root, "")
+        assert "drive/comfy" not in rest and "renders/" not in rest
+    assert db.list_tombstones() == [] and _marker_exists(db)

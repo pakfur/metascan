@@ -47,7 +47,18 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    cast,
+)
 
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
 from metascan.core.judgments import GRADES
@@ -154,15 +165,37 @@ ratings file next to it ({pending}), also holds them back: while that file
 is there, deleting this one alone is not enough.
 """
 
-# The output folders the last scan could not reach, appended to the marker
-# by note_unreachable_output and replaced by the next scan's findings.
-_UNREACHABLE_HEADER = "The last scan could not reach these generated-output folders:"
+# What the last scan could not bring back of the generated output, appended
+# to the marker by note_generated_output and replaced by the next scan's
+# findings. Every section starts with _LAST_SCAN_COULD_NOT, which the text
+# above never has at the start of a line: the block is everything from the
+# first one on -- also the one an older build wrote (the unreachable
+# folders alone). Never a file's path: the owner may share this file, and a
+# generated file's name can carry prompt text.
+_LAST_SCAN_COULD_NOT = "The last scan could not "
+_UNREACHABLE_HEADER = _LAST_SCAN_COULD_NOT + "reach these generated-output folders:"
 _UNREACHABLE_ADVICE = """\
 Their images and clips may still be there, so their ratings are kept,
 pending, and none of them is recorded as deleted. Reconnect or mount the
 drive and run a scan. If a folder is gone for good, recreate it (empty is
 fine) and run Full clean & rescan.
 """
+_UNREADABLE_ADVICE = """\
+A file still on disk is never recorded as deleted: its ratings are kept,
+pending, and the full clean stays unfinished. The scan's Done step lists
+the files. Delete each one, or move it out of the output folder (or repair
+it), then run Full clean & rescan. A file that only failed this time (a
+busy disk) comes back by itself at the next scan.
+"""
+_CHECK_FAILED = (
+    _LAST_SCAN_COULD_NOT
+    + """check the generated output ({error};
+the server log has the details), so the full clean stays unfinished: the
+ratings of the generated images and clips that did not come back are kept,
+pending, and none of them is recorded as deleted. The next scan tries
+again.
+"""
+)
 
 
 def full_clean_marker_path(data_dir: Path) -> Path:
@@ -192,23 +225,75 @@ def write_full_clean_marker(data_dir: Path) -> None:
     _fsync_dir(target.parent)
 
 
-def note_unreachable_output(data_dir: Path, folders: Dict[str, str]) -> bool:
-    """Name in the marker the generated-output folders the last scan could
-    not reach -- ``folders`` maps each to why ("missing", "can't be read")
-    -- with the way out, in place of what an earlier scan named there; none
-    leaves the marker as it was written. Only an existing marker is
-    rewritten: one deleted by hand while the scan ran stays deleted. Never
-    raises (the text is advice; the marker's existence holds the pause):
-    False when the marker is not there or could not be rewritten."""
+def generated_output_place(root: Optional[str]) -> str:
+    """Where generated files are, said by the output folder that holds them:
+    ``in <root>``, or, for ``None`` (a file under none of the configured
+    output folders), ``outside the configured output folders``. The marker
+    and the scan route's log say it the same way."""
+    return "outside the configured output folders" if root is None else f"in {root}"
+
+
+def _unreadable_section(count: int, roots: Sequence[Optional[str]]) -> str:
+    what = "image or clip that is" if count == 1 else "images or clips that are"
+    lines = "".join(f"  {generated_output_place(root)}\n" for root in roots)
+    return (
+        f"{_LAST_SCAN_COULD_NOT}read or import {count} generated {what}\n"
+        f"on disk:\n{lines}{_UNREADABLE_ADVICE}"
+    )
+
+
+def _generated_output_block(
+    unreachable: Mapping[str, str],
+    unreadable_count: int,
+    unreadable_roots: Sequence[Optional[str]],
+    check_failed: Optional[str],
+) -> str:
+    sections: List[str] = []
+    if unreachable:
+        lines = "".join(f"  {folder} ({why})\n" for folder, why in unreachable.items())
+        sections.append(f"{_UNREACHABLE_HEADER}\n{lines}{_UNREACHABLE_ADVICE}")
+    if unreadable_count > 0:
+        sections.append(_unreadable_section(unreadable_count, unreadable_roots))
+    if check_failed:
+        sections.append(_CHECK_FAILED.format(error=check_failed))
+    return "".join("\n" + section for section in sections)
+
+
+def note_generated_output(
+    data_dir: Path,
+    unreachable: Mapping[str, str],
+    unreadable_count: int = 0,
+    unreadable_roots: Sequence[Optional[str]] = (),
+    check_failed: Optional[str] = None,
+) -> bool:
+    """Say in the marker, after its text, what the last scan could not bring
+    back of the generated output, in place of what an earlier scan said
+    there; nothing to say leaves the marker as it was written:
+
+    * ``unreachable``: the output folders it could not reach, each mapped
+      to why ("missing", "can't be read"), with the way out;
+    * ``unreadable_count`` files on disk it could not read or import, and
+      ``unreadable_roots``, the output folders that hold them (``None``: a
+      file under none of them), with the way out. Never a file's path: the
+      owner may share this file, and a generated file's name can carry
+      prompt text;
+    * ``check_failed``: the type name of the error the check itself raised
+      (nothing about the output is known), and that the next scan tries
+      again.
+
+    Folders are written as given (the scan route passes them absolute).
+    Only an existing marker is rewritten: one deleted by hand while the scan
+    ran stays deleted. Never raises (the text is advice; the marker's
+    existence holds the pause): False when the marker is not there or could
+    not be rewritten."""
     target = full_clean_marker_path(data_dir)
-    block = ""
-    if folders:
-        lines = "".join(f"  {folder} ({why})\n" for folder, why in folders.items())
-        block = f"\n{_UNREACHABLE_HEADER}\n{lines}{_UNREACHABLE_ADVICE}"
+    block = _generated_output_block(
+        unreachable, unreadable_count, unreadable_roots, check_failed
+    )
     try:
         with open(target, "r+", encoding="utf-8") as f:
             text = f.read()
-            new = text.partition("\n" + _UNREACHABLE_HEADER)[0] + block
+            new = text.partition("\n" + _LAST_SCAN_COULD_NOT)[0] + block
             if new != text:
                 f.seek(0)
                 f.write(new)
@@ -219,7 +304,7 @@ def note_unreachable_output(data_dir: Path, folders: Dict[str, str]) -> bool:
         return False
     except (OSError, ValueError) as e:  # ValueError: not UTF-8
         logger.warning(
-            "Could not name the unreachable generated-output folders in %s (%s)",
+            "Could not note the last scan's generated-output findings in %s (%s)",
             target,
             e,
         )

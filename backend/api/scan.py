@@ -5,6 +5,7 @@ import logging
 import os
 import stat
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -29,8 +30,9 @@ from backend.services.taste_snapshot import (
     clear_full_clean_marker,
     full_clean_marker_exists,
     full_clean_running,
+    generated_output_place,
     merge_pending_into_snapshot,
-    note_unreachable_output,
+    note_generated_output,
     pending_snapshot_paths,
     restore_and_persist,
     snapshot_file_path,
@@ -402,6 +404,16 @@ def _absolute_key(path: str) -> str:
     return _path_key(os.path.abspath(path))
 
 
+def _shown_path(path: str) -> str:
+    """``path`` as the scan shows it -- in its log, the marker and the
+    complete event: absolute. A relative one (the default I2V output root,
+    ``data/storyboards/i2v``, and the clips below it) is joined to the
+    working directory as ``_absolute_key`` resolves it, without
+    ``_path_key``'s normalisation (no case folding, no trailing separator).
+    For showing only: paths are matched by their keys."""
+    return os.path.abspath(path)
+
+
 def _output_root_of(path: str, roots: Sequence[str]) -> Optional[str]:
     """The deepest of ``roots`` that ``path`` lies under, or None."""
     key = _absolute_key(path)
@@ -443,6 +455,43 @@ def _ingest_generated_file(scanner: Any, path: str) -> str:
 
 REINGEST_OUTCOMES = ("reingested", "gone", "unreachable", "failed")
 
+# The most failed generated files a scan's complete event lists
+# (unreadable_output, sorted); unreadable_output_count counts every one.
+UNREADABLE_OUTPUT_LIMIT = 50
+
+
+@dataclass
+class ReingestReport:
+    """What the re-ingest of generated output found
+    (``_reingest_generated_files``): the count of each ``REINGEST_OUTCOMES``
+    outcome; ``unreachable``, the output roots that held files back, each
+    with why (``MISSING`` / ``UNREADABLE``), in config order; ``failed``,
+    the paths (native, as listed) of the files on disk that did not come
+    back -- unreadable, or their ingest raised or returned None -- in the
+    order met; ``failed_roots``, the roots that hold those, in config order,
+    then None for one under no configured root; and ``check_failed``, set
+    when the step itself raised: nothing about the output is known."""
+
+    counts: Dict[str, int] = field(
+        default_factory=lambda: dict.fromkeys(REINGEST_OUTCOMES, 0)
+    )
+    unreachable: Dict[str, str] = field(default_factory=dict)
+    failed: List[str] = field(default_factory=list)
+    failed_roots: List[Optional[str]] = field(default_factory=list)
+    check_failed: bool = False
+
+    @property
+    def back(self) -> bool:
+        """Every generated file still on disk came back."""
+        return not (
+            self.check_failed or self.counts["unreachable"] or self.counts["failed"]
+        )
+
+    def add(self, path: str, outcome: str) -> None:
+        self.counts[outcome] += 1
+        if outcome == "failed":
+            self.failed.append(path)
+
 
 def _reingest_generated_files(
     db: Any,
@@ -451,7 +500,7 @@ def _reingest_generated_files(
     full_clean: bool,
     cancelled: Callable[[], bool],
     config: Dict[str, Any],
-) -> Tuple[Dict[str, int], Dict[str, str]]:
+) -> ReingestReport:
     """Re-ingest (``Scanner.ingest_file``) the T2I images and I2V clips whose
     media row is missing but whose file is still on disk -- only while a full
     clean is unfinished (``_full_clean_unfinished``). Outside one a dangling
@@ -469,59 +518,90 @@ def _reingest_generated_files(
     so a drive lost during it counts, and a file found gone is stat-ed again
     last: one whose drive came back by the root check is re-ingested. A
     file that can't be read (``"unreadable"``) is ``"failed"`` unless its
-    root is the one that can't be reached: it may well exist.
+    root is the one that can't be reached: it may well exist. A failed file
+    stays failed however many scans fail on it: it is on disk, so only the
+    owner can decide it is gone (by deleting or moving it).
 
-    Returns the count of each ``REINGEST_OUTCOMES`` outcome and the roots
-    that held files back, each with why (``MISSING`` / ``UNREADABLE``), in
-    config order. A cancel stops it, between files, with no root reported.
-    Raises what the candidate query or the config raises. Runs in a worker
-    thread."""
-    counts = dict.fromkeys(REINGEST_OUTCOMES, 0)
+    Returns the ``ReingestReport``: the failed files are reported with the
+    roots that hold them. A cancel stops it, between files, with nothing
+    reported (only the counts so far). Raises what the candidate query or
+    the config raises. Runs in a worker thread."""
+    report = ReingestReport()
     if not _full_clean_unfinished(data_dir, full_clean):
-        return counts, {}
+        return report
     not_there: List[Tuple[str, str]] = []
     for path in db.generated_paths_without_media():
         if cancelled():
-            return counts, {}
+            return ReingestReport(counts=report.counts)
         outcome = _ingest_generated_file(scanner, path)
         if outcome in ("gone", "unreadable"):
             not_there.append((path, outcome))
         else:
-            counts[outcome] += 1
-    if not not_there:
-        return counts, {}
+            report.add(path, outcome)
+    if not (not_there or report.failed):
+        return report
     roots = _generated_output_roots(config)
-    return _settle_by_output_root(scanner, not_there, roots, counts, cancelled)
+    if not _settle_by_output_root(scanner, not_there, roots, report, cancelled):
+        return ReingestReport(counts=report.counts)
+    report.failed_roots = _roots_holding(report.failed, roots)
+    return report
 
 
 def _settle_by_output_root(
     scanner: Any,
     not_there: Sequence[Tuple[str, str]],
     roots: Sequence[str],
-    counts: Dict[str, int],
+    report: ReingestReport,
     cancelled: Callable[[], bool],
-) -> Tuple[Dict[str, int], Dict[str, str]]:
-    """Count each ``(path, file state)`` the pass did not find by its output
-    root (``_reingest_generated_files``): ``"unreachable"`` under a root that
-    is missing or can't be read (each root probed once, now: after the
-    pass), else a gone file is stat-ed again -- re-ingested if it is back --
-    and an unreadable one is ``"failed"``. Returns ``counts`` and the roots
-    that held files back, with why, in ``roots`` order."""
+) -> bool:
+    """Count into ``report`` each ``(path, file state)`` the pass did not
+    find by its output root (``_reingest_generated_files``):
+    ``"unreachable"`` under a root that is missing or can't be read (each
+    root probed once, now: after the pass), else a gone file is stat-ed
+    again -- re-ingested if it is back -- and an unreadable one is
+    ``"failed"``. Records the roots that held files back, with why, in
+    ``roots`` order. False when a cancel stopped it."""
     states: Dict[str, str] = {}
     for path, state in not_there:
         if cancelled():
-            return counts, {}
+            return False
         root = _output_root_of(path, roots)
         if root is not None and root not in states:
             states[root] = _probe_folder(root)
         if root is not None and states[root] in (MISSING, UNREADABLE):
-            counts["unreachable"] += 1
+            report.add(path, "unreachable")
             continue
         if state == "gone":
             state = _ingest_generated_file(scanner, path)
-        counts["failed" if state == "unreadable" else state] += 1
-    held = {r: states[r] for r in roots if states.get(r) in (MISSING, UNREADABLE)}
-    return counts, held
+        report.add(path, "failed" if state == "unreadable" else state)
+    report.unreachable = {
+        r: states[r] for r in roots if states.get(r) in (MISSING, UNREADABLE)
+    }
+    return True
+
+
+def _roots_holding(paths: Iterable[str], roots: Sequence[str]) -> List[Optional[str]]:
+    """The roots that hold one of ``paths`` -- for each path the deepest
+    that holds it (``_output_root_of``) -- in ``roots`` order, then None
+    when one lies under none of them."""
+    held: Set[Optional[str]] = {_output_root_of(path, roots) for path in paths}
+    return [root for root in roots if root in held] + ([None] if None in held else [])
+
+
+def _generated_output_fields(report: ReingestReport) -> Dict[str, Any]:
+    """The ``complete`` event's account of the generated output, every path
+    absolute (``_shown_path``) and native: ``unreachable_output``, the output
+    roots that held files back; ``unreadable_output``, the failed files,
+    sorted, at most ``UNREADABLE_OUTPUT_LIMIT``, and
+    ``unreadable_output_count``, all of them; ``output_check_failed``, the
+    step itself raised. ``[]``, ``0`` and ``False`` with nothing to report."""
+    failed = sorted(_shown_path(path) for path in report.failed)
+    return {
+        "unreachable_output": [_shown_path(root) for root in report.unreachable],
+        "unreadable_output": failed[:UNREADABLE_OUTPUT_LIMIT],
+        "unreadable_output_count": len(failed),
+        "output_check_failed": report.check_failed,
+    }
 
 
 async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
@@ -674,7 +754,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         except Exception as e:
             logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
-    async def _reingest_generated_output() -> Tuple[bool, Dict[str, str]]:
+    async def _reingest_generated_output() -> ReingestReport:
         """T2I / I2V output enters the library through ComfyClient's ingest,
         under the ComfyUI output root, which is usually outside every scan
         folder: a full clean's folder walk never brings it back. While a
@@ -683,17 +763,19 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         that are still on disk, so the restore puts their ratings back and
         their lineage stays attached.
 
-        Returns whether every generated file still on disk came back, and
-        the output roots that held files back (``_reingest_generated_files``),
-        each with why. Not back when the step itself failed, a file could
-        not be read or ingested, or an output root could not be reached (a
-        drive not mounted) -- the run is then unfinished: no tombstones, and
-        the marker stays, naming those roots. Logs counts, exception types
-        and the roots, never a file's path. Never raises."""
+        Returns what it found (``_reingest_generated_files``; on a failure
+        of the step itself, ``check_failed`` and nothing else). Its ``back``
+        is False when the step itself failed, a file could not be read or
+        ingested, or an output root could not be reached (a drive not
+        mounted) -- the run is then unfinished: no tombstones, and the
+        marker stays, saying why (``note_generated_output``: the roots, the
+        count of failed files and the roots that hold them, or the type of
+        the error). Logs counts, exception types and output roots, never a
+        file's path. Never raises."""
         if data_dir is None:
-            return True, {}
+            return ReingestReport()
         try:
-            counts, unreachable = await asyncio.to_thread(
+            report = await asyncio.to_thread(
                 _reingest_generated_files,
                 db,
                 scanner,
@@ -708,7 +790,15 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "stays unfinished",
                 type(e).__name__,
             )
-            return False, {}
+            if not _cancel_requested:
+                await asyncio.to_thread(
+                    note_generated_output,
+                    data_dir,
+                    {},
+                    check_failed=type(e).__name__,
+                )
+            return ReingestReport(check_failed=True)
+        counts = report.counts
         if any(counts.values()):
             logger.info(
                 "Generated output outside the scan folders: re-ingested %d "
@@ -719,6 +809,9 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 counts["unreachable"],
                 counts["failed"],
             )
+        unreachable = {
+            _shown_path(folder): why for folder, why in report.unreachable.items()
+        }
         if unreachable:
             logger.warning(
                 "Generated output folder(s) %s can't be reached, so %d "
@@ -732,23 +825,32 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 _blockers_text(unreachable),
                 counts["unreachable"],
             )
-        if counts["failed"]:
+        # The output roots that hold the failed files (None: under none).
+        failed_roots = [
+            None if root is None else _shown_path(root) for root in report.failed_roots
+        ]
+        if report.failed:
             logger.warning(
-                "%d generated images / clips on disk could not be read or "
+                "%d generated images / clips on disk (%s) could not be read or "
                 "re-imported; the full clean stays unfinished (their ratings "
                 "stay pending and the T2I / I2V lists keep their rows) until a "
-                "later scan brings them back",
-                counts["failed"],
+                "later scan brings them back. The scan's Done view lists the "
+                "files: delete each one, or move it out of the output folder "
+                "(or repair it), then run Full clean & rescan",
+                len(report.failed),
+                ", ".join(generated_output_place(root) for root in failed_roots),
             )
         if not _cancel_requested:
-            # The marker names what this scan could not reach (or no longer
-            # names what an earlier one could not).
+            # The marker says what this scan could not bring back (or no
+            # longer says what an earlier one could not).
             await asyncio.to_thread(
-                note_unreachable_output,
+                note_generated_output,
                 data_dir,
                 {folder: _WHY_SHORT[why] for folder, why in unreachable.items()},
+                len(report.failed),
+                failed_roots,
             )
-        return not (counts["unreachable"] + counts["failed"]), unreachable
+        return report
 
     async def _every_folder_scanned() -> None:
         """A scan walked every configured folder to the end (and re-ingested
@@ -846,11 +948,13 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
 
         # Every generated file still on disk must come back for the run to
         # finish; never after a cancel (one in the last folder included).
-        # An output root that can't be reached is named in the complete event.
+        # What did not come back is named in the complete event: an output
+        # root that can't be reached, a file that can't be read or ingested.
+        generated = ReingestReport()
         generated_back = False
-        unreachable_output: Dict[str, str] = {}
         if not _cancel_requested:
-            generated_back, unreachable_output = await _reingest_generated_output()
+            generated = await _reingest_generated_output()
+            generated_back = generated.back
 
         # Stale cleanup
         stale_count = 0
@@ -929,7 +1033,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "processed": total_processed,
                 "stale_removed": stale_count,
                 "missing_folders": missing_folders,
-                "unreachable_output": list(unreachable_output),
+                **_generated_output_fields(generated),
             },
         )
 
