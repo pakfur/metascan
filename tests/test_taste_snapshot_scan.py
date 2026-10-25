@@ -1350,6 +1350,36 @@ def test_a_failed_reingest_step_keeps_the_full_clean_unfinished(
     assert complete["output_check_failed"] is False
 
 
+def test_a_reingest_step_that_fails_during_a_cancel_reports_nothing(
+    monkeypatch, tmp_path, db, caplog
+):
+    """The step raises while a cancel is under way: a cancel reports
+    nothing, its failure included -- output_check_failed stays false and the
+    marker is left as it is. The ERROR still names the error's type, and
+    the clean stays unfinished."""
+    files = _generated_library(monkeypatch, tmp_path, db)
+    events = _capture(monkeypatch)
+
+    def cancelled_then_failed():
+        scan_api._cancel_requested = True  # the owner cancels...
+        raise RuntimeError("disk I/O error")  # ...and the query fails
+
+    monkeypatch.setattr(db, "generated_paths_without_media", cancelled_then_failed)
+    with caplog.at_level(logging.ERROR, logger="backend.api.scan"):
+        _run(full_clean=True)
+
+    [complete] = [data for event, data in events if event == "complete"]
+    assert (
+        complete["output_check_failed"],
+        complete["unreachable_output"],
+        complete["unreadable_output"],
+        complete["unreadable_output_count"],
+    ) == (False, [], [], 0)
+    assert _marker_block(db) == ""
+    assert any("(RuntimeError)" in r.getMessage() for r in caplog.records)
+    _unfinished(db, files)
+
+
 def test_an_unmounted_output_folder_keeps_the_full_clean_unfinished(
     monkeypatch, tmp_path, db
 ):
@@ -1422,6 +1452,11 @@ def _route_full_clean(monkeypatch, db, config, scanner_cls=None):
     real folders, the real Scanner unless given another -- and wait for the
     scan it started. Returns the scan's one ``complete`` event (no ``error``
     event)."""
+    return _route_scan(monkeypatch, db, config, scanner_cls, full_clean=True)
+
+
+def _route_scan(monkeypatch, db, config, scanner_cls=None, full_clean=False):
+    """``_route_full_clean`` for an ordinary scan too."""
     from metascan.core.scanner import Scanner
 
     events = []
@@ -1438,7 +1473,7 @@ def _route_full_clean(monkeypatch, db, config, scanner_cls=None):
     monkeypatch.setattr(scan_api, "_cancel_requested", False)
 
     async def go():
-        await scan_api.start_scan(scan_api.ScanRequest(full_clean=True))
+        await scan_api.start_scan(scan_api.ScanRequest(full_clean=full_clean))
         await scan_api._scan_task
 
     asyncio.run(go())
@@ -1943,12 +1978,94 @@ def test_the_complete_event_lists_the_first_fifty_failed_files_and_counts_all(
     assert db.list_tombstones() == [] and _marker_exists(db)
 
 
-def test_a_cancel_during_the_reingest_reports_no_failed_file(monkeypatch, tmp_path, db):
-    """A cancel stops the re-ingest between files. What it found so far is
-    partial, so -- as for the output roots -- the complete event lists no
-    failed file and the marker is left as it is; the clean stays
-    unfinished."""
+CANCEL_POINTS = ("between files", "during the last file", "during the last re-check")
+
+
+@pytest.mark.parametrize("where", CANCEL_POINTS)
+def test_a_cancel_during_the_reingest_reports_no_failed_file(
+    monkeypatch, tmp_path, db, where
+):
+    """A cancel stops the re-ingest. What it found by then is partial, so --
+    as for the output roots -- the complete event says nothing of the
+    generated output ([], 0, false), the marker is left as it is, and the
+    clean stays unfinished. The cancel is checked between files, after the
+    pass (one during the last file's ingest: no output root is even looked
+    up after it) and before the report is returned (one during the re-check
+    of a file found gone, the last thing the step does)."""
+    from metascan.core.scanner import Scanner
+
+    n = 2 if where == "between files" else 1
+    config, gone, root, renders = _rendered_library(tmp_path, db, n)
+    failing = {str(p) for p in renders}
+    clip = None
+    if where == "during the last re-check":
+        # A clip gone with its drive during the pass and back by the root
+        # check: its re-ingest is where the cancel lands.
+        i2v_root = tmp_path / "comfy" / "i2v"
+        clip = i2v_root / "cat" / "clip.mp4"
+        clip.parent.mkdir(parents=True)
+        clip.write_bytes(b"a clip")
+        source = str(tmp_path / "lib" / "keep.png")
+        db.create_i2v_video(source_path=source, file_path=str(clip), **I2V_LINEAGE)
+        unplugged = tmp_path / "unplugged"
+        i2v_root.rename(unplugged)
+        real_probe = scan_api._probe_folder
+
+        def probe(path):
+            if path == str(i2v_root) and unplugged.exists():
+                unplugged.rename(i2v_root)  # mounted again just before the check
+            return real_probe(path)
+
+        monkeypatch.setattr(scan_api, "_probe_folder", probe)
+
+    class CancelsAsItGoes(Scanner):
+        def ingest_file(self, path):
+            if str(path) in failing:
+                if clip is None:
+                    scan_api._cancel_requested = True
+                return None
+            if clip is not None and str(path) == str(clip):
+                scan_api._cancel_requested = True
+                db.save_media(_media(str(path)))
+                return object()
+            return super().ingest_file(path)
+
+    real_roots = scan_api._generated_output_roots
+    looked_up_after_a_cancel = []
+
+    def roots(config):
+        looked_up_after_a_cancel.append(scan_api._cancel_requested)
+        return real_roots(config)
+
+    monkeypatch.setattr(scan_api, "_generated_output_roots", roots)
+    complete = _route_full_clean(monkeypatch, db, config, CancelsAsItGoes)
+
+    assert (
+        complete["unreachable_output"],
+        complete["unreadable_output"],
+        complete["unreadable_output_count"],
+        complete["output_check_failed"],
+    ) == ([], [], 0, False)
+    assert True not in looked_up_after_a_cancel
+    assert _marker_block(db) == ""
+    assert db.list_tombstones() == [] and _marker_exists(db)
+
+
+def test_a_cancelled_scan_leaves_the_marker_as_the_last_check_wrote_it(
+    monkeypatch, tmp_path, db
+):
+    """The marker says what the last scan that checked the generated output
+    to its end found. A full clean leaves two renders that can't be
+    imported, and the marker counts them and names their folder; an
+    ordinary scan then cancelled during its own re-ingest found only part
+    of that, so it leaves the marker byte for byte as it was."""
     config, gone, root, renders = _rendered_library(tmp_path, db, 2)
+    _route_full_clean(monkeypatch, db, config, _scanner_failing_on(renders))
+    marker = ts.full_clean_marker_path(Path(db.db_path))
+    written = marker.read_bytes()
+    block = _marker_block(db)
+    assert f"  in {root}\n" in block and "2 generated images or clips" in block
+
     failing = _scanner_failing_on(renders)
 
     class CancelsAtTheFirstFailure(failing):
@@ -1958,16 +2075,13 @@ def test_a_cancel_during_the_reingest_reports_no_failed_file(monkeypatch, tmp_pa
                 scan_api._cancel_requested = True
             return media
 
-    complete = _route_full_clean(monkeypatch, db, config, CancelsAtTheFirstFailure)
+    complete = _route_scan(monkeypatch, db, config, CancelsAtTheFirstFailure)
 
-    assert (
-        complete["unreachable_output"],
-        complete["unreadable_output"],
-        complete["unreadable_output_count"],
-        complete["output_check_failed"],
-    ) == ([], [], 0, False)
-    assert _marker_block(db) == ""
-    assert db.list_tombstones() == [] and _marker_exists(db)
+    assert (complete["unreadable_output"], complete["unreadable_output_count"]) == (
+        [],
+        0,
+    )
+    assert marker.read_bytes() == written
 
 
 def test_relative_output_folders_and_files_are_shown_absolute(

@@ -469,8 +469,11 @@ class ReingestReport:
     the paths (native, as listed) of the files on disk that did not come
     back -- unreadable, or their ingest raised or returned None -- in the
     order met; ``failed_roots``, the roots that hold those, in config order,
-    then None for one under no configured root; and ``check_failed``, set
-    when the step itself raised: nothing about the output is known."""
+    then None for one under no configured root; ``check_failed``, set when
+    the step itself raised with no cancel: nothing about the output is
+    known; and ``stopped``, set when it did not run to its end (a cancel,
+    or an error): none of its findings is reported, only its counts so far
+    for the log."""
 
     counts: Dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(REINGEST_OUTCOMES, 0)
@@ -479,12 +482,16 @@ class ReingestReport:
     failed: List[str] = field(default_factory=list)
     failed_roots: List[Optional[str]] = field(default_factory=list)
     check_failed: bool = False
+    stopped: bool = False
 
     @property
     def back(self) -> bool:
         """Every generated file still on disk came back."""
         return not (
-            self.check_failed or self.counts["unreachable"] or self.counts["failed"]
+            self.stopped
+            or self.check_failed
+            or self.counts["unreachable"]
+            or self.counts["failed"]
         )
 
     def add(self, path: str, outcome: str) -> None:
@@ -524,27 +531,40 @@ def _reingest_generated_files(
 
     Returns the ``ReingestReport``: the failed files are reported with the
     roots that hold them. A cancel stops it, between files, with nothing
-    reported (only the counts so far). Raises what the candidate query or
-    the config raises. Runs in a worker thread."""
+    reported (``stopped``, only the counts so far); it is checked again
+    after the pass and before the report is returned, so one that lands
+    during the last file's ingest or re-check reports nothing either.
+    Raises what the candidate query or the config raises. Runs in a worker
+    thread."""
     report = ReingestReport()
     if not _full_clean_unfinished(data_dir, full_clean):
         return report
     not_there: List[Tuple[str, str]] = []
     for path in db.generated_paths_without_media():
         if cancelled():
-            return ReingestReport(counts=report.counts)
+            return _stopped(report)
         outcome = _ingest_generated_file(scanner, path)
         if outcome in ("gone", "unreadable"):
             not_there.append((path, outcome))
         else:
             report.add(path, outcome)
+    if cancelled():
+        return _stopped(report)
     if not (not_there or report.failed):
         return report
     roots = _generated_output_roots(config)
     if not _settle_by_output_root(scanner, not_there, roots, report, cancelled):
-        return ReingestReport(counts=report.counts)
+        return _stopped(report)
+    if cancelled():
+        return _stopped(report)
     report.failed_roots = _roots_holding(report.failed, roots)
     return report
+
+
+def _stopped(report: ReingestReport) -> ReingestReport:
+    """What a re-ingest that a cancel stopped reports: its counts so far
+    (for the log) and nothing else -- its findings are partial."""
+    return ReingestReport(counts=report.counts, stopped=True)
 
 
 def _settle_by_output_root(
@@ -594,7 +614,8 @@ def _generated_output_fields(report: ReingestReport) -> Dict[str, Any]:
     roots that held files back; ``unreadable_output``, the failed files,
     sorted, at most ``UNREADABLE_OUTPUT_LIMIT``, and
     ``unreadable_output_count``, all of them; ``output_check_failed``, the
-    step itself raised. ``[]``, ``0`` and ``False`` with nothing to report."""
+    step itself raised with no cancel. ``[]``, ``0`` and ``False`` with
+    nothing to report."""
     failed = sorted(_shown_path(path) for path in report.failed)
     return {
         "unreachable_output": [_shown_path(root) for root in report.unreachable],
@@ -764,14 +785,16 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         their lineage stays attached.
 
         Returns what it found (``_reingest_generated_files``; on a failure
-        of the step itself, ``check_failed`` and nothing else). Its ``back``
-        is False when the step itself failed, a file could not be read or
-        ingested, or an output root could not be reached (a drive not
-        mounted) -- the run is then unfinished: no tombstones, and the
-        marker stays, saying why (``note_generated_output``: the roots, the
-        count of failed files and the roots that hold them, or the type of
-        the error). Logs counts, exception types and output roots, never a
-        file's path. Never raises."""
+        of the step itself, ``check_failed`` and nothing else -- nothing at
+        all when a cancel was requested: a cancel reports nothing). Its
+        ``back`` is False when the step itself failed or stopped, a file
+        could not be read or ingested, or an output root could not be
+        reached (a drive not mounted) -- the run is then unfinished: no
+        tombstones, and the marker stays, saying why
+        (``note_generated_output``: the roots, the count of failed files
+        and the roots that hold them, or the type of the error). Logs
+        counts, exception types and output roots, never a file's path.
+        Never raises."""
         if data_dir is None:
             return ReingestReport()
         try:
@@ -790,14 +813,16 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "stays unfinished",
                 type(e).__name__,
             )
-            if not _cancel_requested:
-                await asyncio.to_thread(
-                    note_generated_output,
-                    data_dir,
-                    {},
-                    check_failed=type(e).__name__,
-                )
-            return ReingestReport(check_failed=True)
+            if _cancel_requested:
+                # A cancel reports nothing, the step's own failure included.
+                return ReingestReport(stopped=True)
+            await asyncio.to_thread(
+                note_generated_output,
+                data_dir,
+                {},
+                check_failed=type(e).__name__,
+            )
+            return ReingestReport(check_failed=True, stopped=True)
         counts = report.counts
         if any(counts.values()):
             logger.info(
