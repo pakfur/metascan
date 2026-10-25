@@ -119,6 +119,43 @@ Most errors are FastAPI's default `{ "detail": "..." }`. These endpoints return 
   ```
   The UI does not match on `code`: the scan dialog shows `message` as it is. It names each folder and why, says to reconnect (or mount) the drive first, and to remove a folder from the scan list only if it is gone for good, since its images' ratings are then dropped from the library.
 
+## Scan progress (`scan` WebSocket channel)
+
+### `complete`
+Sent once by every scan that runs to its end (a cancel that lands in the
+last folder included):
+
+```json
+{ "processed": 120, "stale_removed": 0, "missing_folders": [],
+  "unreachable_output": ["/mnt/d/comfy/t2i"],
+  "unreadable_output": ["/home/me/metascan/data/storyboards/i2v/cat/i2v_cat_1767225600.mp4"],
+  "unreadable_output_count": 1, "output_check_failed": false }
+```
+
+- `processed`: the files it imported; `stale_removed`: the entries the
+  stale cleanup removed.
+- `missing_folders`: the configured scan folders it could not see (missing,
+  unreadable, or empty while the library has images from them).
+- The other keys are about Text-to-Image and Image-to-Video output, which a
+  scan imports again while a Full clean & rescan is unfinished:
+  `unreachable_output` lists the output roots (`t2i.output_root` /
+  `i2v.output_root`, or their default under `comfy.output_root`) that are
+  missing or unreadable and held a file the rescan did not find;
+  `unreadable_output` lists the generated files that are on disk but could
+  not be read or imported (sorted, at most 50), and
+  `unreadable_output_count` counts all of them; `output_check_failed` is
+  `true` when the import itself failed, so nothing about the output is known
+  (the server log has the error; the next scan tries again).
+- Every root and file path is absolute (a relative one is joined to the
+  server's working directory) and in the server's native form.
+- With nothing to report they are `[]`, `[]`, `0` and `false`, as after
+  every ordinary scan while no full clean is unfinished.
+
+Any of them keeps the full clean unfinished: no deleted file is recorded and
+the pending ratings wait. The scan dialog's Done step lists them, each with
+its way out, and `full_clean_incomplete` in the data folder says the same,
+with no file path in it.
+
 ## VLM tagging (`/api/vlm/*`)
 
 ### `GET /api/vlm/status`
@@ -714,19 +751,24 @@ media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
 place (`i2v_videos` has no foreign key to media). Until a Full clean &
 rescan is finished (a scan has since walked every configured folder to the
-end and brought back every generated file still on disk, with neither
-generated-output root missing or unreadable: I2V's, `i2v.output_root` or
-else `<comfy.output_root>/i2v`, and T2I's) they are only left out, never
-deleted, so the rescan can bring them back; deleting `full_clean_incomplete`
-from the data folder ends that early, once no full clean is running and no
-pending ratings file (`taste_snapshot_before_full_clean.json`) is left. A
-folder missing *below* a root that is there (a source image's or a day's)
-holds nothing back: its files count as deleted. A root gone for good keeps
-the clean unfinished (the scan's `complete` event names it in
-`unreachable_output`): recreate it (empty is fine) and run a full clean. Its
-missing files then count as deleted: each one the pending snapshot has an
-entry for (a grade, a view, ★, a category, a brief) is tombstoned with its
-lineage, and any other loses its row with no tombstone.
+end and brought back every generated file still on disk) they are only left
+out, never deleted, so the rescan can bring them back; deleting
+`full_clean_incomplete` from the data folder ends that early, once no full
+clean is running and no pending ratings file
+(`taste_snapshot_before_full_clean.json`) is left. A generated file the
+rescan did not find holds the clean back only while the output root it was
+under is missing or unreadable: I2V's, `i2v.output_root` or else
+`<comfy.output_root>/i2v`, or T2I's. A folder missing *below* a root that
+is there (a source image's or a day's) holds nothing back: its files count
+as deleted. A root gone for good keeps the clean unfinished (the scan's
+`complete` event names it in `unreachable_output`): recreate it (empty is
+fine) and run a full clean. Its missing files then count as deleted: each
+one the pending snapshot has an entry for (a grade, a view, ★, a category, a
+brief) is tombstoned with its lineage, and any other loses its row with no
+tombstone. A generated file that is on disk but can't be read or imported
+holds the clean back too, however many scans fail on it (the event lists it
+in `unreadable_output`): delete it or move it out of the output folder (or
+repair it), then run a full clean.
 
 ### `PATCH /api/i2v/videos/{video_id}`
 Merges a partial `form_state` — any of `idea`, `prompt`, `duration_s`,
@@ -825,7 +867,7 @@ Active batches: `[{batch_id, mode, state: "prompting" | "rendering", total_steps
 Cancels the batch's task (including an in-flight VLM call) and every unfinished job. Returns `{status: "cancelled"}`; idempotent for a batch that already finished. **404** for an id the server has never seen.
 
 ### `GET /api/t2i/images?limit=60&before_id=`
-Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, grade, form_state}`. `grade` is the image's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose media is gone are pruned — until a Full clean & rescan is finished (every configured folder walked and every generated file still on disk back, neither generated-output root missing or unreadable: T2I's, `t2i.output_root` or else `<comfy.output_root>/t2i`, and I2V's) they are only left out, as for `GET /api/i2v/videos` (deleting `full_clean_incomplete` ends that only when no full clean is running and no pending ratings file is left; a missing dated folder below a root that is there holds nothing back; a root gone for good: recreate it, empty, and run a full clean — its missing images are then tombstoned with their lineage when the pending snapshot has an entry for them, and the rest lose their rows with no tombstone).
+Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, grade, form_state}`. `grade` is the image's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose media is gone are pruned — until a Full clean & rescan is finished (every configured folder walked and every generated file still on disk back) they are only left out, as for `GET /api/i2v/videos` (deleting `full_clean_incomplete` ends that only when no full clean is running and no pending ratings file is left; an image the rescan did not find holds the clean back only while the output root it was under — T2I's, `t2i.output_root` or else `<comfy.output_root>/t2i`, or I2V's — is missing or unreadable, and a missing dated folder below a root that is there holds nothing back; a root gone for good: recreate it, empty, and run a full clean — its missing images are then tombstoned with their lineage when the pending snapshot has an entry for them, and the rest lose their rows with no tombstone; an image on disk that can't be read or imported holds the clean back too, listed in the scan's `unreadable_output`: delete it or move it out of the output folder, or repair it, then run a full clean).
 
 ### `PATCH /api/t2i/images/{image_id}`
 Autosaves the dialog's form into one image's editable `form_state`. Partial: send only what changed. The as-rendered columns are not reachable from here. **400** for an unknown field or a bad value (the message names the field); **404** for an unknown id.
