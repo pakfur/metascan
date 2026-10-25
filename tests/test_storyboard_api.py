@@ -944,6 +944,33 @@ def test_delete_panel_purge_images_removes_media_and_trashes_file(
     assert trashed == [str(img)]
 
 
+def test_delete_panel_purge_archives_a_graded_render(client, monkeypatch, tmp_path):
+    """A graded render purged through the route keeps an archived thumbnail
+    on its tombstone, made before the file goes to the trash."""
+    from PIL import Image
+
+    img = tmp_path / "graded.png"
+    Image.new("RGB", (900, 600), (10, 20, 30)).save(img, "PNG")
+    seen_archive_at_trash = []
+    monkeypatch.setattr(
+        "metascan.utils.trash.send2trash",
+        lambda p: seen_archive_at_trash.append(
+            sorted((Path(client.db.db_path) / "archive" / "thumbs").glob("*.jpg"))
+        ),
+    )
+    _sid, _scene_id, panel_id = _seed_panel_with_image(client, str(img))
+    client.db.set_grade(str(img), "pass")
+
+    r = client.delete(f"/api/storyboard/panels/{panel_id}?purge_images=true")
+
+    assert r.status_code == 200
+    [tomb] = [t for t in client.db.list_tombstones() if t["file_path"] == str(img)]
+    assert tomb["grade"] == "pass" and tomb["thumb_path"]
+    archived = Path(client.db.db_path) / tomb["thumb_path"]
+    assert archived.is_file()
+    assert seen_archive_at_trash == [[archived]]
+
+
 def test_delete_panel_default_keeps_and_unhides_media(client):
     _sid, _scene_id, panel_id = _seed_panel_with_image(client, "/tmp/keep-me.png")
 

@@ -3066,7 +3066,10 @@ class DatabaseManager:
             conn.commit()
 
     def delete_storyboard(
-        self, storyboard_id: int, purge_images: bool = False
+        self,
+        storyboard_id: int,
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[bool, List[str], Optional[str]]:
         """Delete a storyboard and everything under it, including its
         library folder (the "Storyboard: <name>" folder the runner
@@ -3080,7 +3083,8 @@ class DatabaseManager:
         destroyed -- see _release_panels. With ``purge_images=True`` the
         media rows are deleted instead (unless still referenced elsewhere)
         and their native-format file paths returned so the caller can
-        remove the files from disk.
+        remove the files from disk; ``thumbs`` (``{posix path: archived
+        thumbnail}``) goes onto their tombstones (``_purge_media_rows``).
         """
         with self.lock, self._get_connection() as conn:
             row = conn.execute(
@@ -3090,7 +3094,7 @@ class DatabaseManager:
             panel_ids = self._panel_ids_for_storyboard(conn, storyboard_id)
             purge_paths = self._release_panels(conn, panel_ids, purge_images)
             cur = conn.execute("DELETE FROM storyboards WHERE id = ?", (storyboard_id,))
-            deleted_files = self._purge_media_rows(conn, purge_paths)
+            deleted_files = self._purge_media_rows(conn, purge_paths, thumbs)
             deleted_folder: Optional[str] = None
             if folder_id is not None:
                 fcur = conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
@@ -3242,7 +3246,10 @@ class DatabaseManager:
     SUBJECT_DELETE_MODES = ("unlink", "content", "purge")
 
     def delete_subject(
-        self, subject_id: int, mode: str = "unlink"
+        self,
+        subject_id: int,
+        mode: str = "unlink",
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[bool, List[str]]:
         """Delete a subject and every non-text reference to it.
 
@@ -3256,7 +3263,8 @@ class DatabaseManager:
           library, jobs purged -- see _release_beats), then any shot left
           without beats and any scene left without shots is deleted too.
         * ``purge`` -- ``content``, but the beats' generated media rows are
-          deleted and their native paths returned for the caller to trash.
+          deleted and their native paths returned for the caller to trash
+          (``thumbs`` as in ``_purge_media_rows``).
 
         Returns ``(deleted, purged_file_paths)`` -- same contract as
         delete_beat/delete_panel. Raises ValueError on an unknown mode.
@@ -3331,7 +3339,7 @@ class DatabaseManager:
                             is None
                         ):
                             conn.execute("DELETE FROM scenes WHERE id = ?", (scid,))
-                deleted_files = self._purge_media_rows(conn, purge_paths)
+                deleted_files = self._purge_media_rows(conn, purge_paths, thumbs)
             cur = conn.execute(
                 "DELETE FROM storyboard_subjects WHERE id = ?", (subject_id,)
             )
@@ -3543,7 +3551,10 @@ class DatabaseManager:
             return survivor
 
     def delete_scene(
-        self, scene_id: int, purge_images: bool = False
+        self,
+        scene_id: int,
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[bool, List[str]]:
         """Delete a scene and its panels.
 
@@ -3555,18 +3566,13 @@ class DatabaseManager:
         _release_panels. With ``purge_images=True`` the media rows are
         deleted instead (unless still referenced elsewhere) and their
         native-format file paths returned so the caller can remove the
-        files from disk.
+        files from disk (``thumbs`` as in ``_purge_media_rows``).
         """
         with self.lock, self._get_connection() as conn:
-            panel_ids = [
-                int(r["id"])
-                for r in conn.execute(
-                    "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
-                ).fetchall()
-            ]
+            panel_ids = self._panel_ids_for_scene(conn, scene_id)
             purge_paths = self._release_panels(conn, panel_ids, purge_images)
             cur = conn.execute("DELETE FROM scenes WHERE id = ?", (scene_id,))
-            deleted_files = self._purge_media_rows(conn, purge_paths)
+            deleted_files = self._purge_media_rows(conn, purge_paths, thumbs)
             conn.commit()
             return int(cur.rowcount) > 0, deleted_files
 
@@ -3648,6 +3654,93 @@ class DatabaseManager:
             ).fetchone()
             return self._decode_panel_row(row) if row is not None else None
 
+    @staticmethod
+    def _beat_ids_for_panels(
+        conn: sqlite3.Connection, panel_ids: Sequence[int]
+    ) -> List[int]:
+        """The beats of ``panel_ids`` (what deleting those panels destroys)."""
+        if not panel_ids:
+            return []
+        placeholders = ",".join("?" * len(panel_ids))
+        return [
+            int(r["id"])
+            for r in conn.execute(
+                f"SELECT id FROM beats WHERE panel_id IN ({placeholders})",
+                list(panel_ids),
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _panel_ids_for_scene(conn: sqlite3.Connection, scene_id: int) -> List[int]:
+        return [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _beat_image_paths(
+        conn: sqlite3.Connection, beat_ids: Sequence[int]
+    ) -> List[str]:
+        """The stored paths of the beat images of ``beat_ids``, distinct."""
+        if not beat_ids:
+            return []
+        placeholders = ",".join("?" * len(beat_ids))
+        return [
+            str(r["file_path"])
+            for r in conn.execute(
+                f"SELECT DISTINCT file_path FROM beat_images "
+                f"WHERE beat_id IN ({placeholders})",
+                list(beat_ids),
+            ).fetchall()
+        ]
+
+    _PURGE_SCOPES: ClassVar[Tuple[str, ...]] = (
+        "storyboard",
+        "scene",
+        "panel",
+        "beat",
+        "subject",
+    )
+
+    def purge_image_candidates(self, scope: str, scope_id: int) -> List[str]:
+        """The beat images (stored POSIX) a purging delete or replace of one
+        storyboard / scene / panel / beat -- or a ``purge``-mode subject
+        delete -- may delete: those of exactly the beats it destroys,
+        picked by the same helpers the operations use. ``_purge_media_rows``
+        then keeps whatever something else still uses. Read-only: a delete
+        archives the graded images among them first
+        (``training_archive.purge_keeping_signal``). A shot's clips are
+        videos, never archived, so they are no candidates.
+
+        * ``storyboard``: delete_storyboard, replace_storyboard_structure,
+          replace_storyboard_scenes;
+        * ``scene``: delete_scene, replace_scene_panels;
+        * ``panel``: delete_panel, replace_panel_beats;
+        * ``beat``: delete_beat; ``subject``: delete_subject.
+
+        ValueError for any other scope."""
+        if scope not in self._PURGE_SCOPES:
+            raise ValueError(f"unknown purge scope {scope!r}")
+        with self.lock, self._get_connection() as conn:
+            if scope == "subject":
+                beat_ids = [
+                    int(r["id"])
+                    for r in self._subject_referencing_beats(conn, scope_id)
+                ]
+            elif scope == "beat":
+                beat_ids = [scope_id]
+            else:
+                if scope == "storyboard":
+                    panel_ids = self._panel_ids_for_storyboard(conn, scope_id)
+                elif scope == "scene":
+                    panel_ids = self._panel_ids_for_scene(conn, scope_id)
+                else:
+                    panel_ids = [scope_id]
+                beat_ids = self._beat_ids_for_panels(conn, panel_ids)
+            return self._beat_image_paths(conn, beat_ids)
+
     def _release_beats(
         self,
         conn: sqlite3.Connection,
@@ -3663,14 +3756,7 @@ class DatabaseManager:
         placeholders = ",".join("?" * len(beat_ids))
         purged: List[str] = []
         if purge_images:
-            purged = [
-                str(r["file_path"])
-                for r in conn.execute(
-                    f"SELECT DISTINCT file_path FROM beat_images "
-                    f"WHERE beat_id IN ({placeholders})",
-                    beat_ids,
-                ).fetchall()
-            ]
+            purged = self._beat_image_paths(conn, beat_ids)
         else:
             conn.execute(
                 f"UPDATE media SET hidden = 0 WHERE file_path IN "
@@ -3715,13 +3801,7 @@ class DatabaseManager:
         if not panel_ids:
             return []
         placeholders = ",".join("?" * len(panel_ids))
-        beat_ids = [
-            int(r["id"])
-            for r in conn.execute(
-                f"SELECT id FROM beats WHERE panel_id IN ({placeholders})",
-                panel_ids,
-            ).fetchall()
-        ]
+        beat_ids = self._beat_ids_for_panels(conn, panel_ids)
         purged = self._release_beats(conn, beat_ids, purge_images)
         # The panels' own rendered clips (panel_videos) follow the same
         # contract as beat images: purge collects their paths for
@@ -4134,7 +4214,10 @@ class DatabaseManager:
             return int(row["panel_id"]) if row is not None else None
 
     def delete_panel(
-        self, panel_id: int, purge_images: bool = False
+        self,
+        panel_id: int,
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[bool, List[str]]:
         """Delete a panel, plus any generation_jobs referencing it.
 
@@ -4147,7 +4230,8 @@ class DatabaseManager:
         they cascade away -- see _release_panels. With
         ``purge_images=True`` the media rows are deleted instead (unless
         still referenced elsewhere) and their native-format file paths
-        returned so the caller can remove the files from disk.
+        returned so the caller can remove the files from disk (``thumbs``
+        as in ``_purge_media_rows``).
         """
         with self.lock, self._get_connection() as conn:
             cur = conn.execute("SELECT id FROM panels WHERE id = ?", (panel_id,))
@@ -4155,7 +4239,7 @@ class DatabaseManager:
                 return False, []
             purge_paths = self._release_panels(conn, [panel_id], purge_images)
             conn.execute("DELETE FROM panels WHERE id = ?", (panel_id,))
-            deleted_files = self._purge_media_rows(conn, purge_paths)
+            deleted_files = self._purge_media_rows(conn, purge_paths, thumbs)
             conn.commit()
             return True, deleted_files
 
@@ -4288,12 +4372,15 @@ class DatabaseManager:
             conn.commit()
 
     def delete_beat(
-        self, beat_id: int, purge_images: bool = False
+        self,
+        beat_id: int,
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[bool, List[str]]:
         """Delete a beat, releasing (or purging) its beat_images/jobs first.
 
         Returns ``(deleted, purged_file_paths)`` -- same contract as
-        delete_panel.
+        delete_panel (``thumbs`` too).
         """
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
@@ -4305,35 +4392,37 @@ class DatabaseManager:
             purge_paths = self._release_beats(conn, [beat_id], purge_images)
             conn.execute("DELETE FROM beats WHERE id = ?", (beat_id,))
             self._sync_panel_duration(conn, int(row["panel_id"]))
-            deleted_files = self._purge_media_rows(conn, purge_paths)
+            deleted_files = self._purge_media_rows(conn, purge_paths, thumbs)
             conn.commit()
             return True, deleted_files
 
     def replace_panel_beats(
-        self, panel_id: int, beats: List[Dict[str, Any]], purge_images: bool = False
+        self,
+        panel_id: int,
+        beats: List[Dict[str, Any]],
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[List[int], List[str]]:
         """Transactionally replace a panel's beats (compose stage 4).
         Releases the old beats' images/jobs first -- beats carry identity
         (keepers, locked prompts) since the shot/beat reorg. With
         ``purge_images=True`` (a user-confirmed destructive recompose) the
         old beats' image media rows are deleted via ``_purge_media_rows``
-        instead of unhidden; returns ``(new_beat_ids, purged_files)`` where
+        instead of unhidden (``thumbs`` as there); returns
+        ``(new_beat_ids, purged_files)`` where
         ``purged_files`` are native paths for the caller to trash. The
         panel's rendered clips (panel_videos) are untouched either way --
         clips are shot-scoped and survive a beats recompose."""
         import json as _json
 
         with self.lock, self._get_connection() as conn:
-            old_ids = [
-                int(r["id"])
-                for r in conn.execute(
-                    "SELECT id FROM beats WHERE panel_id = ?", (panel_id,)
-                ).fetchall()
-            ]
+            old_ids = self._beat_ids_for_panels(conn, [panel_id])
             purge_paths = self._release_beats(conn, old_ids, purge_images)
             conn.execute("DELETE FROM beats WHERE panel_id = ?", (panel_id,))
             deleted_files = (
-                self._purge_media_rows(conn, purge_paths) if purge_images else []
+                self._purge_media_rows(conn, purge_paths, thumbs)
+                if purge_images
+                else []
             )
             new_ids: List[int] = []
             for i, b in enumerate(beats):
@@ -4376,7 +4465,11 @@ class DatabaseManager:
     # ---- Structure replace + tree read -----------------------------------
 
     def replace_storyboard_structure(
-        self, storyboard_id: int, parsed: Dict[str, Any], purge_images: bool = False
+        self,
+        storyboard_id: int,
+        parsed: Dict[str, Any],
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> List[str]:
         """Destructively replace subjects/scenes/panels from a parse result.
 
@@ -4393,8 +4486,9 @@ class DatabaseManager:
         Re-parsing an existing storyboard would otherwise leave those
         media rows hidden forever. With ``purge_images=True`` (a
         user-confirmed destructive re-parse) the generated media rows are
-        deleted via ``_purge_media_rows`` instead; returns the native
-        paths for the caller to trash (empty when not purging).
+        deleted via ``_purge_media_rows`` instead (``thumbs`` as there);
+        returns the native paths for the caller to trash (empty when not
+        purging).
         """
         with self.lock:
             with self._get_connection() as conn:
@@ -4408,7 +4502,9 @@ class DatabaseManager:
                     "DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,)
                 )
                 deleted_files = (
-                    self._purge_media_rows(conn, purge_paths) if purge_images else []
+                    self._purge_media_rows(conn, purge_paths, thumbs)
+                    if purge_images
+                    else []
                 )
                 for i, subj in enumerate(parsed.get("subjects") or []):
                     conn.execute(
@@ -4452,12 +4548,14 @@ class DatabaseManager:
         storyboard_id: int,
         scenes: List[Dict[str, Any]],
         purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[List[int], List[str]]:
         """Destructively replace all scenes (compose stage 2); subjects are
         untouched. Releases panel media/jobs first — see _release_panels.
         With ``purge_images=True`` (a user-confirmed destructive recompose)
         the generated media rows are deleted via ``_purge_media_rows``
-        instead of unhidden; returns ``(new_scene_ids, purged_files)``."""
+        instead of unhidden (``thumbs`` as there); returns
+        ``(new_scene_ids, purged_files)``."""
         import json as _json
 
         with self.lock, self._get_connection() as conn:
@@ -4465,7 +4563,9 @@ class DatabaseManager:
             purge_paths = self._release_panels(conn, panel_ids, purge_images)
             conn.execute("DELETE FROM scenes WHERE storyboard_id = ?", (storyboard_id,))
             deleted_files = (
-                self._purge_media_rows(conn, purge_paths) if purge_images else []
+                self._purge_media_rows(conn, purge_paths, thumbs)
+                if purge_images
+                else []
             )
             new_ids: List[int] = []
             for i, sc in enumerate(scenes):
@@ -4502,26 +4602,27 @@ class DatabaseManager:
             return new_ids, deleted_files
 
     def replace_scene_panels(
-        self, scene_id: int, panels: List[Dict[str, Any]], purge_images: bool = False
+        self,
+        scene_id: int,
+        panels: List[Dict[str, Any]],
+        purge_images: bool = False,
+        thumbs: Optional[Mapping[str, str]] = None,
     ) -> Tuple[List[int], List[str]]:
         """Destructively replace one scene's panels (compose stage 3).
         ``panels`` carry ``action`` + ``duration_s`` -- framing/subject_ids
         now live at the beat level. With ``purge_images=True`` (a
         user-confirmed destructive recompose) the panels' generated media
         rows -- beat images and rendered clips -- are deleted via
-        ``_purge_media_rows`` instead of unhidden; returns
-        ``(new_panel_ids, purged_files)``."""
+        ``_purge_media_rows`` instead of unhidden (``thumbs`` as there);
+        returns ``(new_panel_ids, purged_files)``."""
         with self.lock, self._get_connection() as conn:
-            old_ids = [
-                int(r["id"])
-                for r in conn.execute(
-                    "SELECT id FROM panels WHERE scene_id = ?", (scene_id,)
-                ).fetchall()
-            ]
+            old_ids = self._panel_ids_for_scene(conn, scene_id)
             purge_paths = self._release_panels(conn, old_ids, purge_images)
             conn.execute("DELETE FROM panels WHERE scene_id = ?", (scene_id,))
             deleted_files = (
-                self._purge_media_rows(conn, purge_paths) if purge_images else []
+                self._purge_media_rows(conn, purge_paths, thumbs)
+                if purge_images
+                else []
             )
             new_ids: List[int] = []
             for i, p in enumerate(panels):

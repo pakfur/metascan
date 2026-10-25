@@ -1081,3 +1081,91 @@ def test_merge_scenes_rejects_bad_input(db):
         db.merge_scenes([a, o])
     with pytest.raises(ValueError, match="unknown scene"):
         db.merge_scenes([a, 99999])
+
+
+# ---- deleting keeps the signal: storyboard purges carry thumbnails ----------
+
+
+def _graded_render(db, beat_id: int, path: str, grade: str = "pass") -> str:
+    db.save_media(_media(path))
+    db.set_media_hidden(path, True)
+    db.create_beat_image(beat_id, file_path=path)
+    db.set_grade(path, grade)
+    return path
+
+
+def test_purge_image_candidates_name_each_operations_beat_images(db):
+    """The beat images a purging delete / replace of each scope may delete
+    -- those of exactly the beats it destroys (the purge then keeps what
+    something else still uses). A shot's clips are videos: no candidates."""
+    sb, su, sc, pa = _build_tree(db)
+    cast = db.create_beat(pa, action="cast", subject_ids=[su])
+    plain = db.create_beat(pa, action="plain")
+    sc2 = db.create_scene(sb, name="Other", sort_order=1)
+    pa2 = db.create_panel(sc2, action="x", sort_order=0)
+    elsewhere = db.create_beat(pa2, action="elsewhere")
+    for beat, name in ((cast, "a"), (plain, "b"), (elsewhere, "c")):
+        db.save_media(_media(f"/pics/{name}.png"))
+        db.create_beat_image(beat, file_path=f"/pics/{name}.png")
+    db.save_media(_media("/pics/take.mp4"))
+    db.create_panel_video(pa, file_path="/pics/take.mp4")
+
+    def got(scope, scope_id):
+        return sorted(db.purge_image_candidates(scope, scope_id))
+
+    assert got("storyboard", sb) == ["/pics/a.png", "/pics/b.png", "/pics/c.png"]
+    assert got("scene", sc) == ["/pics/a.png", "/pics/b.png"]
+    assert got("panel", pa) == ["/pics/a.png", "/pics/b.png"]
+    assert got("beat", plain) == ["/pics/b.png"]
+    assert got("subject", su) == ["/pics/a.png"]
+    assert got("beat", 9999) == []
+    with pytest.raises(ValueError):
+        db.purge_image_candidates("galaxy", sb)
+
+
+_THUMB_GONE = "archive/thumbs/" + "a" * 32 + ".jpg"
+_THUMB_KEPT = "archive/thumbs/" + "b" * 32 + ".jpg"
+_PURGES = {
+    "delete_storyboard": lambda db, t, th: db.delete_storyboard(t["sb"], True, th),
+    "delete_subject": lambda db, t, th: db.delete_subject(t["su"], "purge", th),
+    "delete_scene": lambda db, t, th: db.delete_scene(t["sc"], True, th),
+    "delete_panel": lambda db, t, th: db.delete_panel(t["pa"], True, th),
+    "delete_beat": lambda db, t, th: db.delete_beat(t["beat"], True, th),
+    "replace_panel_beats": lambda db, t, th: db.replace_panel_beats(
+        t["pa"], [], True, th
+    ),
+    "replace_storyboard_structure": lambda db, t, th: (
+        db.replace_storyboard_structure(
+            t["sb"], {"subjects": [], "scenes": []}, True, th
+        )
+    ),
+    "replace_storyboard_scenes": lambda db, t, th: db.replace_storyboard_scenes(
+        t["sb"], [], True, th
+    ),
+    "replace_scene_panels": lambda db, t, th: db.replace_scene_panels(
+        t["sc"], [], True, th
+    ),
+}
+
+
+@pytest.mark.parametrize("op", sorted(_PURGES))
+def test_every_storyboard_purge_keeps_the_thumbnails_it_is_given(db, op):
+    """Each purging delete / replace hands ``thumbs`` to _purge_media_rows:
+    the tombstone of a graded render it deletes keeps its thumbnail; a
+    render it releases (another storyboard's subject uses it) is neither
+    tombstoned nor given one."""
+    sb, su, sc, pa = _build_tree(db)
+    beat = db.create_beat(pa, action="cast", subject_ids=[su])
+    gone = _graded_render(db, beat, "/pics/gone.png")
+    kept = _graded_render(db, beat, "/pics/kept.png", "fail")
+    other = db.create_storyboard(
+        name="Other", target_model="sd", architecture="t2i", base_seed=1
+    )
+    db.create_subject(other, name="Bo", description="", reference_path=kept)
+    tree = {"sb": sb, "su": su, "sc": sc, "pa": pa, "beat": beat}
+    _PURGES[op](db, tree, {gone: _THUMB_GONE, kept: _THUMB_KEPT})
+    assert {t["file_path"]: t["thumb_path"] for t in db.list_tombstones()} == {
+        gone: _THUMB_GONE
+    }
+    assert db.get_media(Path(gone)) is None
+    assert db.get_media(Path(kept)) is not None

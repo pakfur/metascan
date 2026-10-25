@@ -24,6 +24,12 @@ I2V) runs :func:`delete_keeping_signal`:
    tombstones; an archive no tombstone took (the row was already gone, the
    delete failed) is removed afterwards.
 
+A purging storyboard delete or replace runs :func:`purge_keeping_signal`
+instead, which keeps the storyboard's own order: the graded images among
+the beat images it may delete are archived, the DB purge runs with their
+thumb paths (its survival rule alone decides what is deleted), archives it
+did not take are removed, and only then are the purged files trashed.
+
 A failed archive (an unreadable or missing file, a full disk) is logged and
 the delete goes on: the tombstone simply has no thumbnail.
 """
@@ -206,6 +212,39 @@ def delete_keeping_signal(
         raise
     try:
         return delete_rows(thumbs)
+    finally:
+        _drop_unused(db, thumbs)
+
+
+def purge_keeping_signal(
+    db: "DatabaseManager",
+    scope: str,
+    scope_id: int,
+    purge: bool,
+    run: Callable[[Optional[Dict[str, str]]], _T],
+) -> _T:
+    """A storyboard delete or replace (``run(thumbs)``, the DB operation)
+    that purges its generated media when ``purge`` (else it just runs).
+    The graded images among the beat images it may delete
+    (``DatabaseManager.purge_image_candidates(scope, scope_id)``) are
+    archived from their live files first -- the caller trashes the purged
+    files only after ``run`` returns, as before. ``run``'s
+    ``_purge_media_rows`` alone decides what is deleted (the survival rule
+    is never repeated here) and keeps the thumbnails of those; an archive no
+    tombstone took (a file a surviving beat, subject or scene still uses is
+    released, not deleted) is removed again. A failure to list or archive
+    is logged and never blocks the operation. Synchronous: callers run it
+    in a worker thread."""
+    if not purge:
+        return run(None)
+    try:
+        candidates = db.purge_image_candidates(scope, scope_id)
+    except Exception:
+        logger.exception("Could not list a storyboard purge's images; no archive")
+        candidates = []
+    thumbs = archive_graded_images(db, candidates)
+    try:
+        return run(thumbs)
     finally:
         _drop_unused(db, thumbs)
 
