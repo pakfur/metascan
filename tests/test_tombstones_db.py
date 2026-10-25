@@ -1,6 +1,7 @@
 """Tombstones written on every media delete path (taste-rating capture)."""
 
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -291,6 +292,39 @@ def test_a_library_prompt_that_is_not_json_never_blocks_the_delete(db):
     assert db.delete_media(Path("/p/odd.png")) is True
     [t] = db.list_tombstones()
     assert (t["grade"], t["prompt"]) == ("pass", None)
+
+
+class _LockedMediaReads:
+    """A connection whose read of the media row fails the way a busy or
+    failing database does; every other statement goes through."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, *args):
+        if "FROM media " in sql:
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+
+def test_only_a_malformed_data_blob_reads_as_no_prompt(db):
+    """Only a ``data`` blob that is not JSON means "no prompt" (guarded in
+    SQL with json_valid). Any other SQLite error is raised -- it fails the
+    delete (rolled back, file kept) instead of writing a ✓ tombstone that
+    silently lost its prompt."""
+    _library_image(db, "/p/lib.png", "SYNTH library prompt", ["krea2_dev"])
+    with db._get_connection() as conn:
+        assert DatabaseManager._library_prompt(conn, "/p/lib.png") == (
+            "SYNTH library prompt",
+            '["krea2_dev"]',
+        )
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            DatabaseManager._library_prompt(_LockedMediaReads(conn), "/p/lib.png")
+        conn.execute("UPDATE media SET data = '{oops' WHERE file_path = '/p/lib.png'")
+        assert DatabaseManager._library_prompt(conn, "/p/lib.png") == (
+            None,
+            '["krea2_dev"]',
+        )
 
 
 def test_set_tombstone_brief(db):

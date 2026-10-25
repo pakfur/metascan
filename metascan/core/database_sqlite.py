@@ -4170,15 +4170,14 @@ class DatabaseManager:
         """``(metadata prompt, model names as a JSON list)`` of a library
         image -- what library hindsight reads (``writer_dataset_raw``) --
         each None when absent. A ``data`` blob that is not JSON reads as
-        no prompt: it never blocks the delete."""
-        try:
-            row = conn.execute(
-                "SELECT json_extract(data, '$.prompt') AS prompt FROM media "
-                "WHERE file_path = ?",
-                (path,),
-            ).fetchone()
-        except sqlite3.OperationalError:  # malformed JSON
-            row = None
+        no prompt (guarded in SQL): it never blocks the delete. Any other
+        database error is raised."""
+        row = conn.execute(
+            "SELECT CASE WHEN json_valid(data) "
+            "THEN json_extract(data, '$.prompt') END AS prompt FROM media "
+            "WHERE file_path = ?",
+            (path,),
+        ).fetchone()
         prompt = row["prompt"] if row is not None else None
         names = [
             str(r["index_key"])
