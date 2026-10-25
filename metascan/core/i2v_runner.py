@@ -93,6 +93,19 @@ def render_seconds(
     return round(span, 1) if span >= 0 else None
 
 
+def i2v_output_root(configured: Optional[str], comfy_output_root: Any) -> Path:
+    """The folder every I2V clip is written under: the configured
+    ``i2v.output_root`` when it is set (each clip in the dated folder its
+    ``i2v.output_prefix`` names below it), else ``<comfy.output_root>/i2v``
+    (one folder per source image below it). One place for both readers:
+    the runner places each clip here (``_output_placement``), and a full
+    clean's re-ingest checks it for a drive that is not mounted."""
+    text = str(configured or "").strip()
+    if text:
+        return Path(to_native_path(text))
+    return Path(comfy_output_root) / "i2v"
+
+
 class I2vRequestError(RuntimeError):
     """Caller error -- the route answers 400 with the message."""
 
@@ -315,12 +328,12 @@ class I2vRunner:
         """submit() kwargs placing the clip. No configured root keeps the
         original layout under comfy.output_root; a configured one must
         already exist (a typo must not silently grow a new tree)."""
+        root = i2v_output_root(output_root, self.output_root)
         if not (output_root or "").strip():
             return {
-                "output_dir": self.output_root / "i2v" / src.stem,
+                "output_dir": root / src.stem,
                 "output_prefix": f"i2v_{src.stem}",
             }
-        root = Path(to_native_path(str(output_root).strip()))
         if not await asyncio.to_thread(root.is_dir):
             raise I2vRequestError(
                 f"Video output directory does not exist: {root} -- fix it in "

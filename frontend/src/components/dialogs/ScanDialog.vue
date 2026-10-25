@@ -112,6 +112,11 @@ const missingImagesOf = computed(() => (oneMissing.value ? 'its images' : 'their
 const folderWord = computed(() => (oneMissing.value ? 'folder' : 'folders'))
 const missingPronoun = computed(() => (oneMissing.value ? 'it' : 'them'))
 
+const oneUnreachable = computed(() => scanStore.unreachableOutput.length === 1)
+const outputOf = computed(() => (oneUnreachable.value ? 'its' : 'their'))
+const outputFolderWord = computed(() => (oneUnreachable.value ? 'folder' : 'folders'))
+const outputGoneFolder = computed(() => (oneUnreachable.value ? 'the folder' : 'a folder'))
+
 function handleClose() {
   scanStore.reset()
   scanStore.resetEmbedding()
@@ -282,6 +287,20 @@ function handleClose() {
           </p>
           <p v-else>Nothing from {{ missingPronoun }} was removed from the library.</p>
         </div>
+        <div v-if="scanStore.unreachableOutput.length" class="missing-note">
+          <p>Generated output not reached (missing or unreadable: is the drive connected and mounted?):</p>
+          <ul>
+            <li v-for="folder in scanStore.unreachableOutput" :key="folder" :title="folder">
+              {{ folder }}
+            </li>
+          </ul>
+          <p>
+            The ratings of {{ outputOf }} images and clips are kept and wait: they
+            come back when a scan finds the {{ outputFolderWord }} again. If
+            {{ outputGoneFolder }} is gone for good, recreate it (even empty), then
+            run Full clean &amp; rescan.
+          </p>
+        </div>
         <div class="dialog-actions">
           <button class="btn-secondary" @click="handleClose">Close</button>
         </div>
@@ -403,6 +422,7 @@ h3 { margin: 0 0 12px; font-size: 18px; color: var(--text-color); }
 }
 .missing-note p { margin: 0 0 4px; }
 .missing-note p:last-child { margin: 4px 0 0; color: var(--text-color-secondary); }
+.missing-note + .missing-note { margin-top: 8px; }
 .missing-note ul { margin: 0; padding-left: 18px; }
 .missing-note li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

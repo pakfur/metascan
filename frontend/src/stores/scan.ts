@@ -38,6 +38,11 @@ export const useScanStore = defineStore('scan', () => {
   // mount point of a drive that is not mounted): the complete event's
   // missing_folders. After a full clean their images' ratings are pending.
   const missingFolders = ref<string[]>([])
+  // Generated-output folders (Text-to-Image's / Image-to-Video's output
+  // root) the run could not reach -- missing or unreadable -- while a full
+  // clean was unfinished: the complete event's unreachable_output. Their
+  // images' ratings are pending until a scan finds the folder again.
+  const unreachableOutput = ref<string[]>([])
   const runWasFullClean = ref(false)
 
   // Embedding state
@@ -71,6 +76,7 @@ export const useScanStore = defineStore('scan', () => {
         phase.value = 'scanning'
         runWasFullClean.value = data.full_clean === true
         missingFolders.value = []
+        unreachableOutput.value = []
         break
       case 'progress':
         phase.value = 'scanning'
@@ -103,6 +109,9 @@ export const useScanStore = defineStore('scan', () => {
         staleRemoved.value = (data.stale_removed as number) || 0
         missingFolders.value = Array.isArray(data.missing_folders)
           ? (data.missing_folders as string[])
+          : []
+        unreachableOutput.value = Array.isArray(data.unreachable_output)
+          ? (data.unreachable_output as string[])
           : []
         break
       case 'error':
@@ -184,6 +193,7 @@ export const useScanStore = defineStore('scan', () => {
     processedCount.value = 0
     staleRemoved.value = 0
     missingFolders.value = []
+    unreachableOutput.value = []
     try {
       await startScan({
         full_cleanup: fullCleanup.value,
@@ -214,6 +224,7 @@ export const useScanStore = defineStore('scan', () => {
     processedCount.value = 0
     staleRemoved.value = 0
     missingFolders.value = []
+    unreachableOutput.value = []
   }
 
   async function startEmbeddingBuild(rebuild = false) {
@@ -256,6 +267,7 @@ export const useScanStore = defineStore('scan', () => {
     processedCount,
     staleRemoved,
     missingFolders,
+    unreachableOutput,
     runWasFullClean,
     embeddingPhase,
     embeddingCurrent,

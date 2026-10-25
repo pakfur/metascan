@@ -618,6 +618,63 @@ def test_a_pending_file_the_parser_cannot_read_never_breaks_the_check(
     assert target.read_bytes() == raw
 
 
+def _older_pending_file(version, path):
+    """A pending file of an older shape rating ``path``, with a stray list a
+    version 3 file has: neither older shape ever had briefs or library
+    prompts, so its validation never looks at them."""
+    row = {
+        "file_path": path,
+        "reasons": "[]",
+        "seen_at": None,
+        "judged_at": T0.isoformat(),
+        "confirmed_at": T0.isoformat(),
+    }
+    if version == 2:
+        return {
+            "version": 2,
+            "judgments": [{**row, "grade": "pass"}],
+            "categories": [],
+            "favorites": [],
+            "briefs": [{"brief": "an entry with no path"}],
+        }
+    return {
+        "judgments": [{**row, "passed": 0}],
+        "categories": [],
+        "favorites": [],
+        "library_prompts": "not a list",
+    }
+
+
+@pytest.mark.parametrize("version", [2, None], ids=["version-2", "version-less"])
+def test_stray_lists_in_an_older_pending_file_never_break_the_check(
+    monkeypatch, db, tmp_path, version
+):
+    """The loader reads a version-2 or version-less pending file as version
+    3 with no briefs or library prompts (upgrade_legacy_snapshot), whatever
+    stray lists it carries. The side-effect-free check reads it the same
+    way: its ratings are the evidence and it never raises, so the route
+    answers 409 rather than 500."""
+    mnt = tmp_path / "mnt"
+    mnt.mkdir()  # the empty mount point of a drive that is not mounted
+    away = str(mnt / "away.png")
+    target = Path(db.db_path) / scan_api.TASTE_SNAPSHOT_FILENAME
+    raw = json.dumps(_older_pending_file(version, away)).encode("utf-8")
+    target.write_bytes(raw)
+
+    assert scan_api.pending_snapshot_paths(Path(db.db_path)) == {away}
+
+    events, scanned = _wire(monkeypatch, db, [mnt])
+    app = FastAPI()
+    app.include_router(scan_api.router)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post("/api/scan/start", json={"full_clean": True})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["folders"] == [str(mnt)]
+    assert scanned == [] and events == []
+    assert target.read_bytes() == raw
+
+
 def _unlistable(folder: Path) -> None:
     """Take read permission off ``folder`` (0o300: it can be entered but not
     listed, and rglob then silently finds nothing in it), or skip the test
