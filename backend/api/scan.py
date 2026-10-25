@@ -860,8 +860,8 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "re-imported; the full clean stays unfinished (their ratings "
                 "stay pending and the T2I / I2V lists keep their rows) until a "
                 "later scan brings them back. The scan's Done view lists the "
-                "files: delete each one, or move it out of the output folder "
-                "(or repair it), then run Full clean & rescan",
+                "files: delete each one or move it somewhere else (or repair "
+                "it), then run Full clean & rescan",
                 len(report.failed),
                 ", ".join(generated_output_place(root) for root in failed_roots),
             )

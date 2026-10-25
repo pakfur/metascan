@@ -187,17 +187,17 @@ fine) and run Full clean & rescan.
 _UNREADABLE_ADVICE = """\
 A file still on disk is never recorded as deleted: its ratings are kept,
 pending, and the full clean stays unfinished. The scan's Done step lists
-the files. Delete each one, or move it out of the output folder (or repair
-it), then run Full clean & rescan. A file that only failed this time (a
-busy disk) comes back by itself at the next scan.
+the files, and any scan lists them again. Delete each one or move it
+somewhere else (or repair it), then run Full clean & rescan. A file that
+only failed this time (a busy disk) comes back by itself at the next scan.
 """
 _CHECK_FAILED = (
     _LAST_SCAN_COULD_NOT
-    + """check the generated output ({error};
-the server log has the details), so the full clean stays unfinished: the
-ratings of the generated images and clips that did not come back are kept,
-pending, and none of them is recorded as deleted. The next scan tries
-again.
+    + """check the generated output: it failed with an
+error of type {error}, the type the server log names too. The full clean
+stays unfinished: the ratings of the generated images and clips that did
+not come back are kept, pending, and none of them is recorded as deleted.
+The next scan tries again.
 """
 )
 
