@@ -7,6 +7,7 @@ for duplicate detection, content search, and similarity search.
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -553,11 +554,21 @@ class FaissIndexManager:
         self._path_to_id: Dict[str, int] = {}
         self._meta: Dict[str, Any] = {}
         self._dirty = False
+        self._loaded_at: Optional[float] = None
 
     @property
     def is_loaded(self) -> bool:
         """Whether the index is currently loaded in memory."""
         return self._index is not None
+
+    @property
+    def loaded_at(self) -> Optional[float]:
+        """When the last successful ``load()`` began reading the files (UTC
+        epoch seconds), None for an index not loaded from disk. Everything
+        saved before then is in memory: the embedding worker marks a file
+        embedded only after it saved the index, so a file marked before this
+        moment has its row here (tombstones are read by path only then)."""
+        return self._loaded_at
 
     @property
     def file_count(self) -> int:
@@ -575,7 +586,10 @@ class FaissIndexManager:
         return self._meta
 
     def load(self) -> bool:
-        """Load the FAISS index and ID mapping from disk."""
+        """Load the FAISS index and ID mapping from disk (``loaded_at`` is
+        taken before the files are read)."""
+        started = time.time()
+        self._loaded_at = None
         try:
             _ensure_heavy_imports()
             assert _faiss is not None
@@ -595,6 +609,7 @@ class FaissIndexManager:
                         self._meta = json.load(f)
 
                 assert self._index is not None
+                self._loaded_at = started
                 logger.info(f"Loaded FAISS index with {self._index.ntotal} vectors")
                 return True
             else:
@@ -622,47 +637,114 @@ class FaissIndexManager:
             "file_count": 0,
         }
         self._dirty = True
+        self._loaded_at = None
         logger.info(f"Created new FAISS index (dim={embedding_dim}, model={model_key})")
 
     def add(self, file_path: str, embedding: np.ndarray) -> None:
-        """Add a single embedding to the index."""
+        """Store ``embedding`` as ``file_path``'s vector.
+
+        A path already in the index has its row overwritten: whatever
+        re-embeds a path (a rebuild, a rescan, a new file on a deleted
+        file's path) computed the vector for the file there now, so the
+        row must never keep the first vector the path ever had."""
         if self._index is None:
             raise RuntimeError("Index not loaded or created")
 
-        # If path already exists, skip (no duplicates in index)
-        if file_path in self._path_to_id:
+        vector = self._checked_vector(embedding)
+        idx = self._path_to_id.get(file_path)
+        if idx is not None:
+            self._replace_rows({idx: vector})
             return
 
-        vector = embedding.reshape(1, -1).astype(np.float32)
-        self._index.add(vector)
+        self._index.add(vector.reshape(1, -1))
         idx = len(self._id_to_path)
         self._id_to_path.append(file_path)
         self._path_to_id[file_path] = idx
         self._dirty = True
 
     def add_batch(self, file_paths: List[str], embeddings: np.ndarray) -> None:
-        """Add a batch of embeddings to the index."""
+        """Store a batch of vectors: paths already in the index have their
+        rows overwritten (as in ``add``), new paths are appended, and a path
+        given twice keeps its last vector."""
         if self._index is None:
             raise RuntimeError("Index not loaded or created")
 
-        # Filter out paths already in index
-        new_indices = []
-        for i, path in enumerate(file_paths):
-            if path not in self._path_to_id:
-                new_indices.append(i)
+        vectors = np.asarray(embeddings, dtype=np.float32)
+        if (
+            vectors.ndim != 2
+            or vectors.shape[0] != len(file_paths)
+            or vectors.shape[1] != self._index.d
+        ):
+            raise ValueError(
+                f"expected {len(file_paths)} vectors of size {self._index.d}, "
+                f"got shape {vectors.shape}"
+            )
 
-        if not new_indices:
+        replaced: Dict[int, np.ndarray] = {}
+        appended: Dict[str, np.ndarray] = {}  # insertion order; last one wins
+        for path, vector in zip(file_paths, vectors):
+            idx = self._path_to_id.get(path)
+            if idx is not None:
+                replaced[idx] = vector
+            else:
+                appended[path] = vector
+
+        if replaced:
+            self._replace_rows(replaced)
+        if not appended:
             return
 
-        new_paths = [file_paths[i] for i in new_indices]
-        new_vectors = embeddings[new_indices].astype(np.float32)
-
-        self._index.add(new_vectors)
-        for path in new_paths:
+        self._index.add(np.ascontiguousarray(np.stack(list(appended.values()))))
+        for path in appended:
             idx = len(self._id_to_path)
             self._id_to_path.append(path)
             self._path_to_id[path] = idx
 
+        self._dirty = True
+
+    def _checked_vector(self, embedding: np.ndarray) -> np.ndarray:
+        """``embedding`` as a float32 vector of the index's size."""
+        assert self._index is not None
+        vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        if vector.size != self._index.d:
+            raise ValueError(
+                f"expected a vector of size {self._index.d}, got {vector.size}"
+            )
+        return vector
+
+    def _flat_rows(self) -> Optional[np.ndarray]:
+        """A writable ``(ntotal, d)`` view onto a flat index's stored
+        vectors, or None when the index keeps them some other way."""
+        _ensure_heavy_imports()
+        assert _faiss is not None
+        index = self._index
+        if not isinstance(index, _faiss.IndexFlat) or not hasattr(index, "get_xb"):
+            return None
+        rows, dim = int(index.ntotal), int(index.d)
+        if rows == 0:
+            return None
+        flat = _faiss.rev_swig_ptr(index.get_xb(), rows * dim)
+        return np.asarray(flat).reshape(rows, dim)
+
+    def _replace_rows(self, rows: Dict[int, np.ndarray]) -> None:
+        """Overwrite the vectors at row ids ``rows`` (row ids, and so the
+        path mapping, are unchanged). A flat index is written in place; any
+        other index is rebuilt as a flat index of the same metric."""
+        assert self._index is not None
+        view = self._flat_rows()
+        if view is not None:
+            for idx, vector in rows.items():
+                view[idx] = vector
+        else:
+            _ensure_heavy_imports()
+            assert _faiss is not None
+            total, dim = int(self._index.ntotal), int(self._index.d)
+            data = np.array(self._index.reconstruct_n(0, total), dtype=np.float32)
+            for idx, vector in rows.items():
+                data[idx] = vector
+            rebuilt = _faiss.IndexFlat(dim, self._index.metric_type)
+            rebuilt.add(np.ascontiguousarray(data))
+            self._index = rebuilt
         self._dirty = True
 
     def search(
@@ -779,6 +861,7 @@ class FaissIndexManager:
         self._path_to_id = {}
         self._meta = {}
         self._dirty = False
+        self._loaded_at = None
 
         for path in [self._index_path, self._mapping_path, self._meta_path]:
             if path.exists():
