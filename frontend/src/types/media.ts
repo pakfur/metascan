@@ -31,7 +31,7 @@ export interface Media {
   // --- Summary fields (GET /api/media, PATCH) ---
   file_path: string
   // --- Detail only (GET /api/media/{path}): a writer-adapter scorecard image
-  // with no favorite / pass yet hides its prompt and generation data.
+  // with no grade yet (★ is none) hides its prompt and generation data.
   scorecard_id?: string | null
   scorecard_blind?: boolean
   is_favorite: boolean

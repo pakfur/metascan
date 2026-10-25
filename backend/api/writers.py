@@ -366,9 +366,11 @@ async def cancel_scorecard() -> Dict[str, str]:
 
 @router.get("/adapters/{adapter_id}/scorecard")
 async def adapter_scorecard_results(adapter_id: int) -> Dict[str, Any]:
-    """``{adapter_id, n_pairs, n_judged, fav_rate_base, fav_rate_adapter,
-    mean_score_base, mean_score_adapter, ready_pairs, latest, running}``.
-    Also promotes an untested adapter whose judged pairs suffice."""
+    """``{adapter_id, n_pairs, n_judged, pass_base, pass_adapter,
+    pass_rate_base, pass_rate_adapter, mean_score_base, mean_score_adapter,
+    ready_pairs, latest, running}`` (judged = both images graded, deleted
+    ones included). Also promotes an untested adapter whose judged pairs
+    suffice."""
     from backend.services.scorecard import (
         adapter_scorecard,
         evaluate_adapter,

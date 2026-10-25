@@ -25,8 +25,8 @@ import {
 import {
   SCORECARD_READY_PAIRS,
   SERVABLE_STATUSES,
-  favText,
   judgedPairs,
+  passText,
   ratePct,
   type ScorecardResult,
   type WriterAdapter,
@@ -432,19 +432,19 @@ const scorecardByAdapter = computed(() => {
 })
 const readyPairs = computed(() => training.scorecards?.ready_pairs ?? SCORECARD_READY_PAIRS)
 
-/** The adapter's favorite rate on its blind scorecard ("31% fav"), or "— fav". */
-function scorecardFav(a: WriterAdapter): string {
-  return favText(scorecardByAdapter.value.get(a.id)?.fav_rate_adapter)
+/** The adapter's pass rate on its blind scorecard ("31% pass"), or "— pass". */
+function scorecardPass(a: WriterAdapter): string {
+  return passText(scorecardByAdapter.value.get(a.id)?.pass_rate_adapter)
 }
 
-const baseFav = computed(() => favText(training.scorecards?.base.fav_rate))
+const basePass = computed(() => passText(training.scorecards?.base.pass_rate))
 
 function scorecardTitle(a: WriterAdapter): string {
   const r = scorecardByAdapter.value.get(a.id)
   if (!r || r.n_pairs === 0) return 'No scorecard yet'
   const parts = [
     `${r.n_judged} of ${r.n_pairs} pairs judged`,
-    `base ${ratePct(r.fav_rate_base)} vs this ${ratePct(r.fav_rate_adapter)} favorites`,
+    `base ${ratePct(r.pass_rate_base)} vs this ${ratePct(r.pass_rate_adapter)} ✓ pass`,
   ]
   if (r.mean_score_base !== null || r.mean_score_adapter !== null) {
     const f = (v: number | null) => (v === null ? '—' : v.toFixed(2))
@@ -822,7 +822,7 @@ function onRecheck() {
                 <td>{{ BASE_LABEL }}</td>
                 <td><span class="st st-ok">ready</span></td>
                 <td class="dim">—</td>
-                <td class="dim nowrap" :title="`Base writer on every judged scorecard pair (${training.scorecards?.base.n_judged ?? 0})`">{{ baseFav }}</td>
+                <td class="dim nowrap" :title="`Base writer on every judged scorecard pair (${training.scorecards?.base.n_judged ?? 0})`">{{ basePass }}</td>
                 <td></td>
               </tr>
               <tr v-for="a in adapterRows" :key="a.id" :data-testid="`adapter-row-${a.id}`">
@@ -846,8 +846,8 @@ function onRecheck() {
                   {{ adapterNote(a) }}
                   <div v-if="profileText(a)" class="small" :data-testid="`adapter-profile-${a.id}`">{{ profileText(a) }}</div>
                 </td>
-                <td class="dim nowrap" :title="scorecardTitle(a)" :data-testid="`adapter-fav-${a.id}`">
-                  {{ scorecardFav(a) }}
+                <td class="dim nowrap" :title="scorecardTitle(a)" :data-testid="`adapter-pass-${a.id}`">
+                  {{ scorecardPass(a) }}
                   <div v-if="judgedText(a)" class="small">{{ judgedText(a) }}</div>
                 </td>
                 <td class="acts">
@@ -891,10 +891,10 @@ function onRecheck() {
             {{ training.scorecardOutcome }}
           </div>
           <div class="dim small foot">
-            "% fav" = your favorite rate on its blind scorecard ({{ training.scorecards?.briefs ?? 40 }} briefs,
-            base vs adapter, same seeds). Scorecard images hide their writer until you favorite or pass them;
-            an untested adapter becomes ready at {{ readyPairs }} judged pairs (both images favorited or
-            passed; seen alone does not count).
+            "% pass" = your pass rate on its blind scorecard ({{ training.scorecards?.briefs ?? 40 }} briefs,
+            base vs adapter, same seeds). Scorecard images hide their writer until you grade them ✓ pass or
+            ✗ fail (★ does not count); an untested adapter becomes ready at {{ readyPairs }} judged pairs (both
+            images graded; a view alone does not count, and a graded image still counts after you delete it).
           </div>
           <div class="dim small foot">
             <button

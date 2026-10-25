@@ -395,7 +395,7 @@ export const useTrainingStore = defineStore('training', () => {
         quietly(loadScorecards(), 'load the scorecards')
         break
       case 'scorecard_judged':
-        // A scorecard image was judged: "n/30 judged" and the fav % move.
+        // A scorecard image was graded: "n/30 judged" and the pass % move.
         if (windowOpen.value) scheduleScorecards()
         break
       case 'scorecard_started':
@@ -423,7 +423,7 @@ export const useTrainingStore = defineStore('training', () => {
         scorecardOutcome.value =
           missing > 0
             ? `Scorecard rendered ${String(data.done)} of ${String(data.total)} briefs; ${missing} did not render — Resume renders them.`
-            : 'Scorecard rendered: judge its images (favorite or pass) to score the adapter.'
+            : 'Scorecard rendered: grade its images (✓ pass or ✗ fail) to score the adapter.'
         quietly(loadScorecards(), 'load the scorecards')
         break
       }

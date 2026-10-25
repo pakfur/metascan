@@ -49,6 +49,6 @@ export interface ThumbItem {
   score?: number | null
   // 1-based prompt variant the image was rendered from ("v2"); absent/null = none shown.
   variant?: number | null
-  // A scorecard image not judged yet: shown as "judge to reveal", never loadable.
+  // A scorecard image not graded yet: shown as "judge to reveal", never loadable.
   blind?: boolean
 }

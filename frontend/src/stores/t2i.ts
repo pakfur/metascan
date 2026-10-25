@@ -781,9 +781,9 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   /**
-   * Copy a judgment the server returned onto a tile: ★, the grade, and the
-   * legacy reject flag the server keeps equal to grade === 'fail' (the
-   * scorecard blind still reads it).
+   * Copy a judgment the server returned onto a tile: ★, the grade (which
+   * alone decides the scorecard blind), and the legacy reject flag the
+   * server keeps equal to grade === 'fail' until it is dropped.
    */
   function applyState(image: T2iImage, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
     if (image.is_favorite !== state.favorite) image.is_favorite = state.favorite
@@ -807,7 +807,7 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   // A blind scorecard row came without its prompt and writer (the server
-  // strips them): once a rating lifts the blind, fetch the full rows.
+  // strips them): once a grade lifts the blind, fetch the full rows.
   function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
     if (wasBlind && !t2iBlind(image)) void refreshImages()
   }

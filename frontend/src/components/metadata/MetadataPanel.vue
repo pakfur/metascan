@@ -154,7 +154,8 @@ async function copyAll() {
 
       <div v-if="media.scorecard_blind" class="meta-section blind-note" data-testid="meta-scorecard-blind">
         Scorecard image — judge to reveal. Its prompt and generation details stay hidden until
-        you favorite or pass it, so base vs adapter is judged blind.
+        you grade it ✓ pass or ✗ fail (P or X; ★ does not count), so base vs adapter is judged
+        blind.
       </div>
 
       <!-- AI Generation -->

@@ -85,26 +85,26 @@ export interface AdapterMenuContext {
 }
 
 /**
- * `name · date · 31% fav` — the favorite rate on the adapter's blind
+ * `name · date · 31% pass` — the pass rate on the adapter's blind
  * scorecard, left out while nothing is judged — plus `· untested · 12/30`
  * (judged pairs) for an adapter not yet promoted by its scorecard.
  */
 export function adapterLabel(a: WriterAdapter, result: ScorecardResult | null | undefined, readyPairs: number): string {
   const date = (a.created_at || '').slice(0, 10)
-  const rate = result?.fav_rate_adapter ?? null
-  const parts = [a.name, date, rate === null ? '' : favText(rate)].filter((p) => p)
+  const rate = result?.pass_rate_adapter ?? null
+  const parts = [a.name, date, rate === null ? '' : passText(rate)].filter((p) => p)
   if (a.status === 'untested') parts.push('untested', judgedPairs(result?.n_judged ?? 0, readyPairs))
   return parts.join(' · ')
 }
 
 /**
- * The menu label of a built-in writer: Base carries `· baseline · 19% fav`,
- * the base writer's favorite rate over every judged scorecard pair, once
- * there is one (the scorecard compares adapters against plain Base).
+ * The menu label of a built-in writer: Base carries `· baseline · 19% pass`,
+ * the base writer's pass rate over every judged scorecard pair, once there
+ * is one (the scorecard compares adapters against plain Base).
  */
 export function builtinWriterLabel(id: string, label: string, scorecards: ScorecardSummary | null): string {
-  const rate = id === 'base' ? (scorecards?.base.fav_rate ?? null) : null
-  return rate === null ? label : `${label} · baseline · ${favText(rate)}`
+  const rate = id === 'base' ? (scorecards?.base.pass_rate ?? null) : null
+  return rate === null ? label : `${label} · baseline · ${passText(rate)}`
 }
 
 /**
@@ -165,10 +165,17 @@ export interface ScorecardResult {
   name?: string
   status?: WriterAdapterStatus
   n_pairs: number
-  /** Pairs whose two images both have an explicit verdict (favorite or pass; seen alone does not count). */
+  /**
+   * Pairs whose two images both have a grade (✓ pass or ✗ fail; ★ and a
+   * view do not count), deleted images included.
+   */
   n_judged: number
-  fav_rate_base: number | null
-  fav_rate_adapter: number | null
+  /** ✓ among each writer's images of the judged pairs. */
+  pass_base: number
+  pass_adapter: number
+  /** pass_* / n_judged, null while nothing is judged. */
+  pass_rate_base: number | null
+  pass_rate_adapter: number | null
   mean_score_base: number | null
   mean_score_adapter: number | null
   latest?: ScorecardRun | null
@@ -187,7 +194,7 @@ export interface ScorecardSummary {
   briefs: number
   ready_pairs: number
   running: ScorecardProgress | null
-  base: { n_judged: number; fav_rate: number | null; mean_score: number | null }
+  base: { n_judged: number; pass_rate: number | null; mean_score: number | null }
   adapters: ScorecardResult[]
 }
 
@@ -196,9 +203,9 @@ export function ratePct(rate: number | null | undefined): string {
   return rate === null || rate === undefined ? '—' : `${Math.round(rate * 100)}%`
 }
 
-/** "31% fav" / "— fav": a scorecard favorite rate, as the Writer menu and the training window show it. */
-export function favText(rate: number | null | undefined): string {
-  return `${ratePct(rate)} fav`
+/** "31% pass" / "— pass": a scorecard pass rate, as the Writer menu and the training window show it. */
+export function passText(rate: number | null | undefined): string {
+  return `${ratePct(rate)} pass`
 }
 
 /** "12/30": judged scorecard pairs toward promotion (capped at `readyPairs`). */

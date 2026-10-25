@@ -4845,13 +4845,10 @@ class DatabaseManager:
         # The legacy reject flag (kept equal to grade == 'fail' until the
         # column is dropped).
         d["passed"] = bool(d.pop("judged_passed", None))
-        # A scorecard image with no explicit verdict yet: the dialog hides
-        # its writer, variant and prompt until it is favorited or passed.
-        d["scorecard_blind"] = (
-            d.get("scorecard_id") is not None
-            and not d["is_favorite"]
-            and not d["passed"]
-        )
+        # A scorecard image with no grade yet: the dialog hides its writer,
+        # variant and prompt until it is graded ✓ or ✗. ★ never reveals it
+        # (the writer would show before the grade).
+        d["scorecard_blind"] = d.get("scorecard_id") is not None and d["grade"] is None
         for column, kind in (
             ("loras", list),
             ("form_state", dict),
@@ -7083,14 +7080,27 @@ class DatabaseManager:
         adapter_id: Optional[int] = None,
         scorecard_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """One row per live scorecard image (of one adapter, one scorecard,
-        or all): ``adapter_id``, ``scorecard_id``, ``batch_id``,
-        ``brief_index`` (None when its batch is unknown), ``writer_id``,
-        ``is_favorite``, ``passed``, ``seen_at`` and the stored taste
-        ``score`` (None when unscored)."""
+        """One row per scorecard image (of one adapter, one scorecard, or
+        all), in image-id order: ``adapter_id``, ``scorecard_id``,
+        ``batch_id``, ``brief_index`` (None when its batch is unknown),
+        ``writer_id``, ``grade`` (✓ ``'pass'`` / ✗ ``'fail'`` / None: the
+        only judgment -- no row carries ★ or a view), the stored taste
+        ``score`` (None when unscored) and ``tombstone``.
+
+        Live images come from ``t2i_images`` JOINed to media. A deleted
+        image that had a grade comes from its tombstone: that grade, and
+        the writer, batch and scorecard of its lineage (the brief and the
+        adapter through ``scorecard_batches`` / ``scorecards``, which are
+        never deleted); it has no score (``taste_scores`` cascade). So
+        deleting a judged image changes no result, promotion or resume. A
+        path that holds a live T2I image again counts as that live row,
+        and of several tombstones of one path the newest counts (as in
+        ``generation_outcomes`` / ``writer_dataset_raw``). A deleted image
+        that was never graded judged nothing and is left out, so its brief
+        has no complete pair and a resume renders it again."""
         sql = (
-            "SELECT c.adapter_id, t.scorecard_id, t.batch_id, b.brief_index, "
-            "t.writer_id, m.is_favorite, j.passed, j.seen_at, s.score "
+            "SELECT t.id AS image_id, c.adapter_id, t.scorecard_id, t.batch_id, "
+            "b.brief_index, t.writer_id, j.grade, s.score "
             "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
             "JOIN scorecards c ON c.id = t.scorecard_id "
             "LEFT JOIN scorecard_batches b ON b.batch_id = t.batch_id "
@@ -7106,19 +7116,98 @@ class DatabaseManager:
             sql += " AND t.scorecard_id = ?"
             args.append(scorecard_id)
         with self.lock, self._get_connection() as conn:
-            rows = [dict(r) for r in conn.execute(sql + " ORDER BY t.id", args)]
-        for r in rows:
-            r["is_favorite"] = bool(r["is_favorite"])
-            r["passed"] = bool(r["passed"])
-        return rows
+            live = [dict(r) for r in conn.execute(sql, args)]
+            deleted = self._graded_scorecard_tombstones(conn)
+        ordered: List[Tuple[int, Dict[str, Any]]] = []
+        for r in live:
+            image_id = int(r.pop("image_id"))
+            r["grade"] = r["grade"] if r["grade"] in GRADES else None
+            r["tombstone"] = False
+            ordered.append((image_id, r))
+        for image_id, row in deleted:
+            if adapter_id is not None and row["adapter_id"] != adapter_id:
+                continue
+            if scorecard_id is not None and row["scorecard_id"] != scorecard_id:
+                continue
+            ordered.append((image_id, row))
+        ordered.sort(key=lambda pair: pair[0])
+        return [row for _, row in ordered]
+
+    def _graded_scorecard_tombstones(
+        self, conn: sqlite3.Connection
+    ) -> List[Tuple[int, Dict[str, Any]]]:
+        """``(t2i image id, scorecard_image_rows row)`` for every deleted
+        scorecard image that had a grade, read from the newest tombstone of
+        each path with no live T2I row (see ``scorecard_image_rows``).
+        Caller holds the lock."""
+        # The CASE keeps json_extract off a lineage that is not JSON.
+        tombs = conn.execute(
+            "SELECT x.file_path, x.grade, x.lineage FROM media_tombstones x "
+            "WHERE x.lineage IS NOT NULL AND (CASE WHEN json_valid(x.lineage) "
+            "THEN json_extract(x.lineage, '$.t2i.scorecard_id') END) "
+            "IS NOT NULL AND NOT EXISTS (SELECT 1 FROM t2i_images t "
+            "JOIN media m ON m.file_path = t.file_path "
+            "WHERE t.file_path = x.file_path) ORDER BY x.id"
+        ).fetchall()
+        if not tombs:
+            return []
+        adapters = {
+            str(r["id"]): int(r["adapter_id"])
+            for r in conn.execute("SELECT id, adapter_id FROM scorecards")
+        }
+        briefs = {
+            str(r["batch_id"]): int(r["brief_index"])
+            for r in conn.execute("SELECT batch_id, brief_index FROM scorecard_batches")
+        }
+        newest: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+        malformed = 0
+        for r in tombs:
+            try:
+                gen = json.loads(r["lineage"])["t2i"]
+            except (ValueError, KeyError, TypeError):
+                gen = None
+            image_id = gen.get("id") if isinstance(gen, dict) else None
+            card = gen.get("scorecard_id") if isinstance(gen, dict) else None
+            if not isinstance(image_id, int) or not isinstance(card, str):
+                malformed += 1
+                continue
+            batch = gen.get("batch_id")
+            # Ascending id: a newer tombstone of the path replaces an older.
+            newest[str(r["file_path"])] = (
+                image_id,
+                {
+                    "adapter_id": adapters.get(card),
+                    "scorecard_id": card,
+                    "batch_id": batch,
+                    "brief_index": (
+                        briefs.get(batch) if isinstance(batch, str) else None
+                    ),
+                    "writer_id": gen.get("writer_id"),
+                    "grade": r["grade"] if r["grade"] in GRADES else None,
+                    "score": None,
+                    "tombstone": True,
+                },
+            )
+        if malformed:
+            logger.warning(
+                "scorecard results: %d tombstone(s) with a malformed lineage skipped",
+                malformed,
+            )
+        # Never graded (it judged nothing), or of an unknown scorecard.
+        return [
+            (image_id, row)
+            for image_id, row in newest.values()
+            if row["grade"] is not None and row["adapter_id"] is not None
+        ]
 
     def scorecard_for_path(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """``{scorecard_id, adapter_id, blind}`` for a scorecard image, else
-        None. ``blind``: no explicit verdict yet (not favorited, not passed)
-        -- the viewer and the T2I tiles hide its writer until then."""
+        """``{scorecard_id, adapter_id, blind}`` for a live scorecard image,
+        else None. ``blind``: no grade yet -- the viewer, the T2I tiles and
+        the details panel hide its writer and prompt until it is graded ✓
+        or ✗. ★ is no grade and never reveals it."""
         with self.lock, self._get_connection() as conn:
             r = conn.execute(
-                "SELECT t.scorecard_id, c.adapter_id, m.is_favorite, j.passed "
+                "SELECT t.scorecard_id, c.adapter_id, j.grade "
                 "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
                 "LEFT JOIN scorecards c ON c.id = t.scorecard_id "
                 "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
@@ -7131,7 +7220,7 @@ class DatabaseManager:
         return {
             "scorecard_id": str(r["scorecard_id"]),
             "adapter_id": int(r["adapter_id"]) if r["adapter_id"] is not None else None,
-            "blind": not r["is_favorite"] and not r["passed"],
+            "blind": r["grade"] not in GRADES,
         }
 
     # ---- training runs (writer LoRA training) ----------------------------

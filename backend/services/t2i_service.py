@@ -20,7 +20,7 @@ class T2iService:
         """Generated images, newest first, each with a COMPLETE
         ``form_state``: the stored one, or one built from its as-rendered
         facts for an image ingested after a restart. The dialog sees one
-        shape. A blind scorecard image (no verdict yet) carries neither its
+        shape. A blind scorecard image (no grade yet) carries neither its
         prompt nor its writer (``scorecard_blind``)."""
         rows: List[Dict[str, Any]] = await asyncio.to_thread(
             self.db.list_t2i_images, limit, before_id

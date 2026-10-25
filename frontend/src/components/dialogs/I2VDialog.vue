@@ -223,7 +223,7 @@ const { selected: categoryIds, refresh: refreshCategories } = useGenerationCateg
 )
 
 // Prompt-writer adapters after Base: the I2V ones scoped to `all` or to a
-// selected category, labelled with their scorecard favorite rate. (Training
+// selected category, labelled with their scorecard pass rate. (Training
 // creates T2I adapters only, so this list is empty today; the scorecard
 // compares T2I writers, so I2V's Base carries no baseline rate.)
 const adapterOptions = computed(() =>
@@ -788,7 +788,7 @@ function jobLabel(chip: {
             />
           </label>
           <div class="writer-row">
-            <label class="inline-pick" title="Who writes the prompt: Base (the unguided prompt-writer model) or one of your trained writers (name · date · favorite rate)">
+            <label class="inline-pick" title="Who writes the prompt: Base (the unguided prompt-writer model) or one of your trained writers (name · date · pass rate)">
               <span>Writer</span>
               <select
                 :value="writer"

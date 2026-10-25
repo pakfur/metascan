@@ -314,7 +314,7 @@ const { selected: categoryIds, refresh: refreshCategories } = useGenerationCateg
 )
 
 // Prompt-writer adapters after Base / Base + taste: the T2I ones scoped to
-// `all` or to a selected category, labelled with their favorite rate on the
+// `all` or to a selected category, labelled with their pass rate on the
 // blind scorecard (Base with its baseline rate); one with too few examples
 // for the selected model is listed disabled.
 const adapterOptions = computed(() =>
@@ -793,7 +793,7 @@ function onSelectTile(item: ThumbItem) {
   }
   if (item.blind) {
     // Loading it would show its prompt (and who wrote it): judge it first.
-    toast.show(`${SCORECARD_BLIND_TEXT}: favorite or pass it first (double-click opens it).`, 'info')
+    toast.show(`${SCORECARD_BLIND_TEXT}: grade it ✓ or ✗ first (double-click opens it).`, 'info')
     return
   }
   autosave.flush() // pending edits belong to the image being left
@@ -1010,7 +1010,7 @@ onBeforeUnmount(() => {
                   @click="toggleResolved"
                 >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
                 <div class="writer-row">
-                  <label class="inline-pick" title="Who writes the prompts: base Qwen, base Qwen shown your favorite prompts as examples, or one of your trained writers (name · date · favorite rate)">
+                  <label class="inline-pick" title="Who writes the prompts: base Qwen, base Qwen shown your passed (✓) prompts as examples, or one of your trained writers (name · date · pass rate)">
                     <span>Writer</span>
                     <select
                       :value="writer"
