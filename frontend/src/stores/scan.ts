@@ -173,10 +173,18 @@ export const useScanStore = defineStore('scan', () => {
     currentFile.value = ''
     processedCount.value = 0
     staleRemoved.value = 0
-    await startScan({
-      full_cleanup: fullCleanup.value,
-      full_clean: scanMode.value === 'full_clean',
-    })
+    try {
+      await startScan({
+        full_cleanup: fullCleanup.value,
+        full_clean: scanMode.value === 'full_clean',
+      })
+    } catch (e) {
+      // A refused start never reaches the WebSocket, e.g. 409
+      // scan_folders_missing (a full clean with a scan folder missing):
+      // ApiError carries the server's message.
+      phase.value = 'error'
+      errorMessage.value = (e as Error).message
+    }
   }
 
   async function cancel() {

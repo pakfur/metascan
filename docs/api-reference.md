@@ -34,7 +34,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/folders/{id}/items` | Add items to a static folder |
 | DELETE | `/api/folders/{id}/items` | Remove items from a static folder |
 | POST | `/api/scan/prepare` | Count files for scan confirmation |
-| POST | `/api/scan/start` | Begin scan (progress via WebSocket) |
+| POST | `/api/scan/start` | Begin scan (progress via WebSocket). A full clean is refused with 409 `scan_folders_missing` while a configured scan folder is missing |
 | POST | `/api/similarity/search` | Find similar media (image → image); light unbounded results |
 | POST | `/api/similarity/content-search` | CLIP text-to-image search; light unbounded results |
 | POST | `/api/duplicates/find` | Find duplicate groups |
@@ -106,13 +106,18 @@ Subscribe per channel on the frontend with `useWebSocket('<channel>', handler)`.
 
 ## Error Shapes
 
-Most errors are FastAPI's default `{ "detail": "..." }`. Two endpoints return a structured error the UI matches against:
+Most errors are FastAPI's default `{ "detail": "..." }`. These endpoints return a structured error the UI matches against:
 
 - **Dim mismatch (HTTP 409)** from similarity endpoints when the loaded CLIP model's embedding dim differs from the on-disk FAISS index:
   ```json
   { "detail": { "code": "dim_mismatch", "index_dim": 768, "model_dim": 1024 } }
   ```
   The frontend renders an actionable "Rebuild index" prompt in the filter panel's SEARCH section.
+- **Scan folders missing (HTTP 409)** from `POST /api/scan/start` with `full_clean: true` while a configured scan folder does not exist (an unplugged drive). Nothing is deleted:
+  ```json
+  { "detail": { "code": "scan_folders_missing", "folders": ["/Volumes/Art/AI"], "message": "Full clean refused: the scan folder /Volumes/Art/AI is missing, ..." } }
+  ```
+  The scan dialog shows `message`, which says to reconnect the drive or remove the folder from the scan list.
 
 ## VLM tagging (`/api/vlm/*`)
 

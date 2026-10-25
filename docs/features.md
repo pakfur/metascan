@@ -108,7 +108,8 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 
 ## Scanning & Indexing
 - Multi-phase scan with real-time progress (file-by-file WebSocket updates)
-- Stale entry cleanup for deleted files
+- Stale entry cleanup for deleted files. It never removes the entries of a scan folder that is missing (an unplugged drive, a renamed folder): they stay in the library, ratings and all, until the folder is back
+- Full clean & rescan wipes the database and re-imports every file, keeping ★ favorites, ✓ / ✗ grades, reasons and categories. It is refused while a scan folder is missing: reconnect the drive or remove the folder from the scan list (Configuration → Directories). If a folder goes missing during the rescan, the other folders are still imported and the ratings of the missing folder's images wait: they come back when a later scan finds the files again
 - Automatic thumbnail generation
 - pHash computation during scan
 - File system watcher with auto-refresh
