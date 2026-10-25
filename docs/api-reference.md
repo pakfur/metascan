@@ -691,7 +691,7 @@ on `/lint` an unknown id adds a warning and lints as a single take; on
 Returns every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
 quality, width, height, steps, render_s, preset_id, comfy_prompt_id,
-created_at, is_favorite, megapixels, loras, form_state}, ...]`. Each row
+created_at, is_favorite, grade, megapixels, loras, form_state}, ...]`. Each row
 carries two sets of values. Everything except `form_state` is an
 **as-rendered fact** about the clip, written once at ingest and never
 changed (`megapixels`/`loras` are `null` for clips ingested before they
@@ -704,7 +704,7 @@ option). `steps` is the step count actually
 applied (`null` for Fast renders and presets without `MS_STEPS`);
 `render_s` is wall-clock render seconds from the job row (`null` for clips
 ingested before it was recorded); `created_at` is UTC with no zone marker.
-`is_favorite` joined live from `media.is_favorite`. Rows whose backing
+`is_favorite` joined live from `media.is_favorite`; `grade` is the clip's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose backing
 media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
 place (`i2v_videos` has no foreign key to media).
@@ -726,7 +726,8 @@ not ingest — there is no draft or pre-ingest record.
 Deletes one generated clip: its `i2v_videos` row plus its media row (moved
 to the OS trash, subject to the usual "still referenced elsewhere" survival
 checks). Returns `{status: "deleted"}`. **404** if the video id doesn't
-exist.
+exist. **500** `{code: "trash_failed", message}` when the file could be neither moved
+to the trash nor deleted; the rows are kept.
 
 ### `GET /api/i2v/output-preview?root=&prefix=`
 Where a clip generated right now would land for the given (possibly
@@ -805,13 +806,13 @@ Active batches: `[{batch_id, mode, state: "prompting" | "rendering", total_steps
 Cancels the batch's task (including an in-flight VLM call) and every unfinished job. Returns `{status: "cancelled"}`; idempotent for a batch that already finished. **404** for an id the server has never seen.
 
 ### `GET /api/t2i/images?limit=60&before_id=`
-Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, form_state}`. Rows whose media is gone are pruned.
+Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, grade, form_state}`. `grade` is the image's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose media is gone are pruned.
 
 ### `PATCH /api/t2i/images/{image_id}`
 Autosaves the dialog's form into one image's editable `form_state`. Partial: send only what changed. The as-rendered columns are not reachable from here. **400** for an unknown field or a bad value (the message names the field); **404** for an unknown id.
 
 ### `DELETE /api/t2i/images/{image_id}`
-Deletes the `t2i_images` row plus its media row (the file goes to the OS trash). Returns `{status: "deleted"}`. **404** for an unknown id.
+Deletes the `t2i_images` row plus its media row (the file goes to the OS trash). Returns `{status: "deleted"}`. **404** for an unknown id. **500** `{code: "trash_failed", message}` when the file could be neither moved to the trash nor deleted; the rows are kept.
 
 ### `GET /api/t2i/paths`
 Native paths of every T2I image still in the library, for the smart-folder rule *Generated with T2I*.
