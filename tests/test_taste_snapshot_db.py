@@ -171,11 +171,12 @@ def test_snapshot_truncate_rescan_restore_roundtrip(db):
     assert before_gone  # sanity: the missing path really carried a judgment
 
 
-@pytest.mark.parametrize("version", [None, 1, 3])
-def test_restore_refuses_a_snapshot_that_is_not_v2(db, version):
+@pytest.mark.parametrize("version", [None, 1, 2, 4])
+def test_restore_refuses_a_snapshot_that_is_not_v3(db, version):
     """A version-less snapshot carries the old meaning (a favorite is ✓):
     put back as stored it would lose every grade, so the restore refuses
-    it -- and any unknown version -- before writing anything."""
+    it -- and a version-2 one, which the pending-file reader translates
+    first, and any unknown version -- before writing anything."""
     _seed(db)
     snapshot = db.export_taste_state()
     db.truncate_all_data()
@@ -258,18 +259,20 @@ def test_snapshot_survives_json_roundtrip(db):
     assert _marks(db.get_judgment("/l/fav.png")) == FAVORITE
 
 
-def test_v2_snapshot_round_trips(db):
-    """The snapshot is version 2: each judgment row carries its grade and no
-    legacy reject flag, and putting it back restores every grade-era rating
-    exactly -- grades as stored, never derived (★ alone stays ★ alone) --
-    with no new events."""
+def test_v3_snapshot_round_trips(db):
+    """The snapshot is version 3 (grades since version 2): each judgment row
+    carries its grade and no legacy reject flag, and putting it back
+    restores every grade-era rating exactly -- grades as stored, never
+    derived (★ alone stays ★ alone) -- with no new events. (Briefs and
+    library prompts: tests/test_taste_snapshot_briefs.py.)"""
     portrait = _seed_grades(db)
     before = _state(db)
     events = _rows(db, "SELECT * FROM judgment_events ORDER BY id")
 
     snapshot = json.loads(json.dumps(db.export_taste_state()))
 
-    assert snapshot["version"] == 2
+    assert snapshot["version"] == 3
+    assert (snapshot["briefs"], snapshot["library_prompts"]) == ([], [])
     t0, t1 = T0.isoformat(), T1.isoformat()
     assert snapshot["judgments"] == [
         {

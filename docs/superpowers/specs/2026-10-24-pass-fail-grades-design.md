@@ -251,6 +251,19 @@ counts a grade, a favorite, reasons or `judged_at` as newer data.
 > not block putting its snapshot grade back. The snapshot's ★ is restored on
 > its own, even beside a newer grade, and a restore never clears ★.
 
+> **Extended 2026-10-25 (snapshot version 3):** `hindsight_briefs` cascades
+> with the truncate too, and a completed full clean tombstones every path
+> that did not come back, so a vanished ✓ image lost its hindsight example
+> (no archived thumbnail to brief it again from: it was never deleted
+> through the app). Version 3 also carries every hindsight brief (`briefs`)
+> and each ✓ library image's metadata prompt and model names
+> (`library_prompts`, as a delete's tombstone keeps them): for a path a
+> delete would tombstone, the tombstone a completed full clean writes
+> matches the delete's, minus the thumbnail (the rescan did not find the
+> file); a ★-only or brief-only path, which a delete never tombstones, gets
+> one with no grade. A path that comes back gets its brief back unless it
+> has one again. A version-2 file reads as version 3 with neither.
+
 ## Taste scorer
 
 - Labels: ✓ → 1, ✗ → 0, no grade → excluded (views and favorites count for

@@ -281,11 +281,15 @@ def _ensure_index(
 
 
 # Format of the full-clean taste snapshot (``export_taste_state``): 2 = each
-# judgment row carries its ``grade``. A file without a ``version`` key was
-# written before grades, with the old meaning (``passed = 1`` a reject, a
-# favorite the positive); ``backend/services/taste_snapshot.py`` translates
-# it on load, and ``restore_taste_state`` only takes version 2.
-TASTE_SNAPSHOT_VERSION = 2
+# judgment row carries its ``grade``; 3 = it also carries every hindsight
+# brief (``briefs``) and each ✓ library image's metadata prompt and model
+# names (``library_prompts``), which a completed full clean keeps on the
+# tombstone of a path that did not come back, as a delete does. A file
+# without a ``version`` key was written before grades, with the old meaning
+# (``passed = 1`` a reject, a favorite the positive);
+# ``backend/services/taste_snapshot.py`` translates it, and a version-2 one,
+# on load, and ``restore_taste_state`` only takes version 3.
+TASTE_SNAPSHOT_VERSION = 3
 
 
 class MigrationError(RuntimeError):
@@ -4276,12 +4280,8 @@ class DatabaseManager:
             ).fetchone()
             prompt: Optional[str] = None
             model_names: Optional[str] = None
-            if (
-                judgment is not None
-                and judgment["grade"] == "pass"
-                and t2i is None
-                and i2v is None
-                and self._is_image_path(path)
+            if judgment is not None and self._keeps_library_prompt(
+                path, judgment["grade"], t2i is not None or i2v is not None
             ):
                 prompt, model_names = self._library_prompt(conn, path)
             hashes = conn.execute(
@@ -4314,6 +4314,18 @@ class DatabaseManager:
                 embedded_model=embedded_model,
                 embedded_at=embedded_at,
             )
+
+    @classmethod
+    def _keeps_library_prompt(
+        cls, path: str, grade: Optional[str], generated: bool
+    ) -> bool:
+        """Whether the tombstone of ``path`` keeps its metadata prompt and
+        model names (``_library_prompt``): a ✓ library image -- graded
+        pass, an image, and no T2I / I2V row (``generated``; a generation's
+        prompt is in its lineage). The one rule for a delete
+        (``_write_tombstones``) and for the full-clean snapshot
+        (``export_taste_state``), whose tombstones must match."""
+        return grade == "pass" and not generated and cls._is_image_path(path)
 
     @staticmethod
     def _library_prompt(
@@ -4364,18 +4376,19 @@ class DatabaseManager:
         embedded_at: Optional[str] = None,
     ) -> None:
         """Insert one media_tombstones row. ``judgment`` is a live
-        media_judgments row or a version-2 snapshot row (both carry
+        media_judgments row or a version-3 snapshot row (both carry
         ``grade``); the keyword fields are stored as given (see
-        ``_write_tombstones``), and ``scorecard_id`` comes from the T2I
-        lineage. ``embedded_model`` / ``embedded_at`` are the evidence for
-        reading the FAISS index by this path: the CLIP model the file was
-        embedded with and when it was marked, '' when it never was, None
-        when nothing is known (a snapshot restore, a mark with no time).
-        Only when it names the in-memory index's model (the installed
-        lookup) and that index was loaded after the mark is the item's
-        vector there read, into ``tombstone_vectors`` under that model; a
-        skipped read keeps the evidence for the backfill on a later load.
-        The legacy single-vector columns are no longer written. Caller
+        ``_write_tombstones``; ``restore_taste_state`` passes the
+        snapshot's), and ``scorecard_id`` comes from the T2I lineage.
+        ``embedded_model`` / ``embedded_at`` are the evidence for reading
+        the FAISS index by this path: the CLIP model the file was embedded
+        with and when it was marked, '' when it never was, None when
+        nothing is known (a snapshot restore, a mark with no time). Only
+        when it names the in-memory index's model (the installed lookup)
+        and that index was loaded after the mark is the item's vector there
+        read, into ``tombstone_vectors`` under that model; a skipped read
+        keeps the evidence for the backfill on a later load. The legacy
+        single-vector columns are no longer written. Caller
         holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
@@ -9147,17 +9160,26 @@ class DatabaseManager:
     # Taste-state snapshot (full clean & rescan)
     # ------------------------------------------------------------------
     #
-    # ``truncate_all_data`` deletes every media row, and media_judgments /
-    # media_categories cascade with it. judgment_events, categories and
-    # media_tombstones carry no FK to media and survive. The full-clean
-    # scan takes this snapshot first and puts it back verbatim afterwards.
+    # ``truncate_all_data`` deletes every media row -- with its data blob
+    # and ``indices`` rows, where a library prompt and model names are read
+    # from -- and media_judgments / media_categories / hindsight_briefs
+    # cascade with it. judgment_events, categories, media_tombstones,
+    # t2i_images and i2v_videos carry no FK to media and survive. The
+    # full-clean scan takes this snapshot first and puts it back verbatim
+    # afterwards.
 
     def export_taste_state(self) -> Dict[str, Any]:
-        """Snapshot (``version`` 2) every media_judgments row -- file_path,
+        """Snapshot (``version`` 3) every media_judgments row -- file_path,
         grade, reasons, seen_at, judged_at, confirmed_at; no legacy
-        ``passed`` -- every media_categories link (with its category name)
-        and every ``is_favorite = 1`` path (★ only: it carries no grade).
-        Paths are the stored POSIX form. Plain JSON-serialisable data."""
+        ``passed`` -- every media_categories link (with its category name),
+        every ``is_favorite = 1`` path (★ only: it carries no grade), every
+        hindsight brief (``briefs``: file_path, brief, model, created_at, as
+        ``hindsight_briefs`` holds them) and each ✓ library image's metadata
+        prompt and model names (``library_prompts``: file_path, prompt,
+        model_name -- what ``_library_prompt`` gives a delete's tombstone,
+        model_name a sorted JSON list; ``_keeps_library_prompt`` picks the
+        images, and one with neither is left out). Paths are the stored
+        POSIX form. Plain JSON-serialisable data."""
         with self.lock, self._get_connection() as conn:
             judgments = [
                 dict(r)
@@ -9182,25 +9204,57 @@ class DatabaseManager:
                     "ORDER BY file_path"
                 ).fetchall()
             ]
+            briefs = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT file_path, brief, model, created_at "
+                    "FROM hindsight_briefs ORDER BY file_path"
+                ).fetchall()
+            ]
+            library_prompts: List[Dict[str, Any]] = []
+            # The ✓ rows come from the (grade, file_path) index; the two
+            # lineage tables are searched by their unique file_path.
+            for r in conn.execute(
+                "SELECT j.file_path, j.grade, "
+                "EXISTS (SELECT 1 FROM t2i_images g "
+                "WHERE g.file_path = j.file_path) "
+                "OR EXISTS (SELECT 1 FROM i2v_videos v "
+                "WHERE v.file_path = j.file_path) AS generated "
+                "FROM media_judgments j WHERE j.grade = 'pass' "
+                "ORDER BY j.file_path"
+            ).fetchall():
+                path = r["file_path"]
+                if not self._keeps_library_prompt(
+                    path, r["grade"], bool(r["generated"])
+                ):
+                    continue
+                prompt, model_name = self._library_prompt(conn, path)
+                if prompt is not None or model_name is not None:
+                    library_prompts.append(
+                        {"file_path": path, "prompt": prompt, "model_name": model_name}
+                    )
         return {
             "version": TASTE_SNAPSHOT_VERSION,
             "taken_at": self._iso(None),
             "judgments": judgments,
             "categories": links,
             "favorites": favorites,
+            "briefs": briefs,
+            "library_prompts": library_prompts,
         }
 
     def restore_taste_state(
         self, snapshot: Dict[str, Any], tombstone_missing: bool = False
     ) -> Dict[str, Any]:
-        """Put a version-2 ``export_taste_state`` snapshot back for every
+        """Put a version-3 ``export_taste_state`` snapshot back for every
         path whose media row exists again: judgment rows verbatim (the
         grade as stored, never derived; original timestamps), category
-        links (only for categories that still exist) and ★ by raw UPDATE.
+        links (only for categories that still exist), ★ by raw UPDATE and
+        the hindsight brief as stored (model and ``created_at`` included).
         Logs **no** judgment_events -- this is a put-back, not a
-        re-judgment. Idempotent. A snapshot of any other version (one
-        written before grades must be translated first) is refused with
-        ValueError before anything is written.
+        re-judgment. Idempotent. A snapshot of any other version (an older
+        one must be translated first) is refused with ValueError before
+        anything is written.
 
         Never overwrites newer data: a path whose live row already carries
         a grade, a reason or a ``judged_at`` (it was graded, or a grade
@@ -9208,19 +9262,26 @@ class DatabaseManager:
         filled from the snapshot. ★ is not a grade, so neither blocks the
         other: a ★ set after the item re-appeared never stops its grade
         coming back, and the snapshot's ★ is put back beside a newer grade.
-        A restore only ever sets ★, never clears it. Category links are
-        added with ON CONFLICT DO NOTHING.
+        A restore only ever sets ★, never clears it. Category links and
+        briefs are added with ON CONFLICT DO NOTHING: a path briefed again
+        after it re-appeared keeps that brief.
 
         With ``tombstone_missing``, each snapshot path whose media row did
         not come back gets one media_tombstones row built from the snapshot
-        (lineage from the surviving t2i/i2v row). It gets no vector: the
-        truncate took the item's embedding record with it, so nothing says
-        whose row the FAISS index holds at the path; ``embedded_model``
-        stays NULL, which the by-path backfill treats as no evidence (the
-        old guards). Returns ``{restored, missing, tombstoned}``
-        counted in paths plus ``remaining``: the snapshot narrowed to the
-        paths that were not restored (same shape and version, same
-        ``taken_at``)."""
+        (``_tombstone_from_snapshot``): the brief and its model, a ✓ library
+        image's ``library_prompts`` prompt and model names and the lineage
+        of the surviving t2i/i2v row -- for a path a delete would tombstone,
+        the row ``_write_tombstones`` writes, but with no thumbnail (the
+        rescan did not find the file) and no FAISS evidence. It gets no
+        vector: the truncate took the item's embedding record with it, so
+        nothing says whose row the FAISS index holds at the path;
+        ``embedded_model`` stays NULL, which the by-path backfill treats as
+        no evidence (the old guards). A snapshot path is any path with an
+        entry in it, so a ★-only or brief-only one, which a delete never
+        tombstones, gets a tombstone too, with no grade. Returns
+        ``{restored, missing, tombstoned}`` counted in paths plus
+        ``remaining``: the snapshot narrowed to the paths that were not
+        restored (same shape and version, same ``taken_at``)."""
         version = snapshot.get("version")
         if version != TASTE_SNAPSHOT_VERSION:
             raise ValueError(
@@ -9234,7 +9295,15 @@ class DatabaseManager:
         for link in snapshot.get("categories") or []:
             links_by_path.setdefault(link["file_path"], []).append(link)
         favorites = set(snapshot.get("favorites") or [])
-        paths = sorted(set(judgments) | set(links_by_path) | favorites)
+        briefs: Dict[str, Dict[str, Any]] = {
+            b["file_path"]: b for b in snapshot.get("briefs") or []
+        }
+        prompts: Dict[str, Dict[str, Any]] = {
+            lp["file_path"]: lp for lp in snapshot.get("library_prompts") or []
+        }
+        paths = sorted(
+            set(judgments) | set(links_by_path) | favorites | set(briefs) | set(prompts)
+        )
 
         restored = missing = tombstoned = 0
         missing_paths: List[str] = []
@@ -9252,23 +9321,15 @@ class DatabaseManager:
                     missing += 1
                     missing_paths.append(path)
                     if tombstone_missing:
-                        self._insert_tombstone(
+                        self._tombstone_from_snapshot(
                             conn,
                             path,
                             now,
                             path in favorites,
                             judgments.get(path),
-                            [lk["category_name"] for lk in path_links],
-                            conn.execute(
-                                "SELECT * FROM t2i_images WHERE file_path = ? "
-                                "LIMIT 1",
-                                (path,),
-                            ).fetchone(),
-                            conn.execute(
-                                "SELECT * FROM i2v_videos WHERE file_path = ? "
-                                "LIMIT 1",
-                                (path,),
-                            ).fetchone(),
+                            path_links,
+                            briefs.get(path),
+                            prompts.get(path),
                         )
                         tombstoned += 1
                     continue
@@ -9291,6 +9352,7 @@ class DatabaseManager:
                         "ON CONFLICT(file_path, category_id) DO NOTHING",
                         (path, int(lk["category_id"]), lk["source"], lk["assigned_at"]),
                     )
+                self._put_back_brief(conn, path, briefs.get(path))
             conn.commit()
         keep = set(missing_paths)
         remaining = {
@@ -9304,6 +9366,8 @@ class DatabaseManager:
                 lk for p, links in links_by_path.items() if p in keep for lk in links
             ],
             "favorites": sorted(favorites & keep),
+            "briefs": [b for p, b in briefs.items() if p in keep],
+            "library_prompts": [lp for p, lp in prompts.items() if p in keep],
         }
         return {
             "restored": restored,
@@ -9335,7 +9399,7 @@ class DatabaseManager:
     def _put_back_judgment(
         conn: sqlite3.Connection, path: str, j: Dict[str, Any]
     ) -> None:
-        """Write a version-2 snapshot judgment verbatim over an absent or
+        """Write a version-3 snapshot judgment verbatim over an absent or
         seen-only row, keeping the live seen_at only when the snapshot has
         none. The grade is copied as stored, never derived. Caller holds
         the lock."""
@@ -9357,6 +9421,63 @@ class DatabaseManager:
                 j["judged_at"],
                 j["confirmed_at"],
             ),
+        )
+
+    @staticmethod
+    def _put_back_brief(
+        conn: sqlite3.Connection, path: str, brief: Optional[Dict[str, Any]]
+    ) -> None:
+        """Put a snapshot hindsight brief back as stored (its model and
+        ``created_at`` too) unless the path has one again: a brief written
+        after the item re-appeared is never overwritten. Caller holds the
+        lock."""
+        if brief is None:
+            return
+        conn.execute(
+            "INSERT INTO hindsight_briefs (file_path, brief, model, created_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(file_path) DO NOTHING",
+            (path, brief["brief"], brief["model"], brief["created_at"]),
+        )
+
+    def _tombstone_from_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        path: str,
+        now: str,
+        is_favorite: bool,
+        judgment: Optional[Dict[str, Any]],
+        links: List[Dict[str, Any]],
+        brief: Optional[Dict[str, Any]],
+        library: Optional[Dict[str, Any]],
+    ) -> None:
+        """The tombstone of a snapshot path that did not come back, from the
+        snapshot: the brief and its model, a ✓ library image's
+        ``library_prompts`` prompt and model names, and the lineage of the
+        surviving t2i/i2v row -- for a path a delete would tombstone, what
+        ``_write_tombstones`` keeps. No thumbnail: the rescan did not find
+        the file, so there is none to archive. No FAISS evidence either
+        (``embedded_model`` / ``embedded_at`` NULL, so no vector is read):
+        the truncate took the item's embedding record with it. Caller holds
+        the lock."""
+        self._insert_tombstone(
+            conn,
+            path,
+            now,
+            is_favorite,
+            judgment,
+            [lk["category_name"] for lk in links],
+            conn.execute(
+                "SELECT * FROM t2i_images WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone(),
+            conn.execute(
+                "SELECT * FROM i2v_videos WHERE file_path = ? LIMIT 1", (path,)
+            ).fetchone(),
+            brief=brief["brief"] if brief is not None else None,
+            brief_model=brief["model"] if brief is not None else None,
+            prompt=library["prompt"] if library is not None else None,
+            model_name=library["model_name"] if library is not None else None,
+            embedded_model=None,
+            embedded_at=None,
         )
 
     # ------------------------------------------------------------------
