@@ -5,15 +5,18 @@ model (spec docs/superpowers/specs/2026-10-24-pass-fail-grades-design.md,
 A deleted graded image (a tombstone) keeps one CLIP vector per CLIP model in
 ``tombstone_vectors``; the taste scorer and the ✓ pass diversity read only
 the one for the FAISS index's model. A tombstone gets it from the index by
-its path only with evidence that the row there is its own (the file was
-embedded with the index's model and nothing has been embedded at the path
-since): at deletion (from the in-memory index) or from the backfill once an
-index loads (``judgments_service.backfill_tombstone_embeddings``). Otherwise
--- after a CLIP switch, a file never embedded, a path embedded again since
--- it gets it from here: the vector is computed from the image's archived
-thumbnail (``training_archive``; never from its old path, which may hold
-another file now) through the live CLIP inference worker's
-``encode_image``, which has no FAISS or DB side effects.
+its path at deletion (from the in-memory index) or from the backfill once an
+index loads (``judgments_service.backfill_tombstone_embeddings``) only with
+evidence that the row there is its own -- the file was embedded with the
+index's model before that index was loaded, and nothing has been embedded
+at the path since -- or, with no evidence either way (a tombstone written
+before it, or a mark from before the fix), from the backfill under the old
+guards, which leave every tombstone with an archived thumbnail to this
+module. Otherwise -- after a CLIP switch, a file never embedded, a path
+embedded again since -- it gets it from here: the vector is computed from
+the image's archived thumbnail (``training_archive``; never from its old
+path, which may hold another file now) through the live CLIP inference
+worker's ``encode_image``, which has no FAISS or DB side effects.
 
 Rules
 -----

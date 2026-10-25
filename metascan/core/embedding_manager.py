@@ -7,6 +7,7 @@ for duplicate detection, content search, and similarity search.
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -553,11 +554,21 @@ class FaissIndexManager:
         self._path_to_id: Dict[str, int] = {}
         self._meta: Dict[str, Any] = {}
         self._dirty = False
+        self._loaded_at: Optional[float] = None
 
     @property
     def is_loaded(self) -> bool:
         """Whether the index is currently loaded in memory."""
         return self._index is not None
+
+    @property
+    def loaded_at(self) -> Optional[float]:
+        """When the last successful ``load()`` began reading the files (UTC
+        epoch seconds), None for an index not loaded from disk. Everything
+        saved before then is in memory: the embedding worker marks a file
+        embedded only after it saved the index, so a file marked before this
+        moment has its row here (tombstones are read by path only then)."""
+        return self._loaded_at
 
     @property
     def file_count(self) -> int:
@@ -575,7 +586,10 @@ class FaissIndexManager:
         return self._meta
 
     def load(self) -> bool:
-        """Load the FAISS index and ID mapping from disk."""
+        """Load the FAISS index and ID mapping from disk (``loaded_at`` is
+        taken before the files are read)."""
+        started = time.time()
+        self._loaded_at = None
         try:
             _ensure_heavy_imports()
             assert _faiss is not None
@@ -595,6 +609,7 @@ class FaissIndexManager:
                         self._meta = json.load(f)
 
                 assert self._index is not None
+                self._loaded_at = started
                 logger.info(f"Loaded FAISS index with {self._index.ntotal} vectors")
                 return True
             else:
@@ -622,6 +637,7 @@ class FaissIndexManager:
             "file_count": 0,
         }
         self._dirty = True
+        self._loaded_at = None
         logger.info(f"Created new FAISS index (dim={embedding_dim}, model={model_key})")
 
     def add(self, file_path: str, embedding: np.ndarray) -> None:
@@ -845,6 +861,7 @@ class FaissIndexManager:
         self._path_to_id = {}
         self._meta = {}
         self._dirty = False
+        self._loaded_at = None
 
         for path in [self._index_path, self._mapping_path, self._meta_path]:
             if path.exists():

@@ -316,6 +316,45 @@ def _can_drop_columns() -> bool:
     return sqlite3.sqlite_version_info >= DROP_COLUMN_MIN_SQLITE
 
 
+# media_hashes.embedding_updated_at is SQLite's CURRENT_TIMESTAMP: whole
+# seconds, the fraction dropped, so a mark stored as second s happened
+# before s + MARK_RESOLUTION_S.
+MARK_RESOLUTION_S = 1.0
+
+
+def _utc_epoch(stamp: Optional[str]) -> Optional[float]:
+    """Epoch seconds of a stored UTC timestamp ('YYYY-MM-DD HH:MM:SS', as
+    CURRENT_TIMESTAMP writes it); None when absent or unreadable."""
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _loaded_after_mark(embedded_at: Optional[str], loaded_at: Optional[float]) -> bool:
+    """True when an index loaded from disk at ``loaded_at`` (taken before
+    its files were read: ``FaissIndexManager.loaded_at``) holds the row the
+    embedding worker saved for a file it then marked embedded at
+    ``embedded_at``: the worker marks only after the save, so the save
+    happened before ``embedded_at + MARK_RESOLUTION_S``. Unknown either way
+    is False. The server's in-memory index is replaced only after a run
+    completes, so it can lag the marks."""
+    mark = _utc_epoch(embedded_at)
+    if mark is None or loaded_at is None:
+        return False
+    return mark + MARK_RESOLUTION_S <= loaded_at
+
+
+# The delete-time read of the server's in-memory FAISS index:
+# fn(native_path) -> (vector, CLIP model key, the index's loaded_at) | None.
+EmbeddingLookup = Callable[[str], Optional[Tuple[Any, str, Optional[float]]]]
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})"))
 
@@ -592,10 +631,9 @@ class DatabaseManager:
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.db_file = self.db_path / "metascan.db"
         self.lock = Lock()
-        # fn(native_path) -> (vector, model_key) | None; see set_embedding_lookup.
-        self._embedding_lookup: Optional[Callable[[str], Optional[Tuple[Any, str]]]] = (
-            None
-        )
+        # fn(native_path) -> (vector, model_key, loaded_at) | None; see
+        # set_embedding_lookup.
+        self._embedding_lookup: Optional[EmbeddingLookup] = None
         # What a new tombstone row must still fill; set by _init_database.
         self._tombstone_fill: Tuple[str, Tuple[int, ...]] = ("", ())
 
@@ -1678,12 +1716,14 @@ class DatabaseManager:
             # own file's vector (a row holds the last file embedded at the
             # path): embedded_model is the CLIP model the file was embedded
             # with when it was deleted (its media_hashes row), '' when it
-            # never was, NULL on a tombstone written before the column (or
-            # restored from a full-clean snapshot: no evidence either way);
-            # path_rewritten is set by the embedding worker on every
-            # tombstone of each path whose row it appends or overwrites
-            # (mark_tombstone_paths_rewritten), after which the row is never
-            # read for them.
+            # never was, NULL when nothing is known (a tombstone written
+            # before the column, one restored from a full-clean snapshot, or
+            # a mark with no time: one made before the fix, v7); embedded_at
+            # is that mark's time (media_hashes.embedding_updated_at), read
+            # against the loaded index's loaded_at; path_rewritten is set by
+            # the embedding worker on every tombstone of each path whose row
+            # it appends or overwrites (mark_tombstone_paths_rewritten),
+            # after which the row is never read for them.
             for _col, _ddl in (
                 ("grade", _grade_ddl),
                 ("judged_at", "judged_at TEXT"),
@@ -1694,6 +1734,7 @@ class DatabaseManager:
                 ("thumb_path", "thumb_path TEXT"),
                 ("scorecard_id", "scorecard_id TEXT"),
                 ("embedded_model", "embedded_model TEXT"),
+                ("embedded_at", "embedded_at TEXT"),
                 ("path_rewritten", "path_rewritten INTEGER NOT NULL DEFAULT 0"),
             ):
                 _idempotent_add_column(
@@ -2414,7 +2455,8 @@ class DatabaseManager:
 
     def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
         """user_version 6 -> 7: live files on a deleted file's path are
-        embedded again. ``conn`` must have nothing uncommitted.
+        embedded again, and the marks made before it are not evidence.
+        ``conn`` must have nothing uncommitted.
 
         ``FaissIndexManager.add`` used to keep a path's first vector, so a
         file that landed on a deleted file's path kept the deleted file's
@@ -2422,11 +2464,16 @@ class DatabaseManager:
         incremental build looked at it again. Every live path that also has
         a tombstone (it had another life) gets ``has_embedding = 0`` --
         an unreadable file's -1 too, so it is retried -- and the next
-        incremental build re-embeds it, overwriting the row. It only resets
-        flags, so there is no backup; one transaction, the version re-read
-        under the write lock (a concurrent open migrates once). The count
-        line (never a path) is INFO, DEBUG when nothing was reset. A
-        failure rolls it back (still version 6) and raises
+        incremental build re-embeds it, overwriting the row. A path whose
+        earlier file left no tombstone cannot be told apart, so every other
+        ``has_embedding = 1`` row loses its ``embedding_updated_at``: a
+        mark with no time is no evidence (``_write_tombstones`` writes such
+        a tombstone ``embedded_model`` NULL: the old guards, no capture),
+        and the fixed worker's marks carry a time again. It only resets
+        flags and times, so there is no backup; one transaction, the
+        version re-read under the write lock (a concurrent open migrates
+        once). The counts line (never a path) is INFO, DEBUG when both are
+        zero. A failure rolls it back (still version 6) and raises
         ``MigrationError``; the next open retries."""
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -2438,6 +2485,10 @@ class DatabaseManager:
                 "WHERE has_embedding != 0 "
                 "AND file_path IN (SELECT file_path FROM media_tombstones) "
                 "AND file_path IN (SELECT file_path FROM media)"
+            ).rowcount
+            untimed = conn.execute(
+                "UPDATE media_hashes SET embedding_updated_at = NULL "
+                "WHERE has_embedding = 1 AND embedding_updated_at IS NOT NULL"
             ).rowcount
             conn.execute("PRAGMA user_version = 7")
             conn.commit()
@@ -2454,11 +2505,13 @@ class DatabaseManager:
                 "report this message."
             ) from exc
         logger.log(
-            logging.INFO if reset else logging.DEBUG,
+            logging.INFO if reset or untimed else logging.DEBUG,
             "Database upgraded to version 7 (stale CLIP rows on reused paths): "
             "%d live file(s) on a deleted file's path will be embedded again "
-            "by the next index build",
+            "by the next index build; %d earlier mark(s) are no evidence for "
+            "a deleted file's vector",
             reset,
+            untimed,
         )
 
     def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
@@ -4150,17 +4203,19 @@ class DatabaseManager:
                 to_native_path(p) for p in posix if not self._still_referenced(conn, p)
             ]
 
-    def set_embedding_lookup(
-        self, fn: Optional[Callable[[str], Optional[Tuple[Any, str]]]]
-    ) -> None:
+    def set_embedding_lookup(self, fn: Optional[EmbeddingLookup]) -> None:
         """Install the callable tombstones use to snapshot a deleted item's
-        embedding: ``fn(native_path)`` returns ``(vector, model_key)`` or
-        None; the vector is kept in ``tombstone_vectors`` under that model.
-        It is called only for a file its ``media_hashes`` row says was
-        embedded, and its answer is kept only when ``model_key`` is the
-        model the file was embedded with (``_insert_tombstone``). It runs
-        while the DB lock is held, so it must be a fast in-memory lookup.
-        Default: no lookup (the tombstone gets no vector)."""
+        embedding: ``fn(native_path)`` returns ``(vector, model_key,
+        loaded_at)`` -- the in-memory index's row, its CLIP model and when
+        that index was loaded (``FaissIndexManager.loaded_at``) -- or None;
+        the vector is kept in ``tombstone_vectors`` under that model. It is
+        called only for a file its ``media_hashes`` row says was embedded
+        (with a time), and its answer is kept only when ``model_key`` is the
+        model the file was embedded with and the index was loaded after the
+        file was marked (``_loaded_after_mark``; ``_insert_tombstone``). It
+        runs while the DB lock is held, so it must be a fast in-memory
+        lookup that never loads from disk. Default: no lookup (the
+        tombstone gets no vector)."""
         self._embedding_lookup = fn
 
     def _write_tombstones(
@@ -4182,9 +4237,11 @@ class DatabaseManager:
         metadata prompt and model names; and ``thumbs[path]``, the
         thumbnail the caller archived from the live file
         (``training_archive``), relative to the data dir. Its
-        ``embedded_model`` comes from the ``media_hashes`` row (which
-        cascades away with the media row): the CLIP model the file was
-        embedded with, '' when it was not."""
+        ``embedded_model`` / ``embedded_at`` come from the ``media_hashes``
+        row (which cascades away with the media row): the CLIP model the
+        file was embedded with and when it was marked, '' when it was not
+        embedded, NULL when its mark has no time (made before the fix:
+        v7)."""
         for path in posix_paths:
             judgment = conn.execute(
                 "SELECT grade, reasons, seen_at, judged_at, confirmed_at "
@@ -4228,11 +4285,18 @@ class DatabaseManager:
             ):
                 prompt, model_names = self._library_prompt(conn, path)
             hashes = conn.execute(
-                "SELECT clip_model, has_embedding FROM media_hashes "
-                "WHERE file_path = ?",
+                "SELECT clip_model, has_embedding, embedding_updated_at "
+                "FROM media_hashes WHERE file_path = ?",
                 (path,),
             ).fetchone()
-            embedded = hashes is not None and hashes["has_embedding"] == 1
+            embedded_model: Optional[str] = ""
+            embedded_at: Optional[str] = None
+            if hashes is not None and hashes["has_embedding"] == 1:
+                if hashes["clip_model"] and hashes["embedding_updated_at"]:
+                    embedded_model = str(hashes["clip_model"])
+                    embedded_at = str(hashes["embedding_updated_at"])
+                else:
+                    embedded_model = None  # marked, but nothing says when
             self._insert_tombstone(
                 conn,
                 path,
@@ -4247,7 +4311,8 @@ class DatabaseManager:
                 brief_model=brief["model"] if brief is not None else None,
                 prompt=prompt,
                 model_name=model_names,
-                embedded_model=(str(hashes["clip_model"] or "") if embedded else ""),
+                embedded_model=embedded_model,
+                embedded_at=embedded_at,
             )
 
     @staticmethod
@@ -4296,18 +4361,22 @@ class DatabaseManager:
         prompt: Optional[str] = None,
         model_name: Optional[str] = None,
         embedded_model: Optional[str] = None,
+        embedded_at: Optional[str] = None,
     ) -> None:
         """Insert one media_tombstones row. ``judgment`` is a live
         media_judgments row or a version-2 snapshot row (both carry
         ``grade``); the keyword fields are stored as given (see
         ``_write_tombstones``), and ``scorecard_id`` comes from the T2I
-        lineage. ``embedded_model`` is the evidence for reading the FAISS
-        index by this path: the CLIP model the file was embedded with, ''
-        when it never was, None when nothing is known (a snapshot restore).
+        lineage. ``embedded_model`` / ``embedded_at`` are the evidence for
+        reading the FAISS index by this path: the CLIP model the file was
+        embedded with and when it was marked, '' when it never was, None
+        when nothing is known (a snapshot restore, a mark with no time).
         Only when it names the in-memory index's model (the installed
-        lookup) is the item's vector there read, into ``tombstone_vectors``
-        under that model; the legacy single-vector columns are no longer
-        written. Caller holds the lock."""
+        lookup) and that index was loaded after the mark is the item's
+        vector there read, into ``tombstone_vectors`` under that model; a
+        skipped read keeps the evidence for the backfill on a later load.
+        The legacy single-vector columns are no longer written. Caller
+        holds the lock."""
         lineage: Optional[Dict[str, Any]] = None
         for key, row in (("t2i", t2i), ("i2v", i2v)):
             if row is not None:
@@ -4316,16 +4385,24 @@ class DatabaseManager:
                 break
         blob: Optional[bytes] = None
         model_key: Optional[str] = None
-        if embedded_model and self._embedding_lookup is not None:
+        if (
+            embedded_model
+            and _utc_epoch(embedded_at) is not None
+            and self._embedding_lookup is not None
+        ):
             try:
                 found = self._embedding_lookup(to_native_path(path))
-                # The file's own row is in the index of the model it was
-                # embedded with; an index of another model is not known to
-                # hold it at this path.
-                if found is not None and found[1] == embedded_model:
-                    vector, key = found
-                    blob = np.asarray(vector).astype(np.float32).tobytes()
-                    model_key = key
+                if found is not None:
+                    vector, key, loaded_at = found
+                    # The file's own row is in the index of the model it was
+                    # embedded with, from the save before its mark: an index
+                    # of another model, or one loaded before that save, is
+                    # not known to hold it at this path.
+                    if key == embedded_model and _loaded_after_mark(
+                        embedded_at, loaded_at
+                    ):
+                        blob = np.asarray(vector).astype(np.float32).tobytes()
+                        model_key = key
             except Exception as e:
                 logger.debug(f"Tombstone embedding lookup failed for {path}: {e}")
                 blob, model_key = None, None
@@ -4340,8 +4417,8 @@ class DatabaseManager:
             "is_favorite, grade, reasons, categories, seen_at, "
             "judged_at, confirmed_at, lineage, "
             "brief, brief_model, prompt, model_name, thumb_path, scorecard_id, "
-            f"embedded_model{fill_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            f"?, ?, ?, ?, ?, ?, ?, ?{', ?' * len(fill_values)})",
+            f"embedded_model, embedded_at{fill_columns}) VALUES (?, ?, ?, ?, ?, "
+            f"?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{', ?' * len(fill_values)})",
             (
                 path,
                 now,
@@ -4360,6 +4437,7 @@ class DatabaseManager:
                 thumb_path,
                 scorecard_id if isinstance(scorecard_id, str) else None,
                 embedded_model,
+                embedded_at,
                 *fill_values,
             ),
         )
@@ -4371,10 +4449,13 @@ class DatabaseManager:
                 (cur.lastrowid, model_key, blob, now),
             )
 
-    def tombstones_for_vector_backfill(self, model_key: str) -> List[Tuple[int, str]]:
+    def tombstones_for_vector_backfill(
+        self, model_key: str, loaded_at: Optional[float]
+    ) -> List[Tuple[int, str]]:
         """``(id, posix file_path)`` of the tombstones that may take the
-        vector a loaded FAISS index of CLIP model ``model_key`` holds at
-        their path. Oldest first.
+        vector a FAISS index of CLIP model ``model_key``, loaded from disk
+        at ``loaded_at`` (``FaissIndexManager.loaded_at``), holds at their
+        path. Oldest first.
 
         A row there is the vector of the last file embedded at the path,
         which after a delete may be another file's (Review Focus 5), so a
@@ -4384,9 +4465,13 @@ class DatabaseManager:
           (``path_rewritten = 0``: the embedding worker stamps every
           tombstone of each path it appends or overwrites), and
         * its file was embedded with ``model_key`` when it was deleted
-          (``embedded_model``) and it has no vector for that model yet; or
-        * it predates that evidence (``embedded_model`` NULL: written before
-          the column, or restored from a full-clean snapshot) and passes the
+          (``embedded_model``), the index was loaded after that mark
+          (``embedded_at``, ``_loaded_after_mark``: an index loaded earlier
+          may hold another file's row at the path) and it has no vector for
+          that model yet; or
+        * it has no evidence (``embedded_model`` NULL: written before the
+          column, restored from a full-clean snapshot, or deleted with a
+          mark from before the fix) and passes the
           old guards: no vector for any CLIP model (an index of another
           model was built after the file was gone), no archived thumbnail
           (the re-embedder computes its vector from its own image), and a
@@ -4397,8 +4482,8 @@ class DatabaseManager:
         is never listed."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT t.id, t.file_path, t.embedded_model, t.path_rewritten, "
-                "t.thumb_path IS NOT NULL AS archived, "
+                "SELECT t.id, t.file_path, t.embedded_model, t.embedded_at, "
+                "t.path_rewritten, t.thumb_path IS NOT NULL AS archived, "
                 "EXISTS (SELECT 1 FROM media m WHERE m.file_path = t.file_path) "
                 "AS live, "
                 "EXISTS (SELECT 1 FROM tombstone_vectors v "
@@ -4417,7 +4502,9 @@ class DatabaseManager:
                 return False
             if r["embedded_model"] is not None:
                 return bool(
-                    r["embedded_model"] == model_key and not r["has_model_vector"]
+                    r["embedded_model"] == model_key
+                    and not r["has_model_vector"]
+                    and _loaded_after_mark(r["embedded_at"], loaded_at)
                 )
             return (
                 not (r["has_vector"] or r["archived"] or r["live"])
@@ -8899,7 +8986,11 @@ class DatabaseManager:
             return []
 
     def mark_embedded(self, file_paths: List[str], clip_model: str) -> int:
-        """Mark files as having CLIP embeddings in the index."""
+        """Mark files as having CLIP embeddings in the index, now
+        (``embedding_updated_at``). The embedding worker calls it only after
+        the index holding their rows was saved: the time is the evidence a
+        deleted file's row is in any index loaded after it
+        (``_loaded_after_mark``)."""
         marked = 0
         try:
             with self.lock:

@@ -4,21 +4,29 @@ of the last file embedded at the path, which after a delete may be another
 file's (Review Focus 5).
 
 * At deletion (the installed in-memory lookup): only when the file's
-  ``media_hashes`` row says it was embedded with the index's CLIP model.
-  The model goes on the tombstone (``embedded_model``; ``''`` when the file
-  was never embedded, NULL on a tombstone written before this evidence).
+  ``media_hashes`` row says it was embedded with the index's CLIP model,
+  and only from an index loaded after that mark. The evidence goes on the
+  tombstone: ``embedded_model`` (``''`` when the file was never embedded,
+  NULL when nothing is known -- a tombstone written before this evidence,
+  or a mark older than the fix, which carries no time) and ``embedded_at``
+  (the mark's time, ``media_hashes.embedding_updated_at``).
 * By the backfill once an index loads (``tombstones_for_vector_backfill``),
   into ``tombstone_vectors`` under the index's model: only while nothing
   has been embedded at the path since the tombstone was written
   (``path_rewritten = 0``; the embedding worker stamps it), and either the
-  file was embedded with the index's model, or the tombstone predates that
-  evidence and passes the old guards -- no vector for any model, no
-  archived thumbnail, a path no live media row or other tombstone holds.
+  file was embedded with the index's model before the index was loaded,
+  or the tombstone has no evidence (NULL) and passes the old guards -- no
+  vector for any model, no archived thumbnail, a path no live media row or
+  other tombstone holds.
+
+A mark is stored to the second (SQLite ``CURRENT_TIMESTAMP``), so an index
+counts as loaded after it only from the next whole second on.
 
 The worker-side stamping and the review's sequences are in
 ``tests/test_faiss_vector_replacement.py``."""
 
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +37,10 @@ from backend.services import judgments_service
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 from metascan.utils.path_utils import to_native_path
+
+
+# An in-memory index loaded after every mark these tests make.
+LATER = time.time() + 3600
 
 
 @pytest.fixture
@@ -51,10 +63,11 @@ def _media(path: str) -> Media:
 
 
 class FakeFaiss:
-    def __init__(self, vectors, model_key="clip-medium", loaded=True):
+    def __init__(self, vectors, model_key="clip-medium", loaded=True, loaded_at=LATER):
         self.vectors = vectors
         self.meta = {"model_key": model_key}
         self.is_loaded = loaded
+        self.loaded_at = loaded_at
         self.calls = []
 
     def get_embedding(self, key):
@@ -97,8 +110,18 @@ def _vector(db, tomb_id, model):
     return None if blob is None else np.frombuffer(blob, dtype=np.float32)
 
 
-def _listed(db, model="clip-medium"):
-    return [t for t, _ in db.tombstones_for_vector_backfill(model)]
+def _listed(db, model="clip-medium", loaded_at=LATER):
+    return [t for t, _ in db.tombstones_for_vector_backfill(model, loaded_at)]
+
+
+def _mark_epoch(db, path) -> float:
+    """When ``path`` was marked embedded, as stored (to the second)."""
+    with db._get_connection() as conn:
+        (stamp,) = conn.execute(
+            "SELECT embedding_updated_at FROM media_hashes WHERE file_path = ?",
+            (path,),
+        ).fetchone()
+    return datetime.fromisoformat(stamp).replace(tzinfo=timezone.utc).timestamp()
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +142,27 @@ def test_deletion_records_the_model_the_file_was_embedded_with(db):
     db.mark_embedded(["/p/cleared.png"], "clip-medium")
     db.clear_embeddings()  # "Rebuild all" (or a CLIP switch) before it got there
     cleared = _graded_delete(db, "/p/cleared.png")
+    # A mark without a time (one v7 found from before the fix): no evidence.
+    db.save_media(_media("/p/untimed.png"))
+    db.mark_embedded(["/p/untimed.png"], "clip-medium")
+    with db.lock, db._get_connection() as conn:
+        conn.execute("UPDATE media_hashes SET embedding_updated_at = NULL")
+        conn.commit()
+    untimed = _graded_delete(db, "/p/untimed.png")
 
-    assert {
-        t: _tombstone(db, t)["embedded_model"]
-        for t in (embedded, never, hashed, skipped, cleared)
-    } == {embedded: "clip-medium", never: "", hashed: "", skipped: "", cleared: ""}
+    evidence = {
+        t: (_tombstone(db, t)["embedded_model"], _tombstone(db, t)["embedded_at"])
+        for t in (embedded, never, hashed, skipped, cleared, untimed)
+    }
+    assert evidence[embedded][0] == "clip-medium"
+    assert datetime.fromisoformat(evidence[embedded][1])  # the mark's time
+    assert {t: e for t, e in evidence.items() if t != embedded} == {
+        never: ("", None),
+        hashed: ("", None),
+        skipped: ("", None),
+        cleared: ("", None),
+        untimed: (None, None),
+    }
     assert {t["path_rewritten"] for t in db.list_tombstones()} == {0}
 
 
@@ -139,13 +178,15 @@ def test_a_restored_snapshot_tombstone_has_no_evidence(db):
     db.truncate_all_data()
     calls = []
     db.set_embedding_lookup(
-        lambda p: calls.append(p) or (np.ones(32, dtype=np.float32), "clip-medium")
+        lambda p: calls.append(p)
+        or (np.ones(32, dtype=np.float32), "clip-medium", LATER)
     )
 
     db.restore_taste_state(snapshot, tombstone_missing=True)
 
     [t] = db.list_tombstones()
-    assert t["embedded_model"] is None and t["path_rewritten"] == 0
+    assert t["embedded_model"] is None and t["embedded_at"] is None
+    assert t["path_rewritten"] == 0
     assert db.get_tombstone_vectors(t["id"]) == {} and calls == []
     assert _listed(db) == [t["id"]]
 
@@ -158,7 +199,7 @@ def test_a_restored_snapshot_tombstone_has_no_evidence(db):
 def test_delete_time_capture_needs_the_file_embedded_with_the_index_model(db):
     vec = np.arange(32, dtype=np.float32)
     calls = []
-    db.set_embedding_lookup(lambda p: calls.append(p) or (vec, "clip-medium"))
+    db.set_embedding_lookup(lambda p: calls.append(p) or (vec, "clip-medium", LATER))
 
     never = _graded_delete(db, "/p/never.png")
     other = _graded_delete(db, "/p/other.png", embedded_with="clip-small")
@@ -173,9 +214,31 @@ def test_delete_time_capture_needs_the_file_embedded_with_the_index_model(db):
     assert np.array_equal(_vector(db, same, "clip-medium"), vec)
 
 
+def test_delete_time_capture_needs_an_index_loaded_after_the_mark(db):
+    """The server's in-memory index is replaced only after an embedding run
+    completes, so it can predate a file's mark (and with it the row the
+    worker wrote for the file). Only an index loaded from the second after
+    the mark on is read; a skipped capture keeps its evidence for the
+    backfill on the next load."""
+    vec = np.arange(32, dtype=np.float32)
+    for name, offset, kept in (
+        ("same_second", 0.9, False),
+        ("next_second", 1.0, True),
+        ("unknown", None, False),
+    ):
+        path = f"/p/{name}.png"
+        db.save_media(_media(path))
+        db.mark_embedded([path], "clip-medium")
+        loaded = None if offset is None else _mark_epoch(db, path) + offset
+        db.set_embedding_lookup(lambda p, at=loaded: (vec, "clip-medium", at))
+        t = _graded_delete(db, path)
+        assert (db.get_tombstone_vectors(t) != {}) is kept, name
+        assert _tombstone(db, t)["embedded_model"] == "clip-medium"
+
+
 def test_delete_time_vector_is_kept_per_model_and_never_overwritten(db):
     vec = np.arange(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (vec, "clip-small"))
+    db.set_embedding_lookup(lambda p: (vec, "clip-small", LATER))
     t = _graded_delete(db, "/p/a.png", embedded_with="clip-small")
     db.set_embedding_lookup(None)
     (row,) = db.list_tombstones()
@@ -228,6 +291,28 @@ def test_backfill_with_evidence_fills_an_archived_tombstone(db):
     assert db.tombstones_needing_vectors("clip-large") == [(t, thumb)]
 
 
+def test_backfill_with_evidence_needs_an_index_loaded_after_the_mark(db):
+    """The evidence is about the index on disk once the file was marked;
+    an index loaded before that (in the mark's second or earlier) may hold
+    another file's row at the path. Tombstones without evidence do not
+    depend on the load time."""
+    evidence = _graded_delete(db, "/p/a.png", embedded_with="clip-medium")
+    mark = _tombstone(db, evidence)["embedded_at"]
+    marked = datetime.fromisoformat(mark).replace(tzinfo=timezone.utc).timestamp()
+    legacy = _graded_delete(db, "/p/b.png")
+    _make_legacy(db, legacy)
+
+    assert _listed(db, loaded_at=marked + 0.5) == [legacy]
+    assert _listed(db, loaded_at=None) == [legacy]
+    assert _listed(db, loaded_at=marked + 1) == [evidence, legacy]
+    early = FakeFaiss(
+        {"/p/a.png": np.ones(32, dtype=np.float32)}, loaded_at=marked + 0.5
+    )
+    assert judgments_service.backfill_tombstone_embeddings(db, early) == 0
+    assert db.get_tombstone_vectors(evidence) == {}
+    assert "/p/a.png" not in early.calls
+
+
 def test_backfill_never_reads_the_path_of_a_file_never_embedded(db):
     """``embedded_model = ''``: whatever the index holds at the path, it
     was not written for this file -- even when nothing else ever lived
@@ -245,7 +330,7 @@ def test_backfill_never_borrows_across_models(db):
     captured then): a "medium" index built afterwards holds at its path
     only another file's vector, if any."""
     small = np.arange(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (small, "clip-small"))
+    db.set_embedding_lookup(lambda p: (small, "clip-small", LATER))
     t = _graded_delete(db, "/p/switched.png", embedded_with="clip-small")
     db.set_embedding_lookup(None)
     fm = FakeFaiss({"/p/switched.png": np.full(32, 9.0, dtype=np.float32)})
@@ -299,7 +384,7 @@ def test_legacy_backfill_lists_only_tombstones_without_any_vector(db):
     a = _graded_delete(db, "/p/a.png")
     b = _graded_delete(db, "/p/b.png", "fail")
     _make_legacy(db, a, b)
-    assert db.tombstones_for_vector_backfill("clip-medium") == [
+    assert db.tombstones_for_vector_backfill("clip-medium", LATER) == [
         (a, "/p/a.png"),
         (b, "/p/b.png"),
     ]
@@ -307,14 +392,14 @@ def test_legacy_backfill_lists_only_tombstones_without_any_vector(db):
     assert db.add_tombstone_vectors([(a, "clip-x", vec.tobytes())]) == 1
     # A vector for any CLIP model takes it off the list, whatever the index's
     # model is: it was deleted before an index of another model was built.
-    assert db.tombstones_for_vector_backfill("clip-medium") == [(b, "/p/b.png")]
+    assert db.tombstones_for_vector_backfill("clip-medium", LATER) == [(b, "/p/b.png")]
 
 
 def test_legacy_backfill_fills_missing_vectors_from_native_or_posix_key(db):
     have = np.arange(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (have, "clip-medium"))
+    db.set_embedding_lookup(lambda p: (have, "clip-medium", LATER))
     already = _graded_delete(db, "/p/already.png", embedded_with="clip-medium")
-    db.set_embedding_lookup(lambda p: (have, "clip-small"))
+    db.set_embedding_lookup(lambda p: (have, "clip-small", LATER))
     small_only = _graded_delete(db, "/p/small_only.png", embedded_with="clip-small")
     db.set_embedding_lookup(None)
     a = _graded_delete(db, "/p/a.png")
@@ -363,7 +448,7 @@ def test_legacy_backfill_leaves_archived_tombstones_to_the_reembedder(db):
     _make_legacy(db, t)
     fm = FakeFaiss({"/p/kept.png": np.ones(32, dtype=np.float32)})
 
-    assert db.tombstones_for_vector_backfill("clip-medium") == []
+    assert db.tombstones_for_vector_backfill("clip-medium", LATER) == []
     assert judgments_service.backfill_tombstone_embeddings(db, fm) == 0
     assert db.get_tombstone_vectors(t) == {} and fm.calls == []
     assert db.tombstones_needing_vectors("clip-medium") == [(t, thumb)]

@@ -1,6 +1,7 @@
 """Tests for the embedding manager and FAISS index."""
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -182,6 +183,34 @@ class TestFaissIndexManager(unittest.TestCase):
         np.testing.assert_allclose(
             self.manager.get_embedding("a.png"), np.eye(32, dtype=np.float32)[0]
         )
+
+    def test_load_records_when_it_began_reading_the_files(self):
+        # A tombstone reads this index by path only for a file marked
+        # embedded before the load began: the worker marks after it saves.
+        from unittest import mock
+
+        from metascan.core import embedding_manager as em
+
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.assertIsNone(self.manager.loaded_at)  # built in memory
+        self.manager.add("a.png", _norm(np.eye(32, dtype=np.float32)[0]))
+        self.assertTrue(self.manager.save())
+        loaded = FaissIndexManager(self.index_dir)
+        self.assertIsNone(loaded.loaded_at)
+        reads = []
+        real_read = em._faiss.read_index
+
+        def read_index(path):
+            reads.append(time.time())
+            return real_read(path)
+
+        before = time.time()
+        with mock.patch.object(em._faiss, "read_index", read_index):
+            self.assertTrue(loaded.load())
+        self.assertTrue(before <= loaded.loaded_at <= reads[0])
+        empty = FaissIndexManager(self.index_dir / "nothing_here")
+        self.assertFalse(empty.load())
+        self.assertIsNone(empty.loaded_at)
 
     def test_add_batch_refuses_vectors_of_the_wrong_size_or_count(self):
         # Checked before any row is touched: the index is left as it was.

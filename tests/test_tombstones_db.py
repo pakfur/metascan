@@ -43,7 +43,7 @@ def test_judged_item_tombstone_has_judgment_and_embedding(db):
     db.set_grade("/p/a.png", "fail")
     db.set_reason("/p/a.png", "composition", True)
     vec = np.arange(32, dtype=np.float32)
-    db.set_embedding_lookup(lambda p: (vec, "clip-medium"))
+    db.set_embedding_lookup(lambda p: (vec, "clip-medium", float("inf")))
     db.delete_media(Path("/p/a.png"))
     [t] = db.list_tombstones()
     assert (t["grade"], json.loads(t["reasons"])) == ("fail", ["composition"])
