@@ -315,7 +315,11 @@ def test_completed_full_clean_keeps_briefs_and_prompts_of_vanished_images(
 def test_a_full_clean_tombstone_is_the_one_a_delete_writes(monkeypatch, tmp_path):
     """The same library, its files gone two ways: deleted through the app,
     or vanished before a completed full clean. Both write the same
-    tombstones (no thumbnail either way: the DB delete was given none)."""
+    tombstones (no thumbnail either way: the DB delete was given none) but
+    for the FAISS evidence: a delete reads it from the file's media_hashes
+    row ('' = never embedded), while the full clean's truncate took that
+    row, so its tombstones carry none (NULL: the old guards, no capture)."""
+    evidence = ("embedded_model", "embedded_at", "path_rewritten")
     deleted = DatabaseManager(tmp_path / "deleted")
     cleaned = DatabaseManager(tmp_path / "cleaned")
     try:
@@ -326,13 +330,21 @@ def test_a_full_clean_tombstone_is_the_one_a_delete_writes(monkeypatch, tmp_path
         _full_clean(monkeypatch, cleaned)
 
         def rows(db):
+            skip = ("id", "deleted_at", *evidence)
             return {
-                path: {k: v for k, v in t.items() if k not in ("id", "deleted_at")}
+                path: {k: v for k, v in t.items() if k not in skip}
                 for path, t in _tombstones(db).items()
+            }
+
+        def evidence_of(db):
+            return {
+                p: tuple(t[k] for k in evidence) for p, t in _tombstones(db).items()
             }
 
         assert sorted(rows(cleaned)) == sorted(VANISHED)
         assert rows(cleaned) == rows(deleted)
+        assert evidence_of(deleted) == dict.fromkeys(VANISHED, ("", None, 0))
+        assert evidence_of(cleaned) == dict.fromkeys(VANISHED, (None, None, 0))
     finally:
         deleted.close()
         cleaned.close()
