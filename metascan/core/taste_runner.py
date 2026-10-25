@@ -30,7 +30,12 @@ from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
 
-LABELS_VERSION = 1
+# The label rules and labels-doc format the worker trains on. Must equal
+# ``metascan.workers.taste_worker.LABELS_VERSION``; every model records it
+# (``taste_models.labels_version``) and the service retrains an active model
+# of an older version. 1: favorite vs pass or seen. 2: ✓ pass vs ✗ fail
+# grades only, and each row says whether it is a tombstone.
+LABELS_VERSION = 2
 KEEP_PARAMS = 5
 WORKER_TIMEOUT_S = 1800.0
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -44,6 +49,9 @@ def _labels_doc(ls: LabelSet) -> Dict[str, Any]:
             {
                 "key": r.key,
                 "file_path": r.file_path,
+                # A tombstone may use only its own stored vector: the
+                # index's vector for its path may be another file's now.
+                "tombstone": r.tombstone,
                 "label": r.label,
                 "weight": r.weight,
                 "categories": list(r.categories),
@@ -76,7 +84,7 @@ def _write_json(path: Path, doc: Dict[str, Any]) -> None:
 def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
     """The worker's ``diversity`` input: every favorited T2I generation
     in the last ``WRITER_WINDOWS`` windows with its window (tombstoned ones
-    carry their stored vector). Blocking."""
+    carry their stored vector, and only that). Blocking."""
     starts = window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS)
     items: List[Dict[str, Any]] = []
     for g in db.generation_outcomes(since=starts[0], include_embeddings=True):
@@ -90,6 +98,7 @@ def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
             {
                 "file_path": g["file_path"],
                 "window_start": start,
+                "tombstone": bool(g.get("tombstone")),
                 "embedding": base64.b64encode(emb).decode("ascii") if emb else None,
                 "embedding_model": g.get("embedding_model"),
             }
@@ -376,6 +385,7 @@ class TasteRunner:
             "half_life_days": half_life_days,
             "params_path": "",
             "error": error,
+            "labels_version": LABELS_VERSION,
         }
         try:
             await asyncio.to_thread(self.db.record_taste_model, row)
@@ -404,6 +414,7 @@ class TasteRunner:
             "params_path": str(params_path),
             "error": None,
             "n_no_vector": int(result.get("n_no_vector") or 0),
+            "labels_version": LABELS_VERSION,
         }
         model_id = await asyncio.to_thread(self.db.record_taste_model, row)
         scores: Dict[str, float] = result.get("scores") or {}

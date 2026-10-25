@@ -1,7 +1,11 @@
 """Training labels, time-decay weights and within-batch pairs for the taste
 scorer. Pure: ``DatabaseManager.taste_training_raw`` reads the rows,
 ``build_label_set`` turns them into labels. Images only -- the DB layer drops
-videos before they get here."""
+videos before they get here.
+
+Only a grade is a label (spec 2026-10-24-pass-fail-grades, "Taste scorer"):
+✓ pass -> 1, ✗ fail -> 0, no grade -> excluded. ★ favorites, views and
+categories alone never are."""
 
 import logging
 import statistics
@@ -9,8 +13,15 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from metascan.core.judgments import (
+    EVENT_GRADE_CLEAR,
+    EVENT_GRADE_FAIL,
+    EVENT_GRADE_PASS,
+    Grade,
+)
+
 DEFAULT_HALF_LIFE_DAYS: float = 180.0
-# A verdict given while a score was on screen is partly an echo of the score.
+# A grade given while a score was on screen is partly an echo of the score.
 SCORE_SHOWN_WEIGHT: float = 0.5
 MIN_POSITIVES: int = 20
 MIN_NEGATIVES: int = 20
@@ -22,16 +33,32 @@ RETRAIN_CHECK_S: int = 30
 # embedding run.
 MAX_NO_VECTOR_SHARE: float = 0.10
 
+# The events whose ``score_shown`` applies to the grade they set.
+GRADE_EVENT_KINDS: Tuple[str, ...] = (
+    EVENT_GRADE_PASS,
+    EVENT_GRADE_FAIL,
+    EVENT_GRADE_CLEAR,
+)
+
+# What counts toward ``RETRAIN_MIN_EVENTS``: the events that change a label
+# or a model input, on images only (``count_training_events_since``). Never
+# ★ favorite / unfavorite (view events), seen, or the pre-grades verdict
+# events left in the log.
 TRAINING_EVENT_KINDS: Tuple[str, ...] = (
-    "favorite",
-    "unfavorite",
-    "pass",
-    "unpass",
+    *GRADE_EVENT_KINDS,
     "reason_on",
     "reason_off",
     "category_on",
     "category_off",
 )
+
+# The score_shown legacy mapping, read for one thing only: a grade the v6
+# migration made from an old verdict has no grade event, so the halving
+# that applied to that verdict still comes from the last legacy event that
+# set it -- a "favorite" for ✓, a "pass" (the old *reject*) for ✗ -- at or
+# before the row's judged_at. Later favorite / unfavorite events are view
+# events and never count.
+LEGACY_GRADE_EVENTS: Dict[Grade, str] = {"pass": "favorite", "fail": "pass"}
 
 _SECONDS_PER_DAY = 86_400.0
 
@@ -48,6 +75,9 @@ class LabelRow:
     batch_id: Optional[str] = None
     embedding: Optional[bytes] = None
     embedding_model: Optional[str] = None
+    # A deleted image: the worker may use only its own stored vector, never
+    # the index's vector for its old path (another file may live there now).
+    tombstone: bool = False
 
 
 @dataclass
@@ -75,34 +105,37 @@ def decay_weight(rated_at: str, now: datetime, half_life_days: float) -> float:
 
 
 def _label_for(row: Dict[str, Any]) -> Optional[int]:
-    if row.get("is_favorite"):
+    """✓ pass -> 1, ✗ fail -> 0, anything else (no grade) -> None."""
+    grade = row.get("grade")
+    if grade == "pass":
         return 1
-    if row.get("passed") or row.get("seen_at"):
+    if grade == "fail":
         return 0
     return None
 
 
 def _label_row(
-    row: Dict[str, Any], key: str, now: datetime, half_life_days: float
+    row: Dict[str, Any],
+    key: str,
+    now: datetime,
+    half_life_days: float,
+    tombstone: bool = False,
 ) -> Tuple[Optional[LabelRow], bool]:
     """``(row, skipped)``; ``skipped`` is True for a labeled row dropped
-    because its timestamp is empty or unparseable."""
+    because its timestamp is empty or unparseable. The clock runs from the
+    last time the grade was set or confirmed; ``grade_score_shown`` (the
+    score on screen then, see ``LEGACY_GRADE_EVENTS``) halves the weight."""
     label = _label_for(row)
     if label is None:
         return None, False
-    rated_at = row.get("confirmed_at") or row.get("judged_at") or row.get("seen_at")
+    rated_at = row.get("confirmed_at") or row.get("judged_at")
     if not rated_at:
         return None, True
     try:
         weight = decay_weight(rated_at, now, half_life_days)
     except ValueError:
         return None, True
-    shown = row.get("last_verdict_score_shown")
-    if shown is None and not row.get("is_favorite") and not row.get("passed"):
-        # Seen-only negative: the score on screen at dwell time anchors it
-        # just as it would a verdict.
-        shown = row.get("seen_score_shown")
-    if shown is not None:
+    if row.get("grade_score_shown") is not None:
         weight *= SCORE_SHOWN_WEIGHT
     return (
         LabelRow(
@@ -114,6 +147,7 @@ def _label_row(
             batch_id=row.get("t2i_batch_id") or row.get("batch_id"),
             embedding=row.get("embedding"),
             embedding_model=row.get("embedding_model"),
+            tombstone=tombstone,
         ),
         False,
     )
@@ -122,8 +156,8 @@ def _label_row(
 def _labeled_rows(
     raw: Dict[str, Any], now: datetime, half_life_days: float, warn: bool = True
 ) -> List[LabelRow]:
-    """Every labeled row: live images, then the newest tombstone per path
-    whose path has no labeled live row. ``warn`` logs skipped rows."""
+    """Every labeled row: live images, then the newest graded tombstone per
+    path whose path has no labeled live row. ``warn`` logs skipped rows."""
     rows: List[LabelRow] = []
     skipped = 0
     for m in raw.get("media", []):
@@ -131,18 +165,24 @@ def _labeled_rows(
         skipped += bad
         if lr is not None:
             rows.append(lr)
-    # A re-scanned path has a live row plus its old tombstone(s): live wins,
-    # and among tombstones only the newest survives.
+    # A re-scanned path has a live row plus its old tombstone(s): a graded
+    # live row wins, and among the graded tombstones only the newest
+    # survives. An ungraded row (seen, ★ or a category only) hides nothing:
+    # viewing a re-added copy must not drop the grade it was deleted with.
     live_paths = {r.file_path for r in rows}
     newest: Dict[str, Dict[str, Any]] = {}
     for t in raw.get("tombstones", []):
+        if _label_for(t) is None:
+            continue
         cur = newest.get(t["file_path"])
         if cur is None or t["id"] > cur["id"]:
             newest[t["file_path"]] = t
     for t in sorted(newest.values(), key=lambda t: t["id"]):
         if t["file_path"] in live_paths:
             continue
-        lr, bad = _label_row(t, f"tombstone:{t['id']}", now, half_life_days)
+        lr, bad = _label_row(
+            t, f"tombstone:{t['id']}", now, half_life_days, tombstone=True
+        )
         skipped += bad
         if lr is not None:
             rows.append(lr)
@@ -167,6 +207,8 @@ def count_labels(raw: Dict[str, Any], now: datetime) -> Tuple[int, int]:
 def build_label_set(
     raw: Dict[str, Any], now: datetime, half_life_days: float
 ) -> LabelSet:
+    """Labels plus the within-T2I-batch pairs: every ✓ of a batch against
+    every ✗ of the same batch, weighted by the lighter of the two."""
     rows = _labeled_rows(raw, now, half_life_days)
     by_batch: Dict[str, List[int]] = {}
     for i, r in enumerate(rows):

@@ -11,6 +11,7 @@ import pytest
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.core.taste_runner import LABELS_VERSION
 
 T0 = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -41,23 +42,45 @@ def model_row(**over: Any) -> Dict[str, Any]:
         "half_life_days": 180.0,
         "params_path": "/nonexistent/taste_1.npz",
         "error": None,
+        "labels_version": LABELS_VERSION,
     }
     row.update(over)
     return row
 
 
 def seed_labels(
-    db: DatabaseManager, n_fav: int = 20, n_pass: int = 20, at: datetime = T0
+    db: DatabaseManager, n_pos: int = 20, n_neg: int = 20, at: datetime = T0
 ) -> None:
-    """``n_fav`` favorites and ``n_pass`` passes, every event logged at ``at``."""
-    for i in range(n_fav):
-        p = f"/lib/f{i:02d}.png"
+    """``n_pos`` ✓ pass and ``n_neg`` ✗ fail grades, every (grade) event
+    logged at ``at``."""
+    for i in range(n_pos):
+        p = f"/lib/pos{i:02d}.png"
         db.save_media(media(p))
-        db.set_verdict(p, "favorite", None, at)
-    for i in range(n_pass):
-        p = f"/lib/p{i:02d}.png"
+        db.set_grade(p, "pass", None, at)
+    for i in range(n_neg):
+        p = f"/lib/neg{i:02d}.png"
         db.save_media(media(p))
-        db.set_verdict(p, "pass", None, at)
+        db.set_grade(p, "fail", None, at)
+
+
+def seed_migrated(
+    db: DatabaseManager, n_pos: int = 20, n_neg: int = 20, at: datetime = T0
+) -> None:
+    """``n_pos`` ✓ and ``n_neg`` ✗ grades as the v6 migration leaves the
+    old ratings: the grade on the judgment row, timestamps ``at``, and no
+    grade event (so nothing counts toward a retrain)."""
+    ts = at.isoformat()
+    rows = [(f"/lib/mpos{i:02d}.png", "pass") for i in range(n_pos)]
+    rows += [(f"/lib/mneg{i:02d}.png", "fail") for i in range(n_neg)]
+    for p, _ in rows:
+        db.save_media(media(p))
+    with db.lock, db._get_connection() as conn:
+        conn.executemany(
+            "INSERT INTO media_judgments (file_path, passed, grade, reasons, "
+            "seen_at, judged_at, confirmed_at) VALUES (?, ?, ?, '[]', ?, ?, ?)",
+            [(p, 1 if g == "fail" else 0, g, ts, ts, ts) for p, g in rows],
+        )
+        conn.commit()
 
 
 class FakeRunner:

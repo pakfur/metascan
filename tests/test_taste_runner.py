@@ -12,7 +12,7 @@ import pytest
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.media import Media
-from metascan.core.taste_runner import TasteRunner
+from metascan.core.taste_runner import LABELS_VERSION, TasteRunner
 
 DIM = 32
 MODEL_KEY = "small"
@@ -35,26 +35,28 @@ def _vec(rng: np.random.Generator, direction: np.ndarray, sign: float) -> np.nda
     return (v / np.linalg.norm(v)).astype(np.float32)
 
 
-def _build(tmp_path: Path, n_fav: int, n_pass: int, indexed=None):
+def _build(tmp_path: Path, n_pos: int, n_neg: int, indexed=None):
+    """``n_pos`` ✓ images (``/l/f..``) and ``n_neg`` ✗ ones (``/l/p..``)
+    with vectors on either side of a direction, a ✓ video, and a deleted ✓
+    image whose vector survives only on its tombstone."""
     rng = np.random.default_rng(7)
     direction = rng.normal(size=DIM)
     direction /= np.linalg.norm(direction)
     db = DatabaseManager(tmp_path / "db")
     index_dir = tmp_path / "similarity"
     vectors = {}
-    for i in range(n_fav):
-        vectors[f"/l/f{i:02d}.png"] = (_vec(rng, direction, 1.0), "favorite")
-    for i in range(n_pass):
-        vectors[f"/l/p{i:02d}.png"] = (_vec(rng, direction, -1.0), "pass")
-    vectors["/l/vid.mp4"] = (_vec(rng, direction, 1.0), "favorite")
-    for path, (_, verdict) in vectors.items():
+    for i in range(n_pos):
+        vectors[f"/l/f{i:02d}.png"] = (_vec(rng, direction, 1.0), "pass")
+    for i in range(n_neg):
+        vectors[f"/l/p{i:02d}.png"] = (_vec(rng, direction, -1.0), "fail")
+    vectors["/l/vid.mp4"] = (_vec(rng, direction, 1.0), "pass")
+    for path, (_, grade) in vectors.items():
         db.save_media(_media(path))
-        db.set_verdict(path, verdict)
-    # A tombstoned favorite: its vector survives only on the tombstone.
+        db.set_grade(path, grade)
     gone_vec = _vec(rng, direction, 1.0)
     db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
     db.save_media(_media("/l/gone.png"))
-    db.set_verdict("/l/gone.png", "favorite")
+    db.set_grade("/l/gone.png", "pass")
     db.delete_media(Path("/l/gone.png"))
     db.set_embedding_lookup(None)
 
@@ -97,7 +99,7 @@ async def test_train_end_to_end(runner, db):
     r = await runner.train(180)
     assert r["status"] == "ok", r
     assert r["holdout_auc"] is not None and r["holdout_auc"] > 0.8
-    # 30 live favorites + the tombstoned one; the video is never a label.
+    # 30 live ✓ + the tombstoned one; the video is never a label.
     assert (r["n_pos"], r["n_neg"]) == (31, 30)
     model_id, scores = db.get_taste_scores()
     assert model_id == r["model_id"]
@@ -109,9 +111,29 @@ async def test_train_end_to_end(runner, db):
     active = db.get_active_taste_model()
     assert active["id"] == r["model_id"]
     assert active["embedding_model"] == MODEL_KEY and active["dim"] == DIM
+    assert active["labels_version"] == LABELS_VERSION == 2
     assert Path(active["params_path"]).exists()
     assert not runner.is_stale(active)
     assert not runner.training
+
+
+def test_runner_and_worker_agree_on_the_labels_version():
+    from metascan.workers import taste_worker
+
+    assert taste_worker.LABELS_VERSION == LABELS_VERSION == 2
+
+
+def test_worker_refuses_labels_of_another_version(tmp_path):
+    from metascan.workers import taste_worker
+
+    db, index_dir, _, _ = _build(tmp_path, 1, 1)
+    db.close()
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps({"version": 1, "rows": [], "pairs": []}))
+    task = {"mode": "train", "labels_path": str(labels), "out_dir": str(tmp_path)}
+    index = taste_worker._Index(index_dir)
+    with pytest.raises(taste_worker.TasteWorkerError, match="labels version 1"):
+        taste_worker._train(task, index, tmp_path)
 
 
 async def test_labels_as_of_is_snapshot_time(runner, db):
@@ -131,7 +153,7 @@ async def test_not_enough_data_spawns_nothing(runner_few, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
     r = await runner_few.train(180)
     assert r["status"] == "not_enough_data"
-    # 5 live favorites + the tombstoned one.
+    # 5 live ✓ + the tombstoned one.
     assert r["missing"] == {"positives": 14, "negatives": 0}
     assert runner_few.db.list_taste_models() == []
     assert not runner_few.training
@@ -222,6 +244,7 @@ def test_record_failed_model_keeps_active(tmp_path):
         "n_pairs": 0,
         "half_life_days": 180.0,
         "params_path": "/x.npz",
+        "labels_version": LABELS_VERSION,
     }
     active_id = db.record_taste_model(base)
     failed_id = db.record_taste_model({**base, "status": "failed", "error": "boom"})
@@ -277,15 +300,15 @@ def test_index_fingerprint_tracks_meta(setup):
 # ---- a partial index (CLIP switch mid-rebuild) ---------------------------
 
 
-def _partial(n_fav_indexed: int, n_pass_indexed: int = 30) -> set:
-    return {f"/l/f{i:02d}.png" for i in range(n_fav_indexed)} | {
-        f"/l/p{i:02d}.png" for i in range(n_pass_indexed)
+def _partial(n_pos_indexed: int, n_neg_indexed: int = 30) -> set:
+    return {f"/l/f{i:02d}.png" for i in range(n_pos_indexed)} | {
+        f"/l/p{i:02d}.png" for i in range(n_neg_indexed)
     }
 
 
 async def test_partial_index_is_not_enough_vectors(tmp_path):
-    # 30 favorites rated, but only 10 have a vector yet (+ the tombstone's
-    # own stored vector = 11 positives with vectors).
+    # 30 ✓ graded, but only 10 have a vector yet (+ the tombstone's own
+    # stored vector = 11 positives with vectors).
     db, index_dir, _, _ = _build(tmp_path, 30, 30, indexed=_partial(10))
     runner = TasteRunner(db, index_dir, tmp_path / "taste")
     try:
@@ -314,8 +337,9 @@ async def test_model_records_labels_without_vectors(tmp_path):
         db.close()
 
 
-def test_n_no_vector_column_added_to_an_existing_table(tmp_path):
-    """A DB created before the column existed keeps its model rows."""
+def test_model_columns_added_to_an_existing_table(tmp_path):
+    """A DB created before n_no_vector / labels_version existed keeps its
+    model rows; they were trained under the first labels."""
     import sqlite3
 
     db = DatabaseManager(tmp_path / "db")
@@ -342,6 +366,7 @@ def test_n_no_vector_column_added_to_an_existing_table(tmp_path):
     try:
         active = db.get_active_taste_model()
         assert active is not None and active["n_no_vector"] == 0
+        assert active["labels_version"] == 1
         assert active["n_pos"] == 20
     finally:
         db.close()
@@ -433,6 +458,9 @@ async def test_diversity_computed_on_train(setup):
     runner, db, index_dir, rng, direction = setup
     now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
     latest = [f"/l/f{i:02d}.png" for i in range(5)]
+    # Diversity still reads ★ favorites (not grades) here.
+    for p in [*latest, "/l/f05.png", "/l/f06.png"]:
+        db.set_favorite_state(p, True)
     for p in latest:
         _set_created(
             db,
@@ -450,7 +478,8 @@ async def test_diversity_computed_on_train(setup):
     _set_created(
         db, db.create_t2i_image(file_path="/l/gen_gone.png"), "2026-10-16 10:00:00"
     )
-    db.set_verdict("/l/gen_gone.png", "favorite")
+    db.set_favorite_state("/l/gen_gone.png", True)
+    db.set_grade("/l/gen_gone.png", "pass")
     db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
     db.delete_media(Path("/l/gen_gone.png"))
     db.set_embedding_lookup(None)
@@ -516,3 +545,123 @@ async def test_worker_diversity_failure_does_not_fail_training(setup, monkeypatc
     r = await runner.train(180)
     assert r["status"] == "ok", r
     assert db.latest_taste_diversity() == []
+
+
+# ---- Review Focus 5: a reused path never lends its vector to a tombstone --
+
+
+def _index_with(index_dir: Path, vectors) -> None:
+    fm = FaissIndexManager(index_dir)
+    if not fm.load():
+        fm.create(DIM, MODEL_KEY)
+    fm.add_batch(list(vectors), np.stack(list(vectors.values())))
+    assert fm.save()
+
+
+async def test_worker_never_borrows_a_vector_by_path(tmp_path):
+    db, index_dir, rng, direction = _build(tmp_path, 30, 30)
+    try:
+        # A ✓ image deleted while its vector existed only for another CLIP
+        # model; a new, ungraded file now lives at the same path and has a
+        # vector in the index -- a ✗-looking one.
+        db.set_embedding_lookup(lambda p: (np.ones(64, dtype=np.float32), "large"))
+        db.save_media(_media("/l/reused.png"))
+        db.set_grade("/l/reused.png", "pass")
+        db.delete_media(Path("/l/reused.png"))
+        db.set_embedding_lookup(None)
+        db.save_media(_media("/l/reused.png"))
+        _index_with(index_dir, {"/l/reused.png": _vec(rng, direction, -1.0)})
+        runner = TasteRunner(db, index_dir, tmp_path / "taste")
+        r = await runner.train(180)
+        assert r["status"] == "ok", r
+        # The tombstone stays a label but has no vector: the index's vector
+        # for its path belongs to the new file.
+        assert (r["n_pos"], r["n_neg"], r["n_no_vector"]) == (31, 30, 1)
+    finally:
+        db.close()
+
+
+def test_training_matrix_reads_only_a_tombstones_own_vector(tmp_path):
+    import base64
+
+    from metascan.workers import taste_worker
+
+    rng = np.random.default_rng(3)
+    direction = rng.normal(size=DIM)
+    in_index = {
+        p: _vec(rng, direction, 1.0)
+        for p in ("/l/none.png", "/l/other.png", "/l/own.png", "/l/live.png")
+    }
+    index_dir = tmp_path / "similarity"
+    _index_with(index_dir, in_index)
+    own = _vec(rng, direction, -1.0)
+
+    def row(key, path, tombstone, emb=None, model=None, label=1):
+        return {
+            "key": key,
+            "file_path": path,
+            "tombstone": tombstone,
+            "label": label,
+            "weight": 1.0,
+            "categories": [],
+            "batch_id": "b1",
+            "embedding": (
+                base64.b64encode(emb.tobytes()).decode() if emb is not None else None
+            ),
+            "embedding_model": model,
+        }
+
+    labels = {
+        "version": LABELS_VERSION,
+        "rows": [
+            row("tombstone:1", "/l/none.png", True),  # no stored vector
+            row(  # a stored vector, for another CLIP model only
+                "tombstone:2",
+                "/l/other.png",
+                True,
+                np.ones(64, dtype=np.float32),
+                "large",
+            ),
+            row("tombstone:3", "/l/own.png", True, own, MODEL_KEY),
+            row("/l/live.png", "/l/live.png", False, label=0),
+            # A row that does not say what it is gets no vector by path.
+            {**row("tombstone:4", "/l/live.png", True), "tombstone": None},
+        ],
+        "pairs": [[0, 3, 1.0], [2, 3, 1.0]],
+    }
+    emb, y, w, cats, pairs, skipped = taste_worker._training_matrix(
+        labels, taste_worker._Index(index_dir)
+    )
+    assert skipped == 3
+    assert y.tolist() == [1.0, 0.0]
+    assert np.allclose(emb[0], own)  # its own vector, not the index's
+    assert np.allclose(emb[1], in_index["/l/live.png"])
+    assert pairs == [(0, 1, 1.0)]
+
+
+async def test_diversity_never_borrows_a_vector_by_path(setup):
+    from datetime import timezone
+
+    runner, db, index_dir, rng, direction = setup
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    # A deleted ★ generation whose vector existed only for another CLIP
+    # model; a library file now lives at its path and is indexed.
+    db.save_media(_media("/l/gen_reused.png"))
+    image_id = db.create_t2i_image(file_path="/l/gen_reused.png")
+    _set_created(db, image_id, "2026-10-16 10:00:00")
+    db.set_favorite_state("/l/gen_reused.png", True)
+    db.set_embedding_lookup(lambda p: (np.ones(64, dtype=np.float32), "large"))
+    assert db.delete_t2i_image(image_id)[0]  # the lineage row goes too
+    db.set_embedding_lookup(None)
+    db.save_media(_media("/l/gen_reused.png"))
+    (gone,) = [
+        g
+        for g in db.generation_outcomes(include_embeddings=True)
+        if g["file_path"] == "/l/gen_reused.png"
+    ]
+    assert gone["tombstone"] is True and gone["favorite"] is True
+    _index_with(index_dir, {"/l/gen_reused.png": _vec(rng, direction, 1.0)})
+    r = await runner.train(180, now=now)
+    assert r["status"] == "ok", r
+    div = {d["window_start"]: d for d in db.latest_taste_diversity()}
+    assert div["2026-10-10"]["n"] == 0

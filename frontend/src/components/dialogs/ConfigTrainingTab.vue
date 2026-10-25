@@ -118,8 +118,8 @@ async function onTasteRetrain() {
       if (detail?.code === 'not_enough_data') {
         const m = detail.missing
         tasteTrainError.value = m
-          ? `Not enough ratings: need ${plural(m.positives, 'more favorite', 'more favorites')} / ${plural(m.negatives, 'more negative', 'more negatives')} (a negative is a pass, or an image seen in the viewer and not favorited).`
-          : 'Not enough ratings to train yet.'
+          ? `Not enough grades: need ${m.positives} more ✓ / ${m.negatives} more ✗ to train.`
+          : 'Not enough grades to train yet.'
       } else if (detail?.code !== 'already_training') {
         tasteTrainError.value = e.message
       }
@@ -298,20 +298,25 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
     <section class="preload-hint taste-block">
       <div class="section-heading">Taste scorer</div>
       <div v-if="tasteStatus?.active_model" class="taste-model">
-        Active model trained {{ tasteTrainedAt }} on
-        <b>{{ tasteStatus.active_model.n_pos }}</b> favorites /
-        <b>{{ tasteStatus.active_model.n_neg }}</b> negatives
-        <span class="taste-hint">(passes, or seen without a favorite)</span>, holdout AUC
-        <b>{{ tasteAuc }}</b>.
+        <template v-if="tasteStatus.labels_outdated">
+          Active model trained {{ tasteTrainedAt }} on favorites and views, before
+          ✓ pass / ✗ fail grades, holdout AUC <b>{{ tasteAuc }}</b>. Its scores stay until it
+          retrains on grades.
+        </template>
+        <template v-else>
+          Active model trained {{ tasteTrainedAt }} on
+          <b>{{ tasteStatus.active_model.n_pos }}</b> ✓ pass /
+          <b>{{ tasteStatus.active_model.n_neg }}</b> ✗ fail, holdout AUC
+          <b>{{ tasteAuc }}</b>.
+        </template>
         <span v-if="tasteStatus.stale" class="err-text">
           Retrain needed (the CLIP model changed).
         </span>
       </div>
       <div v-else-if="tasteStatus" class="taste-model">No taste model yet.</div>
       <div v-if="tasteMissing" class="taste-missing">
-        Need {{ plural(tasteMissing.positives, 'more favorite', 'more favorites') }} /
-        {{ plural(tasteMissing.negatives, 'more negative', 'more negatives') }}
-        <span class="taste-hint">(a pass, or an image seen in the viewer and not favorited)</span>
+        Need {{ tasteMissing.positives }} more ✓ / {{ tasteMissing.negatives }} more ✗
+        <span class="taste-hint">(only grades train it: ★ favorites and views never do)</span>
         <template v-if="tasteStatus?.missing_reason === 'vectors'">
           with a CLIP vector to train: build the similarity index
           (Similarity Settings &rarr; Build Index) and let it finish.

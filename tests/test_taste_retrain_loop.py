@@ -11,13 +11,14 @@ from tests._taste_service_fixtures import (  # noqa: F401
     model_row,
     recorder,
     seed_labels,
+    seed_migrated,
     service,
     taste_config,
 )
 
 
 async def test_loop_waits_for_quiet(service, db, fake_runner):
-    # 40 label events (>= 25) at T0, no model yet.
+    # 40 grade events (>= 25) at T0, no model yet.
     seed_labels(db)
     assert await service.maybe_retrain(now=after(10)) is False
     assert fake_runner.train_calls == []
@@ -32,10 +33,10 @@ async def test_loop_needs_enough_events(service, db, fake_runner):
     for i in range(24):
         p = f"/lib/new{i:02d}.png"
         db.save_media(media(p))
-        db.set_verdict(p, "pass", None, after(5))
+        db.set_grade(p, "fail", None, after(5))
     assert await service.maybe_retrain(now=after(500)) is False
     db.save_media(media("/lib/new24.png"))
-    db.set_verdict("/lib/new24.png", "pass", None, after(5))
+    db.set_grade("/lib/new24.png", "fail", None, after(5))
     assert await service.maybe_retrain(now=after(500)) is True
     await service.wait_idle()
     assert len(fake_runner.train_calls) == 1
@@ -61,7 +62,7 @@ async def test_loop_respects_auto_retrain_off(service, db, fake_runner, taste_co
 
 
 async def test_loop_skips_when_labels_insufficient(service, db, fake_runner):
-    seed_labels(db, n_fav=5, n_pass=30)
+    seed_labels(db, n_pos=5, n_neg=30)
     assert await service.maybe_retrain(now=after(500)) is False
     assert fake_runner.train_calls == []
 
@@ -82,7 +83,7 @@ async def test_failed_auto_retrain_not_repeated_without_new_events(
     # Same inputs: no retry storm every tick.
     assert await service.maybe_retrain(now=after(600)) is False
     db.save_media(media("/lib/x.png"))
-    db.set_verdict("/lib/x.png", "favorite", None, after(550))
+    db.set_grade("/lib/x.png", "pass", None, after(550))
     assert await service.maybe_retrain(now=after(700)) is True
     await service.wait_idle()
     assert len(fake_runner.train_calls) == 2
@@ -98,7 +99,7 @@ async def test_events_during_training_count_next(service, db, fake_runner):
     for i in range(3):
         p = f"/lib/during{i}.png"
         db.save_media(media(p))
-        db.set_verdict(p, "favorite", None, after(20))
+        db.set_grade(p, "pass", None, after(20))
     fake_runner.gate.set()
     await service.wait_idle()
     status = await service.status()
@@ -195,26 +196,40 @@ def test_label_counts_match_build_label_set(db):
 
     from metascan.core.taste_labels import build_label_set, count_labels
 
-    seed_labels(db, n_fav=4, n_pass=3)
-    for p in ("/m/seen.png", "/m/unseen.png", "/m/vid.mp4", "/m/gone.png"):
+    seed_labels(db, n_pos=4, n_neg=3)
+    for p in (
+        "/m/seen.png",
+        "/m/star.png",
+        "/m/unseen.png",
+        "/m/vid.mp4",
+        "/m/gone.png",
+    ):
         db.save_media(media(p))
     db.mark_seen("/m/seen.png")
-    db.set_verdict("/m/vid.mp4", "favorite")
-    # Tombstoned favorite, path never re-added.
-    db.set_verdict("/m/gone.png", "favorite")
+    db.set_favorite_state("/m/star.png", True)
+    db.set_grade("/m/vid.mp4", "pass")
+    # Tombstoned ✓, path never re-added.
+    db.set_grade("/m/gone.png", "pass")
     db.delete_media(Path("/m/gone.png"))
-    # Tombstoned pass, path re-added live and labeled: live wins.
-    db.set_verdict("/lib/f00.png", "pass")
-    db.delete_media(Path("/lib/f00.png"))
-    db.save_media(media("/lib/f00.png"))
-    db.set_verdict("/lib/f00.png", "favorite")
-    # Tombstoned twice: only the newest tombstone counts.
+    # Tombstoned ✗, path re-added live and graded: live wins.
+    db.set_grade("/lib/pos00.png", "fail")
+    db.delete_media(Path("/lib/pos00.png"))
+    db.save_media(media("/lib/pos00.png"))
+    db.set_grade("/lib/pos00.png", "pass")
+    # Tombstoned twice: only the newest graded tombstone counts.
     db.save_media(media("/m/twice.png"))
-    db.set_verdict("/m/twice.png", "favorite")
+    db.set_grade("/m/twice.png", "pass")
     db.delete_media(Path("/m/twice.png"))
     db.save_media(media("/m/twice.png"))
-    db.set_verdict("/m/twice.png", "pass")
+    db.set_grade("/m/twice.png", "fail")
     db.delete_media(Path("/m/twice.png"))
+    # Tombstoned ✗, then a re-added copy only viewed and deleted again.
+    db.save_media(media("/m/viewed.png"))
+    db.set_grade("/m/viewed.png", "fail")
+    db.delete_media(Path("/m/viewed.png"))
+    db.save_media(media("/m/viewed.png"))
+    db.mark_seen("/m/viewed.png")
+    db.delete_media(Path("/m/viewed.png"))
     full = build_label_set(db.taste_training_raw(), after(1000), 180.0)
     assert count_labels(db.taste_label_counts_raw(), after(1000)) == (
         full.n_pos,
@@ -265,7 +280,7 @@ async def test_not_enough_vectors_is_reported_as_missing(
 
 
 async def test_label_shortage_reports_labels_reason(service, db):
-    seed_labels(db, n_fav=5, n_pass=30)
+    seed_labels(db, n_pos=5, n_neg=30)
     st = await service.status()
     assert st["missing"] == {"positives": 15, "negatives": 0}
     assert st["missing_reason"] == "labels"
@@ -352,12 +367,11 @@ async def test_retrain_loop_tick_checks_stale(
 
 
 async def test_first_model_trains_without_25_events(service, db, fake_runner):
-    # 20 favorites (20 events) + 20 seen-only negatives (no training events).
-    seed_labels(db, n_fav=20, n_pass=0)
-    for i in range(20):
-        p = f"/lib/s{i:02d}.png"
-        db.save_media(media(p))
-        db.mark_seen(p, now=after(0))
+    # Grades the v6 migration made from the old ratings carry no grade
+    # event: the first model trains as soon as they suffice.
+    seed_migrated(db, n_pos=20, n_neg=20)
+    db.save_media(media("/lib/last.png"))
+    db.set_grade("/lib/last.png", "fail", None, after(0))  # 1 event
     assert (await service.status())["missing"] is None
     assert await service.maybe_retrain(now=after(10)) is False  # not idle yet
     assert await service.maybe_retrain(now=after(500)) is True
@@ -378,3 +392,76 @@ async def test_score_write_failure_schedules_a_rescore(service, db, fake_runner)
     await service.start_training()
     await service.wait_idle()
     assert fake_runner.rescore_calls == 1
+
+
+# ---- what makes a model due under grades ----------------------------------
+
+
+async def test_model_with_old_labels_version_is_due(service, db, fake_runner):
+    from metascan.core.taste_runner import LABELS_VERSION
+
+    # Right after the v6 migration: grades without grade events, and the
+    # active model trained under the old labels (favorites and views).
+    seed_migrated(db)
+    mid = db.record_taste_model(
+        model_row(labels_as_of=after(1).isoformat(), labels_version=1)
+    )
+    db.replace_taste_scores(mid, {"/lib/mpos00.png": 0.7})
+    st = await service.status()
+    assert st["labels_outdated"] is True and st["new_events"] == 0
+    # Its scores stay served until the retrain lands.
+    assert (await service.scores())["model_id"] == mid
+    assert (await service.scores())["scores"] == {"/lib/mpos00.png": 0.7}
+    assert await service.maybe_retrain(now=after(500)) is True
+    await service.wait_idle()
+    assert len(fake_runner.train_calls) == 1
+    # A model of the current labels with no new events is not due.
+    db.record_taste_model(
+        model_row(labels_as_of=after(2).isoformat(), labels_version=LABELS_VERSION)
+    )
+    assert (await service.status())["labels_outdated"] is False
+    assert await service.maybe_retrain(now=after(600)) is False
+    assert len(fake_runner.train_calls) == 1
+
+
+async def test_outdated_model_waits_for_enough_grades(service, db, fake_runner):
+    # Fewer than 20 ✗ after the migration: due, but nothing to train on yet.
+    seed_migrated(db, n_pos=40, n_neg=5)
+    mid = db.record_taste_model(model_row(labels_version=1))
+    assert await service.maybe_retrain(now=after(500)) is False
+    assert fake_runner.train_calls == []
+    st = await service.status()
+    assert st["missing"] == {"positives": 0, "negatives": 15}
+    assert st["labels_outdated"] is True
+    assert (await service.scores())["model_id"] is None  # no scores stored
+    db.replace_taste_scores(mid, {"/lib/mpos00.png": 0.4})
+    assert (await service.scores())["model_id"] == mid
+
+
+async def test_favorite_events_do_not_count_toward_retrain(service, db, fake_runner):
+    seed_labels(db)
+    db.record_taste_model(model_row(labels_as_of=after(1).isoformat()))
+    # 30 ★ toggles and views on the library: view events, never labels.
+    for i in range(30):
+        p = f"/lib/pos{i % 20:02d}.png"
+        db.set_favorite_state(p, i < 20, now=after(10 + i))
+    for i in range(20):
+        db.save_media(media(f"/lib/view{i:02d}.png"))
+        db.mark_seen(f"/lib/view{i:02d}.png", now=after(60))
+    assert (await service.status())["new_events"] == 0
+    assert await service.maybe_retrain(now=after(500)) is False
+    assert fake_runner.train_calls == []
+
+
+async def test_video_events_do_not_count(service, db, fake_runner):
+    seed_labels(db)
+    db.record_taste_model(model_row(labels_as_of=after(1).isoformat()))
+    # 30 grade + reason events on videos: the scorer is images only.
+    for i in range(15):
+        p = f"/lib/clip{i:02d}.mp4"
+        db.save_media(media(p))
+        db.set_grade(p, "pass", None, after(10))
+        db.set_reason(p, "motion", True, now=after(10))
+    assert (await service.status())["new_events"] == 0
+    assert await service.maybe_retrain(now=after(500)) is False
+    assert fake_runner.train_calls == []

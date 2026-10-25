@@ -11,6 +11,7 @@ export interface TasteModelInfo {
   half_life_days: number
 }
 
+// How many more grades a model needs: positives are ✓ pass, negatives ✗ fail.
 export interface TasteMissing {
   positives: number
   negatives: number
@@ -19,6 +20,9 @@ export interface TasteMissing {
 export interface TasteStatus {
   active_model: TasteModelInfo | null
   stale: boolean
+  // The active model was trained before ✓ / ✗ grades (on favorites and
+  // views): it is due for a retrain, and its scores are served until then.
+  labels_outdated: boolean
   training: boolean
   // Label-changing events since the active model's snapshot; null when
   // there is no model yet (the first one trains once `missing` is null).

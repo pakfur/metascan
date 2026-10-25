@@ -24,6 +24,7 @@ from metascan.core.taste_labels import (
     missing_for_training,
     window_starts,
 )
+from metascan.core.taste_runner import LABELS_VERSION
 from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,15 @@ class TasteService:
         total = int(model.get("n_pos") or 0) + int(model.get("n_neg") or 0) + missing
         return total > 0 and missing / total > MAX_NO_VECTOR_SHARE
 
+    @staticmethod
+    def _labels_outdated(model: Optional[Dict[str, Any]]) -> bool:
+        """True when ``model`` was trained under older label rules (before
+        grades: favorites and views). It stays active -- its scores are
+        served -- until the retrain it is due for lands."""
+        if model is None:
+            return False
+        return int(model.get("labels_version") or 1) < LABELS_VERSION
+
     @property
     def is_training(self) -> bool:
         return bool(self.runner.training) or (
@@ -212,6 +222,8 @@ class TasteService:
                 {k: model.get(k) for k in _MODEL_FIELDS} if model is not None else None
             ),
             "stale": stale,
+            # Trained before grades: due for a retrain, scores still served.
+            "labels_outdated": self._labels_outdated(model),
             "training": self.is_training,
             "new_events": new_events,
             "missing": missing,
@@ -366,10 +378,13 @@ class TasteService:
             await asyncio.to_thread(self.runner.is_stale, model)
         )
         under_vectored = self._embedding_ran and self._under_vectored(model)
+        outdated = self._labels_outdated(model)
         count, newest = await asyncio.to_thread(self._events_since, model)
-        # No model yet: train as soon as the labels suffice (checked below),
-        # without waiting for RETRAIN_MIN_EVENTS verdict events.
-        due = model is None or stale or under_vectored
+        # No model yet, or one trained under older label rules: train as
+        # soon as the labels suffice (checked below), without waiting for
+        # RETRAIN_MIN_EVENTS grade events (grades the v6 migration made
+        # from the old ratings have none).
+        due = model is None or stale or under_vectored or outdated
         if not due and count < RETRAIN_MIN_EVENTS:
             return False
         if newest is not None:
@@ -393,10 +408,11 @@ class TasteService:
             return False
         logger.info(
             "Auto-retraining the taste scorer (%d new events, stale=%s, "
-            "under_vectored=%s)",
+            "under_vectored=%s, labels_outdated=%s)",
             count,
             stale,
             under_vectored,
+            outdated,
         )
         return True
 
