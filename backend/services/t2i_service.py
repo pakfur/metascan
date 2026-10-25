@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from metascan.core.scorecard_blind import blind_t2i_row
 from metascan.core.t2i_form import form_state_for_row
-from metascan.utils.trash import remove_files_to_trash
+from metascan.core.training_archive import delete_generated
+from metascan.utils.trash import trash_file
 
 
 class T2iService:
@@ -56,7 +57,22 @@ class T2iService:
         return await asyncio.to_thread(_apply)
 
     async def delete_image(self, image_id: int) -> bool:
-        deleted, purged = await asyncio.to_thread(self.db.delete_t2i_image, image_id)
-        if deleted and purged:
-            await asyncio.to_thread(remove_files_to_trash, purged)
-        return bool(deleted)
+        """Delete one generated image: a graded one's thumbnail is archived
+        from the live file, the file goes to the OS trash (or is unlinked),
+        then the rows go and the tombstone keeps the thumbnail's path
+        (``training_archive.delete_generated``). A file a storyboard still
+        uses is released, never trashed. A failed trash raises and keeps
+        the rows; False for an unknown image."""
+
+        def run() -> bool:
+            row = self.db.get_t2i_image(image_id)
+            if row is None:
+                return False
+            return delete_generated(
+                self.db,
+                row["file_path"],
+                trash_file,
+                lambda thumbs: self.db.delete_t2i_image(image_id, thumbs),
+            )
+
+        return await asyncio.to_thread(run)

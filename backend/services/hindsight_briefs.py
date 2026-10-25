@@ -2,11 +2,14 @@
 
 For every ✓ image (graded pass -- ★ favorites and views never count) with a
 known prompt and a known target-model family, and no brief yet (the rule
-lives in ``writer_dataset.hindsight_candidates``), the GENERAL-role VLM
+lives in ``writer_dataset.hindsight_brief_targets``), the GENERAL-role VLM
 looks at the image and writes a one-sentence "what someone might have asked
 for" brief. The brief is the user turn of a hindsight training example
-(brief -> the prompt that produced the image); it is cached in
-``hindsight_briefs``.
+(brief -> the prompt that produced the image); a live image's is cached in
+``hindsight_briefs``. A deleted ✓ image that never got one is briefed from
+the thumbnail archived when it was deleted (``training_archive``) and the
+brief is stored on its tombstone (``set_tombstone_brief``); one whose
+archive is gone is no candidate.
 
 Rules
 -----
@@ -38,8 +41,10 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from metascan.core.training_archive import resolve_thumb
 from metascan.core.vlm_client import VlmError, background_vlm_work
-from metascan.core.writer_dataset import hindsight_candidates
+from metascan.core.writer_dataset import BriefTarget, hindsight_brief_targets
+from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
 
@@ -309,14 +314,46 @@ class HindsightBriefsJob:
         )
         return result if code is None else f"error:{code}"
 
-    async def _run(self) -> str:
+    def _targets(self) -> List[BriefTarget]:
+        """Every brief target, without a deleted one whose archived
+        thumbnail is gone (it can never be briefed). Blocking: the DB read
+        and the archive checks run in a worker thread."""
+        raw = self._db.writer_dataset_raw(True)
+        data_dir = Path(self._db.db_path)
+        return [
+            t
+            for t in hindsight_brief_targets(raw)
+            if t.briefed
+            or t.tombstone_id is None
+            or resolve_thumb(data_dir, t.thumb_path) is not None
+        ]
+
+    def _image_of(self, target: BriefTarget) -> Optional[Path]:
+        """What the VLM looks at: the live file, or a deleted image's
+        archived thumbnail."""
+        if target.tombstone_id is None:
+            return Path(to_native_path(target.path))
+        return resolve_thumb(Path(self._db.db_path), target.thumb_path)
+
+    async def _store(self, target: BriefTarget, brief: str, model_id: str) -> bool:
         db = self._db
-        raw = await asyncio.to_thread(db.writer_dataset_raw, True)
-        candidates: List[str] = hindsight_candidates(raw)
-        have = await asyncio.to_thread(db.get_hindsight_briefs)
-        pending = [p for p in candidates if p not in have]
-        self._state["total"] = len(candidates)
-        self._state["done"] = len(candidates) - len(pending)
+        if target.tombstone_id is None:
+            return bool(
+                await asyncio.to_thread(
+                    db.set_hindsight_brief, target.path, brief, model_id
+                )
+            )
+        return bool(
+            await asyncio.to_thread(
+                db.set_tombstone_brief, target.tombstone_id, brief, model_id
+            )
+        )
+
+    async def _run(self) -> str:
+        targets = await asyncio.to_thread(self._targets)
+        pending = [t for t in targets if not t.briefed]
+        self._state["total"] = len(targets)
+        self._state["done"] = len(targets) - len(pending)
         self._progress()
         if not pending:
             return self._finish("done")
@@ -336,7 +373,7 @@ class HindsightBriefsJob:
         stops: Optional[int] = None
         failures = 0
         first = True
-        for path in pending:
+        for target in pending:
             if self._cancelled:
                 return self._finish("cancelled")
             waited = await self._wait_clear()
@@ -356,10 +393,10 @@ class HindsightBriefsJob:
                 except VlmError:
                     return self._finish("error", "vlm_unavailable")
                 first = False
-            image = Path(path)
+            image = self._image_of(target)
             brief = ""
             try:
-                if image.is_file():
+                if image is not None and image.is_file():
                     text = await client.generate_text(
                         system_prompt=system_prompt,
                         user_prompt=USER_PROMPT,
@@ -381,9 +418,7 @@ class HindsightBriefsJob:
                 return self._finish("cancelled")
             stored = False
             if brief:
-                stored = await asyncio.to_thread(
-                    db.set_hindsight_brief, path, brief, model_id
-                )
+                stored = await self._store(target, brief, model_id)
             if stored:
                 failures = 0
                 self._state["done"] += 1

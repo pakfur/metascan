@@ -29,13 +29,20 @@ Example kinds
   counted once (``edit_pairs``). Several seeds of one edited variant are one
   edit (deduplicated on target model + description + direction + both
   normalized texts); one ✓ among them makes it count.
-* **Hindsight examples** (``SftExample``, ``source="hindsight"``): a live ✓
-  image with a known prompt and a cached ``hindsight_briefs`` brief. User
-  turn = the brief (no direction), target = the prompt that produced the
-  image. A T2I image's target model is its ``model`` column; a library item
-  (no T2I row) needs a metadata prompt and a model name that
-  ``taste_examples.matches_model_family`` places in exactly one
-  ``MODEL_PROFILES`` family (none or several: left out).
+* **Hindsight examples** (``SftExample``, ``source="hindsight"``): a ✓
+  image with a known prompt and a brief -- a live image's from
+  ``hindsight_briefs``, a deleted one's from its tombstone (copied at
+  deletion, or written later by the briefs job from its archived
+  thumbnail). User turn = the brief (no direction), target = the prompt
+  that produced the image. A T2I image's target model is its ``model``
+  column; a library item (no T2I row; deleted, its tombstone keeps the
+  metadata prompt and model names) needs a metadata prompt and a model
+  name that ``taste_examples.matches_model_family`` places in exactly one
+  ``MODEL_PROFILES`` family (none or several: left out). A brief always
+  comes from the very row whose prompt it is paired with, and one path
+  has one target: a live image (T2I first, then library) wins; a deleted
+  one counts only while no live file holds its path, the newest tombstone
+  of the path winning.
 
 Inclusion rules (all kinds)
 ---------------------------
@@ -59,8 +66,8 @@ Inclusion rules (all kinds)
 * Deleted generations count: a path with no live media row is read from its
   newest ``media_tombstones`` row whose lineage carries the ``t2i`` row
   (grade, ``judged_at`` and category NAMES as at deletion; a category scope
-  matches them by the category's current name). A live row always wins. A
-  deleted image has no brief (the table cascades), so no hindsight.
+  matches them by the category's current name). A live row always wins.
+  Deleted ✓ images keep their hindsight too (see above).
   Malformed tombstones are skipped with one WARNING carrying the count.
 * Scope: ``"all"`` keeps every example; ``"<category id>"`` keeps only
   examples whose images (the union over both variants of a pair, every seed
@@ -382,6 +389,29 @@ def parse_scope(scope: Union[str, int], categories: Dict[int, str]) -> Optional[
     return cid
 
 
+def _hindsight_source(
+    raw: Mapping[str, Any], by_path: Mapping[str, Dict[str, Any]], path: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(T2I row, library row)`` -- at most one of them -- that is the
+    hindsight candidate of ``path``: a live T2I row, else a live library
+    image, else the newest deleted row of the path, and a deleted row only
+    while no live file holds the path (a file restored or new there is the
+    image hindsight speaks of now, so a brief is never paired with another
+    image's prompt)."""
+    gen = by_path.get(path)
+    lib = (raw.get("library") or {}).get(path)
+    if gen is not None and gen.get("live"):
+        return gen, None
+    if lib is not None and lib.get("live"):
+        return None, lib
+    if gen is not None and gen.get("path_live"):
+        gen = None
+    if gen is not None and lib is not None:
+        newer_lib = int(lib["tombstone_id"]) > int(gen["tombstone_id"])
+        return (None, lib) if newer_lib else (gen, None)
+    return gen, lib
+
+
 def _hindsight_target(
     raw: Mapping[str, Any],
     by_path: Mapping[str, Dict[str, Any]],
@@ -391,17 +421,17 @@ def _hindsight_target(
     """Whether ``path`` may be a hindsight target, and its parts:
     ``(profile, prompt, source row, timestamp stamps, group description)``.
     The ONE place the rule lives -- the dataset builder and the briefs job
-    (which decides what to write a brief for) both call it. ✓ (grade
-    ``pass``; ★ is no grade), live, image, not manual / fallback /
-    scorecard, a known prompt and exactly one target-model family."""
+    (which decides what to write a brief for) both call it. The source row
+    is ``_hindsight_source``'s, live or deleted; then: ✓ (grade ``pass``;
+    ★ is no grade), image, not manual / fallback / scorecard, a known
+    prompt and exactly one target-model family."""
     if not is_image_path(path):
         return None
-    gen = by_path.get(path)
+    gen, lib = _hindsight_source(raw, by_path, path)
     group_text: Optional[str] = None
     if gen is not None:
         if (
-            not gen.get("live")
-            or _grade(gen) != "pass"
+            _grade(gen) != "pass"
             or not _usable(gen)
             or gen.get("writer_id") == WRITER_FALLBACK
         ):
@@ -412,7 +442,6 @@ def _hindsight_target(
         source_row: Dict[str, Any] = gen
         stamps: List[Any] = _row_stamps(gen)
     else:
-        lib = (raw.get("library") or {}).get(path)
         if lib is None or _grade(lib) != "pass":
             return None
         families = [
@@ -429,12 +458,74 @@ def _hindsight_target(
     return profile, prompt, source_row, stamps, group_text
 
 
-def hindsight_candidates(raw: Mapping[str, Any]) -> List[str]:
-    """Sorted paths a hindsight brief may be written for, from
-    ``DatabaseManager.writer_dataset_raw(candidates=True)``."""
+def _brief_of(
+    briefs: Mapping[str, Mapping[str, Any]], path: str, row: Mapping[str, Any]
+) -> Optional[str]:
+    """The brief of a hindsight source row: a live image's from
+    ``hindsight_briefs``, a deleted one's from its own tombstone."""
+    brief = (
+        (briefs.get(path) or {}).get("brief") if row.get("live") else row.get("brief")
+    )
+    return None if _blank(brief) else str(brief)
+
+
+def _briefed_paths(raw: Mapping[str, Any]) -> List[str]:
+    """Sorted paths that have a brief: live images' (``briefs``) and the
+    deleted rows' own."""
+    paths = set(raw.get("briefs") or {})
+    deleted = list(raw.get("generations") or []) + [
+        dict(row, file_path=path) for path, row in (raw.get("library") or {}).items()
+    ]
+    paths.update(
+        str(r["file_path"])
+        for r in deleted
+        if not r.get("live") and not _blank(r.get("brief"))
+    )
+    return sorted(paths)
+
+
+@dataclass(frozen=True)
+class BriefTarget:
+    """One image the hindsight-briefs job briefs (or already has a brief
+    for). A live one's brief goes to ``hindsight_briefs`` by ``path``; a
+    deleted one's (``tombstone_id`` set) onto its tombstone, written from
+    its archived thumbnail (``thumb_path``, relative to the data dir)."""
+
+    path: str
+    briefed: bool
+    tombstone_id: Optional[int] = None
+    thumb_path: Optional[str] = None
+
+
+def hindsight_brief_targets(raw: Mapping[str, Any]) -> List[BriefTarget]:
+    """Every hindsight target of
+    ``DatabaseManager.writer_dataset_raw(candidates=True)``, sorted by
+    path: live ones, briefed or not, and deleted ones that have a brief or
+    an archived thumbnail to write one from (a deleted image with neither
+    can never be briefed)."""
     by_path = {g["file_path"]: g for g in raw.get("generations") or []}
-    paths = set(by_path) | set(raw.get("library") or {})
-    return sorted(p for p in paths if _hindsight_target(raw, by_path, p) is not None)
+    briefs: Mapping[str, Mapping[str, Any]] = raw.get("briefs") or {}
+    targets: List[BriefTarget] = []
+    for path in sorted(set(by_path) | set(raw.get("library") or {})):
+        target = _hindsight_target(raw, by_path, path)
+        if target is None:
+            continue
+        row = target[2]
+        if row.get("live"):
+            targets.append(BriefTarget(path, briefed=path in briefs))
+        elif _brief_of(briefs, path, row) is not None:
+            targets.append(BriefTarget(path, True, int(row["tombstone_id"])))
+        elif row.get("thumb_path"):
+            targets.append(
+                BriefTarget(path, False, int(row["tombstone_id"]), row["thumb_path"])
+            )
+    return targets
+
+
+def hindsight_candidates(raw: Mapping[str, Any]) -> List[str]:
+    """Sorted paths a hindsight brief may be written for (or already has
+    one), from ``DatabaseManager.writer_dataset_raw(candidates=True)``."""
+    return [t.path for t in hindsight_brief_targets(raw)]
 
 
 class _Describer:
@@ -656,15 +747,14 @@ def examples_from_raw(
     briefs: Dict[str, Dict[str, Any]] = raw.get("briefs") or {}
     by_path = {g["file_path"]: g for g in raw.get("generations") or []}
     n_hindsight = 0
-    for path in sorted(briefs):
-        brief = briefs[path].get("brief")
-        if _blank(brief):
-            continue
-        brief = str(brief)
+    for path in _briefed_paths(raw):
         target = _hindsight_target(raw, by_path, path, describe)
         if target is None:
             continue
         profile, prompt, source_row, stamps, group_text = target
+        brief = _brief_of(briefs, path, source_row)
+        if brief is None:
+            continue
         as_of = _newest(stamps)
         if not in_scope([source_row]) or not in_time(as_of):
             continue

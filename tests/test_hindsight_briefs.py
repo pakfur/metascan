@@ -4,7 +4,7 @@ waits, explicit unloads and the routes -- a fake VLM, an isolated DB."""
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List
 
@@ -415,6 +415,108 @@ def test_library_item_with_known_family_is_a_candidate(db, store, tmp_path):
     client, events = FakeClient(), []
     asyncio.run(_run(_job(db, store, client, events)))
     assert len(db.get_hindsight_briefs()) == 1
+
+
+def _real_image(path: Path) -> None:
+    """Swap the placeholder bytes for a real image (an archive needs one)."""
+    from PIL import Image
+
+    Image.new("RGB", (900, 600), (40, 90, 160)).save(path, "PNG")
+
+
+def test_briefs_job_briefs_a_deleted_pass_from_its_thumbnail(db, store, tmp_path):
+    # A ✓ image deleted before it got a brief: the job briefs it from the
+    # thumbnail archived at deletion and stores the brief on its tombstone;
+    # the writer dataset then has its hindsight example.
+    from unittest import mock
+
+    from backend.services.media_service import MediaService
+    from backend.services.t2i_service import T2iService
+    from metascan.core.training_archive import archive_dir
+    from metascan.core.writer_dataset import build_examples
+
+    _gen(db, tmp_path, "gen.png", prompt="T2I PROMPT")
+    _library(db, tmp_path, "lib.png")
+    _gen(db, tmp_path, "fail.png", grade="fail")
+    _gen(db, tmp_path, "junk.png")  # unreadable: deleted without a thumbnail
+    for name in ("gen.png", "lib.png", "fail.png"):
+        _real_image(tmp_path / name)
+    ids = {Path(r["file_path"]).name: r["id"] for r in db.list_t2i_images()}
+    with mock.patch("metascan.utils.trash.send2trash"), mock.patch(
+        "backend.services.media_service.send2trash"
+    ):
+        for name in ("gen.png", "fail.png", "junk.png"):
+            assert asyncio.run(T2iService(db).delete_image(ids[name]))
+        assert asyncio.run(
+            MediaService(db, None).delete_media(str(tmp_path / "lib.png"))
+        )
+    assert db.get_hindsight_briefs() == {}
+    archived = {p.name for p in archive_dir(Path(db.db_path)).iterdir()}
+    assert len(archived) == 3  # gen, lib and the ✗ one
+
+    client, events = FakeClient(), []
+    asyncio.run(_run(_job(db, store, client, events)))
+    shown = sorted(c["image_path"] for c in client.calls)
+    assert len(shown) == 2 and {p.name for p in shown} <= archived
+    assert all(p.parent == archive_dir(Path(db.db_path)) for p in shown)
+    tombs = {Path(t["file_path"]).name: t for t in db.list_tombstones()}
+    for name in ("gen.png", "lib.png"):
+        assert tombs[name]["brief"].startswith("a scene number")
+        assert tombs[name]["brief_model"] == "qwen3vl-4b"
+    assert tombs["fail.png"]["brief"] is None and tombs["junk.png"]["brief"] is None
+    progress = [d for _, ev, d in events if ev == "briefs_progress"]
+    assert progress[0] == {"done": 0, "total": 2}
+    assert progress[-1] == {"done": 2, "total": 2}
+    assert events[-1][1] == "briefs_done"
+    assert db.get_hindsight_briefs() == {}  # never written to the live table
+
+    # Resumable: a second run finds both briefed and asks the VLM nothing.
+    client2, events2 = FakeClient(), []
+    asyncio.run(_run(_job(db, store, client2, events2)))
+    assert client2.calls == []
+    assert [d for _, ev, d in events2 if ev == "briefs_progress"][0] == {
+        "done": 2,
+        "total": 2,
+    }
+    full = tmp_path / "full.yml"
+    full.write_text(
+        "T2I_CAPTION_PREAMBLE: |-\n  PREAMBLE\nMETA_KREA2: |-\n  KREA\n",
+        encoding="utf-8",
+    )
+    # T2I rows are made at the wall clock: build after it.
+    later = datetime.now(timezone.utc) + timedelta(days=1)
+    sft, _, counts = build_examples(
+        db, "all", PromptStore(full), later, content_mode="default"
+    )
+    assert counts.hindsight == 2
+    assert sorted(s.chosen for s in sft) == ["LIB", "T2I PROMPT"]
+
+
+def test_a_deleted_pass_whose_archive_is_gone_is_no_candidate(db, store, tmp_path):
+    # An archive removed by hand can never be briefed: it is no candidate
+    # (and no failure that could end the run).
+    from unittest import mock
+
+    from backend.services.t2i_service import T2iService
+    from metascan.core.training_archive import archive_dir
+
+    _gen(db, tmp_path, "gen.png")
+    _gen(db, tmp_path, "live.png")
+    _real_image(tmp_path / "gen.png")
+    gen_id = next(
+        r["id"] for r in db.list_t2i_images() if r["file_path"].endswith("gen.png")
+    )
+    with mock.patch("metascan.utils.trash.send2trash"):
+        assert asyncio.run(T2iService(db).delete_image(gen_id))
+    for archived in archive_dir(Path(db.db_path)).iterdir():
+        archived.unlink()
+    client, events = FakeClient(), []
+    asyncio.run(_run(_job(db, store, client, events)))
+    assert [c["image_path"].name for c in client.calls] == ["live.png"]
+    assert [d for _, ev, d in events if ev == "briefs_progress"][-1] == {
+        "done": 1,
+        "total": 1,
+    }
 
 
 def test_real_prompt_is_in_the_shipped_yaml():

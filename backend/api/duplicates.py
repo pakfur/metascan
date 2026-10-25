@@ -2,12 +2,10 @@
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from send2trash import send2trash
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
@@ -71,15 +69,13 @@ async def delete_duplicates(
     body: DeleteRequest,
     service: MediaService = Depends(_get_service),
 ):
-    """Batch delete selected duplicate files."""
+    """Batch delete selected duplicate files, each the way the library
+    delete does it (``MediaService.delete_media``: a graded image's
+    thumbnail archived first, then the OS trash, then the row)."""
     deleted = 0
     for fp in body.file_paths:
         try:
-            path = Path(fp)
-            if path.exists():
-                await asyncio.to_thread(send2trash, str(path))
-            db = get_db()
-            await asyncio.to_thread(db.delete_media, path)
+            await service.delete_media(fp)
             deleted += 1
         except Exception as e:
             logger.error(f"Failed to delete {fp}: {e}")

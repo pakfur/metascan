@@ -11,8 +11,17 @@ from send2trash import send2trash
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.core.training_archive import delete_keeping_signal
+from metascan.utils.path_utils import to_posix_path
 
 logger = logging.getLogger(__name__)
+
+
+def _trash_library_file(path: Path) -> None:
+    """The library delete's trash step: the OS trash or an error (no
+    unlink fallback); a file that is already gone is fine."""
+    if path.exists():
+        send2trash(str(path))
 
 
 class MediaService:
@@ -47,11 +56,23 @@ class MediaService:
         return await asyncio.to_thread(self.db.get_media_with_details, Path(file_path))
 
     async def delete_media(self, file_path: str) -> bool:
-        """Delete a media file by moving it to trash and removing from DB."""
+        """Delete a media file: a graded image's thumbnail is archived from
+        the live file first, then the file goes to the OS trash, then the
+        row is deleted and its tombstone keeps the thumbnail's path
+        (``training_archive.delete_keeping_signal``). A failed trash raises
+        and keeps the row; False when there was no row to delete."""
         path = Path(file_path)
-        if path.exists():
-            await asyncio.to_thread(send2trash, str(path))
-        return await asyncio.to_thread(self.db.delete_media, path)
+        posix_path = to_posix_path(path)
+
+        def run() -> bool:
+            return delete_keeping_signal(
+                self.db,
+                [path],
+                _trash_library_file,
+                lambda thumbs: self.db.delete_media(path, thumbs.get(posix_path)),
+            )
+
+        return await asyncio.to_thread(run)
 
     async def set_favorite(self, file_path: str, is_favorite: bool) -> bool:
         """★ only: the grade and its reasons are never touched."""
