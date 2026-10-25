@@ -406,11 +406,13 @@ def _absolute_key(path: str) -> str:
 
 def _shown_path(path: str) -> str:
     """``path`` as the scan shows it -- in its log, the marker and the
-    complete event: absolute. A relative one (the default I2V output root,
+    complete event: ``os.path.abspath``, the step ``_absolute_key`` starts
+    with. A relative path (the default I2V output root,
     ``data/storyboards/i2v``, and the clips below it) is joined to the
-    working directory as ``_absolute_key`` resolves it, without
-    ``_path_key``'s normalisation (no case folding, no trailing separator).
-    For showing only: paths are matched by their keys."""
+    working directory, and any path is normalised the way ``abspath`` does
+    it (``..``, ``.`` and doubled separators collapsed), but neither
+    case-folded nor given the trailing separator ``_path_key`` adds. For
+    showing only: paths are matched by their keys."""
     return os.path.abspath(path)
 
 
@@ -615,10 +617,12 @@ def _generated_output_fields(report: ReingestReport) -> Dict[str, Any]:
     sorted, at most ``UNREADABLE_OUTPUT_LIMIT``, and
     ``unreadable_output_count``, all of them; ``output_check_failed``, the
     step itself raised with no cancel. ``[]``, ``0`` and ``False`` with
-    nothing to report."""
+    nothing to report. Two spellings of one root (one relative) show once."""
     failed = sorted(_shown_path(path) for path in report.failed)
     return {
-        "unreachable_output": [_shown_path(root) for root in report.unreachable],
+        "unreachable_output": list(
+            dict.fromkeys(_shown_path(root) for root in report.unreachable)
+        ),
         "unreadable_output": failed[:UNREADABLE_OUTPUT_LIMIT],
         "unreadable_output_count": len(failed),
         "output_check_failed": report.check_failed,
@@ -850,10 +854,14 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 _blockers_text(unreachable),
                 counts["unreachable"],
             )
-        # The output roots that hold the failed files (None: under none).
-        failed_roots = [
-            None if root is None else _shown_path(root) for root in report.failed_roots
-        ]
+        # The output roots that hold the failed files (None: under none),
+        # each once however it is spelled in the config.
+        failed_roots = list(
+            dict.fromkeys(
+                None if root is None else _shown_path(root)
+                for root in report.failed_roots
+            )
+        )
         if report.failed:
             logger.warning(
                 "%d generated images / clips on disk (%s) could not be read or "
