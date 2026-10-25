@@ -102,10 +102,13 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   at least one ✓ image (not `fallback`) and **loses** only when every image is ✗ (one
   ungraded or seen-only image keeps it from losing); an edit counts only when one of its
   renders is ✓; hindsight takes ✓ images with a known prompt and a brief, live or
-  deleted. Hindsight is one source row per path (`_hindsight_source`: a live T2I row,
-  else a live library image, else the newest deleted row while no live file holds the
-  path) and a brief always comes from its own row (`hindsight_briefs` for a live image,
-  the tombstone's `brief` for a deleted one), never borrowed by path. An example's
+  deleted (a path a completed full clean tombstoned counts as deleted: its tombstone
+  carries the snapshot's brief and, for a library image, prompt and model names; root
+  CLAUDE.md, "Full clean & rescan"). Hindsight is one source row per path
+  (`_hindsight_source`: a live T2I row, else a live library image, else the newest
+  deleted row while no live file holds the path) and a brief always comes from its own
+  row (`hindsight_briefs` for a live image, the tombstone's `brief` for a deleted one),
+  never borrowed by path. An example's
   `as_of` is the newest `created_at` / `judged_at` of its images (a tombstone's
   `COALESCE(judged_at, confirmed_at)`), never `seen_at`, so viewing, starring or
   deleting never makes old data "new since the last adapter". Images only. Scorecard images
@@ -218,7 +221,8 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `hindsight_brief_targets` so it cannot drift from the builder: live ✓ images, and
   deleted ✓ images from their archived thumbnail (`training_archive.resolve_thumb`;
   written with `db.set_tombstone_brief`, never into `hindsight_briefs`; one whose
-  archive is gone is skipped).
+  archive is gone is skipped, and one with neither a brief nor an archive, such as a
+  path a completed full clean tombstoned before it was briefed, is no target).
   `job.blocked` is set to `TrainingManager.gpu_locked`: it pauses between images and
   refuses a start with 409 `gpu_busy_training`. Never refuse training because the job
   says "running"; the lock cancels it and restarts it afterwards.
