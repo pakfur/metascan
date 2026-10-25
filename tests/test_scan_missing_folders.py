@@ -399,6 +399,35 @@ def test_full_clean_with_every_folder_present_completes_as_before(
     assert complete.get("missing_folders", []) == []
 
 
+def test_an_ordinary_scan_with_no_marker_reports_nothing_about_generated_output(
+    monkeypatch, db, tmp_path
+):
+    """With no unfinished full clean an ordinary scan leaves the generated
+    output alone -- not even a dangling T2I row whose file is on disk is
+    handed to the scanner (this fake one could not import it) -- and its
+    complete event says nothing about it: no folder unreachable, no file
+    unreadable, no failed check. Every field of the event, pinned."""
+    lib = tmp_path / "lib"
+    _touch(lib / "a.png")
+    render = _touch(tmp_path / "comfy" / "t2i" / "2026-01-01" / "t2i_1.png")
+    db.create_t2i_image(file_path=render)
+    events, scanned = _wire(monkeypatch, db, [lib])
+
+    assert _start() is None
+
+    assert scanned == [str(lib)]
+    [complete] = _completes(events)
+    assert complete == {
+        "processed": 0,
+        "stale_removed": 0,
+        "missing_folders": [],
+        "unreachable_output": [],
+        "unreadable_output": [],
+        "unreadable_output_count": 0,
+        "output_check_failed": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 3. The ordinary stale cleanup never deletes a missing folder's rows
 # ---------------------------------------------------------------------------

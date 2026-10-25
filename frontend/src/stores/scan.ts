@@ -43,6 +43,17 @@ export const useScanStore = defineStore('scan', () => {
   // clean was unfinished: the complete event's unreachable_output. Their
   // images' ratings are pending until a scan finds the folder again.
   const unreachableOutput = ref<string[]>([])
+  // Generated files on disk that the run could not read or import while a
+  // full clean was unfinished: the complete event's unreadable_output (the
+  // first 50 paths, sorted) and unreadable_output_count (all of them). They
+  // keep the full clean unfinished until each is deleted, moved somewhere
+  // else or repaired.
+  const unreadableOutput = ref<string[]>([])
+  const unreadableOutputCount = ref(0)
+  // The re-import of generated output failed itself, with no cancel
+  // (output_check_failed): nothing about it is known; the server log and
+  // the full-clean marker name the error's type; the next scan tries again.
+  const outputCheckFailed = ref(false)
   const runWasFullClean = ref(false)
 
   // Embedding state
@@ -77,6 +88,9 @@ export const useScanStore = defineStore('scan', () => {
         runWasFullClean.value = data.full_clean === true
         missingFolders.value = []
         unreachableOutput.value = []
+        unreadableOutput.value = []
+        unreadableOutputCount.value = 0
+        outputCheckFailed.value = false
         break
       case 'progress':
         phase.value = 'scanning'
@@ -113,6 +127,11 @@ export const useScanStore = defineStore('scan', () => {
         unreachableOutput.value = Array.isArray(data.unreachable_output)
           ? (data.unreachable_output as string[])
           : []
+        unreadableOutput.value = Array.isArray(data.unreadable_output)
+          ? (data.unreadable_output as string[])
+          : []
+        unreadableOutputCount.value = (data.unreadable_output_count as number) || 0
+        outputCheckFailed.value = data.output_check_failed === true
         break
       case 'error':
         phase.value = 'error'
@@ -194,6 +213,9 @@ export const useScanStore = defineStore('scan', () => {
     staleRemoved.value = 0
     missingFolders.value = []
     unreachableOutput.value = []
+    unreadableOutput.value = []
+    unreadableOutputCount.value = 0
+    outputCheckFailed.value = false
     try {
       await startScan({
         full_cleanup: fullCleanup.value,
@@ -225,6 +247,9 @@ export const useScanStore = defineStore('scan', () => {
     staleRemoved.value = 0
     missingFolders.value = []
     unreachableOutput.value = []
+    unreadableOutput.value = []
+    unreadableOutputCount.value = 0
+    outputCheckFailed.value = false
   }
 
   async function startEmbeddingBuild(rebuild = false) {
@@ -268,6 +293,9 @@ export const useScanStore = defineStore('scan', () => {
     staleRemoved,
     missingFolders,
     unreachableOutput,
+    unreadableOutput,
+    unreadableOutputCount,
+    outputCheckFailed,
     runWasFullClean,
     embeddingPhase,
     embeddingCurrent,
