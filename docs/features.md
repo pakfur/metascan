@@ -108,7 +108,8 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 
 ## Scanning & Indexing
 - Multi-phase scan with real-time progress (file-by-file WebSocket updates)
-- Stale entry cleanup for deleted files
+- Stale entry cleanup for deleted files. It never removes the entries of a scan folder whose files can't be seen: a folder that is missing (an unplugged drive, a renamed folder) or can't be read, or one that is empty while the library still has images from it (the mount point of a drive that is not mounted). Those entries stay in the library, ratings and all, until the folder is back. Only the scan folders themselves are checked: a drive mounted at a subfolder *inside* a scan folder is not, so while it is unmounted its files look deleted. Add such a mount point to the scan list as a folder of its own, or run the cleanup only while the drive is mounted
+- Full clean & rescan wipes the database and re-imports every file, keeping ★ favorites, ✓ / ✗ grades, reasons and categories. It is refused while a scan folder is missing, can't be read, or is empty while the library has images from it. Reconnect (or mount) the drive and try again. Remove the folder from the scan list (Configuration → Directories) only if it is gone for good: the ratings of its images are then dropped from the library. If a folder goes missing during the rescan, the other folders are still imported, the Done step names the folder, and the ratings of its images wait: they come back when a later scan finds the files again
 - Automatic thumbnail generation
 - pHash computation during scan
 - File system watcher with auto-refresh

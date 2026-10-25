@@ -216,8 +216,10 @@ def _is_empty(snapshot: Dict[str, Any]) -> bool:
     return not (snapshot.get("favorites") or any(snapshot.get(k) for k in _ROW_LISTS))
 
 
-def _snapshot_paths(snapshot: Dict[str, Any]) -> Set[str]:
-    """Every path ``snapshot`` holds an entry for."""
+def snapshot_paths(snapshot: Dict[str, Any]) -> Set[str]:
+    """Every path ``snapshot`` holds an entry for (a judgment row, a
+    category link, ★, a brief or a library prompt), in the stored POSIX
+    form."""
     paths = set(snapshot.get("favorites") or [])
     for key in _ROW_LISTS:
         paths.update(e["file_path"] for e in snapshot.get(key) or [])
@@ -569,6 +571,18 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     return upgrade_legacy_snapshot(cast(Dict[str, Any], snap))
 
 
+def pending_snapshot_paths(data_dir: Path) -> Set[str]:
+    """The paths the pending file holds ratings for, read without side
+    effects: nothing is quarantined or raised, and a missing, unreadable or
+    invalid file holds none. For checks that must change nothing; the full
+    clean itself loads the file with :func:`load_pending_snapshot`."""
+    try:
+        snap = json.loads(snapshot_file_path(data_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return snapshot_paths(snap) if _valid_shape(snap) else set()
+
+
 def restore_and_persist(
     db: Any, data_dir: Path, snapshot: Dict[str, Any], tombstone_missing: bool
 ) -> Dict[str, int]:
@@ -643,7 +657,7 @@ def merge_pending_into_snapshot(
     pending = load_pending_snapshot(data_dir)
     if pending is None:
         return snapshot
-    fresh_paths = _snapshot_paths(snapshot)
+    fresh_paths = snapshot_paths(snapshot)
     merged = dict(snapshot)
     for key in _ROW_LISTS:
         merged[key] = list(snapshot.get(key) or []) + [
