@@ -1337,7 +1337,7 @@ def test_a_failed_reingest_step_keeps_the_full_clean_unfinished(
         complete["unreadable_output_count"],
     ) == ([], [], 0)
     block = _marker_block(db)
-    assert "could not check the generated output (RuntimeError;" in block
+    assert "it failed with an error of type RuntimeError" in " ".join(block.split())
     assert "the next scan tries again" in _flat(block)
     assert "/secret/path" not in _marker_text(db)
     assert "disk I/O" not in _marker_text(db)
@@ -1891,8 +1891,8 @@ def test_a_generated_file_that_cannot_be_imported_is_listed_until_dealt_with(
     assert "could not read or import 1 generated image or clip that is on disk" in flat
     assert f"  in {root}\n" in block
     assert (
-        "delete each one, or move it out of the output folder (or repair it), "
-        "then run full clean & rescan"
+        "delete each one or move it somewhere else (or repair it), then run "
+        "full clean & rescan"
     ) in flat
     assert str(render) not in _marker_text(db)
     assert render.name not in _marker_text(db)
@@ -1915,6 +1915,47 @@ def test_a_generated_file_that_cannot_be_imported_is_listed_until_dealt_with(
     assert sorted(tombs) == sorted([str(gone), str(render)])
     assert tombs[str(render)]["grade"] == "pass"
     assert _lineage(tombs[str(render)]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+
+
+def test_a_failed_file_under_no_output_folder_is_said_to_be_outside_them(
+    monkeypatch, tmp_path, db, caplog
+):
+    """A ✓ render whose lineage row lies outside both configured output
+    roots (the output folder moved in config; the old drive's files stayed)
+    is on disk but can't be imported. It is failed like any other, and the
+    WARNING and the marker say it lies outside the configured output
+    folders -- no folder of theirs holds it -- with the way out that fits a
+    file anywhere: delete it or move it somewhere else."""
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    config["comfy"] = {"output_root": str(tmp_path / "comfy")}
+    stray = _png(tmp_path / "old_drive" / "t2i" / "2026-01-01" / "t2i_1.png")
+    db.save_media(_media(str(stray)))
+    db.create_t2i_image(file_path=str(stray), **T2I_LINEAGE)
+    db.set_grade(str(stray), "pass", now=T0)
+
+    with caplog.at_level(logging.WARNING, logger="backend.api.scan"):
+        complete = _route_full_clean(
+            monkeypatch, db, config, _scanner_failing_on([stray])
+        )
+
+    assert complete["unreadable_output"] == [str(stray)]
+    assert complete["unreachable_output"] == []
+    block = _marker_block(db)
+    assert "  outside the configured output folders\n" in block
+    assert "\n  in " not in block  # no configured output folder holds it
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    [warning] = [w for w in warnings if "could not be read or re-imported" in w]
+    assert warning.startswith(
+        "1 generated images / clips on disk (outside the configured output "
+        "folders) could not be read or re-imported;"
+    )
+    assert (
+        "delete each one or move it somewhere else (or repair it), then run "
+        "Full clean & rescan"
+    ) in warning
+    assert str(stray) not in " ".join(warnings) + _marker_text(db)
+    assert db.list_tombstones() == [] and _marker_exists(db)
+    assert str(stray) in _pending_paths(db)
 
 
 def test_a_file_that_keeps_failing_is_never_recorded_as_deleted(

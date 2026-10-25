@@ -46,12 +46,13 @@ export const useScanStore = defineStore('scan', () => {
   // Generated files on disk that the run could not read or import while a
   // full clean was unfinished: the complete event's unreadable_output (the
   // first 50 paths, sorted) and unreadable_output_count (all of them). They
-  // keep the full clean unfinished until each is deleted, moved out of the
-  // output folder or repaired.
+  // keep the full clean unfinished until each is deleted, moved somewhere
+  // else or repaired.
   const unreadableOutput = ref<string[]>([])
   const unreadableOutputCount = ref(0)
-  // The re-import of generated output failed itself (output_check_failed):
-  // nothing about it is known; the next scan tries again.
+  // The re-import of generated output failed itself, with no cancel
+  // (output_check_failed): nothing about it is known; the server log and
+  // the full-clean marker name the error's type; the next scan tries again.
   const outputCheckFailed = ref(false)
   const runWasFullClean = ref(false)
 

@@ -391,9 +391,11 @@ def test_the_marker_counts_the_generated_files_the_last_scan_could_not_import(
     for advice in (
         "a file still on disk is never recorded as deleted",
         "its ratings are kept, pending",
-        "the scan's done step lists the files",
-        "delete each one, or move it out of the output folder (or repair it), "
-        "then run full clean & rescan",
+        # The Done step's list is gone once the dialog closes.
+        "the scan's done step lists the files, and any scan lists them again",
+        # It may lie outside every output folder: "out of" it would not fit.
+        "delete each one or move it somewhere else (or repair it), then run "
+        "full clean & rescan",
         "a file that only failed this time (a busy disk) comes back by itself "
         "at the next scan",
     ):
@@ -413,8 +415,9 @@ def test_the_marker_counts_the_generated_files_the_last_scan_could_not_import(
 def test_the_marker_says_when_the_check_itself_failed(tmp_path):
     """The re-ingest step raised: nothing about the generated output is
     known. The marker says the check failed, naming the error by its type
-    alone, and that the next scan tries again; it replaces what an earlier
-    scan said."""
+    alone -- the type the server log names, which has nothing more (the
+    step logs no traceback) -- and that the next scan tries again; it
+    replaces what an earlier scan said."""
     ts.write_full_clean_marker(tmp_path)
     written = _marker_text(tmp_path)
     ts.note_generated_output(tmp_path, {"/mnt/d/comfy/t2i": "missing"})
@@ -422,9 +425,11 @@ def test_the_marker_says_when_the_check_itself_failed(tmp_path):
     ts.note_generated_output(tmp_path, {}, check_failed="OperationalError")
     block = _noted(tmp_path, written)
     flat = _flat(block)
-    assert "the last scan could not check the generated output (operationalerror;" in (
-        flat
-    )
+    assert (
+        "the last scan could not check the generated output: it failed with an "
+        "error of type operationalerror, the type the server log names too."
+    ) in flat
+    assert "details" not in flat
     assert "none of them is recorded as deleted. the next scan tries again." in flat
     assert "/mnt/d/comfy/t2i" not in block
 

@@ -329,16 +329,17 @@ function handleClose() {
           </p>
           <p>
             {{ unreadableKeep }} the full clean unfinished: {{ unreadableOf }}
-            ratings are kept and wait. Delete {{ unreadableEach }}, or move it out
-            of the output folder (or repair it), then run Full clean &amp; rescan.
-            A file that only failed this time (a busy disk) comes back by itself
-            at the next scan.
+            ratings are kept and wait. Delete {{ unreadableEach }} or move it
+            somewhere else (or repair it), then run Full clean &amp; rescan. A file
+            that only failed this time (a busy disk) comes back by itself at the
+            next scan.
           </p>
         </div>
         <div v-if="scanStore.outputCheckFailed" class="missing-note">
           <p>
-            The Text to Image and Image to Video output couldn't be checked (an
-            error: see the server log).
+            The Text to Image and Image to Video output couldn't be checked: an
+            error stopped the check. The server log names its type, and so does
+            full_clean_incomplete in the data folder.
           </p>
           <p>
             The ratings of the images and clips that did not come back are kept
