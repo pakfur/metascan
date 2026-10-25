@@ -35,7 +35,8 @@ Rules
 * Resumable: every run lists what is still missing.
 * Only an archive that is gone (or not an archive path) is skipped until
   the server restarts. A CLIP error for an image (``InferenceError``: the
-  worker reports any failure this way, a CUDA out-of-memory included)
+  worker reports any failure this way, a CUDA out-of-memory included) or an
+  unusable vector (empty, the wrong size, NaN -- as autocast can produce)
   skips it for the rest of the pass only; images that failed before go to
   the back of the queue, so a few unreadable ones never hold up the rest.
   ``MAX_CONSECUTIVE_ERRORS`` errors in a row end the pass, and it tries
@@ -296,7 +297,8 @@ class TombstoneReembedder:
                 return
             if outcome == _FAILING:
                 # CLIP keeps failing: try again later, waiting longer each
-                # time (a notify meanwhile does not hurry it).
+                # time. A notify meanwhile (an embedding run) tries sooner;
+                # the wait still doubles while CLIP keeps failing.
                 delay = self._error_retry_s
                 self._error_retry_s = min(delay * 2, MAX_ERROR_RETRY_S)
                 self._schedule_retry(delay)
@@ -506,7 +508,10 @@ class TombstoneReembedder:
             or (dim and arr.size != int(dim))
             or not np.isfinite(arr).all()
         ):
-            return self._abort("CLIP returned an unusable vector")
+            # This image's answer, not CLIP stopping (NaN under autocast:
+            # embedding_manager skips normalising a NaN norm). Ending the
+            # pass would leave it first in the queue for good.
+            return self._encode_failed(p, tomb_id, "an unusable vector")
         added = await asyncio.to_thread(
             self._db.add_tombstone_vectors, [(tomb_id, p.model_key, arr.tobytes())]
         )
@@ -518,20 +523,19 @@ class TombstoneReembedder:
         self._emit()
         return None
 
-    def _encode_failed(
-        self, p: _Pass, tomb_id: int, exc: InferenceError
-    ) -> Optional[str]:
-        """CLIP answered with an error for this image. The worker reports any
-        failure so (a CUDA out-of-memory too), so the image is never given
-        up on: it is skipped for the rest of this pass and tried again on
-        the next one, after the images that have not failed. Errors in a row
-        mean CLIP itself is failing: the pass ends (``_FAILING``)."""
+    def _encode_failed(self, p: _Pass, tomb_id: int, why: object) -> Optional[str]:
+        """CLIP answered with an error (``InferenceError``) or an unusable
+        vector for this image. The worker reports any failure as an error (a
+        CUDA out-of-memory too), so the image is never given up on: it is
+        skipped for the rest of this pass and tried again on the next one,
+        after the images that have not failed. Errors in a row mean CLIP
+        itself is failing: the pass ends (``_FAILING``)."""
         key = (tomb_id, p.model_key)
         self._attempts[key] = self._attempts.get(key, 0) + 1
         p.skipped.add(tomb_id)
         p.errors += 1
         p.done += 1
-        logger.debug("Tombstone %d: CLIP could not encode it (%s)", tomb_id, exc)
+        logger.debug("Tombstone %d: CLIP could not encode it (%s)", tomb_id, why)
         self._emit()
         if p.errors < MAX_CONSECUTIVE_ERRORS:
             return None
