@@ -48,9 +48,12 @@ logger = logging.getLogger(__name__)
 TASTE_SNAPSHOT_FILENAME = "taste_snapshot_before_full_clean.json"
 
 # The versioned pending files this module reads: 2 (grades; no briefs or
-# library prompts) and the current one. A file without a version is the
-# pre-grades form.
-_READABLE_VERSIONS = (2, TASTE_SNAPSHOT_VERSION)
+# library prompts) and 3 (the current version: also briefs and library
+# prompts). A file without a version is the pre-grades form. Spelled out,
+# never derived from TASTE_SNAPSHOT_VERSION, and every reader names the
+# version it means: a later bump must say how it reads a version-3 file,
+# which would otherwise be read as a version-2 one, briefs dropped.
+_READABLE_VERSIONS = (2, 3)
 
 # A snapshot's lists of per-path rows (``favorites`` is a list of paths).
 _ROW_LISTS = ("judgments", "categories", "briefs", "library_prompts")
@@ -200,10 +203,23 @@ def _valid_link(lk: Any) -> bool:
     )
 
 
+def _utf8(v: Any) -> bool:
+    """Text SQLite can store: a str that encodes as UTF-8. JSON can carry
+    a lone surrogate (``"\\udc80"``) that does not, and binding one fails
+    the restore halfway with the whole text in the error."""
+    if not isinstance(v, str):
+        return False
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _valid_brief(b: Any) -> bool:
     """A ``hindsight_briefs`` row: every column is NOT NULL text."""
     return isinstance(b, dict) and all(
-        isinstance(b.get(k), str) for k in ("file_path", "brief", "model", "created_at")
+        _utf8(b.get(k)) for k in ("file_path", "brief", "model", "created_at")
     )
 
 
@@ -212,21 +228,21 @@ def _valid_model_name(v: Any) -> bool:
     ``model_name`` stores (``_library_prompt``)."""
     if v is None:
         return True
-    if not isinstance(v, str):
+    if not _utf8(v):
         return False
     try:
         names = json.loads(v)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
-    return isinstance(names, list) and all(isinstance(n, str) for n in names)
+    return isinstance(names, list) and all(_utf8(n) for n in names)
 
 
 def _valid_library_prompt(lp: Any) -> bool:
     return (
         isinstance(lp, dict)
-        and isinstance(lp.get("file_path"), str)
+        and _utf8(lp.get("file_path"))
         and "prompt" in lp
-        and _opt_str(lp["prompt"])
+        and (lp["prompt"] is None or _utf8(lp["prompt"]))
         and "model_name" in lp
         and _valid_model_name(lp["model_name"])
     )
@@ -252,8 +268,9 @@ def _valid_shape(snap: Any) -> bool:
         and all(isinstance(p, str) for p in favorites)
     ):
         return False
-    if snap.get("version") != TASTE_SNAPSHOT_VERSION:
-        return True  # an older shape has neither list: read as none
+    if not versioned or snap["version"] == 2:
+        return True  # neither shape has briefs or library prompts
+    # Version 3: briefs and library prompts.
     briefs, prompts = snap.get("briefs", []), snap.get("library_prompts", [])
     return (
         isinstance(briefs, list)
@@ -270,7 +287,9 @@ def upgrade_legacy_snapshot(
     snapshot: Dict[str, Any], now: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """``snapshot`` as the current version, 3 (a version-3 one is returned
-    as is). Takes a snapshot that passed validation.
+    as is). Takes a snapshot that passed validation; a versioned one this
+    function has no upgrade for raises ValueError (a version bump must add
+    its own step, never read an older file as version 2).
 
     A version-2 file already has its grades and no briefs or library
     prompts: its rows are kept, and it gets both lists empty.
@@ -286,10 +305,13 @@ def upgrade_legacy_snapshot(
     grades work, still version-less) is taken as stored, and a file with
     such rows creates no row for a bare favorite: there ★ is not a grade.
     """
-    if snapshot.get("version") == TASTE_SNAPSHOT_VERSION:
+    version = snapshot.get("version")
+    if version == TASTE_SNAPSHOT_VERSION:
         return snapshot
-    if "version" in snapshot:  # 2: the rows already carry their grades
+    if version == 2:  # the rows already carry their grades
         return _as_current(snapshot, list(snapshot.get("judgments") or []))
+    if "version" in snapshot:
+        raise ValueError(f"no upgrade from taste snapshot version {version!r}")
     rows = list(snapshot.get("judgments") or [])
     favorites = list(snapshot.get("favorites") or [])
     starred = set(favorites)
@@ -370,23 +392,26 @@ def _quarantine(target: Path, why: str) -> None:
 def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
     """The pending snapshot as version 3 (a version-2 one, or one written
     before grades, is translated: :func:`upgrade_legacy_snapshot`), or None
-    when there is none. A file that cannot be parsed (or has the wrong
-    shape / value types / an unknown version) is quarantined and None
-    returned. Raises :class:`PendingSnapshotUnreadable` when the file
-    exists but can't be read (locked, permissions -- it may well be valid)
-    or can't be quarantined; the file is left in place."""
+    when there is none. A file that cannot be parsed (not UTF-8, not JSON,
+    or nested deeper than the parser goes) or has the wrong shape / value
+    types / an unknown version is quarantined and None returned. Raises
+    :class:`PendingSnapshotUnreadable` when the file exists but can't be
+    read (locked, permissions -- it may well be valid) or can't be
+    quarantined; the file is left in place."""
     target = snapshot_file_path(data_dir)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw = target.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as e:
         raise PendingSnapshotUnreadable(
             f"pending ratings file {target} could not be read: {e}"
         ) from e
+    # Decoded here, not by the read: a decode error is not an OSError, and
+    # if it escaped the loader it would abort every full clean on the file.
     try:
-        snap = json.loads(raw)
-    except ValueError as e:
+        snap = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:  # UnicodeDecodeError: a ValueError
         _quarantine(target, str(e))
         return None
     if not _valid_shape(snap):
@@ -442,8 +467,12 @@ def _apply_pending(db: Any, data_dir: Path) -> Dict[str, int]:
         sqlite3.ProgrammingError,
     ) as e:
         # The data itself is unusable (the restore rolled back): quarantine
-        # it rather than fail -- and block every full clean -- forever.
-        _quarantine(snapshot_file_path(data_dir), f"restore rejected it: {e!r}")
+        # it rather than fail -- and block every full clean -- forever. The
+        # error by its type only: its text can quote the data (a
+        # UnicodeEncodeError's repr carries the whole brief it failed on).
+        _quarantine(
+            snapshot_file_path(data_dir), f"restore rejected it: {type(e).__name__}"
+        )
         return {"restored": 0, "missing": 0}
     if counts["restored"]:
         logger.info(

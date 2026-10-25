@@ -423,16 +423,16 @@ def test_full_clean_aborts_when_pending_file_is_unreadable(monkeypatch, db):
         "favorites": [],
     }
     target.write_text(json.dumps(old), encoding="utf-8")
-    real_read = Path.read_text
+    real_read = Path.read_bytes
 
     def locked(self, *a, **k):
         if self == target:
             raise PermissionError("locked by another process")
         return real_read(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_text", locked)
+    monkeypatch.setattr(Path, "read_bytes", locked)
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
-    monkeypatch.setattr(Path, "read_text", real_read)
+    monkeypatch.setattr(Path, "read_bytes", real_read)
 
     assert json.loads(target.read_text(encoding="utf-8")) == old
     assert _marks(db.get_judgment("/lib/fav.png")) == FAVORITE  # not truncated

@@ -9035,12 +9035,15 @@ class DatabaseManager:
         after it re-appeared keeps that brief.
 
         With ``tombstone_missing``, each snapshot path whose media row did
-        not come back gets one media_tombstones row built from the snapshot,
-        keeping what a delete keeps (``_write_tombstones``): the brief and
-        its model, a ✓ library image's ``library_prompts`` prompt and model
-        names, the embedding via the installed lookup (else none) and the
-        lineage of the surviving t2i/i2v row -- but no thumbnail (the file
-        is gone). A snapshot path is any path with an entry in it. Returns
+        not come back gets one media_tombstones row built from the snapshot
+        (``_tombstone_from_snapshot``): the brief and its model, a ✓ library
+        image's ``library_prompts`` prompt and model names, the embedding
+        via the installed lookup (else none) and the lineage of the
+        surviving t2i/i2v row -- for a path a delete would tombstone, the
+        row ``_write_tombstones`` writes, but with no thumbnail (the rescan
+        did not find the file). A snapshot path is any path with an entry
+        in it, so a ★-only or brief-only one, which a delete never
+        tombstones, gets a tombstone too, with no grade. Returns
         ``{restored, missing, tombstoned}`` counted in paths plus
         ``remaining``: the snapshot narrowed to the paths that were not
         restored (same shape and version, same ``taken_at``)."""
@@ -9212,11 +9215,12 @@ class DatabaseManager:
         brief: Optional[Dict[str, Any]],
         library: Optional[Dict[str, Any]],
     ) -> None:
-        """The tombstone of a snapshot path that did not come back, with
-        what a delete keeps (``_write_tombstones``), from the snapshot: the
-        brief and its model, a ✓ library image's ``library_prompts``
-        prompt and model names, and the lineage of the surviving t2i/i2v
-        row. No thumbnail: the file is gone. Caller holds the lock."""
+        """The tombstone of a snapshot path that did not come back, from the
+        snapshot: the brief and its model, a ✓ library image's
+        ``library_prompts`` prompt and model names, and the lineage of the
+        surviving t2i/i2v row -- for a path a delete would tombstone, what
+        ``_write_tombstones`` keeps. No thumbnail: the rescan did not find
+        the file, so there is none to archive. Caller holds the lock."""
         self._insert_tombstone(
             conn,
             path,

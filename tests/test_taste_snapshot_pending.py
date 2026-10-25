@@ -390,20 +390,20 @@ def test_read_error_keeps_the_file_in_place(db, monkeypatch, caplog):
     snap = _pending_snapshot(db)
     data_dir = Path(db.db_path)
     target = ts.snapshot_file_path(data_dir)
-    real_read = Path.read_text
+    real_read = Path.read_bytes
 
     def locked(self, *a, **k):
         if self == target:
             raise PermissionError("locked")
         return real_read(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_text", locked)
+    monkeypatch.setattr(Path, "read_bytes", locked)
     with caplog.at_level(logging.WARNING, logger=ts.logger.name):
         assert ts.apply_pending_taste_snapshot(db, data_dir) == {
             "restored": 0,
             "missing": 0,
         }
-    monkeypatch.setattr(Path, "read_text", real_read)
+    monkeypatch.setattr(Path, "read_bytes", real_read)
     assert json.loads(target.read_text(encoding="utf-8")) == snap
     assert list(data_dir.glob(ts.TASTE_SNAPSHOT_FILENAME + ".corrupt-*")) == []
     assert any("locked" in r.getMessage() for r in caplog.records)
@@ -450,14 +450,14 @@ def test_unreadable_file_is_signalled_and_apply_leaves_it(db, monkeypatch):
     snap = _pending_snapshot(db)
     data_dir = Path(db.db_path)
     target = ts.snapshot_file_path(data_dir)
-    real_read = Path.read_text
+    real_read = Path.read_bytes
 
     def locked(self, *a, **k):
         if self == target:
             raise PermissionError("locked")
         return real_read(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_text", locked)
+    monkeypatch.setattr(Path, "read_bytes", locked)
     with pytest.raises(ts.PendingSnapshotUnreadable):
         ts.load_pending_snapshot(data_dir)
     with pytest.raises(ts.PendingSnapshotUnreadable):
@@ -468,7 +468,7 @@ def test_unreadable_file_is_signalled_and_apply_leaves_it(db, monkeypatch):
         "restored": 0,
         "missing": 0,
     }
-    monkeypatch.setattr(Path, "read_text", real_read)
+    monkeypatch.setattr(Path, "read_bytes", real_read)
     assert json.loads(target.read_text(encoding="utf-8")) == snap
 
 
