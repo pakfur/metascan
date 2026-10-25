@@ -7,7 +7,7 @@
 - Three-panel resizable layout: filters, thumbnails, metadata
 - Thumbnail size presets (S/M/L)
 - Sorting by file name, date added, or date modified — plus relevance while a search is active
-- Favorites system with star toggle
+- ★ favorites (star toggle) and ✓ pass / ✗ fail grades, with a small grade badge on every tile (see [Rating](#rating-favorites-and-grades))
 - Dark/light mode following system preference
 
 ## Media Viewer
@@ -16,7 +16,52 @@
 - Frame-by-frame stepping (comma/period keys)
 - Previous/next navigation with keyboard arrows
 - Per-file playback speed persistence
+- Rating rail: ★ favorite, ✓ pass / ✗ fail grade, reasons and categories, all from the keyboard (see [Rating](#rating-favorites-and-grades))
 - Keyboard shortcuts help overlay
+
+## Rating: favorites and grades
+
+Two independent marks, set in the media viewer (and in the Text to Image and Image to Video result viewers):
+
+- **★ Favorite**: "I want to look at this again". It drives the Favorites filter, the smart-folder favorite rule and the star on tiles, and nothing ever learns from it. The tile star, the slideshow's F and the mobile viewer's star set it too.
+- **Grade**: ✓ **Pass** ("the prompt did what I wanted"), ✗ **Fail** ("it didn't"), or none. Grades are the only thing the taste scorer, prompt-writer training, the writer statistics and the writer scorecard learn from. Looking at an image teaches nothing.
+
+Neither mark changes the other: an image can be ★ and ✗, or ✓ without ★.
+
+In the viewer:
+
+- **F** toggles ★, **P** toggles ✓ and **X** toggles ✗. Pressing the key of the grade already set clears it. Switching between ✓ and ✗, or clearing, also clears the reasons.
+- **1–6** toggle a reason (realism, composition, emotion, light, concept, motion): what worked for a ✓, what missed for a ✗. A reason needs a grade first ("Press P or X first").
+- **C** opens the category picker. Shift+Enter makes a category sticky: it is added to every image you grade until you turn it off or reload the page.
+- **R** starts review mode: ungraded images the taste scorer is least sure about, the ones closest to 0.5 first.
+- The rating rail beside the image has the same buttons (★ Favorite, ✓ Pass, ✗ Fail, or "No grade"), the reasons ("worked on…" for ✓, "missed on…" for ✗), the taste score (the chance you'd pass this), the image's place in its T2I batch, and "● seen". Clicking a button never takes the keyboard away from the viewer.
+
+Library, Text to Image and Image to Video tiles show the grade as a small read-only ✓ / ✗ badge; grading happens in the viewer. The library grid takes the grades you give in the viewer when you close it. Smart folders have a **Grade** rule (✓ Pass, ✗ Fail or No grade), so "every ✗" is one folder away.
+
+**Deleting a graded image keeps what it taught.** Before the file goes to the trash, Metascan saves a JPEG thumbnail of it (at most 512 px) in `data/archive/thumbs/`, and the deleted image's grade, reasons, categories, prompt and hindsight brief stay on record. The taste scorer, prompt-writer training and the scorecard keep counting it, even after you switch to another CLIP model: the deleted images are then re-embedded from their thumbnails in the background, only while the GPU is otherwise idle (Config → Training shows "re-embedding deleted images, n / N").
+
+### Upgrading an existing library (one time)
+
+The first start of this version converts your ratings, once:
+
+- every ★ favorite stays ★ and also becomes ✓ pass;
+- every old reject (the old X key, stored as "pass" in the old data) becomes ✗ fail;
+- an image you had only looked at stays ungraded;
+- reasons, categories and the dates the taste scorer weighs by are kept, and nothing is added to the rating history.
+
+The taste scorer's model from before keeps its scores until it has retrained on the grades. With auto-retrain on (the default) that happens by itself once there are 20 ✓ and 20 ✗; until then the Training tab says how many are missing.
+
+Before it changes anything, Metascan backs up the database next to it as `metascan.db.pre-v6-<date>-<time>.bak` (in UTC, for example `metascan.db.pre-v6-20261025-091500.bak`), in `data/`, or in `~/.metascan/data/` for the packaged app. The drive needs free space of about 1.2 × the database's size. A database with no ratings is not backed up. Delete the backup once you are happy with the upgrade.
+
+If the backup or the upgrade fails, **the server does not start**. It prints one message that says why (for example how much space to free) and that your ratings are unchanged. Fix the cause and start Metascan again: the upgrade is tried again. Under `python run_server.py`, which runs with auto-reload, a refused start leaves the reloader running and holding the port (8700 by default), so the terminal looks busy: press **Ctrl-C** before you start again. Left running, it would retry the upgrade after every change to a backend file.
+
+To go back to the backup:
+
+1. Stop the server.
+2. In the data folder, move `metascan.db` to another folder, together with `metascan.db-wal` and `metascan.db-shm` if they are there. Keep them until you are sure.
+3. Copy the `.bak` file into the data folder as `metascan.db`.
+
+The backup is the database from before the upgrade, so this version upgrades it again (with a new backup) on its next start. To keep the old ratings as they were, run the previous version of Metascan.
 
 ## Slideshow
 - Ordered or random (shuffled) playback
@@ -85,7 +130,7 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 
 ## Folders (Static & Smart)
 - **Static folders** — manually curated collections; right-click items to add/remove
-- **Smart folders** — saved rules over fields like tags, model, source, modified/added date, favorite status, and whether an image has one or more I2V (image-to-video) clips. Evaluated client-side and re-resolved as the library changes
+- **Smart folders** — saved rules over fields like tags, model, source, modified/added date, favorite status, grade (✓ pass, ✗ fail or none), and whether an image has one or more I2V (image-to-video) clips. Evaluated client-side and re-resolved as the library changes
 - Cross-tab sync over WebSocket: creating, renaming, or moving items broadcasts to every connected browser
 
 ## Storyboards
@@ -145,7 +190,12 @@ Requires two registered ComfyUI workflows (turbo and high quality) — see [Imag
 | Left/Right | Previous/Next media (in viewer) |
 | Up/Down | Volume up/down (video) |
 | , / . | Previous/Next frame (video) |
-| F | Toggle favorite |
+| F | Toggle ★ favorite (viewer, slideshow) |
+| P | Toggle ✓ pass (viewer) |
+| X | Toggle ✗ fail (viewer) |
+| 1–6 | Toggle a reason: realism, composition, emotion, light, concept, motion (viewer; press P or X first) |
+| C | Categories; Shift+Enter makes one sticky (viewer) |
+| R | Review mode: ungraded images, least certain first (viewer) |
 | M | Mute/Unmute (video) |
 | Ctrl+D | Delete file |
 | H or ? | Show shortcuts help (in viewer) |

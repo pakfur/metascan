@@ -23,7 +23,11 @@ the root CLAUDE.md still applies.
   panel_id precedent), ingest keyed on that column (storyboard ingest
   keys on beat_id/panel_id; the two never collide), `i2v_videos_changed`
   on the `i2v` WS channel. Generated clips are VISIBLE library media
-  (never hidden — unlike storyboard clips); star = `media.is_favorite`.
+  (never hidden — unlike storyboard clips); star = `media.is_favorite`, the
+  favorite only (`setFavorite`, never a grade). A clip tile shows a read-only
+  ✓ / ✗ badge from the row's `grade`; grades set in the I2V result viewer
+  reach the tile live through `store.applyJudgment` (`judgmentMirror`). Clips
+  keep collecting grades, but no consumer trains on video.
   `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily
   prunes rows whose media is gone; deleting the source image keeps the
   videos. Presets are kind `ref2v` tagged `minimax`/`i2va`

@@ -10,6 +10,17 @@
 
 # Unreleased
 
+### Pass / Fail Grades
+
+Favorites and training signals are now two separate marks:
+
+- **★ Favorite** is back to "I want to look at this again": filters, smart folders and the tile star use it, and nothing learns from it
+- **✓ Pass / ✗ Fail grades** (P / X in the viewer, reasons on 1–6) are the only thing the taste scorer, prompt-writer training and the writer scorecard learn from; viewing an image teaches nothing
+- Grades show as a small ✓ / ✗ badge on library, Text to Image and Image to Video tiles, and smart folders get a **Grade** rule
+- Deleting a graded image keeps what it taught: its thumbnail, prompt and brief are kept for training, across CLIP model changes too
+- The training sections moved to a new **Config → Training** tab
+- **One-time upgrade:** the first start converts your ratings (favorites become ★ + ✓, old rejects ✗) after backing up the database to `data/metascan.db.pre-v6-<date>-<time>.bak`; if that fails the server refuses to start and changes nothing. See [Upgrading an existing library](docs/features.md#upgrading-an-existing-library-one-time) for restoring the backup and for the Ctrl-C a refused start needs under `run_server.py`
+
 ### Search as a Filter
 
 Content search moved from a separate results view into the left filter panel, where it composes with everything else:
@@ -74,7 +85,7 @@ Metascan is an open-source browser for AI-generated images and videos that doubl
 
 A FastAPI backend handles scanning, the SQLite database, CLIP/FAISS similarity search, duplicate detection, and Real-ESRGAN/GFPGAN/RIFE upscaling, while a Vue 3 SPA provides the UI. The two halves talk over REST and a multiplexed WebSocket, which means the heavy GPU work can stay on a desktop tower while you browse from any laptop, tablet, or phone on the network. The stack is cross-platform — Linux, macOS (Apple Silicon and Intel), and Windows are first-class, and a hardware probe at startup auto-tunes which CLIP model and upscaler are recommended for your machine.
 
-The library organizes itself two ways. Static folders are manually curated collections you fill by right-clicking items; smart folders are saved rule sets — over tags, model, source, dates, favorite status — that re-resolve as content changes, so a folder like "high-step photoreal generations from last month" stays current without maintenance. Folder mutations broadcast over the WebSocket so multiple browser tabs stay in sync.
+The library organizes itself two ways. Static folders are manually curated collections you fill by right-clicking items; smart folders are saved rule sets — over tags, model, source, dates, favorite status, ✓ / ✗ grade — that re-resolve as content changes, so a folder like "high-step photoreal generations from last month" stays current without maintenance. Folder mutations broadcast over the WebSocket so multiple browser tabs stay in sync.
 
 <div align="left">
   <img src="/assets/screenshot.jpg" alt="Metascan Main Interface" width="600">
@@ -139,7 +150,7 @@ Then open `http://<server-ip>:8700` from any browser. For the dev frontend, run 
 
 Detailed documentation lives in [`docs/`](docs/):
 
-- **[Features](docs/features.md)** — full feature list, including media browsing, viewer, slideshow, similarity search, duplicates, upscaling, filtering, folders, and keyboard shortcuts
+- **[Features](docs/features.md)** — full feature list, including media browsing, viewer, rating (★ favorites and ✓ / ✗ grades, and the one-time upgrade), slideshow, similarity search, duplicates, upscaling, filtering, folders, and keyboard shortcuts
 - **[Tech Stack](docs/tech-stack.md)** — backend, frontend, AI/media processing, infrastructure, and dev tooling
 - **[First-Time Setup](docs/first_time_setup.md)** — step-by-step, per-platform install of Python, Node, FFmpeg, virtualenv, and all dependencies
 - **[Installation](docs/installation.md)** — prerequisites, end-user setup, contributor setup, environment variables
@@ -149,7 +160,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Text to Image](docs/t2i.md)** — the Text to Image dialog: caption sources, character and wildcard files, prompt styles per model, server-side batches, and workflow requirements
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
-- **[Prompt-Writer Training](docs/writer-training.md)** — train a LoRA adapter for the prompt writer from your ratings and edits: Windows/WSL2 setup, base weights, the GPU lock, serving, and the blind scorecard
+- **[Prompt-Writer Training](docs/writer-training.md)** — train a LoRA adapter for the prompt writer from your ✓ / ✗ grades and edits: Windows/WSL2 setup, base weights, the GPU lock, serving, and the blind scorecard
 - **[Hardware Detection](docs/hardware-detection.md)** — what gets probed, tier classification, per-model gates, auto-warnings
 - **[Building llama-server](docs/build-llama-server.md)** — when and how to build llama.cpp from source for accelerators upstream doesn't ship (notably Linux + CUDA)
 - **[Developer Guidelines](docs/developer-guidelines.md)** — build commands, code style, testing, CI
