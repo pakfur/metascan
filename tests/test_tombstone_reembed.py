@@ -148,6 +148,9 @@ class FakeClip:
         self.starts: List[Tuple[str, str]] = []
         self.encoded: List[str] = []
         self.unreadable: set = set()
+        # path -> the vector CLIP answers for it instead of a usable one (a
+        # NaN vector, as autocast can produce, or one of the wrong size).
+        self.unusable: Dict[str, np.ndarray] = {}
         # Every image fails, as when the worker runs out of GPU memory: it
         # answers ok:false, which the client raises as InferenceError.
         self.failing = False
@@ -177,6 +180,8 @@ class FakeClip:
             raise RuntimeError("worker shut down")
         if self.failing or path in self.unreadable:
             raise InferenceError("compute_image_embedding returned None")
+        if path in self.unusable:
+            return self.unusable[path]
         return _vector_of(path)
 
     async def shutdown(self) -> None:
@@ -615,6 +620,52 @@ async def test_a_clip_error_skips_the_image_for_the_rest_of_the_pass(db):
     r.notify()
     await r.wait_idle()
     assert env.clip.encoded[-1] == _archive_of(db, bad)  # the next pass
+    await r.aclose()
+
+
+@pytest.mark.parametrize(
+    "vector",
+    [
+        np.full(DIM, np.nan, dtype=np.float32),  # NaN under autocast
+        np.ones(DIM // 2, dtype=np.float32) / np.sqrt(DIM // 2),  # wrong size
+        np.zeros(0, dtype=np.float32),
+    ],
+    ids=["nan", "wrong-size", "empty"],
+)
+async def test_an_unusable_vector_skips_the_image_for_the_pass(db, caplog, vector):
+    """CLIP can answer with a vector that is no use (NaN under autocast:
+    embedding_manager skips the normalisation when the norm is NaN). That
+    is this image's problem, not CLIP's: like a CLIP error the image is
+    skipped for the rest of the pass and tried again on the next one, after
+    the others -- it never ends the pass, which would put it back at the
+    head of the queue and hold up every older image for good."""
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    good = [_delete_graded(db, f"/l/g{i}.png", "pass") for i in range(2)]
+    bad = _delete_graded(db, "/l/nan.png", "fail")  # newest: tried first
+    env = Env(db)
+    env.clip.unusable[_archive_of(db, bad)] = vector
+    r = env.reembedder()
+    r.notify()
+    await r.wait_idle()
+    assert env.clip.encoded == [_archive_of(db, t) for t in (bad, *reversed(good))]
+    assert all(db.get_tombstone_vectors(t) for t in good)
+    assert db.get_tombstone_vectors(bad) == {}
+    assert env.done == [2] and r.status() is None
+    (warning,) = _warnings(caplog)
+    assert "stopped" not in warning
+    assert "Re-embedded 2 of 3" in warning and "1 could not be encoded" in warning
+
+    # Never given up on: the next pass tries it again, and once CLIP answers
+    # with a usable vector it gets one.
+    r.notify()
+    await r.wait_idle()
+    assert env.clip.encoded[-1] == _archive_of(db, bad)
+    assert db.get_tombstone_vectors(bad) == {}
+    env.clip.unusable.clear()
+    r.notify()
+    await r.wait_idle()
+    assert np.array_equal(_vectors(db, bad)["large"], _vector_of(_archive_of(db, bad)))
+    assert env.done == [2, 1]
     await r.aclose()
 
 
