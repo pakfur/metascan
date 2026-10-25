@@ -10,17 +10,17 @@ Everything is built and trained locally. Your captions, prompts and edits are ne
 
 ## What it learns from
 
-Three kinds of example, all from images only (I2V clips are never read):
+Three kinds of example, all from images only (I2V clips are never read), and all from your **grades**: ✓ pass ("the prompt did what I wanted") and ✗ fail ("it didn't"), given in the viewer with P and X.
 
 | Kind | Where it comes from | Used for |
 |---|---|---|
-| **Preference pair** | A T2I caption written as several variants: a variant with at least one favorite image beats a variant whose images were all seen or passed with none favorited | DPO |
-| **Edit** | A prompt you edited before rendering: your text is preferred to the writer's draft | DPO pair and SFT target |
-| **Hindsight** | A favorited image with a known prompt, plus a short "brief" the general VLM writes about the image | SFT |
+| **Preference pair** | A T2I caption written as several variants: a variant with at least one ✓ image beats a variant whose images are all ✗ (a variant with no ✓ and an ungraded image is neither) | DPO |
+| **Edit** | A prompt you edited before rendering, once at least one of its images is ✓: your text is preferred to the writer's draft | DPO pair and SFT target |
+| **Hindsight** | A ✓ image with a known prompt, plus a short "brief" the general VLM writes about the image | SFT |
 
-Scorecard images, `manual` prompts and the stock `fallback` text are never training targets. Deleted images still count (from their tombstone). About 10% of the preference groups are held out and never trained on (a group is held by a stable hash, so it stays held as your data grows; with two or more groups at least one is held and never all); they give the **holdout agreement** (the share of held-out pairs where the adapter prefers your chosen prompt), shown next to the base model's number.
+★ favorites and simply looking at an image never make an example, so browsing, starring and experimenting with a prompt teach the writer nothing. Scorecard images, `manual` prompts and the stock `fallback` text are never training targets. Deleted images still count: a deleted graded image keeps its grade, prompt and brief (from its tombstone), and a deleted ✓ image that had no brief yet can still get one, from the thumbnail saved when it was deleted. About 10% of the preference groups are held out and never trained on (a group is held by a stable hash, so it stays held as your data grows; with two or more groups at least one is held and never all); they give the **holdout agreement** (the share of held-out pairs where the adapter prefers your chosen prompt), shown next to the base model's number.
 
-**Readiness** is per scope (`All`, or one category): trainable at 100 or more preference and edit pairs, "enough new data" at 200 or more pairs since the newest adapter of that scope. The window shows both, and **Write briefs** fills in the hindsight briefs (a resumable background job: starting a training run cancels it, and it restarts by itself when the GPU is free).
+**Readiness** is per scope (`All`, or one category): trainable at 100 or more preference and edit pairs, "enough new data" at 200 or more pairs since the newest adapter of that scope (an example is as new as its newest render or grade, so starring, viewing or deleting never makes old data new). The window shows both, and **Write briefs** fills in the hindsight briefs of ✓ images (a resumable background job: starting a training run cancels it, and it restarts by itself when the GPU is free).
 
 ## What you need
 
@@ -33,7 +33,7 @@ Scorecard images, `manual` prompts and the stock `fallback` text are never train
 | Converter | llama.cpp's `convert_lora_to_gguf.py` (turns the trained adapter into a GGUF `llama-server` can load) |
 | TRL version | `trl>=0.25.0,<0.26`, pinned by `requirements-train.txt` (only the TRL 0.25 line is confirmed to work). The DPO step uses the SFT adapter as its reference model through `DPOConfig(model_adapter_name, ref_adapter_name)`; the gate probes the installed TRL for exactly those two `DPOConfig` fields, not for the version number |
 
-The **Writer training** rows in the Models tab and the training window's gate block list whatever is missing, one reason per piece.
+The **Writer training** rows in **Config → Training** and the training window's gate block list whatever is missing, one reason per piece.
 
 ## Setup on Windows (native)
 
@@ -60,7 +60,7 @@ If native Windows installs give you trouble, run the **whole** Metascan backend 
 
 ## Download the base weights and the converter
 
-Open **Config → Models → Writer training**:
+Open **Config → Training** (the **Writer training** group):
 
 - **`writer-train-base`**: the Hugging Face weights, `huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated` by default (the full-precision model the served GGUF was made from), about 17.5 GB. They download into `data/models/vlm/train/<org>--<name>/` through a `.partial` folder, so an interrupted download resumes where it stopped and a half-finished download never opens the gate. Use `models.writer_train_repo` to name another repo, and `models.huggingface_token` if the repo is gated. Deleting the base is refused while any running, paused or failed run was started from it.
 - **`llama-cpp-converter`**: Metascan downloads only the converter's files (`convert_lora_to_gguf.py`, `gguf-py`, `conversion`, `requirements`, `models/templates`) from the llama.cpp release tag it was tested with (`LLAMA_CPP_RELEASE`) into `data/llama.cpp/`, with a `.metascan-release` marker. The row warns when that tag differs from the `llama-server` you run. To use your own checkout, set `models.llama_cpp_dir` to it; Metascan then never downloads into or deletes it. (`scripts/build_llama_server.sh` builds in a temporary directory and keeps no checkout, so the build alone does not provide the converter.)
@@ -71,7 +71,7 @@ Both downloads work on any machine; they are skipped by **Download all missing**
 
 ## Training
 
-**Config → Models → Train prompt writer** (or the header chip while a run is active) opens the **Writer training** window. It is a floating panel: closing it never stops a run.
+**Config → Training → Train prompt writer** (or the header chip while a run is active) opens the **Writer training** window. It is a floating panel: closing it never stops a run.
 
 1. Pick the **scope** (`All`, or one category) and check the **Dataset** panel and readiness.
 2. Pick the **effort**:
@@ -143,13 +143,13 @@ An attempt that runs out of GPU memory fails with "Ran out of GPU memory during 
 
 ## Using an adapter
 
-A finished adapter shows up in the **Writer** menu of the T2I dialog as `name · date · NN% fav`, where the rate is its favorite rate on its blind scorecard (left out until a scorecard image of it is judged), plus `· untested · n/30` (judged pairs) until the scorecard promotes it. **Base** shows `baseline · NN% fav`, the base writer's rate on the same scorecards. Training creates T2I adapters only, so the I2V dialog's Writer menu offers Base. Details:
+A finished adapter shows up in the **Writer** menu of the T2I dialog as `name · date · NN% pass`, where the rate is its pass rate on its blind scorecard (the share of its images in judged pairs that you graded ✓; left out until a pair is judged), plus `· untested · n/30` (judged pairs) until the scorecard promotes it. **Base** shows `baseline · NN% pass`, the base writer's rate on the same scorecards. Training creates T2I adapters only, so the I2V dialog's Writer menu offers Base. Details:
 
 - A scope-`all` adapter is always offered; a one-category adapter is offered when that category is among the ones you selected. An adapter with fewer than 50 training examples for the chosen target model is shown disabled.
 - Your pick is remembered. When the picked adapter is not offered for the moment (its category deselected, a target model it has too few examples for, not servable, refused by the writer), the dialog uses **Base** and says so, and switches back by itself when the adapter is offered again. Only deleting the adapter resets the pick to Base.
 - Adapters are served with `llama-server --lora` per adapter, loaded unapplied and switched on per request, so one writer process serves the base and every adapter. Adding, deleting or withdrawing an adapter restarts the writer once it is idle (the next request starts it again); a request that needs a just-added adapter while the writer is busy gets `409 adapter_loading` ("try again"), and one for an adapter that is gone, failed, of the other surface or built on another base model gets `409 adapter_unavailable` and the dialog uses **Base** with a note (until the adapter list changes).
 - Adapter writers get no variant "angle" hint and no taste examples (they were trained without them); their variants differ by sampling. For a scope-`all` adapter the request's category names are added to the request, exactly as in training.
-- Every image records which writer made its prompt (`adapter:<id>`), so the **Writers** dashboard (Models tab) can compare favorite rates per writer.
+- Every image records which writer made its prompt (`adapter:<id>`), so the **Writers** dashboard (Config → Training) can compare pass rates (✓ out of ✓ + ✗ among graded generations) per writer.
 
 ## The scorecard
 
@@ -157,19 +157,19 @@ The scorecard answers "is this adapter actually better than the base writer for 
 
 - **40 fixed briefs** (`data/taste/scorecard_briefs.txt`, written for this and committed). For each brief, the base writer and the adapter each write a prompt with the **same seed**, and both are rendered with the same ComfyUI workflow (default target model `krea2`, using its `t2i.model_workflows` preset; without one you get `no_workflow`). That is 80 images.
 - Render it from the training window (**render scorecard**; **resume** continues a partial one at the same seeds; **re-render** adds a fresh set). It needs the GPU free of training.
-- **Blind**: the scorecard images look like any other image in the grid and viewer, with no prompt, tags, writer or variant shown (the server strips them, not just the UI), until you give an explicit **favorite or pass**. Looking at an image without deciding does not reveal it. Clearing a verdict hides it again.
-- **Judged** means both images of a pair have an explicit verdict, favorite or pass; an image you only looked at (seen, no verdict) does not count, even though it is a negative label for the taste scorer. At **30 judged pairs** the adapter moves from **untested** to **ready** and stays ready. The window shows `n/30 judged`, and the Models tab Writers table shows the favorite rate of the base and of each adapter, the mean taste score, and judged pairs.
-- Scorecard images are real judgments for the taste scorer, but are never writer training data or part of the writer favorite-rate stats.
+- **Blind**: the scorecard images look like any other image in the grid and viewer, with no prompt, tags, writer or variant shown (the server strips them, not just the UI), until you grade them ✓ or ✗ (P or X). ★ and simply looking do not reveal an image; clearing its grade hides it again.
+- **Judged** means both images of a pair have a grade. At **30 judged pairs** the adapter moves from **untested** to **ready** and stays ready. Deleting judged images afterwards changes nothing: they keep counting, from their tombstones. The window shows `n/30 judged`, and the Writers table in Config → Training shows the pass rate of the base and of each adapter, the mean taste score, and judged pairs.
+- Scorecard grades are real labels for the taste scorer, but scorecard images are never writer training data or part of the writer pass-rate stats.
 - Each brief counts as one pair (its latest complete render). **Resume** skips briefs still rendering and says so if only those are left; a scorecard cannot start while the server is shutting down.
 
 A "ready" adapter that scores no better than the base is your call: delete it, or train again with more data.
 
 ## First run on a new machine
 
-1. **Gate all green**: Models → Writer training shows the base and converter present and no reasons in the training window (use **Re-check** after installing packages).
+1. **Gate all green**: Config → Training (Writer training) shows the base and converter present and no reasons in the training window (use **Re-check** after installing packages).
 2. **Quick run on small data** first: scope `All` or a small category with at least 100 pairs, effort **Quick**, scorecard off. Watch VRAM (it must stay under your card's 32 GB at the peak during DPO) and that the loss moves and a checkpoint appears. The first time through also confirms the pieces that could not be tested without a GPU: the model loads as `Qwen3VLForConditionalGeneration`, the converter accepts the adapter, and the run reports a GGUF with the expected LoRA tensor count.
 3. **Check the GGUF loads**: the finished adapter appears in the T2I Writer menu; pick it and press **Generate Prompt**. A prompt comes back and the dialog does not fall back to Base.
-4. **Run the scorecard**, judge pairs with F and X, and watch `n/30` climb to **ready**.
+4. **Run the scorecard**, grade both images of each pair with P (✓) or X (✗), and watch `n/30` climb to **ready**.
 5. Then train the real Standard run.
 
 ## Troubleshooting

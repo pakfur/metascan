@@ -18,6 +18,8 @@ paths:
   - "frontend/src/api/training.ts"
   - "frontend/src/types/training.ts"
   - "frontend/src/components/dialogs/WriterTrainingDialog.vue"
+  - "frontend/src/components/dialogs/ConfigTrainingTab.vue"
+  - "frontend/src/types/writers.ts"
   - "tests/test_training_manager.py"
   - "tests/test_writer_*.py"
   - "tests/test_scorecard.py"
@@ -95,7 +97,18 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `DPOConfig` still has `model_adapter_name` / `ref_adapter_name`
   (`writer_train_probe.probe_trl_reference_support` runs the same check for the gate).
 - **Data rules (`writer_dataset.py`).** Three example kinds (variant preference pairs,
-  edit pairs -> DPO + SFT, hindsight SFT). Images only. Scorecard images
+  edit pairs -> DPO + SFT, hindsight SFT), and the ✓ / ✗ grade is the only label
+  (`_grade`; ★, views and `seen_at` never reach the raw rows): a variant **wins** with
+  at least one ✓ image (not `fallback`) and **loses** only when every image is ✗ (one
+  ungraded or seen-only image keeps it from losing); an edit counts only when one of its
+  renders is ✓; hindsight takes ✓ images with a known prompt and a brief, live or
+  deleted. Hindsight is one source row per path (`_hindsight_source`: a live T2I row,
+  else a live library image, else the newest deleted row while no live file holds the
+  path) and a brief always comes from its own row (`hindsight_briefs` for a live image,
+  the tombstone's `brief` for a deleted one), never borrowed by path. An example's
+  `as_of` is the newest `created_at` / `judged_at` of its images (a tombstone's
+  `COALESCE(judged_at, confirmed_at)`), never `seen_at`, so viewing, starring or
+  deleting never makes old data "new since the last adapter". Images only. Scorecard images
   (`t2i_images.scorecard_id` not NULL), `manual` and (as a target) `fallback` writers
   are excluded; deleted generations are read from `media_tombstones`. Trainable at
   `MIN_TRAINABLE_PAIRS = 100`, "enough new" at `ENOUGH_NEW_PAIRS = 200` counted since
@@ -142,8 +155,13 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   re-check under the lock. A submit that lands exactly as the lock is taken fails with
   `GpuBusyError` (-> 409) rather than being held. `tests/test_training_manager.py`
   enumerates the consumer routes; add a new GPU route to its list. Not locked: browsing,
-  rating, judgments, the taste scorer (CPU), `/api/vlm/unload`. Shutdown closes the
-  training manager first (a completion refreshes the writer), then the scorecard.
+  rating, judgments, the taste scorer (CPU), `/api/vlm/unload`. The tombstone
+  re-embedder (`backend/services/tombstone_reembed.py`) is a CLIP consumer that
+  yields to the lock (`reembed_blocked` checks `gpu_reserved()` before CLIP starts and
+  between images) and is deliberately NOT a `gpu_busy` reason: a training start wins.
+  Shutdown closes the re-embedder first (a pending retry must not start CLIP while
+  training lets go of the lock), then the training manager (a completion refreshes the
+  writer), then the scorecard.
   The lifespan installs training (`recover()`) right after the T2I runner, before any
   CLIP / FAISS / VLM preload.
 - **The gate** (`hardware.writer_training_reasons`) lists one reason per missing
@@ -154,7 +172,7 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   deps/TRL probe runs in a single-flight background subprocess per interpreter
   (`gate.checking`); only a passing answer is cached for the process, anything else
   (missing deps, old TRL, probe failures) for 60 s, and every finished probe emits
-  `gate_changed` (the Models tab shows only cached results); the missing-deps reason
+  `gate_changed` (the Training tab shows only cached results); the missing-deps reason
   names the interpreter probed; `GET /api/writers/training?recheck=1` clears the cache. `/api/models/status`
   uses `probe=False` ("not checked yet") and never spawns. `GET .../training?dataset=0`
   is the light status (no dataset build, no `next_name`) the app uses on every WS
@@ -169,10 +187,18 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   one prompt each with the SAME seed (`brief_seed(scorecard_id, i)`; order from
   `adapter_first`), no angle, no taste examples; then one Manual batch per brief with
   two supplied `prompts[]`. All prompts are written, the VLM is unloaded, then batches
-  render one at a time. **Judged = an explicit favorite or pass on both images** (seen
-  alone is NOT judged and does not lift the blind); 30 judged pairs promote `untested`
-  -> `ready` through a single CAS (`db.promote_writer_adapter`), after which the adapter
-  stays ready. Blinding is server-side: while an image is blind, `GET /api/media/{path}`,
+  render one at a time. **Judged = a grade (✓ or ✗) on both images**; ★ and seen never
+  judge and never lift the blind (blind = a scorecard image with no grade; clearing the
+  grade hides it again; only a grade PATCH runs the judgment check). 30 judged pairs
+  promote `untested` -> `ready` through a single CAS (`db.promote_writer_adapter`),
+  after which the adapter stays ready. Results are pass rates (`pass_base` /
+  `pass_adapter`, `pass_rate_base` / `pass_rate_adapter`, `n_judged`, `n_pairs`, mean
+  taste score), and results and promotion count **deleted graded** scorecard images
+  from their tombstones (`scorecard_image_rows`: selected by the indexed
+  `media_tombstones.scorecard_id`, never by parsing lineages; grade from the tombstone,
+  writer and batch from its lineage; a live T2I row at the path wins, then the newest
+  tombstone; a deleted ungraded image is left out so a resume renders its brief again;
+  deleted images have no taste score), so deleting after judging changes nothing. Blinding is server-side: while an image is blind, `GET /api/media/{path}`,
   `/api/t2i/images`, the PATCH answer and the scorecard `batch_step` / batches payloads
   drop prompt, tags, writer, variant and lineage (`scorecard_blind.py` helpers; tests
   assert no writer or prompt text appears anywhere in the JSON). `scorecard_batches` and
@@ -187,8 +213,12 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   (`interrupted`), and it needs a `t2i.model_workflows` preset for the target model
   (default `krea2`; else 409 `no_workflow`).
 - **Hindsight briefs.** `HindsightBriefsJob` (general VLM role, one image per request,
-  resumable, cancellable, one at a time) writes the one-sentence briefs. Its selection
-  reuses `writer_dataset._hindsight_target` so it cannot drift from the builder.
+  resumable, cancellable, one at a time) writes the one-sentence briefs for ✓ images
+  without one. Its selection reuses `writer_dataset._hindsight_target` /
+  `hindsight_brief_targets` so it cannot drift from the builder: live ✓ images, and
+  deleted ✓ images from their archived thumbnail (`training_archive.resolve_thumb`;
+  written with `db.set_tombstone_brief`, never into `hindsight_briefs`; one whose
+  archive is gone is skipped).
   `job.blocked` is set to `TrainingManager.gpu_locked`: it pauses between images and
   refuses a start with 409 `gpu_busy_training`. Never refuse training because the job
   says "running"; the lock cancels it and restarts it afterwards.
@@ -203,6 +233,6 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   viewer open and focus inside the window (or on body), so Esc and the rating keys
   belong to the viewer. Writer menu rates (T2I / I2V dialogs) are the blind scorecard
   rates from `GET /api/writers/scorecards` (`training.scorecards`), never writer-stats:
-  `types/writers.ts::favText` / `judgedPairs` format them for both the menu and the
-  window. After a WS reconnect the app does one light status fetch
+  `types/writers.ts::passText` / `judgedPairs` format them (`NN% pass`) for both the
+  menu and the window. After a WS reconnect the app does one light status fetch
   (`onWsConnect`).

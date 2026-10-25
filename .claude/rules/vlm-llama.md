@@ -310,8 +310,8 @@ the root CLAUDE.md still applies.
   training worker with `--base <HF dir>`; the worker verifies the GGUF (LoRA
   tensor count, no vision tensors) and fails the run otherwise. The
   converter is pinned to `LLAMA_CPP_RELEASE`; a `llama-server` built from a
-  much different llama.cpp may not load the adapter (Models tab shows
-  `release_mismatch`).
+  much different llama.cpp may not load the adapter (the converter row in
+  Config → Training shows `release_mismatch`).
 
 - **VLM status row requires the binary too.** `_vlm_status_rows` in
   `backend/api/models.py` only flips a row to `available` when GGUF +

@@ -245,6 +245,12 @@ favorites list restores ★ and ✓. Validation accepts both shapes, so a legacy
 pending file is restored, never quarantined for its shape. `_has_newer_judgment`
 counts a grade, a favorite, reasons or `judged_at` as newer data.
 
+> **Superseded 2026-10-25 (implementation ruling 5):** a favorite is *not*
+> newer data. `_has_newer_judgment` counts a grade, reasons or `judged_at`;
+> with ★ independent of the grade, a ★ set after an item re-appeared must
+> not block putting its snapshot grade back. The snapshot's ★ is restored on
+> its own, even beside a newer grade, and a restore never clears ★.
+
 ## Taste scorer
 
 - Labels: ✓ → 1, ✗ → 0, no grade → excluded (views and favorites count for

@@ -90,6 +90,16 @@ the root CLAUDE.md still applies.
   transaction: media rows are deleted (indices + `folder_items` cascade)
   and the native file paths returned up through `StoryboardService`,
   which moves the files to the OS trash (`send2trash`, unlink fallback).
+  **A purge archives its graded images first** (CLAUDE.md, "Judgments and
+  tombstones"): every purging delete and confirmed replace goes through
+  `training_archive.purge_keeping_signal` — `db.purge_image_candidates(scope,
+  scope_id)` lists the beat images that operation may delete (built from the
+  same helpers the operations use), the graded ones are archived from the
+  live files, the operation gets the `thumbs` mapping and
+  `_purge_media_rows` attaches a thumbnail only to what it really deletes;
+  archives of images the purge keeps are removed again. The trash still
+  runs after the rows, and a clip (`delete_panel_video`, a shot's
+  `panel_videos`) is a video, never archived.
   Files still referenced by a surviving `beat_images` row, a
   `storyboard_subjects.reference_path`, or a `scenes.reference_path` are
   unhidden instead of deleted —
