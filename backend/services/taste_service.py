@@ -256,8 +256,9 @@ class TasteService:
         return [to_native_path(p) for p in paths]
 
     async def writer_stats(self) -> Dict[str, Any]:
-        """Favorite rate per writer per 14-day window, the latest stored
-        favorite diversity, and the taste-collapse flag."""
+        """Pass rate (✓ of graded) per writer per 14-day window, the latest
+        stored ✓ pass diversity, and the taste-collapse flag (on the pooled
+        T2I pass rate)."""
         now = _utcnow()
         windows = await asyncio.to_thread(
             self.db.writer_window_stats, WRITER_WINDOW_DAYS, WRITER_WINDOWS, now

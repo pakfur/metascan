@@ -71,13 +71,14 @@ class LabelRow:
     file_path: str
     label: int
     weight: float
+    # A deleted image: the worker may use only its own stored vector, never
+    # the index's vector for its old path (another file may live there now).
+    # Required: a default would make every row of a new source "live".
+    tombstone: bool
     categories: List[str] = field(default_factory=list)
     batch_id: Optional[str] = None
     embedding: Optional[bytes] = None
     embedding_model: Optional[str] = None
-    # A deleted image: the worker may use only its own stored vector, never
-    # the index's vector for its old path (another file may live there now).
-    tombstone: bool = False
 
 
 @dataclass
@@ -119,12 +120,14 @@ def _label_row(
     key: str,
     now: datetime,
     half_life_days: float,
-    tombstone: bool = False,
+    *,
+    tombstone: bool,
 ) -> Tuple[Optional[LabelRow], bool]:
     """``(row, skipped)``; ``skipped`` is True for a labeled row dropped
     because its timestamp is empty or unparseable. The clock runs from the
     last time the grade was set or confirmed; ``grade_score_shown`` (the
-    score on screen then, see ``LEGACY_GRADE_EVENTS``) halves the weight."""
+    score on screen then, see ``LEGACY_GRADE_EVENTS``) halves the weight.
+    ``tombstone`` (required) says whether ``row`` is a deleted image."""
     label = _label_for(row)
     if label is None:
         return None, False
@@ -161,7 +164,7 @@ def _labeled_rows(
     rows: List[LabelRow] = []
     skipped = 0
     for m in raw.get("media", []):
-        lr, bad = _label_row(m, m["file_path"], now, half_life_days)
+        lr, bad = _label_row(m, m["file_path"], now, half_life_days, tombstone=False)
         skipped += bad
         if lr is not None:
             rows.append(lr)
@@ -247,14 +250,14 @@ def missing_for_training(n_pos: int, n_neg: int) -> Optional[Dict[str, int]]:
 
 WRITER_WINDOW_DAYS: int = 14
 WRITER_WINDOWS: int = 6
-# Taste collapse: the newest favorite diversity falls below this share of
-# the median of the previous COLLAPSE_PREV_WINDOWS windows while the
-# favorite rate rises.
+# Taste collapse: the newest ✓ pass diversity falls below this share of the
+# median of the previous COLLAPSE_PREV_WINDOWS windows while the pass rate
+# rises.
 COLLAPSE_RATIO: float = 0.75
 COLLAPSE_PREV_WINDOWS: int = 5
-# The latest window needs at least this many favorites with a vector: a
+# The latest window needs at least this many ✓ T2I images with a vector: a
 # mean distance over two or three is noise, not a collapse.
-COLLAPSE_MIN_FAVORITES: int = 5
+COLLAPSE_MIN_PASSES: int = 5
 
 
 def window_starts(
@@ -295,16 +298,17 @@ def window_for(
 
 
 def _pooled_t2i_rates(windows: List[Dict[str, Any]]) -> List[Optional[float]]:
-    """Favorite rate per window over every T2I writer, oldest first."""
-    seen: Dict[str, int] = {}
-    fav: Dict[str, int] = {}
+    """Pass rate (✓ of graded) per window over every T2I writer, oldest
+    first; None for a window with nothing graded."""
+    n_graded: Dict[str, int] = {}
+    n_pass: Dict[str, int] = {}
     for w in windows:
         if (w.get("kind") or "t2i") != "t2i":
             continue
         start = str(w["window_start"])
-        seen[start] = seen.get(start, 0) + int(w.get("n_seen") or 0)
-        fav[start] = fav.get(start, 0) + int(w.get("n_fav") or 0)
-    return [fav[s] / seen[s] if seen[s] else None for s in sorted(seen)]
+        n_graded[start] = n_graded.get(start, 0) + int(w.get("n_graded") or 0)
+        n_pass[start] = n_pass.get(start, 0) + int(w.get("n_pass") or 0)
+    return [n_pass[s] / n_graded[s] if n_graded[s] else None for s in sorted(n_graded)]
 
 
 def collapse_warning(
@@ -312,19 +316,19 @@ def collapse_warning(
     windows: List[Dict[str, Any]],
     window_days: int = WRITER_WINDOW_DAYS,
 ) -> bool:
-    """Taste collapse: the latest window's favorite diversity is below
+    """Taste collapse: the latest window's ✓ pass diversity is below
     ``COLLAPSE_RATIO`` x the median of the previous up-to-5 windows (those
-    with a value) **and** the latest pooled T2I favorite rate is above the
+    with a value) **and** the latest pooled T2I pass rate is above the
     previous window's, and the latest window holds at least
-    ``COLLAPSE_MIN_FAVORITES`` favorites with a vector. Diversity is stored per training run with that run's
-    window starts while rates slide with today: unless the latest diversity
-    window starts within ``window_days`` of the latest rate window they
-    describe different periods, so no flag. False whenever either side
-    lacks the data."""
+    ``COLLAPSE_MIN_PASSES`` ✓ images with a vector. Diversity is stored
+    per training run with that run's window starts while rates slide with
+    today: unless the latest diversity window starts within
+    ``window_days`` of the latest rate window they describe different
+    periods, so no flag. False whenever either side lacks the data."""
     div = sorted(diversity, key=lambda d: str(d["window_start"]))
     if not div or div[-1].get("mean_distance") is None:
         return False
-    if int(div[-1].get("n") or 0) < COLLAPSE_MIN_FAVORITES:
+    if int(div[-1].get("n") or 0) < COLLAPSE_MIN_PASSES:
         return False
     rate_starts = sorted(
         {str(w["window_start"]) for w in windows if (w.get("kind") or "t2i") == "t2i"}

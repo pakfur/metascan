@@ -11,7 +11,7 @@ Task (written by ``metascan.core.taste_runner.TasteRunner``)::
      "diversity": {"window_starts": [iso date], "items": [{file_path,
                    window_start, tombstone, embedding: b64 | null,
                    embedding_model}]}}
-                   # optional, train mode: favorite diversity per window
+                   # optional, train mode: ✓ pass diversity per window
 
 Writes ``<out_dir>/taste_result.json`` and exits 0, or writes
 ``{"status": "error", "error": str}`` and exits 1.
@@ -265,7 +265,7 @@ def _rescore(task: Dict[str, Any], index: _Index) -> Dict[str, Any]:
 
 
 def _diversity(spec: Dict[str, Any], index: _Index) -> List[Dict[str, Any]]:
-    """Mean pairwise cosine distance between the favorited images of each
+    """Mean pairwise cosine distance between the ✓ passed images of each
     window: ``[{window_start, n, mean_distance}]`` in ``window_starts``
     order. ``n`` counts items with a vector (stored embedding when its
     model matches the index, else -- live items only -- the index);
@@ -321,7 +321,7 @@ def run(task: Dict[str, Any]) -> Dict[str, Any]:
                 result["diversity"] = _diversity(task["diversity"], index)
             except Exception:
                 # A dashboard metric: never worth failing training over.
-                logger.warning("favorite diversity failed", exc_info=True)
+                logger.warning("pass diversity failed", exc_info=True)
         return result
     return _rescore(task, index)
 

@@ -397,6 +397,20 @@ def test_live_row_beats_tombstone_of_same_path():
     assert ls.pairs == []
 
 
+def test_a_label_row_must_say_whether_it_is_a_tombstone():
+    """The worker reads a vector by path only for a row marked live; a
+    default would mark every row of a new source live. So no label row is
+    built without the flag."""
+    from metascan.core.taste_labels import LabelRow, _label_row
+
+    with pytest.raises(TypeError):
+        LabelRow(key="/l/a.png", file_path="/l/a.png", label=1, weight=1.0)
+    with pytest.raises(TypeError):
+        _label_row(_live(), "/l/a.png", T0, 180)
+    row, skipped = _label_row(_tomb(4), "tombstone:4", T0, 180, tombstone=True)
+    assert row is not None and row.tombstone is True and not skipped
+
+
 def test_an_ungraded_live_row_hides_no_tombstone():
     raw = {"media": [_live(grade=None)], "tombstones": [_tomb(1)]}
     ls = build_label_set(raw, T0, 180)

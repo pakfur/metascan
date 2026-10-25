@@ -457,28 +457,26 @@ async def test_diversity_computed_on_train(setup):
 
     runner, db, index_dir, rng, direction = setup
     now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    # ``_build`` graded /l/fNN ✓ and /l/pNN ✗: diversity is over ✓ T2I.
     latest = [f"/l/f{i:02d}.png" for i in range(5)]
-    # Diversity still reads ★ favorites (not grades) here.
-    for p in [*latest, "/l/f05.png", "/l/f06.png"]:
-        db.set_favorite_state(p, True)
     for p in latest:
         _set_created(
             db,
             db.create_t2i_image(file_path=p, writer_id="base"),
             "2026-10-15 10:00:00",
         )
-    # One favorite in the previous window: n = 1, no distance.
+    # One ✓ in the previous window: n = 1, no distance.
     _set_created(db, db.create_t2i_image(file_path="/l/f05.png"), "2026-10-01 10:00:00")
-    # Outside the six windows, and a pass in the latest one: neither counts.
+    # Outside the six windows, and a ★ ✗ in the latest one: neither counts.
     _set_created(db, db.create_t2i_image(file_path="/l/f06.png"), "2026-06-01 10:00:00")
     _set_created(db, db.create_t2i_image(file_path="/l/p00.png"), "2026-10-15 10:00:00")
-    # A deleted favorite generation: its vector lives only on the tombstone.
+    assert db.set_favorite(Path("/l/p00.png"), True)
+    # A deleted ✓ generation: its vector lives only on the tombstone.
     gone_vec = _vec(rng, direction, 1.0)
     db.save_media(_media("/l/gen_gone.png"))
     _set_created(
         db, db.create_t2i_image(file_path="/l/gen_gone.png"), "2026-10-16 10:00:00"
     )
-    db.set_favorite_state("/l/gen_gone.png", True)
     db.set_grade("/l/gen_gone.png", "pass")
     db.set_embedding_lookup(lambda p: (gone_vec, MODEL_KEY))
     db.delete_media(Path("/l/gen_gone.png"))
@@ -644,12 +642,12 @@ async def test_diversity_never_borrows_a_vector_by_path(setup):
 
     runner, db, index_dir, rng, direction = setup
     now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
-    # A deleted ★ generation whose vector existed only for another CLIP
+    # A deleted ✓ generation whose vector existed only for another CLIP
     # model; a library file now lives at its path and is indexed.
     db.save_media(_media("/l/gen_reused.png"))
     image_id = db.create_t2i_image(file_path="/l/gen_reused.png")
     _set_created(db, image_id, "2026-10-16 10:00:00")
-    db.set_favorite_state("/l/gen_reused.png", True)
+    db.set_grade("/l/gen_reused.png", "pass")
     db.set_embedding_lookup(lambda p: (np.ones(64, dtype=np.float32), "large"))
     assert db.delete_t2i_image(image_id)[0]  # the lineage row goes too
     db.set_embedding_lookup(None)
@@ -659,9 +657,38 @@ async def test_diversity_never_borrows_a_vector_by_path(setup):
         for g in db.generation_outcomes(include_embeddings=True)
         if g["file_path"] == "/l/gen_reused.png"
     ]
-    assert gone["tombstone"] is True and gone["favorite"] is True
+    assert gone["tombstone"] is True and gone["grade"] == "pass"
     _index_with(index_dir, {"/l/gen_reused.png": _vec(rng, direction, 1.0)})
     r = await runner.train(180, now=now)
     assert r["status"] == "ok", r
     div = {d["window_start"]: d for d in db.latest_taste_diversity()}
     assert div["2026-10-10"]["n"] == 0
+
+
+async def test_a_diversity_row_must_say_whether_it_is_a_tombstone(
+    setup, monkeypatch, caplog
+):
+    """A generation row that does not say whether it is a tombstone is
+    refused, never taken for a live one whose vector may be read by its
+    path (the path may hold another file now): no diversity is stored, and
+    training still runs."""
+    from datetime import timezone
+
+    runner, db, _, _, _ = setup
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    for p in [f"/l/f{i:02d}.png" for i in range(5)]:
+        _set_created(db, db.create_t2i_image(file_path=p), "2026-10-15 10:00:00")
+    outcomes = db.generation_outcomes
+
+    def unmarked(*args, **kwargs):
+        rows = outcomes(*args, **kwargs)
+        for row in rows:
+            del row["tombstone"]
+        return rows
+
+    monkeypatch.setattr(db, "generation_outcomes", unmarked)
+    with caplog.at_level("WARNING", logger="metascan.core.taste_runner"):
+        r = await runner.train(180, now=now)
+    assert r["status"] == "ok", r
+    assert db.latest_taste_diversity() == []
+    assert "KeyError: 'tombstone'" in caplog.text

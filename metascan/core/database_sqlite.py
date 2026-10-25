@@ -1662,8 +1662,9 @@ class DatabaseManager:
                 )
                 """
             )
-            # Favorite diversity per 14-day window (mean pairwise CLIP
-            # cosine distance), written by each taste training run.
+            # ✓ pass diversity per 14-day window (mean pairwise CLIP cosine
+            # distance of the window's ✓ T2I generations), written by each
+            # taste training run.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS taste_diversity (
@@ -6681,12 +6682,14 @@ class DatabaseManager:
         self, since: Optional[str] = None, include_embeddings: bool = False
     ) -> List[Dict[str, Any]]:
         """One row per T2I image / I2V clip: ``{kind, file_path, writer_id,
-        writer_model, created_at, seen, favorite, tombstone, embedding,
-        embedding_model}``. ``seen`` is a ``seen_at`` or a verdict. Live
-        generations come from the lineage tables JOINed to media; deleted
-        ones (``tombstone`` True) from the newest tombstone whose lineage
-        carries the generation row (so deleting passes does not inflate a
-        rate), unless the path is live again.
+        writer_model, created_at, grade, tombstone, embedding,
+        embedding_model}``. ``grade`` is ✓ ``'pass'`` / ✗ ``'fail'`` / None,
+        the only outcome: no row carries ★ or a view time. Live generations
+        come from the lineage tables JOINed to media; deleted ones
+        (``tombstone`` True) from the newest tombstone whose lineage
+        carries the generation row (so deleting failures does not inflate a
+        rate), unless the path is live again. Every row says whether it is
+        a tombstone.
         Scorecard images (``t2i_images.scorecard_id`` set, live or in the
         tombstone lineage) are left out: their results have their own rows.
         ``since`` (an ISO date) drops older generations. ``embedding`` is
@@ -6696,9 +6699,11 @@ class DatabaseManager:
         out: Dict[Tuple[str, str], Dict[str, Any]] = {}
         with self.lock, self._get_connection() as conn:
             for kind, table in self._GENERATION_TABLES:
+                # No media column is read: the JOIN only proves the
+                # generation is live (media's primary-key index answers it).
                 sql = (
                     f"SELECT g.file_path, g.writer_id, g.writer_model, g.created_at, "
-                    "m.is_favorite, j.passed, j.seen_at "
+                    "j.grade "
                     f"FROM {table} g JOIN media m ON m.file_path = g.file_path "
                     "LEFT JOIN media_judgments j ON j.file_path = g.file_path"
                 )
@@ -6713,23 +6718,19 @@ class DatabaseManager:
                 if where:
                     sql += " WHERE " + " AND ".join(where)
                 for r in conn.execute(sql, params):
-                    favorite = bool(r["is_favorite"])
                     out[(kind, r["file_path"])] = {
                         "kind": kind,
                         "file_path": r["file_path"],
                         "writer_id": r["writer_id"],
                         "writer_model": r["writer_model"],
                         "created_at": r["created_at"],
-                        "favorite": favorite,
-                        "seen": favorite
-                        or bool(r["passed"])
-                        or r["seen_at"] is not None,
+                        "grade": r["grade"],
                         "tombstone": False,
                         "embedding": None,
                         "embedding_model": None,
                     }
             live = set(out)
-            cols = "id, file_path, is_favorite, passed, seen_at, lineage"
+            cols = "id, file_path, grade, lineage"
             if include_embeddings:
                 cols += ", embedding, embedding_model"
             sql = f"SELECT {cols} FROM media_tombstones WHERE lineage IS NOT NULL"
@@ -6770,7 +6771,6 @@ class DatabaseManager:
                         continue
                     if since is not None and str(created_at) < since:
                         continue
-                    favorite = bool(r["is_favorite"])
                     # Ascending id: a newer tombstone replaces an older one.
                     out[key] = {
                         "kind": kind,
@@ -6778,10 +6778,7 @@ class DatabaseManager:
                         "writer_id": gen.get("writer_id"),
                         "writer_model": gen.get("writer_model"),
                         "created_at": str(created_at),
-                        "favorite": favorite,
-                        "seen": favorite
-                        or bool(r["passed"])
-                        or r["seen_at"] is not None,
+                        "grade": r["grade"],
                         "tombstone": True,
                         "embedding": (r["embedding"] if include_embeddings else None),
                         "embedding_model": (
@@ -7328,14 +7325,16 @@ class DatabaseManager:
         windows: int = 6,
         now: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        """Favorite rate among SEEN generations per writer (and the model
+        """Pass rate among GRADED generations per writer (and the model
         that wrote its drafts) per window: ``[{kind, writer_id,
-        writer_model, window_start, n_seen, n_fav, rate}]``. Every
-        ``(kind, writer, writer_model)`` with a generation in the last
-        ``windows`` windows gets all of them (``rate`` None when ``n_seen``
-        is 0). A NULL writer is ``"unknown"``; a NULL ``writer_model``
-        (typed, fallback, or a row older than the column) stays None. Windows by the generation's
-        ``created_at`` (UTC), counting back from today."""
+        writer_model, window_start, n_graded, n_pass, rate}]``.
+        ``n_graded`` counts ✓ pass and ✗ fail, ``n_pass`` the ✓, ``rate``
+        is ``n_pass / n_graded`` (None when ``n_graded`` is 0); ★ favorites
+        and views count for nothing. Every ``(kind, writer, writer_model)``
+        with a generation in the last ``windows`` windows gets all of them.
+        A NULL writer is ``"unknown"``; a NULL ``writer_model`` (typed,
+        fallback, or a row older than the column) stays None. Windows by
+        the generation's ``created_at`` (UTC), counting back from today."""
         from metascan.core.taste_labels import window_for, window_starts
 
         starts = window_starts(now or datetime.now(timezone.utc), window_days, windows)
@@ -7348,9 +7347,9 @@ class DatabaseManager:
             model = g.get("writer_model") or None
             per = counts.setdefault((g["kind"], writer, model), {})
             cell = per.setdefault(start, [0, 0])
-            if g["seen"]:
+            if g["grade"] in GRADES:
                 cell[0] += 1
-                cell[1] += int(g["favorite"])
+                cell[1] += int(g["grade"] == "pass")
         rows: List[Dict[str, Any]] = []
         names = {a["id"]: a["name"] for a in self.list_writer_adapters(True)}
         for (kind, writer, model), per in sorted(
@@ -7358,15 +7357,15 @@ class DatabaseManager:
         ):
             adapter_id = parse_adapter_writer_id(writer)
             for start in starts:
-                n_seen, n_fav = per.get(start, [0, 0])
+                n_graded, n_pass = per.get(start, [0, 0])
                 row: Dict[str, Any] = {
                     "kind": kind,
                     "writer_id": writer,
                     "writer_model": model,
                     "window_start": start,
-                    "n_seen": n_seen,
-                    "n_fav": n_fav,
-                    "rate": n_fav / n_seen if n_seen else None,
+                    "n_graded": n_graded,
+                    "n_pass": n_pass,
+                    "rate": n_pass / n_graded if n_graded else None,
                 }
                 if adapter_id is not None:
                     # An adapter row carries its remembered name (the
@@ -7643,7 +7642,7 @@ class DatabaseManager:
     def record_taste_diversity(
         self, rows: List[Dict[str, Any]], computed_at: str
     ) -> None:
-        """Upsert one training run's per-window favorite diversity."""
+        """Upsert one training run's per-window ✓ pass diversity."""
         with self.lock, self._get_connection() as conn:
             for r in rows:
                 md = r.get("mean_distance")

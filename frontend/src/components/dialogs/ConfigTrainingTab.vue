@@ -129,7 +129,7 @@ async function onTasteRetrain() {
   }
 }
 
-// ---- Writers: favorite rate per writer per 14-day window + diversity ----
+// ---- Writers: pass rate per writer per 14-day window + ✓ diversity ----
 // The spec's success baseline: the 8B writer with variants, no guidance.
 // Rows are per (writer, model): a base draft from another model is not it.
 const BASELINE_WRITER = 'base'
@@ -228,8 +228,8 @@ function rateText(cell: WriterWindowStat | undefined): string {
 }
 
 function rateTitle(cell: WriterWindowStat | undefined): string {
-  if (!cell || cell.n_seen === 0) return 'No seen generations in this window'
-  return `${cell.n_fav} favorited of ${cell.n_seen} seen`
+  if (!cell || cell.n_graded === 0) return 'No graded generations in this window'
+  return `${cell.n_pass} ✓ pass of ${cell.n_graded} graded`
 }
 </script>
 
@@ -354,12 +354,12 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
         <button class="btn-small writers-refresh" @click="loadWriterStats">Refresh</button>
       </div>
       <div class="taste-hint">
-        Favorite rate among generations you have seen (viewed, favorited or passed), by the
-        writer that drafted the prompt, per 14-day window of generation date.
+        Pass rate (✓ out of ✓ + ✗) among graded generations, by the writer that drafted the
+        prompt, per 14-day window of generation date. ★ favorites and views don't count.
       </div>
       <div v-if="writerStats?.collapse_warning" class="warn-banner writers-warning">
-        Favorites are getting less diverse (latest window more than 25% below the recent median)
-        while the favorite rate rises: the writer may be narrowing toward a few looks.
+        ✓ passed images are getting less diverse (latest window more than 25% below the recent
+        median) while the pass rate rises: the writer may be narrowing toward a few looks.
       </div>
       <div v-if="writerStatsError" class="err-text">
         Could not load writer stats: {{ writerStatsError }}
@@ -396,7 +396,7 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
                   :title="rateTitle(row.cells[s])"
                 >
                   <span class="rate">{{ rateText(row.cells[s]) }}</span>
-                  <span class="n-seen">n={{ row.cells[s]?.n_seen ?? 0 }}</span>
+                  <span class="n-count">n={{ row.cells[s]?.n_graded ?? 0 }}</span>
                 </td>
               </tr>
             </tbody>
@@ -406,7 +406,7 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
           <table class="writers-table">
             <thead>
               <tr>
-                <th class="writer-col">Favorite diversity</th>
+                <th class="writer-col">Pass diversity</th>
                 <th v-for="d in writerStats.diversity" :key="d.window_start">
                   {{ windowLabel(d.window_start) }}
                 </th>
@@ -420,19 +420,19 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
                 <td
                   v-for="d in writerStats.diversity"
                   :key="d.window_start"
-                  :title="`Mean pairwise CLIP distance between ${d.n} favorited T2I images`"
+                  :title="`Mean pairwise CLIP distance between ${d.n} ✓ passed T2I images`"
                 >
                   <span class="rate">
                     {{ d.mean_distance === null ? '—' : d.mean_distance.toFixed(2) }}
                   </span>
-                  <span class="n-seen">n={{ d.n }}</span>
+                  <span class="n-count">n={{ d.n }}</span>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
         <div v-else class="taste-hint">
-          Favorite diversity appears after the next taste training run.
+          Pass diversity appears after the next taste training run.
         </div>
         <div v-if="scorecardRows.length" class="writers-scroll" data-testid="writer-scorecards">
           <table class="writers-table">
@@ -458,7 +458,7 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
                 </td>
                 <td>
                   <span class="rate">{{ r.n_judged }}</span>
-                  <span class="n-seen">of {{ r.n_pairs }}</span>
+                  <span class="n-count">of {{ r.n_pairs }}</span>
                 </td>
               </tr>
             </tbody>
@@ -599,7 +599,7 @@ section { margin-bottom: 14px; }
 .writers-table .writer-col { text-align: left; font-weight: 600; }
 .writers-table tr.baseline { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
 .writers-table .rate { display: inline-block; min-width: 3.2em; }
-.writers-table .n-seen { color: var(--text-color-secondary); font-size: 11px; margin-left: 4px; }
+.writers-table .n-count { color: var(--text-color-secondary); font-size: 11px; margin-left: 4px; }
 .writer-model {
   margin-left: 4px;
   font-size: 11px;
