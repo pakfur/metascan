@@ -239,6 +239,31 @@ class EmbeddingWorker:
         except OSError:
             return -1.0
 
+    def _hand_over_replaced_vector(
+        self,
+        faiss_mgr: FaissIndexManager,
+        db_mgr: DatabaseManager,
+        file_path: str,
+        model_key: str,
+    ) -> None:
+        """Before ``file_path``'s row is overwritten with its current file's
+        vector, give the old vector to the newest graded deleted image at
+        that path that has none for this model (the row was written for that
+        file: this worker is the only writer of the on-disk index). Never
+        fails the embedding."""
+        old = faiss_mgr.get_embedding(file_path)
+        if old is None:
+            return
+        try:
+            db_mgr.adopt_replaced_vector(
+                file_path, model_key, old.astype("float32", copy=False).tobytes()
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Could not keep the replaced vector for a deleted image "
+                f"({type(e).__name__})"
+            )
+
     def run(self) -> None:  # noqa: C901
         """Main worker loop."""
         # Write initial progress immediately so the queue knows we're alive
@@ -473,6 +498,10 @@ class EmbeddingWorker:
                         hash_batch.append((Path(file_path), phash))
 
                     if embedding is not None:
+                        if faiss_mgr.has_file(file_path):
+                            self._hand_over_replaced_vector(
+                                faiss_mgr, db_mgr, file_path, model_key
+                            )
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
                         embedded_count += 1
