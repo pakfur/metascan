@@ -30,6 +30,7 @@ the root CLAUDE.md still applies.
   keep collecting grades, but no consumer trains on video.
   `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily
   prunes rows whose media is gone (never until a full clean is finished,
+  which also re-ingests the clips still on disk outside the scan folders,
   `set_lineage_prune_guard`: CLAUDE.md, "Full clean & rescan keeps
   ratings"); deleting the source image keeps the videos.
   Presets are kind `ref2v` tagged `minimax`/`i2va`

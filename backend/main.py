@@ -224,13 +224,23 @@ async def _open_database() -> None:
 
 def _install_lineage_prune_guard(db: Any) -> None:
     """Startup: the T2I / I2V listings prune lineage rows whose media row is
-    gone, but not while a full clean runs or has entries pending -- its
-    rescan re-adds the media rows one by one (taste_snapshot.py). The
-    pending file lives in the database's directory. Never raises."""
+    gone, but not while a full clean is unfinished -- its rescan re-adds the
+    media rows one by one (taste_snapshot.py). Its marker and pending file
+    live in the database's directory. If the guard can't be built, fall
+    back to one that always pauses (fail safe: nothing is pruned until the
+    next start). Never raises."""
     try:
         db.set_lineage_prune_guard(lineage_prune_guard(Path(db.db_path)))
+        return
     except Exception:
-        logger.exception("Failed to install the lineage prune guard")
+        logger.exception(
+            "Failed to install the lineage prune guard; the T2I / I2V lists "
+            "prune nothing until the next start"
+        )
+    try:
+        db.set_lineage_prune_guard(lambda: True)
+    except Exception:
+        logger.exception("Failed to install the fail-safe lineage prune guard")
 
 
 async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
