@@ -590,6 +590,34 @@ def test_a_full_clean_is_refused_when_pending_ratings_point_into_an_empty_folder
     assert db.list_tombstones() == []
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [b"[" * 100_000, b'{"version": 3, "judgments": ["\xff"]}'],
+    ids=["nested-too-deep", "not-utf8"],
+)
+def test_a_pending_file_the_parser_cannot_read_never_breaks_the_check(
+    monkeypatch, db, tmp_path, raw
+):
+    """The up-front check reads the pending file for evidence without side
+    effects. One the parser cannot read (nested deeper than it goes, not
+    UTF-8) holds none -- it never raises out of the check -- and is left as
+    it is for the full clean's own loader to set aside
+    (test_taste_snapshot_briefs). Here the library's row is the evidence."""
+    mnt = tmp_path / "mnt"
+    mnt.mkdir()  # the empty mount point of a drive that is not mounted
+    db.save_media(_media(mnt / "away.png"))
+    target = Path(db.db_path) / scan_api.TASTE_SNAPSHOT_FILENAME
+    target.write_bytes(raw)
+    assert scan_api.pending_snapshot_paths(Path(db.db_path)) == set()
+
+    events, scanned = _wire(monkeypatch, db, [mnt])
+    err = _start(full_clean=True)
+
+    assert err is not None and err.detail["folders"] == [str(mnt)]
+    assert scanned == [] and events == []
+    assert target.read_bytes() == raw
+
+
 def _unlistable(folder: Path) -> None:
     """Take read permission off ``folder`` (0o300: it can be entered but not
     listed, and rglob then silently finds nothing in it), or skip the test
