@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -296,12 +297,25 @@ _faiss_reload_seq = 0
 _faiss_installed_seq = 0
 
 
+def _wait_for_the_next_second() -> None:
+    """Sleep until the next whole second (at most one). A file's embedding
+    mark is stored to the second, and an index counts as evidence for a
+    deleted file's row only when it was loaded from the second after the
+    mark on (``database_sqlite._loaded_after_mark``): a reload in the same
+    second as a run's last marks would leave its whole last batch -- all
+    of a small T2I auto-index -- waiting for the next load."""
+    now = time.time()
+    time.sleep(int(now) + 1 - now)
+
+
 def _rebuild_faiss_manager(seq: int) -> None:
     """Load a fresh FaissIndexManager from disk and swap it in. Blocking:
-    runs in a worker thread, never under the DB lock. The old manager
+    runs in a worker thread, never under the DB lock (it first waits for
+    the next whole second, ``_wait_for_the_next_second``). The old manager
     stays installed (and searchable) until the new one is loaded."""
     global _faiss_manager, _faiss_installed_seq
     fm = FaissIndexManager(_get_embedding_queue().index_dir)
+    _wait_for_the_next_second()
     fm.load()  # No-op if no on-disk index exists
     with _faiss_swap_lock:
         if seq <= _faiss_installed_seq:

@@ -614,9 +614,12 @@ class EmbeddingWorker:
                     watchdog.cancel()
                     self.errors_count += 1
                     self.last_error = f"{Path(file_path).name}: {e}"
-                    self.logger.error(f"Failed to process {file_path}: {e}")
+                    # The first ten with their traceback, into the log file
+                    # (stderr is a pipe the server drains, not a log).
                     if self.errors_count <= 10:
-                        traceback.print_exc()
+                        self.logger.exception(f"Failed to process {file_path}: {e}")
+                    else:
+                        self.logger.error(f"Failed to process {file_path}: {e}")
                     skipped_paths.append(file_path)
                     processed += 1
                     continue
@@ -632,6 +635,14 @@ class EmbeddingWorker:
                     "the index was not saved"
                 )
             saved = self._save_index(faiss_mgr, len(batch_paths))
+            if not saved:
+                # The run still ends "complete"; its progress says the save
+                # failed (the files are embedded again by the next run).
+                self.errors_count += 1
+                self.last_error = (
+                    f"Could not save the FAISS index: {len(batch_paths)} embedded "
+                    f"file(s) are embedded again by the next run"
+                )
             if hash_batch:
                 db_mgr.save_media_hash_batch(hash_batch)
             if batch_paths and saved:
@@ -680,9 +691,9 @@ class EmbeddingWorker:
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
-            # Write error to progress file FIRST — before any logging that
-            # could block on a full stderr pipe (the subprocess stderr is a
-            # pipe that the parent only drains after we exit).
+            # Write error to progress file FIRST, before any logging (which
+            # may itself fail, e.g. on a full disk), so the parent learns of
+            # it whatever happens next.
             _write_progress_fatal(self.queue_dir, error_msg)
             self.logger.error(f"Worker failed with unhandled exception: {error_msg}")
             self.logger.error(traceback.format_exc())
@@ -707,6 +718,9 @@ def setup_logging(queue_dir: Path) -> None:
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
     root_logger.setLevel(logging.INFO)
+    # ``warnings.warn`` (torch, open_clip, PIL) into the log file, not onto
+    # stderr: the server drains stderr into its own log.
+    logging.captureWarnings(True)
 
     # Log the startup information
     root_logger.info(f"Embedding worker process started (PID={os.getpid()})")

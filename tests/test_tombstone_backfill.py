@@ -552,3 +552,54 @@ def test_loading_the_faiss_manager_triggers_backfill(monkeypatch, tmp_path):
     assert started == [fm] and fm.is_loaded
     similarity._get_faiss_manager()  # cached: no second backfill
     assert started == [fm]
+
+
+def test_a_reload_after_a_run_waits_out_the_second_of_its_last_marks(
+    monkeypatch, tmp_path
+):
+    """The reload after an embedding run often comes in the same second as
+    the run's last marks, and an index loaded then is not evidence for
+    them (a mark is stored to the second): the whole last batch -- all of
+    a T2I auto-index -- would wait for the next load. The reload waits for
+    the next whole second first (at most a second, off the event loop)."""
+    from backend.api import similarity
+
+    clock = {"now": 1_000.3}
+    sleeps = []
+
+    class Clock:
+        @staticmethod
+        def time():
+            return clock["now"]
+
+        @staticmethod
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+    loads = []
+
+    class FakeManager:
+        def __init__(self, index_dir):
+            self.is_loaded = False
+
+        def load(self):
+            loads.append(clock["now"])
+            self.is_loaded = True
+            return True
+
+    class FakeQueue:
+        index_dir = tmp_path
+
+    monkeypatch.setattr(similarity, "time", Clock, raising=False)
+    monkeypatch.setattr(similarity, "FaissIndexManager", FakeManager)
+    monkeypatch.setattr(similarity, "_get_embedding_queue", lambda: FakeQueue())
+    monkeypatch.setattr(similarity, "_start_tombstone_backfill", lambda fm: None)
+    monkeypatch.setattr(similarity, "_faiss_manager", None)
+    monkeypatch.setattr(similarity, "_faiss_installed_seq", 0)
+
+    similarity._rebuild_faiss_manager(1)
+
+    assert loads == [pytest.approx(1_001.0)]
+    assert len(sleeps) == 1 and 0 < sleeps[0] <= 1.0
+    assert similarity._faiss_manager is not None

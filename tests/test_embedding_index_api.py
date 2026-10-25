@@ -463,7 +463,9 @@ def test_a_finished_run_holds_the_queue_until_its_worker_exits(
         return FakeProcess()
 
     monkeypatch.setattr(
-        eq_mod, "subprocess", SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE)
+        eq_mod,
+        "subprocess",
+        SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL),
     )
     eq = eq_mod.EmbeddingQueue()
     eq._queue_dir = tmp_path
@@ -533,3 +535,129 @@ def test_a_cancel_whose_last_save_fails_ends_in_error(tmp_path):
 
     assert events == [("error", "no save")]
     assert not eq.is_indexing()
+
+
+# A stand-in for the worker: it reports progress, then writes far more than a
+# pipe holds (64 KB) to stderr and to stdout before it exits without a final
+# status, as a worker logging an error per file on a full disk would.
+_FLOODING_WORKER = r"""
+import json
+import sys
+from pathlib import Path
+
+queue = Path(sys.argv[1])
+(queue / "progress_embedding.json").write_text(
+    json.dumps({"status": "processing", "current": 1, "total": 2})
+)
+for i in range(2000):
+    sys.stderr.write(f"noise {i:04d} " + "x" * 60 + "\n")
+sys.stdout.write("y" * 100_000)
+sys.stdout.flush()
+sys.stderr.write("fake worker: last words\n")
+"""
+
+
+def test_a_worker_that_floods_stderr_still_exits(tmp_path, monkeypatch, caplog):
+    """Nothing read the worker's stdout / stderr pipes until it exited, so a
+    worker that wrote more than a pipe holds blocked forever and the queue
+    stayed "indexing" until a restart. stdout now goes nowhere and stderr
+    is drained line by line into the server log, keeping a bounded tail
+    for the error message."""
+    import logging
+    import subprocess
+    import sys
+    import time
+    from types import SimpleNamespace
+
+    from metascan.core import embedding_queue as eq_mod
+
+    spawned: list = []
+    real_popen = subprocess.Popen
+
+    def popen(cmd, **kwargs):
+        proc = real_popen([sys.executable, "-c", _FLOODING_WORKER, cmd[-1]], **kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(
+        eq_mod,
+        "subprocess",
+        SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL),
+    )
+    eq = eq_mod.EmbeddingQueue()
+    eq._queue_dir = tmp_path
+    errors: list = []
+    eq.on_error = errors.append
+    caplog.set_level(logging.INFO, logger="metascan.core.embedding_queue")
+    try:
+        assert eq.start_indexing(["/lib/a.png"])
+        deadline = time.time() + 15
+        while eq.is_indexing() and time.time() < deadline:
+            eq.poll_updates()
+            time.sleep(0.05)
+        eq.poll_updates()
+
+        assert not eq.is_indexing(), "the worker blocked on a full pipe"
+        [message] = errors
+        assert "exited unexpectedly" in message and "last words" in message
+        drained = [r.getMessage() for r in caplog.records]
+        assert any("noise 1999" in m for m in drained)
+        assert len(eq._read_process_stderr().splitlines()) <= eq_mod.STDERR_TAIL_LINES
+    finally:
+        for proc in spawned:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def test_a_worker_that_does_not_exit_after_its_last_status_is_reported(
+    tmp_path, monkeypatch, caplog
+):
+    """A worker that wrote its final status keeps the queue indexing until
+    it exits; one that has not exited a minute later is logged (WARNING,
+    once a minute) instead of holding every later build silently."""
+    import json
+    import logging
+
+    from metascan.core import embedding_queue as eq_mod
+
+    class FakeProcess:
+        pid = 4242
+        stderr = None
+        returncode = None
+
+        def poll(self):
+            return None  # never exits
+
+    clock = {"now": 10_000.0}
+    monkeypatch.setattr(
+        eq_mod, "time", type("Clock", (), {"time": staticmethod(lambda: clock["now"])})
+    )
+    eq = eq_mod.EmbeddingQueue()
+    eq._queue_dir = tmp_path
+    eq._process = FakeProcess()
+    (tmp_path / "progress_embedding.json").write_text(
+        json.dumps({"current": 3, "total": 10, "status": "cancelled"})
+    )
+    caplog.set_level(logging.WARNING, logger="metascan.core.embedding_queue")
+
+    def warnings_now():
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "has not exited" in r.getMessage()
+        ]
+
+    eq.poll_updates()  # the final status: waiting for the exit
+    clock["now"] += 30
+    eq.poll_updates()
+    assert warnings_now() == []
+    clock["now"] += 31  # 61 s after the final status
+    eq.poll_updates()
+    eq.poll_updates()
+    assert len(warnings_now()) == 1
+    assert "cancelled" in warnings_now()[0].getMessage()
+    clock["now"] += 60
+    eq.poll_updates()
+    assert len(warnings_now()) == 2
+    assert eq.is_indexing()

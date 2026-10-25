@@ -590,10 +590,13 @@ def test_a_failed_index_save_marks_nothing(env, monkeypatch):
         db.save_media(_media(path))
     monkeypatch.setattr(FaissIndexManager, "save", lambda self: False)
 
-    _run_worker(env, paths)
+    progress = _run_worker(env, paths)
 
     assert sorted(db.get_unembedded_file_paths()) == sorted(paths)
     assert _mark_times(db) == {}
+    # The run still ends "complete", but says the save failed.
+    assert progress["errors_count"] == 1
+    assert "could not save the faiss index" in progress["last_error"].lower()
 
 
 def test_a_batch_whose_save_failed_is_marked_by_the_next_save(env, monkeypatch):
@@ -618,6 +621,44 @@ def test_a_batch_whose_save_failed_is_marked_by_the_next_save(env, monkeypatch):
     assert unmarked == [101, 101]
     assert db.get_unembedded_file_paths() == []
     np.testing.assert_allclose(_index_vector(env, paths[0]), _bytes_vector(paths[0]))
+
+
+def test_a_failing_file_is_logged_with_its_traceback_not_written_to_stderr(
+    env, monkeypatch, capfd, caplog
+):
+    """The worker's stderr is a pipe the server drains; the worker's own
+    errors belong in its log file (the traceback with them)."""
+    db = env["db"]
+    p = _write(env, "broken.png", b"cannot be decoded")
+    db.save_media(_media(p))
+
+    def broken(self, path):
+        raise OSError("truncated image")
+
+    monkeypatch.setattr(FakeClip, "compute_image_embedding", broken)
+    caplog.set_level(logging.ERROR, logger="embedding_worker")
+    _run_worker(env, [p])
+
+    assert "Traceback" not in capfd.readouterr().err
+    [record] = [r for r in caplog.records if "Failed to process" in r.getMessage()]
+    assert record.exc_info is not None
+
+
+def test_worker_warnings_go_to_its_log_file(tmp_path, monkeypatch):
+    """``warnings.warn`` writes to stderr unless logging captures it."""
+    calls = []
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    monkeypatch.setattr(
+        ew, "rotating_file_handler", lambda *a, **k: logging.NullHandler()
+    )
+    monkeypatch.setattr(logging, "captureWarnings", lambda on: calls.append(on))
+    try:
+        ew.setup_logging(tmp_path)
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+    assert calls == [True]
 
 
 # ---------------------------------------------------------------------------
