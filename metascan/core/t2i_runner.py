@@ -432,6 +432,18 @@ def default_output_root(comfy_output_root: Any) -> Path:
     return Path(os.path.abspath(base / "t2i"))
 
 
+def t2i_output_root(configured: Any, comfy_output_root: Any) -> Path:
+    """The folder every T2I image is written under: the configured
+    ``t2i.output_root`` when it is set, else :func:`default_output_root`.
+    The dated folders of ``t2i.output_prefix`` sit below it. One place for
+    both readers: the runner places each batch here (``_placement``), and a
+    full clean's re-ingest checks it for a drive that is not mounted."""
+    text = str(configured or "").strip()
+    if text:
+        return Path(to_native_path(text))
+    return default_output_root(comfy_output_root)
+
+
 def plan_seeds(
     policy: str, first: int, requested: int, rng: random.Random
 ) -> List[int]:
@@ -1142,15 +1154,14 @@ class T2iRunner:
         """
         configured = str(cfg["output_root"]).strip()
         prefix = str(cfg["output_prefix"])
+        root = t2i_output_root(configured, self.output_root)
         if configured:
-            root = Path(to_native_path(configured))
             if not await asyncio.to_thread(root.is_dir):
                 raise T2iRequestError(
                     f"Image output directory does not exist: {root} -- fix it "
                     "in the Text to Image configuration"
                 )
         else:
-            root = default_output_root(self.output_root)
             try:
                 await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
             except OSError as exc:

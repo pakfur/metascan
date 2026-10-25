@@ -310,6 +310,52 @@ def test_the_marker_says_how_to_resume_the_prune(tmp_path):
     assert "every configured folder" in flat
 
 
+def _marker_text(data_dir: Path) -> str:
+    return ts.full_clean_marker_path(data_dir).read_text(encoding="utf-8")
+
+
+def test_the_marker_names_the_output_roots_the_last_scan_could_not_reach(tmp_path):
+    """A scan that could not reach a generated-output root names it in the
+    marker, with the way out; the next scan's findings replace that list,
+    and with none left the marker reads as written."""
+    ts.write_full_clean_marker(tmp_path)
+    written = _marker_text(tmp_path)
+
+    ts.note_unreachable_output(
+        tmp_path, {"/mnt/d/comfy/t2i": "missing", "/mnt/e/clips": "can't be read"}
+    )
+    text = _marker_text(tmp_path)
+    assert text.startswith(written)
+    assert "/mnt/d/comfy/t2i (missing)" in text
+    assert "/mnt/e/clips (can't be read)" in text
+    flat = " ".join(text.split()).lower()
+    assert "recreate it (empty is fine)" in flat and "full clean & rescan" in flat
+
+    ts.note_unreachable_output(tmp_path, {"/mnt/e/clips": "missing"})
+    text = _marker_text(tmp_path)
+    assert text.startswith(written)
+    assert "/mnt/d/comfy/t2i" not in text and "/mnt/e/clips (missing)" in text
+
+    ts.note_unreachable_output(tmp_path, {})
+    assert _marker_text(tmp_path) == written
+
+
+def test_naming_unreachable_output_never_creates_the_marker(tmp_path):
+    """Deleted by hand while a scan ran (to let the lists prune): naming the
+    roots that scan could not reach does not bring it back."""
+    ts.note_unreachable_output(tmp_path, {"/mnt/d/comfy/t2i": "missing"})
+    assert ts.full_clean_marker_exists(tmp_path) is False
+
+
+def test_the_marker_says_favorites_and_briefs_are_recorded_too(tmp_path):
+    """The way out tombstones every path the snapshot has an entry for: a
+    ★ alone or a brief alone is recorded as deleted too."""
+    ts.write_full_clean_marker(tmp_path)
+    flat = " ".join(_marker_text(tmp_path).split()).lower()
+    for kept in ("a grade", "a view", "a favorite", "a category", "hindsight brief"):
+        assert kept in flat
+
+
 def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
     tmp_path, monkeypatch, caplog
 ):

@@ -496,10 +496,9 @@ def _wire_prune_guard(db):
 
 def _out(db, name):
     """A generated file's path in a real ComfyUI output folder next to the
-    test database (the file itself is not created). The re-ingest tells a
-    file gone from a folder that is there (vanished) from one whose folder
-    can't be reached (unmounted, keeps the full clean unfinished), so a
-    fictitious /lib/t2i/ path would never finish a full clean."""
+    test database (the file itself is not created). It lies under no
+    configured output root (``_wire``'s config is empty), so once its media
+    row is gone the re-ingest counts it gone, never unreachable."""
     path = Path(db.db_path).parent / "comfy_output" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     return str(path)
@@ -1312,8 +1311,12 @@ def test_an_unmounted_output_folder_keeps_the_full_clean_unfinished(
 ):
     """P5. The output folder is missing (an unmounted volume): its files are
     unreachable, not vanished -- nothing is tombstoned, the marker stays.
-    Mounted again, the next scan brings them back."""
+    Mounted again, the next scan brings them back. The folder is T2I's
+    output root, <comfy.output_root>/t2i: only a configured output root that
+    is missing or unreadable holds a full clean back."""
     files = _generated_library(monkeypatch, tmp_path, db)
+    comfy = {"comfy": {"output_root": str(tmp_path / "comfy_output")}}
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: comfy)
     out = files[0].parent
     unmounted = out.parent / "t2i_unmounted"
     out.rename(unmounted)
@@ -1361,3 +1364,377 @@ def test_a_vanished_generated_file_is_never_ingested(monkeypatch, tmp_path, db):
     [t] = db.list_tombstones()
     assert (Path(t["file_path"]).name, t["grade"]) == ("img1.png", "fail")
     assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+
+
+# ----------------------------------------------------------------------
+# Only an output ROOT that can't be reached holds a full clean back (final
+# review: one old dangling clip whose folder was deleted by hand kept every
+# full clean unfinished, and nothing said so)
+# ----------------------------------------------------------------------
+
+
+def _route_full_clean(monkeypatch, db, config, scanner_cls=None):
+    """POST /api/scan/start {full_clean} with ``config`` as config.json --
+    real folders, the real Scanner unless given another -- and wait for the
+    scan it started. Returns the scan's one ``complete`` event (no ``error``
+    event)."""
+    from metascan.core.scanner import Scanner
+
+    events = []
+
+    async def broadcast(channel, event, data=None):
+        events.append((event, data))
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: db)
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: None)
+    monkeypatch.setattr(scan_api, "Scanner", scanner_cls or Scanner)
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: config)
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", broadcast)
+    monkeypatch.setattr(scan_api, "_scan_task", None)
+    monkeypatch.setattr(scan_api, "_cancel_requested", False)
+
+    async def go():
+        await scan_api.start_scan(scan_api.ScanRequest(full_clean=True))
+        await scan_api._scan_task
+
+    asyncio.run(go())
+    assert [data for event, data in events if event == "error"] == []
+    [complete] = [data for event, data in events if event == "complete"]
+    return complete
+
+
+def _library_with_a_deleted_image(tmp_path, db):
+    """A scan folder with keep.png and gone.png, both ✓, and gone.png then
+    deleted on disk; the lifespan's prune guard installed. Returns (a config
+    naming the folder, keep, gone)."""
+    from metascan.core.scanner import Scanner
+
+    lib = tmp_path / "lib"
+    keep, gone = _png(lib / "keep.png"), _png(lib / "gone.png")
+    Scanner(db).scan_directory(str(lib))
+    for path in (keep, gone):
+        db.set_grade(str(path), "pass", now=T0)
+    gone.unlink()  # deleted on disk behind the library's back
+    _wire_prune_guard(db)
+    config = {"directories": [{"filepath": str(lib), "search_subfolders": True}]}
+    return config, keep, gone
+
+
+# Where a generated file sits below its output root: (kind, the root's
+# config key or None for the default under comfy.output_root, the root
+# relative to tmp_path, the file below the root).
+LOST_FOLDER_LAYOUTS = {
+    "i2v image folder": ("i2v", None, "comfy/i2v", "cat/clip.mp4"),
+    "i2v dated folder": ("i2v", "i2v", "videos", "2026-01-01/i2v_1767225600.mp4"),
+    "t2i dated folder": ("t2i", None, "comfy/t2i", "2026-01-01/t2i_1767225600.png"),
+    "t2i configured root": ("t2i", "t2i", "images", "2026-01-01/t2i_1.png"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(LOST_FOLDER_LAYOUTS))
+def test_a_folder_lost_below_a_present_output_root_never_holds_a_full_clean_back(
+    monkeypatch, tmp_path, db, layout
+):
+    """The final review's probe_stuck. An old unrated clip (or image) whose
+    media row went at a stale cleanup long ago still dangles -- the I2V
+    dialog of its source was never opened since -- and the folder it was in
+    below its output root (I2V writes one per source image, or a dated one)
+    was deleted by hand. Its output root is there, so the file is gone, not
+    unreachable: the full clean completes, tombstones the deleted ✓ library
+    image and removes the marker. The unrated row gets no tombstone, and
+    the prune takes it once the clean is finished."""
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    kind, key, root_rel, below = LOST_FOLDER_LAYOUTS[layout]
+    root = tmp_path / root_rel
+    root.mkdir(parents=True)
+    config["comfy"] = {"output_root": str(tmp_path / "comfy")}
+    if key is not None:
+        config[key] = {"output_root": str(root)}
+    path = str(root / below)
+    source = str(tmp_path / "lib" / "cat.png")
+    if kind == "i2v":
+        db.create_i2v_video(source_path=source, file_path=path, **I2V_LINEAGE)
+    else:
+        db.create_t2i_image(file_path=path, **T2I_LINEAGE)
+    assert db.generated_paths_without_media() == [path]
+
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert not _marker_exists(db) and _pending(db) is None
+    [t] = db.list_tombstones()
+    assert (t["file_path"], t["grade"]) == (str(gone), "pass")
+    assert db.get_judgment(str(keep)).grade == "pass"
+    db.list_t2i_images()
+    db.list_i2v_videos(source)
+    assert _lineage_rows(db) == (0, 0)  # finished: the dangling row is pruned
+    assert (complete["missing_folders"], complete["unreachable_output"]) == ([], [])
+
+
+@pytest.mark.parametrize("configured", ["i2v", "t2i"])
+def test_a_missing_output_root_holds_the_full_clean_back_and_is_named(
+    monkeypatch, tmp_path, db, caplog, configured
+):
+    """The drive the output goes to is not mounted: both output roots -- one
+    configured (``t2i.output_root`` or ``i2v.output_root``), the other the
+    default under comfy.output_root -- are missing, and their files may well
+    still exist. The full clean stays unfinished -- nothing tombstoned, not
+    even the deleted library image, the ratings pending, the lineage and the
+    marker kept -- and names the roots: in the complete event, the WARNING
+    (folders, never a prompt) and the marker. The way out loses nothing:
+    recreate the roots, empty, and run Full clean & rescan. Their files are
+    gone then, and the completed clean tombstones each rated one with its
+    lineage."""
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    drive = tmp_path / "drive"
+    config["comfy"] = {"output_root": str(drive / "comfy")}
+    root = {"t2i": drive / "comfy" / "t2i", "i2v": drive / "comfy" / "i2v"}
+    root[configured] = drive / f"{configured}_output"
+    config[configured] = {"output_root": str(root[configured])}
+    image = str(root["t2i"] / "2026-01-01" / "t2i_1.png")
+    clip = str(root["i2v"] / "cat" / "clip.mp4")
+    for path in (image, clip):
+        db.save_media(_media(path))  # ingested while the drive was there
+    db.create_t2i_image(file_path=image, **T2I_LINEAGE)
+    db.create_i2v_video(source_path=str(keep), file_path=clip, **I2V_LINEAGE)
+    db.set_grade(image, "pass", now=T0)
+    db.set_grade(clip, "fail", now=T0)
+    roots = [str(root["t2i"]), str(root["i2v"])]
+
+    with caplog.at_level(logging.INFO, logger="backend.api.scan"):
+        complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreachable_output"] == roots
+    assert complete["missing_folders"] == []
+    assert db.list_tombstones() == []
+    assert _pending_paths(db) == sorted([str(gone), image, clip])
+    assert db.get_judgment(str(keep)).grade == "pass"
+    assert _marker_exists(db)
+    db.list_t2i_images()
+    db.list_i2v_videos(str(keep))
+    assert _lineage_rows(db) == (1, 1)
+    marker = ts.full_clean_marker_path(Path(db.db_path)).read_text(encoding="utf-8")
+    assert all(f"{root} (missing)" in marker for root in roots)
+    logged = [r for r in caplog.records if r.name == "backend.api.scan"]
+    [warning] = [
+        r.getMessage()
+        for r in logged
+        if r.levelno == logging.WARNING and roots[0] in r.getMessage()
+    ]
+    assert all(root in warning for root in roots)
+    assert "recreate it (empty is fine)" in warning
+    prompts = [I2V_LINEAGE["prompt_used"]] + [
+        T2I_LINEAGE[k] for k in ("caption", "prompt_used", "draft_prompt")
+    ]
+    text = " ".join(r.getMessage() for r in logged)
+    assert not any(p in text for p in prompts)
+    assert image not in text and clip not in text  # folders, never a file
+
+    for root in roots:  # the way out: recreated, empty
+        Path(root).mkdir(parents=True)
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreachable_output"] == []
+    assert not _marker_exists(db) and _pending(db) is None
+    tombs = {t["file_path"]: t for t in db.list_tombstones()}
+    assert sorted(tombs) == sorted([str(gone), image, clip])
+    assert tombs[image]["grade"] == "pass"
+    assert _lineage(tombs[image]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert tombs[clip]["grade"] == "fail"
+    assert _lineage(tombs[clip]["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
+
+
+def test_an_unreadable_output_root_holds_the_full_clean_back_until_it_is_read(
+    monkeypatch, tmp_path, db
+):
+    """T2I's output root can't be read (a permission error): its files can be
+    neither seen nor ruled out, so the full clean stays unfinished and names
+    the root. Readable again, the next full clean re-ingests the image with
+    its ✓ and completes."""
+    from metascan.core.scanner import Scanner
+
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    out = tmp_path / "comfy"
+    config["comfy"] = {"output_root": str(out)}
+    image = _png(out / "t2i" / "2026-01-01" / "t2i_1.png")
+    assert Scanner(db).ingest_file(image) is not None  # what ComfyClient does
+    db.create_t2i_image(file_path=str(image), **T2I_LINEAGE)
+    db.set_grade(str(image), "pass", now=T0)
+    root = out / "t2i"
+    os.chmod(root, 0)
+    try:
+        try:
+            os.listdir(root)
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("permissions don't stop reading a folder here")
+        complete = _route_full_clean(monkeypatch, db, config)
+    finally:
+        os.chmod(root, 0o755)
+
+    assert complete["unreachable_output"] == [str(root)]
+    assert db.list_tombstones() == []
+    assert _marker_exists(db)
+    assert _pending_paths(db) == sorted([str(gone), str(image)])
+
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreachable_output"] == []
+    assert db.get_judgment(str(image)).grade == "pass"
+    [row] = db.list_t2i_images()
+    assert _lineage(row, T2I_LINEAGE) == T2I_LINEAGE
+    [t] = db.list_tombstones()
+    assert t["file_path"] == str(gone)
+    assert not _marker_exists(db) and _pending(db) is None
+
+
+def test_a_missing_file_outside_every_output_root_is_gone(monkeypatch, tmp_path, db):
+    """The output root moved in config and the old drive is gone: a file left
+    under the old root lies under no configured one, so no unmounted output
+    root can be hiding it -- it is gone, and the completed full clean
+    tombstones it with its ✓ and its lineage. The new root, not created
+    yet, holds nothing back: no file of the library lies under it."""
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    config["comfy"] = {"output_root": str(tmp_path / "new_comfy")}
+    old = str(tmp_path / "old_drive" / "comfy" / "t2i" / "2026-01-01" / "t2i_1.png")
+    db.save_media(_media(old))
+    db.create_t2i_image(file_path=old, **T2I_LINEAGE)
+    db.set_grade(old, "pass", now=T0)
+
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert not _marker_exists(db) and _pending(db) is None
+    tombs = {t["file_path"]: t for t in db.list_tombstones()}
+    assert sorted(tombs) == sorted([str(gone), old])
+    assert tombs[old]["grade"] == "pass"
+    assert _lineage(tombs[old]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert (complete["missing_folders"], complete["unreachable_output"]) == ([], [])
+
+
+def _rendered_library(tmp_path, db, n):
+    """``_library_with_a_deleted_image`` plus ``n`` ✓ T2I renders on disk in
+    <comfy.output_root>/t2i/2026-01-01/, ingested and recorded the way
+    ComfyClient does. Returns (config, gone, the T2I root, the renders)."""
+    from metascan.core.scanner import Scanner
+
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    out = tmp_path / "comfy"
+    config["comfy"] = {"output_root": str(out)}
+    renders = [_png(out / "t2i" / "2026-01-01" / f"t2i_{i}.png") for i in range(n)]
+    for path in renders:
+        assert Scanner(db).ingest_file(path) is not None
+        db.create_t2i_image(file_path=str(path), **T2I_LINEAGE)
+        db.set_grade(str(path), "pass", now=T0)
+    return config, gone, out / "t2i", renders
+
+
+def test_an_output_root_lost_during_the_reingest_holds_the_full_clean_back(
+    monkeypatch, tmp_path, db
+):
+    """The roots are checked after the pass over the files: a drive
+    unplugged after the first render came back makes the second one
+    unreachable, not gone -- nothing is tombstoned and the root is named."""
+    from metascan.core.scanner import Scanner
+
+    config, gone, root, renders = _rendered_library(tmp_path, db, 2)
+    unplugged = tmp_path / "unplugged"
+
+    class UnplugsAfterOneRender(Scanner):
+        def ingest_file(self, path):
+            media = super().ingest_file(path)
+            if str(path).startswith(str(root)) and root.exists():
+                root.rename(unplugged)  # the drive goes
+            return media
+
+    complete = _route_full_clean(monkeypatch, db, config, UnplugsAfterOneRender)
+
+    assert complete["unreachable_output"] == [str(root)]
+    assert db.list_tombstones() == []
+    assert _marker_exists(db)
+    in_library = db.get_existing_file_paths()
+    [back] = [str(p) for p in renders if str(p) in in_library]
+    assert db.get_judgment(back).grade == "pass"  # the one before the unplug
+    [other] = [str(p) for p in renders if str(p) != back]
+    assert _pending_paths(db) == sorted([str(gone), other])
+
+
+def test_an_output_root_back_by_its_check_brings_its_files_back(
+    monkeypatch, tmp_path, db
+):
+    """A file found gone is stat-ed again after its root's check: a drive
+    away during the pass but back by the check has its render re-ingested,
+    never tombstoned."""
+    config, gone, root, [render] = _rendered_library(tmp_path, db, 1)
+    unplugged = tmp_path / "unplugged"
+    root.rename(unplugged)
+    real_probe = scan_api._probe_folder
+
+    def probe(path):
+        if path == str(root) and unplugged.exists():
+            unplugged.rename(root)  # mounted again just before the check
+        return real_probe(path)
+
+    monkeypatch.setattr(scan_api, "_probe_folder", probe)
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreachable_output"] == []
+    assert db.get_judgment(str(render)).grade == "pass"
+    [t] = db.list_tombstones()
+    assert t["file_path"] == str(gone)
+    assert not _marker_exists(db)
+
+
+def test_a_render_that_cannot_be_read_holds_the_full_clean_back(
+    monkeypatch, tmp_path, db
+):
+    """Its root is there but the render can't be stat-ed (its dated folder
+    may not be entered): it may well exist, so it is not gone -- the full
+    clean stays unfinished, the root is not named (it is there), and once
+    the folder can be read again the next full clean brings it back."""
+    config, gone, root, [render] = _rendered_library(tmp_path, db, 1)
+    day = render.parent
+    os.chmod(day, 0)
+    try:
+        try:
+            os.stat(render)
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("permissions don't stop entering a folder here")
+        complete = _route_full_clean(monkeypatch, db, config)
+    finally:
+        os.chmod(day, 0o755)
+
+    assert complete["unreachable_output"] == []
+    assert db.list_tombstones() == []
+    assert _marker_exists(db)
+    assert _pending_paths(db) == sorted([str(gone), str(render)])
+
+    complete = _route_full_clean(monkeypatch, db, config)
+    assert db.get_judgment(str(render)).grade == "pass"
+    [t] = db.list_tombstones()
+    assert t["file_path"] == str(gone)
+    assert not _marker_exists(db)
+
+
+def test_the_deepest_output_root_that_holds_a_file_decides(monkeypatch, tmp_path, db):
+    """Nested roots: T2I writes to <out>, I2V to <out>/clips, where a drive of
+    its own is mounted. With that drive not mounted the clip is unreachable
+    although <out> is there: the deepest root that holds a file decides."""
+    config, keep, gone = _library_with_a_deleted_image(tmp_path, db)
+    out = tmp_path / "out"
+    out.mkdir()
+    clips = out / "clips"  # its drive is not mounted
+    config["t2i"] = {"output_root": str(out)}
+    config["i2v"] = {"output_root": str(clips)}
+    clip = str(clips / "2026-01-01" / "i2v_1.mp4")
+    db.save_media(_media(clip))
+    db.create_i2v_video(source_path=str(keep), file_path=clip, **I2V_LINEAGE)
+    db.set_grade(clip, "pass", now=T0)
+
+    complete = _route_full_clean(monkeypatch, db, config)
+
+    assert complete["unreachable_output"] == [str(clips)]
+    assert db.list_tombstones() == []
+    assert _marker_exists(db)
+    assert _pending_paths(db) == sorted([str(gone), clip])

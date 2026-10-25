@@ -131,8 +131,11 @@ FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
 _MARKER_TEXT = """\
 Metascan started a full clean & rescan at {started}. It is unfinished until
 a scan walks every configured folder to the end and brings back every
-generated image and clip still on disk, with no generated-output folder
-missing or unreadable.
+generated image and clip still on disk, with neither generated-output
+folder missing or unreadable: Text-to-Image's and Image-to-Video's output
+folders, the ones set in their configuration or else the t2i and i2v
+folders in ComfyUI's output folder. A folder missing inside one of them (an
+image's or a day's) holds nothing back: its files count as deleted.
 
 While this file exists, the Text-to-Image and Image-to-Video lists keep the
 records (prompts, writers, variants) of generated images and clips whose
@@ -142,13 +145,23 @@ completes.
 
 If a generated-output folder is gone for good, recreate it (empty is fine)
 and run Full clean & rescan: its missing images then count as deleted, and
-the ones the library had a rating, a view or a category for are recorded as
-deleted with their history.
+the ones the library had a grade, a view, a favorite, a category or a
+hindsight brief for are recorded as deleted with their history.
 
 To let the lists drop those records without scanning, delete this file;
 Metascan may keep running. A full clean that is still running, or a pending
 ratings file next to it ({pending}), also holds them back: while that file
 is there, deleting this one alone is not enough.
+"""
+
+# The output folders the last scan could not reach, appended to the marker
+# by note_unreachable_output and replaced by the next scan's findings.
+_UNREACHABLE_HEADER = "The last scan could not reach these generated-output folders:"
+_UNREACHABLE_ADVICE = """\
+Their images and clips may still be there, so their ratings are kept,
+pending, and none of them is recorded as deleted. Reconnect or mount the
+drive and run a scan. If a folder is gone for good, recreate it (empty is
+fine) and run Full clean & rescan.
 """
 
 
@@ -177,6 +190,41 @@ def write_full_clean_marker(data_dir: Path) -> None:
         f.flush()
         os.fsync(f.fileno())
     _fsync_dir(target.parent)
+
+
+def note_unreachable_output(data_dir: Path, folders: Dict[str, str]) -> bool:
+    """Name in the marker the generated-output folders the last scan could
+    not reach -- ``folders`` maps each to why ("missing", "can't be read")
+    -- with the way out, in place of what an earlier scan named there; none
+    leaves the marker as it was written. Only an existing marker is
+    rewritten: one deleted by hand while the scan ran stays deleted. Never
+    raises (the text is advice; the marker's existence holds the pause):
+    False when the marker is not there or could not be rewritten."""
+    target = full_clean_marker_path(data_dir)
+    block = ""
+    if folders:
+        lines = "".join(f"  {folder} ({why})\n" for folder, why in folders.items())
+        block = f"\n{_UNREACHABLE_HEADER}\n{lines}{_UNREACHABLE_ADVICE}"
+    try:
+        with open(target, "r+", encoding="utf-8") as f:
+            text = f.read()
+            new = text.partition("\n" + _UNREACHABLE_HEADER)[0] + block
+            if new != text:
+                f.seek(0)
+                f.write(new)
+                f.truncate()
+                f.flush()
+                os.fsync(f.fileno())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as e:  # ValueError: not UTF-8
+        logger.warning(
+            "Could not name the unreachable generated-output folders in %s (%s)",
+            target,
+            e,
+        )
+        return False
+    return True
 
 
 def clear_full_clean_marker(data_dir: Path) -> bool:
@@ -580,17 +628,22 @@ def load_pending_snapshot(data_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def pending_snapshot_paths(data_dir: Path) -> Set[str]:
-    """The paths the pending file holds ratings for, read without side
-    effects: nothing is quarantined or raised, and a missing, unreadable or
-    invalid file holds none -- one the parser cannot read too (not UTF-8,
-    not JSON, or nested deeper than it goes, as :func:`load_pending_snapshot`
-    reads them). For checks that must change nothing; the full clean itself
-    loads the file with :func:`load_pending_snapshot`."""
+    """The paths the pending file holds ratings for, as
+    :func:`load_pending_snapshot` reads them -- an older file upgraded
+    (:func:`upgrade_legacy_snapshot`), so stray ``briefs`` or
+    ``library_prompts`` in a version-2 or version-less file are ignored as
+    the loader drops them -- but without side effects: nothing is
+    quarantined or raised, and a missing, unreadable or invalid file holds
+    none -- one the parser cannot read too (not UTF-8, not JSON, or nested
+    deeper than it goes). For checks that must change nothing; the full
+    clean itself loads the file with :func:`load_pending_snapshot`."""
     try:
         snap = json.loads(snapshot_file_path(data_dir).read_text(encoding="utf-8"))
+        if not _valid_shape(snap):
+            return set()
+        return snapshot_paths(upgrade_legacy_snapshot(cast(Dict[str, Any], snap)))
     except (OSError, ValueError, RecursionError):
         return set()
-    return snapshot_paths(snap) if _valid_shape(snap) else set()
 
 
 def restore_and_persist(
