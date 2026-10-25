@@ -629,7 +629,9 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 "%d generated images / clips could not be brought back; the "
                 "full clean stays unfinished (their ratings stay pending and "
                 "the T2I / I2V lists keep their rows) until a later scan brings "
-                "them back",
+                "them back. If their output folder is gone for good, recreate "
+                "it (empty is fine) and run Full clean & rescan: those images "
+                "are then recorded as deleted, with their history",
                 held_back,
             )
         return not held_back
