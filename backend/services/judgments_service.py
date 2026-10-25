@@ -116,24 +116,25 @@ def backfill_tombstone_embeddings(db: DatabaseManager, fm: Any) -> int:
     """Give tombstones a vector for a loaded FAISS manager's CLIP model from
     the index itself.
 
-    Tombstones written while the index wasn't in memory have no vector;
-    deleted items stay in the on-disk index until a full rebuild, so once
-    it loads we can still recover them, into ``tombstone_vectors`` under
-    the index's model. The index is read by path, so a path that holds a
-    live media row now -- or that another tombstone shares -- is skipped:
-    its vector may be another file's (Review Focus 5;
-    ``db.tombstones_for_vector_backfill``). Those get theirs from the
-    archived thumbnail (``tombstone_reembed``). The DB listing and each
+    Tombstones written while the index wasn't in memory have no vector; a
+    deleted file's vector stays in the on-disk index until its CLIP model
+    changes, so once it loads we can still recover them, into
+    ``tombstone_vectors`` under the index's model. The index is read by
+    path, so only tombstones whose path can still be their own are
+    (Review Focus 5; ``db.tombstones_for_vector_backfill``): never one that
+    already has a vector for any model (it was deleted before an index of
+    another model was built), one with an archived thumbnail (the
+    re-embedder computes its vector from its own image), or a path a live
+    media row holds or another tombstone shares. The DB listing and each
     write batch take the lock briefly; every FAISS read happens outside it.
-    A vector already stored for the model is kept. Returns the number
-    filled."""
+    Returns the number filled."""
     if fm is None or not getattr(fm, "is_loaded", False):
         return 0
     model_key = (getattr(fm, "meta", None) or {}).get("model_key")
     if not model_key:
         return 0
     model_key = str(model_key)
-    missing = db.tombstones_for_vector_backfill(model_key)
+    missing = db.tombstones_for_vector_backfill()
     if not missing:
         return 0
     filled = 0

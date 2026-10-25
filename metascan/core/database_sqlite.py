@@ -4091,27 +4091,32 @@ class DatabaseManager:
                 (cur.lastrowid, model_key, blob, now),
             )
 
-    def tombstones_for_vector_backfill(self, model_key: str) -> List[Tuple[int, str]]:
-        """``(id, posix file_path)`` of the tombstones with no vector for CLIP
-        model ``model_key`` that may take the FAISS index's vector for their
-        path (deleted items stay in the on-disk index until a full rebuild).
+    def tombstones_for_vector_backfill(self) -> List[Tuple[int, str]]:
+        """``(id, posix file_path)`` of the tombstones that may take the
+        loaded FAISS index's vector for their path (a deleted file's vector
+        stays in the on-disk index until its CLIP model changes). Oldest
+        first.
 
-        The index keys a vector by path and never replaces one, so once a
-        path has held another file the vector it gives may be that file's
-        (Review Focus 5). Left out, so they never get a vector by path: a
-        tombstone whose path a live media row holds now, and one that shares
-        its path with another tombstone (another life of the path). Their
-        vectors come from the archived thumbnail instead (the re-embedder).
-        Oldest first."""
+        The index keys a vector by path and never replaces one, so a vector
+        read by path may be another file's (Review Focus 5). Left out, so
+        they never get one by path:
+
+        * a tombstone with a vector for any CLIP model. Every vector comes
+          from the index current at the deletion, a later backfill from it,
+          or a re-embed for it, so an index of another model was built
+          after the file was gone and holds at its path only another file;
+        * a tombstone with an archived thumbnail: the re-embedder computes
+          its vector from its own image;
+        * a path that a live media row holds now, or that another tombstone
+          shares: the path has had another life."""
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT t.id, t.file_path, "
+                "SELECT t.id, t.file_path, t.thumb_path IS NOT NULL AS archived, "
                 "EXISTS (SELECT 1 FROM media m WHERE m.file_path = t.file_path) "
                 "AS live, "
                 "EXISTS (SELECT 1 FROM tombstone_vectors v "
-                "WHERE v.tombstone_id = t.id AND v.model_key = ?) AS has_vector "
-                "FROM media_tombstones t ORDER BY t.id",
-                (model_key,),
+                "WHERE v.tombstone_id = t.id) AS has_vector "
+                "FROM media_tombstones t ORDER BY t.id"
             ).fetchall()
         lives: Dict[str, int] = {}
         for r in rows:
@@ -4119,7 +4124,8 @@ class DatabaseManager:
         return [
             (int(r["id"]), str(r["file_path"]))
             for r in rows
-            if not r["has_vector"] and not r["live"] and lives[r["file_path"]] == 1
+            if not (r["has_vector"] or r["archived"] or r["live"])
+            and lives[r["file_path"]] == 1
         ]
 
     def tombstones_needing_vectors(self, model_key: str) -> List[Tuple[int, str]]:
