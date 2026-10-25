@@ -326,6 +326,24 @@ def _noted(data_dir: Path, written: str) -> str:
     return text.removeprefix(written)
 
 
+def test_the_marker_says_what_holds_the_full_clean_back(tmp_path):
+    """Its text says the rule the scan applies: an output folder that is
+    missing or can't be read holds the clean back only when it held a
+    generated file the scan did not find, and a generated file on disk that
+    can't be read or imported holds it back too."""
+    ts.write_full_clean_marker(tmp_path)
+    flat = _flat(_marker_text(tmp_path))
+    assert "neither generated-output folder missing or unreadable" not in flat
+    assert (
+        "a generated-output folder that is missing or can't be read holds it "
+        "back when it held a generated image or clip the scan did not find"
+    ) in flat
+    assert (
+        "generated images and clips that are on disk but can't be read or "
+        "imported hold it back too"
+    ) in flat
+
+
 def test_the_marker_names_the_output_roots_the_last_scan_could_not_reach(tmp_path):
     """A scan that could not reach a generated-output root names it in the
     marker, with the way out; the next scan's findings replace that list,
