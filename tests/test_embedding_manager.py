@@ -107,12 +107,81 @@ class TestFaissIndexManager(unittest.TestCase):
         self.assertEqual(results[0][0], "file1.png")
         self.assertEqual(results[1][0], "file3.png")
 
-    def test_add_duplicate_path_skipped(self):
+    def test_add_same_path_replaces_its_vector(self):
+        # A path re-embedded (rebuild, rescan, a new file on a reused path)
+        # gets the vector computed now, never the first one it ever had.
         self.manager.create(embedding_dim=32, model_key="test")
-        vec = _norm(np.eye(32, dtype=np.float32)[0])
-        self.manager.add("file1.png", vec)
-        self.manager.add("file1.png", vec)
+        old = _norm(np.eye(32, dtype=np.float32)[0])
+        new = _norm(np.eye(32, dtype=np.float32)[1])
+        self.manager.add("file1.png", old)
+        self.manager.add("other.png", _norm(np.eye(32, dtype=np.float32)[2]))
+        self.manager.add("file1.png", new)
+        self.assertEqual(self.manager.file_count, 2)
+        self.assertEqual(self.manager.size, 2)
+        np.testing.assert_allclose(self.manager.get_embedding("file1.png"), new)
+        top = self.manager.search(new, top_k=1)
+        self.assertEqual(top[0][0], "file1.png")
+        self.assertAlmostEqual(top[0][1], 1.0, places=5)
+        old_hits = dict(self.manager.search(old, top_k=2))
+        self.assertLess(old_hits["file1.png"], 0.5)
+
+    def test_add_batch_replaces_existing_and_appends_new(self):
+        self.manager.create(embedding_dim=32, model_key="test")
+        eye = np.eye(32, dtype=np.float32)
+        self.manager.add("a.png", _norm(eye[0]))
+        self.manager.add_batch(
+            ["a.png", "b.png"], np.stack([_norm(eye[3]), _norm(eye[4])])
+        )
+        self.assertEqual(self.manager.file_count, 2)
+        self.assertEqual(self.manager.size, 2)
+        np.testing.assert_allclose(self.manager.get_embedding("a.png"), eye[3])
+        np.testing.assert_allclose(self.manager.get_embedding("b.png"), eye[4])
+
+    def test_add_batch_same_path_twice_keeps_the_last(self):
+        self.manager.create(embedding_dim=32, model_key="test")
+        eye = np.eye(32, dtype=np.float32)
+        self.manager.add_batch(
+            ["a.png", "a.png"], np.stack([_norm(eye[0]), _norm(eye[5])])
+        )
         self.assertEqual(self.manager.file_count, 1)
+        self.assertEqual(self.manager.size, 1)
+        np.testing.assert_allclose(self.manager.get_embedding("a.png"), eye[5])
+
+    def test_a_replaced_vector_survives_save_and_load(self):
+        self.manager.create(embedding_dim=32, model_key="test")
+        eye = np.eye(32, dtype=np.float32)
+        self.manager.add("file1.png", _norm(eye[0]))
+        self.manager.save()
+        loaded = FaissIndexManager(self.index_dir)
+        self.assertTrue(loaded.load())
+        loaded.add("file1.png", _norm(eye[7]))
+        self.assertTrue(loaded.save())
+        again = FaissIndexManager(self.index_dir)
+        self.assertTrue(again.load())
+        self.assertEqual(again.file_count, 1)
+        np.testing.assert_allclose(again.get_embedding("file1.png"), eye[7])
+
+    def test_replace_without_flat_storage_rebuilds_the_index(self):
+        # An index whose rows can't be written in place (not a flat index)
+        # is rebuilt with the new row, in the same row order.
+        self.manager.create(embedding_dim=32, model_key="test")
+        eye = np.eye(32, dtype=np.float32)
+        self.manager.add("a.png", _norm(eye[0]))
+        self.manager.add("b.png", _norm(eye[1]))
+        self.manager._flat_rows = lambda: None  # type: ignore[method-assign]
+        self.manager.add("a.png", _norm(eye[9]))
+        self.assertEqual(self.manager.size, 2)
+        np.testing.assert_allclose(self.manager.get_embedding("a.png"), eye[9])
+        np.testing.assert_allclose(self.manager.get_embedding("b.png"), eye[1])
+
+    def test_a_vector_of_the_wrong_size_is_refused(self):
+        self.manager.create(embedding_dim=32, model_key="test")
+        self.manager.add("a.png", _norm(np.eye(32, dtype=np.float32)[0]))
+        with self.assertRaises(ValueError):
+            self.manager.add("a.png", np.ones(16, dtype=np.float32))
+        np.testing.assert_allclose(
+            self.manager.get_embedding("a.png"), np.eye(32, dtype=np.float32)[0]
+        )
 
     def test_add_batch(self):
         self.manager.create(embedding_dim=32, model_key="test")

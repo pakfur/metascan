@@ -1700,6 +1700,12 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_media_tombstones_thumb "
                 "ON media_tombstones(thumb_path) WHERE thumb_path IS NOT NULL"
             )
+            # The newest tombstone of a path, read by the embedding worker
+            # every time it overwrites that path's FAISS row.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_tombstones_path "
+                "ON media_tombstones(file_path)"
+            )
             # A deleted item's CLIP vector, one per CLIP model (model_key as
             # the FAISS index names it). No FK: tombstones are never deleted.
             # It replaces media_tombstones.embedding / embedding_model, which
@@ -4341,6 +4347,37 @@ class DatabaseManager:
             ),
             reverse=True,
         )
+
+    def adopt_replaced_vector(
+        self, file_path: str, model_key: str, embedding: bytes
+    ) -> bool:
+        """Give the vector the embedding worker is about to overwrite at
+        ``file_path`` (for CLIP model ``model_key``) to the newest tombstone
+        at that path, when that tombstone is a graded image with no vector
+        for the model yet. The worker is the only writer of the on-disk
+        index, so the row it overwrites was written for the file deleted
+        there; without this, an archive-less tombstone's by-path backfill
+        could later take the newer file's vector. True when one was stored."""
+        posix_path = to_posix_path(file_path)
+        if not self._is_image_path(posix_path):
+            return False
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id, grade FROM media_tombstones INDEXED BY "
+                "idx_media_tombstones_path WHERE file_path = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (posix_path,),
+            ).fetchone()
+            if row is None or row["grade"] not in GRADES:
+                return False
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO tombstone_vectors "
+                "(tombstone_id, model_key, embedding, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (row["id"], model_key, embedding, self._iso(None)),
+            )
+            conn.commit()
+            return bool(cur.rowcount == 1)
 
     def add_tombstone_vectors(self, rows: Sequence[Tuple[int, str, bytes]]) -> int:
         """Store ``(tombstone id, CLIP model key, float32 vector bytes)`` rows
