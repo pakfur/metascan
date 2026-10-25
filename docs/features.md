@@ -38,7 +38,7 @@ In the viewer:
 
 Library, Text to Image and Image to Video tiles show the grade as a small read-only ✓ / ✗ badge; grading happens in the viewer. The library grid shows a grade as soon as you give it. While the viewer is open it keeps the images it opened with, in the same order, whatever changes behind it (new images arriving, F5, an image leaving a Grade or ★ folder because you just graded or starred it), so every key acts on the image on screen. Smart folders have a **Grade** rule (✓ Pass, ✗ Fail or No grade), so "every ✗" is one folder away.
 
-**Deleting a graded image keeps what it taught.** Before the file goes to the trash, Metascan saves a JPEG thumbnail of it (at most 512 px) in `data/archive/thumbs/`, and the deleted image's grade, reasons, categories, prompt and hindsight brief stay on record. The taste scorer, prompt-writer training and the scorecard keep counting it, even after you switch to another CLIP model: the deleted images are then re-embedded from their thumbnails in the background, only while the GPU is otherwise idle (Config → Training shows "re-embedding deleted images, n / N").
+**Deleting a graded image keeps what it taught.** Before the file goes to the trash, Metascan saves a JPEG thumbnail of it (at most 512 px, about 50 KB) in `data/archive/thumbs/`, and the deleted image's grade, reasons, categories and hindsight brief stay on record. Its prompt stays too: a generated image keeps it in its generation record, and a ✓ library image keeps the prompt from its metadata (a ✗ or ungraded library image does not). The taste scorer, prompt-writer training and the scorecard keep counting it, even after you switch to another CLIP model: the deleted images are then re-embedded from their thumbnails in the background, only while the GPU is otherwise idle (Config → Training shows "re-embedding deleted images, n / N"). Keep `data/archive/`: without a deleted image's thumbnail it cannot be re-embedded after a CLIP switch, so it stops counting for the taste scorer, and a deleted ✓ image with no hindsight brief yet can no longer get one.
 
 ### Upgrading an existing library (one time)
 
@@ -51,15 +51,15 @@ The first start of this version converts your ratings, once:
 
 The taste scorer's model from before keeps its scores until it has retrained on the grades. With auto-retrain on (the default) that happens by itself once there are 20 ✓ and 20 ✗; until then the Training tab says how many are missing.
 
-Before it changes anything, Metascan backs up the database next to it as `metascan.db.pre-v6-<date>-<time>.bak` (in UTC, for example `metascan.db.pre-v6-20261025-091500.bak`), in `data/`, or in `~/.metascan/data/` for the packaged app. The drive needs free space of about 1.2 × the database's size. A database with no ratings is not backed up. Delete the backup once you are happy with the upgrade.
+Before it changes anything, Metascan backs up the database next to it as `metascan.db.pre-v6-<date>-<time>.bak` (in UTC, for example `metascan.db.pre-v6-20261025-091500.bak`), in `data/`, or in `~/.metascan/data/` for the packaged app. The drive needs free space of about 1.2 × the database's size. Only a database with nothing to convert is not backed up: no ★ favorite, no image you have rated or even just viewed in the viewer, and no record of a deleted image. On a large library the first start takes a while (the backup is a full copy of the database): let it finish. Delete the backup once you are happy with the upgrade.
 
-If the backup or the upgrade fails, **the server does not start**. It prints one message that says why (for example how much space to free) and that your ratings are unchanged. Fix the cause and start Metascan again: the upgrade is tried again. Under `python run_server.py`, which runs with auto-reload, a refused start leaves the reloader running and holding the port (8700 by default), so the terminal looks busy: press **Ctrl-C** before you start again. Left running, it would retry the upgrade after every change to a backend file.
+If the backup or the upgrade fails, **the server does not start**. It prints one message that says why (for example how much space to free) and that your ratings are unchanged. Fix the cause and start Metascan again: the upgrade is tried again. A failed upgrade normally deletes the backup it took (the database is unchanged, so it still matches it; the message names the backup when it keeps one), and the next start takes a new one, so retries never fill the drive with copies. Under `python run_server.py`, which runs with auto-reload, a refused start leaves the reloader running and holding the port (8700 by default), so the terminal looks busy: press **Ctrl-C** before you start again. Left running, it would retry the upgrade after every change to a backend file.
 
 To go back to the backup:
 
 1. Stop the server.
 2. In the data folder, move `metascan.db` to another folder, together with `metascan.db-wal` and `metascan.db-shm` if they are there. Keep them until you are sure.
-3. Copy the `.bak` file into the data folder as `metascan.db`.
+3. Copy the `.bak` file into the data folder as `metascan.db`. If there are several, take the newest (the date and time are in its name).
 
 The backup is the database from before the upgrade, so this version upgrades it again (with a new backup) on its next start. To keep the old ratings as they were, run the previous version of Metascan.
 

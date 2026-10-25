@@ -97,7 +97,8 @@ frontend/src/
     metadata/   # MetadataPanel, MetadataField
     viewer/     # MediaViewer, ImageViewer, VideoPlayer, SlideshowViewer
     dialogs/    # ScanDialog, SimilaritySettings, DuplicateFinder,
-                #   UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab),
+                #   UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab,
+                #   ConfigTrainingTab and the ModelStatusRow they share),
                 #   NewFolderDialog, SmartFolderEditor
   types/        # TypeScript interfaces (Media, FilterData, WsMessage, folders, hardware)
 ```
