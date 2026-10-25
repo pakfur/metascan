@@ -3,6 +3,9 @@
 DatabaseManager is synchronous and guarded by a threading.Lock; route
 handlers must never call it directly on the event loop. Every method here
 is a thin asyncio.to_thread hop, matching backend/services/comfy_service.py.
+A purging delete first archives the graded images it removes
+(``training_archive.purge_keeping_signal``); the files go to the trash
+after the rows, as before.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
+from metascan.core.training_archive import purge_keeping_signal
 from metascan.utils.trash import remove_files_to_trash as _remove_files_sync
 
 logger = logging.getLogger(__name__)
@@ -79,7 +83,14 @@ class StoryboardService:
         folder_deleted for the storyboard's library folder, which is
         removed along with the storyboard."""
         ok, purged_files, folder_id = await asyncio.to_thread(
-            self.db.delete_storyboard, storyboard_id, purge_images
+            purge_keeping_signal,
+            self.db,
+            "storyboard",
+            storyboard_id,
+            purge_images,
+            lambda thumbs: self.db.delete_storyboard(
+                storyboard_id, purge_images, thumbs
+            ),
         )
         if purged_files:
             await asyncio.to_thread(_remove_files_sync, purged_files)
@@ -119,7 +130,14 @@ class StoryboardService:
         return await asyncio.to_thread(self.db.subject_references, subject_id)
 
     async def delete_subject(self, subject_id: int, mode: str = "unlink") -> bool:
-        ok, purged = await asyncio.to_thread(self.db.delete_subject, subject_id, mode)
+        ok, purged = await asyncio.to_thread(
+            purge_keeping_signal,
+            self.db,
+            "subject",
+            subject_id,
+            mode == "purge",
+            lambda thumbs: self.db.delete_subject(subject_id, mode, thumbs),
+        )
         if purged:
             await asyncio.to_thread(_remove_files_sync, purged)
         return ok
@@ -161,7 +179,12 @@ class StoryboardService:
 
     async def delete_scene(self, scene_id: int, purge_images: bool = False) -> bool:
         ok, purged_files = await asyncio.to_thread(
-            self.db.delete_scene, scene_id, purge_images
+            purge_keeping_signal,
+            self.db,
+            "scene",
+            scene_id,
+            purge_images,
+            lambda thumbs: self.db.delete_scene(scene_id, purge_images, thumbs),
         )
         if purged_files:
             await asyncio.to_thread(_remove_files_sync, purged_files)
@@ -182,7 +205,12 @@ class StoryboardService:
 
     async def delete_panel(self, panel_id: int, purge_images: bool = False) -> bool:
         ok, purged_files = await asyncio.to_thread(
-            self.db.delete_panel, panel_id, purge_images
+            purge_keeping_signal,
+            self.db,
+            "panel",
+            panel_id,
+            purge_images,
+            lambda thumbs: self.db.delete_panel(panel_id, purge_images, thumbs),
         )
         if purged_files:
             await asyncio.to_thread(_remove_files_sync, purged_files)
@@ -192,6 +220,7 @@ class StoryboardService:
         return await asyncio.to_thread(_row_exists_sync, self.db, "panels", panel_id)
 
     async def delete_panel_video(self, video_id: int) -> bool:
+        # A clip is a video: nothing to archive (graded images only).
         ok, purged_files = await asyncio.to_thread(self.db.delete_panel_video, video_id)
         if purged_files:
             await asyncio.to_thread(_remove_files_sync, purged_files)
@@ -209,7 +238,14 @@ class StoryboardService:
         await asyncio.to_thread(self.db.update_beat, beat_id, **fields)
 
     async def delete_beat(self, beat_id: int, purge_images: bool = False) -> bool:
-        ok, purged = await asyncio.to_thread(self.db.delete_beat, beat_id, purge_images)
+        ok, purged = await asyncio.to_thread(
+            purge_keeping_signal,
+            self.db,
+            "beat",
+            beat_id,
+            purge_images,
+            lambda thumbs: self.db.delete_beat(beat_id, purge_images, thumbs),
+        )
         if purged:
             await asyncio.to_thread(_remove_files_sync, purged)
         return ok

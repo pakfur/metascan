@@ -38,6 +38,7 @@ from metascan.core.storyboard_parse import (
 )
 from metascan.core.storyboard_synthesis import build_render_messages, finalize_prompt
 from metascan.core.video_targets import shot_cap
+from metascan.core.training_archive import purge_keeping_signal
 from metascan.utils.trash import remove_files_to_trash
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_models import REGISTRY
@@ -248,9 +249,17 @@ class StoryboardRunner:
 
         # A confirmed re-parse is a user-accepted destructive operation:
         # the old tree's generated media is purged (files to the OS
-        # trash), not released into the library.
+        # trash), not released into the library -- graded images archived
+        # first (purge_keeping_signal).
         purged = await asyncio.to_thread(
-            self.db.replace_storyboard_structure, storyboard_id, parsed, confirm
+            purge_keeping_signal,
+            self.db,
+            "storyboard",
+            storyboard_id,
+            confirm,
+            lambda thumbs: self.db.replace_storyboard_structure(
+                storyboard_id, parsed, confirm, thumbs
+            ),
         )
         if purged:
             await asyncio.to_thread(remove_files_to_trash, purged)
@@ -608,7 +617,14 @@ class StoryboardRunner:
                 timeout=300.0,
             )
             new_ids, purged_files = await asyncio.to_thread(
-                self.db.replace_storyboard_scenes, storyboard_id, scenes, purge
+                purge_keeping_signal,
+                self.db,
+                "storyboard",
+                storyboard_id,
+                purge,
+                lambda thumbs: self.db.replace_storyboard_scenes(
+                    storyboard_id, scenes, purge, thumbs
+                ),
             )
             if purged_files:
                 await asyncio.to_thread(remove_files_to_trash, purged_files)
@@ -706,7 +722,14 @@ class StoryboardRunner:
                     for p in panels:
                         p["is_turn"] = 0
                 _, purged_files = await asyncio.to_thread(
-                    self.db.replace_scene_panels, scene["id"], panels, purge
+                    purge_keeping_signal,
+                    self.db,
+                    "scene",
+                    int(scene["id"]),
+                    purge,
+                    lambda thumbs: self.db.replace_scene_panels(
+                        scene["id"], panels, purge, thumbs
+                    ),
                 )
                 if purged_files:
                     await asyncio.to_thread(remove_files_to_trash, purged_files)
@@ -816,7 +839,14 @@ class StoryboardRunner:
                     beats, float(panel.get("duration_s") or 12.0)
                 )
                 _, purged_files = await asyncio.to_thread(
-                    self.db.replace_panel_beats, panel["id"], beats, purge
+                    purge_keeping_signal,
+                    self.db,
+                    "panel",
+                    int(panel["id"]),
+                    purge,
+                    lambda thumbs: self.db.replace_panel_beats(
+                        panel["id"], beats, purge, thumbs
+                    ),
                 )
                 if purged_files:
                     await asyncio.to_thread(remove_files_to_trash, purged_files)
@@ -939,7 +969,14 @@ class StoryboardRunner:
         # 5. Write (the confirmed destructive path purges like a
         # confirmed shots recompose).
         panel_ids, purged_files = await asyncio.to_thread(
-            self.db.replace_scene_panels, scene_id, panels, purge
+            purge_keeping_signal,
+            self.db,
+            "scene",
+            scene_id,
+            purge,
+            lambda thumbs: self.db.replace_scene_panels(
+                scene_id, panels, purge, thumbs
+            ),
         )
         if purged_files:
             await asyncio.to_thread(remove_files_to_trash, purged_files)

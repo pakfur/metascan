@@ -474,3 +474,213 @@ def test_trash_file_falls_back_to_unlink_and_raises_when_both_fail(
         with pytest.raises(OSError):
             trash_file(stuck)
     assert stuck.exists()
+
+
+# ---- storyboard purges (fix round 1, ruling 18) -------------------------------
+
+
+class _Board:
+    """One storyboard whose one beat casts a subject and has three renders
+    (hidden, as storyboard renders ingest): a ✓ keeper, an ungraded take,
+    and a ✗ take another storyboard's subject uses as its reference
+    picture -- so every purge releases that one instead of deleting it."""
+
+    def __init__(self, db: DatabaseManager, tmp_path: Path) -> None:
+        self.sb = db.create_storyboard(
+            name="Yard", target_model="sd", architecture="t2i", base_seed=1
+        )
+        self.subject = db.create_subject(self.sb, name="Ann", description="")
+        self.scene = db.create_scene(self.sb, name="s", sort_order=0)
+        self.panel = db.create_panel(self.scene, action="a", sort_order=0)
+        self.beat = db.create_beat(
+            self.panel, action="a beat", subject_ids=[self.subject]
+        )
+        self.graded = _render(db, self.beat, tmp_path / "graded.png", "pass")
+        self.plain = _render(db, self.beat, tmp_path / "plain.png", None)
+        self.shared = _render(db, self.beat, tmp_path / "shared.png", "fail")
+        other = db.create_storyboard(
+            name="Other", target_model="sd", architecture="t2i", base_seed=2
+        )
+        db.create_subject(other, name="Bo", description="", reference_path=self.shared)
+
+
+def _render(db: DatabaseManager, beat_id: int, path: Path, grade: Optional[str]) -> str:
+    """A rendered beat image on disk and in the library (hidden)."""
+    stored = _save(db, _png(path))
+    db.set_media_hidden(stored, True)
+    db.create_beat_image(beat_id, file_path=stored)
+    if grade is not None:
+        db.set_grade(stored, grade)
+    return stored
+
+
+def _no_tombstone(db: DatabaseManager, path: str) -> bool:
+    return not [t for t in db.list_tombstones() if t["file_path"] == path]
+
+
+def _assert_kept_signal(db: DatabaseManager, board: Any) -> None:
+    """The ✓ render is gone with an archived thumbnail on its tombstone;
+    the ungraded one is gone with nothing; the released one is untouched
+    and nothing is archived for it."""
+    tomb = _tomb(db, board.graded)
+    assert tomb["grade"] == "pass" and tomb["thumb_path"]
+    archived = Path(db.db_path) / tomb["thumb_path"]
+    with Image.open(archived) as img:
+        assert img.format == "JPEG" and max(img.size) <= ARCHIVE_MAX_PX
+    assert _archived(db) == [archived]
+    assert db.get_media(Path(board.graded)) is None
+    assert db.get_media(Path(board.plain)) is None and _no_tombstone(db, board.plain)
+    assert db.get_media(Path(board.shared)) is not None  # released
+    assert _no_tombstone(db, board.shared)
+
+
+_STORYBOARD_DELETES = {
+    "beat": lambda s, b: s.delete_beat(b.beat, purge_images=True),
+    "panel": lambda s, b: s.delete_panel(b.panel, purge_images=True),
+    "scene": lambda s, b: s.delete_scene(b.scene, purge_images=True),
+    "storyboard": lambda s, b: s.delete_storyboard(b.sb, purge_images=True),
+    "subject": lambda s, b: s.delete_subject(b.subject, mode="purge"),
+}
+
+
+@pytest.mark.parametrize("scope", sorted(_STORYBOARD_DELETES))
+async def test_storyboard_deletes_archive_the_graded_images_they_purge(
+    db: Any, tmp_path: Path, scope: str
+) -> None:
+    """Every purging storyboard delete archives each graded image it really
+    deletes, from the live file, before the file goes to the trash (the
+    storyboard's own order: DB purge, then trash), and its tombstone keeps
+    the thumbnail. An ungraded render and a released one get none."""
+    from backend.services.storyboard_service import StoryboardService
+
+    board = _Board(db, tmp_path)
+    order: List[tuple] = []
+    real_archive = training_archive.archive_thumbnail
+
+    def archive_spy(src: Path, out: Path) -> Optional[Path]:
+        assert src.is_file(), "archived from the live file"
+        order.append(("archive", src.name))
+        return real_archive(src, out)
+
+    def trash_spy(path: str) -> None:
+        order.append(("trash", Path(path).name))
+
+    with mock.patch.object(
+        training_archive, "archive_thumbnail", archive_spy
+    ), mock.patch("metascan.utils.trash.send2trash", side_effect=trash_spy):
+        result = await _STORYBOARD_DELETES[scope](StoryboardService(db), board)
+    assert (result[0] if isinstance(result, tuple) else result) is True
+    _assert_kept_signal(db, board)
+    assert order.index(("archive", "graded.png")) < order.index(("trash", "graded.png"))
+    assert ("trash", "shared.png") not in order
+    assert sorted(name for kind, name in order if kind == "trash") == [
+        "graded.png",
+        "plain.png",
+    ]
+
+
+async def test_storyboard_replaces_archive_the_graded_images_they_purge(
+    db: Any, tmp_path: Path
+) -> None:
+    """The replace paths, through the runner: a confirmed beats recompose
+    (replace_panel_beats) and a confirmed re-parse
+    (replace_storyboard_structure) archive the graded renders they purge."""
+    import json
+
+    from metascan.core.storyboard_runner import StoryboardRunner
+    from tests.test_storyboard_compose import FakeVlm
+    from tests.test_storyboard_runner import VALID_PARSE_PAYLOAD, StubVlm
+
+    vlm: Any = FakeVlm()
+    runner = StoryboardRunner(
+        db=db, comfy=None, get_vlm=lambda: vlm, output_root=tmp_path / "out"
+    )
+    sb = db.create_storyboard(
+        name="B", target_model="sd", architecture="t2i", base_seed=1
+    )
+    db.update_storyboard(sb, source_text="A scavenger finds a ship.")
+    await runner.compose_story(sb)
+    panel = db.get_storyboard_tree(sb)["scenes"][0]["panels"][0]
+    first, second = (b["id"] for b in panel["beats"])
+    graded = _render(db, first, tmp_path / "recompose.png", "pass")
+    plain = _render(db, first, tmp_path / "recompose_plain.png", None)
+    with mock.patch("metascan.utils.trash.send2trash") as trash:
+        await runner.compose_story(
+            sb, stages=("beats",), panel_ids=[panel["id"]], confirm=True
+        )
+    assert sorted(Path(c.args[0]).name for c in trash.call_args_list) == [
+        "recompose.png",
+        "recompose_plain.png",
+    ]
+    thumb = _tomb(db, graded)["thumb_path"]
+    assert thumb and (Path(db.db_path) / thumb).is_file()
+    assert _no_tombstone(db, plain)
+
+    beat = db.get_storyboard_tree(sb)["scenes"][0]["panels"][0]["beats"][0]["id"]
+    reparsed = _render(db, beat, tmp_path / "reparse.png", "fail")
+    vlm = StubVlm(responses=[json.dumps(VALID_PARSE_PAYLOAD)])
+    with mock.patch("metascan.utils.trash.send2trash"):
+        await runner.parse(sb, "INT. YARD - DUSK.", confirm=True)
+    thumb = _tomb(db, reparsed)["thumb_path"]
+    assert thumb and (Path(db.db_path) / thumb).is_file()
+    assert len(_archived(db)) == 2
+
+
+async def test_a_storyboard_purge_with_an_unreadable_render_still_deletes(
+    db: Any, tmp_path: Path
+) -> None:
+    from backend.services.storyboard_service import StoryboardService
+
+    board = _Board(db, tmp_path)
+    Path(board.graded).write_bytes(b"not an image")
+    with mock.patch("metascan.utils.trash.send2trash"):
+        assert await StoryboardService(db).delete_beat(board.beat, purge_images=True)
+    tomb = _tomb(db, board.graded)
+    assert (tomb["grade"], tomb["thumb_path"]) == ("pass", None)
+    assert db.get_media(Path(board.graded)) is None
+    assert _archived(db) == []
+
+
+async def test_a_graded_clip_purged_with_its_shot_is_never_archived(
+    db: Any, tmp_path: Path
+) -> None:
+    """A shot's rendered clip (panel_videos) is a video: its purge writes
+    its tombstone, never an archive."""
+    from backend.services.storyboard_service import StoryboardService
+
+    board = _Board(db, tmp_path)
+    clip = tmp_path / "take.mp4"
+    clip.write_bytes(b"\x00video")
+    stored = _save(db, clip)
+    video_id = db.create_panel_video(board.panel, file_path=stored)
+    db.set_grade(stored, "pass")
+    tried: List[str] = []
+    real_archive = training_archive.archive_thumbnail
+
+    def archive_spy(src: Path, out: Path) -> Optional[Path]:
+        tried.append(src.name)
+        return real_archive(src, out)
+
+    with mock.patch.object(
+        training_archive, "archive_thumbnail", archive_spy
+    ), mock.patch("metascan.utils.trash.send2trash"):
+        assert await StoryboardService(db).delete_panel_video(video_id)
+        assert await StoryboardService(db).delete_panel(board.panel, purge_images=True)
+    assert "take.mp4" not in tried
+    assert _tomb(db, stored)["thumb_path"] is None
+
+
+async def test_a_storyboard_purge_whose_candidates_cannot_be_listed_still_deletes(
+    db: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from backend.services.storyboard_service import StoryboardService
+
+    board = _Board(db, tmp_path)
+    with mock.patch.object(
+        db, "purge_image_candidates", side_effect=RuntimeError("db hiccup")
+    ), mock.patch("metascan.utils.trash.send2trash"), caplog.at_level(logging.ERROR):
+        assert await StoryboardService(db).delete_beat(board.beat, purge_images=True)
+    assert db.get_media(Path(board.graded)) is None
+    assert _tomb(db, board.graded)["thumb_path"] is None
+    assert _archived(db) == []
+    assert any("no archive" in r.getMessage() for r in caplog.records)
