@@ -4,6 +4,8 @@ from typing import Dict, Any, Optional, Union
 from PIL import Image
 import logging
 
+from metascan.utils.png_chunks import png_exif, png_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -213,14 +215,17 @@ class MetadataExtractor(ABC):
         """
         try:
             with Image.open(image_path) as img:
-                metadata = {}
+                metadata: Dict[str, Any] = {}
 
-                # For PNG files, check text chunks
-                if img.format == "PNG" and hasattr(img, "text"):
-                    metadata.update(img.text)
-
-                # For JPEG/other formats, check EXIF
-                exif = img.getexif()
+                # A PNG's text chunks and EXIF, read without decoding it
+                # unless it has some after its image data: Pillow's
+                # img.text and getexif() decode the whole image.
+                if img.format == "PNG":
+                    metadata.update(png_text(img))
+                    exif = png_exif(img)
+                else:
+                    # For JPEG/other formats, check EXIF
+                    exif = img.getexif()
                 if exif:
                     from PIL.ExifTags import TAGS, IFD
 
