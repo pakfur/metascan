@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import signal
+import sqlite3
 import sys
 import time
 import traceback
@@ -73,6 +74,11 @@ TAG_THRESHOLD = 0.22
 # clip_tag_samples.json for visual validation. Deterministic across a run
 # because we seed the RNG from the file list.
 TAG_SAMPLE_COUNT = 3
+
+# Pauses before the stamp of a batch's tombstones is tried again after a
+# database error (a lock held past SQLite's 5 s busy timeout): a brief lock
+# must not fail the run and lose everything since the last save.
+STAMP_RETRY_DELAYS_S = (0.5, 1.0, 2.0)
 
 
 def _write_progress_fatal(queue_dir: Path, error: str) -> None:
@@ -245,17 +251,45 @@ class EmbeddingWorker:
         """Stamp every tombstone at ``file_paths`` -- the paths whose row
         this run appended or overwrote -- before the index is saved: once a
         rewritten row is on disk (the server may load it at any time), no
-        tombstone there may read it by path as its own. False when the stamp
-        could not be written: the caller must not save the index then."""
-        try:
-            db_mgr.mark_tombstone_paths_rewritten(file_paths)
-            return True
-        except Exception as e:
+        tombstone there may read it by path as its own. A database error is
+        tried again after each of ``STAMP_RETRY_DELAYS_S``. False when the
+        stamp could not be written: the caller must not save the index
+        then."""
+        delays = list(STAMP_RETRY_DELAYS_S)
+        while True:
+            try:
+                db_mgr.mark_tombstone_paths_rewritten(file_paths)
+                return True
+            except sqlite3.OperationalError as e:
+                if delays:
+                    delay = delays.pop(0)
+                    self.logger.warning(
+                        f"Could not stamp the tombstones of re-embedded paths "
+                        f"({e}); trying again in {delay:g}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                failure = f"{type(e).__name__}: {e}"
+            except Exception as e:
+                failure = f"{type(e).__name__}: {e}"
             self.logger.error(
                 f"Could not stamp the tombstones of re-embedded paths "
-                f"({type(e).__name__}: {e}); the index is not saved"
+                f"({failure}); the index is not saved"
             )
             return False
+
+    def _save_index(self, faiss_mgr: FaissIndexManager, pending: int) -> bool:
+        """Save the index. Its files are marked embedded only after this
+        succeeded: a mark is the evidence that a file's row is on disk. On
+        failure the ``pending`` files stay unmarked (a later save in this
+        run, or the next run, takes care of them)."""
+        if faiss_mgr.save():
+            return True
+        self.logger.error(
+            f"Could not save the FAISS index: {pending} embedded file(s) "
+            f"stay unmarked until a later save succeeds"
+        )
+        return False
 
     def run(self) -> None:  # noqa: C901
         """Main worker loop."""
@@ -545,22 +579,23 @@ class EmbeddingWorker:
 
                     processed += 1
 
-                    # Periodic saves every 100 files, each after the stamp of
-                    # the batch's tombstones (a failed stamp skips the save:
-                    # the batch carries over to the next one).
-                    if processed % 100 == 0 and self._stamp_rewritten_paths(
-                        db_mgr, batch_paths
-                    ):
-                        faiss_mgr.save()
-                        if hash_batch:
-                            db_mgr.save_media_hash_batch(hash_batch)
-                            hash_batch = []
-                        if batch_paths:
-                            db_mgr.mark_embedded(batch_paths, model_key)
-                            batch_paths = []
-                        if skipped_paths:
-                            db_mgr.mark_embedding_skipped(skipped_paths)
-                            skipped_paths = []
+                    # Periodic saves every 100 files: the batch's tombstones
+                    # are stamped before the save and its files marked only
+                    # after it succeeded; a failed stamp or save carries the
+                    # batch over to the next save.
+                    if processed % 100 == 0:
+                        if self._stamp_rewritten_paths(
+                            db_mgr, batch_paths
+                        ) and self._save_index(faiss_mgr, len(batch_paths)):
+                            if hash_batch:
+                                db_mgr.save_media_hash_batch(hash_batch)
+                                hash_batch = []
+                            if batch_paths:
+                                db_mgr.mark_embedded(batch_paths, model_key)
+                                batch_paths = []
+                            if skipped_paths:
+                                db_mgr.mark_embedding_skipped(skipped_paths)
+                                skipped_paths = []
 
                         elapsed = time.time() - batch_start_time
                         rate = 100 / elapsed if elapsed > 0 else 0
@@ -588,17 +623,18 @@ class EmbeddingWorker:
 
             # Final save, after the stamp of the batch's tombstones. Without
             # the stamp nothing is saved: the run fails and the batch's files
-            # are embedded again next time.
+            # are embedded again next time. They are marked only once the
+            # save succeeded.
             self.logger.info("Saving final batch...")
             if not self._stamp_rewritten_paths(db_mgr, batch_paths):
                 raise RuntimeError(
                     "could not mark the deleted items at re-embedded paths; "
                     "the index was not saved"
                 )
-            faiss_mgr.save()
+            saved = self._save_index(faiss_mgr, len(batch_paths))
             if hash_batch:
                 db_mgr.save_media_hash_batch(hash_batch)
-            if batch_paths:
+            if batch_paths and saved:
                 db_mgr.mark_embedded(batch_paths, model_key)
             if skipped_paths:
                 db_mgr.mark_embedding_skipped(skipped_paths)

@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # If the worker hasn't updated progress in this many seconds, consider it stale
 WORKER_STALE_TIMEOUT = 120.0
 
+# The worker's last statuses. One ends a run only once the worker process has
+# exited: a cancelled worker still stamps, saves and marks its last batch
+# after writing "cancelled", and a second worker started meanwhile would
+# write the same index (the FAISS index must have one writer).
+_FINAL_STATUSES = ("complete", "cancelled", "error")
+
 
 class EmbeddingQueue:
     """Process-based embedding queue manager.
@@ -43,6 +49,9 @@ class EmbeddingQueue:
         self._last_progress: Dict[str, Any] = {}
         self._start_time: float = 0.0
         self._last_progress_time: float = 0.0
+        # A final status read while the worker was still running: reported
+        # (and the queue cleaned up) once the process has exited.
+        self._finished: Optional[Dict[str, Any]] = None
 
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
         self.on_complete: Optional[Callable[[int], None]] = None
@@ -66,7 +75,8 @@ class EmbeddingQueue:
         return self._queue_dir
 
     def is_indexing(self) -> bool:
-        """Check if the embedding worker is currently running."""
+        """Check if the embedding worker is currently running -- until its
+        process has exited, also after it wrote its last status."""
         if self._process is None:
             return False
         return self._process.poll() is None
@@ -124,6 +134,7 @@ class EmbeddingQueue:
                 pass
 
         self._last_progress = {}
+        self._finished = None
         self._start_time = time.time()
         self._last_progress_time = time.time()
 
@@ -199,6 +210,14 @@ class EmbeddingQueue:
         # First check: did the process exit?
         process_exited = self._process.poll() is not None
 
+        # The worker wrote its last status earlier and was still running:
+        # the run ends when the process does, with the status it left last
+        # (a cancelled run whose final save failed ends in "error").
+        if self._finished is not None:
+            if process_exited:
+                self._finish(self._read_final_status() or self._finished)
+            return
+
         progress_file = self._queue_dir / "progress_embedding.json"
 
         if not progress_file.exists():
@@ -264,7 +283,6 @@ class EmbeddingQueue:
             current = data.get("current", 0)
             total = data.get("total", 0)
             current_file = data.get("current_file", "")
-            error = data.get("error", "")
             errors_count = data.get("errors_count", 0)
 
             if status == "starting":
@@ -293,33 +311,29 @@ class EmbeddingQueue:
                 if errors_count > 0:
                     label += f" ({errors_count} errors)"
                 self._emit_progress(current, total, label)
-            elif status == "complete":
-                self._emit_progress(total, total, "Indexing complete")
-                self._emit_complete(current)
-                self._cleanup()
+            elif status in _FINAL_STATUSES:
+                if status == "complete":
+                    self._emit_progress(total, total, "Indexing complete")
+                elif status == "cancelled":
+                    self._emit_progress(
+                        current, total, f"Indexing cancelled at {current}/{total}"
+                    )
+                if process_exited:
+                    self._finish(data)
+                else:
+                    self._finished = data  # still finishing its last batch
                 return
-            elif status == "cancelled":
-                self._emit_progress(
-                    current, total, f"Indexing cancelled at {current}/{total}"
-                )
-                self._emit_complete(current)
-                self._cleanup()
-                return
-            elif status not in ("", "error"):
+            elif status != "":
                 # Forward unknown statuses to the UI rather than silently
                 # dropping them — this keeps the parent forward-compatible
                 # with new worker statuses added later.
                 label = current_file or status
                 self._emit_progress(current, total, label)
-            elif status == "error":
-                self._emit_error(error)
-                self._cleanup()
-                return
 
         # Check if process exited unexpectedly (not a terminal status)
         if process_exited:
             last_status = self._last_progress.get("status", "")
-            if last_status not in ("complete", "cancelled", "error"):
+            if last_status not in _FINAL_STATUSES:
                 stderr_text = self._read_process_stderr()
                 rc = self._process.returncode if self._process else -1
                 error_msg = (
@@ -332,6 +346,26 @@ class EmbeddingQueue:
                 logger.error(error_msg)
                 self._emit_error(error_msg)
                 self._cleanup()
+
+    def _read_final_status(self) -> Optional[Dict[str, Any]]:
+        """The progress file when it holds a final status, else None."""
+        try:
+            with open(self._queue_dir / "progress_embedding.json", "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+        if isinstance(data, dict) and data.get("status") in _FINAL_STATUSES:
+            return data
+        return None
+
+    def _finish(self, data: Dict[str, Any]) -> None:
+        """Report the end of a run whose worker process has exited (its
+        last status ``data``), then clean up."""
+        if data.get("status") == "error":
+            self._emit_error(data.get("error", ""))
+        else:
+            self._emit_complete(data.get("current", 0))
+        self._cleanup()
 
     def _read_process_stderr(self) -> str:
         """Read stderr from the subprocess (non-blocking best-effort)."""
@@ -349,6 +383,7 @@ class EmbeddingQueue:
     def _cleanup(self) -> None:
         """Clean up after the worker finishes."""
         self._process = None
+        self._finished = None
         self._start_time = 0.0
         # Clean up task file but leave progress for debugging
         task_file = self._queue_dir / "embedding_task.json"

@@ -82,16 +82,17 @@ def test_sticky_broadcasts_once(client, seeded, monkeypatch):
 
 
 class _FakeFaiss:
-    def __init__(self, loaded, vec_for):
+    def __init__(self, loaded, vec_for, loaded_at=1_700_000_000.0):
         self.is_loaded = loaded
         self.meta = {"model_key": "small"}
+        self.loaded_at = loaded_at
         self._vec_for = vec_for
 
     def get_embedding(self, key):
         return self._vec_for.get(key)
 
 
-def test_faiss_embedding_lookup(monkeypatch):
+def test_faiss_embedding_lookup(monkeypatch, caplog):
     import numpy as np
 
     from backend.services.judgments_service import faiss_embedding_lookup
@@ -100,8 +101,16 @@ def test_faiss_embedding_lookup(monkeypatch):
     fake = _FakeFaiss(True, {"/p/a.png": vec})
     monkeypatch.setattr("backend.api.similarity._faiss_manager", fake)
     got = faiss_embedding_lookup("/p/a.png")
-    assert got is not None and got[1] == "small" and got[0] is vec
+    # The vector, its model and when the in-memory index was loaded: the
+    # database reads it only for a file marked before that.
+    assert got is not None and got[0] is vec
+    assert got[1:] == ("small", 1_700_000_000.0)
     assert faiss_embedding_lookup("/p/missing.png") is None
+    fake.loaded_at = None  # not loaded from disk: no evidence it holds a mark
+    with caplog.at_level("WARNING"):
+        assert faiss_embedding_lookup("/p/a.png") is None
+    assert not caplog.records  # an expected answer, not a failed lookup
+    fake.loaded_at = 1_700_000_000.0
     fake.is_loaded = False
     assert faiss_embedding_lookup("/p/a.png") is None
 
@@ -125,6 +134,7 @@ def test_faiss_embedding_lookup_failure_logs_warning(monkeypatch, caplog):
     class Broken:
         is_loaded = True
         meta = {"model_key": "small"}
+        loaded_at = 1_700_000_000.0
 
         def get_embedding(self, key):
             raise RuntimeError("bad index")

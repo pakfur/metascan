@@ -265,7 +265,7 @@ def test_diversity_uses_passed_generations(db):
     gone = _gen(db, "/g/gone_pass.png", "base", LATEST, "pass")
     gone_star = _gen(db, "/g/gone_star.png", "base", LATEST, favorite=True)
     db.mark_embedded(["/g/gone_pass.png", "/g/gone_star.png"], "small")
-    db.set_embedding_lookup(lambda p: (vec, "small"))
+    db.set_embedding_lookup(lambda p: (vec, "small", float("inf")))
     assert db.delete_t2i_image(gone)[0]
     assert db.delete_t2i_image(gone_star)[0]
     db.set_embedding_lookup(None)

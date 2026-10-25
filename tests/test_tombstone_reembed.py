@@ -253,7 +253,7 @@ async def test_reembeds_graded_tombstones_for_the_current_model(db, caplog):
     # is "large" now.
     db.save_media(media("/l/pass.png"))
     db.mark_embedded(["/l/pass.png"], "small")
-    db.set_embedding_lookup(lambda p: (small, "small"))
+    db.set_embedding_lookup(lambda p: (small, "small", float("inf")))
     t_pass = _delete_graded(db, "/l/pass.png", "pass")
     db.set_embedding_lookup(None)
     t_fail = _delete_graded(db, "/l/fail.png", "fail")  # no vector at all

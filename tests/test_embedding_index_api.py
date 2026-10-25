@@ -424,3 +424,112 @@ def test_poll_updates_noop_when_no_active_worker(tmp_path, caplog):
         f"poll_updates kept warning after completion: "
         f"{[r.getMessage() for r in stale_warnings]!r}"
     )
+
+
+@pytest.mark.parametrize("status", ["cancelled", "complete", "error"])
+def test_a_finished_run_holds_the_queue_until_its_worker_exits(
+    tmp_path, monkeypatch, status
+):
+    """A cancelled worker still stamps, saves and marks its last batch after
+    it writes "cancelled" (any worker still runs when it writes its last
+    status). Until the process has exited the queue keeps indexing -- a new
+    start is refused, so two workers never write the index at once -- and
+    only then reports the end, so the reload it triggers sees the final
+    save."""
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from metascan.core import embedding_queue as eq_mod
+
+    class FakeProcess:
+        pid = 4242
+        stderr = None
+        returncode = None
+
+        def __init__(self):
+            self.exited = False
+
+        def poll(self):
+            return 0 if self.exited else None
+
+        def terminate(self):
+            pass
+
+    spawned: list = []
+
+    def popen(*args, **kwargs):
+        spawned.append(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        eq_mod, "subprocess", SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE)
+    )
+    eq = eq_mod.EmbeddingQueue()
+    eq._queue_dir = tmp_path
+    worker = FakeProcess()
+    eq._process = worker
+    events: list = []
+    eq.on_complete = lambda total: events.append(("complete", total))
+    eq.on_error = lambda msg: events.append(("error", msg))
+    (tmp_path / "progress_embedding.json").write_text(
+        json.dumps(
+            {
+                "current": 3,
+                "total": 10,
+                "status": status,
+                "error": "boom" if status == "error" else "",
+            }
+        )
+    )
+
+    for _ in range(3):  # the worker is still finishing its last batch
+        eq.poll_updates()
+    assert events == [] and eq.is_indexing()
+    assert eq.start_indexing(["/lib/new.png"]) is False and spawned == []
+
+    worker.exited = True
+    eq.poll_updates()
+
+    assert events == ([("error", "boom")] if status == "error" else [("complete", 3)])
+    assert not eq.is_indexing()
+    assert eq.start_indexing(["/lib/new.png"]) is True and len(spawned) == 1
+
+
+def test_a_cancel_whose_last_save_fails_ends_in_error(tmp_path):
+    """The worker writes "cancelled", then its final stamp fails and it
+    writes "error" before it exits: the run ends with the status it left
+    last."""
+    import json
+
+    from metascan.core.embedding_queue import EmbeddingQueue
+
+    class FakeProcess:
+        returncode = None
+        stderr = None
+
+        def __init__(self):
+            self.exited = False
+
+        def poll(self):
+            return 0 if self.exited else None
+
+    eq = EmbeddingQueue()
+    eq._queue_dir = tmp_path
+    worker = FakeProcess()
+    eq._process = worker
+    events: list = []
+    eq.on_complete = lambda total: events.append(("complete", total))
+    eq.on_error = lambda msg: events.append(("error", msg))
+    progress = tmp_path / "progress_embedding.json"
+    progress.write_text(json.dumps({"current": 3, "total": 10, "status": "cancelled"}))
+    eq.poll_updates()
+    progress.write_text(
+        json.dumps({"current": 0, "total": 0, "status": "error", "error": "no save"})
+    )
+    worker.exited = True
+
+    eq.poll_updates()
+
+    assert events == [("error", "no save")]
+    assert not eq.is_indexing()

@@ -13,7 +13,10 @@ A row read by path is a tombstone's own only when its file was embedded with
 the index's CLIP model when it was deleted (``media_tombstones
 .embedded_model``, copied from its ``media_hashes`` row) and nothing has been
 embedded at the path since (``path_rewritten``: the worker stamps every
-tombstone of each path it appends or overwrites, before it saves the index).
+tombstone of each path it appends or overwrites, before it saves the index),
+and only from an index loaded after the file was marked embedded
+(``embedded_at``, its ``media_hashes.embedding_updated_at``, against the
+manager's ``loaded_at``: the server's in-memory index can lag the disk).
 When unsure, no vector. The R1a / R1b / R2 / R2b sequences are the review's
 reproductions of a hand-off that once gave a tombstone another file's vector.
 """
@@ -22,14 +25,17 @@ import hashlib
 import json
 import logging
 import sqlite3
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pytest
 
+from backend.api import similarity
 from backend.services import judgments_service
+from backend.services.judgments_service import faiss_embedding_lookup
 from metascan.core.database_sqlite import DatabaseManager, MigrationError
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.media import Media
@@ -37,6 +43,8 @@ from metascan.workers import embedding_worker as ew
 
 DIM = 32
 MODEL = "small"
+# What a test lookup reports as its index's load time: after every mark.
+LATER = time.time() + 3600
 # An archived thumbnail as a tombstone stores it (the re-embedder's input).
 THUMB = "archive/thumbs/0123456789abcdef0123456789abcdef.jpg"
 
@@ -157,11 +165,41 @@ def _index_vector(env, path: str) -> np.ndarray:
     return vec
 
 
+def _marks_a_while_ago(db, seconds: int = 10) -> None:
+    """Move every embedding mark (live and on tombstones) ``seconds`` back:
+    an index loaded now was loaded after them, without waiting out the
+    one-second resolution of the marks."""
+    with db.lock, db._get_connection() as conn:
+        conn.execute(
+            "UPDATE media_hashes SET embedding_updated_at = "
+            "datetime(embedding_updated_at, ?) WHERE embedding_updated_at IS NOT NULL",
+            (f"-{seconds} seconds",),
+        )
+        conn.execute(
+            "UPDATE media_tombstones SET embedded_at = datetime(embedded_at, ?) "
+            "WHERE embedded_at IS NOT NULL",
+            (f"-{seconds} seconds",),
+        )
+        conn.commit()
+
+
 def _backfill(env, db) -> int:
-    """What the server does whenever it loads the on-disk index."""
+    """What the server does whenever it loads the on-disk index, here a
+    while after every mark so far."""
+    _marks_a_while_ago(db)
     fm = FaissIndexManager(env["index"])
     assert fm.load()
     return judgments_service.backfill_tombstone_embeddings(db, fm)
+
+
+def _server_index(env, db, monkeypatch) -> FaissIndexManager:
+    """Load the on-disk index as the server's in-memory one and install the
+    delete-time lookup on ``db``, as the lifespan does."""
+    fm = FaissIndexManager(env["index"])
+    assert fm.load()
+    monkeypatch.setattr(similarity, "_faiss_manager", fm)
+    db.set_embedding_lookup(faiss_embedding_lookup)
+    return fm
 
 
 def _tombstone_vector(db, tomb_id: int, model: str = MODEL):
@@ -198,6 +236,16 @@ def _flags(db) -> Dict[str, int]:
         return {
             r["file_path"]: r["has_embedding"]
             for r in conn.execute("SELECT file_path, has_embedding FROM media_hashes")
+        }
+
+
+def _mark_times(db) -> Dict[str, Optional[str]]:
+    with db._get_connection() as conn:
+        return {
+            r["file_path"]: r["embedding_updated_at"]
+            for r in conn.execute(
+                "SELECT file_path, embedding_updated_at FROM media_hashes"
+            )
         }
 
 
@@ -296,7 +344,7 @@ def test_r1a_a_clip_switch_then_rebuild_never_gives_a_tombstone_the_live_files(e
     p = _write(env, "reused.png", b"file A")
     vec_a = _bytes_vector(p)
     _seed_index(env, [(p, vec_a)])
-    db.set_embedding_lookup(lambda q: (vec_a, MODEL))  # the in-memory index
+    db.set_embedding_lookup(lambda q: (vec_a, MODEL, LATER))  # the in-memory index
     tomb_a = _graded_delete(db, p, "fail", embedded_with=MODEL, thumb=THUMB)
     db.set_embedding_lookup(None)
     np.testing.assert_allclose(_tombstone_vector(db, tomb_a), vec_a)
@@ -495,11 +543,139 @@ def test_a_failed_stamp_keeps_the_rewritten_row_off_disk(env, monkeypatch):
     monkeypatch.setattr(
         DatabaseManager, "mark_tombstone_paths_rewritten", locked, raising=False
     )
+    monkeypatch.setattr(ew, "STAMP_RETRY_DELAYS_S", (0.0, 0.0, 0.0), raising=False)
     _run_worker(env, [p], status="error")
 
     np.testing.assert_allclose(_index_vector(env, p), vec_a)
     assert db.get_unembedded_file_paths() == [p]
     assert _tombstone(db, tomb)["path_rewritten"] == 0
+
+
+def test_a_locked_database_is_retried_before_the_stamp_fails_the_run(env, monkeypatch):
+    """A brief lock (another writer inside SQLite's busy timeout) on the
+    final stamp is retried, so the run still saves and marks its batch."""
+    db = env["db"]
+    p = _write(env, "reused.png", b"file A")
+    _seed_index(env, [(p, _bytes_vector(p))])
+    tomb = _graded_delete(db, p, "pass", embedded_with=MODEL)
+    _write(env, "reused.png", b"file B")
+    db.save_media(_media(p))
+    real = DatabaseManager.mark_tombstone_paths_rewritten
+    attempts = []
+
+    def briefly_locked(self, file_paths):
+        attempts.append(list(file_paths))
+        if len(attempts) < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, file_paths)
+
+    monkeypatch.setattr(
+        DatabaseManager, "mark_tombstone_paths_rewritten", briefly_locked
+    )
+    monkeypatch.setattr(ew, "STAMP_RETRY_DELAYS_S", (0.0, 0.0, 0.0), raising=False)
+    _run_worker(env, [p])
+
+    assert len(attempts) == 3
+    assert _tombstone(db, tomb)["path_rewritten"] == 1
+    np.testing.assert_allclose(_index_vector(env, p), _bytes_vector(p))
+    assert db.get_unembedded_file_paths() == []
+
+
+def test_a_failed_index_save_marks_nothing(env, monkeypatch):
+    """A file is marked embedded only once the index holding its row is on
+    disk: the marks are the evidence a deleted file's row is in the index."""
+    db = env["db"]
+    paths = [_write(env, f"f{i}.png", f"file {i}".encode()) for i in range(3)]
+    for path in paths:
+        db.save_media(_media(path))
+    monkeypatch.setattr(FaissIndexManager, "save", lambda self: False)
+
+    _run_worker(env, paths)
+
+    assert sorted(db.get_unembedded_file_paths()) == sorted(paths)
+    assert _mark_times(db) == {}
+
+
+def test_a_batch_whose_save_failed_is_marked_by_the_next_save(env, monkeypatch):
+    """The periodic save after 100 files fails, the final one succeeds: the
+    final save writes every row, so the whole run is marked then."""
+    db = env["db"]
+    paths = [_write(env, f"f{i:03d}.png", f"file {i}".encode()) for i in range(101)]
+    for path in paths:
+        db.save_media(_media(path))
+    real_save = FaissIndexManager.save
+    unmarked = []  # how many of the run's files are unmarked at each save
+
+    def first_save_fails(self):
+        unmarked.append(len(db.get_unembedded_file_paths()))
+        return False if len(unmarked) == 1 else real_save(self)
+
+    monkeypatch.setattr(FaissIndexManager, "save", first_save_fails)
+    _run_worker(env, paths)
+
+    # The first 100 were not marked after their save failed: they wait for
+    # the final save, which writes every row.
+    assert unmarked == [101, 101]
+    assert db.get_unembedded_file_paths() == []
+    np.testing.assert_allclose(_index_vector(env, paths[0]), _bytes_vector(paths[0]))
+
+
+# ---------------------------------------------------------------------------
+# The in-memory index can lag the disk: evidence by load time
+# ---------------------------------------------------------------------------
+
+
+def test_a_capture_never_reads_an_in_memory_index_older_than_the_files_mark(
+    env, monkeypatch
+):
+    """The server's in-memory index is replaced only after a run completes
+    (never after a failed one). B lands on A's path and is embedded and
+    marked while the server still holds the index with A's row: deleting B
+    then must not take that row. B keeps its evidence, so the backfill on
+    the next load gives it its own vector."""
+    db = env["db"]
+    p = _write(env, "reused.png", b"file A")
+    vec_a = _bytes_vector(p)
+    _seed_index(env, [(p, vec_a)])
+    db.save_media(_media(p))
+    db.mark_embedded([p], MODEL)
+    _marks_a_while_ago(db)  # A was embedded well before the server loaded
+    _server_index(env, db, monkeypatch)
+    tomb_a = _graded_delete(db, p, "pass")
+    np.testing.assert_allclose(_tombstone_vector(db, tomb_a), vec_a)
+
+    _write(env, "reused.png", b"file B")  # B lands on the freed path
+    vec_b = _bytes_vector(p)
+    db.save_media(_media(p))
+    _run_worker(env, db.get_unembedded_file_paths())  # B's row on disk, B marked
+    db.set_grade(p, "fail")  # before the server swaps in the reloaded index
+    assert db.delete_media(Path(p))
+    tomb_b = max(t["id"] for t in db.list_tombstones() if t["file_path"] == p)
+
+    assert db.get_tombstone_vectors(tomb_b) == {}, "T_B took the in-memory A row"
+    row = _tombstone(db, tomb_b)
+    assert row["embedded_model"] == MODEL and row["embedded_at"] is not None
+    assert _backfill(env, db) == 1  # the next load: B's own row
+    np.testing.assert_allclose(_tombstone_vector(db, tomb_b), vec_b)
+    np.testing.assert_allclose(_tombstone_vector(db, tomb_a), vec_a)
+
+
+def test_a_capture_waits_out_the_marks_one_second_resolution(env, monkeypatch):
+    """A mark is stored to the second: an index loaded in the second the
+    file was marked may predate it, so it is not read."""
+    db = env["db"]
+    p = _write(env, "a.png", b"file A")
+    _seed_index(env, [(p, _bytes_vector(p))])
+    db.save_media(_media(p))
+    db.mark_embedded([p], MODEL)
+    fm = _server_index(env, db, monkeypatch)
+    (mark,) = _mark_times(db).values()
+    stored = datetime.fromisoformat(mark).replace(tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(fm, "_loaded_at", stored + 0.9, raising=False)
+
+    tomb = _graded_delete(db, p, "pass")
+
+    assert db.get_tombstone_vectors(tomb) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +709,59 @@ def test_v7_re_embeds_a_live_file_left_with_a_deleted_files_vector(env):
     assert db.get_tombstone_vectors(tomb) == {}
 
 
+def test_v7_takes_the_evidence_from_marks_made_before_the_fix(env):
+    """A reused path whose earlier file left no tombstone is invisible to
+    v7: the live file keeps ``has_embedding = 1`` over the earlier file's
+    row. Its mark predates the fix, so v7 clears its time: when it is graded
+    and deleted it has no evidence (NULL, the old guards), so its archived
+    tombstone stays the re-embedder's and never takes the earlier row."""
+    db = env["db"]
+    p = _write(env, "reused.png", b"file A")
+    vec_a = _bytes_vector(p)
+    _seed_index(env, [(p, vec_a)])
+    db.save_media(_media(p))
+    db.mark_embedded([p], MODEL)
+    assert db.delete_media(Path(p))  # ungraded: no tombstone
+    _write(env, "reused.png", b"file B")
+    db.save_media(_media(p))
+    db.mark_embedded([p], MODEL)  # the build before the fix: A's row kept at p
+    _set_user_version(db, 6)
+
+    db = DatabaseManager(env["data"])  # the upgrade: no tombstone at p
+    assert db.get_unembedded_file_paths() == []  # B stays "embedded"
+    assert _mark_times(db) == {p: None}
+    db.set_grade(p, "fail")
+    assert db.delete_media(Path(p), THUMB)  # archived, no index in memory
+    (tomb_b,) = [t["id"] for t in db.list_tombstones()]
+    assert _tombstone(db, tomb_b)["embedded_model"] is None
+
+    assert _backfill(env, db) == 0
+    assert db.get_tombstone_vectors(tomb_b) == {}, "T_B took the earlier file's row"
+    assert db.tombstones_needing_vectors(MODEL) == [(tomb_b, THUMB)]
+
+
+def test_a_file_marked_after_the_upgrade_is_evidence_again(env, monkeypatch):
+    """v7 only clears the marks it found: the fixed worker's own marks carry
+    a time again, so a file it embeds is captured at deletion as usual."""
+    db = env["db"]
+    p = _write(env, "a.png", b"file A")
+    db.save_media(_media(p))
+    db.mark_embedded([p], MODEL)
+    _set_user_version(db, 6)
+    db = DatabaseManager(env["data"])  # v7 clears the old mark's time
+    assert _mark_times(db) == {p: None}
+    db.clear_embeddings()
+    _run_worker(env, db.get_unembedded_file_paths())  # the fixed worker
+    assert _mark_times(db)[p] is not None
+    _marks_a_while_ago(db)
+    _server_index(env, db, monkeypatch)
+
+    tomb = _graded_delete(db, p, "pass")
+
+    assert _tombstone(db, tomb)["embedded_model"] == MODEL
+    np.testing.assert_allclose(_tombstone_vector(db, tomb), _bytes_vector(p))
+
+
 def test_v7_resets_only_live_paths_that_have_a_tombstone(env, caplog):
     db = env["db"]
     reused = "/lib/reused.png"  # embedded, has a tombstone: re-embedded
@@ -551,6 +780,8 @@ def test_v7_resets_only_live_paths_that_have_a_tombstone(env, caplog):
 
     assert _user_version(db) == 7
     assert _flags(db) == {reused: 0, skipped: 0, kept: 1}
+    # The mark kept (no tombstone at its path) predates the fix: no time.
+    assert _mark_times(db)[kept] is None
     [line] = [
         r
         for r in caplog.records
@@ -558,20 +789,20 @@ def test_v7_resets_only_live_paths_that_have_a_tombstone(env, caplog):
     ]
     assert line.levelno == logging.INFO
     assert "2 live file(s)" in line.getMessage()
+    assert "1 earlier mark(s)" in line.getMessage()
     assert "/lib/" not in line.getMessage()  # counts only
 
-    # Once: a later open resets nothing.
+    # Once: a later open resets nothing and keeps the new marks' times.
     db.mark_embedded([reused], MODEL)
     caplog.clear()
     DatabaseManager(env["data"])
-    assert _flags(db)[reused] == 1
+    assert _flags(db)[reused] == 1 and _mark_times(db)[reused] is not None
     assert not [r for r in caplog.records if "version 7" in r.getMessage()]
 
 
 def test_v7_on_a_library_with_nothing_to_reset_logs_at_debug(env, caplog):
     db = env["db"]
-    db.save_media(_media("/lib/a.png"))
-    db.mark_embedded(["/lib/a.png"], MODEL)
+    db.save_media(_media("/lib/a.png"))  # never embedded
     _set_user_version(db, 6)
     caplog.set_level(logging.DEBUG, logger="metascan.core.database_sqlite")
     DatabaseManager(env["data"])
@@ -581,7 +812,7 @@ def test_v7_on_a_library_with_nothing_to_reset_logs_at_debug(env, caplog):
         if r.getMessage().startswith("Database upgraded to version 7")
     ]
     assert line.levelno == logging.DEBUG and "0 live file(s)" in line.getMessage()
-    assert _flags(db) == {"/lib/a.png": 1}
+    assert "0 earlier mark(s)" in line.getMessage()
 
 
 def test_v7_failure_changes_nothing_and_stops_the_open(env):
