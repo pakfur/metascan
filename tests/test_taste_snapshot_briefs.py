@@ -195,6 +195,16 @@ def _rescanner(db: DatabaseManager, then: Optional[str] = None):
 
 def _full_clean(monkeypatch, db: DatabaseManager, then: Optional[str] = None):
     events = _wire(monkeypatch, db, [], scanner_cls=_rescanner(db, then))
+    # GEN's output folder, /gen, is not a real folder: report it there and
+    # the render gone from it, as a vanished T2I image is (an unreachable
+    # folder would keep the clean unfinished; the re-ingest rules have their
+    # own tests in test_taste_snapshot_scan).
+    real_state = scan_api._generated_file_state
+    monkeypatch.setattr(
+        scan_api,
+        "_generated_file_state",
+        lambda path: "gone" if Path(path) == Path(GEN) else real_state(path),
+    )
     try:
         asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
     finally:
