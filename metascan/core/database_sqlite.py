@@ -596,6 +596,9 @@ class DatabaseManager:
         self._embedding_lookup: Optional[Callable[[str], Optional[Tuple[Any, str]]]] = (
             None
         )
+        # fn() -> True while the T2I / I2V lineage prune must wait; see
+        # set_lineage_prune_guard.
+        self._lineage_prune_guard: Optional[Callable[[], bool]] = None
         # What a new tombstone row must still fill; set by _init_database.
         self._tombstone_fill: Tuple[str, Tuple[int, ...]] = ("", ())
 
@@ -4090,6 +4093,34 @@ class DatabaseManager:
         lookup. Default: no lookup (the tombstone gets no vector)."""
         self._embedding_lookup = fn
 
+    def set_lineage_prune_guard(self, fn: Optional[Callable[[], bool]]) -> None:
+        """Install the callable that pauses the lazy prune of
+        ``list_t2i_images`` / ``list_i2v_videos``: while ``fn()`` is True
+        they still list only the rows whose media row exists, but delete
+        none of the others. A full clean & rescan empties ``media`` and
+        re-adds it file by file, so until the rescan reaches a file its
+        lineage row looks dangling -- and the completed full clean reads a
+        vanished item's lineage from that row when it tombstones it. The
+        lifespan installs ``taste_snapshot.lineage_prune_guard`` (a full
+        clean is running, or its pending file exists). A guard that raises
+        counts as True: never prune when unsure. It runs while the DB lock
+        is held (so a truncate cannot land between the read and the
+        delete): it must be fast and must not touch the database. Default:
+        no guard, the listings prune."""
+        self._lineage_prune_guard = fn
+
+    def _lineage_prune_paused(self) -> bool:
+        """Whether the installed guard holds the lineage prune back right
+        now. Caller holds the lock."""
+        guard = self._lineage_prune_guard
+        if guard is None:
+            return False
+        try:
+            return bool(guard())
+        except Exception as e:
+            logger.debug("Lineage prune guard failed (%r); not pruning", e)
+            return True
+
     def _write_tombstones(
         self,
         conn: sqlite3.Connection,
@@ -5219,7 +5250,9 @@ class DatabaseManager:
         media.is_favorite and the grade (None when ungraded) merged in.
         Rows whose media row no longer exists (deleted from the library)
         are pruned in the same call -- the JOIN is the referential
-        integrity here, by design."""
+        integrity here, by design -- or, while the lineage prune guard
+        holds the prune back (a full clean is running or pending,
+        ``set_lineage_prune_guard``), only left out."""
         posix = to_posix_path(source_path)
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
@@ -5241,7 +5274,7 @@ class DatabaseManager:
                 d["is_favorite"] = bool(d.get("is_favorite"))
                 d["grade"] = self._row_grade(d)
                 out.append(d)
-            if stale:
+            if stale and not self._lineage_prune_paused():
                 conn.execute(
                     "DELETE FROM i2v_videos WHERE id IN ("
                     + ",".join("?" * len(stale))
@@ -5451,7 +5484,9 @@ class DatabaseManager:
         row no longer exists (deleted from the library) are pruned in the
         same call -- the JOIN is the referential integrity here, by design
         -- and the page is refilled past them, because the strip treats a
-        short page as the last one."""
+        short page as the last one. While the lineage prune guard holds
+        the prune back (a full clean is running or pending,
+        ``set_lineage_prune_guard``) they are only left out."""
         out: List[Dict[str, Any]] = []
         stale: List[int] = []
         cursor = before_id
@@ -5477,15 +5512,15 @@ class DatabaseManager:
                         out.append(self._t2i_image_row(r))
                 if len(rows) < want:
                     break
-            for start in range(0, len(stale), 500):
-                chunk = stale[start : start + 500]
-                conn.execute(
-                    "DELETE FROM t2i_images WHERE id IN ("
-                    + ",".join("?" * len(chunk))
-                    + ")",
-                    chunk,
-                )
-            if stale:
+            if stale and not self._lineage_prune_paused():
+                for start in range(0, len(stale), 500):
+                    chunk = stale[start : start + 500]
+                    conn.execute(
+                        "DELETE FROM t2i_images WHERE id IN ("
+                        + ",".join("?" * len(chunk))
+                        + ")",
+                        chunk,
+                    )
                 conn.commit()
         return out
 

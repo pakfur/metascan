@@ -1,6 +1,6 @@
 """Scan-route level: a full clean & rescan keeps ratings, reasons and
-categories (final-review item 1). Uses a real temp DB and a fake scanner
-that re-saves a chosen set of paths."""
+categories (final-review item 1), and the T2I / I2V lineage rows. Uses a
+real temp DB and a fake scanner that re-saves a chosen set of paths."""
 
 import asyncio
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.api import scan as scan_api
+from backend.services import taste_snapshot as ts
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 
@@ -442,3 +443,261 @@ def test_full_clean_aborts_when_pending_file_is_unreadable(monkeypatch, db):
     msg = errors[0][2]["message"].lower()
     assert "pending ratings file" in msg and "could not be read" in msg
     assert not any(e[1] == "phase_changed" for e in events)
+
+
+# ----------------------------------------------------------------------
+# T2I / I2V lineage outlives the rescan: the listings' lazy prune pauses
+# while a full clean runs or has entries pending
+# ----------------------------------------------------------------------
+
+T2I_LINEAGE = {
+    "batch_id": "b" * 32,
+    "model": "krea2",
+    "caption": "a red kite over a gray sea",
+    "prompt_used": "A red kite flies over a gray sea.",
+    "draft_prompt": "A kite over the sea.",
+    "edited": 1,
+    "writer_id": "base+taste",
+    "writer_model": "qwen3-vl-8b",
+    "variant_group": "vg-1",
+    "scorecard_id": "card-1",
+}
+I2V_LINEAGE = {
+    "prompt_used": "The kite climbs into the wind.",
+    "writer_id": "base",
+    "writer_model": "qwen3-vl-8b",
+    "variant_group": "vg-2",
+}
+SRC = "/lib/src.png"
+
+
+def _lineage(row, facts):
+    return {k: row[k] for k in facts}
+
+
+def _lineage_rows(db):
+    """(t2i_images rows, i2v_videos rows) actually stored."""
+    with db._get_connection() as conn:
+        return tuple(
+            int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("t2i_images", "i2v_videos")
+        )
+
+
+def _wire_prune_guard(db):
+    """What the lifespan installs (backend/main.py)."""
+    db.set_lineage_prune_guard(ts.lineage_prune_guard(Path(db.db_path)))
+
+
+def _seed_generations(db, images, clips):
+    """Writer-made T2I images, and I2V clips made from SRC."""
+    db.save_media(_media(SRC))
+    for n, path in enumerate(images):
+        db.save_media(_media(path))
+        db.create_t2i_image(file_path=path, variant_index=n, **T2I_LINEAGE)
+    for n, path in enumerate(clips):
+        db.save_media(_media(path))
+        db.create_i2v_video(
+            source_path=SRC, file_path=path, variant_index=n, **I2V_LINEAGE
+        )
+
+
+def test_full_clean_keeps_the_lineage_of_t2i_images_and_i2v_clips(monkeypatch, db):
+    """The T2I and I2V dialogs list while the rescan re-adds the files one by
+    one. An image or clip that comes back keeps its lineage row; a graded one
+    that vanished is tombstoned WITH its lineage, read from the row the
+    listings left alone."""
+    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    clip_back, clip_gone = "/lib/i2v/back.mp4", "/lib/i2v/gone.mp4"
+    _seed_generations(db, [back, gone], [clip_back, clip_gone])
+    db.set_grade(back, "fail", now=T0)
+    db.set_grade(gone, "pass", now=T0)
+    db.set_grade(clip_gone, "fail", now=T0)
+    _wire_prune_guard(db)
+    seen = {}
+
+    class DialogsOpenScanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            seen["empty"] = (db.list_t2i_images(), db.list_i2v_videos(SRC))
+            for path in (back, SRC, clip_back):
+                db.save_media(_media(path))
+            seen["partly"] = (db.list_t2i_images(), db.list_i2v_videos(SRC))
+            return 3
+
+    _wire(monkeypatch, db, [], scanner_cls=DialogsOpenScanner)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    assert seen["empty"] == ([], [])
+    images, clips = seen["partly"]
+    assert [r["file_name"] for r in images] == ["back.png"]
+    assert [Path(r["file_path"]).name for r in clips] == ["back.mp4"]
+
+    # What came back keeps its row, lineage and all (and its grade).
+    [image] = db.list_t2i_images()
+    assert (image["file_name"], image["grade"]) == ("back.png", "fail")
+    assert _lineage(image, T2I_LINEAGE) == T2I_LINEAGE
+    assert image["variant_index"] == 0
+    [clip] = db.list_i2v_videos(SRC)
+    assert Path(clip["file_path"]).name == "back.mp4"
+    assert _lineage(clip, I2V_LINEAGE) == I2V_LINEAGE
+
+    # What vanished is tombstoned with its grade AND its lineage.
+    tombs = {t["file_path"]: t for t in db.list_tombstones()}
+    assert sorted(tombs) == [clip_gone, gone]
+    assert (tombs[gone]["grade"], tombs[gone]["scorecard_id"]) == ("pass", "card-1")
+    assert _lineage(tombs[gone]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert tombs[gone]["lineage"]["t2i"]["variant_index"] == 1
+    assert tombs[clip_gone]["grade"] == "fail"
+    assert _lineage(tombs[clip_gone]["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
+
+    # The full clean is over and nothing is pending: the listings above
+    # pruned the rows of what vanished.
+    assert _pending(db) is None and not ts.is_full_clean_running()
+    assert _lineage_rows(db) == (1, 1)
+
+
+def test_full_clean_with_nothing_to_snapshot_pauses_the_prune_too(monkeypatch, db):
+    """An unrated library still gets a pending file (empty lists) before the
+    truncate, and the run is marked as running from before its snapshot to
+    after its restore."""
+    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    _seed_generations(db, [back, gone], [])
+    _wire_prune_guard(db)
+    seen = {}
+    real_export = db.export_taste_state
+
+    def spy_export():
+        seen["running at the snapshot"] = ts.is_full_clean_running()
+        return real_export()
+
+    monkeypatch.setattr(db, "export_taste_state", spy_export)
+
+    class ListingScanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            seen["file"] = _pending(db)
+            seen["running"] = ts.is_full_clean_running()
+            seen["listed"] = db.list_t2i_images()
+            db.save_media(_media(back))
+            return 1
+
+    _wire(monkeypatch, db, [], scanner_cls=ListingScanner)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    assert seen["running at the snapshot"] is True
+    assert seen["running"] is True
+    snap = seen["file"]
+    assert (snap["judgments"], snap["categories"], snap["favorites"]) == ([], [], [])
+    assert seen["listed"] == []
+    # Nothing was rated: no tombstone, the file is gone, the prune is back.
+    assert db.list_tombstones() == []
+    assert _pending(db) is None and not ts.is_full_clean_running()
+    [image] = db.list_t2i_images()
+    assert image["file_name"] == "back.png"
+    assert _lineage(image, T2I_LINEAGE) == T2I_LINEAGE
+    assert _lineage_rows(db) == (1, 0)
+
+
+def test_a_cancelled_full_clean_keeps_the_lineage_until_one_completes(monkeypatch, db):
+    """A cancel leaves a graded image pending: its lineage row outlives every
+    listing until a later full clean tombstones it with that lineage."""
+    gone = "/lib/t2i/gone.png"
+    _seed_generations(db, [gone], [])
+    db.set_grade(gone, "pass", now=T0)
+    _wire_prune_guard(db)
+    _wire(monkeypatch, db, [])
+    scan_api._cancel_requested = True
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    finally:
+        scan_api._cancel_requested = False
+    assert not ts.is_full_clean_running()
+    assert _pending_paths(db) == [gone]
+    assert db.list_t2i_images() == []  # the dialog opens: not listed ...
+    assert _lineage_rows(db) == (1, 0)  # ... and kept while it is pending
+
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+
+    [t] = db.list_tombstones()
+    assert (t["file_path"], t["grade"]) == (gone, "pass")
+    assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert _pending(db) is None
+    assert db.list_t2i_images() == []
+    assert _lineage_rows(db) == (0, 0)  # nothing pending: pruned
+
+
+def test_a_shutdown_mid_full_clean_keeps_the_prune_paused(monkeypatch, db):
+    gone = "/lib/t2i/gone.png"
+    _seed_generations(db, [gone], [])
+    db.set_grade(gone, "pass", now=T0)
+    _wire_prune_guard(db)
+
+    class ShutdownScanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            raise asyncio.CancelledError()
+
+    _wire(monkeypatch, db, [], scanner_cls=ShutdownScanner)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    assert not ts.is_full_clean_running()  # cleared on the way out ...
+    assert _pending_paths(db) == [gone]  # ... but the file says pending
+    assert db.list_t2i_images() == []
+    assert _lineage_rows(db) == (1, 0)
+
+
+@pytest.mark.parametrize("ending", ["snapshot fails", "scanner fails", "cancelled"])
+def test_the_running_mark_is_cleared_however_a_full_clean_ends(monkeypatch, db, ending):
+    _seed(db)
+    seen = {}
+
+    class Scanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            seen["running"] = ts.is_full_clean_running()
+            if ending == "scanner fails":
+                raise RuntimeError("boom")
+            scan_api._cancel_requested = True
+            return 0
+
+    if ending == "snapshot fails":
+
+        def boom():
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(db, "export_taste_state", boom)
+    _wire(monkeypatch, db, [], scanner_cls=Scanner)
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
+    finally:
+        scan_api._cancel_requested = False
+    if ending == "snapshot fails":
+        assert "running" not in seen  # aborted before anything was deleted
+    else:
+        assert seen["running"] is True
+    assert not ts.is_full_clean_running()
+
+
+def test_an_ordinary_scan_never_pauses_the_prune(monkeypatch, db):
+    seen = {}
+
+    class Scanner:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_directory(self, *a, **k):
+            seen["running"] = ts.is_full_clean_running()
+            return 0
+
+    _wire(monkeypatch, db, [], scanner_cls=Scanner)
+    asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
+    assert seen["running"] is False

@@ -50,7 +50,10 @@ from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
 from backend.services.taste_service import TasteService
-from backend.services.taste_snapshot import apply_pending_taste_snapshot
+from backend.services.taste_snapshot import (
+    apply_pending_taste_snapshot,
+    lineage_prune_guard,
+)
 from backend.services.tombstone_reembed import (
     TombstoneReembedder,
     reembed_blocked,
@@ -217,6 +220,17 @@ async def _open_database() -> None:
         "Warmed DB + thumbnail cache singletons in %.0fms",
         (time.perf_counter() - t0) * 1000,
     )
+
+
+def _install_lineage_prune_guard(db: Any) -> None:
+    """Startup: the T2I / I2V listings prune lineage rows whose media row is
+    gone, but not while a full clean runs or has entries pending -- its
+    rescan re-adds the media rows one by one (taste_snapshot.py). The
+    pending file lives in the database's directory. Never raises."""
+    try:
+        db.set_lineage_prune_guard(lineage_prune_guard(Path(db.db_path)))
+    except Exception:
+        logger.exception("Failed to install the lineage prune guard")
 
 
 async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
@@ -473,6 +487,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         get_db().set_embedding_lookup(faiss_embedding_lookup)
     except Exception:
         logger.exception("Failed to install tombstone embedding lookup")
+    _install_lineage_prune_guard(get_db())
 
     await _apply_pending_taste_snapshot(get_db(), get_data_dir())
 
