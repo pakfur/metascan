@@ -82,13 +82,15 @@ def _write_json(path: Path, doc: Dict[str, Any]) -> None:
 
 
 def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
-    """The worker's ``diversity`` input: every favorited T2I generation
-    in the last ``WRITER_WINDOWS`` windows with its window (tombstoned ones
-    carry their stored vector, and only that). Blocking."""
+    """The worker's ``diversity`` input: every ✓ pass T2I generation (live
+    or deleted; ★ and views choose nothing) in the last ``WRITER_WINDOWS``
+    windows with its window (tombstoned ones carry their stored vector, and
+    only that). A row must say whether it is a tombstone (KeyError when it
+    does not). Blocking."""
     starts = window_starts(now, WRITER_WINDOW_DAYS, WRITER_WINDOWS)
     items: List[Dict[str, Any]] = []
     for g in db.generation_outcomes(since=starts[0], include_embeddings=True):
-        if g["kind"] != "t2i" or not g["favorite"]:
+        if g["kind"] != "t2i" or g["grade"] != "pass":
             continue
         start = window_for(g["created_at"], starts, WRITER_WINDOW_DAYS)
         if start is None:
@@ -98,7 +100,9 @@ def _diversity_task(db: Any, now: datetime) -> Dict[str, Any]:
             {
                 "file_path": g["file_path"],
                 "window_start": start,
-                "tombstone": bool(g.get("tombstone")),
+                # Passed on as given, never defaulted: the worker reads a
+                # vector by path only for an item marked live (False).
+                "tombstone": g["tombstone"],
                 "embedding": base64.b64encode(emb).decode("ascii") if emb else None,
                 "embedding_model": g.get("embedding_model"),
             }
@@ -319,7 +323,7 @@ class TasteRunner:
                 except Exception:
                     # A dashboard metric: never worth failing training over.
                     logger.warning(
-                        "collecting favorite diversity inputs failed", exc_info=True
+                        "collecting pass diversity inputs failed", exc_info=True
                     )
                 result = await self._run_worker(
                     {
@@ -352,7 +356,7 @@ class TasteRunner:
             shutil.rmtree(run_dir, ignore_errors=True)
 
     async def _record_diversity(self, result: Dict[str, Any]) -> None:
-        """Store the worker's per-window favorite diversity, whatever the
+        """Store the worker's per-window ✓ pass diversity, whatever the
         training outcome (it only needs the index). Never raises."""
         rows = result.get("diversity")
         if not isinstance(rows, list):
@@ -364,7 +368,7 @@ class TasteRunner:
                 datetime.now(timezone.utc).isoformat(),
             )
         except Exception:
-            logger.warning("recording favorite diversity failed", exc_info=True)
+            logger.warning("recording pass diversity failed", exc_info=True)
 
     async def _record_failure(
         self, ls: LabelSet, half_life_days: float, result: Dict[str, Any]
