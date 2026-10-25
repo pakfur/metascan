@@ -19,8 +19,9 @@ export interface TasteMissing {
 
 // Deleted graded images being given CLIP vectors for the current model from
 // their archived thumbnails (after a CLIP switch, or deleted while the index
-// was not loaded). `running` is false while it waits for the GPU (writer
-// training, a generation or an index build); it resumes on its own.
+// was not loaded). `running` is false only while it waits for the GPU
+// (writer training, a generation or an index build; loading CLIP counts as
+// running), and the Training tab says so; it resumes on its own.
 export interface TasteReembed {
   running: boolean
   done: number

@@ -49,7 +49,8 @@ Rules
 * When a pass ends with vectors added, ``on_done(n_added)`` -- the lifespan
   marks the taste scorer due (``TasteService.mark_due("reembed")``).
 * ``status()`` is ``{running, done, total}`` while a pass is unfinished
-  (``running`` False while it waits for the GPU), else None; ``on_progress``
+  (``running`` False only while it waits for the GPU -- loading CLIP counts
+  as running), else None; ``on_progress``
   gets it on every change (at most once a second, plus every start, pause
   and end) and None when the pass ends.
 * The CLIP worker stays loaded afterwards, as after a search.
@@ -381,13 +382,15 @@ class TombstoneReembedder:
                 return _DONE
             if self._is_blocked():
                 return self._pause()
+            # Running from here: loading CLIP is part of the work, not a wait
+            # for the GPU (``running`` False reads as "paused, GPU busy").
+            self._set_running(p)
             if client is None:
                 client = await self._start_clip(model_key)
                 if client is None:
                     if self._is_blocked():
                         return self._pause()
                     return self._abort("CLIP did not start")
-            self._set_running(p)
             outcome = await self._embed_all(client, p, pending, attempted)
             if outcome is not None:
                 return outcome

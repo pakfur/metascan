@@ -669,6 +669,33 @@ async def test_an_unusable_vector_skips_the_image_for_the_pass(db, caplog, vecto
     await r.aclose()
 
 
+async def test_the_pass_is_running_while_clip_starts(db):
+    """Loading CLIP can take a while. The pass is running then -- the
+    Training tab reads ``running: False`` as "paused while the GPU is busy",
+    which would blame the GPU for the model load."""
+    ids = [_delete_graded(db, f"/l/c{i}.png", "pass") for i in range(2)]
+    env = Env(db)
+    entered, gate = asyncio.Event(), asyncio.Event()
+    real_start = env.clip.ensure_started
+
+    async def slow_start(model_key: str, device: str = "auto") -> None:
+        entered.set()
+        await gate.wait()
+        await real_start(model_key, device)
+
+    env.clip.ensure_started = slow_start  # type: ignore[method-assign]
+    r = env.reembedder()
+    r.notify()
+    await _until(entered.is_set)
+    assert r.status() == {"running": True, "done": 0, "total": 2}
+    assert env.progress == [{"running": True, "done": 0, "total": 2}]
+    gate.set()
+    await r.wait_idle()
+    assert all(db.get_tombstone_vectors(t) for t in ids)
+    assert r.status() is None and env.done == [2]
+    await r.aclose()
+
+
 async def test_nothing_happens_without_a_current_model(db):
     _delete_graded(db, "/l/a.png", "pass")
     env = Env(db, model_key=None)
