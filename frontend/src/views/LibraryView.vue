@@ -91,7 +91,9 @@ useWebSocket('watcher', () => {
 
 function openViewer(media: Media) {
   // Viewer navigates within the active scope (library / manual / smart) so
-  // prev/next stays inside the folder the user just clicked into.
+  // prev/next stays inside the folder the user just clicked into. The
+  // desktop MediaViewer copies that list when it opens: reloads and grades
+  // that change the list never move another image under the open viewer.
   const list = isMobile.value ? gridList.value : mediaStore.scopedMedia
   const idx = list.findIndex((m) => m.file_path === media.file_path)
   viewerIndex.value = idx >= 0 ? idx : 0

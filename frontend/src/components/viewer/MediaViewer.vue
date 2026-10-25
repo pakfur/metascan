@@ -46,6 +46,8 @@ import type { CategoryRef, Grade, JudgmentState } from '../../types/judgments'
 // an emit, because responses can land after the viewer has closed.
 const props = withDefaults(
   defineProps<{
+    // Read once, when the viewer opens (see `baseList`): later changes to
+    // the parent's list never reach an open viewer.
     mediaList: Media[]
     initialIndex: number
     allowDestructive?: boolean
@@ -85,8 +87,21 @@ interface ReviewState {
 const review = ref<ReviewState | null>(null)
 let reviewLoading = false
 
+// What the viewer navigates outside review: a copy of mediaList taken when
+// it opens. The viewer picks its item by index, and the parent's list moves
+// under an open viewer -- the library reloads on every new T2I image
+// (App.vue) and on F5, a ★ or grade takes the image out of a filtered
+// folder, a rescore reorders the Taste sort -- so F / P / X would land on an
+// image the owner never looked at. The items are the parent's own objects
+// (the library's until a reload replaces them), and `receive` keeps their ★
+// and grade current either way; a delete drops the item from the copy.
+const baseList = ref<Media[]>([...props.mediaList])
+// path -> the copy's item, for `receive`.
+const ownItems = new Map<string, Media>()
+for (const m of baseList.value) ownItems.set(m.file_path, m)
+
 // The list the viewer is navigating right now.
-const activeList = computed<Media[]>(() => review.value?.list ?? props.mediaList)
+const activeList = computed<Media[]>(() => review.value?.list ?? baseList.value)
 
 const current = computed(() => activeList.value[currentIndex.value] ?? null)
 
@@ -137,14 +152,6 @@ const lastKnown = new Map<string, JudgmentState>()
 const chains = new Map<string, Promise<void>>()
 let seenTimer: ReturnType<typeof setTimeout> | null = null
 let hintTimer: ReturnType<typeof setTimeout> | null = null
-// Grades reach the library list (tile badges, the `grade` smart-folder
-// rule) when the viewer closes, not on every key. The library mount
-// navigates mediaStore.scopedMedia live, so a grade that took the current
-// item out of a grade-filtered smart folder would slide the next image
-// under the index: a quick second key (X after P, a reason) would then
-// grade an image the owner never looked at. The grid is hidden behind the
-// viewer anyway. A response that lands after close goes straight through.
-const pendingGrades = new Map<string, Grade | null>()
 // Video seen fires once per visit; reset on every item change.
 let seenSentForVisit = false
 let unmounted = false
@@ -181,14 +188,29 @@ function receive(path: string, incoming: JudgmentState): void {
   }
   lastKnown.set(path, state)
   refreshBlindDetails(path, state)
-  // The server's flag is the truth whether or not this item is still on
-  // screen, so the grid star follows even for a stale response.
+  // The server's ★ and grade are the truth whether or not this item is
+  // still on screen, so the grid follows at once, even for a stale
+  // response. The viewer navigates its own copy, so a change of membership
+  // in a filtered folder never moves the image under it.
   mediaStore.applyFavoriteFlag(path, state.favorite)
-  if (unmounted) mediaStore.applyGrades(new Map([[path, state.grade]]))
-  else pendingGrades.set(path, state.grade)
+  mediaStore.applyGrade(path, state.grade)
+  mirrorOntoOwnItems(path, state)
   props.favoriteMirror?.(path, state.favorite)
   props.judgmentMirror?.(path, state)
   if (!unmounted && path === currentPath.value) judgment.value = state
+}
+
+// The viewer's own items for `path` (the opening copy, the review list)
+// follow the server's ★ and grade: the header star and the rail read them
+// until an item's judgment arrives. Usually the same objects the stores
+// just updated; not after a library reload replaced them, nor for a T2I /
+// I2V copy.
+function mirrorOntoOwnItems(path: string, state: JudgmentState): void {
+  for (const m of [ownItems.get(path), review.value?.list.find((x) => x.file_path === path)]) {
+    if (!m) continue
+    if (m.is_favorite !== state.favorite) m.is_favorite = state.favorite
+    if ((m.grade ?? null) !== state.grade) m.grade = state.grade
+  }
 }
 
 // A scorecard image is judged blind: no writer, prompt or variant until it
@@ -415,7 +437,7 @@ function exitReview(): void {
   if (!state) return
   review.value = null
   undoData.value = null
-  const list = props.mediaList
+  const list = baseList.value
   const found = state.returnPath
     ? list.findIndex((m) => m.file_path === state.returnPath)
     : -1
@@ -518,14 +540,16 @@ async function deleteCurrent() {
 
   undoData.value = { media: deletedMedia, index: deletedIndex }
 
-  // The review list is the viewer's own copy, so drop the file from it too.
+  // Both lists the viewer navigates are its own copies (the opening one and
+  // the review list), so the file is dropped from each here.
+  const path = deletedMedia.file_path
+  const kept = (m: Media) => m.file_path !== path
+  baseList.value = baseList.value.filter(kept)
+  ownItems.delete(path)
   if (review.value) {
-    const list = review.value.list.filter((m) => m.file_path !== deletedMedia.file_path)
-    if (!list.length) {
-      exitReview()
-      return
-    }
-    review.value = { ...review.value, list }
+    const list = review.value.list.filter(kept)
+    if (list.length) review.value = { ...review.value, list }
+    else exitReview()
   }
 
   // Navigate after delete
@@ -652,8 +676,6 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   if (seenTimer) clearTimeout(seenTimer)
   if (hintTimer) clearTimeout(hintTimer)
-  mediaStore.applyGrades(pendingGrades)
-  pendingGrades.clear()
 })
 
 function formatSize(bytes: number): string {
