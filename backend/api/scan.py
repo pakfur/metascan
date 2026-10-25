@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -18,11 +18,14 @@ from backend.services.taste_snapshot import (
     PendingSnapshotUnreadable,
     apply_pending_taste_snapshot,
     merge_pending_into_snapshot,
+    pending_snapshot_paths,
     restore_and_persist,
     snapshot_file_path,
+    snapshot_paths,
     write_snapshot_file,
 )
 from metascan.core.scanner import Scanner
+from metascan.utils.path_utils import to_native_path
 
 logger = logging.getLogger(__name__)
 
@@ -38,44 +41,32 @@ def _data_dir(db: Any) -> Optional[Path]:
     return Path(base) if base is not None else None
 
 
-# A configured scan folder that is missing (an unmounted drive, a renamed
-# folder) hides its files; it does not mean they were deleted. A full clean
-# with one missing never completes, and the stale cleanup leaves its rows.
+# A configured scan folder whose files can't be seen -- an unplugged drive, a
+# renamed folder, a dead share, a folder the server may not list, or the
+# empty mount point of a drive that is not mounted -- hides them; it does not
+# mean they were deleted. A full clean with one never completes, and the
+# stale cleanup leaves its rows.
 SCAN_FOLDERS_MISSING = "scan_folders_missing"
-_REFUSED_LOG = "Full clean refused, nothing deleted: scan folder(s) missing: %s"
+_REFUSED_LOG = "Full clean refused, nothing deleted: scan folder(s) unavailable: %s"
+
+# _probe_folder states. EMPTY alone is not unavailable (_unavailable_folders).
+PRESENT, EMPTY, MISSING, UNREADABLE = "present", "empty", "missing", "unreadable"
 
 
-def _folder_missing(filepath: str) -> bool:
-    """True when a configured scan folder can't be seen right now: it does
-    not exist, or its stat fails (I/O error, permissions, a dead network
-    share)."""
+def _probe_folder(filepath: str) -> str:
+    """What a configured scan folder looks like right now: MISSING (not
+    there), UNREADABLE (its stat or its listing fails: Python's rglob finds
+    nothing, silently, in a folder it may not list), EMPTY (no entries at
+    all) or PRESENT."""
     try:
-        return not Path(filepath).exists()
+        if not Path(filepath).exists():
+            return MISSING
+        with os.scandir(filepath) as entries:
+            return PRESENT if next(entries, None) is not None else EMPTY
+    except FileNotFoundError:
+        return MISSING
     except OSError:
-        return True
-
-
-def _missing_scan_folders(directories: Sequence[DirectoryConfig]) -> List[str]:
-    """The configured scan folders missing now, each once, in config order."""
-    return list(
-        dict.fromkeys(d.filepath for d in directories if _folder_missing(d.filepath))
-    )
-
-
-def _missing_folders_message(folders: Sequence[str]) -> str:
-    if len(folders) == 1:
-        return (
-            f"Full clean refused: the scan folder {folders[0]} is missing, so "
-            "its images could not be re-imported. Reconnect the drive or "
-            "remove the folder from the scan list (Configuration → "
-            "Directories), then try again. Nothing was deleted."
-        )
-    return (
-        f"Full clean refused: {len(folders)} scan folders are missing "
-        f"({', '.join(folders)}), so their images could not be re-imported. "
-        "Reconnect the drives or remove the folders from the scan list "
-        "(Configuration → Directories), then try again. Nothing was deleted."
-    )
+        return UNREADABLE
 
 
 def _path_key(path: str) -> str:
@@ -86,28 +77,125 @@ def _path_key(path: str) -> str:
     return os.path.normcase(os.path.normpath(path)).rstrip(os.sep) + os.sep
 
 
+def _unavailable_folders(
+    directories: Sequence[DirectoryConfig],
+    expected_paths: Callable[[], Iterable[str]],
+) -> Dict[str, str]:
+    """The configured scan folders whose files can't be seen now, each once
+    in config order, with why: MISSING, UNREADABLE or EMPTY. An empty folder
+    counts only when one of ``expected_paths()`` (paths the library has, or
+    had, a row or a rating for; called only when a folder is empty) lies
+    under it: then it is the mount point of a drive that is not mounted. A
+    folder nothing ever came from (one just added) does not count. A mount
+    point *below* a configured folder is not seen."""
+    folders = list(dict.fromkeys(d.filepath for d in directories))
+    states = {f: _probe_folder(f) for f in folders}
+    empty = {f: _path_key(f) for f in folders if states[f] == EMPTY}
+    backed: Set[str] = set()
+    if empty:
+        for p in expected_paths():
+            key = _path_key(to_native_path(p))
+            backed.update(f for f, prefix in empty.items() if key.startswith(prefix))
+            if len(backed) == len(empty):
+                break
+    return {
+        f: states[f]
+        for f in folders
+        if states[f] in (MISSING, UNREADABLE) or f in backed
+    }
+
+
+def _full_clean_blockers(
+    db: Any, directories: Sequence[DirectoryConfig]
+) -> Dict[str, str]:
+    """The unavailable folders a full clean must not start with: an empty
+    one counts when the library has rows under it, or the pending file of an
+    earlier, unfinished full clean holds ratings under it."""
+    data_dir = _data_dir(db)
+
+    def expected() -> Iterable[str]:
+        paths: Set[str] = set(db.get_existing_file_paths())
+        if data_dir is not None:
+            paths |= pending_snapshot_paths(data_dir)
+        return paths
+
+    return _unavailable_folders(directories, expected)
+
+
+_WHY_SHORT = {
+    MISSING: "missing",
+    UNREADABLE: "can't be read",
+    EMPTY: "empty: is its drive mounted?",
+}
+
+
+def _blockers_text(blockers: Dict[str, str]) -> str:
+    return ", ".join(f"{f} ({why})" for f, why in blockers.items())
+
+
+def _refusal_message(blockers: Dict[str, str]) -> str:
+    """Reconnect first; removing a folder from the scan list is the last
+    resort, and the message says what it costs."""
+    tail = (
+        " Remove {what} from the scan list (Configuration → Directories) only "
+        "if it is gone for good: its images' ratings are then dropped from the "
+        "library. Nothing was deleted."
+    )
+    if len(blockers) > 1:
+        return (
+            f"Full clean refused: {len(blockers)} scan folders can't be scanned: "
+            f"{_blockers_text(blockers)}. Reconnect or mount their drives and try "
+            "again." + tail.format(what="a folder")
+        )
+    [(folder, why)] = blockers.items()
+    if why == EMPTY:
+        head = (
+            f"Full clean refused: the scan folder {folder} is empty, but the "
+            "library has images from it. Is its drive mounted? Mount it and try "
+            "again."
+        )
+    elif why == UNREADABLE:
+        head = (
+            f"Full clean refused: the scan folder {folder} can't be read, so its "
+            "images could not be re-imported. Check its drive and the folder's "
+            "permissions, then try again."
+        )
+    else:
+        head = (
+            f"Full clean refused: the scan folder {folder} is missing, so its "
+            "images could not be re-imported. Reconnect its drive and try again."
+        )
+    return head + tail.format(what="the folder")
+
+
 def _stale_paths_to_clean(
     existing_db_paths: Iterable[str], directories: Sequence[DirectoryConfig]
-) -> Tuple[List[Path], Dict[str, int]]:
+) -> Tuple[List[Path], Dict[str, int], Dict[str, str]]:
     """The rows whose files are gone, split into the ones to delete and, for
-    each configured scan folder that is missing, how many of its rows are
-    left alone. A row under no configured folder (one removed from the
-    config) is deleted as before. The folders are checked after the
-    per-file pass, so a drive lost during it counts as missing."""
+    each configured scan folder whose files can't be seen
+    (:func:`_unavailable_folders`; an empty one counts, its rows lie under
+    it), how many of its rows are left alone; plus why each unavailable
+    folder is. A row under no configured folder (one removed from the
+    config) is deleted as before. The folders are checked after the per-file
+    pass, so a drive lost during it counts, and what would be deleted is
+    stat-ed again last: a drive away during the pass but back by the folder
+    check has its files back."""
     stale = [p for p in existing_db_paths if not Path(p).exists()]
     if not stale:
-        return [], {}
-    missing = [(f, _path_key(f)) for f in _missing_scan_folders(directories)]
-    to_delete: List[Path] = []
+        return [], {}, {}
+    unavailable = _unavailable_folders(directories, lambda: stale)
+    prefixes = [(f, _path_key(f)) for f in unavailable]
+    candidates: List[str] = []
     left_alone: Dict[str, int] = {}
     for p in stale:
         key = _path_key(p)
-        folder = next((f for f, prefix in missing if key.startswith(prefix)), None)
+        folder = next((f for f, prefix in prefixes if key.startswith(prefix)), None)
         if folder is None:
-            to_delete.append(Path(p))
+            candidates.append(p)
         else:
             left_alone[folder] = left_alone.get(folder, 0) + 1
-    return to_delete, left_alone
+    to_delete = [Path(p) for p in candidates if not Path(p).exists()]
+    return to_delete, left_alone, unavailable
 
 
 class ScanRequest(BaseModel):
@@ -176,24 +264,32 @@ async def start_scan(body: ScanRequest):
 
     A full clean deletes every row first and gets a file back only by
     re-importing it, so it is refused (409 ``scan_folders_missing``) while a
-    configured scan folder is missing; an ordinary scan skips that folder."""
+    configured scan folder's files can't be seen (:func:`_full_clean_blockers`);
+    an ordinary scan skips that folder."""
     global _scan_task, _cancel_requested
 
     if _scan_task and not _scan_task.done():
         raise HTTPException(status_code=409, detail="Scan already in progress")
 
     if body.full_clean:
-        missing = _missing_scan_folders(get_directories(load_app_config()))
-        if missing:
-            logger.warning(_REFUSED_LOG, ", ".join(missing))
+        # Off the event loop: it stats and lists folders (a dead share can
+        # hang) and reads the library's paths.
+        blockers = await asyncio.to_thread(
+            _full_clean_blockers, get_db(), get_directories(load_app_config())
+        )
+        if blockers:
+            logger.warning(_REFUSED_LOG, _blockers_text(blockers))
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": SCAN_FOLDERS_MISSING,
-                    "folders": missing,
-                    "message": _missing_folders_message(missing),
+                    "folders": list(blockers),
+                    "message": _refusal_message(blockers),
                 },
             )
+        # Another request may have started a scan while this one waited.
+        if _scan_task and not _scan_task.done():
+            raise HTTPException(status_code=409, detail="Scan already in progress")
 
     _cancel_requested = False
     _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
@@ -223,7 +319,8 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
 
     await ws_manager.broadcast("scan", "started", {"full_clean": full_clean})
 
-    # Configured folders found missing at any check of this run, in config
+    # Configured folders whose files could not be seen at some check of this
+    # run (missing, unreadable, or empty with rows under them), in config
     # order. A full clean that saw one never completes (no tombstones).
     missing_folders: List[str] = []
 
@@ -245,16 +342,16 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
     if full_clean:
         # start_scan refuses this up front (409); checked again before
         # anything is written, for a folder lost since or a direct caller.
-        missing = _missing_scan_folders(directories)
-        if missing:
-            logger.warning(_REFUSED_LOG, ", ".join(missing))
+        blockers = await asyncio.to_thread(_full_clean_blockers, db, directories)
+        if blockers:
+            logger.warning(_REFUSED_LOG, _blockers_text(blockers))
             await ws_manager.broadcast(
                 "scan",
                 "error",
                 {
                     "code": SCAN_FOLDERS_MISSING,
-                    "folders": missing,
-                    "message": _missing_folders_message(missing),
+                    "folders": list(blockers),
+                    "message": _refusal_message(blockers),
                 },
             )
             return
@@ -347,6 +444,18 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
         except Exception as e:
             logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
+    def _expected_paths() -> Iterable[str]:
+        """What should be under the configured folders, for telling an empty
+        mount point from a folder nothing ever came from: the paths a full
+        clean's snapshot holds ratings for (the rows are gone), else the
+        library's rows."""
+        if taste_snapshot is not None:
+            return snapshot_paths(taste_snapshot)
+        return db.get_existing_file_paths()
+
+    async def _unavailable(dirs: Sequence[DirectoryConfig]) -> Dict[str, str]:
+        return await asyncio.to_thread(_unavailable_folders, dirs, _expected_paths)
+
     try:
         total_processed = 0
         total_dirs = len(directories)
@@ -359,11 +468,14 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
                 return
 
             dir_path = Path(dir_config.filepath)
-            if not dir_path.exists():
+            unavailable = await _unavailable([dir_config])
+            if unavailable:
                 logger.warning(
-                    "Scan folder %s is missing; skipped", dir_config.filepath
+                    "Scan folder %s is %s; skipped",
+                    dir_config.filepath,
+                    unavailable[dir_config.filepath],
                 )
-                _note_missing([dir_config.filepath])
+                _note_missing(unavailable)
                 continue
 
             await ws_manager.broadcast(
@@ -385,13 +497,30 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
                 )
                 return not _cancel_requested
 
-            processed = await asyncio.to_thread(
-                scanner.scan_directory,
-                str(dir_path),
-                dir_config.search_subfolders,
-                progress_callback,
-                False,  # not full_scan - skip existing
-            )
+            try:
+                processed = await asyncio.to_thread(
+                    scanner.scan_directory,
+                    str(dir_path),
+                    dir_config.search_subfolders,
+                    progress_callback,
+                    False,  # not full_scan - skip existing
+                )
+            except (ValueError, OSError):
+                # The scanner raises ValueError("Directory does not exist")
+                # for a folder gone since the check above, and an OSError for
+                # one lost mid-walk: skip it like any unavailable folder and
+                # scan the rest. A failure in a folder that is there still
+                # fails the run.
+                unavailable = await _unavailable([dir_config])
+                if not unavailable:
+                    raise
+                logger.warning(
+                    "Scan folder %s is %s (lost during its scan); skipped",
+                    dir_config.filepath,
+                    unavailable[dir_config.filepath],
+                )
+                _note_missing(unavailable)
+                continue
             total_processed += processed
 
         # Stale cleanup
@@ -401,16 +530,17 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
                 "scan", "phase_changed", {"phase": "stale_cleanup"}
             )
             existing_db_paths = await asyncio.to_thread(db.get_existing_file_paths)
-            # A row under a configured folder that is missing now is left
-            # alone: its file is out of sight, not deleted.
-            stale_paths, left_alone = await asyncio.to_thread(
+            # A row under a configured folder whose files can't be seen now
+            # is left alone: its file is out of sight, not deleted.
+            stale_paths, left_alone, why = await asyncio.to_thread(
                 _stale_paths_to_clean, existing_db_paths, directories
             )
             for folder, count in left_alone.items():
                 logger.warning(
-                    "Stale cleanup: scan folder %s is missing; left its %d rows "
+                    "Stale cleanup: scan folder %s is %s; left %d row(s) under it "
                     "in the library",
                     folder,
+                    why[folder],
                     count,
                 )
             _note_missing(left_alone)
@@ -422,10 +552,10 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:  # no
         if full_clean:
             # Checked once more: a drive lost during its own folder's scan
             # brought back only part of it.
-            _note_missing(_missing_scan_folders(directories))
+            _note_missing(await _unavailable(directories))
             if missing_folders:
                 logger.warning(
-                    "Full clean incomplete: scan folder(s) %s missing; the "
+                    "Full clean incomplete: scan folder(s) %s unavailable; the "
                     "ratings of images that did not come back stay pending, "
                     "none are tombstoned",
                     ", ".join(missing_folders),
