@@ -142,11 +142,15 @@ FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
 _MARKER_TEXT = """\
 Metascan started a full clean & rescan at {started}. It is unfinished until
 a scan walks every configured folder to the end and brings back every
-generated image and clip still on disk, with neither generated-output
-folder missing or unreadable: Text-to-Image's and Image-to-Video's output
+generated image and clip still on disk. A generated-output folder that is
+missing or can't be read holds it back when it held a generated image or
+clip the scan did not find: on a drive that is not mounted, that file may
+still be there. These are Text-to-Image's and Image-to-Video's output
 folders, the ones set in their configuration or else the t2i and i2v
 folders in ComfyUI's output folder. A folder missing inside one of them (an
 image's or a day's) holds nothing back: its files count as deleted.
+Generated images and clips that are on disk but can't be read or imported
+hold it back too.
 
 While this file exists, the Text-to-Image and Image-to-Video lists keep the
 records (prompts, writers, variants) of generated images and clips whose
