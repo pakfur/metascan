@@ -9,6 +9,10 @@ import type { CategoryRef, Grade, JudgmentState, Reason } from '../../types/judg
 // as the key. The default slot holds the category picker while it is open.
 const props = defineProps<{
   judgment: JudgmentState | null
+  // What the item's own record says, shown until its judgment arrives (the
+  // header star does the same): its ★, and its grade where it carries one.
+  fallbackFavorite?: boolean
+  fallbackGrade?: Grade | null
   hint: string | null
   sticky: CategoryRef | null
   // Learned taste score for the current image, null when there is none
@@ -22,8 +26,12 @@ const emit = defineEmits<{
 }>()
 
 // ★ favorite and the grade are independent: both can be on at once.
-const favorite = computed(() => props.judgment?.favorite ?? false)
-const grade = computed(() => props.judgment?.grade ?? null)
+const favorite = computed(() =>
+  props.judgment ? props.judgment.favorite : (props.fallbackFavorite ?? false),
+)
+const grade = computed(() =>
+  props.judgment ? props.judgment.grade : (props.fallbackGrade ?? null),
+)
 
 const reasonsHeader = computed(() => {
   if (grade.value === 'pass') return 'worked on…'

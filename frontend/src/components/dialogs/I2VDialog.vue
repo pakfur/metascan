@@ -711,6 +711,8 @@ async function onToggleFavorite(v: I2vVideo) {
 }
 
 // Synthesized Media list for the read-only viewer (ShotHeader precedent).
+// The clip's own ★ and grade, never the source image's from the spread: the
+// viewer's rail shows them until the clip's judgment arrives.
 const viewerMedia = computed<Media[]>(() =>
   store.videos.map((v) => ({
     ...props.media,
@@ -718,6 +720,7 @@ const viewerMedia = computed<Media[]>(() =>
     file_name: v.file_path.split(/[\\/]/).pop() ?? v.file_path,
     is_video: true,
     is_favorite: v.is_favorite,
+    grade: v.grade ?? null,
   })),
 )
 

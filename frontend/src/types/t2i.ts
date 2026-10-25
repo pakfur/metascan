@@ -709,6 +709,8 @@ export function t2iImageToMedia(img: T2iImage): Media {
     file_path: img.file_path,
     file_name: img.file_name,
     is_favorite: img.is_favorite,
+    // What the viewer's rail shows until the image's judgment arrives.
+    grade: img.grade ?? null,
     is_video: false,
     playback_speed: null,
     width: img.width ?? 0,
