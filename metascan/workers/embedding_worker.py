@@ -239,30 +239,23 @@ class EmbeddingWorker:
         except OSError:
             return -1.0
 
-    def _hand_over_replaced_vector(
-        self,
-        faiss_mgr: FaissIndexManager,
-        db_mgr: DatabaseManager,
-        file_path: str,
-        model_key: str,
-    ) -> None:
-        """Before ``file_path``'s row is overwritten with its current file's
-        vector, give the old vector to the newest graded deleted image at
-        that path that has none for this model (the row was written for that
-        file: this worker is the only writer of the on-disk index). Never
-        fails the embedding."""
-        old = faiss_mgr.get_embedding(file_path)
-        if old is None:
-            return
+    def _stamp_rewritten_paths(
+        self, db_mgr: DatabaseManager, file_paths: List[str]
+    ) -> bool:
+        """Stamp every tombstone at ``file_paths`` -- the paths whose row
+        this run appended or overwrote -- before the index is saved: once a
+        rewritten row is on disk (the server may load it at any time), no
+        tombstone there may read it by path as its own. False when the stamp
+        could not be written: the caller must not save the index then."""
         try:
-            db_mgr.adopt_replaced_vector(
-                file_path, model_key, old.astype("float32", copy=False).tobytes()
-            )
+            db_mgr.mark_tombstone_paths_rewritten(file_paths)
+            return True
         except Exception as e:
-            self.logger.warning(
-                f"Could not keep the replaced vector for a deleted image "
-                f"({type(e).__name__})"
+            self.logger.error(
+                f"Could not stamp the tombstones of re-embedded paths "
+                f"({type(e).__name__}: {e}); the index is not saved"
             )
+            return False
 
     def run(self) -> None:  # noqa: C901
         """Main worker loop."""
@@ -498,10 +491,9 @@ class EmbeddingWorker:
                         hash_batch.append((Path(file_path), phash))
 
                     if embedding is not None:
-                        if faiss_mgr.has_file(file_path):
-                            self._hand_over_replaced_vector(
-                                faiss_mgr, db_mgr, file_path, model_key
-                            )
+                        # Appends a new path's row or overwrites an existing
+                        # one; either way its tombstones are stamped with
+                        # this batch, before the next save.
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
                         embedded_count += 1
@@ -553,8 +545,12 @@ class EmbeddingWorker:
 
                     processed += 1
 
-                    # Periodic saves every 100 files
-                    if processed % 100 == 0:
+                    # Periodic saves every 100 files, each after the stamp of
+                    # the batch's tombstones (a failed stamp skips the save:
+                    # the batch carries over to the next one).
+                    if processed % 100 == 0 and self._stamp_rewritten_paths(
+                        db_mgr, batch_paths
+                    ):
                         faiss_mgr.save()
                         if hash_batch:
                             db_mgr.save_media_hash_batch(hash_batch)
@@ -590,8 +586,15 @@ class EmbeddingWorker:
                     processed += 1
                     continue
 
-            # Final save
+            # Final save, after the stamp of the batch's tombstones. Without
+            # the stamp nothing is saved: the run fails and the batch's files
+            # are embedded again next time.
             self.logger.info("Saving final batch...")
+            if not self._stamp_rewritten_paths(db_mgr, batch_paths):
+                raise RuntimeError(
+                    "could not mark the deleted items at re-embedded paths; "
+                    "the index was not saved"
+                )
             faiss_mgr.save()
             if hash_batch:
                 db_mgr.save_media_hash_batch(hash_batch)

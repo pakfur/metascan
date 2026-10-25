@@ -183,6 +183,22 @@ class TestFaissIndexManager(unittest.TestCase):
             self.manager.get_embedding("a.png"), np.eye(32, dtype=np.float32)[0]
         )
 
+    def test_add_batch_refuses_vectors_of_the_wrong_size_or_count(self):
+        # Checked before any row is touched: the index is left as it was.
+        self.manager.create(embedding_dim=32, model_key="test")
+        eye = np.eye(32, dtype=np.float32)
+        self.manager.add("a.png", _norm(eye[0]))
+        for paths, vectors in (
+            (["a.png", "b.png"], np.ones((2, 16), dtype=np.float32)),  # size
+            (["a.png", "b.png"], np.stack([_norm(eye[1])])),  # count
+            (["a.png"], _norm(eye[1])),  # not a batch
+        ):
+            with self.assertRaises(ValueError):
+                self.manager.add_batch(paths, vectors)
+        self.assertEqual(self.manager.file_count, 1)
+        self.assertEqual(self.manager.size, 1)
+        np.testing.assert_allclose(self.manager.get_embedding("a.png"), eye[0])
+
     def test_add_batch(self):
         self.manager.create(embedding_dim=32, model_key="test")
         paths = ["a.png", "b.png", "c.png"]

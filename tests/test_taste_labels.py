@@ -224,6 +224,7 @@ def test_tombstone_rows_carry_embedding(db):
     db.set_embedding_lookup(lambda p: (vec, "clip-large"))
     db.save_media(_media("/l/gone.png"))
     db.save_media(_media("/l/gone.mp4"))
+    db.mark_embedded(["/l/gone.png", "/l/gone.mp4"], "clip-large")
     db.create_t2i_image(file_path="/l/gone.png", batch_id="b9")
     db.set_grade("/l/gone.png", "pass", now=T0)
     db.set_grade("/l/gone.mp4", "pass", now=T0)
