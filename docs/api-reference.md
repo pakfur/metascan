@@ -707,7 +707,12 @@ ingested before it was recorded); `created_at` is UTC with no zone marker.
 `is_favorite` joined live from `media.is_favorite`; `grade` is the clip's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose backing
 media has been deleted from the library are pruned lazily on read —
 deleting the *source* image, by contrast, leaves its generated videos in
-place (`i2v_videos` has no foreign key to media).
+place (`i2v_videos` has no foreign key to media). Until a Full clean &
+rescan is finished (a scan of every configured folder has completed since)
+they are only left out, never deleted, so the rescan can bring them back;
+deleting `full_clean_incomplete` from the data folder ends that early, once
+no full clean is running and no pending ratings file
+(`taste_snapshot_before_full_clean.json`) is left.
 
 ### `PATCH /api/i2v/videos/{video_id}`
 Merges a partial `form_state` — any of `idea`, `prompt`, `duration_s`,
@@ -806,7 +811,7 @@ Active batches: `[{batch_id, mode, state: "prompting" | "rendering", total_steps
 Cancels the batch's task (including an in-flight VLM call) and every unfinished job. Returns `{status: "cancelled"}`; idempotent for a batch that already finished. **404** for an id the server has never seen.
 
 ### `GET /api/t2i/images?limit=60&before_id=`
-Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, grade, form_state}`. `grade` is the image's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose media is gone are pruned.
+Generated images, newest first, each with a **complete** `form_state`: `{id, file_path, file_name, batch_id, model, preset_id, caption, prompt_used, negative_used, seed, prompt_seed, width, height, megapixels, aspect_ratio, loras, render_s, comfy_prompt_id, created_at, is_favorite, grade, form_state}`. `grade` is the image's ✓ `pass` / ✗ `fail` / `null` from its judgment, independent of `is_favorite`. Rows whose media is gone are pruned — until a Full clean & rescan is finished they are only left out, as for `GET /api/i2v/videos` (deleting `full_clean_incomplete` ends that only when no full clean is running and no pending ratings file is left).
 
 ### `PATCH /api/t2i/images/{image_id}`
 Autosaves the dialog's form into one image's editable `form_state`. Partial: send only what changed. The as-rendered columns are not reachable from here. **400** for an unknown field or a bad value (the message names the field); **404** for an unknown id.

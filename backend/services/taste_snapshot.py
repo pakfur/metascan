@@ -28,6 +28,13 @@ positive -- so on load :func:`upgrade_legacy_snapshot` translates it exactly
 as the v6 migration maps live ratings. All three shapes validate; any other
 version is quarantined. Briefs and prompts are training text: nothing here
 logs them (counts only).
+
+While a full clean runs, its file exists, or its lasting marker
+``<data dir>/full_clean_incomplete`` does (written before the truncate,
+removed only when a scan of every configured folder completes), the T2I /
+I2V listings must not prune their lineage rows (:func:`lineage_prune_guard`):
+the rescan re-adds the media rows one by one, and a completed full clean
+reads the vanished items' lineage from those rows when it tombstones them.
 """
 
 import itertools
@@ -35,10 +42,12 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, cast
 
 from metascan.core.database_sqlite import TASTE_SNAPSHOT_VERSION
 from metascan.core.judgments import GRADES
@@ -61,6 +70,146 @@ _ROW_LISTS = ("judgments", "categories", "briefs", "library_prompts")
 
 def snapshot_file_path(data_dir: Path) -> Path:
     return Path(data_dir) / TASTE_SNAPSHOT_FILENAME
+
+
+# ---- the lineage prune pause ---------------------------------------------------
+#
+# ``list_t2i_images`` / ``list_i2v_videos`` delete the lineage rows whose
+# media row is gone. A full clean empties ``media`` and the rescan re-adds
+# it file by file, so until the rescan reaches a file its lineage row looks
+# dangling: one listing (the T2I dialog opening, a WebSocket reconnect)
+# would wipe the lot. The lifespan installs lineage_prune_guard on the
+# database (``DatabaseManager.set_lineage_prune_guard``).
+
+_full_clean_runs = 0
+_full_clean_lock = threading.Lock()
+
+
+@contextmanager
+def full_clean_running() -> Iterator[None]:
+    """Mark a full clean as running in this process for the ``with`` block.
+    The scan route wraps the whole run, from before its snapshot to after
+    its restore; the mark goes however the block ends (an abort, an error,
+    a shutdown's CancelledError). The marker and the pending file outlive a
+    run, this mark does not."""
+    global _full_clean_runs
+    with _full_clean_lock:
+        _full_clean_runs += 1
+    try:
+        yield
+    finally:
+        with _full_clean_lock:
+            _full_clean_runs -= 1
+
+
+def is_full_clean_running() -> bool:
+    return _full_clean_runs > 0
+
+
+def _exists(path: Path) -> bool:
+    """Only a missing file is False: any other error checking for it
+    (permissions, a data dir that is not a directory) is raised, so a
+    caller that must fail safe can. Never ``Path.exists``, which reads some
+    of those errors as "missing"."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def pending_snapshot_exists(data_dir: Path) -> bool:
+    """Whether the pending file exists (see ``_exists``)."""
+    return _exists(snapshot_file_path(data_dir))
+
+
+# The lasting mark of an unfinished full clean. The pending file only lists
+# rated paths and goes as soon as they are all back (or empty, at once),
+# while the rescan may still be far from the unrated T2I / I2V files.
+FULL_CLEAN_MARKER_FILENAME = "full_clean_incomplete"
+
+_MARKER_TEXT = """\
+Metascan started a full clean & rescan at {started}. It is unfinished until
+a scan walks every configured folder to the end.
+
+While this file exists, the Text-to-Image and Image-to-Video lists keep the
+records (prompts, writers, variants) of generated images and clips whose
+library entry is missing, instead of deleting them: the rescan may still
+bring them back. Metascan deletes this file itself when a scan of every
+configured folder completes.
+
+To let the lists drop those records without scanning, delete this file;
+Metascan may keep running. A full clean that is still running, or a pending
+ratings file next to it ({pending}), also holds them back.
+"""
+
+
+def full_clean_marker_path(data_dir: Path) -> Path:
+    return Path(data_dir) / FULL_CLEAN_MARKER_FILENAME
+
+
+def full_clean_marker_exists(data_dir: Path) -> bool:
+    """Whether the marker exists (see ``_exists``)."""
+    return _exists(full_clean_marker_path(data_dir))
+
+
+def write_full_clean_marker(data_dir: Path) -> None:
+    """Create (or refresh) the marker, durably: a full clean writes it before
+    anything else -- before it applies or writes the pending file, and so
+    before the truncate -- with its data and directory entry fsynced, so a
+    crash after the truncate still finds it, and a marker that can't be
+    written stops the clean with nothing written. Raises OSError."""
+    target = full_clean_marker_path(data_dir)
+    text = _MARKER_TEXT.format(
+        started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        pending=TASTE_SNAPSHOT_FILENAME,
+    )
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    _fsync_dir(target.parent)
+
+
+def clear_full_clean_marker(data_dir: Path) -> bool:
+    """Remove the marker: only the scan route calls it, once a scan has walked
+    every configured folder to the end and re-ingested the generated output
+    still on disk -- every file still on disk in a configured folder, and
+    every T2I / I2V output still on disk, has its media row again. True when
+    it is gone. A failed removal (OSError) is logged and returns False: the
+    marker stays, so the prune stays paused (fail safe)."""
+    target = full_clean_marker_path(data_dir)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as e:
+        logger.error(
+            "Could not remove %s (%s): the T2I / I2V lists keep their records "
+            "of missing files until it is gone; delete it by hand to resume "
+            "(a running full clean or a pending ratings file still holds them)",
+            target,
+            e,
+        )
+        return False
+    return True
+
+
+def lineage_prune_guard(data_dir: Path) -> Callable[[], bool]:
+    """The guard for ``DatabaseManager.set_lineage_prune_guard``: True --
+    no prune -- while a full clean runs in this process, its marker exists
+    in ``data_dir`` (written before the truncate; removed only once a scan
+    of every configured folder completes, so it outlives a cancel, an error
+    and a restart), or its pending file does (it holds the ratings that have
+    not come back). A failed check raises, which the database counts as
+    True. Runs under the DB lock: two stats, nothing else."""
+
+    def paused() -> bool:
+        return (
+            is_full_clean_running()
+            or full_clean_marker_exists(data_dir)
+            or pending_snapshot_exists(data_dir)
+        )
+
+    return paused
 
 
 def _is_empty(snapshot: Dict[str, Any]) -> bool:

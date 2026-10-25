@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import (
     Any,
@@ -290,6 +291,10 @@ def _ensure_index(
 # ``backend/services/taste_snapshot.py`` translates it, and a version-2 one,
 # on load, and ``restore_taste_state`` only takes version 3.
 TASTE_SNAPSHOT_VERSION = 3
+
+# A lineage prune guard that keeps failing is logged at WARNING at most this
+# often (seconds); the failures in between go to DEBUG.
+PRUNE_GUARD_WARN_INTERVAL_S = 3600.0
 
 
 class MigrationError(RuntimeError):
@@ -638,6 +643,10 @@ class DatabaseManager:
         # fn(native_path) -> (vector, model_key, loaded_at) | None; see
         # set_embedding_lookup.
         self._embedding_lookup: Optional[EmbeddingLookup] = None
+        # fn() -> True while the T2I / I2V lineage prune must wait; see
+        # set_lineage_prune_guard. When it last failed loudly (monotonic).
+        self._lineage_prune_guard: Optional[Callable[[], bool]] = None
+        self._prune_guard_warned_at: Optional[float] = None
         # What a new tombstone row must still fill; set by _init_database.
         self._tombstone_fill: Tuple[str, Tuple[int, ...]] = ("", ())
 
@@ -1513,7 +1522,9 @@ class DatabaseManager:
             # Image-to-video flow: which library image produced which clip.
             # No REFERENCES media(file_path) on either column by design:
             # list_i2v_videos JOINs media and lazily prunes rows whose media
-            # is gone, and deleting the source image keeps the videos.
+            # is gone (never while a full clean is unfinished, see
+            # set_lineage_prune_guard), and deleting the source image keeps
+            # the videos.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS i2v_videos (
@@ -1596,11 +1607,12 @@ class DatabaseManager:
             # Text-to-image flow: one row per generated picture. Same shape
             # of contract as i2v_videos -- no REFERENCES on any column,
             # list_t2i_images JOINs media and lazily prunes rows whose media
-            # is gone. The columns before form_state are the as-rendered
-            # facts (written once at ingest); form_state is the editable
-            # copy, and set_t2i_image_form_state the only UPDATE there is
-            # (see metascan/core/t2i_form.py). No extra index: the list
-            # queries order by id, which is the rowid.
+            # is gone (never while a full clean is unfinished, see
+            # set_lineage_prune_guard). The columns before form_state are
+            # the as-rendered facts (written once at ingest); form_state is
+            # the editable copy, and set_t2i_image_form_state the only
+            # UPDATE there is (see metascan/core/t2i_form.py). No extra
+            # index: the list queries order by id, which is the rowid.
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS t2i_images (
@@ -4222,6 +4234,49 @@ class DatabaseManager:
         tombstone gets no vector)."""
         self._embedding_lookup = fn
 
+    def set_lineage_prune_guard(self, fn: Optional[Callable[[], bool]]) -> None:
+        """Install the callable that pauses the lazy prune of
+        ``list_t2i_images`` / ``list_i2v_videos``: while ``fn()`` is True
+        they still list only the rows whose media row exists, but delete
+        none of the others. A full clean & rescan empties ``media`` and
+        re-adds it file by file, so until the rescan reaches a file its
+        lineage row looks dangling -- and the completed full clean reads a
+        vanished item's lineage from that row when it tombstones it. The
+        lifespan installs ``taste_snapshot.lineage_prune_guard`` (a full
+        clean is running, its marker says one has not been followed by a
+        completed scan yet, or its pending file exists). A guard that raises
+        counts as True: never prune when unsure (one WARNING per
+        ``PRUNE_GUARD_WARN_INTERVAL_S``, DEBUG in between). It runs while
+        the DB lock
+        is held (so a truncate cannot land between the read and the
+        delete): it must be fast and must not touch the database. Default:
+        no guard, the listings prune."""
+        self._lineage_prune_guard = fn
+
+    def _lineage_prune_paused(self) -> bool:
+        """Whether the installed guard holds the lineage prune back right
+        now. Caller holds the lock."""
+        guard = self._lineage_prune_guard
+        if guard is None:
+            return False
+        try:
+            return bool(guard())
+        except Exception as e:
+            now = time.monotonic()
+            last = self._prune_guard_warned_at
+            if last is None or now - last >= PRUNE_GUARD_WARN_INTERVAL_S:
+                self._prune_guard_warned_at = now
+                logger.warning(
+                    "Lineage prune guard failed (%r); the T2I / I2V lists keep "
+                    "rows whose media is gone until it works (repeats within "
+                    "%.0f s are logged at DEBUG)",
+                    e,
+                    PRUNE_GUARD_WARN_INTERVAL_S,
+                )
+            else:
+                logger.debug("Lineage prune guard failed (%r); not pruning", e)
+            return True
+
     def _write_tombstones(
         self,
         conn: sqlite3.Connection,
@@ -5460,7 +5515,9 @@ class DatabaseManager:
         media.is_favorite and the grade (None when ungraded) merged in.
         Rows whose media row no longer exists (deleted from the library)
         are pruned in the same call -- the JOIN is the referential
-        integrity here, by design."""
+        integrity here, by design -- or, while the lineage prune guard
+        holds the prune back (a full clean is running, unfinished or pending,
+        ``set_lineage_prune_guard``), only left out."""
         posix = to_posix_path(source_path)
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
@@ -5482,7 +5539,7 @@ class DatabaseManager:
                 d["is_favorite"] = bool(d.get("is_favorite"))
                 d["grade"] = self._row_grade(d)
                 out.append(d)
-            if stale:
+            if stale and not self._lineage_prune_paused():
                 conn.execute(
                     "DELETE FROM i2v_videos WHERE id IN ("
                     + ",".join("?" * len(stale))
@@ -5617,6 +5674,14 @@ class DatabaseManager:
         "FROM t2i_images t LEFT JOIN media m ON m.file_path = t.file_path "
         "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
     )
+    # media INNER JOIN: only the rows whose media exists (a paused listing,
+    # which prunes nothing, lets SQLite skip the rest).
+    _T2I_LIVE_IMAGE_SELECT: ClassVar[str] = (
+        "SELECT t.*, m.file_path AS media_path, m.is_favorite, "
+        "j.grade AS judged_grade "
+        "FROM t2i_images t JOIN media m ON m.file_path = t.file_path "
+        "LEFT JOIN media_judgments j ON j.file_path = t.file_path"
+    )
 
     @staticmethod
     def _row_grade(d: Dict[str, Any]) -> Optional[Grade]:
@@ -5692,11 +5757,28 @@ class DatabaseManager:
         row no longer exists (deleted from the library) are pruned in the
         same call -- the JOIN is the referential integrity here, by design
         -- and the page is refilled past them, because the strip treats a
-        short page as the last one."""
+        short page as the last one. While the lineage prune guard holds
+        the prune back (a full clean is running, unfinished or pending,
+        ``set_lineage_prune_guard``) they are only left out, by ONE inner
+        JOIN query: the refill loop would walk thousands of dangling rows a
+        round trip at a time under the lock, and has nothing to prune."""
         out: List[Dict[str, Any]] = []
         stale: List[int] = []
         cursor = before_id
         with self.lock, self._get_connection() as conn:
+            # Read once, under the lock: a truncate cannot land between
+            # this read and the delete below.
+            if limit > 0 and self._lineage_prune_paused():
+                sql = self._T2I_LIVE_IMAGE_SELECT
+                args: List[Any] = []
+                if before_id is not None:
+                    sql += " WHERE t.id < ?"
+                    args.append(before_id)
+                args.append(limit)
+                return [
+                    self._t2i_image_row(r)
+                    for r in conn.execute(sql + " ORDER BY t.id DESC LIMIT ?", args)
+                ]
             while len(out) < limit:
                 want = limit - len(out)
                 if cursor is None:
@@ -5718,17 +5800,32 @@ class DatabaseManager:
                         out.append(self._t2i_image_row(r))
                 if len(rows) < want:
                     break
-            for start in range(0, len(stale), 500):
-                chunk = stale[start : start + 500]
-                conn.execute(
-                    "DELETE FROM t2i_images WHERE id IN ("
-                    + ",".join("?" * len(chunk))
-                    + ")",
-                    chunk,
-                )
             if stale:
+                for start in range(0, len(stale), 500):
+                    chunk = stale[start : start + 500]
+                    conn.execute(
+                        "DELETE FROM t2i_images WHERE id IN ("
+                        + ",".join("?" * len(chunk))
+                        + ")",
+                        chunk,
+                    )
                 conn.commit()
         return out
+
+    def generated_paths_without_media(self) -> List[str]:
+        """Native paths of the T2I images and I2V clips whose media row is
+        missing, each once. Generated output enters the library through
+        ComfyClient's ingest, usually outside every scan folder, so after a
+        full clean the folder walk never brings it back: the scan route
+        re-ingests the ones still on disk. Read-only."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT t.file_path FROM t2i_images t WHERE NOT EXISTS "
+                "(SELECT 1 FROM media m WHERE m.file_path = t.file_path) "
+                "UNION SELECT v.file_path FROM i2v_videos v WHERE NOT EXISTS "
+                "(SELECT 1 FROM media m WHERE m.file_path = v.file_path)"
+            ).fetchall()
+        return [to_native_path(str(r["file_path"])) for r in rows]
 
     def list_t2i_paths(self) -> List[str]:
         """Native paths of every generated image still in the library, in
