@@ -247,7 +247,7 @@ def training_paths_from_config(
     this Python), the HF base weights dir (``models.writer_train_repo``,
     default the 8B writer's source repo) and llama.cpp's LoRA converter
     (``models.llama_cpp_dir``, default ``data/llama.cpp``). One resolver
-    with the Models tab: ``writer_training_assets.asset_paths``."""
+    with the Training tab's asset rows: ``writer_training_assets.asset_paths``."""
     from backend.services.writer_training_assets import asset_paths
 
     return asset_paths(config, data_dir).gate_paths()
@@ -699,7 +699,7 @@ class TrainingManager:
         try:
             deps, trl = await self._probe(python)
             store_training_probe(python, deps, trl)
-            # The Models tab shows only cached results: tell it one landed.
+            # The Training tab shows only cached results: tell it one landed.
             self._emit("gate_changed", {})
         except asyncio.CancelledError:
             raise

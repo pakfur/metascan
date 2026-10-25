@@ -567,15 +567,15 @@ def test_scorecard_tombstones_are_found_by_their_column(
         # Not JSON and not a scorecard tombstone: never read.
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
-            "passed, reasons, grade, lineage) "
-            "VALUES ('/x/odd.png', 'now', 0, 0, '[]', 'pass', 'not json')"
+            "reasons, grade, lineage) "
+            "VALUES ('/x/odd.png', 'now', 0, '[]', 'pass', 'not json')"
         )
         # A scorecard tombstone whose lineage lost its image id: skipped,
         # one WARNING carrying the count only.
         conn.execute(
             "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
-            "passed, reasons, grade, lineage, scorecard_id) "
-            "VALUES ('/x/broken.png', 'now', 0, 0, '[]', 'pass', ?, ?)",
+            "reasons, grade, lineage, scorecard_id) "
+            "VALUES ('/x/broken.png', 'now', 0, '[]', 'pass', ?, ?)",
             (json.dumps({"t2i": {"writer_id": "base"}}), lib.card),
         )
         conn.commit()

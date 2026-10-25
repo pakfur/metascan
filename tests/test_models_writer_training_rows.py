@@ -1,4 +1,4 @@
-"""Writer training assets in the Models tab (Task 7): the HF base weights
+"""Writer training assets in the Training tab (Task 7): the HF base weights
 row and the llama.cpp LoRA converter row, their downloads (stubbed: no
 network), deletes, and the ``writer_training`` gate following the disk."""
 

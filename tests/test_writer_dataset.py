@@ -1106,8 +1106,8 @@ def test_malformed_tombstones_warn_with_a_count_only(db, store, caplog):
             # Category names that are not JSON: unreadable.
             conn.execute(
                 "INSERT INTO media_tombstones (file_path, deleted_at, is_favorite, "
-                "passed, reasons, categories, lineage) "
-                "VALUES (?, '2026-10-01', 1, 0, '[]', 'oops', ?)",
+                "reasons, categories, lineage) "
+                "VALUES (?, '2026-10-01', 1, '[]', 'oops', ?)",
                 (path, '{"t2i": {"caption": "SECRET"}}'),
             )
         conn.commit()

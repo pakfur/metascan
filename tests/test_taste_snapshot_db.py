@@ -21,15 +21,20 @@ T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 T1 = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
 
 
-# A seeded pre-grades rating as it reads now, (★ favorite, grade): the
-# ``set_verdict`` shim maps an old favorite to ★ + ✓ and an old pass (a
-# reject) to ✗ without ★.
+# A seeded rating as (★ favorite, grade): ★ with ✓, what a pre-grades
+# favorite became, and ✗ without ★, what an old reject became.
 FAVORITE = (True, "pass")
 REJECT = (False, "fail")
 
 
 def _marks(state):
     return (state.favorite, state.grade)
+
+
+def _favorite(db, path, now):
+    """★ + ✓: a favorite that was also graded pass."""
+    db.set_favorite_state(path, True, now=now)
+    db.set_grade(path, "pass", now=now)
 
 
 @pytest.fixture
@@ -57,27 +62,28 @@ def _rows(db, sql):
 
 
 def _seed(db):
-    """fav (+reasons, category), passed (+reasons, 2 categories), seen-only,
-    untouched, and a favorite that will not come back."""
-    for p in ("/l/fav.png", "/l/pass.png", "/l/seen.png", "/l/plain.png"):
+    """fav (★ + ✓, reasons, a category), reject (✗, reasons, two
+    categories), seen-only, untouched, and a ★ + ✓ that will not come
+    back."""
+    for p in ("/l/fav.png", "/l/reject.png", "/l/seen.png", "/l/plain.png"):
         db.save_media(_media(p))
     db.save_media(_media("/l/gone.png"))
     anime = db.create_category("Anime")
     scifi = db.create_category("Sci-Fi")
 
-    db.set_verdict("/l/fav.png", "favorite", now=T0)
+    _favorite(db, "/l/fav.png", T0)
     db.set_reason("/l/fav.png", "light", True, now=T0)
     db.set_reason("/l/fav.png", "realism", True, now=T0)
     db.add_media_categories(["/l/fav.png"], anime.id, "viewer")
 
-    db.set_verdict("/l/pass.png", "pass", now=T1)
-    db.set_reason("/l/pass.png", "composition", True, now=T1)
-    db.add_media_categories(["/l/pass.png"], anime.id, "bulk")
-    db.add_media_categories(["/l/pass.png"], scifi.id, "viewer")
+    db.set_grade("/l/reject.png", "fail", now=T1)
+    db.set_reason("/l/reject.png", "composition", True, now=T1)
+    db.add_media_categories(["/l/reject.png"], anime.id, "bulk")
+    db.add_media_categories(["/l/reject.png"], scifi.id, "viewer")
 
     db.mark_seen("/l/seen.png", now=T0)
 
-    db.set_verdict("/l/gone.png", "favorite", now=T1)
+    _favorite(db, "/l/gone.png", T1)
     db.set_reason("/l/gone.png", "emotion", True, now=T1)
     db.add_media_categories(["/l/gone.png"], scifi.id, "viewer")
     return anime, scifi
@@ -140,7 +146,7 @@ def test_snapshot_truncate_rescan_restore_roundtrip(db):
 
     snapshot = db.export_taste_state()
     assert db.truncate_all_data() is True
-    for p in ("/l/fav.png", "/l/pass.png", "/l/seen.png", "/l/plain.png"):
+    for p in ("/l/fav.png", "/l/reject.png", "/l/seen.png", "/l/plain.png"):
         db.save_media(_media(p))  # rescan; gone.png does not come back
 
     counts = db.restore_taste_state(snapshot)
@@ -158,9 +164,9 @@ def test_snapshot_truncate_rescan_restore_roundtrip(db):
     fav = db.get_judgment("/l/fav.png")
     assert _marks(fav) == FAVORITE and fav.reasons == ["realism", "light"]
     assert fav.confirmed_at == T0.isoformat()
-    passed = db.get_judgment("/l/pass.png")
-    assert _marks(passed) == REJECT and passed.reasons == ["composition"]
-    assert [c.name for c in passed.categories] == ["Anime", "Sci-Fi"]
+    rejected = db.get_judgment("/l/reject.png")
+    assert _marks(rejected) == REJECT and rejected.reasons == ["composition"]
+    assert [c.name for c in rejected.categories] == ["Anime", "Sci-Fi"]
     assert db.get_judgment("/l/seen.png").seen_at == T0.isoformat()
     assert before_gone  # sanity: the missing path really carried a judgment
 
@@ -187,7 +193,7 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     _seed(db)
     snapshot = db.export_taste_state()
     db.truncate_all_data()
-    for p in ("/l/fav.png", "/l/pass.png", "/l/seen.png"):
+    for p in ("/l/fav.png", "/l/reject.png", "/l/seen.png"):
         db.save_media(_media(p))
     vec = np.arange(32, dtype=np.float32)
     db.set_embedding_lookup(lambda p: (vec, "clip-small"))
@@ -198,7 +204,7 @@ def test_restore_writes_one_tombstone_per_missing_path(db):
     assert counts == {"restored": 3, "missing": 1, "tombstoned": 1}
     [t] = db.list_tombstones()
     assert t["file_path"] == "/l/gone.png"
-    assert (t["is_favorite"], t["grade"], t["passed"]) == (1, "pass", 0)
+    assert (t["is_favorite"], t["grade"]) == (1, "pass")
     assert json.loads(t["reasons"]) == ["emotion"]
     assert json.loads(t["categories"]) == ["Sci-Fi"]
     assert t["confirmed_at"] == T1.isoformat()
@@ -220,17 +226,17 @@ def test_restore_skips_categories_deleted_meanwhile(db):
     anime, scifi = _seed(db)
     snapshot = db.export_taste_state()
     db.truncate_all_data()
-    db.save_media(_media("/l/pass.png"))
+    db.save_media(_media("/l/reject.png"))
     db.delete_category(scifi.id)
     db.restore_taste_state(snapshot)
-    assert [c.name for c in db.get_media_categories("/l/pass.png")] == ["Anime"]
+    assert [c.name for c in db.get_media_categories("/l/reject.png")] == ["Anime"]
 
 
 def test_restore_is_idempotent(db):
     _seed(db)
     snapshot = db.export_taste_state()
     db.truncate_all_data()
-    for p in ("/l/fav.png", "/l/pass.png", "/l/seen.png"):
+    for p in ("/l/fav.png", "/l/reject.png", "/l/seen.png"):
         db.save_media(_media(p))
     db.restore_taste_state(snapshot)
     first = _state(db)
@@ -336,22 +342,22 @@ def test_restore_reports_the_unrestored_remainder(db):
     rem = counts["remaining"]
     assert sorted(j["file_path"] for j in rem["judgments"]) == [
         "/l/gone.png",
-        "/l/pass.png",
+        "/l/reject.png",
         "/l/seen.png",
     ]
     assert rem["favorites"] == ["/l/gone.png"]
     assert sorted({lk["file_path"] for lk in rem["categories"]}) == [
         "/l/gone.png",
-        "/l/pass.png",
+        "/l/reject.png",
     ]
     assert rem["taken_at"] == snapshot["taken_at"]
     # The remainder restores the rest later, exactly like the original.
-    for p in ("/l/pass.png", "/l/gone.png"):
+    for p in ("/l/reject.png", "/l/gone.png"):
         db.save_media(_media(p))
     again = db.restore_taste_state(json.loads(json.dumps(rem)))
     assert again["restored"] == 2 and again["missing"] == 1
     assert _marks(db.get_judgment("/l/gone.png")) == FAVORITE
-    assert db.get_judgment("/l/pass.png").reasons == ["composition"]
+    assert db.get_judgment("/l/reject.png").reasons == ["composition"]
 
 
 def test_restore_never_overwrites_a_newer_grade(db):
@@ -428,8 +434,8 @@ def test_restore_puts_the_grade_back_under_a_newer_favorite(db):
 
     db.restore_taste_state(snapshot)
 
-    passed = db.get_judgment("/g/pass.png")
-    assert (_marks(passed), passed.judged_at) == ((True, "pass"), T1.isoformat())
+    graded = db.get_judgment("/g/pass.png")
+    assert (_marks(graded), graded.judged_at) == ((True, "pass"), T1.isoformat())
     failed = db.get_judgment("/g/fail.png")
     assert (_marks(failed), failed.reasons, failed.confirmed_at) == (
         (True, "fail"),

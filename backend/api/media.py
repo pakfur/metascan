@@ -1,6 +1,7 @@
 """Media CRUD and streaming endpoints."""
 
 import asyncio
+import logging
 import mimetypes
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
 from metascan.core.scorecard_blind import blind_media_detail
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["media"])
 
@@ -96,10 +99,19 @@ async def update_media(
     media = await service.get_media(file_path)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
-    # A summary row like the list's, grade included: the grid replaces its
-    # row with this answer.
-    grade = await service.get_grade(file_path)
-    return service.media_to_summary_dict(media, grade=grade)
+    # A summary row like the list's, grade included: the grid merges this
+    # answer over its row. When the grade can't be read the key is left
+    # out rather than answered as null, so the row keeps its badge.
+    summary = service.media_to_summary_dict(media)
+    try:
+        summary["grade"] = await service.get_grade(file_path)
+    except Exception:
+        logger.warning(
+            "Could not read the grade for the favorite answer of %s",
+            file_path,
+            exc_info=True,
+        )
+    return summary
 
 
 @router.get("/stream/{file_path:path}")

@@ -85,14 +85,14 @@ def test_judgment_survives_rescan_upsert(db):
     db.save_media(_media("/pics/a.png"))
     with db._get_connection() as conn:
         conn.execute(
-            "INSERT INTO media_judgments (file_path, passed, grade) "
-            "VALUES ('/pics/a.png', 1, 'fail')"
+            "INSERT INTO media_judgments (file_path, grade, reasons) "
+            "VALUES ('/pics/a.png', 'fail', '[\"light\"]')"
         )
         conn.commit()
     db.save_media(_media("/pics/a.png"))
     with db._get_connection() as conn:
-        row = conn.execute("SELECT passed, grade FROM media_judgments").fetchone()
-        assert (row["passed"], row["grade"]) == (1, "fail")
+        row = conn.execute("SELECT grade, reasons FROM media_judgments").fetchone()
+        assert (row["grade"], row["reasons"]) == ("fail", '["light"]')
     assert db.get_judgment("/pics/a.png").grade == "fail"
 
 
@@ -371,7 +371,6 @@ def test_rapid_grade_sequences_end_consistent(db):
         "favorite",
         "grade_pass",
     ]
-    assert _row(db, "/p/a.png")["passed"] == 0
 
 
 def test_reason_without_grade_raises_no_grade(db):
@@ -402,18 +401,6 @@ def test_viewing_never_reconfirms(db):
     s = db.mark_seen("/p/a.png", now=T0 + timedelta(days=4))
     assert s.confirmed_at is None
     assert _events(db, "/p/a.png") == ["seen", "grade_pass"]
-
-
-def test_legacy_passed_column_mirrors_fail(db):
-    """Interim until the legacy column is dropped: readers not yet on
-    grades see a ✗ as the old reject."""
-    db.save_media(_media("/p/a.png"))
-    for grade, passed in (("fail", 1), ("pass", 0), ("fail", 1), (None, 0)):
-        db.set_grade("/p/a.png", grade)
-        assert (_row(db, "/p/a.png")["grade"], _row(db, "/p/a.png")["passed"]) == (
-            grade,
-            passed,
-        )
 
 
 def test_judgment_state_dict_keys(db):
@@ -453,33 +440,6 @@ def test_sticky_category_applies_on_grade_only(db):
     assert _events(db, "/p/a.png").count("category_on") == 1
 
 
-def test_verdict_shim_seeds_ratings_as_migrated(db):
-    """The test-only ``set_verdict`` shim: an old favorite is ★ + ✓, an old
-    pass (a reject) is ✗ without ★, None clears both; it logs the legacy
-    events the old verdict logged."""
-    for p in ("/p/a.png", "/p/b.png"):
-        db.save_media(_media(p))
-    s = db.set_verdict("/p/a.png", "favorite", score_shown=0.7, now=T0)
-    assert (s.favorite, s.grade) == (True, "pass")
-    s = db.set_verdict("/p/a.png", "pass", now=T0)
-    assert (s.favorite, s.grade) == (False, "fail")
-    assert _row(db, "/p/a.png")["passed"] == 1
-    s = db.set_verdict("/p/a.png", None, now=T0)
-    assert (s.favorite, s.grade) == (False, None)
-    assert _events(db, "/p/a.png") == [
-        "favorite",
-        "unfavorite",
-        "pass",
-        "unpass",
-    ]
-    assert db.list_judgment_events("/p/a.png")[0]["score_shown"] == pytest.approx(0.7)
-    # The same verdict again refreshes confirmed_at only.
-    db.set_verdict("/p/b.png", "pass", now=T0)
-    s = db.set_verdict("/p/b.png", "pass", now=T0 + timedelta(days=1))
-    assert _events(db, "/p/b.png") == ["pass"]
-    assert s.confirmed_at.startswith("2026-01-02")
-
-
 def test_t2i_and_i2v_rows_carry_the_grade(db):
     for p in ("/lib/a.png", "/lib/b.png", "/lib/src.png", "/lib/v.mp4"):
         db.save_media(_media(p))
@@ -491,8 +451,8 @@ def test_t2i_and_i2v_rows_carry_the_grade(db):
     db.set_favorite(Path("/lib/b.png"), True)
     rows = {Path(r["file_path"]).name: r for r in db.list_t2i_images()}
     assert (rows["a.png"]["grade"], rows["a.png"]["is_favorite"]) == ("fail", False)
-    assert rows["a.png"]["passed"] is True  # legacy flag, kept for now
     assert (rows["b.png"]["grade"], rows["b.png"]["is_favorite"]) == (None, True)
-    assert rows["b.png"]["passed"] is False
+    # The pre-grades reject flag is gone from the payload.
+    assert "passed" not in rows["a.png"]
     (video,) = db.list_i2v_videos("/lib/src.png")
     assert (video["grade"], video["is_favorite"]) == ("pass", False)

@@ -36,7 +36,7 @@ def _vec(rng: np.random.Generator, direction: np.ndarray, sign: float) -> np.nda
 
 
 def _build(tmp_path: Path, n_pos: int, n_neg: int, indexed=None):
-    """``n_pos`` ✓ images (``/l/f..``) and ``n_neg`` ✗ ones (``/l/p..``)
+    """``n_pos`` ✓ images (``/l/pos..``) and ``n_neg`` ✗ ones (``/l/neg..``)
     with vectors on either side of a direction, a ✓ video, and a deleted ✓
     image whose vector survives only on its tombstone."""
     rng = np.random.default_rng(7)
@@ -46,9 +46,9 @@ def _build(tmp_path: Path, n_pos: int, n_neg: int, indexed=None):
     index_dir = tmp_path / "similarity"
     vectors = {}
     for i in range(n_pos):
-        vectors[f"/l/f{i:02d}.png"] = (_vec(rng, direction, 1.0), "pass")
+        vectors[f"/l/pos{i:02d}.png"] = (_vec(rng, direction, 1.0), "pass")
     for i in range(n_neg):
-        vectors[f"/l/p{i:02d}.png"] = (_vec(rng, direction, -1.0), "fail")
+        vectors[f"/l/neg{i:02d}.png"] = (_vec(rng, direction, -1.0), "fail")
     vectors["/l/vid.mp4"] = (_vec(rng, direction, 1.0), "pass")
     for path, (_, grade) in vectors.items():
         db.save_media(_media(path))
@@ -105,9 +105,9 @@ async def test_train_end_to_end(runner, db):
     assert model_id == r["model_id"]
     assert "/l/vid.mp4" not in scores and len(scores) == 60
     assert all(0.0 <= s <= 1.0 for s in scores.values())
-    favs = np.mean([s for p, s in scores.items() if "/f" in p])
-    passes = np.mean([s for p, s in scores.items() if "/p" in p])
-    assert favs > passes
+    pos_mean = np.mean([s for p, s in scores.items() if "/pos" in p])
+    neg_mean = np.mean([s for p, s in scores.items() if "/neg" in p])
+    assert pos_mean > neg_mean
     active = db.get_active_taste_model()
     assert active["id"] == r["model_id"]
     assert active["embedding_model"] == MODEL_KEY and active["dim"] == DIM
@@ -301,8 +301,8 @@ def test_index_fingerprint_tracks_meta(setup):
 
 
 def _partial(n_pos_indexed: int, n_neg_indexed: int = 30) -> set:
-    return {f"/l/f{i:02d}.png" for i in range(n_pos_indexed)} | {
-        f"/l/p{i:02d}.png" for i in range(n_neg_indexed)
+    return {f"/l/pos{i:02d}.png" for i in range(n_pos_indexed)} | {
+        f"/l/neg{i:02d}.png" for i in range(n_neg_indexed)
     }
 
 
@@ -401,12 +401,12 @@ async def test_rescore_uses_the_slim_query(setup, monkeypatch):
 def test_scoring_raw_has_images_and_categories_only(setup):
     _, db, *_ = setup
     cid = db.create_category("Anime").id
-    db.add_media_categories(["/l/f00.png"], cid, "viewer")
+    db.add_media_categories(["/l/pos00.png"], cid, "viewer")
     raw = db.taste_scoring_raw()
     paths = {m["file_path"] for m in raw["media"]}
-    assert "/l/vid.mp4" not in paths and "/l/f00.png" in paths
+    assert "/l/vid.mp4" not in paths and "/l/pos00.png" in paths
     cats = {m["file_path"]: m["categories"] for m in raw["media"]}
-    assert cats["/l/f00.png"] == ["Anime"] and cats["/l/p00.png"] == []
+    assert cats["/l/pos00.png"] == ["Anime"] and cats["/l/neg00.png"] == []
 
 
 async def test_score_write_failure_keeps_model_and_asks_for_rescore(setup, monkeypatch):
@@ -457,8 +457,8 @@ async def test_diversity_computed_on_train(setup):
 
     runner, db, index_dir, rng, direction = setup
     now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
-    # ``_build`` graded /l/fNN ✓ and /l/pNN ✗: diversity is over ✓ T2I.
-    latest = [f"/l/f{i:02d}.png" for i in range(5)]
+    # ``_build`` graded /l/posNN ✓ and /l/negNN ✗: diversity is over ✓ T2I.
+    latest = [f"/l/pos{i:02d}.png" for i in range(5)]
     for p in latest:
         _set_created(
             db,
@@ -466,11 +466,17 @@ async def test_diversity_computed_on_train(setup):
             "2026-10-15 10:00:00",
         )
     # One ✓ in the previous window: n = 1, no distance.
-    _set_created(db, db.create_t2i_image(file_path="/l/f05.png"), "2026-10-01 10:00:00")
+    _set_created(
+        db, db.create_t2i_image(file_path="/l/pos05.png"), "2026-10-01 10:00:00"
+    )
     # Outside the six windows, and a ★ ✗ in the latest one: neither counts.
-    _set_created(db, db.create_t2i_image(file_path="/l/f06.png"), "2026-06-01 10:00:00")
-    _set_created(db, db.create_t2i_image(file_path="/l/p00.png"), "2026-10-15 10:00:00")
-    assert db.set_favorite(Path("/l/p00.png"), True)
+    _set_created(
+        db, db.create_t2i_image(file_path="/l/pos06.png"), "2026-06-01 10:00:00"
+    )
+    _set_created(
+        db, db.create_t2i_image(file_path="/l/neg00.png"), "2026-10-15 10:00:00"
+    )
+    assert db.set_favorite(Path("/l/neg00.png"), True)
     # A deleted ✓ generation: its vector lives only on the tombstone.
     gone_vec = _vec(rng, direction, 1.0)
     db.save_media(_media("/l/gen_gone.png"))
@@ -532,7 +538,7 @@ async def test_worker_diversity_failure_does_not_fail_training(setup, monkeypatc
             "window_starts": ["2026-10-10"],
             "items": [
                 {
-                    "file_path": "/l/f00.png",
+                    "file_path": "/l/pos00.png",
                     "window_start": "2026-10-10",
                     "embedding": "!!!notbase64",
                     "embedding_model": MODEL_KEY,
@@ -676,7 +682,7 @@ async def test_a_diversity_row_must_say_whether_it_is_a_tombstone(
 
     runner, db, _, _, _ = setup
     now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
-    for p in [f"/l/f{i:02d}.png" for i in range(5)]:
+    for p in [f"/l/pos{i:02d}.png" for i in range(5)]:
         _set_created(db, db.create_t2i_image(file_path=p), "2026-10-15 10:00:00")
     outcomes = db.generation_outcomes
 

@@ -781,15 +781,12 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   /**
-   * Copy a judgment the server returned onto a tile: ★, the grade (which
-   * alone decides the scorecard blind), and the legacy reject flag the
-   * server keeps equal to grade === 'fail' until it is dropped.
+   * Copy a judgment the server returned onto a tile: ★ and the grade (which
+   * alone decides the scorecard blind).
    */
   function applyState(image: T2iImage, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
     if (image.is_favorite !== state.favorite) image.is_favorite = state.favorite
     if (image.grade !== state.grade) image.grade = state.grade
-    const passed = state.grade === 'fail'
-    if (image.passed !== passed) image.passed = passed
   }
 
   /**

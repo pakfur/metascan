@@ -1446,7 +1446,7 @@ def _probing_manager(db, tmp_path, probe, **kw) -> TrainingManager:
 
 
 async def test_a_finished_probe_broadcasts_gate_changed(db, tmp_path, dataset):
-    # The Models tab only shows cached probe results: tell it when one lands.
+    # The Training tab only shows cached probe results: tell it when one lands.
     probe = _Probe(result=("training dependencies not installed: peft", ""))
     rec = Recorder()
     clear_writer_training_probe_cache()

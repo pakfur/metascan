@@ -15,9 +15,11 @@ from typing import Dict, List, Optional
 
 import pytest
 
+from metascan.core import database_sqlite
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 from tests._taste_api_fixtures import client, seeded  # noqa: F401
+from tests.test_grades_migration import _build_v5_db, _judgment
 
 
 @pytest.fixture
@@ -98,11 +100,18 @@ def test_a_grade_change_shows_on_the_next_read(db: DatabaseManager) -> None:
     assert _grades(db.get_all_media_summaries()) == {"/l/a.png": "fail"}
 
 
-def test_the_old_reject_flag_is_never_read_as_a_grade(db: DatabaseManager) -> None:
+def test_the_old_reject_flag_is_never_read_as_a_grade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # ``passed`` is the pre-grades reject flag: it must not show as ✓ or ✗.
-    _add(db, "/l/old.png")
+    # v6 drops it; an SQLite too old to drop a column keeps it, so build that
+    # database and plant the flag on every row.
+    db_dir = tmp_path / "v5"
+    _build_v5_db(db_dir, live={"/l/old.png": (0, _judgment(0, [], judged=False))})
+    with monkeypatch.context() as m:
+        m.setattr(database_sqlite, "_can_drop_columns", lambda: False)
+        db = DatabaseManager(db_dir)
     _add(db, "/l/new.png", minutes=1)
-    db.mark_seen("/l/old.png")
     db.set_grade("/l/new.png", "pass")
     with db._get_connection() as conn:
         conn.execute("UPDATE media_judgments SET passed = 1")
@@ -207,6 +216,32 @@ def test_media_list_and_the_legacy_patch_carry_the_grade(
     # Same keys as a list row (the list row also has ``hidden``).
     assert "grade" in r.json() and set(r.json()) <= set(rows["/p/b.png"])
 
+    rows = {r["file_path"]: r for r in client.get("/api/media").json()}
+    assert (rows["/p/a.png"]["is_favorite"], rows["/p/a.png"]["grade"]) == (
+        True,
+        "fail",
+    )
+
+
+def test_the_legacy_patch_leaves_out_a_grade_it_cannot_read(
+    client, seeded, monkeypatch, caplog  # noqa: F811
+) -> None:
+    # A failed read is not "no grade": answering grade null would clear the
+    # item's real ✗ badge (the grid merges the answer over its row), so the
+    # key is left out, ★ still applies, and the failure is logged.
+    import backend.dependencies as deps
+
+    client.patch("/api/judgments//p/a.png", json={"grade": "fail"})
+
+    def broken(file_path: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as m:
+        m.setattr(deps._db_singleton, "get_grade", broken)
+        r = client.patch("/api/media//p/a.png", json={"is_favorite": True})
+    assert r.status_code == 200
+    assert r.json()["is_favorite"] is True and "grade" not in r.json()
+    assert any("Could not read the grade" in rec.getMessage() for rec in caplog.records)
     rows = {r["file_path"]: r for r in client.get("/api/media").json()}
     assert (rows["/p/a.png"]["is_favorite"], rows["/p/a.png"]["grade"]) == (
         True,
