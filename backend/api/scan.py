@@ -3,9 +3,10 @@
 import asyncio
 import logging
 import os
+import stat
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -181,18 +182,42 @@ def _full_clean_unfinished(data_dir: Path, full_clean: bool) -> bool:
         return True
 
 
+def _generated_file_state(path: str) -> str:
+    """``"present"`` (a regular file); ``"gone"`` (its folder is there, the
+    file is not: deleted); or ``"unreachable"`` (its folder is missing or
+    can't be read -- an unmounted ``t2i.output_root`` / ``i2v.output_root``,
+    a permission error -- so it may well still exist; or something other
+    than a file sits at the path)."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        try:
+            folder = os.stat(os.path.dirname(path))
+        except OSError:
+            return "unreachable"
+        return "gone" if stat.S_ISDIR(folder.st_mode) else "unreachable"
+    except OSError:
+        return "unreachable"
+    return "present" if stat.S_ISREG(st.st_mode) else "unreachable"
+
+
 def _ingest_generated_file(scanner: Any, path: str) -> str:
-    """Re-ingest one generated file: ``"reingested"``, ``"gone"`` (no longer
-    on disk) or ``"unreadable"``."""
-    if not os.path.isfile(path):
-        return "gone"
+    """Re-ingest one generated file: ``"reingested"``, ``"gone"``,
+    ``"unreachable"`` (``_generated_file_state``) or ``"failed"`` (on disk,
+    but the ingest raised or could not read it as media)."""
+    state = _generated_file_state(path)
+    if state != "present":
+        return state
     try:
         media = scanner.ingest_file(Path(path))
     except Exception as e:
         # The type only: counts, never paths, leave the re-ingest.
         logger.debug("Re-ingesting a generated file failed (%s)", type(e).__name__)
-        return "unreadable"
-    return "unreadable" if media is None else "reingested"
+        return "failed"
+    return "failed" if media is None else "reingested"
+
+
+REINGEST_OUTCOMES = ("reingested", "gone", "unreachable", "failed")
 
 
 def _reingest_generated_files(
@@ -201,21 +226,21 @@ def _reingest_generated_files(
     data_dir: Path,
     full_clean: bool,
     cancelled: Callable[[], bool],
-) -> Tuple[int, int, int]:
+) -> Dict[str, int]:
     """Re-ingest (``Scanner.ingest_file``) the T2I images and I2V clips whose
     media row is missing but whose file is still on disk -- only while a full
     clean is unfinished (``_full_clean_unfinished``). Outside one a dangling
-    row means a deleted file, and nothing is done. Returns ``(re-ingested,
-    no longer on disk, unreadable)``; stops at a cancel. Runs in a worker
-    thread."""
+    row means a deleted file, and nothing is done. Returns the count of each
+    ``REINGEST_OUTCOMES`` outcome; stops at a cancel. Raises what the
+    candidate query raises. Runs in a worker thread."""
+    counts = dict.fromkeys(REINGEST_OUTCOMES, 0)
     if not _full_clean_unfinished(data_dir, full_clean):
-        return 0, 0, 0
-    counts = {"reingested": 0, "gone": 0, "unreadable": 0}
+        return counts
     for path in db.generated_paths_without_media():
         if cancelled():
             break
         counts[_ingest_generated_file(scanner, path)] += 1
-    return counts["reingested"], counts["gone"], counts["unreadable"]
+    return counts
 
 
 async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
@@ -336,17 +361,22 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         except Exception as e:
             logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
 
-    async def _reingest_generated_output() -> None:
+    async def _reingest_generated_output() -> bool:
         """T2I / I2V output enters the library through ComfyClient's ingest,
         under the ComfyUI output root, which is usually outside every scan
         folder: a full clean's folder walk never brings it back. While a
         full clean is unfinished (this one, or the marker of an earlier
         one), re-ingest the generated files whose media row is missing but
         that are still on disk, so the restore puts their ratings back and
-        their lineage stays attached. Counts only in the log. Never
-        raises."""
+        their lineage stays attached.
+
+        Returns whether every generated file still on disk came back: False
+        when the step itself failed, a file failed to ingest, or a file's
+        folder could not be reached (an unmounted output root) -- the run is
+        then unfinished: no tombstones, and the marker stays. Logs counts
+        and exception types only. Never raises."""
         if data_dir is None:
-            return
+            return True
         try:
             counts = await asyncio.to_thread(
                 _reingest_generated_files,
@@ -357,14 +387,32 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 lambda: _cancel_requested,
             )
         except Exception as e:
-            logger.error(f"Re-ingesting generated output failed: {e}", exc_info=True)
-            return
-        if any(counts):
-            logger.info(
-                "Full clean: re-ingested %d generated images / clips from "
-                "outside the scan folders; %d no longer on disk, %d unreadable",
-                *counts,
+            logger.error(
+                "Re-ingesting generated output failed (%s); the full clean "
+                "stays unfinished",
+                type(e).__name__,
             )
+            return False
+        if any(counts.values()):
+            logger.info(
+                "Generated output outside the scan folders: re-ingested %d "
+                "images / clips; %d gone from disk, %d in a folder that can't "
+                "be reached, %d failed to ingest",
+                counts["reingested"],
+                counts["gone"],
+                counts["unreachable"],
+                counts["failed"],
+            )
+        held_back = counts["unreachable"] + counts["failed"]
+        if held_back:
+            logger.warning(
+                "%d generated images / clips could not be brought back; the "
+                "full clean stays unfinished (their ratings stay pending and "
+                "the T2I / I2V lists keep their rows) until a later scan brings "
+                "them back",
+                held_back,
+            )
+        return not held_back
 
     async def _every_folder_scanned() -> None:
         """A scan walked every configured folder to the end (and re-ingested
@@ -430,8 +478,11 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
             total_processed += processed
             walked_folders += 1
 
+        # Every generated file still on disk must come back for the run to
+        # finish; never after a cancel (one in the last folder included).
+        generated_back = False
         if not _cancel_requested:
-            await _reingest_generated_output()
+            generated_back = await _reingest_generated_output()
 
         # Stale cleanup
         stale_count = 0
@@ -448,13 +499,14 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
 
         # Restore ratings for files that re-appeared in the rescan. A cancel
         # that landed during the last directory still leaves the loop
-        # normally -- it must not tombstone what wasn't re-imported yet.
-        await _restore_taste_from_snapshot(completed=not _cancel_requested)
+        # normally -- it must not tombstone what wasn't re-imported yet, and
+        # neither may a run whose generated output did not all come back.
+        finished = not _cancel_requested and generated_back
+        await _restore_taste_from_snapshot(completed=finished)
         await _apply_pending()
-        # Not after a cancel (one in the last folder lands here too), not
-        # when a configured folder was missing (its files were not walked),
-        # and not when there was no folder to walk at all.
-        if not _cancel_requested and not missing_folders and walked_folders:
+        # Not when unfinished, not when a configured folder was missing (its
+        # files were not walked), and not with no folder to walk at all.
+        if finished and not missing_folders and walked_folders:
             await _every_folder_scanned()
 
         # Auto-trigger embedding build when:
