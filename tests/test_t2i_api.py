@@ -1163,6 +1163,22 @@ class TestImages(T2iApiCase):
         self.assertEqual(resp.status_code, 404)
         trash.assert_not_called()
 
+    def test_delete_500s_with_a_code_when_the_file_cannot_be_removed(self) -> None:
+        # send2trash refused and the unlink fallback failed too (trash_file
+        # raises): the rows stay, and the answer is JSON with a code, so the
+        # dialog's request() reads the message instead of a bare 500.
+        image_id = self.add_image("a.png", **self.facts())
+        path = str(self.data_dir / "images" / "a.png")
+        refused = PermissionError(13, "Permission denied", path)
+        with patch("backend.services.t2i_service.trash_file", side_effect=refused):
+            resp = self.client.delete(f"/api/t2i/images/{image_id}")
+        self.assertEqual(resp.status_code, 500)
+        detail = resp.json()["detail"]
+        self.assertEqual(detail["code"], "trash_failed")
+        self.assertIn("Permission denied", detail["message"])
+        self.assertIsNotNone(self.db.get_t2i_image(image_id))
+        self.assertEqual(self.client.get("/api/t2i/paths").json(), [path])
+
     def test_delete_is_not_a_204(self) -> None:
         image_id = self.add_image("a.png", **self.facts())
         with patch("metascan.utils.trash.send2trash"):

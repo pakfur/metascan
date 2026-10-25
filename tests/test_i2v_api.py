@@ -535,6 +535,19 @@ class TestI2vApi(_I2vApiBase):
         resp = self.client.delete(f"/api/i2v/videos/{video_id}")
         self.assertEqual(resp.status_code, 404)
 
+    def test_delete_500s_with_a_code_when_the_clip_cannot_be_removed(self):
+        video_id = self.db.create_i2v_video(
+            source_path="/lib/a.png", file_path="/lib/a.png"
+        )
+        refused = PermissionError(13, "Permission denied", "/lib/a.png")
+        with patch("backend.services.i2v_service.trash_file", side_effect=refused):
+            resp = self.client.delete(f"/api/i2v/videos/{video_id}")
+        self.assertEqual(resp.status_code, 500)
+        detail = resp.json()["detail"]
+        self.assertEqual(detail["code"], "trash_failed")
+        self.assertIn("Permission denied", detail["message"])
+        self.assertIsNotNone(self.db.get_i2v_video(video_id))  # the rows stay
+
     def test_sources_lists_images_with_clips(self):
         resp = self.client.get("/api/i2v/sources")
         self.assertEqual(resp.status_code, 200)
