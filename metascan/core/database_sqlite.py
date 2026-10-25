@@ -1,3 +1,4 @@
+import glob
 import json
 import math
 import os
@@ -300,6 +301,10 @@ class MigrationError(RuntimeError):
 # the database plus a margin for the migration's own writes.
 V6_BACKUP_SPACE_FACTOR = 1.2
 
+# How long a start waits for another Metascan's pre-v6 backup of the same
+# database to finish before it gives up (MigrationError; retried next start).
+V6_BACKUP_LOCK_TIMEOUT_S = 10.0
+
 # ALTER TABLE ... DROP COLUMN arrived in SQLite 3.35.0; 3.35.5 fixed defects
 # in it that could corrupt the database file. Older, v6 leaves the pre-grades
 # reject columns where they are (see _legacy_tombstone_fill).
@@ -420,6 +425,70 @@ def _remove_partial_backup(partial: Path) -> None:
             logger.warning("Could not remove the incomplete backup %s: %s", path, exc)
 
 
+def _remove_stale_partials(db_path: Path) -> None:
+    """Delete what earlier pre-v6 backups of ``db_path`` left half-written:
+    a start killed mid-copy leaves ``<backup>.partial`` (and maybe its
+    journal) behind for good. Called only with the database's write lock
+    held (``backup_before_v6``), so no backup is being written."""
+    pattern = f"{glob.escape(db_path.name)}.pre-v6-*.bak.partial"
+    for partial in sorted(db_path.parent.glob(pattern)):
+        logger.info("Removing an incomplete backup from an earlier start: %s", partial)
+        _remove_partial_backup(partial)
+
+
+def _backup_failed(directory: Path, exc: BaseException) -> MigrationError:
+    return MigrationError(
+        "Metascan could not back up its database before upgrading it to "
+        f"version 6 (pass/fail grades): {exc}. Your ratings have not been "
+        f"changed. Make sure {directory} is writable and has free space, "
+        "then start Metascan again."
+    )
+
+
+def _hold_write_lock(db_path: Path) -> sqlite3.Connection:
+    """A connection holding the write lock of ``db_path`` (an empty write
+    transaction; closing the connection lets go). It waits up to
+    ``V6_BACKUP_LOCK_TIMEOUT_S`` for another connection to let go, then
+    raises ``MigrationError``."""
+    try:
+        guard = sqlite3.connect(str(db_path), timeout=V6_BACKUP_LOCK_TIMEOUT_S)
+    except sqlite3.Error as exc:
+        raise _backup_failed(db_path.parent, exc) from exc
+    try:
+        guard.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error as exc:
+        guard.close()
+        if getattr(exc, "sqlite_errorname", "") not in ("SQLITE_BUSY", "SQLITE_LOCKED"):
+            raise _backup_failed(db_path.parent, exc) from exc
+        raise MigrationError(
+            "Metascan could not back up its database before upgrading it to "
+            f"version 6 (pass/fail grades): the database is busy ({exc}), "
+            "perhaps because another Metascan is upgrading it. Your ratings "
+            "have not been changed. Wait until that one has started (or stop "
+            "it), then start Metascan again."
+        ) from exc
+    return guard
+
+
+def _discard_backup(backup: Path) -> bool:
+    """Delete the backup of a v6 attempt that was rolled back: the database
+    still matches it, and a cause that repeats on every start must not pile
+    up full copies. False (with a WARNING) when it could not be deleted."""
+    try:
+        backup.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Could not remove the backup %s of the failed upgrade: %s", backup, exc
+        )
+        return False
+    logger.info(
+        "Removed the backup %s: the failed upgrade was rolled back, so the "
+        "database still matches it",
+        backup,
+    )
+    return True
+
+
 def backup_before_v6(db_path: Path, now: datetime) -> Optional[Path]:
     """Back up the database file ``db_path`` before the v6 (pass/fail
     grades) migration: a consistent copy through the SQLite backup API at
@@ -433,11 +502,28 @@ def backup_before_v6(db_path: Path, now: datetime) -> Optional[Path]:
     for: the database is already at version 6, or holds nothing to
     migrate (no judgment rows, tombstones or favorites).
 
+    One backup at a time: the database's write lock is held (nothing is
+    written) from before the first step until the copy is in place. The
+    first step removes the ``.partial`` files a start killed mid-backup
+    left behind -- with the lock held, none of them can be a backup another
+    start is still writing; such a start makes this one wait (up to
+    ``V6_BACKUP_LOCK_TIMEOUT_S``).
+
     The drive must have ``V6_BACKUP_SPACE_FACTOR`` x the database's size
     free first. When it hasn't, or the backup fails in any way, raises
     ``MigrationError`` (owner-facing) with no partial copy left; the
     database itself is only ever read. The caller must have nothing
     uncommitted on the database."""
+    guard = _hold_write_lock(db_path)
+    try:
+        _remove_stale_partials(db_path)
+        return _copy_before_v6(db_path, now)
+    finally:
+        guard.close()
+
+
+def _copy_before_v6(db_path: Path, now: datetime) -> Optional[Path]:
+    """``backup_before_v6`` once the write lock is held."""
     directory = db_path.parent
     partial: Optional[Path] = None
     try:
@@ -489,12 +575,7 @@ def backup_before_v6(db_path: Path, now: datetime) -> Optional[Path]:
     except Exception as exc:
         if partial is not None:
             _remove_partial_backup(partial)
-        raise MigrationError(
-            "Metascan could not back up its database before upgrading it to "
-            f"version 6 (pass/fail grades): {exc}. Your ratings have not been "
-            f"changed. Make sure {directory} is writable and has free space, "
-            "then start Metascan again."
-        ) from exc
+        raise _backup_failed(directory, exc) from exc
     logger.info(
         "Backed up the database to %s before upgrading it to version 6 "
         "(pass/fail grades); delete the backup once you are happy with the "
@@ -2421,11 +2502,13 @@ class DatabaseManager:
             counts = self._v6_counts(conn)
             conn.commit()
         except Exception as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                # Closing the connection discards the transaction anyway.
-                logger.exception("Rolling back the failed v6 migration raised")
+            # Once the rollback is confirmed the database matches this
+            # attempt's backup again, so the backup goes: the next start
+            # takes its own (a cause that repeats would otherwise add a full
+            # copy every time). Unconfirmed, it is the copy to keep.
+            rolled_back = self._roll_back_v6(conn)
+            if backup is not None and rolled_back and _discard_backup(backup):
+                backup = None
             at_backup = (
                 f" The backup taken just before is at {backup}." if backup else ""
             )
@@ -2434,8 +2517,8 @@ class DatabaseManager:
                 f"(pass/fail grades): {exc}. The upgrade was rolled back, so "
                 "your ratings are unchanged and the database is still at "
                 f"version 5.{at_backup} To retry, start Metascan again; if it "
-                "fails the same way, keep the database and the backup and "
-                "report this message."
+                "fails the same way, keep the database"
+                f"{' and the backup' if backup else ''} and report this message."
             ) from exc
         logger.info(
             "Database upgraded to version 6 (pass/fail grades): favorites -> "
@@ -2465,6 +2548,18 @@ class DatabaseManager:
                 ".".join(str(n) for n in DROP_COLUMN_MIN_SQLITE),
                 ", ".join(legacy),
             )
+
+    @staticmethod
+    def _roll_back_v6(conn: sqlite3.Connection) -> bool:
+        """Roll a failed v6 attempt back. True once the database reads as
+        version 5 again: it then matches the backup taken before it."""
+        try:
+            conn.rollback()
+            return int(conn.execute("PRAGMA user_version").fetchone()[0]) < 6
+        except sqlite3.Error:
+            # Closing the connection discards the transaction anyway.
+            logger.exception("Rolling back the failed v6 migration raised")
+            return False
 
     @staticmethod
     def _v6_counts(conn: sqlite3.Connection) -> Dict[str, int]:
