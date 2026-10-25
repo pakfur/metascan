@@ -21,6 +21,7 @@ the old *reject*. These tests keep live code from reading them as a grade:
 
 import ast
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime
@@ -545,3 +546,74 @@ def test_an_old_sqlite_keeps_the_legacy_columns_unread(tmp_path, monkeypatch):
     db.save_media(_media("/lib/new.png"))
     db.restore_taste_state(snap)
     assert db.get_judgment("/lib/new.png").grade == "pass"
+
+
+@pytest.mark.skipif(not _drop_safe(), reason="this SQLite cannot drop a column")
+def test_a_failed_drop_keeps_the_legacy_columns_unread(tmp_path, caplog):
+    """DROP COLUMN refuses a column something else in the schema still names
+    -- here a view the owner made over the old reject flag of the deleted
+    images. That failure is deterministic: rolling the whole upgrade back
+    would refuse every later start (with a new full backup each time). The
+    drops run in a savepoint instead: undone together, both columns stay
+    unread (as on an old SQLite), one WARNING says why, and the upgrade
+    completes -- once, never retried."""
+    db_dir = tmp_path / "db"
+    db_file = _build_v5_db(db_dir)
+    conn = sqlite3.connect(str(db_file))
+    # On media_tombstones, the second table dropped: the first drop
+    # (media_judgments) succeeds and must be undone with it.
+    conn.execute(
+        "CREATE VIEW old_rejects AS "
+        "SELECT file_path FROM media_tombstones WHERE passed = 1"
+    )
+    conn.commit()
+    conn.close()
+
+    caplog.set_level(logging.INFO, logger="metascan.core.database_sqlite")
+    db = DatabaseManager(db_dir)
+    assert _user_version(db_file) == 6
+    for table in ("media_judgments", "media_tombstones"):
+        assert "passed" in _columns(db_file, table)
+    assert _query(db_file, "PRAGMA integrity_check") == [("ok",)]
+    assert dict(_query(db_file, "SELECT file_path, grade FROM media_judgments")) == (
+        EXPECTED_GRADES
+    )
+    assert dict(_query(db_file, "SELECT file_path, grade FROM media_tombstones")) == (
+        EXPECTED_TOMB_GRADES
+    )
+    # The owner's view still works.
+    assert _query(db_file, "SELECT file_path FROM old_rejects ORDER BY 1") == [
+        ("/gone/both.png",),
+        ("/gone/reject.png",),
+    ]
+    messages = [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name == "metascan.core.database_sqlite"
+    ]
+    [warning] = [m for level, m in messages if level >= logging.WARNING]
+    assert "old_rejects" in warning  # SQLite's reason
+    assert "media_judgments" in warning and "media_tombstones" in warning
+    assert "/lib/" not in warning and "/gone/" not in warning
+    [counts] = [
+        m for _, m in messages if m.startswith("Database upgraded to version 6")
+    ]
+    assert "old reject columns dropped 0" in counts
+
+    # Kept-column mode: a new tombstone fills the NOT NULL copy with 0.
+    db.save_media(_media("/lib/new.png"))
+    db.set_grade("/lib/new.png", "fail")
+    assert db.delete_media(Path("/lib/new.png"))
+    assert [
+        (t["grade"], t["passed"])
+        for t in db.list_tombstones()
+        if t["file_path"] == "/lib/new.png"
+    ] == [("fail", 0)]
+
+    # Done once: the next start neither retries the drop nor warns again.
+    caplog.clear()
+    DatabaseManager(db_dir)
+    assert _user_version(db_file) == 6
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    for table in ("media_judgments", "media_tombstones"):
+        assert "passed" in _columns(db_file, table)

@@ -2333,8 +2333,13 @@ class DatabaseManager:
         dropped, so nothing can read the old reject flag as a grade again
         -- on an SQLite older than ``DROP_COLUMN_MIN_SQLITE`` they stay,
         never read (``_legacy_tombstone_fill``); the backup keeps them
-        either way. A table made by this code never had the column (a
-        database older than v5 upgraded now): it has no reject to map.
+        either way. The drops run in a savepoint: DROP COLUMN refuses a
+        column something else in the schema still names (a view, a
+        trigger, an index), and that refusal would come back on every
+        start, so it undoes both drops instead, keeps the columns (unread,
+        as on an old SQLite), logs a WARNING and lets the upgrade complete.
+        A table made by this code never had the column (a database older
+        than v5 upgraded now): it has no reject to map.
 
         On any failure none of this is written (user_version stays 5, the
         columns are back) and ``MigrationError`` is raised; the next open
@@ -2345,6 +2350,8 @@ class DatabaseManager:
         ts = now.isoformat()
         can_drop = _can_drop_columns()
         legacy: List[str] = []
+        dropped = 0
+        drop_error: Optional[sqlite3.OperationalError] = None
         try:
             conn.execute("BEGIN IMMEDIATE")
             if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 6:
@@ -2397,9 +2404,19 @@ class DatabaseManager:
                 (ts,),
             ).rowcount
             # The old reject flag has been read for the last time.
-            if can_drop:
-                for table in legacy:
-                    conn.execute(f"ALTER TABLE {table} DROP COLUMN passed")
+            if can_drop and legacy:
+                conn.execute("SAVEPOINT v6_drop_passed")
+                try:
+                    for table in legacy:
+                        conn.execute(f"ALTER TABLE {table} DROP COLUMN passed")
+                except sqlite3.OperationalError as exc:
+                    if not conn.in_transaction:
+                        raise  # it took the transaction with it: fail the upgrade
+                    conn.execute("ROLLBACK TO v6_drop_passed")
+                    drop_error = exc
+                else:
+                    dropped = len(legacy)
+                conn.execute("RELEASE v6_drop_passed")
             conn.execute("PRAGMA user_version = 6")
             counts = self._v6_counts(conn)
             conn.commit()
@@ -2431,8 +2448,15 @@ class DatabaseManager:
             counts["tomb_pass"],
             counts["tomb_fail"],
             vectors,
-            len(legacy) if can_drop else 0,
+            dropped,
         )
+        if drop_error is not None:
+            logger.warning(
+                "Could not drop the old reject columns (%s): they stay in %s, "
+                "never read",
+                drop_error,
+                ", ".join(legacy),
+            )
         if legacy and not can_drop:
             logger.info(
                 "SQLite %s cannot drop a column safely (%s or newer can): the "
