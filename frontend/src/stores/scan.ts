@@ -34,6 +34,11 @@ export const useScanStore = defineStore('scan', () => {
   // Scan results
   const processedCount = ref(0)
   const staleRemoved = ref(0)
+  // Scan folders the run could not see (missing, unreadable, or the empty
+  // mount point of a drive that is not mounted): the complete event's
+  // missing_folders. After a full clean their images' ratings are pending.
+  const missingFolders = ref<string[]>([])
+  const runWasFullClean = ref(false)
 
   // Embedding state
   const embeddingPhase = ref<'idle' | 'building' | 'complete' | 'error'>('idle')
@@ -64,6 +69,8 @@ export const useScanStore = defineStore('scan', () => {
     switch (event) {
       case 'started':
         phase.value = 'scanning'
+        runWasFullClean.value = data.full_clean === true
+        missingFolders.value = []
         break
       case 'progress':
         phase.value = 'scanning'
@@ -94,6 +101,9 @@ export const useScanStore = defineStore('scan', () => {
         }
         processedCount.value = (data.processed as number) || 0
         staleRemoved.value = (data.stale_removed as number) || 0
+        missingFolders.value = Array.isArray(data.missing_folders)
+          ? (data.missing_folders as string[])
+          : []
         break
       case 'error':
         phase.value = 'error'
@@ -173,10 +183,19 @@ export const useScanStore = defineStore('scan', () => {
     currentFile.value = ''
     processedCount.value = 0
     staleRemoved.value = 0
-    await startScan({
-      full_cleanup: fullCleanup.value,
-      full_clean: scanMode.value === 'full_clean',
-    })
+    missingFolders.value = []
+    try {
+      await startScan({
+        full_cleanup: fullCleanup.value,
+        full_clean: scanMode.value === 'full_clean',
+      })
+    } catch (e) {
+      // A refused start never reaches the WebSocket, e.g. 409
+      // scan_folders_missing (a full clean with a scan folder missing):
+      // ApiError carries the server's message.
+      phase.value = 'error'
+      errorMessage.value = (e as Error).message
+    }
   }
 
   async function cancel() {
@@ -194,6 +213,7 @@ export const useScanStore = defineStore('scan', () => {
     currentFile.value = ''
     processedCount.value = 0
     staleRemoved.value = 0
+    missingFolders.value = []
   }
 
   async function startEmbeddingBuild(rebuild = false) {
@@ -235,6 +255,8 @@ export const useScanStore = defineStore('scan', () => {
     currentFile,
     processedCount,
     staleRemoved,
+    missingFolders,
+    runWasFullClean,
     embeddingPhase,
     embeddingCurrent,
     embeddingTotal,
