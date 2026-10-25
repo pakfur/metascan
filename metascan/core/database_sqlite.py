@@ -2520,11 +2520,7 @@ class DatabaseManager:
                 "fails the same way, keep the database"
                 f"{' and the backup' if backup else ''} and report this message."
             ) from exc
-        logger.info(
-            "Database upgraded to version 6 (pass/fail grades): favorites -> "
-            "pass %d (judgment rows created %d), rejects -> fail %d, "
-            "tombstones -> pass %d / fail %d, tombstone vectors copied %d, "
-            "old reject columns dropped %d",
+        numbers = (
             counts["pass"],
             created,
             counts["fail"],
@@ -2532,6 +2528,15 @@ class DatabaseManager:
             counts["tomb_fail"],
             vectors,
             dropped,
+        )
+        # All zeros on a new database: nothing to announce.
+        logger.log(
+            logging.INFO if any(numbers) else logging.DEBUG,
+            "Database upgraded to version 6 (pass/fail grades): favorites -> "
+            "pass %d (judgment rows created %d), rejects -> fail %d, "
+            "tombstones -> pass %d / fail %d, tombstone vectors copied %d, "
+            "old reject columns dropped %d",
+            *numbers,
         )
         if drop_error is not None:
             logger.warning(
