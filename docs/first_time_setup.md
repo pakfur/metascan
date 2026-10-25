@@ -249,7 +249,7 @@ cd ..
 For contributors, also do a one-time type-check pass to make sure your install is clean:
 
 ```bash
-cd frontend && npx vue-tsc --noEmit && cd ..
+cd frontend && npx vue-tsc -b && cd ..
 ```
 
 ## 8. First run
