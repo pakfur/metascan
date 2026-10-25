@@ -2422,10 +2422,14 @@ class DatabaseManager:
         A table made by this code never had the column (a database older
         than v5 upgraded now): it has no reject to map.
 
-        On any failure none of this is written (user_version stays 5, the
-        columns are back) and ``MigrationError`` is raised; the next open
-        retries. Concurrent managers are safe: the version is re-read
-        under the write lock."""
+        On any other failure none of this is written (user_version stays
+        5, the columns are back) and ``MigrationError`` is raised; the next
+        open retries. Once the rollback is confirmed (``_roll_back_v6``) the
+        attempt's backup is deleted -- the database still matches it -- so
+        a failure that repeats never piles up copies; an unconfirmed one
+        keeps it and the message names it. Concurrent managers are safe:
+        the version is re-read under the write lock, and
+        ``backup_before_v6`` takes one backup at a time."""
         now = datetime.now(timezone.utc)
         backup = backup_before_v6(self.db_file, now)
         ts = now.isoformat()
