@@ -513,6 +513,39 @@ def test_v6_skips_the_backup_with_nothing_to_migrate(tmp_path):
     assert _backups(tmp_path / "fresh") == []
 
 
+def _v6_count_lines(caplog) -> List[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.getMessage().startswith("Database upgraded to version 6")
+    ]
+
+
+def test_v6_logs_its_counts_at_info_only_when_it_changed_something(tmp_path, caplog):
+    # A brand-new database: every count is zero, so the line is DEBUG -- a
+    # fresh install does not announce an upgrade.
+    caplog.set_level(logging.DEBUG, logger="metascan.core.database_sqlite")
+    DatabaseManager(tmp_path / "fresh")
+    [line] = _v6_count_lines(caplog)
+    assert line.levelno == logging.DEBUG
+    assert "favorites -> pass 0" in line.getMessage()
+
+    # A v5 database with no ratings still loses its old reject columns.
+    caplog.clear()
+    _build_v5_db(tmp_path / "unrated", live={"/lib/a.png": (0, None)})
+    DatabaseManager(tmp_path / "unrated")
+    [line] = _v6_count_lines(caplog)
+    dropped = 2 if database_sqlite._can_drop_columns() else 0
+    assert line.levelno == (logging.INFO if dropped else logging.DEBUG)
+
+    # Ratings mapped: INFO (the counts themselves are checked above).
+    caplog.clear()
+    _build_v5_db(tmp_path / "rated")
+    DatabaseManager(tmp_path / "rated")
+    [line] = _v6_count_lines(caplog)
+    assert line.levelno == logging.INFO
+
+
 def test_backup_never_overwrites_an_existing_backup(tmp_path):
     db_file = _build_v5_db(tmp_path / "db")
     now = datetime(2026, 10, 24, 17, 30, 5, tzinfo=timezone.utc)
