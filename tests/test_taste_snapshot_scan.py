@@ -491,6 +491,17 @@ def _wire_prune_guard(db):
     db.set_lineage_prune_guard(ts.lineage_prune_guard(Path(db.db_path)))
 
 
+def _out(db, name):
+    """A generated file's path in a real ComfyUI output folder next to the
+    test database (the file itself is not created). The re-ingest tells a
+    file gone from a folder that is there (vanished) from one whose folder
+    can't be reached (unmounted, keeps the full clean unfinished), so a
+    fictitious /lib/t2i/ path would never finish a full clean."""
+    path = Path(db.db_path).parent / "comfy_output" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 def _seed_generations(db, images, clips):
     """Writer-made T2I images, and I2V clips made from SRC."""
     db.save_media(_media(SRC))
@@ -509,8 +520,8 @@ def test_full_clean_keeps_the_lineage_of_t2i_images_and_i2v_clips(monkeypatch, d
     one. An image or clip that comes back keeps its lineage row; a graded one
     that vanished is tombstoned WITH its lineage, read from the row the
     listings left alone."""
-    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
-    clip_back, clip_gone = "/lib/i2v/back.mp4", "/lib/i2v/gone.mp4"
+    back, gone = _out(db, "t2i/back.png"), _out(db, "t2i/gone.png")
+    clip_back, clip_gone = _out(db, "i2v/back.mp4"), _out(db, "i2v/gone.mp4")
     _seed_generations(db, [back, gone], [clip_back, clip_gone])
     db.set_grade(back, "fail", now=T0)
     db.set_grade(gone, "pass", now=T0)
@@ -565,7 +576,7 @@ def test_full_clean_with_nothing_to_snapshot_pauses_the_prune_too(monkeypatch, d
     """An unrated library still gets a pending file (empty lists) before the
     truncate, and the run is marked as running from before its snapshot to
     after its restore."""
-    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    back, gone = _out(db, "t2i/back.png"), _out(db, "t2i/gone.png")
     _seed_generations(db, [back, gone], [])
     _wire_prune_guard(db)
     seen = {}
@@ -608,7 +619,7 @@ def test_full_clean_with_nothing_to_snapshot_pauses_the_prune_too(monkeypatch, d
 def test_a_cancelled_full_clean_keeps_the_lineage_until_one_completes(monkeypatch, db):
     """A cancel leaves a graded image pending: its lineage row outlives every
     listing until a later full clean tombstones it with that lineage."""
-    gone = "/lib/t2i/gone.png"
+    gone = _out(db, "t2i/gone.png")
     _seed_generations(db, [gone], [])
     db.set_grade(gone, "pass", now=T0)
     _wire_prune_guard(db)
@@ -634,7 +645,7 @@ def test_a_cancelled_full_clean_keeps_the_lineage_until_one_completes(monkeypatc
 
 
 def test_a_shutdown_mid_full_clean_keeps_the_prune_paused(monkeypatch, db):
-    gone = "/lib/t2i/gone.png"
+    gone = _out(db, "t2i/gone.png")
     _seed_generations(db, [gone], [])
     db.set_grade(gone, "pass", now=T0)
     _wire_prune_guard(db)
@@ -811,9 +822,9 @@ def test_a_cancelled_full_clean_keeps_unrated_lineage_until_a_scan_completes(
     cancel, so nothing is pending, but the unrated T2I images and I2V clips
     were not rescanned yet. Their rows outlive every listing until a scan
     of every folder completes; then the ones still gone are pruned."""
-    rated = "/lib/t2i/rated.png"
-    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
-    clip_back, clip_gone = "/lib/i2v/back.mp4", "/lib/i2v/gone.mp4"
+    rated = _out(db, "t2i/rated.png")
+    back, gone = _out(db, "t2i/back.png"), _out(db, "t2i/gone.png")
+    clip_back, clip_gone = _out(db, "i2v/back.mp4"), _out(db, "i2v/gone.mp4")
     _seed_generations(db, [rated, back, gone], [clip_back, clip_gone])
     db.set_grade(rated, "pass", now=T0)
     _wire_prune_guard(db)
@@ -863,8 +874,8 @@ def test_a_shutdown_mid_full_clean_keeps_the_marker_across_a_restart(monkeypatch
     consumes it. The marker still keeps the rows of what was not rescanned."""
     from backend.main import _install_lineage_prune_guard
 
-    back = "/lib/t2i/back.png"
-    clip = "/lib/i2v/back.mp4"
+    back = _out(db, "t2i/back.png")
+    clip = _out(db, "i2v/back.mp4")
     _seed_generations(db, [back], [clip])
     _wire_prune_guard(db)
 
@@ -895,7 +906,7 @@ def test_a_shutdown_mid_full_clean_keeps_the_marker_across_a_restart(monkeypatch
     "ending", ["scanner fails", "cancelled", "cancelled in the last folder"]
 )
 def test_a_failed_or_cancelled_full_clean_keeps_the_marker(monkeypatch, db, ending):
-    _seed_generations(db, ["/lib/t2i/back.png"], [])
+    _seed_generations(db, [_out(db, "t2i/back.png")], [])
     _wire_prune_guard(db)
 
     class Scanner:
@@ -922,7 +933,7 @@ def test_a_failed_or_cancelled_full_clean_keeps_the_marker(monkeypatch, db, endi
 def test_a_scan_that_misses_a_configured_folder_keeps_the_marker(monkeypatch, db):
     """A folder it could not see (an unmounted drive) was not walked: its
     files may come back, so the full clean is still unfinished."""
-    _seed_generations(db, ["/lib/t2i/back.png"], [])
+    _seed_generations(db, [_out(db, "t2i/back.png")], [])
     ts.write_full_clean_marker(Path(db.db_path))
 
     class Unmounted:
@@ -943,7 +954,7 @@ def test_a_scan_that_misses_a_configured_folder_keeps_the_marker(monkeypatch, db
 def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
     monkeypatch, db, caplog
 ):
-    back, gone = "/lib/t2i/back.png", "/lib/t2i/gone.png"
+    back, gone = _out(db, "t2i/back.png"), _out(db, "t2i/gone.png")
     _seed_generations(db, [back, gone], [])
     _wire_prune_guard(db)
     ts.write_full_clean_marker(Path(db.db_path))  # an unfinished full clean
@@ -1091,3 +1102,254 @@ def test_full_clean_reingests_i2v_clips_outside_the_scan_folders(
     assert _lineage(row, I2V_LINEAGE) == I2V_LINEAGE
     assert row["grade"] == "fail"
     assert db.list_tombstones() == []
+
+
+# ----------------------------------------------------------------------
+# The re-ingest must succeed for the full clean to finish (re-review r1)
+# ----------------------------------------------------------------------
+
+
+def _generated_library(monkeypatch, tmp_path, db, scanner_cls=None):
+    """A library folder with one photo, and three T2I images in a ComfyUI
+    output folder outside it -- ingested and recorded the way ComfyClient
+    does, img0 graded ✓ and img1 ✗. The scan route is wired to the real
+    folder (no Path.exists patch) and, unless given another, the real
+    Scanner."""
+    from metascan.core.scanner import Scanner
+
+    library = tmp_path / "library"
+    _png(library / "photo.png")
+    out = tmp_path / "comfy_output" / "t2i"
+    files = [_png(out / f"img{n}.png") for n in range(3)]
+    scanner = Scanner(db)
+    scanner.scan_directory(str(library))
+    for n, path in enumerate(files):
+        assert scanner.ingest_file(path) is not None
+        db.create_t2i_image(file_path=str(path), variant_index=n, **T2I_LINEAGE)
+    db.set_grade(str(files[0]), "pass", now=T0)
+    db.set_grade(str(files[1]), "fail", now=T0)
+    _wire_prune_guard(db)
+
+    class Library:
+        filepath = str(library)
+        search_subfolders = True
+
+    async def quiet(*a, **k):
+        pass
+
+    monkeypatch.setattr(scan_api, "get_db", lambda: db)
+    monkeypatch.setattr(scan_api, "get_thumbnail_cache", lambda: None)
+    monkeypatch.setattr(scan_api, "load_app_config", lambda: {})
+    monkeypatch.setattr(scan_api, "get_directories", lambda c: [Library()])
+    monkeypatch.setattr(scan_api.ws_manager, "broadcast", quiet)
+    monkeypatch.setattr(scan_api, "Scanner", scanner_cls or Scanner)
+    return files
+
+
+def _in_library(db, files):
+    paths = db.get_existing_file_paths()
+    return [f.name for f in files if str(f) in paths]
+
+
+def _run(full_clean):
+    try:
+        asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=full_clean))
+    finally:
+        scan_api._cancel_requested = False
+
+
+def _unfinished(db, files):
+    """The full clean did not finish: marker kept, nothing tombstoned, every
+    generated row kept through a listing."""
+    assert _marker_exists(db)
+    assert db.list_tombstones() == []
+    db.list_t2i_images()
+    assert _lineage_rows(db) == (len(files), 0)
+
+
+def _all_back(db, files):
+    assert _in_library(db, files) == [f.name for f in files]
+    images = db.list_t2i_images()
+    assert [_lineage(r, T2I_LINEAGE) for r in images] == [T2I_LINEAGE] * 3
+    assert {r["file_name"]: r["grade"] for r in images} == {
+        "img0.png": "pass",
+        "img1.png": "fail",
+        "img2.png": None,
+    }
+    assert not _marker_exists(db) and _pending(db) is None
+    assert db.list_tombstones() == []
+
+
+def test_an_ordinary_scan_finishes_a_cancelled_full_clean(monkeypatch, tmp_path, db):
+    """P1. A cancel during the last folder skips the re-ingest; the marker
+    stays. The next ordinary scan sees the marker, re-ingests the generated
+    output, puts the pending grades back and clears the marker."""
+    from metascan.core.scanner import Scanner
+
+    class CancelInTheLastFolder(Scanner):
+        def scan_directory(self, *a, **k):
+            n = super().scan_directory(*a, **k)
+            scan_api._cancel_requested = True
+            return n
+
+    files = _generated_library(monkeypatch, tmp_path, db, CancelInTheLastFolder)
+    real_query = db.generated_paths_without_media
+    queried = []
+
+    def spy_query():
+        queried.append(1)
+        return real_query()
+
+    monkeypatch.setattr(db, "generated_paths_without_media", spy_query)
+    _run(full_clean=True)
+    assert queried == []  # no re-ingest work at all after a cancel
+    assert _in_library(db, files) == []
+    _unfinished(db, files)
+    assert sorted(Path(p).name for p in _pending_paths(db)) == ["img0.png", "img1.png"]
+
+    monkeypatch.setattr(scan_api, "Scanner", Scanner)
+    _run(full_clean=False)
+    assert queried == [1]
+    _all_back(db, files)
+
+
+def test_a_cancel_during_the_reingest_stops_it(monkeypatch, tmp_path, db):
+    """P2. The cancel is checked between files: one re-ingested, then stop."""
+    from metascan.core.scanner import Scanner
+
+    reingested = []
+
+    class CancelAfterOneFile(Scanner):
+        def ingest_file(self, path):
+            media = super().ingest_file(path)
+            if "comfy_output" in str(path):
+                reingested.append(Path(path).name)
+                scan_api._cancel_requested = True
+            return media
+
+    files = _generated_library(monkeypatch, tmp_path, db, CancelAfterOneFile)
+    _run(full_clean=True)
+    assert reingested == ["img0.png"]
+    _unfinished(db, files)
+
+
+@pytest.mark.parametrize("failure", ["raises", "unreadable"])
+def test_a_generated_file_that_fails_to_ingest_keeps_the_full_clean_unfinished(
+    monkeypatch, tmp_path, db, caplog, failure
+):
+    """P3. img1 is still on disk but does not come back (the ingest raises,
+    or the file is no image any more): the others do, and the full clean
+    stays unfinished -- img1 keeps its row and its pending ✗, no tombstone.
+    A later scan that can read it finishes the clean."""
+    from metascan.core.scanner import Scanner
+
+    class LockedFile(Scanner):
+        def ingest_file(self, path):
+            if Path(path).name == "img1.png" and "comfy_output" in str(path):
+                raise OSError("locked by another process")
+            return super().ingest_file(path)
+
+    files = _generated_library(
+        monkeypatch, tmp_path, db, LockedFile if failure == "raises" else None
+    )
+    good = files[1].read_bytes()
+    if failure == "unreadable":
+        files[1].write_bytes(b"not an image")
+    with caplog.at_level(logging.DEBUG, logger="backend.api.scan"):
+        _run(full_clean=True)
+    assert _in_library(db, files) == ["img0.png", "img2.png"]
+    _unfinished(db, files)
+    assert [Path(p).name for p in _pending_paths(db)] == ["img1.png"]
+    # The scan route's own log: counts and exception types, never a path.
+    messages = " ".join(
+        r.getMessage() for r in caplog.records if r.name == "backend.api.scan"
+    )
+    assert "re-ingested" in messages
+    assert "img1" not in messages and "locked by another" not in messages
+
+    files[1].write_bytes(good)
+    monkeypatch.setattr(scan_api, "Scanner", Scanner)
+    _run(full_clean=False)
+    _all_back(db, files)
+
+
+def test_a_failed_reingest_step_keeps_the_full_clean_unfinished(
+    monkeypatch, tmp_path, db, caplog
+):
+    """P4. The step itself fails: nothing came back, so nothing may be
+    tombstoned or pruned. The log names the exception type only."""
+    files = _generated_library(monkeypatch, tmp_path, db)
+    real = db.generated_paths_without_media
+
+    def boom():
+        raise RuntimeError("disk I/O error at /secret/path")
+
+    monkeypatch.setattr(db, "generated_paths_without_media", boom)
+    with caplog.at_level(logging.DEBUG, logger="backend.api.scan"):
+        _run(full_clean=True)
+    assert _in_library(db, files) == []
+    _unfinished(db, files)
+    messages = " ".join(
+        r.getMessage() for r in caplog.records if r.name == "backend.api.scan"
+    )
+    assert "RuntimeError" in messages and "/secret/path" not in messages
+
+    monkeypatch.setattr(db, "generated_paths_without_media", real)
+    _run(full_clean=False)
+    _all_back(db, files)
+
+
+def test_an_unmounted_output_folder_keeps_the_full_clean_unfinished(
+    monkeypatch, tmp_path, db
+):
+    """P5. The output folder is missing (an unmounted volume): its files are
+    unreachable, not vanished -- nothing is tombstoned, the marker stays.
+    Mounted again, the next scan brings them back."""
+    files = _generated_library(monkeypatch, tmp_path, db)
+    out = files[0].parent
+    unmounted = out.parent / "t2i_unmounted"
+    out.rename(unmounted)
+    _run(full_clean=True)
+    _unfinished(db, files)
+    assert sorted(Path(p).name for p in _pending_paths(db)) == ["img0.png", "img1.png"]
+
+    unmounted.rename(out)  # mounted again
+    _run(full_clean=False)
+    _all_back(db, files)
+
+
+def test_an_ordinary_scan_reingests_nothing_without_an_unfinished_full_clean(
+    monkeypatch, tmp_path, db
+):
+    """Outside a full clean a dangling row means the file left the library:
+    an ordinary scan never adds it back, even if a file is at that path."""
+    files = _generated_library(monkeypatch, tmp_path, db)
+    assert db.delete_media(files[2])  # its row now dangles; the file stays
+    _run(full_clean=False)
+    assert _in_library(db, files) == ["img0.png", "img1.png"]
+    assert [r["file_name"] for r in db.list_t2i_images()] == ["img1.png", "img0.png"]
+    assert _lineage_rows(db) == (2, 0)  # pruned as before
+
+
+def test_a_vanished_generated_file_is_never_ingested(monkeypatch, tmp_path, db):
+    """A generated file gone from a folder that is still there is gone: it
+    is not handed to the ingest, it does not hold the full clean back, and
+    it is tombstoned with its lineage."""
+    from metascan.core.scanner import Scanner
+
+    attempted = []
+
+    class Recording(Scanner):
+        def ingest_file(self, path):
+            if "comfy_output" in str(path):
+                attempted.append(Path(path).name)
+            return super().ingest_file(path)
+
+    files = _generated_library(monkeypatch, tmp_path, db, Recording)
+    files[1].unlink()
+    _run(full_clean=True)
+    assert attempted == ["img0.png", "img2.png"]
+    assert not _marker_exists(db)
+    [t] = db.list_tombstones()
+    assert (Path(t["file_path"]).name, t["grade"]) == ("img1.png", "fail")
+    assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
