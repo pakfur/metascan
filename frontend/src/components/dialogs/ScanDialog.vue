@@ -117,6 +117,16 @@ const outputOf = computed(() => (oneUnreachable.value ? 'its' : 'their'))
 const outputFolderWord = computed(() => (oneUnreachable.value ? 'folder' : 'folders'))
 const outputGoneFolder = computed(() => (oneUnreachable.value ? 'the folder' : 'a folder'))
 
+// Generated files on disk that can't be read or imported: the event lists
+// the first 50 (sorted) and counts them all.
+const oneUnreadable = computed(() => scanStore.unreadableOutputCount === 1)
+const unreadableMore = computed(() =>
+  Math.max(0, scanStore.unreadableOutputCount - scanStore.unreadableOutput.length),
+)
+const unreadableKeep = computed(() => (oneUnreadable.value ? 'It keeps' : 'They keep'))
+const unreadableOf = computed(() => (oneUnreadable.value ? 'its' : 'their'))
+const unreadableEach = computed(() => (oneUnreadable.value ? 'it' : 'each one'))
+
 function handleClose() {
   scanStore.reset()
   scanStore.resetEmbedding()
@@ -301,6 +311,40 @@ function handleClose() {
             run Full clean &amp; rescan.
           </p>
         </div>
+        <div v-if="scanStore.unreadableOutputCount > 0" class="missing-note">
+          <p v-if="oneUnreadable">
+            A generated image or clip is on disk but can't be read or imported:
+          </p>
+          <p v-else>
+            {{ scanStore.unreadableOutputCount.toLocaleString() }} generated images or
+            clips are on disk but can't be read or imported:
+          </p>
+          <ul class="file-list">
+            <li v-for="(file, i) in scanStore.unreadableOutput" :key="i" :title="file">
+              {{ file }}
+            </li>
+          </ul>
+          <p v-if="unreadableMore > 0" class="more">
+            and {{ unreadableMore.toLocaleString() }} more
+          </p>
+          <p>
+            {{ unreadableKeep }} the full clean unfinished: {{ unreadableOf }}
+            ratings are kept and wait. Delete {{ unreadableEach }}, or move it out
+            of the output folder (or repair it), then run Full clean &amp; rescan.
+            A file that only failed this time (a busy disk) comes back by itself
+            at the next scan.
+          </p>
+        </div>
+        <div v-if="scanStore.outputCheckFailed" class="missing-note">
+          <p>
+            The Text to Image and Image to Video output couldn't be checked (an
+            error: see the server log).
+          </p>
+          <p>
+            The ratings of the images and clips that did not come back are kept
+            and wait: the next scan tries again.
+          </p>
+        </div>
         <div class="dialog-actions">
           <button class="btn-secondary" @click="handleClose">Close</button>
         </div>
@@ -425,6 +469,16 @@ h3 { margin: 0 0 12px; font-size: 18px; color: var(--text-color); }
 .missing-note + .missing-note { margin-top: 8px; }
 .missing-note ul { margin: 0; padding-left: 18px; }
 .missing-note li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Up to 50 file paths: a box of its own that scrolls, each path wrapped
+   whole (its file name is the end of it). */
+.missing-note .file-list {
+  max-height: 160px; overflow-y: auto; scrollbar-gutter: stable;
+  margin: 4px 0; padding: 4px 6px 4px 22px;
+  border: 1px solid var(--surface-border); border-radius: 4px;
+  background: var(--surface-section); font-size: 12px;
+}
+.missing-note .file-list li { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.missing-note .more { color: var(--text-color-secondary); }
 
 .dialog-actions { display: flex; gap: 10px; margin-top: 16px; }
 .btn-primary, .btn-secondary, .btn-danger {
