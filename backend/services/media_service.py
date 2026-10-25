@@ -80,6 +80,10 @@ class MediaService:
             self.db.set_favorite, Path(file_path), is_favorite
         )
 
+    async def get_grade(self, file_path: str) -> Optional[str]:
+        """✓ ``pass`` / ✗ ``fail`` / None (``DatabaseManager.get_grade``)."""
+        return await asyncio.to_thread(self.db.get_grade, file_path)
+
     async def toggle_favorite(self, file_path: str) -> bool:
         """Flip ★ only (see ``set_favorite``)."""
         return await asyncio.to_thread(self.db.toggle_favorite, Path(file_path))
@@ -116,13 +120,14 @@ class MediaService:
         rows = await asyncio.to_thread(self.db.get_tags_for_file, Path(file_path))
         return [{"name": name, "source": source} for name, source in rows]
 
-    def media_to_summary_dict(self, media: Media) -> dict:
+    def media_to_summary_dict(self, media: Media, grade: Optional[str] = None) -> dict:
         """Light payload for list-style responses (grid + viewer).
 
         Shape matches ``DatabaseManager.get_all_media_summaries`` — only
-        materialized columns — so PATCH responses are interchangeable with
-        items from the list endpoint. Heavier detail fields (prompt,
-        tags, loras, ...) still arrive through ``GET /api/media/{path}``.
+        materialized columns, plus the item's ``grade`` (``get_grade``; not
+        on ``Media``) — so PATCH responses are interchangeable with items
+        from the list endpoint. Heavier detail fields (prompt, tags, loras,
+        ...) still arrive through ``GET /api/media/{path}``.
         """
         return {
             "file_path": str(media.file_path),
@@ -144,6 +149,7 @@ class MediaService:
             "gps_latitude": media.gps_latitude,
             "gps_longitude": media.gps_longitude,
             "orientation": media.orientation,
+            "grade": grade,
         }
 
     def media_to_dict(self, media: Media) -> dict:

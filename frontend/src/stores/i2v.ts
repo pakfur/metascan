@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { Media } from '../types/media'
+import type { JudgmentState } from '../types/judgments'
 import type { I2vDraft, I2vConfig, I2vFormState, I2vJobChip, I2vTemplate, I2vVideo } from '../types/i2v'
 import { fetchI2vConfig, listI2vTemplates, listI2vVideos, updateI2vFormState } from '../api/i2v'
 import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
@@ -201,6 +202,16 @@ export const useI2vStore = defineStore('i2v', () => {
     }
   }
 
+  // Follow every judgment the result viewer gets back (F / P / X): ★ and the
+  // grade, so the strip's star and ✓ / ✗ badge match.
+  function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
+    for (const v of videos.value) {
+      if (norm(v.file_path) !== norm(path)) continue
+      if (v.is_favorite !== state.favorite) v.is_favorite = state.favorite
+      if ((v.grade ?? null) !== state.grade) v.grade = state.grade
+    }
+  }
+
   // Autosave target for the dialog. Writes the clip's EDITABLE form state
   // only, then mirrors the server's merged result onto the local row so a
   // later click on that clip loads what was just saved.
@@ -234,6 +245,7 @@ export const useI2vStore = defineStore('i2v', () => {
     handleI2vEvent,
     toggleFavorite,
     applyFavoriteFlag,
+    applyJudgment,
     saveFormState,
   }
 })

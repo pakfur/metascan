@@ -152,6 +152,8 @@ function togglePause() {
   }
 }
 
+// F / the ★ button: ★ only (the legacy media PATCH). The slideshow has no
+// grading, and a favorite never sets or clears a grade.
 function toggleFavorite() {
   if (!current.value) return
   mediaStore.toggleFavorite(current.value)

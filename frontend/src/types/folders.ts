@@ -3,6 +3,7 @@
 // trivially derivable from a Media summary + detail record.
 export type RuleField =
   | 'favorite'
+  | 'grade'
   | 'type'
   | 'model'
   | 'filename'

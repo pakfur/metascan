@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { REASONS } from '../../types/judgments'
-import type { CategoryRef, JudgmentState, Reason } from '../../types/judgments'
+import type { CategoryRef, Grade, JudgmentState, Reason } from '../../types/judgments'
 
-// Display only: the media viewer owns every API call and key binding and
-// passes the current item's judgment down. The default slot holds the
-// category picker while it is open.
+// The media viewer owns every API call and key binding and passes the
+// current item's judgment down. The rail's ★ / ✓ / ✗ buttons are the mouse
+// twins of F / P / X: they only emit, and the viewer runs the same toggle
+// as the key. The default slot holds the category picker while it is open.
 const props = defineProps<{
   judgment: JudgmentState | null
   hint: string | null
@@ -15,14 +16,19 @@ const props = defineProps<{
   score: number | null
 }>()
 
-// ★ favorite and the grade are independent: both can show at once.
+const emit = defineEmits<{
+  favorite: []
+  grade: [grade: Grade]
+}>()
+
+// ★ favorite and the grade are independent: both can be on at once.
 const favorite = computed(() => props.judgment?.favorite ?? false)
 const grade = computed(() => props.judgment?.grade ?? null)
 
 const reasonsHeader = computed(() => {
   if (grade.value === 'pass') return 'worked on…'
   if (grade.value === 'fail') return 'missed on…'
-  return 'reasons (X first)'
+  return 'reasons (P or X first)'
 })
 
 function isOn(reason: Reason): boolean {
@@ -36,12 +42,46 @@ function isOn(reason: Reason): boolean {
       📌 {{ sticky.name }}
     </div>
 
-    <span v-if="favorite" class="marker fav">★ Favorite</span>
-    <span v-if="grade === 'pass'" class="marker grade-pass">✓ Pass</span>
-    <span v-else-if="grade === 'fail'" class="marker grade-fail">✗ Fail</span>
-    <span v-else class="marker none">No grade</span>
+    <!-- mousedown.prevent: a click must not move focus off the viewer, or
+         the next key press would land on the button. -->
+    <button
+      type="button"
+      class="marker toggle fav"
+      :class="{ on: favorite }"
+      :aria-pressed="favorite"
+      title="★ Favorite (F): to look at again. Never trains anything."
+      @mousedown.prevent
+      @click="emit('favorite')"
+    >
+      <span class="k">F</span>★ Favorite
+    </button>
+    <div class="grade-group" role="group" aria-label="Grade">
+      <button
+        type="button"
+        class="marker toggle grade-pass"
+        :class="{ on: grade === 'pass' }"
+        :aria-pressed="grade === 'pass'"
+        title="✓ Pass (P): the prompt did what you wanted. Press again to clear."
+        @mousedown.prevent
+        @click="emit('grade', 'pass')"
+      >
+        <span class="k">P</span>✓ Pass
+      </button>
+      <button
+        type="button"
+        class="marker toggle grade-fail"
+        :class="{ on: grade === 'fail' }"
+        :aria-pressed="grade === 'fail'"
+        title="✗ Fail (X): it didn't. Press again to clear."
+        @mousedown.prevent
+        @click="emit('grade', 'fail')"
+      >
+        <span class="k">X</span>✗ Fail
+      </button>
+      <span v-if="!grade" class="marker none">No grade</span>
+    </div>
 
-    <div v-if="score !== null" class="taste-score" title="Learned taste score (0–1)">
+    <div v-if="score !== null" class="taste-score" title="Taste score: the chance you'd pass this (0–1)">
       taste {{ score.toFixed(2) }}
     </div>
     <div v-if="judgment?.batch" class="batch-pos" title="Position in its T2I generation batch">
@@ -106,19 +146,55 @@ function isOn(reason: Reason): boolean {
   font-weight: 600;
 }
 
-.marker.fav {
+.grade-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ★ / ✓ / ✗: outlined while off, filled while on. */
+.marker.toggle {
+  align-self: stretch;
+  text-align: left;
+  font: inherit;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid #555;
+  color: #bbb;
+  cursor: pointer;
+}
+
+.marker.toggle:hover {
+  border-color: #888;
+  color: #eee;
+}
+
+.marker.toggle:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
+}
+
+.marker.fav.on {
   background: #c9a227;
+  border-color: #c9a227;
   color: #111;
 }
 
-.marker.grade-pass {
+.marker.grade-pass.on {
   background: #2f6f4f;
+  border-color: #3c9;
   color: #fff;
 }
 
-.marker.grade-fail {
+.marker.grade-fail.on {
   background: #6f2f2f;
+  border-color: #c55;
   color: #fff;
+}
+
+.marker.fav.on .k {
+  border-color: #6b5a1a;
+  color: #111;
 }
 
 .marker.none {

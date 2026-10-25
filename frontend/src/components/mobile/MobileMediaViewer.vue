@@ -61,6 +61,8 @@ function navigate(direction: number) {
   }
 }
 
+// ★ only (the legacy media PATCH): mobile has no grading, and a favorite
+// never sets or clears a grade.
 async function toggleFavorite() {
   if (current.value) await mediaStore.toggleFavorite(current.value)
 }

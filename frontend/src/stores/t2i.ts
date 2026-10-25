@@ -793,9 +793,10 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   /**
-   * Follow every judgment the result viewer gets back (its F / X / ☆): ★
-   * AND the grade, so the tile star matches and a scorecard tile leaves
-   * "judge to reveal". The library copy is already handled by the viewer.
+   * Follow every judgment the result viewer gets back (its F / P / X / ☆):
+   * ★ AND the grade, so the tile star and ✓ / ✗ badge match and a scorecard
+   * tile leaves "judge to reveal". The library copy is handled by the viewer
+   * (★ at once, the grade when it closes).
    */
   function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
     for (const image of images.value) {

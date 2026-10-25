@@ -42,8 +42,8 @@ useWebSocket('folders', (event, data) => {
   }
 })
 
-// Category mutations from any tab (or a sticky-category verdict) refresh the
-// list the media viewer's category picker reads.
+// Category mutations from any tab (or a sticky category riding a grade)
+// refresh the list the media viewer's category picker reads.
 useWebSocket('categories', (event) => {
   if (event === ('categories_changed' satisfies CategoriesWsEvent)) {
     categoriesStore.load().catch((e) => console.error('Failed to load categories', e))

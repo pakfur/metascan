@@ -1,3 +1,5 @@
+import type { Grade } from './judgments'
+
 export interface LoRA {
   lora_name: string
   lora_weight: number
@@ -44,6 +46,11 @@ export interface Media {
   duration: number | null
   similarity_score?: number
   hidden?: boolean
+  // ✓ pass / ✗ fail, null when ungraded (GET /api/media, PATCH): the tile
+  // badge and the `grade` smart-folder rule. Independent of is_favorite. It
+  // comes from media_judgments, not a media column, so it is read apart from
+  // the covering-index summary query (database_sqlite._SUMMARY_GRADES_SQL).
+  grade?: Grade | null
 
   // --- Photo summary fields (also returned by GET /api/media) ---
   camera_make?: string | null
