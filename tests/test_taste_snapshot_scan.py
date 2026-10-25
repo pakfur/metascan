@@ -945,7 +945,12 @@ def test_a_scan_that_misses_a_configured_folder_keeps_the_marker(monkeypatch, db
 
     _wire(monkeypatch, db, [])
     monkeypatch.setattr(scan_api, "get_directories", lambda c: [_DirCfg(), Unmounted()])
-    monkeypatch.setattr(scan_api.Path, "exists", lambda self: str(self) != "/unmounted")
+    # A folder's turn asks _probe_folder (test_scan_missing_folders).
+    monkeypatch.setattr(
+        scan_api,
+        "_probe_folder",
+        lambda path: scan_api.MISSING if path == "/unmounted" else scan_api.PRESENT,
+    )
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=False))
     assert _marker_exists(db)
 
