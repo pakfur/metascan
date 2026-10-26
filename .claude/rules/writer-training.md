@@ -99,6 +99,11 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `requirements-train.txt` pins `trl>=0.25.0,<0.26`; before widening, check
   `DPOConfig` still has `model_adapter_name` / `ref_adapter_name`
   (`writer_train_probe.probe_trl_reference_support` runs the same check for the gate).
+  It also caps `transformers<5`: TRL 0.25 decides which optional packages are
+  installed with transformers' private `_is_package_available`, which returns a
+  `(bool, version)` pair in 5.x even without `return_version`, so TRL takes every one
+  as installed and `trl.DPOTrainer` fails to import (it reaches for mergekit; SFT
+  happens not to). Lift both caps together.
 - **Data rules (`writer_dataset.py`).** Three example kinds (variant preference pairs,
   edit pairs -> DPO + SFT, hindsight SFT), and the ✓ / ✗ grade is the only label
   (`_grade`; ★, views and `seen_at` never reach the raw rows): a variant **wins** with
@@ -174,7 +179,10 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   piece: CUDA, a 32 GB card (`WRITER_TRAINING_MIN_VRAM_GB`, at max_seq 2048 with DPO's
   three passes; compared against `WRITER_TRAINING_VRAM_FLOOR_GB` = 30 because torch
   reports GiB and a 5090 shows 31.8), training deps, the TRL reference probe (skipped when the deps are
-  missing), base weights (every shard listed by the index), converter script. The
+  missing; it also loads `trl.SFTTrainer` and `trl.DPOTrainer`, which TRL imports
+  lazily, so a TRL that cannot work with the installed transformers is a gate reason
+  named by exception types and the transformers version, not a run that fails at
+  DPO), base weights (every shard listed by the index), converter script. The
   deps/TRL probe runs in a single-flight background subprocess per interpreter
   (`gate.checking`); only a passing answer is cached for the process, anything else
   (missing deps, old TRL, probe failures) for 60 s, and every finished probe emits

@@ -15,7 +15,13 @@
 torch>=2.7.0
 # Qwen3-VL (Qwen3VLForConditionalGeneration, model_type "qwen3_vl") landed
 # in transformers 4.57; ``dtype=`` in from_pretrained needs >= 4.56.
-transformers>=4.57.0
+# Capped below 5: TRL 0.25 decides which optional packages are installed
+# with transformers' private ``_is_package_available``, which in 5.x returns
+# a (bool, version) pair even when no version is asked for, so TRL takes
+# every one as installed and the DPO trainer fails to import (it reaches
+# for mergekit; SFT happens not to). The writer_training gate loads both
+# trainers to catch this. Lift the cap together with the trl cap below.
+transformers>=4.57.0,<5
 # Regex target_modules + disable_adapter() for the DPO reference.
 peft>=0.17.0
 # SFTConfig(completion_only_loss), conversational prompt/completion and
