@@ -179,6 +179,7 @@ A "ready" adapter that scores no better than the base is your call: delete it, o
 | Gate says dependencies are missing after installing | The check is cached per server; press **Re-check** in the training window |
 | "Requires 32 GB VRAM" | The feature needs a 32 GB card; there is no override |
 | TRL reason in the gate | Install the pinned version: `pip install -r requirements-train.txt` |
+| "trl … cannot load its trainers with transformers 5.x", or a run fails at the start of DPO with `RuntimeError, raised from ModuleNotFoundError at: mergekit_utils.py…` in the log | TRL 0.25 does not work with transformers 5. Run `pip install -r requirements-train.txt` (it installs the newest transformers 4.x), restart the server, and Resume the failed run: its SFT stage is kept |
 | Start says `gpu_busy` | The reasons name what is running (ComfyUI jobs, a T2I batch, an index build, and so on); wait or cancel it |
 | Resume says `worker_alive` or `worker_unverifiable` | A training process from before a crash is still running; the message gives the PID |
 | Base weights delete refused (`training_uses_base`) | A running, paused or failed run uses them; cancel those runs first |

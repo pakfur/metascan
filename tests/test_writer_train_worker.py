@@ -1153,6 +1153,7 @@ class TestTrlProbe:
             "@dataclasses.dataclass\nclass DPOConfig:\n"
             "    beta: float = 0.1\n    model_adapter_name: str = ''\n"
             "    ref_adapter_name: str = ''\n"
+            "class SFTTrainer: pass\nclass DPOTrainer: pass\n"
         )
         wrapper = tmp_path / "py"
         wrapper.write_text(
@@ -1166,6 +1167,58 @@ class TestTrlProbe:
         )
         ok, reason = probe.probe_trl_reference_support(str(wrapper))
         assert not ok and "model_adapter_name" in reason
+
+    def test_trainers_that_cannot_load(self) -> None:
+        out = json.dumps(
+            {
+                "installed": True,
+                "version": "0.25.1",
+                "missing": [],
+                "trainers_error": "RuntimeError",
+                "trainers_cause": "ModuleNotFoundError",
+                "transformers": "5.20.2",
+            }
+        )
+        with mock.patch.object(probe.subprocess, "run", return_value=_cp(out)):
+            ok, reason = probe.probe_trl_reference_support()
+        assert not ok
+        assert reason == (
+            "trl 0.25.1 cannot load its trainers with transformers 5.20.2 "
+            "(RuntimeError from ModuleNotFoundError); install the versions pinned "
+            "in requirements-train.txt: pip install -r requirements-train.txt"
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX wrapper script")
+    def test_a_lazy_trainer_import_that_fails_is_caught(self, tmp_path: Path) -> None:
+        # TRL 0.25 with transformers 5: DPOConfig is fine, but importing the
+        # DPO trainer (lazily, on first use) fails -- the run used to find
+        # out only when it reached DPO.
+        site = tmp_path / "site"
+        (site / "trl").mkdir(parents=True)
+        (site / "trl" / "__init__.py").write_text(
+            "import dataclasses\n__version__ = '0.25.1'\n"
+            "@dataclasses.dataclass\nclass DPOConfig:\n"
+            "    model_adapter_name: str = ''\n    ref_adapter_name: str = ''\n"
+            "class SFTTrainer: pass\n"
+            "def __getattr__(name):\n"
+            "    if name == 'DPOTrainer':\n"
+            "        try:\n"
+            "            import mergekit_is_not_installed  # noqa\n"
+            "        except ModuleNotFoundError as e:\n"
+            "            raise RuntimeError('Failed to import trl.trainer') from e\n"
+            "    raise AttributeError(name)\n"
+        )
+        (site / "transformers").mkdir()
+        (site / "transformers" / "__init__.py").write_text("__version__ = '5.20.2'\n")
+        wrapper = tmp_path / "py"
+        wrapper.write_text(
+            f'#!/bin/sh\nPYTHONPATH="{site}" exec "{sys.executable}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        ok, reason = probe.probe_trl_reference_support(str(wrapper))
+        assert not ok
+        assert "with transformers 5.20.2" in reason
+        assert "(RuntimeError from ModuleNotFoundError)" in reason
 
 
 class TestRound2:
