@@ -16,9 +16,8 @@ import type { WorkflowPreset } from '../../types/storyboard'
 const props = defineProps<{
   image: T2iImage | null
   /**
-   * The viewer's judgment says a scorecard image with no grade. It can be
-   * newer than the row: a list reply made before a grade was cleared again
-   * can land after it.
+   * The viewer's judgment says a scorecard image with no grade: a second
+   * check beside the row's own grade, which the store keeps current.
    */
   blind: boolean
   presets: WorkflowPreset[]
@@ -31,7 +30,7 @@ const props = defineProps<{
 const hidden = computed(() => props.blind || (props.image ? t2iBlind(props.image) : false))
 const isScorecard = computed(() => !!props.image?.scorecard_id)
 // Graded, but the row on hand is still the copy fetched blind: the full one
-// is on its way (applyJudgment fetches it).
+// is on its way (the store's fillIfRevealed fetches it).
 const loading = computed(() => !hidden.value && !!props.image?.scorecard_blind)
 
 /** The caption as the writer saw it, when wildcards or characters changed it. */

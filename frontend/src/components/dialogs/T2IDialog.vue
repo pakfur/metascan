@@ -800,6 +800,14 @@ function onSelectTile(item: ThumbItem) {
     )
     return
   }
+  const held = store.images.find((i) => i.id === id)
+  if (held?.scorecard_blind) {
+    // Graded, but the row on hand is still the copy the server stripped:
+    // its prompt is on its way (a click asks again if that fetch failed).
+    store.fillIfRevealed(held)
+    toast.show("This image's prompt is still loading: try again in a moment.", 'info')
+    return
+  }
   autosave.flush() // pending edits belong to the image being left
   const stored = store.selectImage(id)
   if (!stored) return
