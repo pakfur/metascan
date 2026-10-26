@@ -247,6 +247,26 @@ def dpo_args_kwargs(
     return kw
 
 
+def text_only_dpo_trainer(dpo_trainer: Any) -> Any:
+    """TRL's ``DPOTrainer`` for text-only preference data on an image-text
+    base. TRL 0.25 takes any model whose type is an image-text one (Qwen3-VL
+    is ``qwen3_vl``) for a vision model and tokenizes its dataset with
+    ``process_row``, which needs a processor and an ``images`` column: an
+    ``AttributeError`` on the tokenizer the writer passes (``_ensure``: TRL
+    gets the tokenizer, never the processor). The writer's pairs are text,
+    so the dataset keeps ``tokenize_row``; its batches carry no
+    ``pixel_values`` and TRL's forward is text-only, as in SFT. Only the
+    tokenizing choice changes (``is_vision_model`` is read nowhere else in
+    TRL 0.25's DPO trainer); revisit with the trl cap."""
+
+    class TextOnlyDPOTrainer(dpo_trainer):  # type: ignore[misc, valid-type]
+        def _prepare_dataset(self, *args: Any, **kwargs: Any) -> Any:
+            self.is_vision_model = False
+            return super()._prepare_dataset(*args, **kwargs)
+
+    return TextOnlyDPOTrainer
+
+
 def check_adapter_keys(keys: Iterable[str]) -> int:
     """A saved adapter must hold LoRA weights and nothing from the vision
     tower. Returns the LoRA key count."""
@@ -643,7 +663,7 @@ class RealBackend:
             {"max_prompt_length": None, "max_completion_length": None},
         )
         cb = self._callback(ctx, "dpo")
-        trainer = d.trl.DPOTrainer(
+        trainer = text_only_dpo_trainer(d.trl.DPOTrainer)(
             model=self.model,
             ref_model=ref_model,
             args=args,

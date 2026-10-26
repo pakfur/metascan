@@ -651,6 +651,31 @@ class _Tok:
 
 
 class TestRealHelpers:
+    def test_the_dpo_trainer_tokenizes_text_on_an_image_text_base(self) -> None:
+        # TRL 0.25 sets is_vision_model from the model type (Qwen3-VL's
+        # qwen3_vl is an image-text type) and then, in _prepare_dataset,
+        # tokenizes with process_row, which needs a processor and images.
+        class StandInDPOTrainer:
+            def __init__(self, **kwargs: Any) -> None:
+                self.is_vision_model = True
+                self.tokenized_with = self._prepare_dataset(kwargs["train_dataset"])
+
+            def _prepare_dataset(self, dataset: Any) -> str:
+                return "process_row" if self.is_vision_model else "tokenize_row"
+
+        trainer = real.text_only_dpo_trainer(StandInDPOTrainer)(train_dataset=[])
+        assert isinstance(trainer, StandInDPOTrainer)
+        assert trainer.tokenized_with == "tokenize_row"
+
+    def test_the_dpo_stage_builds_its_trainer_text_only(self) -> None:
+        import inspect
+
+        source = inspect.getsource(real.RealBackend.train_dpo)
+        assert "text_only_dpo_trainer(d.trl.DPOTrainer)(" in source
+        assert "d.trl.DPOTrainer(" not in source.replace(
+            "text_only_dpo_trainer(d.trl.DPOTrainer)(", ""
+        )
+
     def test_messages(self) -> None:
         assert real.prompt_messages({"system": "S", "user": "U"}) == [
             {"role": "system", "content": "S"},
