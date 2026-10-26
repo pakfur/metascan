@@ -431,7 +431,8 @@ class TestProfile:
             tmp_path,
             fake={"oom_at": {"stage": "sft", "step": 2, "wrapped": True}},
         )
-        with caplog.at_level(logging.DEBUG, logger=w.logger.name):
+        # The worker logs at INFO: where the failure happened must show there.
+        with caplog.at_level(logging.INFO, logger=w.logger.name):
             assert _run(task, tmp_path) == w.EXIT_ERROR
         res = _result(task)
         assert res["error_code"] == "oom"
@@ -440,9 +441,10 @@ class TestProfile:
         frames = [
             r.getMessage()
             for r in caplog.records
-            if r.levelno == logging.DEBUG and " at: " in r.getMessage()
+            if r.levelno == logging.ERROR and " at: " in r.getMessage()
         ]
         assert frames and ".py:" in frames[0]
+        assert any("raised from OutOfMemoryError at: " in m for m in frames)
 
     def test_progress_carries_live_memory(self, tmp_path: Path) -> None:
         task = _make_task(tmp_path)
