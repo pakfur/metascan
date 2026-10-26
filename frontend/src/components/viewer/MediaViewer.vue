@@ -66,6 +66,38 @@ const emit = defineEmits<{
   close: []
 }>()
 
+// The optional `details` slot (the T2I viewer's Details panel) renders left
+// of the image for the item on show. It folds to a strip, by its button or
+// I, so the image gets the room back; open or folded is remembered per
+// browser. A mount without the slot gets neither the panel nor the key.
+// `blind` is this viewer's own word that the item is a scorecard image with
+// no grade: the judgments it got back, in order, so it can be newer than a
+// parent's copy of the item (a reply fetched before a grade change can land
+// after it).
+const slots = defineSlots<{
+  details?: (props: { media: Media; blind: boolean }) => unknown
+}>()
+const DETAILS_OPEN_KEY = 'metascan.viewer.details.v1'
+const detailsOpen = ref(readDetailsOpen())
+
+function readDetailsOpen(): boolean {
+  try {
+    return localStorage.getItem(DETAILS_OPEN_KEY) !== 'closed'
+  } catch {
+    return true
+  }
+}
+
+function toggleDetails(): void {
+  if (!slots.details) return
+  detailsOpen.value = !detailsOpen.value
+  try {
+    localStorage.setItem(DETAILS_OPEN_KEY, detailsOpen.value ? 'open' : 'closed')
+  } catch {
+    // Not remembered; the panel still toggles.
+  }
+}
+
 const mediaStore = useMediaStore()
 // The writer training window steps aside while a viewer is open.
 useRegisterViewer()
@@ -656,6 +688,12 @@ function onKeyDown(e: KeyboardEvent) {
     case '?':
       showHelp.value = !showHelp.value
       break
+    case 'i':
+    case 'I':
+      // Not with a modifier (Cmd+I and the like are the browser's), and a
+      // held key does not flap the panel.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) toggleDetails()
+      break
     case 'd':
       if ((e.ctrlKey || e.metaKey) && props.allowDestructive) {
         e.preventDefault()
@@ -730,6 +768,31 @@ function formatSize(bytes: number): string {
 
       <!-- Main display area -->
       <div class="viewer-body">
+        <!-- The Details panel; folded, the whole strip is its button.
+             mousedown.prevent + tabindex -1 as on the star: I is the
+             keyboard path. -->
+        <aside
+          v-if="$slots.details"
+          class="details-panel"
+          :class="{ folded: !detailsOpen }"
+          data-testid="viewer-details"
+        >
+          <button
+            class="details-toggle"
+            tabindex="-1"
+            :aria-expanded="detailsOpen"
+            :title="detailsOpen ? 'Hide details (I)' : 'Show details (I)'"
+            @mousedown.prevent
+            @click="toggleDetails"
+          >
+            <span class="details-title">Details</span>
+            <span class="details-chevron" aria-hidden="true">{{ detailsOpen ? '‹' : '›' }}</span>
+          </button>
+          <!-- Keyed by the item, so each one starts scrolled to the top. -->
+          <div v-if="detailsOpen && current" :key="current.file_path" class="details-content">
+            <slot name="details" :media="current" :blind="scorecardBlind" />
+          </div>
+        </aside>
         <!-- Wrapper div carries the scoped class because Galleria has
              inheritAttrs: false and drops class/style from its root. -->
         <div class="media-galleria">
@@ -817,6 +880,7 @@ function formatSize(bytes: number): string {
               </tr>
               <tr v-if="ratingEnabled"><td>C</td><td>Categories (Shift+Enter: sticky)</td></tr>
               <tr v-if="ratingEnabled"><td>R</td><td>Review ungraded, least certain first</td></tr>
+              <tr v-if="$slots.details"><td>I</td><td>Show / hide details</td></tr>
               <tr v-if="allowDestructive"><td>Ctrl+D</td><td>Delete file</td></tr>
               <tr><td>, .</td><td>Prev / Next frame (video)</td></tr>
               <tr><td>M</td><td>Mute / Unmute (video)</td></tr>
@@ -930,6 +994,75 @@ function formatSize(bytes: number): string {
   display: flex;
   align-items: stretch;
   min-height: 0;
+}
+
+/* Details panel (the `details` slot), left of the image */
+.details-panel {
+  flex: none;
+  width: clamp(240px, 24vw, 360px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(0, 0, 0, 0.78);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  color: #ddd;
+  font-size: 12px;
+}
+
+.details-panel.folded {
+  width: 28px;
+}
+
+.details-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #aaa;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.details-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.details-chevron {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.details-panel.folded .details-toggle {
+  flex: 1;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 8px 0;
+  border-bottom: none;
+}
+
+.details-panel.folded .details-chevron {
+  order: -1;
+}
+
+.details-panel.folded .details-title {
+  writing-mode: vertical-rl;
+}
+
+.details-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 10px 6px 12px 12px;
 }
 
 .media-galleria {

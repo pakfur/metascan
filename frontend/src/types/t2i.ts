@@ -1,7 +1,8 @@
 import type { Grade } from './judgments'
 import type { Media } from './media'
 import type { ThumbItem } from './jobs'
-import type { AdapterWriterId } from './writers'
+import type { AdapterWriterId, WriterAdapter } from './writers'
+import { isAdapterWriterId } from './writers'
 
 // Reused, not copied: a select's options plus a stored value that has since
 // left the config list (types/i2v.ts owns the one implementation).
@@ -296,6 +297,31 @@ export const T2I_WRITERS: { id: T2iWriter; label: string }[] = [
   { id: 'base', label: 'Base' },
   { id: 'base+taste', label: 'Base + taste' },
 ]
+
+/**
+ * Who wrote an image's prompt, said plainly for the viewer's Details panel:
+ * the built-in writers by their menu label, an adapter by its registry name,
+ * a typed prompt and the no-VLM fallback. `adapters` is null until the
+ * registry has loaded (an adapter then shows by its id). Null when the image
+ * has no lineage (older rows).
+ */
+export function t2iWriterLabel(
+  writerId: string | null | undefined,
+  adapters: WriterAdapter[] | null,
+): string | null {
+  if (!writerId) return null
+  const builtin = T2I_WRITERS.find((w) => w.id === writerId)
+  if (builtin) return builtin.label
+  if (writerId === 'manual') return 'Typed prompt (no writer)'
+  if (writerId === 'fallback') return 'Fallback: the caption became the prompt (no writer model)'
+  if (isAdapterWriterId(writerId)) {
+    if (adapters === null) return `${writerId} (adapter)`
+    // The registry lists every adapter but the deleted ones.
+    const adapter = adapters.find((a) => a.writer_id === writerId)
+    return adapter ? `${adapter.name} (adapter)` : `${writerId} (deleted adapter)`
+  }
+  return writerId
+}
 
 /** Prompt variants per caption: each one renders the caption's same seeds. */
 export const MAX_VARIANTS = 4
