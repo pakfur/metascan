@@ -74,6 +74,7 @@ import CaptionFilterPopover from '../t2i/CaptionFilterPopover.vue'
 import CategorySelect from '../generation/CategorySelect.vue'
 import JobTile from '../generation/JobTile.vue'
 import SeedControls from '../generation/SeedControls.vue'
+import T2iImageInfo from '../generation/T2iImageInfo.vue'
 import ThumbGrid from '../generation/ThumbGrid.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
 import MediaViewer from '../viewer/MediaViewer.vue'
@@ -793,7 +794,10 @@ function onSelectTile(item: ThumbItem) {
   }
   if (item.blind) {
     // Loading it would show its prompt (and who wrote it): judge it first.
-    toast.show(`${SCORECARD_BLIND_TEXT}: grade it ✓ or ✗ first (double-click opens it).`, 'info')
+    toast.show(
+      `${SCORECARD_BLIND_TEXT}: double-click to open it (Details shows its brief), then grade it ✓ or ✗ (P or X) before loading it.`,
+      'info',
+    )
     return
   }
   autosave.flush() // pending edits belong to the image being left
@@ -1293,7 +1297,19 @@ onBeforeUnmount(() => {
       :favorite-mirror="store.applyFavoriteFlag"
       :judgment-mirror="store.applyJudgment"
       @close="viewerIndex = null"
-    />
+    >
+      <!-- What made the image on show: the store's live row, so a grade
+           that lifts a scorecard blind fills the prompt in. -->
+      <template #details="{ media, blind }">
+        <T2iImageInfo
+          :image="store.imageAt(media.file_path)"
+          :blind="blind"
+          :presets="presets"
+          :adapters="store.adaptersLoaded ? store.adapters : null"
+          :models="models"
+        />
+      </template>
+    </MediaViewer>
   </div>
 </template>
 

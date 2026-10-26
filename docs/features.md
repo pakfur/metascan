@@ -198,6 +198,7 @@ Requires two registered ComfyUI workflows (turbo and high quality) — see [Imag
 | 1–6 | Toggle a reason: realism, composition, emotion, light, concept, motion (viewer; press P or X first) |
 | C | Categories; Shift+Enter makes one sticky (viewer) |
 | R | Review mode: ungraded images, least certain first (viewer) |
+| I | Show / hide the Details panel (Text to Image viewer) |
 | M | Mute/Unmute (video) |
 | Ctrl+D | Delete file |
 | H or ? | Show shortcuts help (in viewer) |
