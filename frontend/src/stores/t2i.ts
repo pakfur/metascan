@@ -58,7 +58,8 @@ const asNum = (v: unknown, fallback: number): number =>
 const asNumOrNull = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? v : null
 // Job and media rows are POSIX or native depending on the endpoint.
-const samePath = (a: string, b: string): boolean => a.replace(/\\/g, '/') === b.replace(/\\/g, '/')
+const pathKey = (p: string): string => p.replace(/\\/g, '/')
+const samePath = (a: string, b: string): boolean => pathKey(a) === pathKey(b)
 const cloneJson = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
 /**
@@ -120,6 +121,13 @@ export const useT2iStore = defineStore('t2i', () => {
   const canShowMore = computed(() => imagePaging.value.more)
   const selectedId = ref<number | null>(null)
   const selectedImage = computed(() => images.value.find((i) => i.id === selectedId.value) ?? null)
+  // The held row of a file, for the result viewer's Details panel: it reads
+  // the live row (a grade that lifts a scorecard blind brings the prompt in),
+  // never the copy the viewer navigates.
+  const imagesByPath = computed(() => new Map(images.value.map((i) => [pathKey(i.file_path), i])))
+  function imageAt(path: string): T2iImage | null {
+    return imagesByPath.value.get(pathKey(path)) ?? null
+  }
 
   // Batches that are running, oldest first.
   const activeBatches = ref<T2iActiveBatch[]>([])
@@ -805,9 +813,36 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   // A blind scorecard row came without its prompt and writer (the server
-  // strips them): once a grade lifts the blind, fetch the full rows.
+  // strips them): once a grade lifts the blind, fetch the full rows. The
+  // refresh brings the first page only, and a scorecard run is 80 images, so
+  // a row it left as fetched blind is then fetched on its own.
   function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
-    if (wasBlind && !t2iBlind(image)) void refreshImages()
+    if (!wasBlind || t2iBlind(image)) return
+    const id = image.id
+    void refreshImages().then(() => {
+      const row = images.value.find((i) => i.id === id)
+      if (row?.scorecard_blind && !t2iBlind(row)) void refetchImage(id)
+    })
+  }
+
+  // One held row again, as the server has it now: the list's cursor answers
+  // the newest row older than `before_id`, which is this one while it lives.
+  // It only fills in what the blind copy lacked. A reply still blind, or one
+  // that lands after the grade was cleared again, is dropped, and the row
+  // keeps its ★ and grade: those follow the viewer's judgment responses, in
+  // order, and a reply asked for before a later change must not undo it.
+  async function refetchImage(id: number): Promise<void> {
+    let fresh: T2iImage | undefined
+    try {
+      fresh = (await t2iApi.listT2iImages(1, id + 1))[0]
+    } catch (e) {
+      console.warn('T2I: could not refetch a revealed scorecard image', e)
+      return
+    }
+    const index = images.value.findIndex((i) => i.id === id)
+    const live = index >= 0 ? images.value[index] : null
+    if (!fresh || fresh.id !== id || fresh.scorecard_blind || !live || t2iBlind(live)) return
+    images.value[index] = { ...fresh, is_favorite: live.is_favorite, grade: live.grade }
   }
 
   // Follow a ★ the server returned elsewhere, so the strip's tile star matches.
@@ -944,6 +979,7 @@ export const useT2iStore = defineStore('t2i', () => {
     loadingOlder,
     selectedId,
     selectedImage,
+    imageAt,
     activeBatches,
     randomBatch,
     liveSeed,
