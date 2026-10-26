@@ -515,6 +515,44 @@ class TestErrors:
         assert row_text not in caplog.text
         assert "ValueError" in caplog.text
 
+    def test_an_unexpected_error_is_located_in_the_log(
+        self, tmp_path: Path, monkeypatch: Any, caplog: Any
+    ) -> None:
+        # Where a library error happened (file, line, function, for it and
+        # what it was raised from) reaches the log at the worker's own
+        # level, INFO; its text and its cause's never do.
+        from metascan.workers import writer_train_fake as fake
+
+        row_text = "ROWTEXT a private brief about a lighthouse"
+
+        def inner() -> None:
+            raise ValueError(f"bad example: {row_text}")
+
+        def boom(*a: Any, **kw: Any) -> Any:
+            try:
+                inner()
+            except ValueError as e:
+                raise RuntimeError(f"while tokenizing {row_text}") from e
+
+        monkeypatch.setattr(fake.FakeBackend, "train_dpo", boom)
+        task = _make_task(tmp_path)
+        with caplog.at_level(logging.INFO):
+            assert _run(task, tmp_path) == w.EXIT_ERROR
+        located = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.ERROR and " at: " in r.getMessage()
+        ]
+        assert located[0].startswith("writer train RuntimeError at: ")
+        assert "test_writer_train_worker.py:" in located[0] and " boom" in located[0]
+        assert located[1].startswith(
+            "writer train RuntimeError, raised from ValueError at: "
+        )
+        assert " inner" in located[1]
+        assert row_text not in caplog.text
+        assert "bad example" not in caplog.text and "tokenizing" not in caplog.text
+        assert row_text not in json.dumps(_result(task))
+
     def test_an_unexpected_error_before_the_run_never_quotes_it(
         self, tmp_path: Path, monkeypatch: Any, caplog: Any
     ) -> None:

@@ -184,6 +184,7 @@ A "ready" adapter that scores no better than the base is your call: delete it, o
 | Base weights delete refused (`training_uses_base`) | A running, paused or failed run uses them; cancel those runs first |
 | `adapter_loading` on a prompt | The writer is busy loading a new adapter; retry once the batch ends |
 | Training failed with "Ran out of GPU memory…" | The run needed more VRAM than the card (or the rehearsal cap); see [Reading an OOM entry](#training-profiles-vram-and-performance) and resume with the cap off |
+| Training failed with "unexpected `<Error>` in the training worker" | A library error. Its text is never kept (it could quote your prompts), but the server log has where it happened: the lines `writer train <Error> at: <file>:<line> <function> <- …` (and `raised from …` lines for its causes) name only files, lines and functions. Report those lines with the versions of torch, transformers, trl, peft, accelerate and datasets; the run keeps its checkpoints and can be resumed |
 | Converter row shows a release mismatch | The adapter GGUF may not match your `llama-server`; rebuild or re-download so both come from a similar llama.cpp version |
 
 Developer rules for this subsystem are in [`.claude/rules/writer-training.md`](../.claude/rules/writer-training.md) and [`.claude/rules/vlm-llama.md`](../.claude/rules/vlm-llama.md).

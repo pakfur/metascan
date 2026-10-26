@@ -156,6 +156,9 @@ STATE_VERSION = 1
 
 STAGES = ("sft", "dpo", "eval", "convert")
 BACKENDS = ("real", "fake")
+# A failure's frames are logged for it and for up to this many exceptions
+# it was raised from (_log_frames).
+FRAME_CHAIN_DEPTH = 3
 
 # Effort presets (global constraints): shown resolved in the UI.
 # ``lr`` is the SFT learning rate; DPO has its own (``dpo_lr``).
@@ -1352,18 +1355,29 @@ def _run_stages(
 
 
 def _log_frames(name: str, e: BaseException) -> None:
-    """The traceback's file/line/function frames at DEBUG -- never a value
-    or a message (they could quote training data)."""
-    if not logger.isEnabledFor(logging.DEBUG):
-        return
-    frames = traceback.extract_tb(e.__traceback__)
-    logger.debug(
-        "writer train %s at: %s",
-        name,
-        " <- ".join(
-            f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames)
-        ),
-    )
+    """Where a failure happened: each traceback frame's file name, line and
+    function, innermost first, then the same for up to FRAME_CHAIN_DEPTH
+    exceptions it was raised from. At ERROR, beside the failure line, so a
+    failed run's log locates it (the worker logs at INFO: DEBUG never showed
+    it). Never a value or a message: they could quote training data."""
+    exc: Optional[BaseException] = e
+    for depth in range(FRAME_CHAIN_DEPTH + 1):
+        if exc is None:
+            return
+        where = " <- ".join(
+            f"{Path(f.filename).name}:{f.lineno} {f.name}"
+            for f in reversed(traceback.extract_tb(exc.__traceback__))
+        )
+        if depth == 0:
+            logger.error("writer train %s at: %s", name, where or "(no frames)")
+        else:
+            logger.error(
+                "writer train %s, raised from %s at: %s",
+                name,
+                type(exc).__name__,
+                where or "(no frames)",
+            )
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
 
 
 def _report_failure(e: BaseException) -> str:
@@ -1371,7 +1385,8 @@ def _report_failure(e: BaseException) -> str:
     :class:`TrainWorkerError` is ours (written to never quote data) and
     keeps its message; anything else (a library error) could quote a
     dataset row, so only its type name is stored and logged, plus the
-    traceback's file/line/function frames -- no values -- at DEBUG."""
+    traceback's file/line/function frames -- no values -- at ERROR
+    (``_log_frames``)."""
     if isinstance(e, TrainWorkerError):
         logger.error("writer train failed: %s", e)
         return str(e) or type(e).__name__

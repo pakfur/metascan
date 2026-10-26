@@ -63,8 +63,11 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   (the failing step = last finished + 1; `load` while loading). progress.json carries
   `alloc_gib`, `peak_gib` (this stage), `vram_cap_gb` (applied) and
   `vram_cap_ignored_total_gib` (card total when a cap >= the card was ignored).
-  `is_oom_error` follows `__cause__` / `__context__` 5 links deep; the OOM branch logs
-  only the DEBUG frame trace (file:line function), never the exception text. The manager's
+  `is_oom_error` follows `__cause__` / `__context__` 5 links deep. The OOM branch, like
+  every failure that is not a `TrainWorkerError`, logs where it happened at ERROR
+  (`_log_frames`: each frame's file:line function, innermost first, then the same for
+  up to `FRAME_CHAIN_DEPTH` = 3 exceptions it was raised from; the worker logs at INFO,
+  so a DEBUG trace never showed), never the exception text. The manager's
   `_finish` calls `training_profiles.record_attempt` FIRST (completion / cancel delete
   the run dir): the profile minus `timeline`, plus `adapter_id` / `adapter_name`, goes
   into `<data_dir>/logs/writer_training_profiles.json` (newest 50, atomic tmp + fsync +
@@ -119,7 +122,7 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   sha256 rank of `{seed}:{group}` (about 10% of groups; a group never changes sides as
   data grows; with 2+ groups at least one is held and never all) and is removed from
   SFT too. The user turn must stay identical to inference (parity
-  test). Examples and briefs are NEVER logged (counts and exception types only; for a non-`TrainWorkerError` the worker's `result.json`
+  test). Examples and briefs are NEVER logged (counts, exception types and frame traces only; for a non-`TrainWorkerError` the worker's `result.json`
   `error` holds the type name only); the
   Preview endpoint (`GET /api/writers/dataset/preview`) is the only egress.
 - **Run lifecycle.** `start` checks, in order: `already_training`, hyperparams
