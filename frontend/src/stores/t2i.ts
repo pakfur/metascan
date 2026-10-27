@@ -8,7 +8,7 @@ import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
 import { useJobTracker } from '../composables/useJobTracker'
 import { useToast } from '../composables/useToast'
-import { makeJudgmentNotes } from '../utils/judgmentNotes'
+import { makeRowNotes } from '../utils/rowNotes'
 import { useFoldersStore } from './folders'
 import { useMediaStore } from './media'
 import {
@@ -129,14 +129,15 @@ export const useT2iStore = defineStore('t2i', () => {
   function imageAt(path: string): T2iImage | null {
     return imagesByPath.value.get(pathKey(path)) ?? null
   }
-  // The ★ and grades the server answered (utils/judgmentNotes.ts): the rows a
-  // reply brings back keep each one answered after the request went out.
-  const notes = makeJudgmentNotes()
+  // The ★, grades and autosaved forms the server answered (utils/rowNotes.ts):
+  // the rows a reply brings back keep each one answered after the request
+  // went out.
+  const notes = makeRowNotes<T2iImage>()
   // The rows being fetched again, whole (refetchImage): one request each.
   const refetching = new Set<number>()
 
-  // Rows a reply brought, asked for at `askedAt`: each gets back the ★ and
-  // grade the server answered since.
+  // Rows a reply brought, asked for at `askedAt`: each gets back the ★, grade
+  // and form the server answered since.
   function settleRows(rows: T2iImage[], askedAt: number): void {
     for (const row of rows) notes.settle(pathKey(row.file_path), row, askedAt)
   }
@@ -794,7 +795,10 @@ export const useT2iStore = defineStore('t2i', () => {
   /**
    * Autosave target: writes the image's EDITABLE form_state only, then
    * mirrors the server's merged row locally so selecting the tile again loads
-   * what was just saved. An empty patch sends nothing (the server refuses it).
+   * what was just saved. The saved form is noted, so a list reply asked for
+   * before the save cannot put the older form back (a later tile load would
+   * then fill the boxes with it, and the next autosave write it over the
+   * newer one). An empty patch sends nothing (the server refuses it).
    */
   async function saveFormState(id: number, fields: Partial<T2iFormState>): Promise<void> {
     if (Object.keys(fields).length === 0) return
@@ -802,6 +806,11 @@ export const useT2iStore = defineStore('t2i', () => {
     try {
       const row = await t2iApi.patchT2iImage(id, fields)
       notes.settle(pathKey(row.file_path), row, askedAt)
+      // A row the server stripped (a blind scorecard image) carries no prompt
+      // in its form: that is no form to keep.
+      if (!row.scorecard_blind) {
+        notes.note(pathKey(row.file_path), { form_state: cloneJson(row.form_state) })
+      }
       const index = images.value.findIndex((i) => i.id === id)
       if (index >= 0) {
         images.value[index] = row
@@ -837,7 +846,7 @@ export const useT2iStore = defineStore('t2i', () => {
    * the grade when it closes).
    */
   function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
-    notes.note(pathKey(path), { favorite: state.favorite, grade: state.grade })
+    notes.note(pathKey(path), { is_favorite: state.favorite, grade: state.grade })
     for (const image of images.value) {
       if (!samePath(image.file_path, path)) continue
       applyState(image, state)
@@ -879,7 +888,7 @@ export const useT2iStore = defineStore('t2i', () => {
 
   // Follow a ★ the server returned elsewhere, so the strip's tile star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
-    notes.note(pathKey(path), { favorite })
+    notes.note(pathKey(path), { is_favorite: favorite })
     for (const image of images.value) {
       if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
         image.is_favorite = favorite
