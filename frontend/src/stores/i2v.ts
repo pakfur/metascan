@@ -8,6 +8,7 @@ import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { setFavorite } from '../api/judgments'
 import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
+import { makeRowNotes } from '../utils/rowNotes'
 
 // POSIX/native tolerance: job rows store POSIX, Media paths are native.
 function norm(p: string): string {
@@ -52,6 +53,7 @@ export const useI2vStore = defineStore('i2v', () => {
 
   async function open(media: Media): Promise<void> {
     source.value = media
+    videosSeq += 1
     draft.value = null
     jobs.value = new Map()
     videos.value = []
@@ -66,14 +68,31 @@ export const useI2vStore = defineStore('i2v', () => {
 
   function close(): void {
     source.value = null
+    videosSeq += 1
     draft.value = null
     videos.value = []
     jobs.value = new Map()
   }
 
+  // The ★ and grades the server answered (utils/rowNotes.ts): the clips
+  // a reply brings back keep each one answered after the request went out.
+  const notes = makeRowNotes<I2vVideo>()
+  let videosSeq = 0
+
+  // A reply that arrives after a newer refresh started, or after the dialog
+  // moved to another source image, is dropped.
   async function refreshVideos(): Promise<void> {
     if (!source.value) return
-    videos.value = await listI2vVideos(source.value.file_path)
+    const seq = ++videosSeq
+    const askedAt = notes.ask()
+    try {
+      const rows = await listI2vVideos(source.value.file_path)
+      if (seq !== videosSeq) return
+      for (const row of rows) notes.settle(norm(row.file_path), row, askedAt)
+      videos.value = rows
+    } finally {
+      notes.done(askedAt)
+    }
   }
 
   // Reload-survival: rebuild the in-flight set from the server, filtered
@@ -179,22 +198,26 @@ export const useI2vStore = defineStore('i2v', () => {
     void refreshVideos()
   }
 
-  // ★ only: never the grade, its reasons or the scorecard.
+  // ★ only: never the grade, its reasons or the scorecard. The answer is
+  // applied by path: a refresh may have replaced this row meanwhile.
   async function toggleFavorite(video: I2vVideo): Promise<void> {
+    const path = video.file_path
     const nextVal = !video.is_favorite
     video.is_favorite = nextVal // optimistic
+    let state: JudgmentState
     try {
-      const state = await setFavorite(video.file_path, nextVal)
-      video.is_favorite = state.favorite
+      state = await setFavorite(path, nextVal)
     } catch (e) {
-      video.is_favorite = !nextVal
+      for (const v of videos.value) if (norm(v.file_path) === norm(path)) v.is_favorite = !nextVal
       throw e
     }
+    applyJudgment(path, state)
   }
 
   // Follow a ★ the server returned from the result viewer's F / ☆ so the
   // strip's star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
+    notes.note(norm(path), { is_favorite: favorite })
     for (const v of videos.value) {
       if (norm(v.file_path) === norm(path) && v.is_favorite !== favorite) {
         v.is_favorite = favorite
@@ -203,8 +226,10 @@ export const useI2vStore = defineStore('i2v', () => {
   }
 
   // Follow every judgment the result viewer gets back (F / P / X): ★ and the
-  // grade, so the strip's star and ✓ / ✗ badge match.
+  // grade, so the strip's star and ✓ / ✗ badge match. Noted, so a reply asked
+  // for before it cannot undo it.
   function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
+    notes.note(norm(path), { is_favorite: state.favorite, grade: state.grade })
     for (const v of videos.value) {
       if (norm(v.file_path) !== norm(path)) continue
       if (v.is_favorite !== state.favorite) v.is_favorite = state.favorite

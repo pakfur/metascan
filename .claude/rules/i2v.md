@@ -26,7 +26,12 @@ the root CLAUDE.md still applies.
   (never hidden — unlike storyboard clips); star = `media.is_favorite`, the
   favorite only (`setFavorite`, never a grade). A clip tile shows a read-only
   ✓ / ✗ badge from the row's `grade`; grades set in the I2V result viewer
-  reach the tile live through `store.applyJudgment` (`judgmentMirror`). Clips
+  reach the tile live through `store.applyJudgment` (`judgmentMirror`), and
+  a strip refresh never undoes one: `refreshVideos` drops a reply a newer
+  refresh or another source image superseded, and puts back on its rows
+  each ★ / grade the server answered after it went out
+  (`utils/rowNotes.ts`, as the T2I store does; the tile ★ applies its
+  answer by path through `applyJudgment`). Clips
   keep collecting grades, but no consumer trains on video.
   `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily
   prunes rows whose media is gone (never until a full clean is finished,

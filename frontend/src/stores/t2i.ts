@@ -8,6 +8,7 @@ import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
 import { useJobTracker } from '../composables/useJobTracker'
 import { useToast } from '../composables/useToast'
+import { makeRowNotes } from '../utils/rowNotes'
 import { useFoldersStore } from './folders'
 import { useMediaStore } from './media'
 import {
@@ -128,6 +129,18 @@ export const useT2iStore = defineStore('t2i', () => {
   function imageAt(path: string): T2iImage | null {
     return imagesByPath.value.get(pathKey(path)) ?? null
   }
+  // The ★, grades and autosaved forms the server answered (utils/rowNotes.ts):
+  // the rows a reply brings back keep each one answered after the request
+  // went out.
+  const notes = makeRowNotes<T2iImage>()
+  // The rows being fetched again, whole (refetchImage): one request each.
+  const refetching = new Set<number>()
+
+  // Rows a reply brought, asked for at `askedAt`: each gets back the ★, grade
+  // and form the server answered since.
+  function settleRows(rows: T2iImage[], askedAt: number): void {
+    for (const row of rows) notes.settle(pathKey(row.file_path), row, askedAt)
+  }
 
   // Batches that are running, oldest first.
   const activeBatches = ref<T2iActiveBatch[]>([])
@@ -218,13 +231,16 @@ export const useT2iStore = defineStore('t2i', () => {
   }
 
   // Refetches the first page and folds it into the list. A reply that
-  // arrives after a newer request was made is dropped.
+  // arrives after a newer request was made is dropped, and the rows a reply
+  // brings keep each ★ and grade answered after it was asked for.
   async function refreshImages(): Promise<void> {
     const seq = ++imagesSeq
+    const askedAt = notes.ask()
     imagesLoading.value = true
     try {
       const fresh = await t2iApi.listT2iImages(IMAGE_PAGE_SIZE)
       if (seq !== imagesSeq) return
+      settleRows(fresh, askedAt)
       const merged = mergeImagePage(images.value, fresh, IMAGE_PAGE_SIZE, hasMoreImages.value)
       images.value = merged.images
       hasMoreImages.value = merged.hasMore
@@ -235,9 +251,11 @@ export const useT2iStore = defineStore('t2i', () => {
       if (selectedId.value !== null && !merged.images.some((i) => i.id === selectedId.value)) {
         selectedId.value = null
       }
+      for (const row of fresh) fillIfRevealed(row)
     } catch (e) {
       if (seq === imagesSeq) imagesError.value = errorMessage(e)
     } finally {
+      notes.done(askedAt)
       if (seq === imagesSeq) imagesLoading.value = false
     }
   }
@@ -246,13 +264,17 @@ export const useT2iStore = defineStore('t2i', () => {
     if (!hasMoreImages.value || loadingOlder.value || images.value.length === 0) return
     loadingOlder.value = true
     const cursor = images.value[images.value.length - 1].id
+    const askedAt = notes.ask()
     try {
       const page = await t2iApi.listT2iImages(IMAGE_PAGE_SIZE, cursor)
+      settleRows(page, askedAt)
       images.value = mergeOlderPage(images.value, page)
       hasMoreImages.value = page.length >= IMAGE_PAGE_SIZE
+      for (const row of page) fillIfRevealed(row)
     } catch (e) {
       toast.show(`Couldn't load older images: ${errorMessage(e)}`, 'warn')
     } finally {
+      notes.done(askedAt)
       loadingOlder.value = false
     }
   }
@@ -755,7 +777,9 @@ export const useT2iStore = defineStore('t2i', () => {
    */
   function selectImage(id: number): T2iFormState | null {
     const image = images.value.find((i) => i.id === id)
-    if (!image) return null
+    // A scorecard row the server stripped (fetched blind) has an empty prompt
+    // in its form: loaded, autosave would write that into the image.
+    if (!image || image.scorecard_blind) return null
     selectedId.value = id
     // The image's form replaces the boxes: drafts of another prompt must not
     // ride along with the next Generate.
@@ -771,13 +795,30 @@ export const useT2iStore = defineStore('t2i', () => {
   /**
    * Autosave target: writes the image's EDITABLE form_state only, then
    * mirrors the server's merged row locally so selecting the tile again loads
-   * what was just saved. An empty patch sends nothing (the server refuses it).
+   * what was just saved. The saved form is noted, so a list reply asked for
+   * before the save cannot put the older form back (a later tile load would
+   * then fill the boxes with it, and the next autosave write it over the
+   * newer one). An empty patch sends nothing (the server refuses it).
    */
   async function saveFormState(id: number, fields: Partial<T2iFormState>): Promise<void> {
     if (Object.keys(fields).length === 0) return
-    const row = await t2iApi.patchT2iImage(id, fields)
-    const index = images.value.findIndex((i) => i.id === id)
-    if (index >= 0) images.value[index] = row
+    const askedAt = notes.ask()
+    try {
+      const row = await t2iApi.patchT2iImage(id, fields)
+      notes.settle(pathKey(row.file_path), row, askedAt)
+      // A row the server stripped (a blind scorecard image) carries no prompt
+      // in its form: that is no form to keep.
+      if (!row.scorecard_blind) {
+        notes.note(pathKey(row.file_path), { form_state: cloneJson(row.form_state) })
+      }
+      const index = images.value.findIndex((i) => i.id === id)
+      if (index >= 0) {
+        images.value[index] = row
+        fillIfRevealed(row)
+      }
+    } finally {
+      notes.done(askedAt)
+    }
   }
 
   function mirrorFavoriteToLibrary(path: string, favorite: boolean): void {
@@ -800,53 +841,54 @@ export const useT2iStore = defineStore('t2i', () => {
   /**
    * Follow every judgment the result viewer gets back (its F / P / X / ☆):
    * ★ AND the grade, so the tile star and ✓ / ✗ badge match and a scorecard
-   * tile leaves "judge to reveal". The library copy is handled by the viewer
-   * (★ at once, the grade when it closes).
+   * tile leaves "judge to reveal". Noted, so a reply asked for before it
+   * cannot undo it. The library copy is handled by the viewer (★ at once,
+   * the grade when it closes).
    */
   function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
+    notes.note(pathKey(path), { is_favorite: state.favorite, grade: state.grade })
     for (const image of images.value) {
       if (!samePath(image.file_path, path)) continue
-      const wasBlind = t2iBlind(image)
       applyState(image, state)
-      refetchIfRevealed(image, wasBlind)
+      fillIfRevealed(image)
     }
   }
 
-  // A blind scorecard row came without its prompt and writer (the server
-  // strips them): once a grade lifts the blind, fetch the full rows. The
-  // refresh brings the first page only, and a scorecard run is 80 images, so
-  // a row it left as fetched blind is then fetched on its own.
-  function refetchIfRevealed(image: T2iImage, wasBlind: boolean): void {
-    if (!wasBlind || t2iBlind(image)) return
-    const id = image.id
-    void refreshImages().then(() => {
-      const row = images.value.find((i) => i.id === id)
-      if (row?.scorecard_blind && !t2iBlind(row)) void refetchImage(id)
-    })
+  // A blind scorecard row comes without its prompt and writer (the server
+  // strips them, `scorecard_blind`): once a grade lifts the blind, the row is
+  // fetched again, whole. Never retried by itself (it would spin while the
+  // server is down); a click on the tile asks again.
+  function fillIfRevealed(row: T2iImage): void {
+    if (row.scorecard_blind && !t2iBlind(row) && !refetching.has(row.id)) void refetchImage(row.id)
   }
 
   // One held row again, as the server has it now: the list's cursor answers
   // the newest row older than `before_id`, which is this one while it lives.
-  // It only fills in what the blind copy lacked. A reply still blind, or one
-  // that lands after the grade was cleared again, is dropped, and the row
-  // keeps its ★ and grade: those follow the viewer's judgment responses, in
-  // order, and a reply asked for before a later change must not undo it.
   async function refetchImage(id: number): Promise<void> {
-    let fresh: T2iImage | undefined
+    refetching.add(id)
+    const askedAt = notes.ask()
+    let row: T2iImage | null = null
     try {
-      fresh = (await t2iApi.listT2iImages(1, id + 1))[0]
+      const fresh = (await t2iApi.listT2iImages(1, id + 1))[0]
+      const index = images.value.findIndex((i) => i.id === id)
+      if (fresh?.id === id && index >= 0) {
+        notes.settle(pathKey(fresh.file_path), fresh, askedAt)
+        images.value[index] = fresh
+        row = fresh
+      }
     } catch (e) {
       console.warn('T2I: could not refetch a revealed scorecard image', e)
-      return
+    } finally {
+      notes.done(askedAt)
+      refetching.delete(id)
     }
-    const index = images.value.findIndex((i) => i.id === id)
-    const live = index >= 0 ? images.value[index] : null
-    if (!fresh || fresh.id !== id || fresh.scorecard_blind || !live || t2iBlind(live)) return
-    images.value[index] = { ...fresh, is_favorite: live.is_favorite, grade: live.grade }
+    // A grade answered after the ask can lift a blind this reply still had.
+    if (row) fillIfRevealed(row)
   }
 
   // Follow a ★ the server returned elsewhere, so the strip's tile star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
+    notes.note(pathKey(path), { is_favorite: favorite })
     for (const image of images.value) {
       if (samePath(image.file_path, path) && image.is_favorite !== favorite) {
         image.is_favorite = favorite
@@ -862,18 +904,19 @@ export const useT2iStore = defineStore('t2i', () => {
   async function toggleFavorite(id: number): Promise<void> {
     const image = images.value.find((i) => i.id === id)
     if (!image) return
+    const path = image.file_path
     const next = !image.is_favorite
-    const wasBlind = t2iBlind(image)
     image.is_favorite = next
+    let state: JudgmentState
     try {
-      const state = await setFavorite(image.file_path, next)
-      applyState(image, state)
-      mirrorFavoriteToLibrary(image.file_path, state.favorite)
-      refetchIfRevealed(image, wasBlind)
+      state = await setFavorite(path, next)
     } catch (e) {
-      image.is_favorite = !next
+      // The held row, by path: a refresh may have replaced this one meanwhile.
+      for (const row of images.value) if (samePath(row.file_path, path)) row.is_favorite = !next
       throw e
     }
+    applyJudgment(path, state)
+    mirrorFavoriteToLibrary(path, state.favorite)
   }
 
   function removeFromLibrary(path: string): void {
@@ -898,6 +941,23 @@ export const useT2iStore = defineStore('t2i', () => {
     if (image) removeFromLibrary(image.file_path)
     // Pulls one older row into the gap when there is a next page.
     void refreshImages()
+  }
+
+  /**
+   * Deletes every graded image of a scorecard (the server keeps their grades
+   * in tombstones, so the scorecard and training still count them) and drops
+   * them from the grid, the library grid and manual folders. Ungraded ones
+   * stay. Throws on a refusal (409 while the scorecard renders).
+   */
+  async function deleteGradedScorecardImages(scorecardId: string): Promise<t2iApi.ScorecardCleanup> {
+    const result = await t2iApi.deleteGradedScorecardImages(scorecardId)
+    const gone = new Set(result.deleted_paths.map(pathKey))
+    const selected = selectedImage.value
+    images.value = images.value.filter((i) => !gone.has(pathKey(i.file_path)))
+    if (selected && gone.has(pathKey(selected.file_path))) selectedId.value = null
+    for (const path of result.deleted_paths) removeFromLibrary(path)
+    void refreshImages()
+    return result
   }
 
   // ---- prompt drafts (writer variants) ----------------------------------------------------
@@ -1025,7 +1085,9 @@ export const useT2iStore = defineStore('t2i', () => {
     toggleFavorite,
     applyFavoriteFlag,
     applyJudgment,
+    fillIfRevealed,
     deleteImage,
+    deleteGradedScorecardImages,
     // draft
     loadDraft,
     saveDraft,

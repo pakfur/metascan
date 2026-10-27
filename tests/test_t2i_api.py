@@ -1186,6 +1186,71 @@ class TestImages(T2iApiCase):
         self.assertNotEqual(resp.status_code, 204)
         self.assertTrue(resp.content)  # the frontend's request() parses JSON
 
+    def scorecard_images(self) -> Dict[str, int]:
+        """Two graded and one ungraded image of scorecard "card-a", one graded
+        image of "card-b"."""
+        ids = {
+            "pass": self.add_image("p.png", **self.facts(), scorecard_id="card-a"),
+            "fail": self.add_image("f.png", **self.facts(), scorecard_id="card-a"),
+            "open": self.add_image("o.png", **self.facts(), scorecard_id="card-a"),
+            "other": self.add_image("x.png", **self.facts(), scorecard_id="card-b"),
+        }
+        images = self.data_dir / "images"
+        self.db.set_grade(str(images / "p.png"), "pass")
+        self.db.set_grade(str(images / "f.png"), "fail")
+        self.db.set_grade(str(images / "x.png"), "pass")
+        return ids
+
+    def test_delete_graded_scorecard_images_keeps_the_ungraded_and_the_signal(
+        self,
+    ) -> None:
+        ids = self.scorecard_images()
+        with patch("metascan.utils.trash.send2trash") as trash:
+            resp = self.client.post("/api/t2i/scorecards/card-a/delete-graded")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["deleted"], 2)
+        self.assertEqual(body["kept_ungraded"], 1)
+        self.assertEqual(body["failed"], 0)
+        self.assertEqual(len(body["deleted_paths"]), 2)
+        self.assertEqual(trash.call_count, 2)
+        self.assertIsNone(self.db.get_t2i_image(ids["pass"]))
+        self.assertIsNone(self.db.get_t2i_image(ids["fail"]))
+        self.assertIsNotNone(self.db.get_t2i_image(ids["open"]))
+        self.assertIsNotNone(self.db.get_t2i_image(ids["other"]))  # another scorecard
+        with self.db._get_connection() as conn:
+            kept = sorted(
+                (r["scorecard_id"], r["grade"])
+                for r in conn.execute(
+                    "SELECT scorecard_id, grade FROM media_tombstones"
+                )
+            )
+        self.assertEqual(kept, [("card-a", "fail"), ("card-a", "pass")])
+
+    def test_delete_graded_scorecard_images_409_while_it_renders(self) -> None:
+        ids = self.scorecard_images()
+        running = {"scorecard_id": "card-a", "adapter_id": 1}
+        with patch(
+            "backend.services.scorecard.running_scorecard", return_value=running
+        ), patch("metascan.utils.trash.send2trash") as trash:
+            resp = self.client.post("/api/t2i/scorecards/card-a/delete-graded")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["code"], "scorecard_running")
+        trash.assert_not_called()
+        self.assertIsNotNone(self.db.get_t2i_image(ids["pass"]))
+
+    def test_delete_graded_scorecard_images_counts_a_file_it_cannot_trash(
+        self,
+    ) -> None:
+        ids = self.scorecard_images()
+        refused = PermissionError(13, "Permission denied")
+        with patch("backend.services.t2i_service.trash_file", side_effect=refused):
+            resp = self.client.post("/api/t2i/scorecards/card-a/delete-graded")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["deleted"], 0)
+        self.assertEqual(resp.json()["failed"], 2)
+        self.assertIsNotNone(self.db.get_t2i_image(ids["pass"]))
+
     def test_paths_are_native_and_only_for_images_still_in_the_library(self) -> None:
         self.add_image("a.png", **self.facts())
         self.add_image("b.png", **self.facts())
