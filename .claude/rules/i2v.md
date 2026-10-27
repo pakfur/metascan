@@ -30,7 +30,7 @@ the root CLAUDE.md still applies.
   a strip refresh never undoes one: `refreshVideos` drops a reply a newer
   refresh or another source image superseded, and puts back on its rows
   each ★ / grade the server answered after it went out
-  (`utils/judgmentNotes.ts`, as the T2I store does; the tile ★ applies its
+  (`utils/rowNotes.ts`, as the T2I store does; the tile ★ applies its
   answer by path through `applyJudgment`). Clips
   keep collecting grades, but no consumer trains on video.
   `i2v_videos` has no FK to media: `list_i2v_videos` JOINs and lazily

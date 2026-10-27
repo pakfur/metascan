@@ -8,7 +8,7 @@ import { cancelJob as apiCancelJob, listJobs } from '../api/comfy'
 import { setFavorite } from '../api/judgments'
 import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
-import { makeJudgmentNotes } from '../utils/judgmentNotes'
+import { makeRowNotes } from '../utils/rowNotes'
 
 // POSIX/native tolerance: job rows store POSIX, Media paths are native.
 function norm(p: string): string {
@@ -74,9 +74,9 @@ export const useI2vStore = defineStore('i2v', () => {
     jobs.value = new Map()
   }
 
-  // The ★ and grades the server answered (utils/judgmentNotes.ts): the clips
+  // The ★ and grades the server answered (utils/rowNotes.ts): the clips
   // a reply brings back keep each one answered after the request went out.
-  const notes = makeJudgmentNotes()
+  const notes = makeRowNotes<I2vVideo>()
   let videosSeq = 0
 
   // A reply that arrives after a newer refresh started, or after the dialog
@@ -217,7 +217,7 @@ export const useI2vStore = defineStore('i2v', () => {
   // Follow a ★ the server returned from the result viewer's F / ☆ so the
   // strip's star matches.
   function applyFavoriteFlag(path: string, favorite: boolean): void {
-    notes.note(norm(path), { favorite })
+    notes.note(norm(path), { is_favorite: favorite })
     for (const v of videos.value) {
       if (norm(v.file_path) === norm(path) && v.is_favorite !== favorite) {
         v.is_favorite = favorite
@@ -229,7 +229,7 @@ export const useI2vStore = defineStore('i2v', () => {
   // grade, so the strip's star and ✓ / ✗ badge match. Noted, so a reply asked
   // for before it cannot undo it.
   function applyJudgment(path: string, state: Pick<JudgmentState, 'favorite' | 'grade'>): void {
-    notes.note(norm(path), { favorite: state.favorite, grade: state.grade })
+    notes.note(norm(path), { is_favorite: state.favorite, grade: state.grade })
     for (const v of videos.value) {
       if (norm(v.file_path) !== norm(path)) continue
       if (v.is_favorite !== state.favorite) v.is_favorite = state.favorite
