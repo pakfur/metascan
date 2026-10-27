@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
+from metascan.core.judgments import GRADES
 from metascan.core.scorecard_blind import blind_t2i_row
 from metascan.core.t2i_form import form_state_for_row
 from metascan.core.training_archive import delete_generated
 from metascan.utils.trash import trash_file
+
+logger = logging.getLogger(__name__)
 
 
 class T2iService:
@@ -55,6 +59,52 @@ class T2iService:
             return dict(blind_t2i_row(dict(row, form_state=dict(merged))))
 
         return await asyncio.to_thread(_apply)
+
+    async def delete_graded_scorecard_images(self, scorecard_id: str) -> Dict[str, Any]:
+        """Delete every graded live image of one scorecard, as
+        :meth:`delete_image` deletes one: the tombstone keeps its grade,
+        lineage and archived thumbnail, so the scorecard's pairs, the
+        adapter's promotion and the taste labels are unchanged. Ungraded
+        images stay. Each image's grade is read again just before it goes
+        (one cleared meanwhile stays). A file that cannot be trashed is
+        counted in ``failed`` and kept. ``{deleted, deleted_paths,
+        kept_ungraded, failed}``; paths are never logged."""
+
+        def run() -> Dict[str, Any]:
+            graded, ungraded = self.db.scorecard_cleanup_candidates(scorecard_id)
+            deleted_paths: List[str] = []
+            failed = 0
+            for image_id in graded:
+                row = self.db.get_t2i_image(image_id)
+                if row is None:
+                    continue
+                if row.get("grade") not in GRADES:
+                    ungraded += 1
+                    continue
+                try:
+                    gone = delete_generated(
+                        self.db,
+                        row["file_path"],
+                        trash_file,
+                        lambda thumbs, i=image_id: self.db.delete_t2i_image(i, thumbs),
+                    )
+                except OSError:
+                    failed += 1
+                    continue
+                if gone:
+                    deleted_paths.append(row["file_path"])
+            if failed:
+                logger.warning(
+                    "scorecard cleanup: %d image(s) could not be trashed", failed
+                )
+            return {
+                "deleted": len(deleted_paths),
+                "deleted_paths": deleted_paths,
+                "kept_ungraded": ungraded,
+                "failed": failed,
+            }
+
+        return await asyncio.to_thread(run)
 
     async def delete_image(self, image_id: int) -> bool:
         """Delete one generated image: a graded one's thumbnail is archived

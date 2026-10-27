@@ -197,7 +197,17 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   `models.writer_train_python` or `sys.executable`); see `hardware.md` for the rows.
 - **Scorecard (`scorecard.py`, `scorecard_blind.py`).** 40 briefs from
   `data/taste/scorecard_briefs.txt`, each screened by `caption_reject_reason` (adult-only
-  invariant; do not add a line that fails it). Per brief, base and `adapter:<id>` write
+  invariant; do not add a line that fails it), and each with one or two adult subjects,
+  their age stated, showing a clear emotion in a varied setting
+  (`test_every_committed_brief_names_an_adult_subject_by_age`). Briefs are read by line
+  index at render time; each image keeps its brief as its caption, so editing the file
+  never changes a scorecard already rendered (a resume renders the new text for a missing
+  index). **Cleanup:** `POST /api/t2i/scorecards/{id}/delete-graded`
+  (`T2iService.delete_graded_scorecard_images`, from the viewer's Details panel) deletes
+  a scorecard's GRADED live images through `delete_generated` like any T2I delete
+  (tombstone, archived thumbnail), re-reading each grade just before; ungraded ones stay,
+  since deleting one would leave its brief unjudged and a resume would render it again;
+  409 `scorecard_running` while that scorecard renders. Per brief, base and `adapter:<id>` write
   one prompt each with the SAME seed (`brief_seed(scorecard_id, i)`; order from
   `adapter_first`), no angle, no taste examples; then one Manual batch per brief with
   two supplied `prompts[]`. All prompts are written, the VLM is unloaded, then batches

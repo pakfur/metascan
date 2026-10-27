@@ -26,6 +26,11 @@ const props = defineProps<{
   models: T2iModelInfo[]
 }>()
 
+const emit = defineEmits<{
+  /** Delete every graded image of this scorecard (the dialog confirms). */
+  'delete-scorecard': [scorecardId: string]
+}>()
+
 // What the server strips from a blind row stays out of sight here too.
 const hidden = computed(() => props.blind || (props.image ? t2iBlind(props.image) : false))
 const isScorecard = computed(() => !!props.image?.scorecard_id)
@@ -121,6 +126,18 @@ const loras = computed(() => (props.image?.loras ?? []).map((l) => `${l.name} ×
         <h4>Seed · size</h4>
         <p>{{ t2iImageDetails(image) }}</p>
       </section>
+
+      <section v-if="image.scorecard_id" class="cleanup">
+        <button
+          class="cleanup-btn"
+          tabindex="-1"
+          title="Their grades keep counting for the scorecard and for training; ungraded images stay"
+          @mousedown.prevent
+          @click="emit('delete-scorecard', image.scorecard_id)"
+        >
+          Delete this scorecard's graded images
+        </button>
+      </section>
     </template>
   </div>
 </template>
@@ -189,6 +206,26 @@ p {
   border: 1px solid #555;
   color: #bbb;
   font-size: 10.5px;
+}
+
+.cleanup {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cleanup-btn {
+  padding: 5px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  border-radius: 6px;
+  background: none;
+  color: #f87171;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cleanup-btn:hover {
+  background: rgba(248, 113, 113, 0.12);
 }
 
 .loras {
