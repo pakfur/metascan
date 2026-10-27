@@ -867,6 +867,25 @@ function onOpenViewer(index: number) {
   viewerIndex.value = index
 }
 
+// The Details panel's "delete this scorecard's graded images": the viewer
+// closes afterwards, since the list it navigates holds the deleted files.
+async function onDeleteScorecard(scorecardId: string): Promise<void> {
+  const ok = window.confirm(
+    "Delete every graded image of this scorecard? Their grades keep counting for the scorecard and for training. Images you have not graded stay.",
+  )
+  if (!ok) return
+  try {
+    const r = await store.deleteGradedScorecardImages(scorecardId)
+    viewerIndex.value = null
+    const parts = [`Deleted ${r.deleted} graded image${r.deleted === 1 ? '' : 's'}`]
+    if (r.kept_ungraded) parts.push(`${r.kept_ungraded} ungraded kept`)
+    if (r.failed) parts.push(`${r.failed} could not be moved to the trash`)
+    toast.show(parts.join(' · '), r.failed ? 'warn' : 'info', 6000)
+  } catch (e) {
+    toast.show(errMsg(e), 'warn')
+  }
+}
+
 // ---- the scratch-form draft ---------------------------------------------------------------------------------
 // Per-viewer convenience: what is in the boxes survives closing the dialog
 // (every storage access is guarded inside the store). It is written only
@@ -1315,6 +1334,7 @@ onBeforeUnmount(() => {
           :presets="presets"
           :adapters="store.adaptersLoaded ? store.adapters : null"
           :models="models"
+          @delete-scorecard="onDeleteScorecard"
         />
       </template>
     </MediaViewer>

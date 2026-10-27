@@ -7977,6 +7977,22 @@ class DatabaseManager:
             ).fetchone()
             return str(r["scorecard_id"]) if r else None
 
+    def scorecard_cleanup_candidates(self, scorecard_id: str) -> Tuple[List[int], int]:
+        """``(ids of the graded live images, count of the ungraded ones)`` of
+        one scorecard: what "delete the graded images" may remove, and what
+        it keeps (an ungraded image deleted would leave its brief without a
+        judged pair, and a resume would render it again)."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT t.id, j.grade FROM t2i_images t "
+                "JOIN media m ON m.file_path = t.file_path "
+                "LEFT JOIN media_judgments j ON j.file_path = t.file_path "
+                "WHERE t.scorecard_id = ? ORDER BY t.id",
+                (scorecard_id,),
+            ).fetchall()
+        graded = [int(r["id"]) for r in rows if r["grade"] in GRADES]
+        return graded, len(rows) - len(graded)
+
     def scorecard_image_rows(
         self,
         adapter_id: Optional[int] = None,

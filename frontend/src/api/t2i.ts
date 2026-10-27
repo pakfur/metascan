@@ -95,6 +95,20 @@ export function deleteT2iImage(id: number): Promise<{ status: 'deleted' }> {
   return del(`/t2i/images/${id}`)
 }
 
+/** What deleting a scorecard's graded images did. */
+export interface ScorecardCleanup {
+  deleted: number
+  deleted_paths: string[]
+  kept_ungraded: number
+  failed: number
+}
+
+// Deletes a scorecard's graded images; their grades keep counting (from the
+// tombstones) and ungraded ones stay. 409 scorecard_running while it renders.
+export function deleteGradedScorecardImages(scorecardId: string): Promise<ScorecardCleanup> {
+  return post(`/t2i/scorecards/${encodeURIComponent(scorecardId)}/delete-graded`)
+}
+
 // Output paths of every T2I image still in the library — the "Generated with
 // T2I" smart-folder rule's membership set.
 export function listT2iPaths(): Promise<string[]> {

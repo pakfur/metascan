@@ -943,6 +943,23 @@ export const useT2iStore = defineStore('t2i', () => {
     void refreshImages()
   }
 
+  /**
+   * Deletes every graded image of a scorecard (the server keeps their grades
+   * in tombstones, so the scorecard and training still count them) and drops
+   * them from the grid, the library grid and manual folders. Ungraded ones
+   * stay. Throws on a refusal (409 while the scorecard renders).
+   */
+  async function deleteGradedScorecardImages(scorecardId: string): Promise<t2iApi.ScorecardCleanup> {
+    const result = await t2iApi.deleteGradedScorecardImages(scorecardId)
+    const gone = new Set(result.deleted_paths.map(pathKey))
+    const selected = selectedImage.value
+    images.value = images.value.filter((i) => !gone.has(pathKey(i.file_path)))
+    if (selected && gone.has(pathKey(selected.file_path))) selectedId.value = null
+    for (const path of result.deleted_paths) removeFromLibrary(path)
+    void refreshImages()
+    return result
+  }
+
   // ---- prompt drafts (writer variants) ----------------------------------------------------
 
   /** Holds a new set (Generate Prompt, the hand-back), replacing any other. */
@@ -1070,6 +1087,7 @@ export const useT2iStore = defineStore('t2i', () => {
     applyJudgment,
     fillIfRevealed,
     deleteImage,
+    deleteGradedScorecardImages,
     // draft
     loadDraft,
     saveDraft,
