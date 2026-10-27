@@ -475,6 +475,25 @@ async def delete_image(image_id: int) -> Dict[str, str]:
     return {"status": "deleted"}
 
 
+@router.post("/scorecards/{scorecard_id}/delete-graded")
+async def delete_graded_scorecard_images(scorecard_id: str) -> Dict[str, Any]:
+    """Delete a scorecard's graded images, keeping their grades, lineage and
+    thumbnails in tombstones (the scorecard still counts them); ungraded
+    ones stay. 409 ``scorecard_running`` while that scorecard renders."""
+    from backend.services.scorecard import running_scorecard
+
+    running = running_scorecard()
+    if running is not None and running.get("scorecard_id") == scorecard_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "scorecard_running",
+                "message": "This scorecard is still rendering: wait for it to finish.",
+            },
+        )
+    return await _service().delete_graded_scorecard_images(scorecard_id)
+
+
 @router.get("/paths")
 async def list_paths() -> List[str]:
     """Native paths of every generated image still in the library, for the

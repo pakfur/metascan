@@ -77,6 +77,19 @@ def test_every_committed_brief_passes_the_caption_screen() -> None:
         assert "(" not in brief and ")" not in brief
 
 
+def test_every_committed_brief_names_an_adult_subject_by_age() -> None:
+    # The scorecard asks the writer to carry a person and a feeling into the
+    # prompt: every brief has one or two adult subjects, their age stated.
+    import re
+
+    briefs, _ = sc.load_briefs(sc.SCORECARD_BRIEFS_PATH)
+    age = re.compile(
+        r"\bin (his|her|their) (twenties|thirties|forties|fifties|sixties|seventies|eighties)\b"
+    )
+    for brief in briefs:
+        assert age.search(brief), brief
+
+
 def test_a_brief_that_fails_the_screen_is_dropped(tmp_path: Path) -> None:
     path = tmp_path / "briefs.txt"
     path.write_text(
