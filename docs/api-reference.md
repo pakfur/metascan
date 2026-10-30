@@ -740,8 +740,22 @@ accept `template_id` (string or null). On `/prompt` an unknown id is
 on `/lint` an unknown id adds a warning and lints as a single take; on
 `/batches` it is recorded into the clip's `form_state` only.
 
-### `GET /api/i2v/videos?source_path=`
-Returns every clip generated from that source image, newest first:
+### `GET /api/i2v/batches`
+The runs still going, `[{batch_id, source_path, phase: "writing" | "rendering",
+batch, total_batches, queued, total_videos}, ...]`. A run lives in server memory
+only; a restart ends it (jobs already submitted stay).
+
+### `POST /api/i2v/batches/{batch_id}/cancel`
+Stops the run's prompt writing and cancels its unfinished jobs; returns
+`{status: "cancelled"}`. Idempotent for a run that has already ended; **404**
+only for an id the server never saw.
+
+### `GET /api/i2v/videos?source_path=&limit=&before_id=`
+Without `source_path`, returns a page of **every** clip in the library, newest
+first, each in the shape below: `limit` (1..200, default 60) and `before_id`
+(only clips with a smaller id) page it, and nothing is pruned on this read.
+With `source_path`, `limit` and `before_id` are ignored and the reply is
+every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
 quality, width, height, steps, render_s, preset_id, comfy_prompt_id,
 created_at, is_favorite, grade, megapixels, loras, form_state}, ...]`. Each row
@@ -824,6 +838,9 @@ Returns the `i2v` config section with defaults filled in:
   "default_steps": 25,
   "output_root": "",
   "output_prefix": "/%Y-%m-%d/i2v_",
+  "max_batch_size": 20,
+  "max_count_per_batch": 20,
+  "window": 4,
   "quality_steps_supported": false
 }
 ```
@@ -837,6 +854,13 @@ where they're picked.
 ### `i2v` WebSocket channel
 - **`i2v_videos_changed`** — `{source_path, files}`, sent once a ComfyUI
   job's outputs have been downloaded and ingested as `i2v_videos` rows.
+- **`batch_progress`** — `{batch_id, source_path, phase, batch, total_batches,
+  queued, total_videos, warnings}` while a run writes prompts and submits jobs.
+- **`batch_done`** — the same fields, once every job of the run has ended.
+- **`batch_failed`** — the same fields plus `error`; what was already queued
+  stays queued.
+- **`batch_cancelled`** — the same fields, after
+  `POST /api/i2v/batches/{id}/cancel`.
 
 ## Text-to-image (`/api/t2i/*`)
 

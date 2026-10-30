@@ -91,9 +91,9 @@ the root CLAUDE.md still applies.
   `types/i2v.ts::formatI2vTimestamp` appends `Z` before formatting;
   parsing it bare reads it as local time. **Cancel is the generic
   `POST /api/comfy/jobs/{id}/cancel`** (`api/comfy.ts::cancelJob`), not an
-  i2v route: the dialog's footer Cancel runs `store.cancelAllJobs()` over
-  every queued/running job for the open source image, and each job tile
-  has its own ✕. Tiles leave via the `comfy` channel's `job_update` →
+  i2v route: the dialog's footer Cancel runs `store.cancelSourceRuns()` (cancel each
+  of the image's runs, below, then `cancelAllJobs()` over every
+  queued/running job for it), and each job tile has its own ✕. Tiles leave via the `comfy` channel's `job_update` →
   `cancelled`, and are also dropped on the POST succeeding so a missed WS
   frame cannot strand one.
   **Clip placement is `i2v.output_root` + `i2v.output_prefix`**, resolved
@@ -121,10 +121,15 @@ the root CLAUDE.md still applies.
   (directories only, dot-dirs hidden). Both routes are deliberately sync
   `def` (threadpool): they stat possibly slow `/mnt/<drive>` mounts.
   **`I2VDialog` closes only via its ✕** — no `@click.self` on the overlay;
-  don't re-add one. A Generate whose `requestSignature()` (prompt, seed,
-  quality, effective steps, duration, size, loras) equals the last
-  successful submit's asks `confirm()` first; the snapshot is
-  component-local by decision, so earlier sessions never count.
+  don't re-add one. The ✕ asks `confirm()` first when the form holds
+  changes no render has used (below). A Generate whose `requestSignature()`
+  (prompt, seed, quality, effective steps, duration, size, loras) equals the
+  last successful submit's, with box text, Batch 1 and Count 1, asks
+  `confirm()` first; the snapshot is component-local by decision, so
+  earlier sessions never count. Only the dialog's button is called
+  Generate: `POST /api/i2v/generate` is gone (the dialog posts
+  `/batches`), and `I2vRunner.generate` is the per-video worker the run
+  calls.
   **Each clip carries two sets of values, and only one is editable.**
   The as-rendered columns (`prompt_used`, `seed`, `duration_s`, `quality`,
   `steps`, `width`/`height`, plus `megapixels`/`loras`) are facts: written
@@ -206,7 +211,7 @@ the root CLAUDE.md still applies.
   500, not a 404/400 — a data fault must not be reported as a bad
   request). The runner re-raises the lookup failure as
   `I2vRequestError(str(exc)) from exc`, and the route checks the chained
-  cause, never the message text; `/lint` and `/generate` apply the same
+  cause, never the message text; `/lint` and `/batches` apply the same
   split when resolving `template_id` (unknown → lint as a single take,
   broken library → 500). The dialog's Cadence
   `<select>` binds `:value`/`@change` rather than `v-model`, so picking a
@@ -232,20 +237,92 @@ the root CLAUDE.md still applies.
   the UI instead of corrupting text. The markers mirror
   `i2v_compiler.py`'s `_OPENING` and field labels; if those change, the
   fallback catches it. `TextEditPopup` is shared with the storyboard and
-  collapses newlines on save — correct here, because each H3 field is one
-  logical line; its `width`/`rows` props are optional and default to the
+  collapses newlines on save unless it is given `multiline`, which every
+  I2V panel passes: a Prompt, Soundscape or Music field keeps its line
+  breaks, and the lint's description ends at the next field, not at a
+  blank line (`83b0875`; a blank line inside the prompt no longer cuts the
+  check short). Its `width`/`rows` props are optional and default to the
   size its nine original callers were written against.
-  **Seed policy and generate count are session-local, not `form_state`.**
-  They are actions, not properties of a clip, so clicking a clip never
-  changes how many videos the next Generate makes; the defaults (Fixed, 1)
-  are byte-for-byte the old behaviour. `Fixed` forces the effective count
-  to 1 by decision — the same seed would render the same clip N times — and
-  the count field keeps whatever was typed for when the policy changes
-  back. The batch submits serially, advancing the seed after each job so
-  the field shows the next unused seed, and stops (rather than repeating a
-  seed) when increment/decrement would leave `0..2^31-1`. The
-  "nothing has changed" confirm is checked once for the batch, since any
-  non-Fixed policy makes later submits differ by construction.
+  **RAW / STRUCTURED is a view preference.** `components/generation/
+  I2vPromptEditor.vue` shows the one prompt as a single box (RAW) or as the
+  four panels (STRUCTURED, the default); the choice lives in localStorage
+  (`metascan.i2v.promptView.v1`). A view switch never writes `prompt`, and
+  when the document stops parsing while STRUCTURED is preferred the editor
+  stays in RAW (`promptViewState`) even if a keystroke makes it parse again,
+  so the view never flips under the cursor, until the user picks STRUCTURED
+  or a clip load calls `resetView`; the header panel is read-only with no
+  edit control.
+  **Batch × Count, and a run is server-owned.** Batch (1..`i2v.max_batch_size`)
+  is how many prompts a run uses, Count (1..`i2v.max_count_per_batch`) how
+  many videos each renders; both default 20 and the route 400s outside them.
+  The seed policy, Batch and Count are session-local, not `form_state`: they
+  are actions, not properties of a clip, so clicking a clip never changes
+  what the next Generate makes. The box text is batch 1's prompt; an empty
+  box is written, as are batches 2..N (`I2vRunner.write_prompt`), so only
+  then is a VLM needed. `plan_i2v_seeds` plans every seed before anything
+  runs: `fixed` gives each batch the one seed and forces Count to 1 by
+  decision (the same seed would render the same clip N times; the field
+  keeps what was typed for when the policy changes back); `increment` /
+  `decrement` run on across batches and a seed leaving `0..2^31-1` raises
+  `I2vRequestError` (400) instead of repeating one; `random` starts at the
+  box seed. The reply's `next_seed` is what the field shows afterwards.
+  `POST /api/i2v/batches` returns at once (`I2vRunner.start_batch`
+  creates an asyncio task, `_I2vBatch`, kept in memory only: **a restart
+  loses the run's unwritten prompts and unsubmitted videos**, while jobs
+  already submitted are `generation_jobs` rows and follow ComfyClient's own
+  rules; `GET /api/i2v/batches` lists the live runs so a reopened dialog
+  rebuilds its status). Order: with `comfy.unload_vlm_during_generation`
+  every prompt is written first, then the VLM is shut down, then the jobs
+  are submitted; off, each batch renders as soon as its prompt is written.
+  Submitting goes through a per-run `window` (`i2v.window`, default 4,
+  floored at 1; an `asyncio.Semaphore`): a job takes a slot when submitted
+  and its terminal `job_update` (`done`, `failed`, `cancelled`) frees it, so
+  a run keeps at most that many unfinished jobs in ComfyClient and the rest
+  wait here. `I2vRunner.handle_job_event` takes `job_update` as well as
+  `job_outputs`; a job that ends before `submit` returns finds no owner and
+  is held in `_early_ended` (capped at 256), then settled by `_register` and
+  `_submit_one` so it neither keeps a slot nor leaves its `_job_meta`
+  behind (an unsettled one stalled the run). A failed job does not end the
+  run. Events on the `i2v` channel, all carrying `{batch_id, source_path,
+  phase, batch, total_batches, queued, total_videos}`: `batch_progress`
+  (and `warnings`, the lint findings of the written prompts), then exactly
+  one of `batch_done`, `batch_failed` (plus `error`: the writer or a
+  submit failed; what was queued stays) or `batch_cancelled`.
+  `POST /api/i2v/batches/{id}/cancel` stops the writing and cancels every
+  unfinished job of the run; it is idempotent for a run that is already
+  over (a short list of finished ids is kept) and 404s only for an id the
+  runner never saw. The "nothing has changed" confirm is checked only for
+  a single video from box text, since any larger run differs by
+  construction.
+  **The dialog has three panels and two clip lists.** The left list is the
+  open image's clips (`GET /api/i2v/videos?source_path=`); the right is
+  every clip, newest first, `GET /api/i2v/videos` without `source_path`
+  paged by `limit` (1..200, default 60) and `before_id`. The all-videos
+  listing **prunes nothing** (the per-image one still lazily prunes, under
+  the same guard); the store keeps both lists, the open source and the
+  runs, and `i2v_videos_changed` refreshes both. **Switching image:** a
+  click on a clip of another image asks `confirmLeave` (kind `clip`), then
+  `findSource` looks up the clip's source in the media store and
+  `store.switchSource` makes it the open image; the form then loads the
+  clip (`loadClip`). A media store that is loaded and lacks the path means
+  **deleted**: the source is null, Generate and Generate prompt are
+  disabled with `SOURCE_DELETED_NOTE`, and the clip's values can still be
+  viewed. An empty store is loaded first, and when it is still empty the
+  image is not called deleted (unknown is not deleted): it stays usable on a
+  stand-in sized like the clip, since the server refuses a really missing
+  source anyway. **The dialog has a `ready` state**, false until the store
+  has opened and the config defaults are in the form: clip clicks (a toast
+  says it is still loading), Generate and Generate prompt do nothing before
+  it, since a click would be compared with a baseline that does not exist
+  and the defaults would land over the clip's values.
+  **Unsaved changes.** `frontend/src/utils/unsavedForm.ts` (pure,
+  shared with the T2I dialog) compares the form with `cleanForm`, the form
+  as it last matched a render or a load, and `confirmLeave` asks a native
+  `confirm()` before a clip click, an image switch or the ✕ would drop
+  them. A selected clip's edits autosave, so they are not unsaved unless
+  the save failed (then it asks, in different words); the seed advance
+  after a Generate and the values of a clip that vanished underneath the
+  form move the baseline and never count as edits.
   **Prompt rewrites are offered, never applied.**
   `metascan/core/i2v_fixes.py` (pure, no model call) owns the two lint
   findings that can be fixed mechanically, as `I2vFinding(code, message,

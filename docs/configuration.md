@@ -106,7 +106,10 @@ Read by `backend.config.get_i2v_config` and served to the frontend by `GET /api/
     "steps": [20, 25, 30, 35, 40],
     "default_steps": 25,
     "output_root": "",
-    "output_prefix": "/%Y-%m-%d/i2v_"
+    "output_prefix": "/%Y-%m-%d/i2v_",
+    "max_batch_size": 20,
+    "max_count_per_batch": 20,
+    "window": 4
   }
 }
 ```
@@ -121,6 +124,8 @@ Read by `backend.config.get_i2v_config` and served to the frontend by `GET /api/
 - **`default_steps`** — which entry the selector opens with. Falls back to the first entry if it isn't in `steps`.
 - **`output_root`** — absolute directory generated clips are saved under, chosen with the **Browse…** directory picker (it walks the *server's* filesystem). Empty keeps the default layout, `<comfy.output_root>/i2v/<image name>/`. The directory must already exist — a generate against a missing one returns 400 rather than creating it.
 - **`output_prefix`** — a path *relative to `output_root`* whose last component is the file name prefix; a unique number (epoch seconds) and the extension are appended. `strftime` date tokens expand at generate time: `%Y` year, `%m` month, `%d` day, `%H` hour, `%M` **minute**, `%S` second. With root `/mnt/d/Media/images` and prefix `/%Y-%m-%d/minimax_`, a clip lands at `/mnt/d/Media/images/2026-09-20/minimax_1789930000.mp4`. A leading slash is cosmetic (never the filesystem root), missing subdirectories are created, `..` is rejected, and characters illegal in file names become `-`. An existing file is never overwritten — a `_2`, `_3`… tail is added instead. Ignored while `output_root` is empty. The config tab shows a live preview of the resolved path and warns about `%M` used without `%H` (almost always a typo for `%m`).
+- **`max_batch_size`** / **`max_count_per_batch`** — the ceilings for the dialog's **Batch** (prompts per run) and **Count** (videos per prompt) fields, which the batch endpoint enforces. Defaults `20` and `20`, floored at `1`; config-file only.
+- **`window`** — how many unfinished jobs one run keeps inside ComfyClient's queue at once; the rest wait in the run. Default `4`, floored at `1`; config-file only.
 
 ## `t2i`
 
