@@ -100,12 +100,14 @@ export const useI2vStore = defineStore('i2v', () => {
     } catch {
       templates.value = []
     }
+    // The right-hand list and the runs are extras: their failure leaves them
+    // empty rather than the dialog without its defaults.
     await Promise.all([
       refreshVideos(),
-      refreshAllVideos(),
       refreshActiveJobs(),
-      refreshBatches(),
       loadAdapters(),
+      refreshAllVideos().catch(() => {}),
+      refreshBatches().catch(() => {}),
     ])
   }
 
@@ -178,11 +180,13 @@ export const useI2vStore = defineStore('i2v', () => {
       if (seq !== allSeq) return
       for (const row of rows) notes.settle(norm(row.file_path), row, askedAt)
       const full = rows.length >= ALL_PAGE
-      allVideos.value = full ? mergeNewestPage(rows, allVideos.value) : rows
-      // A short page is the whole list; a full one leaves the older rows
-      // unknown, whether or not some are held.
+      const merged = full ? mergeNewestPage(rows, allVideos.value) : rows
+      allVideos.value = merged
+      // A short page is the whole list. A full one leaves older rows unknown
+      // unless the merge kept some held ones beyond it (then the flag stands):
+      // a list that grew past one page since it was short has more.
       if (!full) hasMoreAll.value = false
-      else if (!allVideosLoaded.value) hasMoreAll.value = true
+      else hasMoreAll.value = hasMoreAll.value || merged.length === rows.length
       allVideosLoaded.value = true
     } finally {
       notes.done(askedAt)
@@ -234,14 +238,38 @@ export const useI2vStore = defineStore('i2v', () => {
 
   // The server's running runs, replacing the list wholesale: a run that
   // ended while no frame reached us leaves nothing behind.
+  // Frames that arrived while the request was out are newer than its reply:
+  // a run that ended meanwhile stays gone, one that moved keeps its frame,
+  // and one a frame added is kept even if the reply lacks it.
+  let batchTick = 0
+  const batchEnded = new Map<string, number>()
+  const batchTouched = new Map<string, number>()
+  function stamp(m: Map<string, number>, id: string): void {
+    m.delete(id)
+    m.set(id, ++batchTick)
+    while (m.size > 200) m.delete(m.keys().next().value as string)
+  }
+
   async function refreshBatches(): Promise<void> {
     const seq = ++batchesSeq
+    const askedAt = ++batchTick
     const rows = await listI2vBatches()
     if (seq !== batchesSeq) return
-    batches.value = rows
+    const current = new Map(batches.value.map((b) => [b.batch_id, b]))
+    const next: I2vBatch[] = []
+    for (const row of rows) {
+      if ((batchEnded.get(row.batch_id) ?? 0) > askedAt) continue
+      const newer = (batchTouched.get(row.batch_id) ?? 0) > askedAt ? current.get(row.batch_id) : undefined
+      next.push(newer ?? row)
+    }
+    for (const [id, row] of current) {
+      if ((batchTouched.get(id) ?? 0) > askedAt && !next.some((b) => b.batch_id === id)) next.push(row)
+    }
+    batches.value = next
   }
 
   function upsertBatch(row: I2vBatch): void {
+    stamp(batchTouched, row.batch_id)
     const i = batches.value.findIndex((b) => b.batch_id === row.batch_id)
     if (i < 0) batches.value = [...batches.value, row]
     else batches.value = batches.value.map((b, j) => (j === i ? row : b))
@@ -381,6 +409,7 @@ export const useI2vStore = defineStore('i2v', () => {
       return
     }
     if (event === 'batch_done' || event === 'batch_failed' || event === 'batch_cancelled') {
+      stamp(batchEnded, row.batch_id)
       batches.value = batches.value.filter((b) => b.batch_id !== row.batch_id)
       if (event === 'batch_failed' && mine) {
         statusNote.value = `A run stopped: ${String(data.error ?? 'unknown error')}`
