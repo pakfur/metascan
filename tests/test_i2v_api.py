@@ -685,6 +685,27 @@ class TestI2vFormStateApi(_I2vApiBase):
         self.assertEqual(resp.status_code, 200)
         return resp.json()
 
+    def test_get_videos_without_source_returns_all_with_form_state(self):
+        self._clip("/lib/o1.mp4")
+        self._clip("/lib/o2.mp4")
+        resp = self.client.get("/api/i2v/videos", params={"limit": 1})
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["form_state"]["seed"], 42)
+        self.assertIn("o2.mp4", rows[0]["file_path"])
+        more = self.client.get(
+            "/api/i2v/videos", params={"limit": 1, "before_id": rows[0]["id"]}
+        ).json()
+        self.assertEqual(len(more), 1)
+        self.assertIn("o1.mp4", more[0]["file_path"])
+
+    def test_get_videos_with_source_is_unchanged(self):
+        self._clip("/lib/o1.mp4")
+        rows = self._videos()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["form_state"]["seed"], 42)
+
     def test_list_returns_the_stored_form_state(self):
         self._clip(form_state=self.FORM, megapixels=0.5, loras=self.FORM["loras"])
         self.assertEqual(self._videos()[0]["form_state"], self.FORM)
