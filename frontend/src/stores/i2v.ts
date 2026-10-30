@@ -129,8 +129,8 @@ export const useI2vStore = defineStore('i2v', () => {
     jobs.value = new Map()
   }
 
-  // Show another source image: `media` is null when the path is a clip's
-  // source whose image is gone from the library. Replies still out for the
+  // Show another source image: `media` is null only when the library is known
+  // to lack the clip's source image (deleted); an unknown one gets a stand-in. Replies still out for the
   // previous source are dropped.
   function switchSource(path: string, media: Media | null): void {
     sourcePath.value = path
