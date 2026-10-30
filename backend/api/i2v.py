@@ -233,7 +233,7 @@ async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
 def _checked_form(
     body: GenerateRequest,
 ) -> Tuple[Dict[str, Any], int, Any]:
-    """What /generate and /batches share: the form's checks, the config and
+    """What /batches does first: the form's checks, the config and
     the preset its quality slot names, and the cadence template (or None)."""
     if body.duration_s <= 0:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
@@ -270,48 +270,6 @@ def _checked_form(
             "Configuration → Image to Video.",
         )
     return cfg, preset_id, template
-
-
-@router.post("/generate", dependencies=GPU_FREE)
-async def generate(body: GenerateRequest) -> Dict[str, Any]:
-    runner = _require_runner()
-    cfg, preset_id, template = _checked_form(body)
-    category_ids = await checked_category_ids(body.category_ids)
-    try:
-        job_id = await runner.generate(
-            source_path=body.source_path,
-            prompt=body.prompt,
-            duration_s=body.duration_s,
-            quality=body.quality,
-            seed=body.seed,
-            megapixels=body.megapixels,
-            loras=body.loras,
-            preset_id=preset_id,
-            idea=body.idea,
-            steps=body.steps,
-            output_root=cfg["output_root"] or None,
-            output_prefix=cfg["output_prefix"],
-            template_id=body.template_id,
-            category_ids=category_ids,
-            writer_id=body.writer_id,
-            draft_prompt=body.draft_prompt,
-            writer_model=body.writer_model,
-        )
-    except WriterAdapterUnavailable as exc:
-        # A draft from an adapter that has gone: the dialog falls back.
-        raise _adapter_409(exc) from exc
-    except I2vRequestError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (BindingError, PresetNotFoundError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except GpuBusyError as exc:
-        raise gpu_busy_http_error() from exc
-    except ComfyError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {
-        "job_id": job_id,
-        "warnings": lint_i2v_prompt(body.prompt, body.duration_s, template=template),
-    }
 
 
 @router.post("/batches", dependencies=GPU_FREE)

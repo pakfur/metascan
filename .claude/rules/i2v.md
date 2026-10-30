@@ -17,7 +17,7 @@ the root CLAUDE.md still applies.
   `assemble_i2v_prompt` (the base guide's I2VA structure — exact §2.1
   alignment line, `[Shot 1]` opener, three core fields), and advisory
   `lint_i2v_prompt` that runs on generated AND hand-edited prompts
-  (`POST /api/i2v/generate` re-lints the submitted text). `I2vRunner`
+  (`POST /api/i2v/lint` lints the text). `I2vRunner`
   mirrors StoryboardRunner's layering: correlation via
   `generation_jobs.i2v_source_path` (nullable TEXT, no REFERENCES — the
   panel_id precedent), ingest keyed on that column (storyboard ingest
@@ -275,4 +275,4 @@ the root CLAUDE.md still applies.
   fixes** only when `fixes.length > 0` AND `lintedFor === prompt` (a
   stale rewrite must never clobber newer typing). Never auto-apply on
   Generate: the box is "Generate uses this text".
-- **Generation categories.** `POST /api/i2v/generate` takes `category_ids` (default `[]`), validated by `checked_category_ids` (404 `{code: "unknown_category"}` before upload/queue) and passed to `I2vRunner.generate(category_ids=…)`, which keeps them in the in-memory `_job_meta` (not the form). Ingest tags each new clip via `generation_categories.tag_generated_media` (source `generation`) before `i2v_videos_changed`; a deleted category is a logged skip. The dialog's selection is session-local like the seed policy (`metascan.i2v.categories.v1`).
+- **Generation categories.** `POST /api/i2v/batches` takes `category_ids` (default `[]`), validated by `checked_category_ids` (404 `{code: "unknown_category"}` before upload/queue) and passed to `I2vRunner.generate(category_ids=…)`, which keeps them in the in-memory `_job_meta` (not the form). Ingest tags each new clip via `generation_categories.tag_generated_media` (source `generation`) before `i2v_videos_changed`; a deleted category is a logged skip. The dialog's selection is session-local like the seed policy (`metascan.i2v.categories.v1`).

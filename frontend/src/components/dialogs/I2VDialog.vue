@@ -8,13 +8,14 @@ import {
   withCurrentOption,
   type I2vFix,
   I2V_WRITERS,
+  type I2vBatch,
   type I2vFormState,
   type I2vWriter,
   type I2vTemplate,
   type I2vVideo,
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
-import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
+import { generatePrompt, startI2vBatch, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
 import {
   ADAPTER_LOADING,
@@ -30,6 +31,7 @@ import { useWriterPick } from '../../composables/useWriterPick'
 import { useTrainingStore } from '../../stores/training'
 import { useToast } from '../../composables/useToast'
 import { errorText } from '../../utils/gpuBusy'
+import { confirmLeave, type LeaveKind } from '../../utils/unsavedForm'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
@@ -111,6 +113,7 @@ function onCadenceChange(id: string) {
 }
 
 const expanding = ref(false)
+const pathKey = (p: string) => p.replace(/\\/g, '/')
 
 // Writer: per browser like the seed policy, never per clip (form_state does
 // not carry it), so loading a clip never changes it. See the Writer pick below.
@@ -126,6 +129,10 @@ const viewerIndex = ref<{ list: 'left' | 'right'; index: number } | null>(null)
 const promptEditor = ref<InstanceType<typeof I2vPromptEditor> | null>(null)
 const loadingMoreAll = ref(false)
 
+// The open source image: props.media only seeds the first open; after that the
+// store owns it, and it is null once a clip's source image has been deleted.
+const sourceMedia = computed(() => store.source)
+
 onMounted(async () => {
   await store.open(props.media)
   const cfg = store.config
@@ -135,9 +142,29 @@ onMounted(async () => {
     megapixels.value = cfg.default_megapixels
     steps.value = cfg.default_steps
   }
+  cleanForm = JSON.stringify(currentForm())
 })
 
+// The form as it was when it last matched a render or a load: what the
+// unsaved-changes prompts compare against. A string, not reactive.
+let cleanForm = ''
+
+// True when the user may leave the form behind: nothing to lose, or they
+// accepted the prompt (native confirm(), as the nothing-changed prompt).
+function mayLeave(kind: LeaveKind): boolean {
+  return confirmLeave(
+    {
+      selected: selectedId.value !== null,
+      saveFailed: saveFailed.value,
+      baseline: cleanForm,
+      current: JSON.stringify(currentForm()),
+    },
+    kind,
+  )
+}
+
 function close() {
+  if (!mayLeave('close')) return
   flushFormState() // before store.close() empties the clip list
   store.close()
   emit('close')
@@ -175,17 +202,20 @@ const stepsHint = computed(() => {
 })
 // Preview only; the server recomputes from the source's real dimensions.
 const outputDims = computed(() =>
-  i2vDims(props.media.width ?? 0, props.media.height ?? 0, megapixels.value),
+  i2vDims(sourceMedia.value?.width ?? 0, sourceMedia.value?.height ?? 0, megapixels.value),
 )
 
 // ---- seed policy + batch generate -------------------------------------------
 // The seed policy advances the seed once per submitted job, so the
 // field ends up showing the next unused seed. Fixed is the default and is
 // exactly the old behaviour: one job, seed untouched.
-const MAX_GENERATE_COUNT = 20
-
 const seedPolicy = ref<SeedPolicy>('fixed')
+// Batch is how many prompts a run uses, Count how many videos each renders.
+// Session-local like the policy: a clip load never changes either.
+const batchSize = ref(1)
 const generateCount = ref(1)
+const maxBatch = computed(() => store.config?.max_batch_size ?? 20)
+const maxCount = computed(() => store.config?.max_count_per_batch ?? 20)
 
 // Categories every clip of the next Generate is tagged with. Session-local
 // like the seed policy: not part of form_state, so loading a clip never
@@ -243,33 +273,21 @@ function handledAdapterError(e: unknown): boolean {
   }
   return false
 }
-const batchProgress = ref('')
 
 // A Fixed seed would render the same video N times, so the count is ignored
 // rather than obeyed -- the field keeps whatever was typed for when the
 // policy changes back.
 const countIgnored = computed(() => seedPolicy.value === 'fixed')
-const effectiveCount = computed(() => {
-  if (countIgnored.value) return 1
-  const n = Math.round(Number(generateCount.value))
+function clampTo(value: unknown, max: number): number {
+  const n = Math.round(Number(value))
   if (!Number.isFinite(n)) return 1
-  return Math.min(MAX_GENERATE_COUNT, Math.max(1, n))
-})
-
-// null = the next seed would leave the 0..2^31-1 range, so the batch stops
-// instead of silently repeating a seed.
-function nextSeed(current: number): number | null {
-  switch (seedPolicy.value) {
-    case 'increment':
-      return current < SEED_MAX ? current + 1 : null
-    case 'decrement':
-      return current > 0 ? current - 1 : null
-    case 'random':
-      return randomSeed()
-    default:
-      return current
-  }
+  return Math.min(max, Math.max(1, n))
 }
+const effectiveBatch = computed(() => clampTo(batchSize.value, maxBatch.value))
+const effectiveCount = computed(() =>
+  countIgnored.value ? 1 : clampTo(generateCount.value, maxCount.value),
+)
+const totalVideos = computed(() => effectiveBatch.value * effectiveCount.value)
 
 // ---- live lint + "Apply fixes" ---------------------------------------------
 // The prompt box is linted as it changes (generated text and hand edits
@@ -351,7 +369,7 @@ async function onExpandPrompt() {
   const forTemplate = templateId.value
   try {
     const res = await generatePrompt({
-      source_path: props.media.file_path,
+      source_path: store.sourcePath ?? '',
       idea: forIdea,
       duration_s: durationS.value,
       template_id: templateId.value || null,
@@ -381,6 +399,7 @@ async function onExpandPrompt() {
 // genuinely different render and must not trigger the prompt below.
 function requestSignature(): string {
   return JSON.stringify({
+    source: store.sourcePath ? pathKey(store.sourcePath) : null,
     prompt: prompt.value,
     seed: seed.value,
     quality: quality.value,
@@ -406,8 +425,13 @@ const lastSubmitted = ref<string | null>(null)
 // The clip's as-rendered fields (prompt_used, seed, quality, steps, which
 // feed the tile label) are facts about the video and are never written.
 const selectedId = ref<number | null>(null)
+// Either list holds it: after a switch from the right list the left one is
+// still loading.
 const selectedVideo = computed(
-  () => store.videos.find((v) => v.id === selectedId.value) ?? null,
+  () =>
+    store.videos.find((v) => v.id === selectedId.value) ??
+    store.allVideos.find((v) => v.id === selectedId.value) ??
+    null,
 )
 const saveFailed = ref(false)
 // JSON of the form as last loaded or saved; an autosave is skipped while
@@ -509,18 +533,26 @@ function loadClip(v: I2vVideo) {
   lastSubmitted.value = requestSignature()
 }
 
-// The tile waits out the double-click window (useDelayedClick), so a
-// double-click never reaches here.
-function onSelectClip(v: I2vVideo) {
-  loadClip(v)
+const differs = (a: string, b: string | null) => b === null || pathKey(a) !== pathKey(b)
+
+// The library row of a clip's source image, or null when it is gone.
+function findSource(path: string): Media | null {
+  const key = pathKey(path)
+  return mediaStore.allMedia.find((m) => pathKey(m.file_path) === key) ?? null
 }
 
-// A clip of another source image cannot be loaded here yet (switching the
-// source comes with the run row); one of this image's clips loads as in the
-// left list.
-function onSelectAllClip(v: I2vVideo) {
-  const own = store.videos.find((x) => x.id === v.id)
-  if (own) onSelectClip(own)
+// A click on a clip in either list. The tile waits out the double-click
+// window (useDelayedClick), so a double-click never reaches here.
+function onSelectClip(v: I2vVideo) {
+  if (v.id === selectedId.value) return
+  if (!mayLeave('clip')) return
+  if (differs(v.source_path, store.sourcePath)) {
+    const media = findSource(v.source_path)
+    store.switchSource(media?.file_path ?? v.source_path, media)
+  }
+  loadClip(v)
+  cleanForm = JSON.stringify(currentForm())
+  promptEditor.value?.resetView()
 }
 
 async function onShowMoreAll() {
@@ -538,33 +570,69 @@ async function onShowMoreAll() {
 function stopEditingClip() {
   flushFormState()
   selectedId.value = null
+  cleanForm = JSON.stringify(currentForm()) // the values are saved in the clip
 }
 
 // The selected clip can vanish underneath us: deleted here, or pruned by
-// the server because its media row is gone.
-watch(
-  () => store.videos,
-  (videos) => {
-    if (selectedId.value != null && !videos.some((v) => v.id === selectedId.value)) {
-      if (saveTimer) clearTimeout(saveTimer)
-      saveTimer = null
-      selectedId.value = null
-    }
-  },
-)
+// the server because its media row is gone. It may sit in either list (a
+// clip picked on the right is not in the left one while the image changes).
+// Its values were the clip's, so the form is not "unsaved" afterwards.
+watch([() => store.videos, () => store.allVideos], ([videos, all]) => {
+  if (
+    selectedId.value != null &&
+    !videos.some((v) => v.id === selectedId.value) &&
+    !all.some((v) => v.id === selectedId.value)
+  ) {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    selectedId.value = null
+    cleanForm = JSON.stringify(currentForm())
+  }
+})
 
 onBeforeUnmount(flushFormState)
 
-async function onGenerate() {
-  if (!prompt.value.trim()) {
-    toast.show('Write or generate a prompt first', 'warn')
-    return
+// Footer Cancel: stops this image's runs (their unfinished writing and their
+// jobs) and every job still in flight for it. Each job tile also carries its
+// own ✕ for cancelling just that one.
+async function onCancelAll() {
+  cancelling.value = true
+  try {
+    await store.cancelSourceRuns()
+    toast.show('Cancelled', 'success')
+  } catch (e) {
+    toast.show(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    cancelling.value = false
   }
-  const total = effectiveCount.value
-  // Checked once for the whole batch: with any policy but Fixed the seed
-  // moves, so every later submit differs from this one by construction.
+}
+
+const canCancel = computed(() => store.sourceBatches.length > 0 || store.activeJobIds.length > 0)
+
+// `Batch k/N · writing prompt` per run of the open image, from the server's
+// list (rebuilt on open, so a run that ended while the dialog was shut shows
+// nothing).
+const runStatus = computed(() =>
+  store.sourceBatches.map(
+    (b: I2vBatch) =>
+      `Batch ${b.batch}/${b.total_batches} · ${b.phase === 'writing' ? 'writing prompt' : 'rendering'}`,
+  ),
+)
+
+const SOURCE_DELETED_NOTE =
+  "This clip's source image was deleted, so it can't be generated again."
+
+async function onGenerate() {
+  const sourcePath = store.sourcePath
+  if (!sourcePath || !store.source) return
+  const text = prompt.value.trim()
   const signature = requestSignature()
+  // Only a run that would repeat one identical render asks: box text, one
+  // batch, one video, nothing changed since the last submit.
   if (
+    text &&
+    effectiveBatch.value === 1 &&
+    effectiveCount.value === 1 &&
     signature === lastSubmitted.value &&
     !confirm(
       'Nothing has changed since your last Generate — same seed, quality, ' +
@@ -574,92 +642,90 @@ async function onGenerate() {
   ) {
     return
   }
+  // Let go of the selected clip first, before anything changes the form: a
+  // seed advance would otherwise autosave into it.
+  flushFormState()
+  selectedId.value = null
   const d = store.draft
+  // Lineage only for box text with a live draft for this idea and cadence.
   const heldDraft =
-    d && d.idea === idea.value && d.templateId === templateId.value ? d : null
+    text && d && d.idea === idea.value && d.templateId === templateId.value ? d : null
+  const sent = currentForm()
+  // Batch 1 keeps the box text; the run writes it (and batches 2..N) otherwise.
+  const writes = !text || effectiveBatch.value > 1
   submitting.value = true
-  let queued = 0
-  let stopped: string | null = null
   try {
-    for (let i = 0; i < total; i++) {
-      batchProgress.value = total > 1 ? `${i + 1}/${total}` : ''
-      try {
-        const res = await generateVideo({
-          source_path: props.media.file_path,
-          prompt: prompt.value,
-          duration_s: durationS.value,
-          quality: quality.value,
-          seed: seed.value,
-          megapixels: megapixels.value,
-          loras: loras.value,
-          idea: idea.value,
-          template_id: templateId.value || null,
-          category_ids: [...categoryIds.value],
-          // Lineage: only a live draft for this idea and cadence counts; a
-          // prompt without one is typed from scratch (recorded `manual`).
-          ...(heldDraft
-            ? {
-                writer_id: heldDraft.writer_id,
-                draft_prompt: heldDraft.text,
-                writer_model: heldDraft.writer_model,
-              }
-            : {}),
-          ...(stepsEnabled.value ? { steps: steps.value } : {}),
-        })
-        warnings.value = res.warnings
-        // The signature of what was just submitted: the seed has not
-        // advanced yet at this point.
-        lastSubmitted.value = requestSignature()
-        store.trackJob(res.job_id)
-        queued += 1
-      } catch (e) {
-        if (adapterErrorCode(e) === ADAPTER_UNAVAILABLE) {
-          // The draft's adapter has gone: the prompt goes out as typed next.
-          store.setDraft(null)
-          void store.loadAdapters()
-          stopped = 'the trained writer of this prompt is no longer available; Generate again to send it as typed'
-        } else if (isUnknownCategoryError(e)) {
-          void refreshCategories()
-          stopped =
-            'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'
-        } else {
-          stopped = errorText(e)
-        }
-        break
-      }
-      const advanced = nextSeed(seed.value)
-      if (advanced === null) {
-        // Leave the seed where it is rather than repeat it. Only a batch
-        // with submits still owing has actually been cut short.
-        if (i + 1 < total) stopped = 'the seed reached the end of its range'
-        break
-      }
-      seed.value = advanced
+    const res = await startI2vBatch({
+      source_path: sourcePath,
+      prompt: text ? prompt.value : '',
+      idea: idea.value,
+      duration_s: durationS.value,
+      quality: quality.value,
+      seed: seed.value,
+      seed_policy: seedPolicy.value,
+      batch_size: effectiveBatch.value,
+      count_per_batch: effectiveCount.value,
+      megapixels: megapixels.value,
+      loras: loras.value,
+      writer: writer.value,
+      template_id: templateId.value || null,
+      category_ids: [...categoryIds.value],
+      ...(heldDraft
+        ? {
+            writer_id: heldDraft.writer_id,
+            draft_prompt: heldDraft.text,
+            writer_model: heldDraft.writer_model,
+          }
+        : {}),
+      ...(stepsEnabled.value ? { steps: steps.value } : {}),
+    })
+    lastSubmitted.value = signature
+    store.statusNote = null
+    store.warnings = res.warnings
+    // The seed field shows the next unused seed unless it was edited meanwhile.
+    const takeSeed = res.next_seed !== null && seed.value === sent.seed
+    if (takeSeed && res.next_seed !== null) seed.value = res.next_seed
+    // The baseline is what was generated, seed advance included, so the
+    // automatic seed change never counts as an edit.
+    if (selectedId.value === null) {
+      cleanForm = JSON.stringify({ ...sent, seed: takeSeed ? seed.value : sent.seed })
+    }
+    store.trackBatch({
+      batch_id: res.batch_id,
+      source_path: sourcePath,
+      phase: writes ? 'writing' : 'rendering',
+      batch: 1,
+      total_batches: effectiveBatch.value,
+      queued: 0,
+      total_videos: res.total_videos,
+    })
+    void store.refreshBatches().catch(() => {})
+    toast.show(
+      res.total_videos > 1 ? `${res.total_videos} video jobs queued` : 'Video job queued',
+      'success',
+    )
+  } catch (e) {
+    if (adapterErrorCode(e) === ADAPTER_UNAVAILABLE && text && !writes) {
+      // The draft's adapter has gone: the prompt goes out as typed next.
+      store.setDraft(null)
+      void store.loadAdapters()
+      toast.show(
+        'the trained writer of this prompt is no longer available; Generate again to send it as typed',
+        'warn',
+      )
+    } else if (handledAdapterError(e)) {
+      // dealt with
+    } else if (isUnknownCategoryError(e)) {
+      void refreshCategories()
+      toast.show(
+        'A chosen category no longer exists. It was removed from Categories; check them and Generate again.',
+        'warn',
+      )
+    } else {
+      toast.show(errorText(e), 'warn') // gpu_busy and the rest
     }
   } finally {
     submitting.value = false
-    batchProgress.value = ''
-  }
-  if (stopped) {
-    toast.show(total > 1 ? `${stopped} — queued ${queued} of ${total}` : stopped, 'warn')
-  } else {
-    toast.show(total > 1 ? `${total} video jobs queued` : 'Video job queued', 'success')
-  }
-}
-
-// Footer Cancel: stops every queued/running job for this image. Each job
-// tile also carries its own ✕ for cancelling just that one.
-async function onCancelAll() {
-  const count = store.activeJobIds.length
-  if (!count) return
-  cancelling.value = true
-  try {
-    await store.cancelAllJobs()
-    toast.show(count > 1 ? `Cancelled ${count} video jobs` : 'Video job cancelled', 'success')
-  } catch (e) {
-    toast.show(e instanceof Error ? e.message : String(e), 'warn')
-  } finally {
-    cancelling.value = false
   }
 }
 
@@ -678,11 +744,12 @@ async function onDeleteVideo(v: I2vVideo) {
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = null
     selectedId.value = null
+    cleanForm = JSON.stringify(currentForm()) // the clip's own values: nothing to lose
   }
   try {
     await deleteI2vVideo(v.id)
     store.removeVideo(v.id)
-    await store.refreshVideos()
+    await Promise.all([store.refreshVideos(), store.refreshAllVideos()])
     void mediaStore.loadAllMedia()
     void foldersStore.refreshI2vSources()
   } catch (e) {
@@ -705,7 +772,6 @@ async function onToggleFavorite(v: I2vVideo) {
 // library row by path when it is there, else the source image's row spread.
 // The clip's own ★ and grade always win over either: the viewer's rail shows
 // them until the clip's judgment arrives.
-const pathKey = (p: string) => p.replace(/\\/g, '/')
 const viewerMedia = computed<Media[]>(() => {
   if (!viewerIndex.value) return []
   const clips = viewerIndex.value.list === 'left' ? store.videos : store.allVideos
@@ -713,10 +779,16 @@ const viewerMedia = computed<Media[]>(() => {
   return clips.map((v) => {
     const row = byPath.get(pathKey(v.file_path))
     const base: Media = row ?? {
-      ...props.media,
       file_path: v.file_path,
       file_name: v.file_path.split(/[\\/]/).pop() ?? v.file_path,
+      is_favorite: v.is_favorite,
       is_video: true,
+      playback_speed: null,
+      width: v.width ?? 0,
+      height: v.height ?? 0,
+      file_size: 0,
+      frame_rate: null,
+      duration: v.duration_s,
     }
     return { ...base, is_favorite: v.is_favorite, grade: v.grade ?? null }
   })
@@ -737,7 +809,13 @@ const viewerMedia = computed<Media[]>(() => {
       <div class="i2v-body">
         <!-- Left: the source image and its own clips, newest first. -->
         <section class="i2v-side i2v-left" aria-label="This image's videos">
-          <img class="i2v-source" :src="thumbnailUrl(media.file_path)" alt="" />
+          <img
+            v-if="sourceMedia"
+            class="i2v-source"
+            :src="thumbnailUrl(sourceMedia.file_path)"
+            alt=""
+          />
+          <div v-else class="i2v-source-gone">Source image deleted</div>
           <I2vClipList
             class="side-list"
             :videos="store.videos"
@@ -842,7 +920,12 @@ const viewerMedia = computed<Media[]>(() => {
                 >{{ a.label }}</option>
               </select>
             </label>
-            <button class="btn" :disabled="expanding" @click="onExpandPrompt">
+            <button
+              class="btn"
+              :disabled="expanding || !sourceMedia"
+              :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
+              @click="onExpandPrompt"
+            >
               {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
             </button>
           </div>
@@ -929,42 +1012,69 @@ const viewerMedia = computed<Media[]>(() => {
 
           <footer class="i2v-run">
             <div class="run-row">
-              <label
-                class="fld fld-inline"
-                :class="{ 'fld-off': countIgnored }"
-                title="How many videos one Generate queues"
-              >
-                <span>Generate count</span>
-                <input
-                  v-model.number="generateCount"
-                  type="number"
-                  min="1"
-                  :max="MAX_GENERATE_COUNT"
-                />
-              </label>
+              <div class="counts">
+                <label
+                  class="fld fld-inline"
+                  title="How many prompts one Generate uses. With text in the Prompt box, batch 1 renders it; the others are written."
+                >
+                  <span>Batch</span>
+                  <input
+                    v-model.number="batchSize"
+                    type="number"
+                    min="1"
+                    :max="maxBatch"
+                    step="1"
+                    @change="batchSize = effectiveBatch"
+                  />
+                </label>
+                <label
+                  class="fld fld-inline"
+                  :class="{ 'fld-off': countIgnored }"
+                  :title="countIgnored
+                    ? 'Ignored while the seed is Fixed: the same seed would render the same video again'
+                    : 'How many videos to render for each prompt'"
+                >
+                  <span>Count</span>
+                  <input
+                    v-model.number="generateCount"
+                    type="number"
+                    min="1"
+                    :max="maxCount"
+                    step="1"
+                    :disabled="countIgnored"
+                    @change="generateCount = clampTo(generateCount, maxCount)"
+                  />
+                </label>
+              </div>
               <div class="actions">
                 <button
                   class="btn danger"
-                  :disabled="cancelling || !store.activeJobIds.length"
-                  :title="store.activeJobIds.length
-                    ? 'Stop the running video workflow and drop queued ones for this image'
-                    : 'No video is generating'"
+                  :disabled="cancelling || !canCancel"
+                  :title="canCancel
+                    ? 'Stop this image\'s runs and its running video workflow, and drop queued ones'
+                    : 'Nothing is running for this image'"
                   @click="onCancelAll"
                 >
                   {{ cancelling ? 'Cancelling…' : 'Cancel' }}
                 </button>
                 <button
                   class="btn primary"
-                  :disabled="submitting || !prompt.trim()"
+                  :disabled="submitting || !sourceMedia"
+                  :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
                   @click="onGenerate"
                 >
                   {{ submitting
-                    ? (batchProgress ? `Generating ${batchProgress}…` : 'Submitting…')
-                    : (effectiveCount > 1 ? `Generate ×${effectiveCount}` : 'Generate') }}
+                    ? 'Submitting…'
+                    : (totalVideos > 1 ? `Generate ×${totalVideos}` : 'Generate') }}
                 </button>
               </div>
             </div>
-            <small v-if="countIgnored" class="dims-hint">count ignored while the seed is Fixed</small>
+            <p v-if="!sourceMedia" class="hint warn">{{ SOURCE_DELETED_NOTE }}</p>
+            <p v-for="line in runStatus" :key="line" class="status" role="status">{{ line }}</p>
+            <p v-if="store.statusNote" class="hint warn">{{ store.statusNote }}</p>
+            <ul v-if="store.warnings.length" class="lint">
+              <li v-for="w in store.warnings" :key="w">⚠ {{ w }}</li>
+            </ul>
           </footer>
         </div>
 
@@ -979,7 +1089,7 @@ const viewerMedia = computed<Media[]>(() => {
             :has-more="store.hasMoreAll"
             :loading-more="loadingMoreAll"
             empty-text="No videos yet."
-            @select="onSelectAllClip"
+            @select="onSelectClip"
             @play="viewerIndex = { list: 'right', index: $event }"
             @favorite="onToggleFavorite"
             @delete="onDeleteVideo"
@@ -1147,7 +1257,15 @@ const viewerMedia = computed<Media[]>(() => {
   border-top: 1px solid var(--surface-border);
 }
 .run-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+.counts { display: flex; flex-wrap: wrap; gap: 10px 16px; }
 .fld-inline { flex-direction: row; align-items: center; gap: 8px; }
+.status, .hint { margin: 0; font-size: 12px; color: var(--text-color-secondary); }
+.hint.warn { color: #c33; }
+.i2v-source-gone {
+  display: flex; align-items: center; justify-content: center; height: 120px;
+  font-size: 12px; color: var(--text-color-secondary); text-align: center;
+  border: 1px dashed var(--surface-border); border-radius: 6px; margin-right: 8px;
+}
 .fld-inline input { width: 70px; }
 .actions { display: flex; align-items: center; gap: 8px; }
 

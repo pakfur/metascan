@@ -855,8 +855,8 @@ def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:
                 raise self.error
             return "prompt", [], BASE
 
-        async def generate(self, **kw: Any) -> int:
-            raise WriterAdapterUnavailable(str(kw["writer_id"]))
+        async def start_batch(self, request: Any) -> Any:
+            raise WriterAdapterUnavailable(str(request.writer_id))
 
     runner = Runner()
     i2v_api.set_i2v_runner(runner)
@@ -875,20 +875,23 @@ def test_i2v_route_passes_the_writer_and_409s(tmp_path: Path) -> None:
         resp = client.post("/api/i2v/prompt", json=body)
         assert resp.status_code == 409
         assert resp.json()["detail"]["code"] == "adapter_unavailable"
-        # Generate with a gone adapter's draft: 409 too (the fallback path).
+        # A run started with a gone adapter's draft: 409 too (the fallback path).
         cfg = {"fast_preset_id": 1, "quality_preset_id": 2}
         with mock.patch(
             "backend.api.i2v.get_i2v_config",
             return_value={**i2v_api.get_i2v_config({}), **cfg},
         ), mock.patch("backend.api.i2v.load_app_config", return_value={}):
             resp = client.post(
-                "/api/i2v/generate",
+                "/api/i2v/batches",
                 json={
                     "source_path": "/x.png",
                     "prompt": "p",
                     "duration_s": 6,
                     "quality": "fast",
                     "seed": 1,
+                    "seed_policy": "fixed",
+                    "batch_size": 1,
+                    "count_per_batch": 1,
                     "writer_id": "adapter:4",
                     "draft_prompt": "d",
                     "writer_model": BASE,

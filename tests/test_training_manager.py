@@ -600,7 +600,6 @@ CONSUMERS: List[Tuple[str, str]] = [
     ("POST", "/api/t2i/prompt"),
     ("POST", "/api/t2i/batches"),
     ("POST", "/api/i2v/prompt"),
-    ("POST", "/api/i2v/generate"),
     ("POST", "/api/i2v/batches"),
     ("POST", "/api/storyboard/1/parse"),
     ("POST", "/api/storyboard/1/synthesize"),

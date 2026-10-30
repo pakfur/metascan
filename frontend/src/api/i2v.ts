@@ -30,29 +30,6 @@ export function lintI2vPrompt(body: {
   return post('/i2v/lint', body)
 }
 
-export function generateVideo(body: {
-  source_path: string
-  prompt: string
-  duration_s: number
-  quality: 'fast' | 'quality'
-  seed: number
-  megapixels: number
-  loras: { name: string; strength: number }[]
-  idea?: string
-  // High quality only; the server ignores it for Fast.
-  steps?: number
-  template_id?: string | null
-  // Categories the clip is tagged with at ingest; an unknown id is a 404.
-  category_ids?: number[]
-  // Lineage: the writer that drafted `prompt` and its draft. Omitted for a
-  // prompt typed from scratch (the server records it as `manual`).
-  writer_id?: string
-  draft_prompt?: string
-  writer_model?: string | null
-}): Promise<{ job_id: number; warnings: string[] }> {
-  return post('/i2v/generate', body)
-}
-
 export function listI2vVideos(sourcePath: string): Promise<I2vVideo[]> {
   return get(`/i2v/videos?source_path=${encodeURIComponent(sourcePath)}`)
 }
