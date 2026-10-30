@@ -741,6 +741,14 @@ def test_generated_text_lints_clean_against_its_template():
     ] == []
 
 
+def test_blank_line_keeps_shot_scan_in_template_lint():
+    t, text = _dialog_text()
+    assert "[Shot 2]" in text
+    blank = text.replace(" [Shot 2]", "\n\n[Shot 2]", 1)
+    assert blank != text
+    assert lint_against_template(blank, t) == []
+
+
 def test_lint_flags_a_missing_shot():
     t, text = _dialog_text()
     text = text.replace("[Shot 3] At 00:05.000, ", "")
