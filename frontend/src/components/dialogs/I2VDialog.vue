@@ -5,17 +5,17 @@ import {
   cadenceChips,
   formatI2vTimestamp,
   i2vDims,
-  i2vVideoDetails,
   withCurrentOption,
   type I2vFix,
   I2V_WRITERS,
+  type I2vBatch,
   type I2vFormState,
   type I2vWriter,
   type I2vTemplate,
   type I2vVideo,
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
-import { generatePrompt, generateVideo, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
+import { generatePrompt, startI2vBatch, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
 import {
   ADAPTER_LOADING,
@@ -31,19 +31,18 @@ import { useWriterPick } from '../../composables/useWriterPick'
 import { useTrainingStore } from '../../stores/training'
 import { useToast } from '../../composables/useToast'
 import { errorText } from '../../utils/gpuBusy'
+import { confirmLeave, type LeaveKind } from '../../utils/unsavedForm'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useMediaStore } from '../../stores/media'
 import { useFoldersStore } from '../../stores/folders'
 import MediaViewer from '../viewer/MediaViewer.vue'
-import GradeBadge from '../thumbnails/GradeBadge.vue'
+import I2vClipList from '../generation/I2vClipList.vue'
+import I2vPromptEditor from '../generation/I2vPromptEditor.vue'
+import JobTile from '../generation/JobTile.vue'
+import SeedControls from '../generation/SeedControls.vue'
 import CategorySelect from '../generation/CategorySelect.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
-import TextEditPopup from '../storyboard/TextEditPopup.vue'
-import {
-  parseI2vPrompt,
-  replaceI2vSection,
-  type I2vSectionKey,
-} from '../../utils/i2vPromptSections'
+import { SEED_MAX, randomSeed, type SeedPolicy } from '../../types/t2i'
 import type { LoraEntry } from '../../types/storyboard'
 
 const props = defineProps<{ media: Media }>()
@@ -114,6 +113,7 @@ function onCadenceChange(id: string) {
 }
 
 const expanding = ref(false)
+const pathKey = (p: string) => p.replace(/\\/g, '/')
 
 // Writer: per browser like the seed policy, never per clip (form_state does
 // not carry it), so loading a clip never changes it. See the Writer pick below.
@@ -124,24 +124,57 @@ const WRITER_STORAGE_KEY = 'metascan.i2v.writer.v1'
 // store / loadClip). Typing in the Prompt box does not: that is an edit.
 watch([idea, templateId], () => store.setDraft(null))
 const submitting = ref(false)
-const viewerIndex = ref<number | null>(null)
+// Which clip list the viewer was opened from, and the clip's place in it.
+const viewerIndex = ref<{ list: 'left' | 'right'; index: number } | null>(null)
+const promptEditor = ref<InstanceType<typeof I2vPromptEditor> | null>(null)
+const loadingMoreAll = ref(false)
 
-function randomSeed(): number {
-  return Math.floor(Math.random() * 2 ** 31)
-}
+// The open source image: props.media only seeds the first open; after that the
+// store owns it, and it is null once a clip's source image has been deleted.
+const sourceMedia = computed(() => store.source)
+
+// False until the store has opened and the config defaults are in the form. The
+// lists may show earlier; a click on a clip then would be compared with a
+// baseline that does not exist yet, and the defaults would land over its values.
+// So loading, Generate and Generate prompt stay inert until it is true.
+const ready = ref(false)
 
 onMounted(async () => {
-  await store.open(props.media)
-  const cfg = store.config
-  if (cfg) {
-    durationS.value = cfg.default_duration
-    quality.value = cfg.default_quality
-    megapixels.value = cfg.default_megapixels
-    steps.value = cfg.default_steps
+  try {
+    await store.open(props.media)
+    const cfg = store.config
+    if (cfg) {
+      durationS.value = cfg.default_duration
+      quality.value = cfg.default_quality
+      megapixels.value = cfg.default_megapixels
+      steps.value = cfg.default_steps
+    }
+  } finally {
+    cleanForm = JSON.stringify(currentForm())
+    ready.value = true
   }
 })
 
+// The form as it was when it last matched a render or a load: what the
+// unsaved-changes prompts compare against. A string, not reactive.
+let cleanForm = ''
+
+// True when the user may leave the form behind: nothing to lose, or they
+// accepted the prompt (native confirm(), as the nothing-changed prompt).
+function mayLeave(kind: LeaveKind): boolean {
+  return confirmLeave(
+    {
+      selected: selectedId.value !== null,
+      saveFailed: saveFailed.value,
+      baseline: cleanForm,
+      current: JSON.stringify(currentForm()),
+    },
+    kind,
+  )
+}
+
 function close() {
+  if (ready.value && !mayLeave('close')) return
   flushFormState() // before store.close() empties the clip list
   store.close()
   emit('close')
@@ -179,42 +212,20 @@ const stepsHint = computed(() => {
 })
 // Preview only; the server recomputes from the source's real dimensions.
 const outputDims = computed(() =>
-  i2vDims(props.media.width ?? 0, props.media.height ?? 0, megapixels.value),
+  i2vDims(sourceMedia.value?.width ?? 0, sourceMedia.value?.height ?? 0, megapixels.value),
 )
 
-// ---- prompt panels ---------------------------------------------------------
-// The document stays ONE string (`prompt`) everywhere it already was: the
-// clip's form_state, the lint, and what Generate sends. These panels are a
-// view over it -- each editable one is a computed whose setter splices only
-// its own span back in, so editing one region cannot disturb another. A
-// document that does not parse (hand-mangled, or written before the panels
-// existed) falls back to editing the whole thing in one box.
-const sections = computed(() => parseI2vPrompt(prompt.value))
-
-function sectionModel(key: I2vSectionKey) {
-  return computed({
-    get: () => sections.value?.[key] ?? '',
-    set: (value: string) => {
-      prompt.value = replaceI2vSection(prompt.value, key, value)
-    },
-  })
-}
-
-const promptBody = sectionModel('prompt')
-const soundscapeBody = sectionModel('soundscape')
-const musicBody = sectionModel('music')
-
 // ---- seed policy + batch generate -------------------------------------------
-// "Seed after generate" advances the seed once per submitted job, so the
+// The seed policy advances the seed once per submitted job, so the
 // field ends up showing the next unused seed. Fixed is the default and is
 // exactly the old behaviour: one job, seed untouched.
-const SEED_POLICIES = ['fixed', 'increment', 'decrement', 'random'] as const
-type SeedPolicy = (typeof SEED_POLICIES)[number]
-const SEED_MAX = 2 ** 31 - 1
-const MAX_GENERATE_COUNT = 20
-
 const seedPolicy = ref<SeedPolicy>('fixed')
+// Batch is how many prompts a run uses, Count how many videos each renders.
+// Session-local like the policy: a clip load never changes either.
+const batchSize = ref(1)
 const generateCount = ref(1)
+const maxBatch = computed(() => store.config?.max_batch_size ?? 20)
+const maxCount = computed(() => store.config?.max_count_per_batch ?? 20)
 
 // Categories every clip of the next Generate is tagged with. Session-local
 // like the seed policy: not part of form_state, so loading a clip never
@@ -272,33 +283,21 @@ function handledAdapterError(e: unknown): boolean {
   }
   return false
 }
-const batchProgress = ref('')
 
 // A Fixed seed would render the same video N times, so the count is ignored
 // rather than obeyed -- the field keeps whatever was typed for when the
 // policy changes back.
 const countIgnored = computed(() => seedPolicy.value === 'fixed')
-const effectiveCount = computed(() => {
-  if (countIgnored.value) return 1
-  const n = Math.round(Number(generateCount.value))
+function clampTo(value: unknown, max: number): number {
+  const n = Math.round(Number(value))
   if (!Number.isFinite(n)) return 1
-  return Math.min(MAX_GENERATE_COUNT, Math.max(1, n))
-})
-
-// null = the next seed would leave the 0..2^31-1 range, so the batch stops
-// instead of silently repeating a seed.
-function nextSeed(current: number): number | null {
-  switch (seedPolicy.value) {
-    case 'increment':
-      return current < SEED_MAX ? current + 1 : null
-    case 'decrement':
-      return current > 0 ? current - 1 : null
-    case 'random':
-      return randomSeed()
-    default:
-      return current
-  }
+  return Math.min(max, Math.max(1, n))
 }
+const effectiveBatch = computed(() => clampTo(batchSize.value, maxBatch.value))
+const effectiveCount = computed(() =>
+  countIgnored.value ? 1 : clampTo(generateCount.value, maxCount.value),
+)
+const totalVideos = computed(() => effectiveBatch.value * effectiveCount.value)
 
 // ---- live lint + "Apply fixes" ---------------------------------------------
 // The prompt box is linted as it changes (generated text and hand edits
@@ -380,7 +379,7 @@ async function onExpandPrompt() {
   const forTemplate = templateId.value
   try {
     const res = await generatePrompt({
-      source_path: props.media.file_path,
+      source_path: store.sourcePath ?? '',
       idea: forIdea,
       duration_s: durationS.value,
       template_id: templateId.value || null,
@@ -410,6 +409,7 @@ async function onExpandPrompt() {
 // genuinely different render and must not trigger the prompt below.
 function requestSignature(): string {
   return JSON.stringify({
+    source: store.sourcePath ? pathKey(store.sourcePath) : null,
     prompt: prompt.value,
     seed: seed.value,
     quality: quality.value,
@@ -435,8 +435,13 @@ const lastSubmitted = ref<string | null>(null)
 // The clip's as-rendered fields (prompt_used, seed, quality, steps, which
 // feed the tile label) are facts about the video and are never written.
 const selectedId = ref<number | null>(null)
+// Either list holds it: after a switch from the right list the left one is
+// still loading.
 const selectedVideo = computed(
-  () => store.videos.find((v) => v.id === selectedId.value) ?? null,
+  () =>
+    store.videos.find((v) => v.id === selectedId.value) ??
+    store.allVideos.find((v) => v.id === selectedId.value) ??
+    null,
 )
 const saveFailed = ref(false)
 // JSON of the form as last loaded or saved; an autosave is skipped while
@@ -538,44 +543,145 @@ function loadClip(v: I2vVideo) {
   lastSubmitted.value = requestSignature()
 }
 
-// detail > 1 is the second click of a double-click, which plays the clip;
-// it must not also re-run the load.
-function onSelectClip(v: I2vVideo, event: MouseEvent) {
-  if (event.detail > 1) return
-  loadClip(v)
+const differs = (a: string, b: string | null) => b === null || pathKey(a) !== pathKey(b)
+
+// The library row of a clip's source image, or null when it is gone. A media
+// store that has not loaded knows nothing, which is not "deleted": it is
+// loaded first, and when that fails the image stays usable on a stand-in sized
+// like the clip (the output follows the source's aspect), because a truly
+// missing source is refused by the server anyway.
+async function findSource(v: I2vVideo): Promise<Media | null> {
+  const lookup = () => {
+    const key = pathKey(v.source_path)
+    return mediaStore.allMedia.find((m) => pathKey(m.file_path) === key) ?? null
+  }
+  if (mediaStore.allMedia.length === 0) {
+    try {
+      await mediaStore.loadAllMedia({ silent: true })
+    } catch {
+      // unknown, handled below
+    }
+    if (mediaStore.allMedia.length === 0) {
+      return {
+        file_path: v.source_path,
+        is_favorite: false,
+        is_video: false,
+        playback_speed: null,
+        width: v.width ?? 0,
+        height: v.height ?? 0,
+        file_size: 0,
+        frame_rate: null,
+        duration: null,
+      }
+    }
+  }
+  return lookup()
+}
+
+let switching = false
+
+// A click on a clip in either list. The tile waits out the double-click
+// window (useDelayedClick), so a double-click never reaches here.
+async function onSelectClip(v: I2vVideo) {
+  if (v.id === selectedId.value) return
+  if (!ready.value) {
+    toast.show('Still loading', 'info', 3000)
+    return
+  }
+  if (switching) return
+  if (!mayLeave('clip')) return
+  switching = true
+  try {
+    if (differs(v.source_path, store.sourcePath)) {
+      const media = await findSource(v)
+      store.switchSource(media?.file_path ?? v.source_path, media)
+    }
+    loadClip(v)
+    cleanForm = JSON.stringify(currentForm())
+    promptEditor.value?.resetView()
+  } finally {
+    switching = false
+  }
+}
+
+async function onShowMoreAll() {
+  loadingMoreAll.value = true
+  try {
+    await store.loadOlderVideos()
+  } catch (e) {
+    toast.show(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    loadingMoreAll.value = false
+  }
 }
 
 // The form keeps its values and goes back to being a scratch area.
 function stopEditingClip() {
   flushFormState()
   selectedId.value = null
+  cleanForm = JSON.stringify(currentForm()) // the values are saved in the clip
 }
 
 // The selected clip can vanish underneath us: deleted here, or pruned by
-// the server because its media row is gone.
-watch(
-  () => store.videos,
-  (videos) => {
-    if (selectedId.value != null && !videos.some((v) => v.id === selectedId.value)) {
-      if (saveTimer) clearTimeout(saveTimer)
-      saveTimer = null
-      selectedId.value = null
-    }
-  },
-)
+// the server because its media row is gone. It may sit in either list (a
+// clip picked on the right is not in the left one while the image changes).
+// Its values were the clip's, so the form is not "unsaved" afterwards.
+watch([() => store.videos, () => store.allVideos], ([videos, all]) => {
+  if (
+    selectedId.value != null &&
+    !videos.some((v) => v.id === selectedId.value) &&
+    !all.some((v) => v.id === selectedId.value)
+  ) {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    selectedId.value = null
+    cleanForm = JSON.stringify(currentForm())
+  }
+})
 
 onBeforeUnmount(flushFormState)
 
-async function onGenerate() {
-  if (!prompt.value.trim()) {
-    toast.show('Write or generate a prompt first', 'warn')
-    return
+// Footer Cancel: stops this image's runs (their unfinished writing and their
+// jobs) and every job still in flight for it. Each job tile also carries its
+// own ✕ for cancelling just that one.
+async function onCancelAll() {
+  cancelling.value = true
+  try {
+    await store.cancelSourceRuns()
+    toast.show('Cancelled', 'success')
+  } catch (e) {
+    toast.show(e instanceof Error ? e.message : String(e), 'warn')
+  } finally {
+    cancelling.value = false
   }
-  const total = effectiveCount.value
-  // Checked once for the whole batch: with any policy but Fixed the seed
-  // moves, so every later submit differs from this one by construction.
+}
+
+const canCancel = computed(() => store.sourceBatches.length > 0 || store.activeJobIds.length > 0)
+
+// `Batch k/N · writing prompt` per run of the open image, from the server's
+// list (rebuilt on open, so a run that ended while the dialog was shut shows
+// nothing).
+const runStatus = computed(() =>
+  store.sourceBatches.map(
+    (b: I2vBatch) =>
+      `Batch ${b.batch}/${b.total_batches} · ${b.phase === 'writing' ? 'writing prompt' : 'rendering'}`,
+  ),
+)
+
+const SOURCE_DELETED_NOTE =
+  "This clip's source image was deleted, so it can't be generated again."
+
+async function onGenerate() {
+  const sourcePath = store.sourcePath
+  if (!ready.value || !sourcePath || !store.source) return
+  const text = prompt.value.trim()
   const signature = requestSignature()
+  // Only a run that would repeat one identical render asks: box text, one
+  // batch, one video, nothing changed since the last submit.
   if (
+    text &&
+    effectiveBatch.value === 1 &&
+    effectiveCount.value === 1 &&
     signature === lastSubmitted.value &&
     !confirm(
       'Nothing has changed since your last Generate — same seed, quality, ' +
@@ -585,92 +691,99 @@ async function onGenerate() {
   ) {
     return
   }
+  // Let go of the selected clip first, before anything changes the form: a
+  // seed advance would otherwise autosave into it.
+  const wasSelected = selectedId.value !== null
+  flushFormState()
+  selectedId.value = null
   const d = store.draft
+  // Lineage only for box text with a live draft for this idea and cadence.
   const heldDraft =
-    d && d.idea === idea.value && d.templateId === templateId.value ? d : null
+    text && d && d.idea === idea.value && d.templateId === templateId.value ? d : null
+  const sent = currentForm()
+  // The clip's edits are saved in it: they are not "unsaved" if the start fails.
+  if (wasSelected) cleanForm = JSON.stringify(sent)
+  // Batch 1 keeps the box text; the run writes it (and batches 2..N) otherwise.
+  const writes = !text || effectiveBatch.value > 1
   submitting.value = true
-  let queued = 0
-  let stopped: string | null = null
   try {
-    for (let i = 0; i < total; i++) {
-      batchProgress.value = total > 1 ? `${i + 1}/${total}` : ''
-      try {
-        const res = await generateVideo({
-          source_path: props.media.file_path,
-          prompt: prompt.value,
-          duration_s: durationS.value,
-          quality: quality.value,
-          seed: seed.value,
-          megapixels: megapixels.value,
-          loras: loras.value,
-          idea: idea.value,
-          template_id: templateId.value || null,
-          category_ids: [...categoryIds.value],
-          // Lineage: only a live draft for this idea and cadence counts; a
-          // prompt without one is typed from scratch (recorded `manual`).
-          ...(heldDraft
-            ? {
-                writer_id: heldDraft.writer_id,
-                draft_prompt: heldDraft.text,
-                writer_model: heldDraft.writer_model,
-              }
-            : {}),
-          ...(stepsEnabled.value ? { steps: steps.value } : {}),
-        })
-        warnings.value = res.warnings
-        // The signature of what was just submitted: the seed has not
-        // advanced yet at this point.
-        lastSubmitted.value = requestSignature()
-        store.trackJob(res.job_id)
-        queued += 1
-      } catch (e) {
-        if (adapterErrorCode(e) === ADAPTER_UNAVAILABLE) {
-          // The draft's adapter has gone: the prompt goes out as typed next.
-          store.setDraft(null)
-          void store.loadAdapters()
-          stopped = 'the trained writer of this prompt is no longer available; Generate again to send it as typed'
-        } else if (isUnknownCategoryError(e)) {
-          void refreshCategories()
-          stopped =
-            'A chosen category no longer exists. It was removed from Categories; check them and Generate again.'
-        } else {
-          stopped = errorText(e)
-        }
-        break
-      }
-      const advanced = nextSeed(seed.value)
-      if (advanced === null) {
-        // Leave the seed where it is rather than repeat it. Only a batch
-        // with submits still owing has actually been cut short.
-        if (i + 1 < total) stopped = 'the seed reached the end of its range'
-        break
-      }
-      seed.value = advanced
+    const res = await startI2vBatch({
+      source_path: sourcePath,
+      prompt: text ? prompt.value : '',
+      idea: idea.value,
+      duration_s: durationS.value,
+      quality: quality.value,
+      seed: seed.value,
+      seed_policy: seedPolicy.value,
+      batch_size: effectiveBatch.value,
+      count_per_batch: effectiveCount.value,
+      megapixels: megapixels.value,
+      loras: loras.value,
+      writer: writer.value,
+      template_id: templateId.value || null,
+      category_ids: [...categoryIds.value],
+      ...(heldDraft
+        ? {
+            writer_id: heldDraft.writer_id,
+            draft_prompt: heldDraft.text,
+            writer_model: heldDraft.writer_model,
+          }
+        : {}),
+      ...(stepsEnabled.value ? { steps: steps.value } : {}),
+    })
+    // The dialog may have moved to a clip or another image during the request:
+    // the form and the global notes then belong to something else.
+    const here = !!store.sourcePath && pathKey(store.sourcePath) === pathKey(sourcePath)
+    if (here && selectedId.value === null) lastSubmitted.value = signature
+    if (here) {
+      store.statusNote = null
+      store.warnings = res.warnings
+    }
+    // The seed field shows the next unused seed unless it was edited meanwhile.
+    const takeSeed =
+      here && selectedId.value === null && res.next_seed !== null && seed.value === sent.seed
+    if (takeSeed && res.next_seed !== null) seed.value = res.next_seed
+    // The baseline is what was generated, seed advance included, so the
+    // automatic seed change never counts as an edit.
+    if (selectedId.value === null) {
+      cleanForm = JSON.stringify({ ...sent, seed: takeSeed ? seed.value : sent.seed })
+    }
+    store.trackBatch({
+      batch_id: res.batch_id,
+      source_path: sourcePath,
+      phase: writes ? 'writing' : 'rendering',
+      batch: 1,
+      total_batches: effectiveBatch.value,
+      queued: 0,
+      total_videos: res.total_videos,
+    })
+    void store.refreshBatches().catch(() => {})
+    toast.show(
+      res.total_videos > 1 ? `${res.total_videos} video jobs queued` : 'Video job queued',
+      'success',
+    )
+  } catch (e) {
+    if (adapterErrorCode(e) === ADAPTER_UNAVAILABLE && text && !writes) {
+      // The draft's adapter has gone: the prompt goes out as typed next.
+      store.setDraft(null)
+      void store.loadAdapters()
+      toast.show(
+        'the trained writer of this prompt is no longer available; Generate again to send it as typed',
+        'warn',
+      )
+    } else if (handledAdapterError(e)) {
+      // dealt with
+    } else if (isUnknownCategoryError(e)) {
+      void refreshCategories()
+      toast.show(
+        'A chosen category no longer exists. It was removed from Categories; check them and Generate again.',
+        'warn',
+      )
+    } else {
+      toast.show(errorText(e), 'warn') // gpu_busy and the rest
     }
   } finally {
     submitting.value = false
-    batchProgress.value = ''
-  }
-  if (stopped) {
-    toast.show(total > 1 ? `${stopped} — queued ${queued} of ${total}` : stopped, 'warn')
-  } else {
-    toast.show(total > 1 ? `${total} video jobs queued` : 'Video job queued', 'success')
-  }
-}
-
-// Footer Cancel: stops every queued/running job for this image. Each job
-// tile also carries its own ✕ for cancelling just that one.
-async function onCancelAll() {
-  const count = store.activeJobIds.length
-  if (!count) return
-  cancelling.value = true
-  try {
-    await store.cancelAllJobs()
-    toast.show(count > 1 ? `Cancelled ${count} video jobs` : 'Video job cancelled', 'success')
-  } catch (e) {
-    toast.show(e instanceof Error ? e.message : String(e), 'warn')
-  } finally {
-    cancelling.value = false
   }
 }
 
@@ -689,10 +802,12 @@ async function onDeleteVideo(v: I2vVideo) {
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = null
     selectedId.value = null
+    cleanForm = JSON.stringify(currentForm()) // the clip's own values: nothing to lose
   }
   try {
     await deleteI2vVideo(v.id)
-    await store.refreshVideos()
+    store.removeVideo(v.id)
+    await Promise.all([store.refreshVideos(), store.refreshAllVideos()])
     void mediaStore.loadAllMedia()
     void foldersStore.refreshI2vSources()
   } catch (e) {
@@ -710,36 +825,32 @@ async function onToggleFavorite(v: I2vVideo) {
   }
 }
 
-// Synthesized Media list for the read-only viewer (ShotHeader precedent).
-// The clip's own ★ and grade, never the source image's from the spread: the
-// viewer's rail shows them until the clip's judgment arrives.
-const viewerMedia = computed<Media[]>(() =>
-  store.videos.map((v) => ({
-    ...props.media,
-    file_path: v.file_path,
-    file_name: v.file_path.split(/[\\/]/).pop() ?? v.file_path,
-    is_video: true,
-    is_favorite: v.is_favorite,
-    grade: v.grade ?? null,
-  })),
-)
-
-// Details label under each clip: quality (+ steps), clip length / render
-// time, and when it was generated. Index-aligned with store.videos.
-const videoDetails = computed(() => store.videos.map(i2vVideoDetails))
-
-function jobLabel(chip: {
-  state: string
-  value?: number
-  max?: number
-  cancelling?: boolean
-}): string {
-  if (chip.cancelling) return 'cancelling…'
-  if (chip.state === 'running' && chip.value != null && chip.max) {
-    return `${Math.round((chip.value / chip.max) * 100)}%`
-  }
-  return chip.state
-}
+// Synthesized Media list for the read-only viewer (ShotHeader precedent), built
+// from the clips of the list the viewer was opened from: each clip's own
+// library row by path when it is there, else the source image's row spread.
+// The clip's own ★ and grade always win over either: the viewer's rail shows
+// them until the clip's judgment arrives.
+const viewerMedia = computed<Media[]>(() => {
+  if (!viewerIndex.value) return []
+  const clips = viewerIndex.value.list === 'left' ? store.videos : store.allVideos
+  const byPath = new Map(mediaStore.allMedia.map((m) => [pathKey(m.file_path), m]))
+  return clips.map((v) => {
+    const row = byPath.get(pathKey(v.file_path))
+    const base: Media = row ?? {
+      file_path: v.file_path,
+      file_name: v.file_path.split(/[\\/]/).pop() ?? v.file_path,
+      is_favorite: v.is_favorite,
+      is_video: true,
+      playback_speed: null,
+      width: v.width ?? 0,
+      height: v.height ?? 0,
+      file_size: 0,
+      frame_rate: null,
+      duration: v.duration_s,
+    }
+    return { ...base, is_favorite: v.is_favorite, grade: v.grade ?? null }
+  })
+})
 </script>
 
 <template>
@@ -753,29 +864,85 @@ function jobLabel(chip: {
         <button class="icon-btn" title="Close" @click="close()">✕</button>
       </header>
 
-      <div class="i2v-top">
-        <img class="i2v-source" :src="thumbnailUrl(media.file_path)" alt="" />
-        <div class="i2v-controls">
-          <label class="fld">
-            <span>Cadence</span>
-            <select
-              :value="templateId"
-              @change="onCadenceChange(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">Single take</option>
-              <option
-                v-for="t in orderedTemplates"
-                :key="t.id"
-                :value="t.id"
-                :disabled="!t.available"
-                :title="t.unavailable_reason ?? t.description"
+      <div class="i2v-body">
+        <!-- Left: the source image and its own clips, newest first. -->
+        <section class="i2v-side i2v-left" aria-label="This image's videos">
+          <img
+            v-if="sourceMedia"
+            class="i2v-source"
+            :src="thumbnailUrl(sourceMedia.file_path)"
+            alt=""
+          />
+          <div v-else class="i2v-source-gone">Source image deleted</div>
+          <I2vClipList
+            class="side-list"
+            :videos="store.videos"
+            :selected-id="selectedId"
+            :columns="1"
+            :has-jobs="store.jobs.size > 0"
+            empty-text="No videos yet — generated clips appear here."
+            @select="onSelectClip"
+            @play="viewerIndex = { list: 'left', index: $event }"
+            @favorite="onToggleFavorite"
+            @delete="onDeleteVideo"
+          >
+            <template #jobs>
+              <JobTile
+                v-for="[jobId, chip] in store.jobs"
+                :key="'job-' + jobId"
+                :chip="chip"
+                @cancel="onCancelJob(jobId)"
+                @dismiss="store.dismissJob(jobId)"
+              />
+            </template>
+          </I2vClipList>
+        </section>
+
+        <!-- Middle: the form is ONE scroll box, so every right edge shares one
+             gutter. The editing bar sticks to its top and the run row to its
+             bottom. -->
+        <div class="i2v-main">
+          <!-- Shown only while a clip is selected: says where edits are going.
+               With no clip selected the form is an unsaved scratch area. -->
+          <div v-if="selectedVideo" class="i2v-top">
+            <div class="editing-bar" :class="{ failed: saveFailed }">
+              <span v-if="saveFailed">
+                Couldn't save your changes to this clip — they'll be retried on the next edit.
+              </span>
+              <span v-else>
+                Editing the clip from {{ formatI2vTimestamp(selectedVideo.created_at) }} ·
+                changes save automatically
+              </span>
+              <button
+                class="link-btn"
+                title="Keep these values in the form, but stop saving them to this clip"
+                @click="stopEditingClip"
+              >Stop editing</button>
+            </div>
+          </div>
+
+          <div class="cadence-row">
+            <label class="fld cadence-pick">
+              <span>Cadence</span>
+              <select
+                :value="templateId"
+                @change="onCadenceChange(($event.target as HTMLSelectElement).value)"
               >
-                {{ t.name }} · {{ t.duration_s }}s{{ t.available ? '' : ' (unavailable)' }}
-              </option>
-            </select>
-            <small v-if="selectedTemplate" class="dims-hint">{{ selectedTemplate.description }}</small>
-            <small v-if="missingTemplateNote" class="dims-hint warn">{{ missingTemplateNote }}</small>
-          </label>
+                <option value="">Single take</option>
+                <option
+                  v-for="t in orderedTemplates"
+                  :key="t.id"
+                  :value="t.id"
+                  :disabled="!t.available"
+                  :title="t.unavailable_reason ?? t.description"
+                >
+                  {{ t.name }} · {{ t.duration_s }}s{{ t.available ? '' : ' (unavailable)' }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <small v-if="selectedTemplate" class="dims-hint">{{ selectedTemplate.description }}</small>
+          <small v-if="missingTemplateNote" class="dims-hint warn">{{ missingTemplateNote }}</small>
           <div
             v-if="cadence.length"
             class="cadence"
@@ -785,6 +952,7 @@ function jobLabel(chip: {
               c.label
             }}</span>
           </div>
+
           <label class="fld">
             <span>Idea</span>
             <textarea
@@ -810,10 +978,43 @@ function jobLabel(chip: {
                 >{{ a.label }}</option>
               </select>
             </label>
-            <button class="btn" :disabled="expanding" @click="onExpandPrompt">
+            <button
+              class="btn"
+              :disabled="expanding || !ready || !sourceMedia"
+              :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
+              @click="onExpandPrompt"
+            >
               {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
             </button>
           </div>
+
+          <I2vPromptEditor ref="promptEditor" v-model="prompt" />
+          <div class="lint-bar">
+            <button
+              class="btn"
+              :disabled="!canApplyFixes"
+              :title="fixes.length
+                ? 'Rewrite the fixable findings below into MiniMax guide phrasing'
+                : 'Nothing the linter can fix automatically'"
+              @click="onApplyFixes"
+            >
+              Apply fixes{{ fixes.length ? ` (${fixes.length})` : '' }}
+            </button>
+            <span v-if="fixes.length" class="lint-bar-hint">
+              The prompt is only changed when you press this.
+            </span>
+          </div>
+          <ul v-if="fixes.length" class="lint lint-fixable">
+            <li v-for="(f, i) in fixes" :key="'fix-' + i">
+              <span>⚠ {{ f.message }}</span>
+              <span class="fix-row"><b>now</b> <code>{{ f.original }}</code></span>
+              <span class="fix-row"><b>fix</b> <code>{{ f.replacement }}</code></span>
+            </li>
+          </ul>
+          <ul v-if="plainWarnings.length" class="lint">
+            <li v-for="(w, i) in plainWarnings" :key="i">⚠ {{ w }}</li>
+          </ul>
+
           <div class="params">
             <label
               class="fld"
@@ -851,228 +1052,115 @@ function jobLabel(chip: {
                 {{ outputDims ? `${outputDims.width}×${outputDims.height}` : 'unknown source size' }}
               </small>
             </label>
-            <label class="fld">
-              <span>Seed</span>
-              <span class="seed-row">
-                <input v-model.number="seed" type="number" />
-                <button class="icon-btn" title="Randomize" @click="seed = randomSeed()">🎲</button>
-              </span>
-            </label>
-            <label class="fld" title="What happens to the seed after each generated job">
-              <span>Seed after generate</span>
-              <select v-model="seedPolicy">
-                <option value="fixed">Fixed</option>
-                <option value="increment">Increment</option>
-                <option value="decrement">Decrement</option>
-                <option value="random">Random</option>
-              </select>
-            </label>
-            <label
-              class="fld"
-              :class="{ 'fld-off': countIgnored }"
-              title="How many videos one Generate queues"
-            >
-              <span>Generate count</span>
-              <input
-                v-model.number="generateCount"
-                type="number"
-                min="1"
-                :max="MAX_GENERATE_COUNT"
-              />
-              <small class="dims-hint">
-                {{ countIgnored
-                  ? 'ignored while the seed is Fixed'
-                  : `${effectiveCount} video${effectiveCount > 1 ? 's' : ''}` }}
-              </small>
-            </label>
-            <CategorySelect v-model="categoryIds" class="i2v-categories" />
+            <SeedControls
+              class="i2v-seed"
+              :seed="seed"
+              :policy="seedPolicy"
+              :max="SEED_MAX"
+              @update:seed="seed = $event"
+              @update:policy="seedPolicy = $event"
+            />
           </div>
+          <CategorySelect v-model="categoryIds" class="i2v-categories" />
           <LoraListEditor
             label="LoRAs"
             :entries="loras"
             @change="loras = $event"
           />
-        </div>
-      </div>
 
-      <!-- Shown only while a clip is selected: says where edits are going.
-           With no clip selected the form is an unsaved scratch area. -->
-      <div v-if="selectedVideo" class="editing-bar" :class="{ failed: saveFailed }">
-        <span v-if="saveFailed">
-          Couldn't save your changes to this clip — they'll be retried on the next edit.
-        </span>
-        <span v-else>
-          Editing the clip from {{ formatI2vTimestamp(selectedVideo.created_at) }} ·
-          changes save automatically
-        </span>
-        <button
-          class="link-btn"
-          title="Keep these values in the form, but stop saving them to this clip"
-          @click="stopEditingClip"
-        >Stop editing</button>
-      </div>
+          <footer class="i2v-run">
+            <div class="run-row">
+              <div class="counts">
+                <label
+                  class="fld fld-inline"
+                  title="How many prompts one Generate uses. With text in the Prompt box, batch 1 renders it; the others are written."
+                >
+                  <span>Batch</span>
+                  <input
+                    v-model.number="batchSize"
+                    type="number"
+                    min="1"
+                    :max="maxBatch"
+                    step="1"
+                    @change="batchSize = effectiveBatch"
+                  />
+                </label>
+                <label
+                  class="fld fld-inline"
+                  :class="{ 'fld-off': countIgnored }"
+                  :title="countIgnored
+                    ? 'Ignored while the seed is Fixed: the same seed would render the same video again'
+                    : 'How many videos to render for each prompt'"
+                >
+                  <span>Count</span>
+                  <input
+                    v-model.number="generateCount"
+                    type="number"
+                    min="1"
+                    :max="maxCount"
+                    step="1"
+                    :disabled="countIgnored"
+                    @change="generateCount = clampTo(generateCount, maxCount)"
+                  />
+                </label>
+              </div>
+              <div class="actions">
+                <button
+                  class="btn danger"
+                  :disabled="cancelling || !canCancel"
+                  :title="canCancel
+                    ? 'Stop this image\'s runs and its running video workflow, and drop queued ones'
+                    : 'Nothing is running for this image'"
+                  @click="onCancelAll"
+                >
+                  {{ cancelling ? 'Cancelling…' : 'Cancel' }}
+                </button>
+                <button
+                  class="btn primary"
+                  :disabled="submitting || !ready || !sourceMedia"
+                  :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
+                  @click="onGenerate"
+                >
+                  {{ submitting
+                    ? 'Submitting…'
+                    : (totalVideos > 1 ? `Generate ×${totalVideos}` : 'Generate') }}
+                </button>
+              </div>
+            </div>
+            <p v-if="!sourceMedia" class="hint warn">{{ SOURCE_DELETED_NOTE }}</p>
+            <p v-for="line in runStatus" :key="line" class="status" role="status">{{ line }}</p>
+            <p v-if="store.statusNote" class="hint warn">{{ store.statusNote }}</p>
+            <ul v-if="store.warnings.length" class="lint">
+              <li v-for="w in store.warnings" :key="w">⚠ {{ w }}</li>
+            </ul>
+          </footer>
+        </div>
 
-      <!-- The prompt document shown as its four regions. A view only:
-           `prompt` is still the single value Generate sends. -->
-      <div v-if="sections" class="i2v-panels">
-        <div class="fld i2v-panel">
-          <span>Header — fixed by the MiniMax format, not editable</span>
-          <textarea :value="sections.header" rows="3" readonly spellcheck="false" />
-        </div>
-        <div class="fld i2v-panel">
-          <span>Prompt (editable — Generate uses this text)</span>
-          <TextEditPopup
-            title="Prompt"
-            width="900px"
-            :rows="22"
-            :value="promptBody"
-            @save="promptBody = $event"
-          >
-            <textarea v-model="promptBody" rows="8" spellcheck="false" />
-          </TextEditPopup>
-        </div>
-        <div class="fld i2v-panel">
-          <span>Soundscape</span>
-          <TextEditPopup
-            title="Soundscape"
-            width="700px"
-            :rows="8"
-            :value="soundscapeBody"
-            @save="soundscapeBody = $event"
-          >
-            <textarea v-model="soundscapeBody" rows="2" spellcheck="false" />
-          </TextEditPopup>
-        </div>
-        <div class="fld i2v-panel">
-          <span>Non diegetic music</span>
-          <TextEditPopup
-            title="Non diegetic music"
-            width="700px"
-            :rows="8"
-            :value="musicBody"
-            @save="musicBody = $event"
-          >
-            <textarea v-model="musicBody" rows="2" spellcheck="false" />
-          </TextEditPopup>
-        </div>
-      </div>
-      <label v-else class="fld i2v-prompt">
-        <span>MiniMax I2VA prompt (editable — Generate uses this text)</span>
-        <textarea v-model="prompt" rows="10" spellcheck="false" />
-        <small class="dims-hint">
-          This text doesn't match the standard layout, so it is edited as one block.
-        </small>
-      </label>
-      <div class="lint-bar">
-        <button
-          class="btn"
-          :disabled="!canApplyFixes"
-          :title="fixes.length
-            ? 'Rewrite the fixable findings below into MiniMax guide phrasing'
-            : 'Nothing the linter can fix automatically'"
-          @click="onApplyFixes"
-        >
-          Apply fixes{{ fixes.length ? ` (${fixes.length})` : '' }}
-        </button>
-        <span v-if="fixes.length" class="lint-bar-hint">
-          The prompt is only changed when you press this.
-        </span>
-      </div>
-      <ul v-if="fixes.length" class="lint lint-fixable">
-        <li v-for="(f, i) in fixes" :key="'fix-' + i">
-          <span>⚠ {{ f.message }}</span>
-          <span class="fix-row"><b>now</b> <code>{{ f.original }}</code></span>
-          <span class="fix-row"><b>fix</b> <code>{{ f.replacement }}</code></span>
-        </li>
-      </ul>
-      <ul v-if="plainWarnings.length" class="lint">
-        <li v-for="(w, i) in plainWarnings" :key="i">⚠ {{ w }}</li>
-      </ul>
-
-      <footer class="i2v-footer">
-        <button
-          class="btn danger"
-          :disabled="cancelling || !store.activeJobIds.length"
-          :title="store.activeJobIds.length
-            ? 'Stop the running video workflow and drop queued ones for this image'
-            : 'No video is generating'"
-          @click="onCancelAll"
-        >
-          {{ cancelling ? 'Cancelling…' : 'Cancel' }}
-        </button>
-        <button
-          class="btn primary"
-          :disabled="submitting || !prompt.trim()"
-          @click="onGenerate"
-        >
-          {{ submitting
-            ? (batchProgress ? `Generating ${batchProgress}…` : 'Submitting…')
-            : (effectiveCount > 1 ? `Generate ×${effectiveCount}` : 'Generate') }}
-        </button>
-      </footer>
-
-      <div class="i2v-strip">
-        <div
-          v-for="[jobId, chip] in store.jobs"
-          :key="'job-' + jobId"
-          class="tile tile-job"
-          :class="{ failed: chip.state === 'failed' }"
-          :title="chip.error ?? undefined"
-        >
-          <span>{{ jobLabel(chip) }}</span>
-          <button
-            v-if="chip.state === 'failed'"
-            class="icon-btn"
-            title="Dismiss"
-            @click="store.dismissJob(jobId)"
-          >✕</button>
-          <button
-            v-else
-            class="icon-btn"
-            title="Cancel this job"
-            :disabled="chip.cancelling"
-            @click="onCancelJob(jobId)"
-          >✕</button>
-        </div>
-        <div v-for="(v, idx) in store.videos" :key="v.id" class="tile-wrap">
-          <div
-            class="tile"
-            :class="{ selected: v.id === selectedId }"
-            :title="`Click to load this clip's idea, settings and prompt · double-click to play\n`
-              + `seed ${v.seed ?? '—'} · ${v.duration_s ?? '—'}s · ${v.quality ?? ''}`
-              + `${v.width && v.height ? ` · ${v.width}×${v.height}` : ''}`"
-            @click="onSelectClip(v, $event)"
-            @dblclick="viewerIndex = idx"
-          >
-            <img :src="thumbnailUrl(v.file_path)" alt="" />
-            <button class="overlay play" title="Play" @click.stop="viewerIndex = idx">▶</button>
-            <button
-              class="overlay star"
-              :class="{ active: v.is_favorite }"
-              title="Favorite"
-              @click.stop="onToggleFavorite(v)"
-            >★</button>
-            <button class="overlay del" title="Delete" @click.stop="onDeleteVideo(v)">✕</button>
-            <GradeBadge v-if="v.grade" class="grade-corner" :grade="v.grade" />
-          </div>
-          <div class="tile-meta">
-            <span class="tile-meta-quality" :title="videoDetails[idx].quality">
-              {{ videoDetails[idx].quality }}
-            </span>
-            <span :title="videoDetails[idx].timing">{{ videoDetails[idx].timing }}</span>
-            <span>{{ videoDetails[idx].generated }}</span>
-          </div>
-        </div>
-        <div v-if="!store.videos.length && !store.jobs.size" class="strip-empty">
-          No videos yet — generated clips appear here.
-        </div>
+        <!-- Right: every I2V video in the library, newest first. -->
+        <section class="i2v-side i2v-right" aria-labelledby="i2v-videos-title">
+          <h4 id="i2v-videos-title" class="sec-title">Videos</h4>
+          <I2vClipList
+            class="side-list"
+            :videos="store.allVideos"
+            :selected-id="selectedId"
+            :columns="2"
+            :has-more="store.hasMoreAll"
+            :loading-more="loadingMoreAll"
+            empty-text="No videos yet."
+            @select="onSelectClip"
+            @play="viewerIndex = { list: 'right', index: $event }"
+            @favorite="onToggleFavorite"
+            @delete="onDeleteVideo"
+            @more="onShowMoreAll"
+          />
+        </section>
       </div>
     </div>
 
     <MediaViewer
       v-if="viewerIndex !== null"
       :media-list="viewerMedia"
-      :initial-index="viewerIndex"
+      :initial-index="viewerIndex.index"
       :allow-destructive="false"
       :allow-rating="true"
       :favorite-mirror="store.applyFavoriteFlag"
@@ -1124,21 +1212,26 @@ function jobLabel(chip: {
   justify-content: center;
 }
 
+/* Three panels: this image's clips, the form, every clip. The form decides the
+   card's height (up to 94vh) and the side panels, height 0 stretched to the
+   row, never make it taller. */
 .i2v-card {
   background: var(--surface-section);
   border-radius: 12px;
-  padding: 22px 28px 24px;
-  width: min(980px, 94vw);
-  max-height: 92vh;
-  overflow-y: auto;
+  padding: 16px 22px 18px;
+  width: min(1500px, 96vw);
+  max-height: 94vh;
+  overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .i2v-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
 }
 
 .i2v-header h3 {
@@ -1160,9 +1253,87 @@ function jobLabel(chip: {
   color: var(--text-color);
 }
 
-.i2v-top { display: flex; gap: 16px; }
-.i2v-source { width: 280px; height: auto; object-fit: contain; border-radius: 6px; }
-.i2v-controls { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.i2v-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 400px;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 20px;
+}
+
+/* The gutter is reserved so nothing changes width when a fold opens and the
+   column starts to scroll. */
+.i2v-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.i2v-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-section);
+}
+
+.i2v-side {
+  height: 0;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 4px 0 12px;
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+}
+
+.side-list { flex: 1 1 auto; }
+.sec-title { margin: 0; font-size: 13px; color: var(--text-color); }
+.i2v-source { width: calc(100% - 8px); height: auto; max-height: 180px; object-fit: contain; border-radius: 6px; }
+
+.cadence-row { display: flex; justify-content: flex-end; }
+.cadence-pick { flex-direction: row; align-items: center; gap: 8px; }
+
+.i2v-run {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  flex: none;
+  margin-top: auto;
+  background: var(--surface-section);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface-border);
+}
+.run-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+.counts { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.fld-inline { flex-direction: row; align-items: center; gap: 8px; }
+.status, .hint { margin: 0; font-size: 12px; color: var(--text-color-secondary); }
+.hint.warn { color: #c33; }
+.i2v-source-gone {
+  display: flex; align-items: center; justify-content: center; height: 120px;
+  font-size: 12px; color: var(--text-color-secondary); text-align: center;
+  border: 1px dashed var(--surface-border); border-radius: 6px; margin-right: 8px;
+}
+.fld-inline input { width: 70px; }
+.actions { display: flex; align-items: center; gap: 8px; }
+
+/* Too narrow for three panels: one column, the card scrolls, nothing shrinks. */
+@media (max-width: 1099px) {
+  .i2v-card { overflow-y: auto; }
+  .i2v-body { display: flex; flex-direction: column; flex: none; min-height: auto; }
+  .i2v-main { flex: none; min-height: auto; overflow: visible; padding-right: 0; }
+  .i2v-side { flex: none; height: 440px; min-height: 0; }
+}
 
 .fld {
   display: flex;
@@ -1216,24 +1387,7 @@ function jobLabel(chip: {
 
 .params { display: flex; gap: 12px; flex-wrap: wrap; }
 .i2v-categories { flex: 1 1 100%; }
-.seed-row { display: inline-flex; gap: 4px; }
-.i2v-prompt { margin-top: 14px; }
-.i2v-panels { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
-.i2v-panel textarea {
-  width: 100%;
-  box-sizing: border-box;
-  font-family: monospace;
-  font-size: 12px;
-}
-.i2v-panel textarea[readonly] {
-  color: var(--text-color-secondary);
-  background: var(--surface-ground);
-}
-/* TextEditPopup centres its button against a single-line input; a textarea
-   host wants the button at the top and the box filling the row. */
-.i2v-panel :deep(.tep) { align-items: flex-start; width: 100%; }
 .dims-hint { color: var(--text-muted, #888); font-size: 11px; margin-top: 2px; }
-.i2v-prompt textarea { width: 100%; font-family: monospace; font-size: 12px; }
 .lint { color: var(--warn, #c90); font-size: 12px; margin: 4px 0; }
 .lint-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .lint-bar-hint { font-size: 11px; color: var(--text-color-secondary); }
@@ -1248,21 +1402,7 @@ function jobLabel(chip: {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.i2v-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .fld-off { opacity: 0.55; }
-.i2v-strip { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0; min-height: 110px; align-items: flex-start; }
-.tile-wrap { flex: 0 0 176px; display: flex; flex-direction: column; gap: 4px; }
-/* Inside the column wrapper the main axis is vertical, so the tile's
-   176px flex-basis would become its HEIGHT; pin both axes instead. */
-.tile-wrap .tile { flex: 0 0 99px; width: 176px; }
-.tile-meta { display: flex; flex-direction: column; font-size: 11px; line-height: 1.35; color: var(--text-color-secondary); }
-.tile-meta span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tile-meta-quality { color: var(--text-color); font-weight: 600; }
-.tile { position: relative; flex: 0 0 176px; height: 99px; border-radius: 6px; overflow: hidden; background: #111; }
-.tile img { width: 100%; height: 100%; object-fit: cover; }
-.tile { cursor: pointer; }
-/* outline, not border: a border would shrink the fixed-size thumbnail. */
-.tile.selected { outline: 2px solid var(--primary-color, #6366f1); outline-offset: 1px; }
 .editing-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 6px 10px; border-radius: 6px; font-size: 12px;
@@ -1277,16 +1417,6 @@ function jobLabel(chip: {
   color: var(--primary-color, #6366f1); white-space: nowrap;
 }
 .link-btn:hover { text-decoration: underline; }
-.tile .overlay { position: absolute; opacity: 0; transition: opacity .15s; }
-.tile:hover .overlay { opacity: 1; }
-.tile .play { inset: 0; margin: auto; width: 36px; height: 36px; }
-.tile .star { top: 4px; left: 4px; }
-.tile .star.active { opacity: 1; color: gold; }
-.tile .del { top: 4px; right: 4px; }
-.tile .grade-corner { position: absolute; right: 4px; bottom: 4px; }
-.tile-job { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #666; }
-.tile-job.failed { border-color: #c33; color: #c33; }
-.strip-empty { color: #888; align-self: center; font-size: 13px; }
 .cadence { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
 .cadence-chip {
   font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap;

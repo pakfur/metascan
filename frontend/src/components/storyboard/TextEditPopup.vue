@@ -6,15 +6,15 @@ import ModalShell from './ModalShell.vue'
 // Popup editor for text that is ONE LOGICAL LINE. The host control rides
 // in the slot untouched (keeping its own commit-on-change wiring); the
 // icon button to its right opens a large editor whose Save emits the new
-// text back through the host's `@save` handler. Newlines collapse to
-// spaces on save.
+// text back through the host's `@save` handler. By default newlines
+// collapse to spaces on save.
 //
 // That makes it right for a single-line `<input>`, and also for a long
 // value a host chooses to show in a `<textarea>` for readability while the
-// value itself must stay one line -- the i2v dialog's prompt panels, where
-// each MiniMax H3 document field (description, soundscape, music) is one
-// line by format. It is NOT for free-form multi-line text, which the
-// collapse would flatten.
+// value itself must stay one line. Free-form multi-line text opts out with
+// `multiline`: Save then emits the draft verbatim -- the i2v prompt editor
+// sets it on all four of its popups, because the owner's own line breaks
+// are kept.
 //
 // `width`/`rows` size the popup for long values; they default to the
 // compact size every original caller was written against.
@@ -23,6 +23,7 @@ const props = defineProps<{
   title?: string
   width?: string
   rows?: number
+  multiline?: boolean
 }>()
 const emit = defineEmits<{ (e: 'save', value: string): void }>()
 
@@ -68,7 +69,7 @@ async function paste(): Promise<void> {
 }
 
 function save(): void {
-  emit('save', draft.value.replace(/\s*\n+\s*/g, ' ').trim())
+  emit('save', props.multiline ? draft.value : draft.value.replace(/\s*\n+\s*/g, ' ').trim())
   open.value = false
 }
 </script>

@@ -227,6 +227,25 @@ class TestI2vDims(unittest.TestCase):
             c.i2v_dims(1920, 1080, 0.0)
 
 
+def test_blank_line_in_description_counts_all_words():
+    result = c.I2vResult(
+        beats=[
+            c.I2vBeat(action="She lifts the cup", camera="static"),
+            c.I2vBeat(
+                action=" ".join(["She keeps walking slowly"] * 12), camera="static"
+            ),
+            c.I2vBeat(action="She smiles", camera="static"),
+        ],
+        overall_soundscape="quiet room",
+        non_diegetic_music="none",
+    )
+    text = c.assemble_i2v_prompt(result)
+    assert not [w for w in c.lint_i2v_prompt(text, 6) if "words" in w]
+    blank = text.replace(" She lifts the cup.", " She lifts the cup.\n\n", 1)
+    assert blank != text
+    assert not [w for w in c.lint_i2v_prompt(blank, 6) if "words" in w]
+
+
 def test_single_take_output_is_pinned():
     """template_id = null must stay byte-for-byte what it was before
     découpage templates existed (spec §5.1). If this test fails, the

@@ -9,9 +9,12 @@ from pathlib import Path
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.i2v_runner import (
+    I2vNotFoundError,
     I2vRequestError,
     I2vRunner,
     I2vUnavailableError,
+    SEED_MAX,
+    plan_i2v_seeds,
     render_seconds,
 )
 from metascan.core.media import Media
@@ -898,3 +901,367 @@ class TestGenerateRecordsTemplateId(TestFormStateAtIngest):
         self.assertIsNone(row["writer_id"])
         self.assertIsNone(row["draft_prompt"])
         self.assertIsNone(row["edited"])
+
+
+class TestPlanSeeds(unittest.TestCase):
+    def test_fixed_is_one_seed_per_batch(self):
+        self.assertEqual(plan_i2v_seeds(5, "fixed", 3, 4), ([[5], [5], [5]], 5))
+
+    def test_increment_runs_across_batches(self):
+        self.assertEqual(plan_i2v_seeds(5, "increment", 2, 2), ([[5, 6], [7, 8]], 9))
+
+    def test_decrement(self):
+        self.assertEqual(plan_i2v_seeds(5, "decrement", 1, 3), ([[5, 4, 3]], 2))
+
+    def test_random_uses_rng(self):
+        draws = iter([1, 2, 3, 4])
+        self.assertEqual(
+            plan_i2v_seeds(9, "random", 1, 2, rng=lambda: next(draws)),
+            ([[9, 1]], 2),
+        )
+
+    def test_last_seed_at_the_edge_has_no_next(self):
+        self.assertEqual(
+            plan_i2v_seeds(SEED_MAX, "increment", 1, 1), ([[SEED_MAX]], None)
+        )
+
+    def test_leaving_the_range_is_refused(self):
+        with self.assertRaises(I2vRequestError):
+            plan_i2v_seeds(SEED_MAX, "increment", 1, 2)
+        with self.assertRaises(I2vRequestError):
+            plan_i2v_seeds(0, "decrement", 2, 1)
+
+
+# ---- batch runs ------------------------------------------------------------
+
+
+class CountingComfy(FakeComfy):
+    def __init__(self, order=None):
+        super().__init__()
+        self.order = order if order is not None else []
+        self.cancels = []
+        self._next = 100
+
+    async def submit(self, preset_id, params, **kwargs):
+        self.order.append("submit")
+        self.submits.append((preset_id, params, kwargs))
+        self._next += 1
+        return self._next
+
+    async def cancel(self, job_id):
+        self.cancels.append(job_id)
+
+
+class WritingVlm(FakeVlm):
+    def __init__(self, order=None, fail_on=None):
+        super().__init__(_beats_response())
+        self.order = order if order is not None else []
+        self.fail_on = fail_on
+        self.shutdowns = 0
+
+    async def generate_text(self, **kwargs):
+        self.order.append("write")
+        if self.fail_on is not None and len(self.calls) + 1 == self.fail_on:
+            raise RuntimeError("model fell over")
+        n = len(self.calls) + 1
+        self.response = json.dumps(
+            {
+                "beats": [
+                    {"action": f"Written take {n} happens.", "camera": "static"}
+                    for _ in range(3)
+                ],
+                "overall_soundscape": "Wind.",
+                "non_diegetic_music": "None.",
+            }
+        )
+        return await super().generate_text(**kwargs)
+
+    async def shutdown(self):
+        self.order.append("unload")
+        self.shutdowns += 1
+
+
+class TestBatchRun(I2vRunnerBase):
+    def setUp(self):
+        super().setUp()
+        self.order = []
+        self.comfy = CountingComfy(self.order)
+        self.vlm = WritingVlm(self.order)
+        self.events = []
+        self._make_runner()
+
+    def _make_runner(self, **kw):
+        self.runner = I2vRunner(
+            db=self.db,
+            comfy=self.comfy,
+            get_vlm=lambda: self.vlm,
+            output_root=Path(self.tmp.name) / "out",
+            **kw,
+        )
+        self.runner.on_event(lambda ch, ev, data: self.events.append((ev, data)))
+
+    def _req(self, **over):
+        from metascan.core.i2v_runner import I2vBatchRequest
+
+        kw = dict(
+            source_path=str(self.src),
+            prompt="BOX PROMPT",
+            idea="a cat",
+            duration_s=6.0,
+            quality="fast",
+            seed=10,
+            seed_policy="increment",
+            batch_size=1,
+            count_per_batch=1,
+            megapixels=0.75,
+            loras=[],
+            preset_id=self.preset_id,
+        )
+        kw.update(over)
+        return I2vBatchRequest(**kw)
+
+    def _finish(self, job_id, state="done"):
+        self.runner.handle_job_event("job_update", {"job_id": job_id, "state": state})
+
+    def _names(self):
+        return [name for name, _ in self.events]
+
+    def run_async(self, coro):
+        async def wrapped():
+            try:
+                return await coro
+            finally:
+                await self.runner.aclose()  # no run outlives its loop
+
+        return super().run_async(wrapped())
+
+    async def _settle(self, n=0):
+        # generate() hops threads (db reads), so give the loop real time.
+        await asyncio.sleep(0.15)
+
+    async def _run_to_end(self, req, finish="done"):
+        """Start, finish every job as it appears, wait for the terminal frame."""
+        started = await self.runner.start_batch(req)
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            for job_id in range(101, 101 + len(self.comfy.submits)):
+                if job_id not in self.finished:
+                    self.finished.add(job_id)
+                    self._finish(job_id, finish)
+            if not self.runner._batches:
+                break
+        return started
+
+    def run_batch(self, req, finish="done"):
+        self.finished = set()
+        return self.run_async(self._run_to_end(req, finish))
+
+    def test_box_text_is_batch_one_and_later_batches_are_written(self):
+        self.run_batch(self._req(batch_size=3))
+        self.assertEqual(len(self.vlm.calls), 2)
+        texts = [p.positive for _, p, _ in self.comfy.submits]
+        self.assertEqual(texts[0], "BOX PROMPT")
+        self.assertIn("Written take 1", texts[1])
+        self.assertIn("Written take 2", texts[2])
+        self.assertEqual(self._names()[-1], "batch_done")
+
+    def test_empty_box_writes_every_batch(self):
+        self.run_batch(self._req(prompt="", batch_size=2))
+        self.assertEqual(len(self.vlm.calls), 2)
+        self.assertEqual(len(self.comfy.submits), 2)
+
+    def test_count_renders_one_prompt_per_seed(self):
+        started = self.run_batch(self._req(count_per_batch=3))
+        self.assertEqual(started.total_videos, 3)
+        params = [p for _, p, _ in self.comfy.submits]
+        self.assertEqual({p.positive for p in params}, {"BOX PROMPT"})
+        self.assertEqual([p.seed for p in params], [10, 11, 12])
+
+    def test_fixed_seed_ignores_count(self):
+        self.run_batch(self._req(seed_policy="fixed", batch_size=2, count_per_batch=5))
+        params = [p for _, p, _ in self.comfy.submits]
+        self.assertEqual(len(params), 2)
+        self.assertEqual({p.seed for p in params}, {10})
+
+    def test_written_clip_form_holds_its_own_prompt(self):
+        self.runner.unload_vlm_during_generation = False
+        meta = {}
+
+        async def go():
+            await self.runner.start_batch(
+                self._req(
+                    batch_size=2,
+                    writer_id="base",
+                    draft_prompt="BOX DRAFT",
+                    writer_model="qwen3vl-8b",
+                )
+            )
+            await self._settle(100)
+            meta.update(self.runner._job_meta)
+
+        self.run_async(go())
+        first, second = meta[101], meta[102]
+        self.assertEqual(first["form"]["prompt"], "BOX PROMPT")
+        self.assertEqual(first["draft_prompt"], "BOX DRAFT")
+        self.assertEqual(first["writer_model"], "qwen3vl-8b")
+        self.assertIn("Written take 1", second["form"]["prompt"])
+        self.assertEqual(second["draft_prompt"], second["form"]["prompt"])
+        self.assertEqual(second["writer_id"], "base")
+        self.assertEqual(second["writer_model"], "qwen3vl-8b")
+
+    def test_prompts_first_then_unload_then_submit(self):
+        self.run_batch(self._req(prompt="", batch_size=2, count_per_batch=1))
+        self.assertEqual(self.order, ["write", "write", "unload", "submit", "submit"])
+
+    def test_unload_off_renders_as_each_prompt_is_ready(self):
+        self._make_runner(unload_vlm_during_generation=False)
+        self.run_batch(self._req(prompt="", batch_size=2))
+        self.assertEqual(self.order, ["write", "submit", "write", "submit"])
+
+    def test_window_caps_unfinished_jobs(self):
+        async def go():
+            await self.runner.start_batch(self._req(count_per_batch=4, window=2))
+            await self._settle()
+            self.assertEqual(len(self.comfy.submits), 2)
+            self._finish(101)
+            await self._settle()
+            self.assertEqual(len(self.comfy.submits), 3)
+            self._finish(102, "failed")
+            await self._settle()
+            self.assertEqual(len(self.comfy.submits), 4)
+            self._finish(103)
+            self._finish(104)
+            await self._settle()
+
+        self.run_async(go())
+        self.assertEqual(self._names()[-1], "batch_done")
+        self.assertNotIn("batch_failed", self._names())
+
+    def test_cancel_stops_writing_and_cancels_jobs(self):
+        async def go():
+            started = await self.runner.start_batch(
+                self._req(count_per_batch=2, batch_size=2, window=2)
+            )
+            await self._settle()
+            self.assertEqual(len(self.comfy.submits), 2)
+            self.assertTrue(await self.runner.cancel_batch(started.batch_id))
+            self.assertFalse(await self.runner.cancel_batch(started.batch_id))
+            with self.assertRaises(I2vNotFoundError):
+                await self.runner.cancel_batch("never-seen")
+
+        self.run_async(go())
+        self.assertEqual(sorted(self.comfy.cancels), [101, 102])
+        self.assertEqual(self._names().count("batch_cancelled"), 1)
+        self.assertEqual(self.runner.active_batches(), [])
+
+    def test_a_failed_write_keeps_what_was_queued(self):
+        self._make_runner(unload_vlm_during_generation=False)
+        self.vlm.fail_on = 2
+        self.run_async(self._after_start(self._req(prompt="", batch_size=2)))
+        self.assertEqual(self.comfy.cancels, [])
+        failed = [d for n, d in self.events if n == "batch_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("1 of 2", failed[0]["error"])
+
+    async def _after_start(self, req):
+        await self.runner.start_batch(req)
+        await self._settle(100)
+
+    def test_source_file_gone_mid_run_ends_failed_keeps_jobs(self):
+        self._make_runner(unload_vlm_during_generation=False)
+        orig = self.comfy.submit
+
+        async def submit(*a, **k):
+            out = await orig(*a, **k)
+            self.src.unlink()
+            return out
+
+        self.comfy.submit = submit
+        self.run_async(self._after_start(self._req(count_per_batch=3)))
+        self.assertEqual(len(self.comfy.submits), 1)
+        self.assertEqual(self.comfy.cancels, [])
+        self.assertEqual(self._names().count("batch_failed"), 1)
+
+    def test_job_that_ends_before_submit_returns_does_not_hang_the_run(self):
+        orig = self.comfy.submit
+
+        async def submit(*a, **k):
+            job_id = await orig(*a, **k)
+            if job_id == 102:  # the last job fails before submit returns
+                self._finish(job_id, "failed")
+            return job_id
+
+        self.comfy.submit = submit
+        self.finished = set()
+        self.run_async(self._run_to_end(self._req(count_per_batch=2, window=1)))
+        self.assertEqual(self._names()[-1], "batch_done")
+        self.assertEqual(self.runner.active_batches(), [])
+        self.assertNotIn(102, self.runner._job_meta)
+        self.assertEqual(len(self.comfy.submits), 2)
+
+    def test_cancelling_one_run_leaves_the_other(self):
+        async def go():
+            a = await self.runner.start_batch(self._req(window=1, count_per_batch=2))
+            b = await self.runner.start_batch(self._req(window=1, count_per_batch=2))
+            await self._settle()
+            await self.runner.cancel_batch(a.batch_id)
+            self.assertEqual(
+                [r["batch_id"] for r in self.runner.active_batches()], [b.batch_id]
+            )
+            self.assertEqual(len(self.comfy.cancels), 1)
+
+        self.run_async(go())
+
+    def test_no_unload_while_another_run_writes(self):
+        gate = asyncio.Event() if False else None
+        blocked = {}
+
+        async def go():
+            release = asyncio.Event()
+            real = self.vlm.generate_text
+
+            async def slow(**kw):
+                if blocked.get("slow"):
+                    await release.wait()
+                return await real(**kw)
+
+            self.vlm.generate_text = slow
+            blocked["slow"] = True
+            await self.runner.start_batch(self._req(prompt="", batch_size=1))
+            await self._settle()
+            self.assertTrue(self.runner.is_prompting())
+            blocked["slow"] = False
+            await self.runner.start_batch(self._req())  # box text, no writing
+            await self._settle()
+            self.assertEqual(self.vlm.shutdowns, 0)
+            release.set()
+            await self._settle()
+            # Same through the other runner's flag.
+            baseline = self.vlm.shutdowns
+            self.runner.prompting_elsewhere = lambda: True
+            await self.runner.start_batch(self._req())
+            await self._settle()
+            self.assertEqual(self.vlm.shutdowns, baseline)
+
+        self.run_async(go())
+
+    def test_unload_happens_when_nobody_else_writes(self):
+        self.run_batch(self._req())
+        self.assertEqual(self.vlm.shutdowns, 1)
+
+    def test_adapter_gone_refuses_at_start(self):
+        from metascan.core.writer_adapters import WriterAdapterUnavailable
+
+        with self.assertRaises(WriterAdapterUnavailable):
+            self.run_async(
+                self.runner.start_batch(self._req(prompt="", writer="adapter:9"))
+            )
+        self.assertEqual(self.runner.active_batches(), [])
+        self.assertEqual(self.comfy.submits, [])
+
+    def test_no_writer_needed_when_batch_one_is_box_text(self):
+        self.runner.get_vlm = lambda: None
+        self.run_batch(self._req())
+        self.assertEqual(len(self.comfy.submits), 1)
+        with self.assertRaises(I2vUnavailableError):
+            self.run_async(self.runner.start_batch(self._req(batch_size=2)))

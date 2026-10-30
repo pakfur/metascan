@@ -14,10 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core.generation_categories import tag_generated_media
@@ -110,8 +113,116 @@ class I2vRequestError(RuntimeError):
     """Caller error -- the route answers 400 with the message."""
 
 
+class I2vNotFoundError(RuntimeError):
+    """No such batch run -- the route answers 404."""
+
+
+SEED_MAX = 2**31 - 1
+
+# How many ended runs stay known, so a late cancel answers "over", not 404.
+_FINISHED_KEEP = 50
+
+
+def _random_seed() -> int:
+    return random.randint(0, SEED_MAX)
+
+
+def plan_i2v_seeds(
+    seed: int,
+    policy: str,
+    batch_size: int,
+    count: int,
+    rng: Callable[[], int] = _random_seed,
+) -> Tuple[List[List[int]], Optional[int]]:
+    """One seed list per batch, in render order, and the next unused seed.
+
+    ``fixed`` gives each batch the one seed (``count`` is ignored: the same
+    seed would render the same clip again). ``increment`` / ``decrement``
+    run on across batches; ``random`` starts at ``seed`` like a single
+    submit and draws the rest from ``rng``. A seed outside ``0..SEED_MAX``
+    is refused; the next seed is None when it would fall outside.
+    """
+    if policy not in ("fixed", "increment", "decrement", "random"):
+        raise I2vRequestError(f"Unknown seed policy: {policy}")
+    per_batch = 1 if policy == "fixed" else count
+    total = batch_size * per_batch
+    step = {"increment": 1, "decrement": -1}.get(policy, 0)
+    seeds: List[int] = []
+    current = seed
+    for i in range(total):
+        if not 0 <= current <= SEED_MAX:
+            raise I2vRequestError(f"Seed {current} is outside 0..{SEED_MAX}")
+        seeds.append(current)
+        current = rng() if policy == "random" else current + step
+    next_seed: Optional[int] = current if 0 <= current <= SEED_MAX else None
+    return [seeds[i : i + per_batch] for i in range(0, total, per_batch)], next_seed
+
+
 class I2vUnavailableError(RuntimeError):
     """The VLM subsystem is not running -- the route answers 503."""
+
+
+_TERMINAL_JOB_STATES = ("done", "failed", "cancelled")
+
+
+@dataclass
+class I2vBatchRequest:
+    source_path: str
+    prompt: str  # "" = batch 1 is written too
+    idea: str
+    duration_s: float
+    quality: str
+    seed: int
+    seed_policy: str  # fixed | increment | decrement | random
+    batch_size: int
+    count_per_batch: int  # ignored (1) when seed_policy is fixed
+    megapixels: float
+    loras: List[Dict[str, Any]]
+    preset_id: int
+    writer: str = "base"
+    steps: Optional[int] = None
+    template_id: Optional[str] = None
+    output_root: Optional[str] = None
+    output_prefix: Optional[str] = None
+    category_ids: List[int] = field(default_factory=list)
+    writer_id: Optional[str] = None  # lineage of the box's draft
+    draft_prompt: Optional[str] = None
+    writer_model: Optional[str] = None
+    window: int = 4
+
+
+@dataclass
+class I2vBatchStarted:
+    batch_id: str
+    total_videos: int
+    next_seed: Optional[int]
+
+
+@dataclass
+class _I2vBatch:
+    id: str
+    req: I2vBatchRequest
+    seeds: List[List[int]]
+    window: "asyncio.Semaphore"
+    phase: str = "writing"  # "writing" | "rendering"
+    batch: int = 0  # 1-based batch being written / rendered
+    prompting: bool = True  # still writing prompts with the VLM
+    submitted: int = 0
+    # Submitted jobs without a terminal update; each owns a window slot.
+    pending: Set[int] = field(default_factory=set)
+    warnings: List[str] = field(default_factory=list)
+    all_submitted: bool = False
+    all_jobs_ended: "asyncio.Event" = field(default_factory=asyncio.Event)
+    task: "Optional[asyncio.Task[None]]" = None
+    finished: Optional[str] = None  # done | failed | cancelled
+
+    @property
+    def total(self) -> int:
+        return len(self.seeds)
+
+    @property
+    def total_videos(self) -> int:
+        return sum(len(s) for s in self.seeds)
 
 
 class I2vRunner:
@@ -123,6 +234,8 @@ class I2vRunner:
         output_root: Path,
         vlm_installed: Optional[Callable[[str], bool]] = None,
         writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
+        get_all_vlms: Optional[Callable[[], Iterable[Any]]] = None,
+        unload_vlm_during_generation: bool = True,
     ) -> None:
         self.db = db
         self.comfy = comfy
@@ -144,6 +257,19 @@ class I2vRunner:
         # Last filename number handed out (epoch seconds). Two submits in
         # the same second must not share one -- see _next_output_number.
         self._last_output_number = 0
+        self.get_all_vlms = get_all_vlms
+        self.unload_vlm_during_generation = unload_vlm_during_generation
+        # True while the other runner (T2I) is writing prompts with the
+        # shared VLM; wired in lifespan. Keeps this run from unloading it.
+        self.prompting_elsewhere: Callable[[], bool] = lambda: False
+        self._batches: Dict[str, _I2vBatch] = {}
+        # Ids of runs that ended (oldest first, bounded).
+        self._finished: Dict[str, None] = {}
+        # job id -> batch id, for submitted jobs without a terminal update.
+        self._job_batch: Dict[int, str] = {}
+        # Terminal states of jobs that ended before submit() returned (so
+        # before the run knew them): job id -> state. Bounded.
+        self._early_ended: Dict[int, str] = {}
 
     def on_event(self, cb: EventCb) -> None:
         self._on_event.append(cb)
@@ -369,6 +495,7 @@ class I2vRunner:
         writer_id: Optional[str] = None,
         draft_prompt: Optional[str] = None,
         writer_model: Optional[str] = None,
+        on_submitted: Optional[Callable[[int], None]] = None,
     ) -> int:
         # Lineage: a prompt with a draft names the writer that drafted it; one
         # typed from scratch is `manual` whatever the caller says. Only a VLM
@@ -464,6 +591,10 @@ class I2vRunner:
                 **placement,
             )
         )
+        # Same step of the loop as the submit: a batch run must know the job
+        # before ComfyUI can announce its end or a cancel can land.
+        if on_submitted is not None:
+            on_submitted(job_id)
         # Held in memory until ingest, never written before it: a cancelled
         # or failed render must leave nothing behind (by decision). `form`
         # is the dialog exactly as submitted -- including a step selection a
@@ -495,10 +626,321 @@ class I2vRunner:
         }
         return job_id
 
+    # ---- batch runs ------------------------------------------------------
+
+    def is_prompting(self) -> bool:
+        """True while any batch run is still writing prompts with the VLM."""
+        return any(b.prompting for b in self._batches.values())
+
+    def active_batches(self) -> List[Dict[str, Any]]:
+        return [self._row(b) for b in self._batches.values()]
+
+    def _row(self, b: _I2vBatch) -> Dict[str, Any]:
+        return {
+            "batch_id": b.id,
+            "source_path": b.req.source_path,
+            "phase": b.phase,
+            "batch": b.batch,
+            "total_batches": b.total,
+            "queued": b.submitted,
+            "total_videos": b.total_videos,
+        }
+
+    async def start_batch(self, req: I2vBatchRequest) -> I2vBatchStarted:
+        """Plan the seeds, check what the run will need, and start it in the
+        background. Raises before anything runs when it cannot."""
+        if req.batch_size < 1 or req.count_per_batch < 1 or req.window < 1:
+            raise I2vRequestError("Batch, count and window must be at least 1")
+        seeds, next_seed = plan_i2v_seeds(
+            req.seed, req.seed_policy, req.batch_size, req.count_per_batch
+        )
+        # The writer is needed only when some prompt must be written: batch
+        # 1 is the box text when there is any.
+        if req.batch_size > 1 or not req.prompt.strip():
+            await self._adapter_lora(req.writer)
+            if self.get_vlm() is None:
+                raise I2vUnavailableError("VLM subsystem is not running")
+        if (
+            req.draft_prompt is not None
+            and parse_adapter_writer_id(req.writer_id) is not None
+        ):
+            if not await asyncio.to_thread(
+                writer_id_allowed, req.writer_id, self.db, "i2v"
+            ):
+                raise WriterAdapterUnavailable(
+                    str(req.writer_id), "not a ready image-to-video adapter"
+                )
+        batch = _I2vBatch(
+            id=uuid.uuid4().hex,
+            req=req,
+            seeds=seeds,
+            window=asyncio.Semaphore(req.window),
+        )
+        self._batches[batch.id] = batch
+        batch.task = asyncio.create_task(self._run(batch), name=f"i2v-{batch.id[:8]}")
+        return I2vBatchStarted(batch.id, batch.total_videos, next_seed)
+
+    def _progress(self, b: _I2vBatch, event: str = "batch_progress") -> None:
+        data = self._row(b)
+        if event in ("batch_progress", "batch_done"):
+            data["warnings"] = list(b.warnings)
+        self._emit("i2v", event, data)
+
+    async def _step_prompt(
+        self, b: _I2vBatch, index: int
+    ) -> Tuple[str, Dict[str, Optional[str]]]:
+        """The text of batch ``index`` (0-based) and its lineage: the box
+        text for batch 1, else a freshly written prompt."""
+        req = b.req
+        b.batch = index + 1
+        if index == 0 and req.prompt.strip():
+            return req.prompt, {
+                "writer_id": req.writer_id,
+                "draft_prompt": req.draft_prompt,
+                "writer_model": req.writer_model,
+            }
+        text, warnings, model = await self.write_prompt(
+            req.source_path, req.idea, req.duration_s, req.template_id, req.writer
+        )
+        b.warnings.extend(w for w in warnings if w not in b.warnings)
+        self._progress(b)
+        return text, {
+            "writer_id": req.writer,
+            "draft_prompt": text,
+            "writer_model": model,
+        }
+
+    async def _submit_step(
+        self, b: _I2vBatch, index: int, text: str, lineage: Dict[str, Optional[str]]
+    ) -> None:
+        b.batch = index + 1
+        for seed in b.seeds[index]:
+            await b.window.acquire()
+            await self._submit_one(b, text, lineage, seed)
+            self._progress(b)
+
+    def _register(self, b: _I2vBatch, job_id: int) -> None:
+        b.submitted += 1
+        if job_id in self._early_ended:
+            # It ended while submit() was still returning: its update found
+            # no owner. It never holds a slot; _submit_one drops its meta.
+            b.window.release()
+            return
+        b.pending.add(job_id)
+        self._job_batch[job_id] = b.id
+
+    async def _submit_one(
+        self, b: _I2vBatch, text: str, lineage: Dict[str, Optional[str]], seed: int
+    ) -> None:
+        """Submit one video. Called holding a window slot: on success the
+        slot belongs to the job (its terminal update frees it), on failure it
+        is released here."""
+        req = b.req
+        # Shielded: ComfyClient.submit writes the job row and only then
+        # queues it, so a cancel landing in between must not lose the id --
+        # the row would sit queued and run after the next restart.
+        # generate() registers the job through on_submitted the moment the
+        # submit returns.
+        inflight: "asyncio.Future[int]" = asyncio.ensure_future(
+            self.generate(
+                source_path=req.source_path,
+                prompt=text,
+                duration_s=req.duration_s,
+                quality=req.quality,
+                seed=seed,
+                megapixels=req.megapixels,
+                loras=req.loras,
+                preset_id=req.preset_id,
+                idea=req.idea,
+                steps=req.steps,
+                template_id=req.template_id,
+                output_root=req.output_root,
+                output_prefix=req.output_prefix,
+                category_ids=req.category_ids,
+                writer_id=lineage["writer_id"],
+                draft_prompt=lineage["draft_prompt"],
+                writer_model=lineage["writer_model"],
+                on_submitted=lambda job_id: self._register(b, job_id),
+            )
+        )
+        before = b.submitted
+        try:
+            job_id = await asyncio.shield(inflight)
+            state = self._early_ended.pop(job_id, None)
+            if state is not None and state != "done":
+                self._job_meta.pop(job_id, None)
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                try:
+                    await inflight  # let a submit in flight land
+                except BaseException:
+                    pass
+            if b.submitted == before:
+                b.window.release()
+            raise
+
+    def _release(self, b: _I2vBatch, job_id: int) -> None:
+        if job_id in b.pending:
+            b.pending.discard(job_id)
+            b.window.release()
+        if b.all_submitted and not b.pending:
+            b.all_jobs_ended.set()
+
+    async def _unload_vlm(self, b: _I2vBatch) -> None:
+        """Free the GPU for ComfyUI: shut down each distinct VLM client that
+        has a model loaded, except the prompt writer while another run (or a
+        T2I Random batch) is still writing prompts with it. Failing to unload
+        never stops the run."""
+        writer = self.get_vlm()
+        clients: List[Any] = (
+            list(self.get_all_vlms()) if self.get_all_vlms is not None else []
+        )
+        if writer is not None and not any(c is writer for c in clients):
+            clients.insert(0, writer)
+        writer_busy = self.prompting_elsewhere() or any(
+            other is not b and other.prompting for other in self._batches.values()
+        )
+        for vlm in clients:
+            if vlm is None or not vlm.model_id:
+                continue
+            if vlm is writer and writer_busy:
+                continue
+            try:
+                await vlm.shutdown()
+            except Exception as exc:
+                logger.warning("could not unload the VLM before rendering: %s", exc)
+
+    async def _run(self, b: _I2vBatch) -> None:
+        """Write the prompts, then submit the jobs -- in that order when
+        unloading is on, interleaved when it is off. Anything that goes wrong
+        ends the run with one ``batch_failed``; what was queued stays."""
+        try:
+            try:
+                if self.unload_vlm_during_generation:
+                    steps = [await self._step_prompt(b, i) for i in range(b.total)]
+                    b.prompting = False
+                    b.phase = "rendering"
+                    self._progress(b)
+                    await self._unload_vlm(b)
+                    for i, (text, lineage) in enumerate(steps):
+                        await self._submit_step(b, i, text, lineage)
+                else:
+                    for i in range(b.total):
+                        text, lineage = await self._step_prompt(b, i)
+                        b.phase = "rendering"
+                        await self._submit_step(b, i, text, lineage)
+            finally:
+                b.prompting = False
+            b.all_submitted = True
+            if not b.pending:
+                b.all_jobs_ended.set()
+            await b.all_jobs_ended.wait()
+            if b.finished is None:
+                self._retire(b, "done")
+        except asyncio.CancelledError:
+            raise  # cancel_batch / aclose own what happens next
+        except Exception as exc:
+            logger.warning("i2v batch %s failed: %s", b.id, exc, exc_info=True)
+            if b.finished is None:
+                reason = f"{exc} ({b.submitted} of {b.total_videos} videos queued)"
+                self._retire(b, "failed", reason)
+
+    def _retire(self, b: _I2vBatch, kind: str, error: Optional[str] = None) -> None:
+        """Emit the run's one terminal frame and drop it from the active
+        list. Callers check ``finished`` first; the abort sets it before its
+        first await, so nothing else retires a run being cancelled."""
+        b.finished = kind
+        event = {
+            "done": "batch_done",
+            "failed": "batch_failed",
+            "cancelled": "batch_cancelled",
+        }[kind]
+        self._batches.pop(b.id, None)
+        self._finished[b.id] = None
+        while len(self._finished) > _FINISHED_KEEP:
+            del self._finished[next(iter(self._finished))]
+        (
+            self._progress(b, event)
+            if error is None
+            else self._emit("i2v", event, {**self._row(b), "error": error})
+        )
+
+    async def cancel_batch(self, batch_id: str) -> bool:
+        """Stop writing and cancel every unfinished job of the run. False
+        when it is already over; an id never seen raises
+        ``I2vNotFoundError``."""
+        b = self._batches.get(batch_id)
+        if b is None:
+            if batch_id in self._finished:
+                return False
+            raise I2vNotFoundError(f"No i2v batch {batch_id}")
+        if b.finished is not None:
+            return False
+        # Shielded: a caller that goes away mid-cancel must not leave the
+        # run half-cancelled.
+        return await asyncio.shield(self._abort(b))
+
+    async def _abort(self, b: _I2vBatch) -> bool:
+        # First, before any await: from here nothing else retires the run.
+        b.finished = "cancelled"
+        task = b.task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+        targets = sorted(b.pending)
+        if targets:
+            results = await asyncio.gather(
+                *(self.comfy.cancel(job_id) for job_id in targets),
+                return_exceptions=True,
+            )
+            for job_id, result in zip(targets, results):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "could not cancel i2v job %s of batch %s: %s",
+                        job_id,
+                        b.id,
+                        result,
+                    )
+        for job_id in targets:
+            self._release(b, job_id)
+            self._job_batch.pop(job_id, None)
+            self._job_meta.pop(job_id, None)
+        self._retire(b, "cancelled")
+        return True
+
+    def _on_job_update(self, payload: Dict[str, Any]) -> None:
+        """A job ended: free its window slot. A failed job does not end the
+        run."""
+        if payload.get("state") not in _TERMINAL_JOB_STATES:
+            return
+        job_id = payload.get("job_id")
+        if not isinstance(job_id, int):
+            return
+        batch_id = self._job_batch.pop(job_id, None)
+        if batch_id is None:
+            if self._batches:
+                # Maybe a job of ours whose submit() has not returned yet.
+                self._early_ended[job_id] = str(payload.get("state"))
+                while len(self._early_ended) > 256:
+                    self._early_ended.pop(next(iter(self._early_ended)))
+            return
+        if payload.get("state") != "done":
+            # A done job's snapshot belongs to its ingest.
+            self._job_meta.pop(job_id, None)
+        b = self._batches.get(batch_id)
+        if b is not None:
+            self._release(b, job_id)
+
     # ---- ingest ------------------------------------------------------------
 
     def handle_job_event(self, event: str, payload: Dict[str, Any]) -> None:
         """Registered via comfy_client.on_job_event. Sync; never raises."""
+        if event == "job_update":
+            try:
+                self._on_job_update(payload)
+            except Exception:
+                logger.warning("i2v job update handling failed", exc_info=True)
+            return
         if event != "job_outputs":
             return
         try:
@@ -583,6 +1025,11 @@ class I2vRunner:
         )
 
     async def aclose(self) -> None:
+        runs = [b.task for b in self._batches.values() if b.task is not None]
+        for task in runs:
+            task.cancel()
+        if runs:
+            await asyncio.gather(*runs, return_exceptions=True)
         tasks = [t for t in self._ingest_tasks if not t.done()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

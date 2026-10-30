@@ -185,6 +185,9 @@ def get_i2v_config(config: dict) -> dict:
             "default_steps": 25,
             "output_root": "",           # "" = <comfy.output_root>/i2v/<image>/
             "output_prefix": "/%Y-%m-%d/i2v_",
+            "max_batch_size": 20,        # batches per run, each >= 1
+            "max_count_per_batch": 20,   # videos per batch, each >= 1
+            "window": 4,                 # unfinished jobs per run
         }
 
     ``output_root`` + ``output_prefix`` place generated clips (see
@@ -254,6 +257,13 @@ def get_i2v_config(config: dict) -> dict:
     if not isinstance(output_prefix, str):
         output_prefix = I2V_DEFAULT_OUTPUT_PREFIX
 
+    def _limit(key: str, default: int) -> int:
+        try:
+            value = raw.get(key)
+            return max(1, int(default if value is None else value))
+        except (TypeError, ValueError):
+            return default
+
     return {
         "fast_preset_id": _preset_id(raw.get("fast_preset_id")),
         "quality_preset_id": _preset_id(raw.get("quality_preset_id")),
@@ -266,6 +276,9 @@ def get_i2v_config(config: dict) -> dict:
         "default_steps": default_steps,
         "output_root": output_root,
         "output_prefix": output_prefix.strip(),
+        "max_batch_size": _limit("max_batch_size", 20),
+        "max_count_per_batch": _limit("max_count_per_batch", 20),
+        "window": _limit("window", 4),
     }
 
 

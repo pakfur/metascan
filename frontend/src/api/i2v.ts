@@ -1,5 +1,14 @@
 import { get, post, del, patch } from './client'
-import type { I2vWriter, I2vConfig, I2vFormState, I2vLintReport, I2vTemplate, I2vVideo } from '../types/i2v'
+import type {
+  I2vWriter,
+  I2vBatch,
+  I2vBatchBody,
+  I2vConfig,
+  I2vFormState,
+  I2vLintReport,
+  I2vTemplate,
+  I2vVideo,
+} from '../types/i2v'
 
 export function generatePrompt(body: {
   source_path: string
@@ -21,31 +30,31 @@ export function lintI2vPrompt(body: {
   return post('/i2v/lint', body)
 }
 
-export function generateVideo(body: {
-  source_path: string
-  prompt: string
-  duration_s: number
-  quality: 'fast' | 'quality'
-  seed: number
-  megapixels: number
-  loras: { name: string; strength: number }[]
-  idea?: string
-  // High quality only; the server ignores it for Fast.
-  steps?: number
-  template_id?: string | null
-  // Categories the clip is tagged with at ingest; an unknown id is a 404.
-  category_ids?: number[]
-  // Lineage: the writer that drafted `prompt` and its draft. Omitted for a
-  // prompt typed from scratch (the server records it as `manual`).
-  writer_id?: string
-  draft_prompt?: string
-  writer_model?: string | null
-}): Promise<{ job_id: number; warnings: string[] }> {
-  return post('/i2v/generate', body)
-}
-
 export function listI2vVideos(sourcePath: string): Promise<I2vVideo[]> {
   return get(`/i2v/videos?source_path=${encodeURIComponent(sourcePath)}`)
+}
+
+// Every clip, newest first, one page at a time: pass the oldest id held as
+// `beforeId` for the next page. Prunes nothing server-side.
+export function listAllI2vVideos(limit: number, beforeId: number | null): Promise<I2vVideo[]> {
+  const q = beforeId == null ? `limit=${limit}` : `limit=${limit}&before_id=${beforeId}`
+  return get(`/i2v/videos?${q}`)
+}
+
+// A server-owned run: the server writes (if `prompt` is empty), queues and
+// advances the seed; progress arrives on the i2v channel.
+export function startI2vBatch(
+  body: I2vBatchBody,
+): Promise<{ batch_id: string; total_videos: number; next_seed: number | null; warnings: string[] }> {
+  return post('/i2v/batches', body)
+}
+
+export function listI2vBatches(): Promise<I2vBatch[]> {
+  return get('/i2v/batches')
+}
+
+export function cancelI2vBatch(id: string): Promise<{ status: string }> {
+  return post(`/i2v/batches/${encodeURIComponent(id)}/cancel`, {})
 }
 
 // Autosave into one clip's editable form state. Partial; the clip's

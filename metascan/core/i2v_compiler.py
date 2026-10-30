@@ -216,7 +216,9 @@ _REF_GUIDE_MARKERS = (
     "summary:",
 )
 _DESCRIPTION_RE = re.compile(
-    r"integrated_multimodal_description:(.*?)(?:\n\n|\Z)", re.S
+    r"integrated_multimodal_description:(.*?)"
+    r"(?:\n\n(?:overall_soundscape|non_diegetic_music):|\Z)",
+    re.S,
 )
 _MIN_WORDS_PER_BEAT = 12
 

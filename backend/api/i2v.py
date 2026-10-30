@@ -12,9 +12,9 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
@@ -33,7 +33,12 @@ from metascan.core.i2v_output import (
     output_prefix_warnings,
     resolve_output_target,
 )
-from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.core.i2v_runner import (
+    I2vBatchRequest,
+    I2vNotFoundError,
+    I2vRequestError,
+    I2vUnavailableError,
+)
 from metascan.core.i2v_templates import (
     I2vTemplateError,
     I2vTemplateNotFound,
@@ -141,6 +146,17 @@ class GenerateRequest(BaseModel):
     writer_model: Optional[str] = None
 
 
+class BatchRequestBody(GenerateRequest):
+    """A run: the form of one render plus how many to make. An empty
+    ``prompt`` has the run write batch 1 too."""
+
+    prompt: str = ""
+    seed_policy: Literal["fixed", "increment", "decrement", "random"]
+    batch_size: int
+    count_per_batch: int
+    writer: Annotated[str, AfterValidator(_writer_choice)] = "base"
+
+
 @router.post("/prompt", dependencies=GPU_FREE)
 async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     runner = _require_runner()
@@ -214,9 +230,11 @@ async def lint_prompt(body: LintRequest) -> Dict[str, Any]:
     return report
 
 
-@router.post("/generate", dependencies=GPU_FREE)
-async def generate(body: GenerateRequest) -> Dict[str, Any]:
-    runner = _require_runner()
+def _checked_form(
+    body: GenerateRequest,
+) -> Tuple[Dict[str, Any], int, Any]:
+    """What /batches does first: the form's checks, the config and
+    the preset its quality slot names, and the cadence template (or None)."""
     if body.duration_s <= 0:
         raise HTTPException(status_code=400, detail="duration_s must be positive")
     if body.quality not in ("fast", "quality"):
@@ -251,42 +269,90 @@ async def generate(body: GenerateRequest) -> Dict[str, Any]:
             detail=f"No {body.quality} preset is configured -- set one in "
             "Configuration → Image to Video.",
         )
-    category_ids = await checked_category_ids(body.category_ids)
-    try:
-        job_id = await runner.generate(
-            source_path=body.source_path,
-            prompt=body.prompt,
-            duration_s=body.duration_s,
-            quality=body.quality,
-            seed=body.seed,
-            megapixels=body.megapixels,
-            loras=body.loras,
-            preset_id=preset_id,
-            idea=body.idea,
-            steps=body.steps,
-            output_root=cfg["output_root"] or None,
-            output_prefix=cfg["output_prefix"],
-            template_id=body.template_id,
-            category_ids=category_ids,
-            writer_id=body.writer_id,
-            draft_prompt=body.draft_prompt,
-            writer_model=body.writer_model,
+    return cfg, preset_id, template
+
+
+@router.post("/batches", dependencies=GPU_FREE)
+async def start_batch(body: BatchRequestBody) -> Dict[str, Any]:
+    runner = _require_runner()
+    cfg, preset_id, template = _checked_form(body)
+    if not 1 <= body.batch_size <= cfg["max_batch_size"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"batch_size must be between 1 and {cfg['max_batch_size']}",
         )
+    if not 1 <= body.count_per_batch <= cfg["max_count_per_batch"]:
+        raise HTTPException(
+            status_code=400,
+            detail="count_per_batch must be between 1 and "
+            f"{cfg['max_count_per_batch']}",
+        )
+    category_ids = await checked_category_ids(body.category_ids)
+    request = I2vBatchRequest(
+        source_path=body.source_path,
+        prompt=body.prompt,
+        idea=body.idea or "",
+        duration_s=body.duration_s,
+        quality=body.quality,
+        seed=body.seed,
+        seed_policy=body.seed_policy,
+        batch_size=body.batch_size,
+        count_per_batch=body.count_per_batch,
+        megapixels=body.megapixels,
+        loras=body.loras,
+        preset_id=preset_id,
+        writer=body.writer,
+        steps=body.steps,
+        template_id=body.template_id,
+        output_root=cfg["output_root"] or None,
+        output_prefix=cfg["output_prefix"],
+        category_ids=category_ids,
+        writer_id=body.writer_id,
+        draft_prompt=body.draft_prompt,
+        writer_model=body.writer_model,
+        window=cfg["window"],
+    )
+    try:
+        started = await runner.start_batch(request)
     except WriterAdapterUnavailable as exc:
-        # A draft from an adapter that has gone: the dialog falls back.
         raise _adapter_409(exc) from exc
+    except I2vUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except I2vRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (BindingError, PresetNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except GpuBusyError as exc:
         raise gpu_busy_http_error() from exc
-    except ComfyError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
-        "job_id": job_id,
-        "warnings": lint_i2v_prompt(body.prompt, body.duration_s, template=template),
+        "batch_id": started.batch_id,
+        "total_videos": started.total_videos,
+        "next_seed": started.next_seed,
+        "warnings": (
+            lint_i2v_prompt(body.prompt, body.duration_s, template=template)
+            if body.prompt.strip()
+            else []
+        ),
     }
+
+
+@router.get("/batches")
+async def list_batches() -> List[Dict[str, Any]]:
+    runner = _require_runner()
+    rows: List[Dict[str, Any]] = runner.active_batches()
+    return rows
+
+
+@router.post("/batches/{batch_id}/cancel")
+async def cancel_batch(batch_id: str) -> Dict[str, str]:
+    """Idempotent: a run that is already over answers the same ``cancelled``;
+    only an id the runner has never seen is a 404."""
+    runner = _require_runner()
+    try:
+        await runner.cancel_batch(batch_id)
+    except I2vNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "cancelled"}
 
 
 @router.get("/templates")
@@ -304,7 +370,15 @@ def _megapixel_options() -> List[float]:
 
 
 @router.get("/videos")
-async def list_videos(source_path: str) -> List[Dict[str, Any]]:
+async def list_videos(
+    source_path: Optional[str] = None,
+    limit: int = Query(60, ge=1, le=200),
+    before_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """One source image's clips, or -- without ``source_path`` -- a page of
+    every clip, newest first (``limit`` / ``before_id`` apply only there)."""
+    if source_path is None:
+        return await _service().list_all_videos(limit, before_id, _megapixel_options())
     return await _service().list_videos(source_path, _megapixel_options())
 
 

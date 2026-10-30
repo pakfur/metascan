@@ -62,6 +62,41 @@ export interface I2vVideo {
   form_state: I2vFormState
 }
 
+/** One running batch run, as GET /api/i2v/batches and the i2v channel's batch_* frames carry it. */
+export interface I2vBatch {
+  batch_id: string
+  // POSIX; compare to a Media path through a normaliser.
+  source_path: string
+  phase: 'writing' | 'rendering'
+  batch: number
+  total_batches: number
+  queued: number
+  total_videos: number
+}
+
+/** Body of POST /api/i2v/batches: one render's form plus the run's shape. */
+export interface I2vBatchBody {
+  source_path: string
+  // Empty: the run writes batch 1's prompt itself.
+  prompt: string
+  idea: string
+  duration_s: number
+  quality: 'fast' | 'quality'
+  seed: number
+  seed_policy: 'fixed' | 'increment' | 'decrement' | 'random'
+  batch_size: number
+  count_per_batch: number
+  megapixels: number
+  loras: { name: string; strength: number }[]
+  writer?: I2vWriter
+  steps?: number
+  template_id?: string | null
+  category_ids?: number[]
+  writer_id?: string
+  draft_prompt?: string
+  writer_model?: string | null
+}
+
 export interface I2vConfig {
   fast_preset_id: number | null
   quality_preset_id: number | null
@@ -75,6 +110,10 @@ export interface I2vConfig {
   // Clip placement: '' root = the default layout under comfy.output_root.
   output_root: string
   output_prefix: string
+  // Run limits: batches per run, videos per batch, batches in flight.
+  max_batch_size: number
+  max_count_per_batch: number
+  window: number
   // Whether the configured High quality preset binds MS_STEPS.
   quality_steps_supported: boolean
 }

@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from backend.api.i2v import get_i2v_config, set_i2v_runner
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.core.i2v_runner import (
+    I2vBatchStarted,
+    I2vNotFoundError,
+    I2vRequestError,
+    I2vUnavailableError,
+)
 from metascan.core.i2v_templates import I2vTemplateError, I2vTemplateNotFound
 from metascan.core.media import Media
 from metascan.core.vlm_client import VlmError
@@ -39,13 +44,28 @@ class FakeRunner:
         self.prompt_result = ("For the target video, ...", ["w1"])
         self.writer_model = "qwen3vl-8b"
         self.prompt_error = None
-        self.generate_result = 42
-        self.generate_error = None
         self.calls = []
         # Dict-shaped call logs (kwargs only), alongside the tuple-shaped
         # ``calls`` above which existing tests already assert against.
         self.prompt_calls = []
-        self.generate_calls = []
+        self.batch_calls = []
+        self.batch_error = None
+        self.batches = []
+        self.known_batches = {"live", "over"}
+
+    async def start_batch(self, req):
+        self.batch_calls.append(req)
+        if self.batch_error:
+            raise self.batch_error
+        return I2vBatchStarted("b1", req.batch_size * req.count_per_batch, 9)
+
+    def active_batches(self):
+        return self.batches
+
+    async def cancel_batch(self, batch_id):
+        if batch_id not in self.known_batches:
+            raise I2vNotFoundError(f"No i2v batch {batch_id}")
+        return batch_id == "live"
 
     async def generate_prompt(self, source_path, idea, duration_s, template_id=None):
         self.calls.append(("prompt", source_path, idea, duration_s))
@@ -68,13 +88,6 @@ class FakeRunner:
             source_path, idea, duration_s, template_id=template_id
         )
         return text, warnings, self.writer_model
-
-    async def generate(self, **kwargs):
-        self.calls.append(("generate", kwargs))
-        self.generate_calls.append(kwargs)
-        if self.generate_error:
-            raise self.generate_error
-        return self.generate_result
 
 
 class _I2vApiBase(unittest.TestCase):
@@ -162,16 +175,6 @@ class TestI2vApi(_I2vApiBase):
         )
         self.assertEqual(resp.json()["writer_model"], "qwen3vl-8b")
 
-    def test_i2v_generate_passes_the_writer_model(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json=self._generate_body(
-                writer_id="base", draft_prompt="a draft", writer_model="qwen3vl-8b"
-            ),
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.runner.generate_calls[0]["writer_model"], "qwen3vl-8b")
-
     def test_i2v_prompt_rejects_an_unoffered_writer(self):
         resp = self.client.post(
             "/api/i2v/prompt",
@@ -183,22 +186,6 @@ class TestI2vApi(_I2vApiBase):
             },
         )
         self.assertEqual(resp.status_code, 422)
-
-    def test_i2v_generate_passes_lineage_to_the_runner(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json=self._generate_body(writer_id="base", draft_prompt="a draft"),
-        )
-        self.assertEqual(resp.status_code, 200)
-        kwargs = self.runner.generate_calls[0]
-        self.assertEqual(kwargs["writer_id"], "base")
-        self.assertEqual(kwargs["draft_prompt"], "a draft")
-
-    def test_i2v_generate_lineage_defaults_to_none(self):
-        self.client.post("/api/i2v/generate", json=self._generate_body())
-        kwargs = self.runner.generate_calls[0]
-        self.assertIsNone(kwargs["writer_id"])
-        self.assertIsNone(kwargs["draft_prompt"])
 
     def test_prompt_happy_path(self):
         resp = self.client.post(
@@ -258,76 +245,6 @@ class TestI2vApi(_I2vApiBase):
         )
         self.assertEqual(resp.status_code, 503)
 
-    # ---- /generate ----------------------------------------------------
-
-    def test_generate_happy_path(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "For the target video, the shot begins mid-air.",
-                "duration_s": 6,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0.75,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
-        self.assertEqual(body["job_id"], 42)
-        self.assertIsInstance(body["warnings"], list)
-        kind, kwargs = self.runner.calls[0]
-        self.assertEqual(kind, "generate")
-        self.assertEqual(kwargs["preset_id"], 5)
-
-    def test_generate_400_unconfigured_slot(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "some prompt text",
-                "duration_s": 6,
-                "quality": "quality",
-                "seed": 1,
-                "megapixels": 0.75,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("Configuration", resp.json()["detail"])
-
-    def test_generate_passes_megapixels_to_runner(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "For the target video, the shot begins mid-air.",
-                "duration_s": 6,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0.5,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 200)
-        kwargs = self.runner.calls[0][1]
-        self.assertEqual(kwargs["megapixels"], 0.5)
-        self.assertNotIn("width", kwargs)
-        self.assertNotIn("height", kwargs)
-
-    def _generate_body(self, **over):
-        body = {
-            "source_path": "/lib/a.png",
-            "prompt": "For the target video, the shot begins mid-air.",
-            "duration_s": 6,
-            "quality": "fast",
-            "seed": 1,
-            "loras": [],
-        }
-        body.update(over)
-        return body
-
     # ---- /lint -------------------------------------------------------
 
     def test_lint_reports_warnings_fixes_and_the_fixed_prompt(self):
@@ -371,28 +288,6 @@ class TestI2vApi(_I2vApiBase):
         resp = self.client.post("/api/i2v/lint", json={"prompt": "x", "duration_s": 0})
         self.assertEqual(resp.status_code, 400)
 
-    def test_generate_passes_configured_output_placement(self):
-        with patch(
-            "backend.api.i2v.load_app_config",
-            return_value={
-                "i2v": {
-                    "fast_preset_id": 5,
-                    "output_root": "/mnt/d/Media/images",
-                    "output_prefix": "/%Y-%m-%d/minimax_",
-                }
-            },
-        ):
-            resp = self.client.post("/api/i2v/generate", json=self._generate_body())
-        self.assertEqual(resp.status_code, 200)
-        kwargs = self.runner.calls[0][1]
-        self.assertEqual(kwargs["output_root"], "/mnt/d/Media/images")
-        self.assertEqual(kwargs["output_prefix"], "/%Y-%m-%d/minimax_")
-
-    def test_generate_output_root_defaults_to_none(self):
-        resp = self.client.post("/api/i2v/generate", json=self._generate_body())
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(self.runner.calls[0][1]["output_root"])
-
     def test_output_preview(self):
         resp = self.client.get(
             "/api/i2v/output-preview",
@@ -426,86 +321,6 @@ class TestI2vApi(_I2vApiBase):
         body = resp.json()
         self.assertIsNone(body["path"])
         self.assertIsNone(body["error"])
-
-    def test_generate_passes_steps_to_runner(self):
-        resp = self.client.post("/api/i2v/generate", json=self._generate_body(steps=35))
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.runner.calls[0][1]["steps"], 35)
-
-    def test_generate_steps_default_to_none(self):
-        resp = self.client.post("/api/i2v/generate", json=self._generate_body())
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(self.runner.calls[0][1]["steps"])
-
-    def test_generate_400_out_of_range_steps(self):
-        for bad in (0, -5, 201):
-            resp = self.client.post(
-                "/api/i2v/generate", json=self._generate_body(steps=bad)
-            )
-            self.assertEqual(resp.status_code, 400, bad)
-            self.assertIn("steps", resp.json()["detail"])
-        self.assertEqual(self.runner.calls, [])
-
-    def test_generate_defaults_megapixels_when_omitted(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "For the target video, the shot begins mid-air.",
-                "duration_s": 6,
-                "quality": "fast",
-                "seed": 1,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.runner.calls[0][1]["megapixels"], 0.75)
-
-    def test_generate_400_non_positive_megapixels(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "For the target video, the shot begins mid-air.",
-                "duration_s": 6,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("megapixels", resp.json()["detail"].lower())
-
-    def test_generate_400_bad_quality(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "some prompt text",
-                "duration_s": 6,
-                "quality": "ultra",
-                "seed": 1,
-                "megapixels": 0.75,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-
-    def test_generate_400_nonpositive_duration(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "some prompt text",
-                "duration_s": 0,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0.75,
-                "loras": [],
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
 
     # ---- /videos ----------------------------------------------------
 
@@ -610,42 +425,128 @@ class TestI2vApi(_I2vApiBase):
         self.assertFalse(body["quality_steps_supported"])
 
 
-class TestI2vGenerateCategories(_I2vApiBase):
+class TestI2vBatchApi(_I2vApiBase):
     def _body(self, **over):
         body = {
             "source_path": "/lib/a.png",
-            "prompt": "For the target video, the shot begins mid-air.",
+            "prompt": "",
             "duration_s": 6,
             "quality": "fast",
             "seed": 1,
+            "seed_policy": "increment",
+            "batch_size": 3,
+            "count_per_batch": 2,
             "loras": [],
         }
         body.update(over)
         return body
 
-    def test_i2v_unknown_category_rejected_before_queueing(self):
-        known = self.db.create_category("Anime").id
-        resp = self.client.post(
-            "/api/i2v/generate", json=self._body(category_ids=[known, 999])
+    def _post(self, **over):
+        return self.client.post("/api/i2v/batches", json=self._body(**over))
+
+    def test_start_batch_maps_the_form(self):
+        cat = self.db.create_category("Anime").id
+        resp = self._post(idea="rain", writer="adapter:7", steps=30, category_ids=[cat])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json(),
+            {"batch_id": "b1", "total_videos": 6, "next_seed": 9, "warnings": []},
         )
+        req = self.runner.batch_calls[0]
+        self.assertEqual(
+            (req.source_path, req.idea, req.preset_id, req.window),
+            ("/lib/a.png", "rain", 5, 4),
+        )
+        self.assertEqual(
+            (req.seed_policy, req.batch_size, req.count_per_batch, req.writer),
+            ("increment", 3, 2, "adapter:7"),
+        )
+        self.assertEqual((req.steps, req.category_ids), (30, [cat]))
+
+    def test_start_batch_is_gpu_free(self):
+        with patch("backend.services.gpu_lock.gpu_reserved", return_value=True):
+            resp = self._post()
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["code"], "gpu_busy_training")
+        self.assertEqual(self.runner.batch_calls, [])
+
+    def test_batch_size_outside_limits_is_400(self):
+        for n in (0, 21):
+            self.assertEqual(self._post(batch_size=n).status_code, 400, n)
+        self.assertEqual(self.runner.batch_calls, [])
+
+    def test_count_outside_limits_is_400(self):
+        for n in (0, 21):
+            self.assertEqual(self._post(count_per_batch=n).status_code, 400, n)
+
+    def test_bad_quality_is_400(self):
+        self.assertEqual(self._post(quality="best").status_code, 400)
+
+    def test_nonpositive_duration_is_400(self):
+        self.assertEqual(self._post(duration_s=0).status_code, 400)
+
+    def test_nonpositive_megapixels_is_400(self):
+        self.assertEqual(self._post(megapixels=0).status_code, 400)
+
+    def test_out_of_range_steps_is_400(self):
+        for bad in (0, 10_000):
+            self.assertEqual(self._post(steps=bad).status_code, 400)
+
+    def test_bad_policy_is_422(self):
+        self.assertEqual(self._post(seed_policy="sideways").status_code, 422)
+
+    def test_bad_writer_is_422(self):
+        self.assertEqual(self._post(writer="nope").status_code, 422)
+
+    def test_seed_range_refusal_is_400(self):
+        self.runner.batch_error = I2vRequestError("Seed 3 is outside 0..2147483647")
+        resp = self._post()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("outside", resp.json()["detail"])
+
+    def test_vlm_down_is_503(self):
+        self.runner.batch_error = I2vUnavailableError("VLM subsystem is not running")
+        self.assertEqual(self._post().status_code, 503)
+
+    def test_adapter_gone_is_409_with_code(self):
+        from metascan.core.writer_adapters import WriterAdapterUnavailable
+
+        self.runner.batch_error = WriterAdapterUnavailable("adapter:7", "deleted")
+        resp = self._post(writer="adapter:7")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["writer_id"], "adapter:7")
+        self.assertTrue(resp.json()["detail"]["code"])
+
+    def test_unknown_category_is_404(self):
+        resp = self._post(category_ids=[999])
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()["detail"]["code"], "unknown_category")
-        self.assertEqual(self.runner.calls, [])
-        self.assertEqual(self.db.list_generation_jobs(limit=10), [])
+        self.assertEqual(self.runner.batch_calls, [])
 
-    def test_known_categories_reach_the_runner(self):
-        anime = self.db.create_category("Anime").id
-        scifi = self.db.create_category("Sci-Fi").id
-        resp = self.client.post(
-            "/api/i2v/generate", json=self._body(category_ids=[anime, scifi, anime])
-        )
+    def test_warnings_lint_the_box_prompt(self):
+        resp = self._post(prompt="a cat sits", batch_size=1, count_per_batch=1)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.runner.generate_calls[0]["category_ids"], [anime, scifi])
+        self.assertTrue(resp.json()["warnings"])
+        self.assertEqual(self.runner.batch_calls[0].prompt, "a cat sits")
 
-    def test_category_ids_default_to_none_chosen(self):
-        resp = self.client.post("/api/i2v/generate", json=self._body())
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(self.runner.generate_calls[0]["category_ids"], [])
+    def test_no_preset_is_400(self):
+        resp = self._post(quality="quality")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cancel_unknown_batch_is_404(self):
+        resp = self.client.post("/api/i2v/batches/nope/cancel")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cancel_ended_batch_is_cancelled(self):
+        for bid in ("live", "over"):
+            resp = self.client.post(f"/api/i2v/batches/{bid}/cancel")
+            self.assertEqual(resp.status_code, 200, bid)
+            self.assertEqual(resp.json(), {"status": "cancelled"})
+
+    def test_list_batches(self):
+        self.runner.batches = [{"batch_id": "live", "phase": "writing"}]
+        resp = self.client.get("/api/i2v/batches")
+        self.assertEqual(resp.json(), self.runner.batches)
 
 
 class TestI2vFormStateApi(_I2vApiBase):
@@ -684,6 +585,27 @@ class TestI2vFormStateApi(_I2vApiBase):
         resp = self.client.get("/api/i2v/videos", params={"source_path": "/lib/a.png"})
         self.assertEqual(resp.status_code, 200)
         return resp.json()
+
+    def test_get_videos_without_source_returns_all_with_form_state(self):
+        self._clip("/lib/o1.mp4")
+        self._clip("/lib/o2.mp4")
+        resp = self.client.get("/api/i2v/videos", params={"limit": 1})
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["form_state"]["seed"], 42)
+        self.assertIn("o2.mp4", rows[0]["file_path"])
+        more = self.client.get(
+            "/api/i2v/videos", params={"limit": 1, "before_id": rows[0]["id"]}
+        ).json()
+        self.assertEqual(len(more), 1)
+        self.assertIn("o1.mp4", more[0]["file_path"])
+
+    def test_get_videos_with_source_is_unchanged(self):
+        self._clip("/lib/o1.mp4")
+        rows = self._videos()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["form_state"]["seed"], 42)
 
     def test_list_returns_the_stored_form_state(self):
         self._clip(form_state=self.FORM, megapixels=0.5, loras=self.FORM["loras"])
@@ -916,69 +838,6 @@ class TestI2vTemplatesApi(_I2vApiBase):
         self.assertEqual(resp.status_code, 500)
         self.assertIn("broken.json", resp.json()["detail"])
 
-    def test_generate_forwards_template_id(self):
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": "p",
-                "duration_s": 15,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0.5,
-                "template_id": "dialog_ots_15",
-            },
-        )
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(self.runner.generate_calls[-1]["template_id"], "dialog_ots_15")
-
-    def test_generate_includes_template_lint_warnings(self):
-        # The warnings returned after Generate must match the dialog's live
-        # lint -- both go through lint_i2v_prompt(..., template=...).
-        text = (
-            "For the target video, at 0.00 seconds into the target video, "
-            "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
-            "integrated_multimodal_description: [Shot 1] words.\n\n"
-            "overall_soundscape: x.\n\n"
-            "non_diegetic_music: y."
-        )
-        resp = self.client.post(
-            "/api/i2v/generate",
-            json={
-                "source_path": "/lib/a.png",
-                "prompt": text,
-                "duration_s": 15,
-                "quality": "fast",
-                "seed": 1,
-                "megapixels": 0.5,
-                "template_id": "dialog_ots_15",
-            },
-        )
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertTrue(
-            any("1 shots" in w and "3" in w for w in resp.json()["warnings"])
-        )
-
-    def test_generate_500_on_a_broken_template_library(self):
-        with patch(
-            "backend.api.i2v.get_i2v_template",
-            side_effect=I2vTemplateError("broken.json: invalid JSON: ..."),
-        ):
-            resp = self.client.post(
-                "/api/i2v/generate",
-                json={
-                    "source_path": "/lib/a.png",
-                    "prompt": "p",
-                    "duration_s": 15,
-                    "quality": "fast",
-                    "seed": 1,
-                    "megapixels": 0.5,
-                    "template_id": "dialog_ots_15",
-                },
-            )
-        self.assertEqual(resp.status_code, 500)
-        self.assertIn("broken.json", resp.json()["detail"])
-
 
 class TestGetI2vConfig(unittest.TestCase):
     def test_empty_dict_defaults(self):
@@ -1102,3 +961,11 @@ class TestI2vConfigOutput(unittest.TestCase):
         cfg = get_i2v_config({"i2v": {"output_root": 5, "output_prefix": ["x"]}})
         self.assertEqual(cfg["output_root"], "")
         self.assertEqual(cfg["output_prefix"], "/%Y-%m-%d/i2v_")
+
+    def test_config_limits_default_and_clamp(self):
+        cfg = get_i2v_config({})
+        self.assertEqual(
+            (cfg["max_batch_size"], cfg["max_count_per_batch"], cfg["window"]),
+            (20, 20, 4),
+        )
+        self.assertEqual(get_i2v_config({"i2v": {"window": 0}})["window"], 1)
