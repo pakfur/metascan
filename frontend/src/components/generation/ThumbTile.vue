@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { thumbnailUrl } from '../../api/client'
 import type { ThumbItem } from '../../types/jobs'
+import { useDelayedClick } from '../../composables/useDelayedClick'
 import GradeBadge from '../thumbnails/GradeBadge.vue'
 
 // One image tile: thumbnail, hover overlays (favourite, delete), a read-only
@@ -35,12 +36,12 @@ const emit = defineEmits<{
 // The overlay buttons stop click AND dblclick (in the template): a fast
 // double-tap on one must neither select nor open the tile underneath.
 //
-// detail > 1 is the second click of a double-click, which opens the viewer;
-// the first click already selected, so it must not select again.
-function onClick(evt: MouseEvent) {
-  if (evt.detail > 1) return
-  emit('select', evt)
-}
+// A single click waits out the double-click window, and a double-click
+// cancels it, so opening the viewer never selects first.
+const { onClick, onDblclick } = useDelayedClick(
+  (evt) => emit('select', evt),
+  () => emit('open'),
+)
 
 function onImgError(e: Event) {
   ;(e.target as HTMLImageElement).style.display = 'none'
@@ -54,7 +55,7 @@ function onImgError(e: Event) {
       :class="{ selected, top }"
       :title="item.title"
       @click="onClick"
-      @dblclick="emit('open')"
+      @dblclick="onDblclick"
     >
       <img :src="thumbnailUrl(item.file_path)" alt="" loading="lazy" decoding="async" @error="onImgError" />
       <span v-if="badge" class="score-badge" :title="badgeTitle">{{ badge }}</span>
