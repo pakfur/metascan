@@ -509,19 +509,18 @@ function loadClip(v: I2vVideo) {
   lastSubmitted.value = requestSignature()
 }
 
-// detail > 1 is the second click of a double-click, which plays the clip;
-// it must not also re-run the load.
-function onSelectClip(v: I2vVideo, event: MouseEvent) {
-  if (event.detail > 1) return
+// The tile waits out the double-click window (useDelayedClick), so a
+// double-click never reaches here.
+function onSelectClip(v: I2vVideo) {
   loadClip(v)
 }
 
 // A clip of another source image cannot be loaded here yet (switching the
 // source comes with the run row); one of this image's clips loads as in the
 // left list.
-function onSelectAllClip(v: I2vVideo, event: MouseEvent) {
+function onSelectAllClip(v: I2vVideo) {
   const own = store.videos.find((x) => x.id === v.id)
-  if (own) onSelectClip(own, event)
+  if (own) onSelectClip(own)
 }
 
 async function onShowMoreAll() {
@@ -744,6 +743,7 @@ const viewerMedia = computed<Media[]>(() => {
             :videos="store.videos"
             :selected-id="selectedId"
             :columns="1"
+            :has-jobs="store.jobs.size > 0"
             empty-text="No videos yet — generated clips appear here."
             @select="onSelectClip"
             @play="viewerIndex = { list: 'left', index: $event }"
