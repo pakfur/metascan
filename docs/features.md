@@ -159,7 +159,7 @@ Right-click any image → "Image to Video…" opens a dialog to turn it into a s
 - Pick a **Cadence**: Single take, or a découpage template that fixes the shot plan — timing, framing, camera and cuts — while the VLM writes only the action and lines. A template sets the clip duration. See [Image-to-Video cadence templates](i2v-templates.md).
 - Pick an output size as a megapixel budget; the clip's orientation and aspect ratio always follow the source image, since that image is the first frame
 - Optional LoRAs applied to the generation
-- Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in a strip within the dialog, with view, favorite (star), and delete actions
+- Generated clips appear as visible library media (not hidden, unlike storyboard candidates) in the dialog (this image's clips on the left, every clip on the right), with view, favorite (star), and delete actions
 - Clips are saved under a configurable root directory with a date-expanding file prefix (Configuration → Video), e.g. `<root>/2026-09-20/minimax_<number>.mp4`
 - Pressing Generate for one video with nothing changed (same seed, quality, steps, prompt…) asks for confirmation first, since it would render an identical clip
 - The dialog has three panels: this image's clips on the left, the form in the middle, and every Image to Video clip in the library (newest first, **Show more** for older ones) on the right. Clicking a clip on the right of another image switches the dialog to that image and loads the clip's settings; if that image has since been deleted its clip can still be looked at, but Generate is off

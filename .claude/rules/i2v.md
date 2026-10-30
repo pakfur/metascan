@@ -27,7 +27,7 @@ the root CLAUDE.md still applies.
   favorite only (`setFavorite`, never a grade). A clip tile shows a read-only
   ✓ / ✗ badge from the row's `grade`; grades set in the I2V result viewer
   reach the tile live through `store.applyJudgment` (`judgmentMirror`), and
-  a strip refresh never undoes one: `refreshVideos` drops a reply a newer
+  a clip-list refresh never undoes one: `refreshVideos` drops a reply a newer
   refresh or another source image superseded, and puts back on its rows
   each ★ / grade the server answered after it went out
   (`utils/rowNotes.ts`, as the T2I store does; the tile ★ applies its
@@ -156,9 +156,9 @@ the root CLAUDE.md still applies.
   and capture the clip id at flush time (the user may have clicked
   another clip since); `flushFormState` runs before a clip switch, on
   **Stop editing**, on close and on unmount. Deselect is an explicit
-  button, not a second click on the tile — a double-click (play) fires
-  two single-clicks first, so `onSelectClip` also ignores
-  `event.detail > 1`. `loadClip` arms `lastSubmitted`: the one deliberate
+  button, not a second click on the tile — a double-click (play) would
+  otherwise fire two single-clicks first, so the tile click goes through
+  `useDelayedClick` and a double-click never reaches `onSelectClip`. `loadClip` arms `lastSubmitted`: the one deliberate
   exception to that snapshot being session-local, because the clip's exact
   seed is now in the form. `withCurrentOption` keeps a loaded value that
   has since left the config lists visible in its select.

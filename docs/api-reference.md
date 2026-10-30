@@ -856,10 +856,11 @@ where they're picked.
   job's outputs have been downloaded and ingested as `i2v_videos` rows.
 - **`batch_progress`** — `{batch_id, source_path, phase, batch, total_batches,
   queued, total_videos, warnings}` while a run writes prompts and submits jobs.
-- **`batch_done`** — the same fields, once every job of the run has ended.
-- **`batch_failed`** — the same fields plus `error`; what was already queued
-  stays queued.
-- **`batch_cancelled`** — the same fields, after
+- **`batch_done`** — the same fields (with `warnings`), once every job of the
+  run has ended.
+- **`batch_failed`** — the same fields except `warnings`, plus `error`; what
+  was already queued stays queued.
+- **`batch_cancelled`** — the same fields except `warnings`, after
   `POST /api/i2v/batches/{id}/cancel`.
 
 ## Text-to-image (`/api/t2i/*`)
