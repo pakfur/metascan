@@ -133,16 +133,26 @@ const loadingMoreAll = ref(false)
 // store owns it, and it is null once a clip's source image has been deleted.
 const sourceMedia = computed(() => store.source)
 
+// False until the store has opened and the config defaults are in the form. The
+// lists may show earlier; a click on a clip then would be compared with a
+// baseline that does not exist yet, and the defaults would land over its values.
+// So loading, Generate and Generate prompt stay inert until it is true.
+const ready = ref(false)
+
 onMounted(async () => {
-  await store.open(props.media)
-  const cfg = store.config
-  if (cfg) {
-    durationS.value = cfg.default_duration
-    quality.value = cfg.default_quality
-    megapixels.value = cfg.default_megapixels
-    steps.value = cfg.default_steps
+  try {
+    await store.open(props.media)
+    const cfg = store.config
+    if (cfg) {
+      durationS.value = cfg.default_duration
+      quality.value = cfg.default_quality
+      megapixels.value = cfg.default_megapixels
+      steps.value = cfg.default_steps
+    }
+  } finally {
+    cleanForm = JSON.stringify(currentForm())
+    ready.value = true
   }
-  cleanForm = JSON.stringify(currentForm())
 })
 
 // The form as it was when it last matched a render or a load: what the
@@ -164,7 +174,7 @@ function mayLeave(kind: LeaveKind): boolean {
 }
 
 function close() {
-  if (!mayLeave('close')) return
+  if (ready.value && !mayLeave('close')) return
   flushFormState() // before store.close() empties the clip list
   store.close()
   emit('close')
@@ -573,7 +583,12 @@ let switching = false
 // A click on a clip in either list. The tile waits out the double-click
 // window (useDelayedClick), so a double-click never reaches here.
 async function onSelectClip(v: I2vVideo) {
-  if (switching || v.id === selectedId.value) return
+  if (v.id === selectedId.value) return
+  if (!ready.value) {
+    toast.show('Still loading', 'info', 3000)
+    return
+  }
+  if (switching) return
   if (!mayLeave('clip')) return
   switching = true
   try {
@@ -658,7 +673,7 @@ const SOURCE_DELETED_NOTE =
 
 async function onGenerate() {
   const sourcePath = store.sourcePath
-  if (!sourcePath || !store.source) return
+  if (!ready.value || !sourcePath || !store.source) return
   const text = prompt.value.trim()
   const signature = requestSignature()
   // Only a run that would repeat one identical render asks: box text, one
@@ -965,7 +980,7 @@ const viewerMedia = computed<Media[]>(() => {
             </label>
             <button
               class="btn"
-              :disabled="expanding || !sourceMedia"
+              :disabled="expanding || !ready || !sourceMedia"
               :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
               @click="onExpandPrompt"
             >
@@ -1102,7 +1117,7 @@ const viewerMedia = computed<Media[]>(() => {
                 </button>
                 <button
                   class="btn primary"
-                  :disabled="submitting || !sourceMedia"
+                  :disabled="submitting || !ready || !sourceMedia"
                   :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
                   @click="onGenerate"
                 >
