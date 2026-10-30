@@ -1123,3 +1123,11 @@ class TestI2vConfigOutput(unittest.TestCase):
         cfg = get_i2v_config({"i2v": {"output_root": 5, "output_prefix": ["x"]}})
         self.assertEqual(cfg["output_root"], "")
         self.assertEqual(cfg["output_prefix"], "/%Y-%m-%d/i2v_")
+
+    def test_config_limits_default_and_clamp(self):
+        cfg = get_i2v_config({})
+        self.assertEqual(
+            (cfg["max_batch_size"], cfg["max_count_per_batch"], cfg["window"]),
+            (20, 20, 4),
+        )
+        self.assertEqual(get_i2v_config({"i2v": {"window": 0}})["window"], 1)

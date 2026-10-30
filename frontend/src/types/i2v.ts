@@ -75,6 +75,10 @@ export interface I2vConfig {
   // Clip placement: '' root = the default layout under comfy.output_root.
   output_root: string
   output_prefix: string
+  // Run limits: batches per run, videos per batch, batches in flight.
+  max_batch_size: number
+  max_count_per_batch: number
+  window: number
   // Whether the configured High quality preset binds MS_STEPS.
   quality_steps_supported: boolean
 }

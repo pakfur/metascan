@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,6 +109,44 @@ def i2v_output_root(configured: Optional[str], comfy_output_root: Any) -> Path:
 
 class I2vRequestError(RuntimeError):
     """Caller error -- the route answers 400 with the message."""
+
+
+SEED_MAX = 2**31 - 1
+
+
+def _random_seed() -> int:
+    return random.randint(0, SEED_MAX)
+
+
+def plan_i2v_seeds(
+    seed: int,
+    policy: str,
+    batch_size: int,
+    count: int,
+    rng: Callable[[], int] = _random_seed,
+) -> Tuple[List[List[int]], Optional[int]]:
+    """One seed list per batch, in render order, and the next unused seed.
+
+    ``fixed`` gives each batch the one seed (``count`` is ignored: the same
+    seed would render the same clip again). ``increment`` / ``decrement``
+    run on across batches; ``random`` starts at ``seed`` like a single
+    submit and draws the rest from ``rng``. A seed outside ``0..SEED_MAX``
+    is refused; the next seed is None when it would fall outside.
+    """
+    if policy not in ("fixed", "increment", "decrement", "random"):
+        raise I2vRequestError(f"Unknown seed policy: {policy}")
+    per_batch = 1 if policy == "fixed" else count
+    total = batch_size * per_batch
+    step = {"increment": 1, "decrement": -1}.get(policy, 0)
+    seeds: List[int] = []
+    current = seed
+    for i in range(total):
+        if not 0 <= current <= SEED_MAX:
+            raise I2vRequestError(f"Seed {current} is outside 0..{SEED_MAX}")
+        seeds.append(current)
+        current = rng() if policy == "random" else current + step
+    next_seed: Optional[int] = current if 0 <= current <= SEED_MAX else None
+    return [seeds[i : i + per_batch] for i in range(0, total, per_batch)], next_seed
 
 
 class I2vUnavailableError(RuntimeError):

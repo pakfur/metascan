@@ -12,6 +12,8 @@ from metascan.core.i2v_runner import (
     I2vRequestError,
     I2vRunner,
     I2vUnavailableError,
+    SEED_MAX,
+    plan_i2v_seeds,
     render_seconds,
 )
 from metascan.core.media import Media
@@ -898,3 +900,32 @@ class TestGenerateRecordsTemplateId(TestFormStateAtIngest):
         self.assertIsNone(row["writer_id"])
         self.assertIsNone(row["draft_prompt"])
         self.assertIsNone(row["edited"])
+
+
+class TestPlanSeeds(unittest.TestCase):
+    def test_fixed_is_one_seed_per_batch(self):
+        self.assertEqual(plan_i2v_seeds(5, "fixed", 3, 4), ([[5], [5], [5]], 5))
+
+    def test_increment_runs_across_batches(self):
+        self.assertEqual(plan_i2v_seeds(5, "increment", 2, 2), ([[5, 6], [7, 8]], 9))
+
+    def test_decrement(self):
+        self.assertEqual(plan_i2v_seeds(5, "decrement", 1, 3), ([[5, 4, 3]], 2))
+
+    def test_random_uses_rng(self):
+        draws = iter([1, 2, 3, 4])
+        self.assertEqual(
+            plan_i2v_seeds(9, "random", 1, 2, rng=lambda: next(draws)),
+            ([[9, 1]], 2),
+        )
+
+    def test_last_seed_at_the_edge_has_no_next(self):
+        self.assertEqual(
+            plan_i2v_seeds(SEED_MAX, "increment", 1, 1), ([[SEED_MAX]], None)
+        )
+
+    def test_leaving_the_range_is_refused(self):
+        with self.assertRaises(I2vRequestError):
+            plan_i2v_seeds(SEED_MAX, "increment", 1, 2)
+        with self.assertRaises(I2vRequestError):
+            plan_i2v_seeds(0, "decrement", 2, 1)
