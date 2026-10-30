@@ -126,9 +126,12 @@ class AutoIndexScheduler:
                 pass
 
 
-def generation_busy(t2i_runner: Any, comfy_client: Any) -> bool:
-    """True while a T2I batch is registered (prompting or rendering) or
-    ComfyUI still has any job queued or running (I2V, storyboards too)."""
+def generation_busy(t2i_runner: Any, comfy_client: Any, i2v_runner: Any = None) -> bool:
+    """True while a T2I batch is registered (prompting or rendering), an I2V
+    run is still writing prompts, or ComfyUI still has any job queued or
+    running (I2V, storyboards too)."""
     if t2i_runner is not None and t2i_runner.active_batches():
+        return True
+    if i2v_runner is not None and i2v_runner.is_prompting():
         return True
     return bool(comfy_client is not None and comfy_client.has_pending_jobs())

@@ -739,6 +739,13 @@ class T2iRunner:
         # Last filename number handed out (epoch seconds). Two images in the
         # same second must not share one -- see _next_output_number.
         self._last_output_number = 0
+        # True while the I2V runner is writing prompts with the shared VLM;
+        # wired in lifespan. Keeps a render here from unloading it.
+        self.prompting_elsewhere: Callable[[], bool] = lambda: False
+
+    def is_prompting(self) -> bool:
+        """True while any Random batch is still writing prompts."""
+        return any(b.prompting for b in self._batches.values())
 
     def on_event(self, cb: EventCb) -> None:
         self._on_event.append(cb)
@@ -1862,7 +1869,7 @@ class T2iRunner:
         )
         if writer is not None and not any(c is writer for c in clients):
             clients.insert(0, writer)
-        writer_busy = any(
+        writer_busy = self.prompting_elsewhere() or any(
             other is not batch and other.mode == "random" and other.prompting
             for other in self._batches.values()
         )
