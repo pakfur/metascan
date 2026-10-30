@@ -247,8 +247,19 @@ watch(
     // An image being edited owns the form: its values are never overwritten.
     const patch = store.selectedId === null ? unlockPatch(finished, hasNegative.value) : null
     if (patch) {
+      const before = toFormState(form)
       Object.assign(form, mergeFormState(form, patch))
-      cleanForm = snapshotForm() // the hand-back is a render's result, not an edit
+      // The hand-back is a render's result, not an edit: move the baseline by
+      // what the patch changed and no more, so edits made during the run (the
+      // boxes that stay unlocked) are still unsaved.
+      if (cleanForm) {
+        const after = toFormState(form)
+        const clean = JSON.parse(cleanForm) as Record<string, unknown>
+        for (const k of Object.keys(after) as (keyof T2iFormState)[]) {
+          if (JSON.stringify(after[k]) !== JSON.stringify(before[k])) clean[k] = after[k]
+        }
+        cleanForm = JSON.stringify(clean)
+      }
     }
     // The handed-back prompt is the writer's draft (one of its caption's
     // variants): kept with it, so the next Generate records that writer and
@@ -930,7 +941,12 @@ watch(
 watch(
   () => store.selectedId,
   (id) => {
-    if (id === null) void saveDraftSoon()
+    if (id === null) {
+      void saveDraftSoon()
+      // Its edits were autosaved into it, so the form is clean: a vanished
+      // image must not leave a false "unsaved changes" prompt behind.
+      cleanForm = snapshotForm()
+    }
   },
 )
 
