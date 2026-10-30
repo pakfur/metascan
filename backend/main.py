@@ -565,6 +565,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_root=Path(comfy_cfg["output_root"]),
         vlm_installed=vlm_model_installed,
         writer_adapter=get_writer_adapter_path,
+        get_all_vlms=get_all_vlm_clients,
+        unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -598,6 +600,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     comfy_client.on_job_event(t2i_runner.handle_job_event)
     t2i.set_t2i_runner(t2i_runner)
+    # Each runner leaves the shared prompt writer loaded while the other is
+    # still writing prompts with it.
+    i2v_runner.prompting_elsewhere = t2i_runner.is_prompting
+    t2i_runner.prompting_elsewhere = i2v_runner.is_prompting
 
     # Writer-adapter scorecards: base vs adapter on fixed briefs, judged
     # blind; started from the training window or after a completed run.
@@ -730,7 +736,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     auto_index = AutoIndexScheduler(
         start_build=similarity.start_auto_index_build,
         is_indexing=similarity.is_indexing,
-        is_busy=lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client),
+        is_busy=lambda: gpu_reserved()
+        or generation_busy(t2i_runner, comfy_client, i2v_runner),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
     # The post-embedding VLM tag drain waits for the same "no generation in
@@ -738,7 +745,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Writer training holds the GPU: the drain (and the hindsight briefs,
     # which wait on the same probe) wait it out too.
     similarity.set_generation_busy_probe(
-        lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client)
+        lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
     )
 
     try:
