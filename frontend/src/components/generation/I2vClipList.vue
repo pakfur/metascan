@@ -12,6 +12,8 @@ defineProps<{
   hasMore?: boolean
   loadingMore?: boolean
   emptyText: string
+  // A job placeholder is on show in the `jobs` slot, so the list is not empty.
+  hasJobs?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -44,7 +46,7 @@ const emit = defineEmits<{
         :disabled="loadingMore"
         @click="emit('more')"
       >{{ loadingMore ? 'Loading…' : 'Show more' }}</button>
-      <div v-if="!videos.length && !$slots.jobs && emptyText" class="clip-empty">{{ emptyText }}</div>
+      <div v-if="!videos.length && !hasJobs && emptyText" class="clip-empty">{{ emptyText }}</div>
     </div>
   </div>
 </template>
