@@ -535,24 +535,58 @@ function loadClip(v: I2vVideo) {
 
 const differs = (a: string, b: string | null) => b === null || pathKey(a) !== pathKey(b)
 
-// The library row of a clip's source image, or null when it is gone.
-function findSource(path: string): Media | null {
-  const key = pathKey(path)
-  return mediaStore.allMedia.find((m) => pathKey(m.file_path) === key) ?? null
+// The library row of a clip's source image, or null when it is gone. A media
+// store that has not loaded knows nothing, which is not "deleted": it is
+// loaded first, and when that fails the image stays usable on a stand-in sized
+// like the clip (the output follows the source's aspect), because a truly
+// missing source is refused by the server anyway.
+async function findSource(v: I2vVideo): Promise<Media | null> {
+  const lookup = () => {
+    const key = pathKey(v.source_path)
+    return mediaStore.allMedia.find((m) => pathKey(m.file_path) === key) ?? null
+  }
+  if (mediaStore.allMedia.length === 0) {
+    try {
+      await mediaStore.loadAllMedia({ silent: true })
+    } catch {
+      // unknown, handled below
+    }
+    if (mediaStore.allMedia.length === 0) {
+      return {
+        file_path: v.source_path,
+        is_favorite: false,
+        is_video: false,
+        playback_speed: null,
+        width: v.width ?? 0,
+        height: v.height ?? 0,
+        file_size: 0,
+        frame_rate: null,
+        duration: null,
+      }
+    }
+  }
+  return lookup()
 }
+
+let switching = false
 
 // A click on a clip in either list. The tile waits out the double-click
 // window (useDelayedClick), so a double-click never reaches here.
-function onSelectClip(v: I2vVideo) {
-  if (v.id === selectedId.value) return
+async function onSelectClip(v: I2vVideo) {
+  if (switching || v.id === selectedId.value) return
   if (!mayLeave('clip')) return
-  if (differs(v.source_path, store.sourcePath)) {
-    const media = findSource(v.source_path)
-    store.switchSource(media?.file_path ?? v.source_path, media)
+  switching = true
+  try {
+    if (differs(v.source_path, store.sourcePath)) {
+      const media = await findSource(v)
+      store.switchSource(media?.file_path ?? v.source_path, media)
+    }
+    loadClip(v)
+    cleanForm = JSON.stringify(currentForm())
+    promptEditor.value?.resetView()
+  } finally {
+    switching = false
   }
-  loadClip(v)
-  cleanForm = JSON.stringify(currentForm())
-  promptEditor.value?.resetView()
 }
 
 async function onShowMoreAll() {
@@ -644,6 +678,7 @@ async function onGenerate() {
   }
   // Let go of the selected clip first, before anything changes the form: a
   // seed advance would otherwise autosave into it.
+  const wasSelected = selectedId.value !== null
   flushFormState()
   selectedId.value = null
   const d = store.draft
@@ -651,6 +686,8 @@ async function onGenerate() {
   const heldDraft =
     text && d && d.idea === idea.value && d.templateId === templateId.value ? d : null
   const sent = currentForm()
+  // The clip's edits are saved in it: they are not "unsaved" if the start fails.
+  if (wasSelected) cleanForm = JSON.stringify(sent)
   // Batch 1 keeps the box text; the run writes it (and batches 2..N) otherwise.
   const writes = !text || effectiveBatch.value > 1
   submitting.value = true
@@ -679,11 +716,17 @@ async function onGenerate() {
         : {}),
       ...(stepsEnabled.value ? { steps: steps.value } : {}),
     })
-    lastSubmitted.value = signature
-    store.statusNote = null
-    store.warnings = res.warnings
+    // The dialog may have moved to a clip or another image during the request:
+    // the form and the global notes then belong to something else.
+    const here = !!store.sourcePath && pathKey(store.sourcePath) === pathKey(sourcePath)
+    if (here && selectedId.value === null) lastSubmitted.value = signature
+    if (here) {
+      store.statusNote = null
+      store.warnings = res.warnings
+    }
     // The seed field shows the next unused seed unless it was edited meanwhile.
-    const takeSeed = res.next_seed !== null && seed.value === sent.seed
+    const takeSeed =
+      here && selectedId.value === null && res.next_seed !== null && seed.value === sent.seed
     if (takeSeed && res.next_seed !== null) seed.value = res.next_seed
     // The baseline is what was generated, seed advance included, so the
     // automatic seed change never counts as an edit.
