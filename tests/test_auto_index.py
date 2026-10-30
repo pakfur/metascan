@@ -201,3 +201,18 @@ async def test_generation_busy_reads_t2i_batches_and_comfy_jobs(tmp_path):
         assert generation_busy(t2i, comfy) is False
     finally:
         await comfy.aclose()
+
+
+async def test_generation_busy_counts_a_writing_i2v_run():
+    from backend.services.auto_index import generation_busy
+
+    class I2v:
+        prompting = False
+
+        def is_prompting(self) -> bool:
+            return self.prompting
+
+    i2v = I2v()
+    assert generation_busy(None, None, i2v) is False
+    i2v.prompting = True
+    assert generation_busy(None, None, i2v) is True

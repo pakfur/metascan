@@ -71,7 +71,9 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/storyboard/beats/{id}/select` | Choose (or clear) a beat's keeper image |
 | POST | `/api/i2v/prompt` | VLM-expand an idea into an I2VA video prompt (review-only, writes nothing) |
 | POST | `/api/i2v/lint` | Lint a prompt and return the no-model rewrites it could apply (Apply fixes) |
-| POST | `/api/i2v/generate` | Submit an image-to-video job to ComfyUI |
+| POST | `/api/i2v/batches` | Start a Batch x Count image-to-video run (202-style: returns at once, progress on the `i2v` WS channel) |
+| GET | `/api/i2v/batches` | Running I2V runs |
+| POST | `/api/i2v/batches/{id}/cancel` | Stop a run's unfinished writing and cancel its jobs |
 | GET | `/api/i2v/videos` | List generated clips for a source image |
 | GET | `/api/i2v/templates` | List cadence templates (with availability) |
 | PATCH | `/api/i2v/videos/{id}` | Autosave the dialog's form into a clip's editable `form_state` |
@@ -690,16 +692,20 @@ wording ("moves left": a pan or a truck?) and quotes with no identifiable
 speaker stay warnings with no fix. Pure text analysis — needs neither the
 i2v runner nor the VLM. **400** if `duration_s <= 0`.
 
-### `POST /api/i2v/generate`
-Body: `{source_path: string, prompt: string, duration_s: float, quality:
-"fast" | "quality", seed: int, megapixels: float = 0.75, loras:
-[{name, strength}, ...] = [], idea?: string, steps?: int,
-template_id?: string | null}`. `template_id` is recorded into the clip's
-`form_state` only — it is not re-validated against the template library,
-since the prompt text already embodies the cadence. Re-lints `prompt` (the
-lint is advisory and never blocks) and submits a job to ComfyUI using the
-config's `fast_preset_id` or `quality_preset_id` for the requested
-`quality`. Returns `{job_id: int, warnings: string[]}`.
+### `POST /api/i2v/batches`
+Body: `{source_path, prompt, duration_s, quality: "fast" | "quality", seed,
+seed_policy: "fixed" | "increment" | "decrement" | "random", batch_size,
+count_per_batch, megapixels = 0.75, loras = [], idea?, writer?, steps?,
+template_id?, category_ids?, writer_id?, draft_prompt?, writer_model?}`.
+Batch is how many prompts the run uses and Count how many videos each
+renders (`i2v.max_batch_size` / `i2v.max_count_per_batch`, 1..20). Text in
+`prompt` is batch 1's prompt; an empty one is written, as are batches 2..N.
+Returns `{batch_id, total_videos, next_seed, warnings}`. This replaces the
+removed `POST /api/i2v/generate`; a single render is `batch_size = count_per_batch = 1`.
+`template_id` is recorded into the clip's `form_state` only — it is not
+re-validated against the template library, since the prompt text already
+embodies the cadence. The config's `fast_preset_id` or `quality_preset_id`
+is used for the requested `quality`.
 Output dimensions are derived server-side from the source image's aspect
 ratio and `megapixels` (`i2v_compiler.i2v_dims`) and written to the
 preset's `MS_RESOLUTION` node; a workflow without one keeps its baked-in
@@ -728,14 +734,28 @@ beats, available, unavailable_reason}, ...]`. `available` is false when
 the template's fixed `duration_s` is not one of the configured
 `i2v.durations`. A malformed template file is a **500** naming it.
 
-`POST /api/i2v/prompt`, `POST /api/i2v/lint` and `POST /api/i2v/generate`
+`POST /api/i2v/prompt`, `POST /api/i2v/lint` and `POST /api/i2v/batches`
 accept `template_id` (string or null). On `/prompt` an unknown id is
 **404** and a `duration_s` that differs from the template's is **400**;
 on `/lint` an unknown id adds a warning and lints as a single take; on
-`/generate` it is recorded into the clip's `form_state` only.
+`/batches` it is recorded into the clip's `form_state` only.
 
-### `GET /api/i2v/videos?source_path=`
-Returns every clip generated from that source image, newest first:
+### `GET /api/i2v/batches`
+The runs still going, `[{batch_id, source_path, phase: "writing" | "rendering",
+batch, total_batches, queued, total_videos}, ...]`. A run lives in server memory
+only; a restart ends it (jobs already submitted stay).
+
+### `POST /api/i2v/batches/{batch_id}/cancel`
+Stops the run's prompt writing and cancels its unfinished jobs; returns
+`{status: "cancelled"}`. Idempotent for a run that has already ended; **404**
+only for an id the server never saw.
+
+### `GET /api/i2v/videos?source_path=&limit=&before_id=`
+Without `source_path`, returns a page of **every** clip in the library, newest
+first, each in the shape below: `limit` (1..200, default 60) and `before_id`
+(only clips with a smaller id) page it, and nothing is pruned on this read.
+With `source_path`, `limit` and `before_id` are ignored and the reply is
+every clip generated from that source image, newest first:
 `[{id, source_path, file_path, prompt_used, idea, seed, duration_s,
 quality, width, height, steps, render_s, preset_id, comfy_prompt_id,
 created_at, is_favorite, grade, megapixels, loras, form_state}, ...]`. Each row
@@ -818,6 +838,9 @@ Returns the `i2v` config section with defaults filled in:
   "default_steps": 25,
   "output_root": "",
   "output_prefix": "/%Y-%m-%d/i2v_",
+  "max_batch_size": 20,
+  "max_count_per_batch": 20,
+  "window": 4,
   "quality_steps_supported": false
 }
 ```
@@ -831,6 +854,14 @@ where they're picked.
 ### `i2v` WebSocket channel
 - **`i2v_videos_changed`** — `{source_path, files}`, sent once a ComfyUI
   job's outputs have been downloaded and ingested as `i2v_videos` rows.
+- **`batch_progress`** — `{batch_id, source_path, phase, batch, total_batches,
+  queued, total_videos, warnings}` while a run writes prompts and submits jobs.
+- **`batch_done`** — the same fields (with `warnings`), once every job of the
+  run has ended.
+- **`batch_failed`** — the same fields except `warnings`, plus `error`; what
+  was already queued stays queued.
+- **`batch_cancelled`** — the same fields except `warnings`, after
+  `POST /api/i2v/batches/{id}/cancel`.
 
 ## Text-to-image (`/api/t2i/*`)
 

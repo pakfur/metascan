@@ -29,6 +29,19 @@ class I2vService:
             row["form_state"] = form_state_for_row(row, megapixel_options)
         return rows
 
+    async def list_all_videos(
+        self,
+        limit: int,
+        before_id: Optional[int],
+        megapixel_options: Sequence[float],
+    ) -> List[Dict[str, Any]]:
+        """One page of every clip, newest first, shaped like
+        ``list_videos`` (complete ``form_state`` per row)."""
+        rows = await asyncio.to_thread(self.db.list_all_i2v_videos, limit, before_id)
+        for row in rows:
+            row["form_state"] = form_state_for_row(row, megapixel_options)
+        return rows
+
     async def list_source_paths(self) -> List[str]:
         return list(await asyncio.to_thread(self.db.list_i2v_source_paths))
 

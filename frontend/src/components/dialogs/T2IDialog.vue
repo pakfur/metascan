@@ -47,6 +47,7 @@ import { useTrainingStore } from '../../stores/training'
 import { useFormAutosave } from '../../composables/useFormAutosave'
 import { isUnknownCategoryError, useGenerationCategories } from '../../composables/useGenerationCategories'
 import { useToast } from '../../composables/useToast'
+import { confirmLeave } from '../../utils/unsavedForm'
 import { useWebSocket } from '../../composables/useWebSocket'
 import { useWriterPick } from '../../composables/useWriterPick'
 import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
@@ -112,6 +113,13 @@ const autosave = useFormAutosave<T2iFormState>({
 })
 const saveFailed = autosave.saveFailed
 
+// The form as it last matched a render or a loaded image, as a plain string:
+// with no image selected, a form that differs from it holds changes nothing
+// has generated, and loading a tile would lose them. Never a ref or a watcher
+// source, and nothing here writes the form.
+let cleanForm = ''
+const snapshotForm = () => JSON.stringify(toFormState(form))
+
 const models = computed(() => store.config?.models ?? [])
 const hasNegative = computed(() => models.value.find((m) => m.id === form.model)?.has_negative ?? false)
 const csvAvailable = computed(() => store.config?.csv.available ?? false)
@@ -151,6 +159,8 @@ function initForm() {
   const draft = store.loadDraft()
   Object.assign(form, draft ? mergeFormState(fresh, usableDraft(draft, cfg, ids)) : fresh)
   lastSubmitted = null
+  // A restored draft compares with the defaults, and its seed alone does not count.
+  cleanForm = JSON.stringify(toFormState({ ...fresh, seed: form.seed }))
   ready.value = true
 }
 
@@ -236,7 +246,21 @@ watch(
     if (!finished || !ready.value) return
     // An image being edited owns the form: its values are never overwritten.
     const patch = store.selectedId === null ? unlockPatch(finished, hasNegative.value) : null
-    if (patch) Object.assign(form, mergeFormState(form, patch))
+    if (patch) {
+      const before = toFormState(form)
+      Object.assign(form, mergeFormState(form, patch))
+      // The hand-back is a render's result, not an edit: move the baseline by
+      // what the patch changed and no more, so edits made during the run (the
+      // boxes that stay unlocked) are still unsaved.
+      if (cleanForm) {
+        const after = toFormState(form)
+        const clean = JSON.parse(cleanForm) as Record<string, unknown>
+        for (const k of Object.keys(after) as (keyof T2iFormState)[]) {
+          if (JSON.stringify(after[k]) !== JSON.stringify(before[k])) clean[k] = after[k]
+        }
+        cleanForm = JSON.stringify(clean)
+      }
+    }
     // The handed-back prompt is the writer's draft (one of its caption's
     // variants): kept with it, so the next Generate records that writer and
     // whether the text was edited, and ◀ ▶ reaches its siblings. Captured
@@ -739,6 +763,7 @@ async function onGenerate() {
     // rendered meanwhile (shownSeed), and this value is what is there when the
     // boxes unlock, whether or not the dialog was open to see the run end.
     if (r.next_seed !== null && form.seed === req.seed) form.seed = r.next_seed
+    cleanForm = snapshotForm()
     toast.show(
       r.total_images === 1 ? 'Image job queued' : `${r.total_images} image jobs queued`,
       'success',
@@ -808,6 +833,14 @@ function onSelectTile(item: ThumbItem) {
     toast.show("This image's prompt is still loading: try again in a moment.", 'info')
     return
   }
+  if (
+    !confirmLeave(
+      { selected: store.selectedId !== null, saveFailed: saveFailed.value, baseline: cleanForm, current: snapshotForm() },
+      'image',
+    )
+  ) {
+    return
+  }
   autosave.flush() // pending edits belong to the image being left
   const stored = store.selectImage(id)
   if (!stored) return
@@ -819,6 +852,7 @@ function onSelectTile(item: ThumbItem) {
   // The form now equals what the server holds, so loading must not echo back
   // as a save. An untouched Generate would render the same image again.
   autosave.markLoaded()
+  cleanForm = snapshotForm()
   lastSubmitted = requestSignature(form, hasNegative.value, usablePrompts(form, batchContext.value))
 }
 
@@ -826,6 +860,7 @@ function onSelectTile(item: ThumbItem) {
 function stopEditing() {
   autosave.flush()
   store.clearSelection()
+  cleanForm = snapshotForm()
 }
 
 // ★ only: a favorite is not a rating, so no score goes with it.
@@ -906,7 +941,12 @@ watch(
 watch(
   () => store.selectedId,
   (id) => {
-    if (id === null) void saveDraftSoon()
+    if (id === null) {
+      void saveDraftSoon()
+      // Its edits were autosaved into it, so the form is clean: a vanished
+      // image must not leave a false "unsaved changes" prompt behind.
+      cleanForm = snapshotForm()
+    }
   },
 )
 

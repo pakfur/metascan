@@ -145,6 +145,49 @@ class TestI2vVideosDb(unittest.TestCase):
         rows = self.db.list_i2v_videos("/lib/src.png")
         self.assertEqual(len(rows), 1)
 
+    def _three(self):
+        _seed_media(self.db, ["/lib/src2.png", "/lib/out3.mp4"])
+        a = self.db.create_i2v_video(
+            source_path="/lib/src.png", file_path="/lib/out1.mp4"
+        )
+        b = self.db.create_i2v_video(
+            source_path="/lib/src2.png", file_path="/lib/out2.mp4"
+        )
+        c = self.db.create_i2v_video(
+            source_path="/lib/src.png", file_path="/lib/out3.mp4"
+        )
+        return a, b, c
+
+    def test_list_all_is_newest_first_and_pages(self):
+        a, b, c = self._three()
+        page = self.db.list_all_i2v_videos(limit=2)
+        self.assertEqual([r["id"] for r in page], [c, b])
+        rest = self.db.list_all_i2v_videos(limit=2, before_id=page[-1]["id"])
+        self.assertEqual([r["id"] for r in rest], [a])
+
+    def test_list_all_never_prunes(self):
+        self._three()
+        self.db.create_i2v_video(source_path="/lib/src.png", file_path="/lib/gone.mp4")
+        with self.db._get_connection() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM i2v_videos").fetchone()[0]
+        self.db.set_lineage_prune_guard(lambda: False)
+        rows = self.db.list_all_i2v_videos()
+        self.assertEqual(len(rows), 3)
+        self.assertFalse(any("gone.mp4" in r["file_path"] for r in rows))
+        with self.db._get_connection() as conn:
+            after = conn.execute("SELECT COUNT(*) FROM i2v_videos").fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_list_all_carries_grade_star_and_source(self):
+        a, _b, _c = self._three()
+        self.db.set_favorite(Path("/lib/out1.mp4"), True)
+        self.db.set_grade("/lib/out1.mp4", "pass")
+        row = [r for r in self.db.list_all_i2v_videos() if r["id"] == a][0]
+        self.assertTrue(row["is_favorite"])
+        self.assertEqual(row["grade"], "pass")
+        self.assertIn("src.png", row["source_path"])
+        self.assertNotIn("media_path", row)
+
 
 class TestGenerationJobsI2vColumn(unittest.TestCase):
     def setUp(self):
