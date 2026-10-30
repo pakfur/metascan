@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import AfterValidator, BaseModel, Field
 
 from backend.config import get_i2v_config, load_app_config
@@ -304,7 +304,15 @@ def _megapixel_options() -> List[float]:
 
 
 @router.get("/videos")
-async def list_videos(source_path: str) -> List[Dict[str, Any]]:
+async def list_videos(
+    source_path: Optional[str] = None,
+    limit: int = Query(60, ge=1, le=200),
+    before_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """One source image's clips, or -- without ``source_path`` -- a page of
+    every clip, newest first (``limit`` / ``before_id`` apply only there)."""
+    if source_path is None:
+        return await _service().list_all_videos(limit, before_id, _megapixel_options())
     return await _service().list_videos(source_path, _megapixel_options())
 
 

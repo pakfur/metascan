@@ -5549,6 +5549,36 @@ class DatabaseManager:
                 conn.commit()
             return out
 
+    def list_all_i2v_videos(
+        self, limit: int = 60, before_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Every I2V video in the library, newest first, one page at a time
+        (``before_id`` is the last id of the previous page). Same row shape
+        as ``list_i2v_videos`` (``source_path`` included). Read-only: the
+        inner JOIN leaves out a row whose media is gone, and nothing is
+        pruned -- ``list_i2v_videos`` owns that."""
+        sql = (
+            "SELECT v.*, m.is_favorite, j.grade AS judged_grade "
+            "FROM i2v_videos v "
+            "JOIN media m ON m.file_path = v.file_path "
+            "LEFT JOIN media_judgments j ON j.file_path = v.file_path "
+        )
+        args: List[Any] = []
+        if before_id is not None:
+            sql += "WHERE v.id < ? "
+            args.append(before_id)
+        sql += "ORDER BY v.id DESC LIMIT ?"
+        args.append(limit)
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = self._i2v_video_row(r)
+            d["is_favorite"] = bool(d.get("is_favorite"))
+            d["grade"] = self._row_grade(d)
+            out.append(d)
+        return out
+
     def list_i2v_source_paths(self) -> List[str]:
         """Native paths of every source image with at least one i2v clip
         still in the library. Feeds the "Has I2V video" smart-folder rule.
