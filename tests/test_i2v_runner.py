@@ -1179,6 +1179,23 @@ class TestBatchRun(I2vRunnerBase):
         self.assertEqual(self.comfy.cancels, [])
         self.assertEqual(self._names().count("batch_failed"), 1)
 
+    def test_job_that_ends_before_submit_returns_does_not_hang_the_run(self):
+        orig = self.comfy.submit
+
+        async def submit(*a, **k):
+            job_id = await orig(*a, **k)
+            if job_id == 102:  # the last job fails before submit returns
+                self._finish(job_id, "failed")
+            return job_id
+
+        self.comfy.submit = submit
+        self.finished = set()
+        self.run_async(self._run_to_end(self._req(count_per_batch=2, window=1)))
+        self.assertEqual(self._names()[-1], "batch_done")
+        self.assertEqual(self.runner.active_batches(), [])
+        self.assertNotIn(102, self.runner._job_meta)
+        self.assertEqual(len(self.comfy.submits), 2)
+
     def test_cancelling_one_run_leaves_the_other(self):
         async def go():
             a = await self.runner.start_batch(self._req(window=1, count_per_batch=2))

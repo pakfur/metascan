@@ -258,6 +258,9 @@ class I2vRunner:
         self._batches: Dict[str, _I2vBatch] = {}
         # job id -> batch id, for submitted jobs without a terminal update.
         self._job_batch: Dict[int, str] = {}
+        # Terminal states of jobs that ended before submit() returned (so
+        # before the run knew them): job id -> state. Bounded.
+        self._early_ended: Dict[int, str] = {}
 
     def on_event(self, cb: EventCb) -> None:
         self._on_event.append(cb)
@@ -708,8 +711,13 @@ class I2vRunner:
             self._progress(b)
 
     def _register(self, b: _I2vBatch, job_id: int) -> None:
-        b.pending.add(job_id)
         b.submitted += 1
+        if job_id in self._early_ended:
+            # It ended while submit() was still returning: its update found
+            # no owner. It never holds a slot; _submit_one drops its meta.
+            b.window.release()
+            return
+        b.pending.add(job_id)
         self._job_batch[job_id] = b.id
 
     async def _submit_one(
@@ -748,7 +756,10 @@ class I2vRunner:
         )
         before = b.submitted
         try:
-            await asyncio.shield(inflight)
+            job_id = await asyncio.shield(inflight)
+            state = self._early_ended.pop(job_id, None)
+            if state is not None and state != "done":
+                self._job_meta.pop(job_id, None)
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 try:
@@ -890,6 +901,11 @@ class I2vRunner:
             return
         batch_id = self._job_batch.pop(job_id, None)
         if batch_id is None:
+            if self._batches:
+                # Maybe a job of ours whose submit() has not returned yet.
+                self._early_ended[job_id] = str(payload.get("state"))
+                while len(self._early_ended) > 256:
+                    self._early_ended.pop(next(iter(self._early_ended)))
             return
         if payload.get("state") != "done":
             # A done job's snapshot belongs to its ingest.
