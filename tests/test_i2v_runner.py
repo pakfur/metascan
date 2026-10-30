@@ -9,6 +9,7 @@ from pathlib import Path
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.i2v_runner import (
+    I2vNotFoundError,
     I2vRequestError,
     I2vRunner,
     I2vUnavailableError,
@@ -1145,6 +1146,8 @@ class TestBatchRun(I2vRunnerBase):
             self.assertEqual(len(self.comfy.submits), 2)
             self.assertTrue(await self.runner.cancel_batch(started.batch_id))
             self.assertFalse(await self.runner.cancel_batch(started.batch_id))
+            with self.assertRaises(I2vNotFoundError):
+                await self.runner.cancel_batch("never-seen")
 
         self.run_async(go())
         self.assertEqual(sorted(self.comfy.cancels), [101, 102])

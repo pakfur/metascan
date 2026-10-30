@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from backend.api.i2v import get_i2v_config, set_i2v_runner
 from metascan.core.database_sqlite import DatabaseManager
-from metascan.core.i2v_runner import I2vRequestError, I2vUnavailableError
+from metascan.core.i2v_runner import (
+    I2vBatchStarted,
+    I2vNotFoundError,
+    I2vRequestError,
+    I2vUnavailableError,
+)
 from metascan.core.i2v_templates import I2vTemplateError, I2vTemplateNotFound
 from metascan.core.media import Media
 from metascan.core.vlm_client import VlmError
@@ -46,6 +51,24 @@ class FakeRunner:
         # ``calls`` above which existing tests already assert against.
         self.prompt_calls = []
         self.generate_calls = []
+        self.batch_calls = []
+        self.batch_error = None
+        self.batches = []
+        self.known_batches = {"live", "over"}
+
+    async def start_batch(self, req):
+        self.batch_calls.append(req)
+        if self.batch_error:
+            raise self.batch_error
+        return I2vBatchStarted("b1", req.batch_size * req.count_per_batch, 9)
+
+    def active_batches(self):
+        return self.batches
+
+    async def cancel_batch(self, batch_id):
+        if batch_id not in self.known_batches:
+            raise I2vNotFoundError(f"No i2v batch {batch_id}")
+        return batch_id == "live"
 
     async def generate_prompt(self, source_path, idea, duration_s, template_id=None):
         self.calls.append(("prompt", source_path, idea, duration_s))
@@ -646,6 +669,117 @@ class TestI2vGenerateCategories(_I2vApiBase):
         resp = self.client.post("/api/i2v/generate", json=self._body())
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.runner.generate_calls[0]["category_ids"], [])
+
+
+class TestI2vBatchApi(_I2vApiBase):
+    def _body(self, **over):
+        body = {
+            "source_path": "/lib/a.png",
+            "prompt": "",
+            "duration_s": 6,
+            "quality": "fast",
+            "seed": 1,
+            "seed_policy": "increment",
+            "batch_size": 3,
+            "count_per_batch": 2,
+            "loras": [],
+        }
+        body.update(over)
+        return body
+
+    def _post(self, **over):
+        return self.client.post("/api/i2v/batches", json=self._body(**over))
+
+    def test_start_batch_maps_the_form(self):
+        cat = self.db.create_category("Anime").id
+        resp = self._post(idea="rain", writer="adapter:7", steps=30, category_ids=[cat])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.json(),
+            {"batch_id": "b1", "total_videos": 6, "next_seed": 9, "warnings": []},
+        )
+        req = self.runner.batch_calls[0]
+        self.assertEqual(
+            (req.source_path, req.idea, req.preset_id, req.window),
+            ("/lib/a.png", "rain", 5, 4),
+        )
+        self.assertEqual(
+            (req.seed_policy, req.batch_size, req.count_per_batch, req.writer),
+            ("increment", 3, 2, "adapter:7"),
+        )
+        self.assertEqual((req.steps, req.category_ids), (30, [cat]))
+
+    def test_start_batch_is_gpu_free(self):
+        with patch("backend.services.gpu_lock.gpu_reserved", return_value=True):
+            resp = self._post()
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["code"], "gpu_busy_training")
+        self.assertEqual(self.runner.batch_calls, [])
+
+    def test_batch_size_outside_limits_is_400(self):
+        for n in (0, 21):
+            self.assertEqual(self._post(batch_size=n).status_code, 400, n)
+        self.assertEqual(self.runner.batch_calls, [])
+
+    def test_count_outside_limits_is_400(self):
+        for n in (0, 21):
+            self.assertEqual(self._post(count_per_batch=n).status_code, 400, n)
+
+    def test_bad_policy_is_422(self):
+        self.assertEqual(self._post(seed_policy="sideways").status_code, 422)
+
+    def test_bad_writer_is_422(self):
+        self.assertEqual(self._post(writer="nope").status_code, 422)
+
+    def test_seed_range_refusal_is_400(self):
+        self.runner.batch_error = I2vRequestError("Seed 3 is outside 0..2147483647")
+        resp = self._post()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("outside", resp.json()["detail"])
+
+    def test_vlm_down_is_503(self):
+        self.runner.batch_error = I2vUnavailableError("VLM subsystem is not running")
+        self.assertEqual(self._post().status_code, 503)
+
+    def test_adapter_gone_is_409_with_code(self):
+        from metascan.core.writer_adapters import WriterAdapterUnavailable
+
+        self.runner.batch_error = WriterAdapterUnavailable("adapter:7", "deleted")
+        resp = self._post(writer="adapter:7")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["detail"]["writer_id"], "adapter:7")
+        self.assertTrue(resp.json()["detail"]["code"])
+
+    def test_unknown_category_is_404(self):
+        resp = self._post(category_ids=[999])
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["detail"]["code"], "unknown_category")
+        self.assertEqual(self.runner.batch_calls, [])
+
+    def test_warnings_lint_the_box_prompt(self):
+        resp = self._post(prompt="a cat sits", batch_size=1, count_per_batch=1)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["warnings"])
+        self.assertEqual(self.runner.batch_calls[0].prompt, "a cat sits")
+
+    def test_no_preset_is_400(self):
+        resp = self._post(quality="quality")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cancel_unknown_batch_is_404(self):
+        resp = self.client.post("/api/i2v/batches/nope/cancel")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_cancel_ended_batch_is_cancelled(self):
+        for bid in ("live", "over"):
+            resp = self.client.post(f"/api/i2v/batches/{bid}/cancel")
+            self.assertEqual(resp.status_code, 200, bid)
+            self.assertEqual(resp.json(), {"status": "cancelled"})
+
+    def test_list_batches(self):
+        self.runner.batches = [{"batch_id": "live", "phase": "writing"}]
+        resp = self.client.get("/api/i2v/batches")
+        self.assertEqual(resp.json(), self.runner.batches)
 
 
 class TestI2vFormStateApi(_I2vApiBase):

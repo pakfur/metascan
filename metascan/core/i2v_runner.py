@@ -113,7 +113,14 @@ class I2vRequestError(RuntimeError):
     """Caller error -- the route answers 400 with the message."""
 
 
+class I2vNotFoundError(RuntimeError):
+    """No such batch run -- the route answers 404."""
+
+
 SEED_MAX = 2**31 - 1
+
+# How many ended runs stay known, so a late cancel answers "over", not 404.
+_FINISHED_KEEP = 50
 
 
 def _random_seed() -> int:
@@ -256,6 +263,8 @@ class I2vRunner:
         # shared VLM; wired in lifespan. Keeps this run from unloading it.
         self.prompting_elsewhere: Callable[[], bool] = lambda: False
         self._batches: Dict[str, _I2vBatch] = {}
+        # Ids of runs that ended (oldest first, bounded).
+        self._finished: Dict[str, None] = {}
         # job id -> batch id, for submitted jobs without a terminal update.
         self._job_batch: Dict[int, str] = {}
         # Terminal states of jobs that ended before submit() returned (so
@@ -847,6 +856,9 @@ class I2vRunner:
             "cancelled": "batch_cancelled",
         }[kind]
         self._batches.pop(b.id, None)
+        self._finished[b.id] = None
+        while len(self._finished) > _FINISHED_KEEP:
+            del self._finished[next(iter(self._finished))]
         (
             self._progress(b, event)
             if error is None
@@ -855,9 +867,14 @@ class I2vRunner:
 
     async def cancel_batch(self, batch_id: str) -> bool:
         """Stop writing and cancel every unfinished job of the run. False
-        when it is not running."""
+        when it is already over; an id never seen raises
+        ``I2vNotFoundError``."""
         b = self._batches.get(batch_id)
-        if b is None or b.finished is not None:
+        if b is None:
+            if batch_id in self._finished:
+                return False
+            raise I2vNotFoundError(f"No i2v batch {batch_id}")
+        if b.finished is not None:
             return False
         # Shielded: a caller that goes away mid-cancel must not leave the
         # run half-cancelled.
