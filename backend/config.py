@@ -187,7 +187,7 @@ def get_i2v_config(config: dict) -> dict:
             "output_prefix": "/%Y-%m-%d/i2v_",
             "max_batch_size": 20,        # batches per run, each >= 1
             "max_count_per_batch": 20,   # videos per batch, each >= 1
-            "window": 4,                 # batches the dialog keeps in flight
+            "window": 4,                 # unfinished jobs per run
         }
 
     ``output_root`` + ``output_prefix`` place generated clips (see

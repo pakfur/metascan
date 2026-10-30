@@ -309,7 +309,7 @@ the math node instead of the `PrimitiveFloat` feeding it.
 **Video generates at the wrong size** — no `MS_RESOLUTION`, or it's on
 `ResolutionSelector`.
 
-**Clips don't appear in the strip** — check that `MS_SAVE` is on the
+**Clips don't appear in the dialog's lists** — check that `MS_SAVE` is on the
 `SaveVideo` node. Metascan fetches outputs over HTTP from the node it
 resolves from that title.
 
