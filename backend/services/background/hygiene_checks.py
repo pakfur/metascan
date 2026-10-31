@@ -277,10 +277,28 @@ class MissingFiles:
         imp = ctx.import_process
         if imp is None or not hasattr(imp, "apply_moves"):
             return gone, []
+        from backend.config import get_directories
+
+        directories = get_directories(ctx.config)
+        # A row under a folder or output root that cannot be seen is not a
+        # missing file (its drive may be away): never a move source either.
+        seen = await self._visible(ctx, directories, gone)
+        candidates = [g for g in gone if str(Path(g)) in seen]
+        if not candidates:
+            return gone, []
         survey = await _survey(ctx, stored)
         if not survey["unknown"] or ctx.stopped():
             return gone, []
-        pairs = await asyncio.to_thread(self._match, ctx.db, gone, survey["unknown"])
+        pairs = await asyncio.to_thread(
+            self._match, ctx.db, candidates, survey["unknown"]
+        )
+        if not pairs:
+            return gone, []
+        # Look again just before applying: a drive lost during the match counts.
+        seen = await self._visible(
+            ctx, directories, [to_native_path(o) for o, _ in pairs]
+        )
+        pairs = [(o, n) for o, n in pairs if str(Path(to_native_path(o))) in seen]
         if not pairs:
             return gone, []
         applied = await imp.apply_moves(pairs)
@@ -292,6 +310,19 @@ class MissingFiles:
             _key(to_native_path(n)) for _, n in applied
         )
         return [g for g in gone if to_posix_path(g) not in moved_old], list(moved_old)
+
+    async def _visible(
+        self, ctx: HygieneContext, directories: Sequence[Any], rows: Sequence[str]
+    ) -> set:
+        """``rows`` (as ``str(Path)``) that are really gone: not under an
+        unavailable scan folder (checked after, files stat-ed again) and not
+        under a missing or unreadable generated-output root."""
+        scan = _scan()
+        to_delete, _left, _unav = await asyncio.to_thread(
+            scan._stale_paths_to_clean, list(rows), directories
+        )
+        kept = await asyncio.to_thread(self._outside_lost_roots, ctx, to_delete)
+        return {str(Path(p)) for p in kept}
 
     @staticmethod
     def _match(

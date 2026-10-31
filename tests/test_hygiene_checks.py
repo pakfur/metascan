@@ -1079,3 +1079,36 @@ async def test_unhashable_files_are_not_retried_until_they_change(
     ctx.thumbnails, ctx.embedding = cache, Kick()
     await check.run(ctx)
     assert len(calls) == 2
+
+
+async def test_a_row_under_a_missing_folder_is_not_a_move_source(db, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    scanner, _ = _real_scanner(db, tmp_path)
+    src = _png(a / "x.png", size=(40, 41))
+    keep = _png(b / "keep.png", size=(30, 31))
+    for p in (src, keep):
+        scanner.ingest_file(p)
+    db.set_grade(src, "pass")
+    old = to_posix_path(src)
+    away = tmp_path / "away"
+    os.rename(a, away)  # the drive is unmounted
+    b.mkdir(exist_ok=True)
+    shutil.copy2(away / "x.png", b / "copy.png")  # cp -p: same size and mtime
+    imp, registry = _real_import(tmp_path, db)
+    try:
+        ctx = _ctx(db, [a, b], tmp_path, imp=imp)
+        result = await MissingFiles().run(ctx)
+        assert result.cleaned == 0
+        assert _has(db, src) and not _has(db, b / "copy.png")
+        assert _q(
+            db, "SELECT grade FROM media_judgments WHERE file_path=?", (old,)
+        ) == [("pass",)]
+        os.rename(away, a)  # the drive returns
+        ctx = _ctx(db, [a, b], tmp_path, imp=imp)
+        assert (await MissingFiles().run(ctx)).cleaned == 0
+        assert _has(db, src)
+        assert _q(
+            db, "SELECT grade FROM media_judgments WHERE file_path=?", (old,)
+        ) == [("pass",)]
+    finally:
+        await registry.aclose()
