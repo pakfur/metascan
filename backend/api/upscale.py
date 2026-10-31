@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.dependencies import get_upscale_process
 from backend.ws.manager import ws_manager
 from backend.services.gpu_lock import GPU_FREE
 
@@ -147,10 +148,26 @@ class UpscaleSubmitRequest(BaseModel):
     concurrent_workers: int = 1
 
 
+async def pause_upscale_queue() -> int:
+    """Pause all processing: the running file is killed and restarts from 0.
+    The route and the Upscaling process share this."""
+    count: int = await asyncio.to_thread(_get_queue().pause_queue)
+    return count
+
+
+async def resume_upscale_queue() -> int:
+    """Resume paused tasks (starts the workers)."""
+    count: int = await asyncio.to_thread(_get_queue().resume_queue)
+    return count
+
+
 @router.post("", dependencies=GPU_FREE)
 async def submit_upscale(body: UpscaleSubmitRequest):
     """Add upscale tasks to the queue and start processing."""
     queue = _get_queue()
+    process = get_upscale_process()
+    if process is not None:
+        await process.owner_task_adding()  # an owner add clears a stop
 
     # Update worker concurrency (clamped to [1,4] inside the queue)
     queue.max_workers = max(1, min(int(body.concurrent_workers), 4))
@@ -172,6 +189,13 @@ async def submit_upscale(body: UpscaleSubmitRequest):
             task.preserve_metadata,
         )
         task_ids.append(task_id)
+
+    if process is not None and process.gated:
+        # Owner-paused: the new tasks queue paused; nothing starts.
+        await process.task_added()
+        return {"task_ids": task_ids, "status": "queued"}
+    if process is not None:
+        process.poke()
 
     # Kick off any pending workers immediately; the poller also does this on
     # its next tick, but this makes the first worker start without delay.
@@ -219,16 +243,22 @@ async def remove_task(task_id: str):
 @router.post("/pause-all")
 async def pause_all():
     """Pause all processing."""
-    queue = _get_queue()
-    count = await asyncio.to_thread(queue.pause_queue)
+    process = get_upscale_process()
+    if process is not None:
+        count = await process.owner_pause()
+    else:
+        count = await pause_upscale_queue()
     return {"status": "paused", "count": count}
 
 
 @router.post("/resume-all", dependencies=GPU_FREE)
 async def resume_all():
     """Resume processing."""
-    queue = _get_queue()
-    count = await asyncio.to_thread(queue.resume_queue)
+    process = get_upscale_process()
+    if process is not None:
+        count = await process.owner_resume()
+    else:
+        count = await resume_upscale_queue()
     return {"status": "resumed", "count": count}
 
 

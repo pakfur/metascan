@@ -40,12 +40,14 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    ContextManager,
     Deque,
     Dict,
     List,
@@ -482,6 +485,8 @@ class TrainingManager:
         now: Optional[Callable[[], datetime]] = None,
         summary_ttl_s: float = 30.0,
         vram_cap: Optional[Callable[[], Any]] = None,
+        hold_embedding: Optional[Callable[[], ContextManager[None]]] = None,
+        index_wait_s: float = 30.0,
     ) -> None:
         self.db = db
         self.data_dir = Path(data_dir)
@@ -520,6 +525,11 @@ class TrainingManager:
         self._summary_generation = 0
         # models.writer_train_vram_cap_gb (raw; validated per run).
         self._vram_cap = vram_cap or (lambda: None)
+        # A context that pauses Embedding (the registry's hold) while start
+        # checks the GPU: an index build then stops being a refusal once the
+        # worker has exited. The run's own declared hold takes over after.
+        self._hold_embedding = hold_embedding
+        self.index_wait_s = float(index_wait_s)
 
     # ---- GPU lock -------------------------------------------------------
 
@@ -533,17 +543,34 @@ class TrainingManager:
         admitted just before the lock may have registered work meanwhile)."""
         self._gpu_held = True
         try:
-            busy = self._gpu_busy()
-            if busy:
-                raise TrainingError(409, "gpu_busy", reasons=busy)
-            self._released = True
-            await self._release_gpu()
-            busy = self._gpu_busy()
-            if busy:
-                raise TrainingError(409, "gpu_busy", reasons=busy)
+            with contextlib.ExitStack() as stack:
+                if self._hold_embedding is not None:
+                    stack.enter_context(self._hold_embedding())
+                busy = await self._busy_after_embedding_hold()
+                if busy:
+                    raise TrainingError(409, "gpu_busy", reasons=busy)
+                self._released = True
+                await self._release_gpu()
+                busy = self._gpu_busy()
+                if busy:
+                    raise TrainingError(409, "gpu_busy", reasons=busy)
         except BaseException:
             self._drop_lock()
             raise
+
+    async def _busy_after_embedding_hold(self) -> List[str]:
+        """``gpu_busy()``, giving a running index build up to
+        ``index_wait_s`` to stop under the embedding hold (it saves, then
+        exits). Any other reason, or a build that outlasts the wait, is
+        refused as before."""
+        busy = self._gpu_busy()
+        if busy != ["index_build"] or self._hold_embedding is None:
+            return busy  # nothing to wait for, or a refusal that will stand
+        deadline = time.monotonic() + self.index_wait_s
+        while busy == ["index_build"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+            busy = self._gpu_busy()
+        return busy
 
     def _drop_lock(self) -> None:
         """Release the GPU (completion, failure, pause, cancel or a refused

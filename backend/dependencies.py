@@ -128,3 +128,42 @@ def set_generation_process(process_id: str, process: Optional[Any]) -> None:
 
 def get_generation_process(process_id: str) -> Optional[Any]:
     return _generation_singletons.get(process_id)
+
+
+_upscale_singleton: Optional[Any] = None
+
+
+def set_upscale_process(process: Optional[Any]) -> None:
+    """Install the Upscaling process (FastAPI lifespan)."""
+    global _upscale_singleton
+    _upscale_singleton = process
+
+
+def get_upscale_process() -> Optional[Any]:
+    return _upscale_singleton
+
+
+_taste_singleton: Optional[Any] = None
+
+
+def set_taste_process(process: Optional[Any]) -> None:
+    """Install the Taste process (FastAPI lifespan)."""
+    global _taste_singleton
+    _taste_singleton = process
+
+
+def get_taste_process() -> Optional[Any]:
+    return _taste_singleton
+
+
+_training_singleton: Optional[Any] = None
+
+
+def set_training_process(process: Optional[Any]) -> None:
+    """Install the Writer training process (FastAPI lifespan)."""
+    global _training_singleton
+    _training_singleton = process
+
+
+def get_training_process() -> Optional[Any]:
+    return _training_singleton

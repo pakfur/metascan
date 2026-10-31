@@ -51,6 +51,10 @@ from backend.dependencies import (
     get_thumbnail_cache,
     interactive_vlm_hold,
     set_generation_process,
+    set_taste_process,
+    set_training_process,
+    set_upscale_process,
+    get_training_process,
     set_registry,
     set_embedding_process,
     set_tagging_process,
@@ -63,6 +67,9 @@ from backend.services.background.generation import (
 )
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
+from backend.services.background.taste import TasteProcess
+from backend.services.background.training import WriterTrainingProcess
+from backend.services.background.upscale import UpscaleProcess
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
@@ -275,6 +282,15 @@ async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
         logger.exception("Applying the pending taste snapshot failed")
 
 
+def _training_broadcast(event: str, data: Dict[str, Any]) -> None:
+    """The manager's events: the ``training`` channel, and the Writer
+    training process (a failed run sticks until the next one)."""
+    ws_manager.broadcast_sync("training", event, data)
+    process = get_training_process()
+    if process is not None:
+        process.record_event(event, data)
+
+
 def _build_training_manager(
     *,
     db: Any,
@@ -284,6 +300,7 @@ def _build_training_manager(
     inference_client: Any,
     vlm_roles: Any,
     on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
+    hold_embedding: Optional[Callable[[], Any]] = None,
 ) -> TrainingManager:
     """Wire the writer training manager to the live services.
     ``on_completed(adapter_id, render_scorecard)`` runs after a completed
@@ -370,15 +387,14 @@ def _build_training_manager(
         gpu_busy=gpu_busy,
         release_gpu=release_gpu,
         refresh_adapters=refresh_writer_adapters,
-        broadcast=lambda event, data: ws_manager.broadcast_sync(
-            "training", event, data
-        ),
+        broadcast=_training_broadcast,
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
         vram_cap=lambda: (load_app_config().get("models") or {}).get(
             "writer_train_vram_cap_gb"
         ),
         on_gpu_released=on_gpu_released,
         on_completed=on_completed,
+        hold_embedding=hold_embedding,
     )
     manager.add_close_hook(on_close)
     return manager
@@ -658,6 +674,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         inference_client=client,
         vlm_roles=vlm_roles,
         on_completed=scorecard_service.on_training_completed,
+        hold_embedding=lambda: background_registry.hold(
+            ["embedding"], by="Writer training"
+        ),
     )
     await _install_training(training_manager)
 
@@ -722,6 +741,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_vlm())
 
+    # An owner pause from the last run gates the queue before its poller
+    # claims anything; the process re-applies it through pause() once registered.
+    if background_registry.persisted_intent("upscale") == "paused":
+        upscale._get_queue().gated = True
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
@@ -807,6 +830,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     t2i_runner.on_event(lambda channel, event, data: t2i_process.poke())
     i2v_runner.on_event(lambda channel, event, data: i2v_process.poke())
 
+    from backend.services import hindsight_briefs as _briefs_mod
+
+    upscale_process = UpscaleProcess(
+        background_registry,
+        upscale._get_queue,
+        upscale.pause_upscale_queue,
+        upscale.resume_upscale_queue,
+    )
+    taste_process = TasteProcess(background_registry, taste_service)
+    training_process = WriterTrainingProcess(
+        background_registry,
+        lambda: training_manager,
+        get_db,
+        _briefs_mod.get_briefs_job,
+        scorecard_service.running,
+    )
+    await training_process.refresh()
+    bg_processes: List[Any] = [upscale_process, taste_process, training_process]
+    for proc in bg_processes:
+        background_registry.register(proc)
+    set_upscale_process(upscale_process)
+    set_taste_process(taste_process)
+    set_training_process(training_process)
+
     # The tag queue outlives the process: Tagging resumes what remains once
     # everything it waits on is wired (a persisted owner pause keeps it paused).
     tagging = TaggingProcess(
@@ -840,6 +887,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("Scorecard service shutdown raised")
         set_scorecard_service(None)
+        for set_proc in (set_upscale_process, set_taste_process, set_training_process):
+            set_proc(None)
+        for proc in bg_processes:
+            await proc.aclose()
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:
