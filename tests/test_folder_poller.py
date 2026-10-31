@@ -98,6 +98,7 @@ def test_seed_reports_unknown_disk_files_as_new(tmp_path):
     assert second.settled_new == [new]
     assert second.changed == []  # known file got its stamp on pass one
     _write(tmp_path / "known.png", b"y" * 30)
+    assert p.poll().changed == []  # first sight of the new stamp
     assert p.poll().changed == [known]
 
 
@@ -181,3 +182,92 @@ def test_directory_symlink_not_followed(tmp_path):
     p = _poller(tmp_path)
     p.poll()
     assert len(p.poll().settled_new) == 1
+
+
+def test_mixed_spellings_key_equal_on_posix(tmp_path, monkeypatch):
+    f = _write(tmp_path / "x" / "a.png")
+    messy = str(tmp_path) + "//x/./a.png"
+    p = _poller(tmp_path, folders=[FolderSpec(str(tmp_path / "x") + "/", True)])
+    p.seed([messy])
+    r = p.poll()
+    assert r.vanished == [] and r.settled_new == []
+    assert p.poll().settled_new == []
+    assert f  # file is the same one the messy spelling names
+
+
+def test_relative_folder_and_skip_root(tmp_path, monkeypatch):
+    _write(tmp_path / "in" / "a.png")
+    _write(tmp_path / "in" / "skip" / "b.png")
+    monkeypatch.chdir(tmp_path)
+    p = FolderPoller([FolderSpec("in", True)], _probe, ["in/skip/"], _is_media)
+    p.poll()
+    assert p.poll().settled_new == [str(tmp_path / "in" / "a.png")]
+
+
+def test_windows_spellings_key_equal():
+    import ntpath
+
+    def win(p):
+        return ntpath.normpath(ntpath.abspath(p))
+
+    p = FolderPoller(
+        [FolderSpec("D:/Media/", True)],
+        _probe,
+        ["D:/Media/skip"],
+        _is_media,
+        normalize=win,
+        sep="\\",
+    )
+    assert p._key("D:/x/a.png") == p._key("D:\\x\\a.png")
+    spec = p._folders[0]
+    assert p._covers(spec, p._key("D:/Media/sub/a.png"))
+    assert not p._covers(spec, p._key("D:\\MediaX\\a.png"))
+    assert p._skipped("D:\\Media\\skip\\b.png")
+    assert not p._skipped("D:\\Media\\skipper\\b.png")
+
+
+def test_jittering_mtime_does_not_report_changed_or_block_settling(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.poll()
+    st = os.stat(f)
+    os.utime(f, (st.st_atime, st.st_mtime + 1.5))
+    assert p.poll().settled_new == [f]
+    os.utime(f, (st.st_atime, st.st_mtime))
+    assert p.poll().changed == []
+
+
+def test_changed_waits_for_a_stable_stamp(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.seed([f])
+    p.poll()
+    _write(tmp_path / "a.png", b"y" * 20)
+    assert p.poll().changed == []
+    _write(tmp_path / "a.png", b"y" * 30)  # still growing
+    assert p.poll().changed == []
+    assert p.poll().changed == [f]
+    assert p.poll().changed == []
+
+
+def test_nested_folders_report_a_file_once(tmp_path):
+    f = _write(tmp_path / "sub" / "a.png")
+    specs = [FolderSpec(str(tmp_path), True), FolderSpec(str(tmp_path / "sub"), True)]
+    p = _poller(tmp_path, folders=specs)
+    p.poll()
+    assert p.poll().settled_new == [f]
+
+
+def test_path_reached_from_two_folders_not_vanished_if_one_unavailable(tmp_path):
+    sub = tmp_path / "mount"
+    f = _write(sub / "a.png")
+    top = tmp_path / "top"
+    top.mkdir()
+    specs = [FolderSpec(str(sub), True), FolderSpec(str(tmp_path), True)]
+    p = _poller(tmp_path, folders=specs)
+    p.seed([f])
+    p.poll()
+    os.remove(f)
+    r = p.poll()  # "mount" is empty with a known file: unavailable
+    assert r.unavailable == [str(sub)]
+    assert r.vanished == []

@@ -6,6 +6,16 @@ path the library already holds, then calls ``poll()`` on the cadence
 enough to ingest), what vanished, what changed and which folders could not be
 seen. A folder that cannot be seen hides its files; it never means they were
 deleted, so nothing under it vanishes and nothing is forgotten.
+
+Limits the consumer must cover: a mount point *below* a configured folder is
+not detected, and a folder emptied by hand stays unavailable while known files
+lie under it (it cannot be told from an unmounted drive). A walk that finds
+fewer files than expected can still report many vanished at once, so the
+consumer must guard mass vanishes (hygiene's mass-removal guard does).
+
+Paths are normalised (``abspath`` + ``normpath``) at the boundary (seed,
+folders, skip roots, walk), then keyed by ``path_key``: the database holds
+POSIX spellings, the walk native ones, and they must key equal.
 """
 
 import os
@@ -55,9 +65,17 @@ class _WalkError(Exception):
     """A folder could not be listed completely."""
 
 
-def _prefix(path: str) -> str:
-    key = path_key(path)
-    return key if key.endswith(os.sep) else key + os.sep
+# A stamp whose mtime moves by no more than this is the same (FAT stores 2 s
+# resolution; network mounts round).
+MTIME_TOLERANCE_S = 2.0
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _same(a: FileStamp, b: FileStamp) -> bool:
+    return a.size == b.size and abs(a.mtime - b.mtime) <= MTIME_TOLERANCE_S
 
 
 def _under(root_prefix: str, key: str) -> bool:
@@ -72,10 +90,17 @@ class FolderPoller:
         probe: Callable[[str], str],
         skip_roots: Sequence[str],
         is_media: Callable[[str], bool],
+        normalize: Callable[[str], str] = _normalize_path,
+        sep: str = os.sep,
     ) -> None:
+        # normalize/sep are a seam so tests can simulate Windows spellings.
+        self._normalize = normalize
+        self._sep = sep
         self._folders = list(folders)
         self._probe = probe
-        self._skip = [_prefix(r) for r in skip_roots]
+        self._skip = [self._prefix(r) for r in skip_roots]
+        # key -> candidate stamp of a known file that is changing.
+        self._changing: Dict[str, FileStamp] = {}
         self._is_media = is_media
         # key -> stamp seen on the last pass (None until a pass has seen it).
         self._known: Dict[str, Optional[FileStamp]] = {}
@@ -85,9 +110,16 @@ class FolderPoller:
         self._spelling: Dict[str, str] = {}
         self._last_walk_s = 0.0
 
+    def _key(self, path: str) -> str:
+        return path_key(self._normalize(path))
+
+    def _prefix(self, path: str) -> str:
+        key = self._key(path)
+        return key if key.endswith(self._sep) else key + self._sep
+
     def seed(self, known: Iterable[str]) -> None:
         for p in known:
-            key = path_key(p)
+            key = self._key(p)
             self._known.setdefault(key, None)
             self._spelling.setdefault(key, p)
 
@@ -97,12 +129,12 @@ class FolderPoller:
     # -- walking ---------------------------------------------------------
 
     def _skipped(self, path: str) -> bool:
-        key = path_key(path) + os.sep
+        key = self._key(path) + self._sep
         return any(_under(s, key) for s in self._skip)
 
     def _walk(self, spec: FolderSpec) -> Dict[str, tuple]:
         found: Dict[str, tuple] = {}
-        stack = [spec.filepath]
+        stack = [self._normalize(spec.filepath)]
         first = True
         while stack:
             directory = stack.pop()
@@ -125,7 +157,7 @@ class FolderPoller:
                             st = entry.stat()
                         except FileNotFoundError:
                             continue  # gone between listing and stat
-                        found[path_key(path)] = (
+                        found[self._key(path)] = (
                             path,
                             FileStamp(st.st_size, st.st_mtime),
                         )
@@ -139,10 +171,10 @@ class FolderPoller:
         return found
 
     def _covers(self, spec: FolderSpec, key: str) -> bool:
-        prefix = _prefix(spec.filepath)
+        prefix = self._prefix(spec.filepath)
         if not _under(prefix, key):
             return False
-        return spec.search_subfolders or os.sep not in key[len(prefix) :]
+        return spec.search_subfolders or self._sep not in key[len(prefix) :]
 
     def _known_under(self, spec: FolderSpec) -> bool:
         return any(self._covers(spec, k) for k in self._known)
@@ -181,14 +213,25 @@ class FolderPoller:
             self._spelling[key] = path
             if key in self._known:
                 old = self._known[key]
-                if old is not None and old != stamp:
-                    result.changed.append(path)
-                self._known[key] = stamp
+                if old is None:
+                    self._known[key] = stamp
+                elif _same(old, stamp):
+                    self._changing.pop(key, None)
+                else:
+                    # Report only once the new stamp has held for two polls,
+                    # so an in-place write is one change, not one per step.
+                    cand = self._changing.get(key)
+                    if cand is not None and _same(cand, stamp):
+                        del self._changing[key]
+                        self._known[key] = stamp
+                        result.changed.append(path)
+                    else:
+                        self._changing[key] = stamp
                 continue
             prev = self._pending.get(key)
             if (
                 prev is not None
-                and prev[1] == stamp
+                and _same(prev[1], stamp)
                 and stamp.size > 0
                 and can_open_for_read(path)
             ):
@@ -214,11 +257,12 @@ class FolderPoller:
                 continue
             result.vanished.append(self._spelling.pop(key, key))
             del self._known[key]
+            self._changing.pop(key, None)
 
         self._last_walk_s = time.monotonic() - t0
         result.walk_s = self._last_walk_s
         return result
 
     def _skipped_key(self, key: str) -> bool:
-        k = key + os.sep
+        k = key + self._sep
         return any(_under(s, k) for s in self._skip)
