@@ -29,10 +29,13 @@ class AutoIndexScheduler:
         is_indexing: Callable[[], bool],
         is_busy: Callable[[], bool],
         delay_s: float = DEFAULT_DELAY_S,
+        is_blocked: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._start_build = start_build
         self._is_indexing = is_indexing
         self._is_busy = is_busy
+        # Embedding held, paused or stopped in the background registry.
+        self._is_blocked = is_blocked
         self.delay_s = float(delay_s)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         try:
@@ -86,7 +89,11 @@ class AutoIndexScheduler:
 
     def _blocked(self) -> bool:
         try:
-            return bool(self._is_indexing()) or bool(self._is_busy())
+            return (
+                bool(self._is_indexing())
+                or bool(self._is_busy())
+                or (self._is_blocked is not None and bool(self._is_blocked()))
+            )
         except Exception:
             # A probe that cannot answer counts as busy: try again later.
             logger.debug("auto index busy probe failed", exc_info=True)

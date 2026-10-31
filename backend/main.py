@@ -51,8 +51,10 @@ from backend.dependencies import (
     get_thumbnail_cache,
     interactive_vlm_hold,
     set_registry,
+    set_embedding_process,
     set_tagging_process,
 )
+from backend.services.background.embedding import EmbeddingProcess
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
 from backend.services.judgments_service import faiss_embedding_lookup
@@ -753,6 +755,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         is_indexing=similarity.is_indexing,
         is_busy=lambda: gpu_reserved()
         or generation_busy(t2i_runner, comfy_client, i2v_runner),
+        is_blocked=lambda: background_registry.blocked("embedding"),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
 
@@ -764,6 +767,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         return gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
 
     similarity.set_generation_busy_probe(_generation_or_training_busy)
+
+    embedding = EmbeddingProcess(
+        background_registry,
+        similarity._get_embedding_queue,
+        get_db,
+        similarity.launch_index_build,
+        similarity.embedding_progress,
+    )
+    background_registry.register(embedding)
+    set_embedding_process(embedding)
 
     # The tag queue outlives the process: Tagging resumes what remains once
     # everything it waits on is wired (a persisted owner pause keeps it paused).
@@ -808,6 +821,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # before closing the taste service that consumes it.
         await tagging.aclose()  # cancels any VLM drain
         set_tagging_process(None)
+        await embedding.aclose()
+        set_embedding_process(None)
         await similarity.shutdown_embedding_queue()
         try:
             from backend.services import hindsight_briefs

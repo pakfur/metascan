@@ -12,6 +12,7 @@ from backend.config import load_app_config
 from backend.services.background.registry import INTERACTIVE_GRACE_S, ProcessRegistry
 
 if TYPE_CHECKING:
+    from backend.services.background.embedding import EmbeddingProcess
     from backend.services.background.tagging import TaggingProcess
 
 # `functools.lru_cache` has a race: it releases the cache lock before
@@ -99,3 +100,16 @@ def set_tagging_process(process: Optional["TaggingProcess"]) -> None:
 
 def get_tagging_process() -> Optional["TaggingProcess"]:
     return _tagging_singleton
+
+
+_embedding_singleton: Optional["EmbeddingProcess"] = None
+
+
+def set_embedding_process(process: Optional["EmbeddingProcess"]) -> None:
+    """Install the Embedding process (FastAPI lifespan)."""
+    global _embedding_singleton
+    _embedding_singleton = process
+
+
+def get_embedding_process() -> Optional["EmbeddingProcess"]:
+    return _embedding_singleton

@@ -194,6 +194,14 @@ class ProcessRegistry:
             res: Tuple[State, List[str]]
             if intent == "stopped":
                 res = (State.STOPPED, [])
+            elif (
+                rep.winding_down
+                and rep.state == State.RUNNING
+                and (intent == "paused" or held)
+            ):
+                # Still saving after a pause or hold: say so. The held list
+                # stays, so _reconcile still counts the process as suspended.
+                res = (State.RUNNING, sorted(set(held)))
             elif intent == "paused":
                 res = (State.PAUSED, [])
             elif held:

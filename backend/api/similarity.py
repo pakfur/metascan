@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
-from backend.dependencies import get_db, get_tagging_process
+from backend.dependencies import get_db, get_embedding_process, get_tagging_process
 from backend.services.scan_dispatch import should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
@@ -34,6 +34,8 @@ _embedding_queue: Optional[EmbeddingQueue] = None
 _embed_poll_task: Optional[asyncio.Task] = None
 _inference_client: Optional[InferenceClient] = None
 _EMBED_POLL_INTERVAL_SECONDS = 0.5
+# The last progress payload the worker reported (the Embedding process reads it).
+_last_embedding_progress: Dict[str, Any] = {}
 
 # Called (from the embedding poller's worker thread) after every completed
 # embedding run; the lifespan installs the taste scorer's rescore here.
@@ -205,25 +207,36 @@ def _get_embedding_queue() -> EmbeddingQueue:
     return _embedding_queue
 
 
+def embedding_progress() -> Dict[str, Any]:
+    """The last progress the embedding worker reported (empty before any)."""
+    return dict(_last_embedding_progress)
+
+
+def _poke_embedding_process() -> None:
+    process = get_embedding_process()
+    if process is not None:
+        process.poke()
+
+
 def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
     def on_progress(current: int, total: int, label: str) -> None:
         # The label is human-formatted; raw structured fields live in
         # eq._last_progress (exposed via get_last_progress()).
         raw = eq.get_last_progress()
-        ws_manager.broadcast_sync(
-            "embedding",
-            "progress",
-            {
-                "current": current,
-                "total": total,
-                "label": label,
-                "status": raw.get("status", ""),
-                "current_file": raw.get("current_file", ""),
-                "errors_count": raw.get("errors_count", 0),
-                "vocab_current": raw.get("vocab_current", 0),
-                "vocab_total": raw.get("vocab_total", 0),
-            },
-        )
+        payload = {
+            "current": current,
+            "total": total,
+            "label": label,
+            "status": raw.get("status", ""),
+            "current_file": raw.get("current_file", ""),
+            "errors_count": raw.get("errors_count", 0),
+            "vocab_current": raw.get("vocab_current", 0),
+            "vocab_total": raw.get("vocab_total", 0),
+        }
+        _last_embedding_progress.clear()
+        _last_embedding_progress.update(payload)
+        ws_manager.broadcast_sync("embedding", "progress", payload)
+        _poke_embedding_process()
 
     def on_complete(total: int) -> None:
         # Reload the FAISS index so search endpoints see the new vectors.
@@ -232,6 +245,7 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
         except Exception as e:
             logger.exception(f"Failed to reload FAISS after index build: {e}")
         ws_manager.broadcast_sync("embedding", "complete", {"total": total})
+        _poke_embedding_process()
         hook = _on_embedding_complete
         if hook is not None:
             try:
@@ -243,6 +257,9 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
 
     def on_error(msg: str) -> None:
         ws_manager.broadcast_sync("embedding", "error", {"message": msg})
+        process = get_embedding_process()
+        if process is not None:
+            process.record_error(msg)
 
     eq.on_progress = on_progress
     eq.on_complete = on_complete
@@ -578,7 +595,7 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 @router.post("/index/build", dependencies=GPU_FREE)
 async def build_index(rebuild: bool = False) -> Dict[str, Any]:
     """Start an embedding worker subprocess for unembedded (or all) files."""
-    return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True)
+    return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True, owner=True)
 
 
 async def start_auto_index_build() -> Dict[str, Any]:
@@ -586,7 +603,7 @@ async def start_auto_index_build() -> Dict[str, Any]:
     see ``backend/services/auto_index.py``). It never queues VLM tagging:
     that would load the VLM on the GPU behind the owner's back between
     generation batches; the new files get CLIP tags instead."""
-    return await _start_index_build(rebuild=False, allow_vlm_tagging=False)
+    return await _start_index_build(rebuild=False, allow_vlm_tagging=False, owner=False)
 
 
 def is_indexing() -> bool:
@@ -594,8 +611,20 @@ def is_indexing() -> bool:
     return _get_embedding_queue().is_indexing()
 
 
-async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
+async def _start_index_build(
+    rebuild: bool, allow_vlm_tagging: bool, owner: bool = True
+) -> Dict[str, Any]:
+    """Every build goes through the Embedding process, which refuses (or
+    queues) one while Embedding is stopped, paused or held."""
+    process = get_embedding_process()
+    if process is None:
+        return await launch_index_build(rebuild, allow_vlm_tagging)
+    return await process.request_build(rebuild, allow_vlm_tagging, owner=owner)
+
+
+async def launch_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
     global _current_scan_tag_with_vlm, _vlm_scan_stops
+    _last_embedding_progress.clear()
 
     if gpu_reserved():
         # Writer training holds the GPU (every entry point: the route, the

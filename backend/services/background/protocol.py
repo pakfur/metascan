@@ -41,6 +41,9 @@ class ProcessReport:
     activity: str
     error: Optional[str] = None
     warnings_count: int = 0
+    # Told to pause or held, but still saving: the registry shows RUNNING with
+    # this activity until the process reports otherwise (Embedding's worker).
+    winding_down: bool = False
 
 
 @dataclass
