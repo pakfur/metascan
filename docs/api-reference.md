@@ -153,7 +153,7 @@ last folder included):
   server's working directory) and in the server's native form; a root is
   listed once however the configuration spells it.
 - With nothing to report they are `[]`, `[]`, `0` and `false`: after every
-  ordinary scan while no full clean is unfinished, and after a scan cancelled
+  scan without `full_clean` (the UI starts none) while no full clean is unfinished, and after a scan cancelled
   during the import, whose findings are partial.
 
 Any of them keeps the full clean unfinished: no deleted file is recorded and
