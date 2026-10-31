@@ -94,7 +94,7 @@ const reloadAfterImport = useDebounceFn(
   { maxWait: 5000 },
 )
 useWebSocket('library', (event) => {
-  if (event === 'media_added') void reloadAfterImport()
+  if (event === 'media_added' || event === 'media_removed') void reloadAfterImport()
 })
 
 function openViewer(media: Media) {

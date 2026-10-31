@@ -135,7 +135,7 @@ async def test_a_pass_waits_for_a_quiet_moment(rig):
     rig.quiet(1)
     await rig.run_pass()
     assert rig.log == ["a", "b"]
-    assert rig.registry.status("hygiene").activity == "In sync"
+    assert rig.registry.status("hygiene").activity.startswith("In sync")
 
 
 async def test_the_first_pass_ignores_the_interval_the_next_does_not(rig):
@@ -307,7 +307,7 @@ async def test_no_checks_reads_in_sync_after_a_pass(mk):
     )
     r.quiet()
     await r.run_pass()
-    assert r.registry.status("hygiene").activity == "In sync"
+    assert r.registry.status("hygiene").activity.startswith("In sync")
 
 
 # ---- scan.finish_ordinary_pass --------------------------------------------
@@ -360,7 +360,7 @@ async def test_play_waits_for_a_running_process_then_runs(rig):
     rig.other.state = State.IDLE
     await rig.run_pass()  # not idle, inside no interval: Play ignores both
     assert rig.log == ["a", "b"]
-    assert rig.registry.status("hygiene").activity == "In sync"
+    assert rig.registry.status("hygiene").activity.startswith("In sync")
 
 
 async def test_a_process_starting_mid_manual_pass_stops_it_and_it_resumes(mk):

@@ -276,6 +276,32 @@ class ImportProcess:
         Hygiene waits ``MOVE_GRACE_S`` from this before it cleans the row."""
         return self._vanished.get(to_posix_path(path))
 
+    def is_settling(self, path: str) -> bool:
+        """Whether Import has ``path`` in hand: waiting to settle, held one
+        pass for a move, or queued to ingest. Hygiene leaves such a file to
+        Import."""
+        native = to_native_path(path)
+        return (
+            native in self._settle_seen
+            or native in self._held
+            or native in self._todo
+            or native in self._retry_next
+        )
+
+    def enqueue_unknown(self, paths: Sequence[str]) -> int:
+        """Files hygiene found on disk that the library does not have: they
+        go through Import's own pipeline (move check, ingest, ``library``
+        event, embedding kick), not a second ingest path. Event loop only.
+        Returns how many were new to the queue."""
+        before = len(self._todo)
+        known = set(self._todo) | set(self._held) | set(self._retry_next)
+        self._queue([p for p in paths if p not in known])
+        added = len(self._todo) - before
+        if added:
+            self._wake_loop()
+            self.poke()
+        return added
+
     # lifecycle -----------------------------------------------------------
     def start_loop(self) -> None:
         """Start the polling loop on the running event loop (lifespan)."""

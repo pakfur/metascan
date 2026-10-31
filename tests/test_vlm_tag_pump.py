@@ -115,3 +115,13 @@ async def test_drain_with_since_starts_when_no_unload_landed(tmp_path):
     assert await pump.drain_once() == 1
     client.ensure_started.assert_awaited_once_with("m", unless_stopped_since=3)
     assert db.tag_queue_count() == 0
+
+
+async def test_a_drain_that_writes_no_tags_marks_the_image_exhausted(tmp_path):
+    db, (a, b) = make_db(tmp_path)
+    client = make_client(side_effect=[[], ["x"]])
+    pump = VlmTagPump(client, db, model_id="qwen3vl-4b")
+    await pump.drain_once()
+    # a got no tags (still untagged) but hygiene must not queue it again
+    assert [Path(p).name for p in db.images_without_vlm_tags()] == ["a.jpg"]
+    assert db.images_without_vlm_tags(for_hygiene=True) == []

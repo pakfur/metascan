@@ -184,6 +184,15 @@ class FolderPoller:
             first = False
         return found
 
+    def walk_folder(self, spec: FolderSpec) -> Optional[List[str]]:
+        """The media files under one folder as the poll sees them (skip
+        roots, partial downloads and ignored names left out), or None when
+        the folder could not be listed completely."""
+        try:
+            return [path for path, _ in self._walk(spec).values()]
+        except _WalkError:
+            return None
+
     def _covers(self, spec: FolderSpec, key: str) -> bool:
         prefix = self._prefix(spec.filepath)
         if not _under(prefix, key):

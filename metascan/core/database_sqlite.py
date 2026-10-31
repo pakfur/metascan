@@ -319,6 +319,7 @@ MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("storyboard_subjects", "reference_path_2"),
     ("t2i_images", "file_path"),
     ("taste_scores", "file_path"),
+    ("vlm_tag_exhausted", "file_path"),
     ("vlm_tag_queue", "file_path"),
 )
 
@@ -1013,6 +1014,17 @@ class DatabaseManager:
                     enqueued_at TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
+                    FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
+                )
+            """
+            )
+
+            # Images the VLM gave up on (or tagged with nothing): hygiene does
+            # not queue them again; a forced retag clears the row.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vlm_tag_exhausted (
+                    file_path TEXT PRIMARY KEY,
                     FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
                 )
             """
@@ -6898,8 +6910,40 @@ class DatabaseManager:
                 "DELETE FROM vlm_tag_queue WHERE file_path = ? AND attempts >= ?",
                 (posix, MAX_TAG_ATTEMPTS),
             ).rowcount
+            if removed:
+                conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_exhausted (file_path) "
+                    "SELECT file_path FROM media WHERE file_path = ?",
+                    (posix,),
+                )
             conn.commit()
         return bool(removed)
+
+    def mark_tag_exhausted(self, path: Union[str, Path]) -> None:
+        """Record that tagging ``path`` produced nothing: hygiene leaves it
+        alone until a forced retag."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO vlm_tag_exhausted (file_path) "
+                "SELECT file_path FROM media WHERE file_path = ?",
+                (to_posix_path(path),),
+            )
+            conn.commit()
+
+    def clear_tag_exhausted(self, paths: Iterable[Union[str, Path]]) -> int:
+        """Forget that tagging gave up on ``paths`` (a forced retag)."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        cleared = 0
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                cleared += conn.execute(
+                    f"DELETE FROM vlm_tag_exhausted WHERE file_path IN ({marks})",
+                    part,
+                ).rowcount
+            conn.commit()
+        return cleared
 
     def tag_queue_count(self) -> int:
         """Rows still waiting to be tagged (failed-out rows are gone)."""
@@ -6911,15 +6955,27 @@ class DatabaseManager:
                 ).fetchone()[0]
             )
 
-    def images_without_vlm_tags(self) -> List[str]:
-        """POSIX paths of library images with no VLM-sourced tag row."""
+    def images_without_vlm_tags(self, *, for_hygiene: bool = False) -> List[str]:
+        """POSIX paths of library images with no VLM-sourced tag row.
+
+        ``for_hygiene`` is the background check's list: it leaves out T2I /
+        I2V output (generated images are not retro-tagged) and the images
+        tagging gave up on (``vlm_tag_exhausted``)."""
         from metascan.core.vlm_client import VlmClient
 
+        extra = (
+            " AND m.file_path NOT IN (SELECT file_path FROM t2i_images)"
+            " AND m.file_path NOT IN (SELECT file_path FROM i2v_videos)"
+            " AND m.file_path NOT IN (SELECT file_path FROM vlm_tag_exhausted)"
+            if for_hygiene
+            else ""
+        )
         with self.lock, self._get_connection() as conn:
             rows = conn.execute(
                 "SELECT m.file_path FROM media m WHERE NOT EXISTS ("
                 "SELECT 1 FROM indices i WHERE i.file_path = m.file_path "
                 "AND i.index_type = 'tag' AND i.source IN ('vlm', 'vlm+prompt'))"
+                + extra
             ).fetchall()
         return [
             r[0]
@@ -9672,6 +9728,69 @@ class DatabaseManager:
         if row is None or row[0] is None:
             return None
         return Candidate(path, int(row[0]), parse_mtime(row[1]), row[2] or None)
+
+    def media_stat_page(
+        self, after: str, limit: int
+    ) -> List[Tuple[str, Optional[int], Optional[float]]]:
+        """Up to ``limit`` rows after the stored path ``after``, in path
+        order: ``(path, file_size, modified_at as epoch seconds)`` (the
+        materialised columns, else the JSON blob; either historical shape).
+        Each call is its own short read, so a caller pages off the lock."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT m.file_path,"
+                " COALESCE(m.file_size, json_extract(m.data, '$.file_size')),"
+                " COALESCE(m.modified_at, json_extract(m.data, '$.modified_at'))"
+                " FROM media m WHERE m.file_path > ? ORDER BY m.file_path LIMIT ?",
+                (after, limit),
+            ).fetchall()
+        return [
+            (r[0], None if r[1] is None else int(r[1]), parse_mtime(r[2])) for r in rows
+        ]
+
+    def mark_unembedded(self, paths: Iterable[str]) -> int:
+        """``has_embedding = 0`` for ``paths`` (stored spelling): the next
+        incremental build embeds them again. Ratings are not touched."""
+        posix = [to_posix_path(p) for p in paths]
+        n = 0
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                n += conn.execute(
+                    "UPDATE media_hashes SET has_embedding = 0 "
+                    f"WHERE has_embedding != 0 AND file_path IN ({marks})",
+                    part,
+                ).rowcount
+            conn.commit()
+        return n
+
+    def set_phash(self, path: str, phash: str) -> None:
+        """Store a phash without touching the embedding mark (a row that has
+        none is created unembedded)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO media_hashes (file_path, phash, has_embedding) "
+                "SELECT file_path, ?, 0 FROM media WHERE file_path = ? "
+                "ON CONFLICT(file_path) DO UPDATE SET phash = excluded.phash",
+                (phash, to_posix_path(path)),
+            )
+            conn.commit()
+
+    def media_missing_derived(self, after: str, limit: int) -> List[str]:
+        """Up to ``limit`` stored paths after ``after`` whose ``media_hashes``
+        row has no phash (or is missing)."""
+        with self._get_connection() as conn:
+            return [
+                r[0]
+                for r in conn.execute(
+                    "SELECT m.file_path FROM media m LEFT JOIN media_hashes h"
+                    " ON h.file_path = m.file_path"
+                    " WHERE m.file_path > ? AND (h.phash IS NULL OR h.phash = '')"
+                    " ORDER BY m.file_path LIMIT ?",
+                    (after, limit),
+                )
+            ]
 
     def get_unembedded_file_paths(self) -> List[str]:
         """Get file paths that exist in media but don't have CLIP embeddings."""

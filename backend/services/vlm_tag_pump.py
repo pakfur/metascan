@@ -161,6 +161,9 @@ class VlmTagPump:
                     await asyncio.to_thread(self._db.finish_tag, p)
                     ok_local = True
                     empty_local = not tags
+                    if empty_local:
+                        # Nothing came back: hygiene must not queue it again.
+                        await asyncio.to_thread(self._db.mark_tag_exhausted, p)
                 except FileNotFoundError:
                     # The file is gone: nothing to tag, nothing to retry.
                     await asyncio.to_thread(self._db.finish_tag, p)

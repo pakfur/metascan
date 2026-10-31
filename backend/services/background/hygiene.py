@@ -24,9 +24,9 @@ import asyncio
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from backend.services.background.idle import IDLE_AFTER_S, IdleTracker
 from backend.services.background.protocol import (
@@ -47,7 +47,26 @@ OTHERS_CACHE_S = 1.0  # should_stop() is asked per row
 
 @dataclass
 class CheckResult:
-    changed: int = 0  # rows fixed or removed
+    changed: int = 0  # rows fixed
+    cleaned: int = 0  # rows removed
+
+
+class MassRemovalBlocked(Exception):
+    """A pass would clean too much of one folder: it cleaned nothing there
+    and waits for the owner's Play. ``folder`` is the folder as configured,
+    ``count`` the rows that would go; ``more`` other folders are blocked too."""
+
+    def __init__(self, folder: str, count: int, more: int = 0) -> None:
+        super().__init__(folder, count, more)
+        self.folder = folder
+        self.count = count
+        self.more = more
+
+    def message(self) -> str:
+        text = f"{self.count:,} files missing from {self.folder}"
+        if self.more:
+            text += f" and {self.more} more"
+        return text + ": press play to confirm"
 
 
 @dataclass
@@ -58,10 +77,30 @@ class HygieneContext:
     import_process: Any  # vanished_since(path)
     should_stop: Callable[[], bool]
     report: Callable[[str, int, int], None]  # activity, done, total
+    clock: Callable[[], float] = time.monotonic
+    embedding: Any = None  # EmbeddingProcess (kick)
+    tagging: Any = None  # TaggingProcess (kick)
+    scanner: Any = None  # Scanner, for ingest_file
+    thumbnails: Any = None  # ThumbnailCache
+    confirmed: Any = frozenset()  # folders the owner confirmed with Play
+    shared: Dict[str, Any] = field(default_factory=dict)  # one pass, all checks
+
+    def stopped(self) -> bool:
+        """Whether the pass must stop (``should_stop``), latched: a check cut
+        short stays cut short for the checks after it, even when the reason
+        goes away. Checks bail with this, between rows."""
+        if self.shared.get("interrupted"):
+            return True
+        if self.should_stop():
+            self.shared["interrupted"] = True
+            return True
+        return False
 
 
 class HygieneCheck(Protocol):
     name: str
+    # Optional ``always = True``: the check runs even when the pass was cut
+    # short (Finish: an interrupted pass must still tell the snapshot code).
 
     async def run(self, ctx: HygieneContext) -> CheckResult: ...
 
@@ -89,7 +128,11 @@ class HygieneProcess:
         get_config: Callable[[], Any],
         get_data_dir: Callable[[Any], Optional[Path]],
         import_process: Callable[[], Any] = lambda: None,
-        checks: Sequence[HygieneCheck] = (),
+        checks: Optional[Sequence[HygieneCheck]] = None,
+        get_embedding: Callable[[], Any] = lambda: None,
+        get_tagging: Callable[[], Any] = lambda: None,
+        get_scanner: Callable[[], Any] = lambda: None,
+        get_thumbnails: Callable[[], Any] = lambda: None,
         clock: Callable[[], float] = time.monotonic,
         idle_after_s: float = IDLE_AFTER_S,
         interval_s: float = HYGIENE_INTERVAL_S,
@@ -101,7 +144,20 @@ class HygieneProcess:
         self._get_config = get_config
         self._get_data_dir = get_data_dir
         self._import_process = import_process
+        if checks is None:
+            from backend.services.background.hygiene_checks import default_checks
+
+            checks = default_checks()
         self.checks: List[HygieneCheck] = list(checks)
+        self._get_embedding = get_embedding
+        self._get_tagging = get_tagging
+        self._get_scanner = get_scanner
+        self._get_thumbnails = get_thumbnails
+        self._blocked: Optional[MassRemovalBlocked] = None
+        self._blocked_folders: List[str] = []
+        self._confirmed: frozenset = frozenset()  # lapses after one pass
+        self._last_run = ""
+        self._cleaned_last = 0
         self._clock = clock
         self._idle_after_s = idle_after_s
         self._interval_s = interval_s
@@ -144,19 +200,31 @@ class HygieneProcess:
                 State.WAITING, None, f"Waiting for {self._waiting_for or 'other work'}"
             )
         if self._error:
-            return ProcessReport(
-                State.FAILED, None, "Library check failed", error=self._error
-            )
+            text = self._error if self._blocked_folders else "Library check failed"
+            return ProcessReport(State.FAILED, None, text, error=self._error)
         if self._ever_complete:
-            return ProcessReport(State.IDLE, None, "In sync")
+            return ProcessReport(State.IDLE, None, self._in_sync_text())
         return ProcessReport(State.IDLE, None, "Waiting for a quiet moment")
 
+    def _in_sync_text(self) -> str:
+        text = "In sync"
+        if self._last_run:
+            text += f", last run {self._last_run}"
+        n = self._cleaned_last
+        if n:
+            text += f", cleaned {n:,} file{'s' if n != 1 else ''}"
+        return text
+
     async def start(self) -> None:
-        """The owner's play: a pass now, ignoring both timers."""
+        """The owner's play: a pass now, ignoring both timers. After a
+        mass-removal block it also confirms the folder the panel names."""
         self._halted = False
-        self._error = None
         if self._running():
+            self._error = None
             return
+        if self._blocked_folders:
+            self._confirmed = frozenset(self._blocked_folders[:1])
+        self._error = None
         self._manual_pending = True
         if not self._begin_if_clear():
             self._notify()
@@ -262,6 +330,12 @@ class HygieneProcess:
             import_process=self._import_process(),
             should_stop=self.should_stop,
             report=self._set_activity,
+            clock=self._clock,
+            embedding=self._get_embedding(),
+            tagging=self._get_tagging(),
+            scanner=self._get_scanner(),
+            thumbnails=self._get_thumbnails(),
+            confirmed=self._confirmed,
         )
 
     def _set_activity(self, activity: str, done: int = 0, total: int = 0) -> None:
@@ -271,16 +345,32 @@ class HygieneProcess:
 
     async def _run_pass(self) -> None:
         complete = False
+        cleaned = 0
+        blocked: List[Tuple[str, int]] = []
         try:
             ctx = self._context()
+            ran = set()
             for check in list(self.checks):
-                if self.should_stop():
+                if ctx.stopped():
                     break
                 self._set_activity(f"Checking {check.name}")
-                await check.run(ctx)
+                result = await check.run(ctx)
+                ran.add(id(check))
+                cleaned += getattr(result, "cleaned", 0)
             else:
                 # cut short during the last check: not complete
-                complete = not self.should_stop()
+                complete = not ctx.stopped()
+            blocked = list(ctx.shared.get("blocked", ()))
+            if not complete:
+                # A check that must see every pass, an interrupted one too.
+                for check in list(self.checks):
+                    if getattr(check, "always", False) and id(check) not in ran:
+                        await check.run(ctx)
+            if blocked:
+                first = blocked[0]
+                self._error = MassRemovalBlocked(
+                    first[0], first[1], len(blocked) - 1
+                ).message()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -292,6 +382,11 @@ class HygieneProcess:
             if complete or self._error:
                 self._manual_pending = False
                 self._next_ok_at = self._clock() + self._interval_s
+                self._confirmed = frozenset()  # one pass only
+                self._blocked_folders = [f for f, _ in blocked]
+                if complete and not self._error:
+                    self._cleaned_last = cleaned
+                    self._last_run = time.strftime("%H:%M")
             self._pass = None
             self._progress = None
             self._notify()

@@ -203,6 +203,9 @@ async def retag(body: RetagRequest) -> Dict[str, Any]:
 
     # Videos never enter the queue (the model is image-only).
     targets = [t for t in targets if VlmClient.is_image_path(Path(t))]
+    if body.force:
+        # An explicit forced retag overrides "tagging gave up on this one".
+        await asyncio.to_thread(db.clear_tag_exhausted, targets)
     before = await asyncio.to_thread(db.queued_tag_paths, targets)
     added = await asyncio.to_thread(db.enqueue_tags, targets)
     after = await asyncio.to_thread(db.queued_tag_paths, targets)

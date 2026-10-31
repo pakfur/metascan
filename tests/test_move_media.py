@@ -93,6 +93,7 @@ def _seed_everything(db, src="/l/a/old.png"):
     db.add_tag_indices(Path(src), ["cat", "dog"], source="clip")
     db.set_hindsight_brief(src, "brief text", "m", now=T0)
     db.enqueue_tags([src])
+    db.mark_tag_exhausted(src)
     db.replace_taste_scores(1, {src: 0.7})
     db.create_folder("f1", "manual", "Folder")
     db.add_folder_items("f1", [src])

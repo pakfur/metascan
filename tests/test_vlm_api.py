@@ -184,3 +184,17 @@ def test_unload_of_the_general_model_is_an_owner_pause_of_tagging(app_with_stub_
     assert st["activity"] == "Paused: model unloaded"
     # Leave no persisted intent behind for the next test's lifespan.
     c.post("/api/background/tagging/resume")
+
+
+def test_a_forced_retag_clears_the_exhausted_mark(app_with_stub_vlm, queue_db):
+    c, _ = app_with_stub_vlm
+    db, (a, b) = queue_db
+    db.mark_tag_exhausted(a)
+    assert db.images_without_vlm_tags(for_hygiene=True) != []
+    assert len(db.images_without_vlm_tags(for_hygiene=True)) == 1  # only b
+    r = c.post(
+        "/api/vlm/retag",
+        json={"scope": "paths", "paths": [str(a)], "force": True},
+    )
+    assert r.status_code == 202
+    assert len(db.images_without_vlm_tags(for_hygiene=True)) == 2
