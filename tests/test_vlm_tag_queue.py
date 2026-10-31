@@ -14,6 +14,8 @@ from metascan.core.database_sqlite import (
     DatabaseManager,
     MigrationError,
 )
+from unittest.mock import AsyncMock
+
 from tests.test_vlm_tag_pump import make_client, make_db
 
 
@@ -95,6 +97,8 @@ async def test_row_survives_until_tags_are_written(tmp_path):
 
 
 async def test_unload_mid_drain_keeps_queue_and_counts_no_failure(tmp_path):
+    from metascan.core.vlm_client import VlmNotReady
+
     names = tuple(f"{i}.jpg" for i in range(6))
     db, _ = make_db(tmp_path, names=names)
     calls = {"n": 0}
@@ -102,7 +106,7 @@ async def test_unload_mid_drain_keeps_queue_and_counts_no_failure(tmp_path):
     async def gen(_p):
         calls["n"] += 1
         if calls["n"] > 2:
-            raise RuntimeError("VlmClient not ready (state=stopped)")
+            raise VlmNotReady("VlmClient not ready (state=stopped)")
         return ["t"]
 
     client = make_client(side_effect=gen)
@@ -210,3 +214,55 @@ def test_embedding_worker_enqueues_images_only(tmp_path):
     w._enqueue_for_vlm(db, str(a), is_video=False)
     w._enqueue_for_vlm(db, str(tmp_path / "b.jpg"), is_video=True)
     assert db.next_tag_batch(10) == [str(a)]
+
+
+def _attempts(db):
+    with sqlite3.connect(str(db.db_file)) as conn:
+        return conn.execute(
+            "SELECT COALESCE(MAX(attempts), 0) FROM vlm_tag_queue"
+        ).fetchone()[0]
+
+
+async def test_gpu_busy_leaves_the_queue_unchanged_with_no_failure(tmp_path):
+    from metascan.core.gpu_guard import GPU_BUSY_MESSAGE
+    from metascan.core.vlm_client import VlmNotReady
+
+    db, _ = make_db(tmp_path)
+    client = make_client(side_effect=VlmNotReady(GPU_BUSY_MESSAGE))
+    await VlmTagPump(client, db, model_id="m", concurrency=1).drain_once()
+    assert db.tag_queue_count() == 2 and _attempts(db) == 0
+    # ... and the same from ensure_started: the drain defers quietly.
+    client2 = make_client(return_value=["t"])
+    client2.ensure_started = AsyncMock(side_effect=VlmNotReady(GPU_BUSY_MESSAGE))
+    assert await VlmTagPump(client2, db, model_id="m").drain_once() == 0
+    assert db.tag_queue_count() == 2 and _attempts(db) == 0
+
+
+async def test_stopped_real_client_raises_vlm_not_ready(tmp_path):
+    from metascan.core.vlm_client import VlmClient, VlmNotReady
+
+    client = VlmClient(spawn_override=lambda mid: "http://127.0.0.1:1")
+    with pytest.raises(VlmNotReady):
+        await client.generate_tags(tmp_path / "x.png")
+
+
+async def test_in_flight_failure_while_gpu_reserved_counts_no_failure(tmp_path):
+    from metascan.core import gpu_guard
+    from metascan.core.vlm_client import VlmError
+
+    db, _ = make_db(tmp_path)
+    client = make_client(side_effect=VlmError("llama-server request failed: eof"))
+    gpu_guard.set_gpu_reservation(lambda: True)
+    try:
+        await VlmTagPump(client, db, model_id="m", concurrency=1).drain_once()
+    finally:
+        gpu_guard.set_gpu_reservation(None)
+    assert db.tag_queue_count() == 2 and _attempts(db) == 0
+
+
+async def test_empty_tags_from_a_server_that_died_keep_the_row(tmp_path):
+    db, _ = make_db(tmp_path, names=("a.jpg",))
+    client = make_client(return_value=[])
+    client.state = "stopped"
+    await VlmTagPump(client, db, model_id="m").drain_once()
+    assert db.tag_queue_count() == 1

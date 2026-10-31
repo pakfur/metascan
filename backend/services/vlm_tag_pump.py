@@ -18,7 +18,12 @@ import time
 from typing import Any, Optional, Set
 
 from backend.services.background.protocol import Progress
-from metascan.core.vlm_client import VlmError, background_vlm_work
+from metascan.core.gpu_guard import gpu_reserved
+from metascan.core.vlm_client import (
+    STATE_READY,
+    VlmNotReady,
+    background_vlm_work,
+)
 from metascan.utils.path_utils import to_native_path_object
 
 logger = logging.getLogger(__name__)
@@ -36,16 +41,14 @@ def _format_eta(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _is_not_ready(exc: BaseException) -> bool:
-    """The client is not up (shut down, unloaded for a render, evicted): the
-    item itself is fine and stays queued. VlmClient raises
-    ``RuntimeError("VlmClient not ready ...")`` after a shutdown and
-    ``VlmError("VLM was unloaded; not bringing it back")`` from a re-ensure;
-    a retired client (role swapped) and a respawn backoff are the same case."""
-    if not isinstance(exc, RuntimeError):
-        return False
-    text = str(exc)
-    return any(m in text for m in ("not ready", "was unloaded", "retired", "retry in"))
+def _client_unavailable(client: Any) -> bool:
+    """Training holds the GPU, or the client is not ready right now: an
+    unload or ``shutdown_all`` killed llama-server under a request. A failure
+    seen then is the VLM going away, not the item's fault."""
+    if gpu_reserved():
+        return True
+    state = getattr(client, "state", None)
+    return isinstance(state, str) and state != STATE_READY
 
 
 class VlmTagPump:
@@ -101,22 +104,20 @@ class VlmTagPump:
         self._total = queued
 
         since = self._unless_stopped_since
-        if since is None:
-            await self._client.ensure_started(self._model_id)
-        else:
-            try:
+        try:
+            if since is None:
+                await self._client.ensure_started(self._model_id)
+            else:
                 await self._client.ensure_started(
                     self._model_id, unless_stopped_since=since
                 )
-            except VlmError:
-                if getattr(self._client, "_explicit_stops", since) == since:
-                    raise
-                logger.info(
-                    "VLM tagging deferred: the VLM was unloaded since the scan "
-                    "started; %d image(s) stay queued for the next drain",
-                    queued,
-                )
-                return 0
+        except VlmNotReady as exc:
+            # Unloaded since the scan began, retired, backing off or the GPU
+            # held by training: the batch stays queued for the next drain.
+            logger.info(
+                "VLM tagging deferred (%s); %d image(s) stay queued", exc, queued
+            )
+            return 0
 
         ok = 0
         fail = 0
@@ -148,6 +149,10 @@ class VlmTagPump:
                 attempted.add(p)
                 try:
                     tags = await self._client.generate_tags(to_native_path_object(p))
+                    if not tags and _client_unavailable(self._client):
+                        # generate_tags answers [] for a request that died
+                        # with the server: keep the row.
+                        raise VlmNotReady("VLM went away mid-request")
                     # Move the sync DB write off the event loop -- see
                     # the matching note in backend/api/vlm.py.
                     await asyncio.to_thread(
@@ -161,8 +166,8 @@ class VlmTagPump:
                     await asyncio.to_thread(self._db.finish_tag, p)
                     return
                 except Exception as e:
-                    if _is_not_ready(e):
-                        # Unloaded under us: the item is fine, keep it.
+                    if isinstance(e, VlmNotReady) or _client_unavailable(self._client):
+                        # Unloaded / GPU taken under us: the item is fine, keep it.
                         if not not_ready:
                             logger.info(
                                 "VLM tagging stopped: the VLM is not ready (%s); "

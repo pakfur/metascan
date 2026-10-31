@@ -104,6 +104,12 @@ class VlmError(RuntimeError):
     """Raised when llama-server returns a non-2xx response or invalid body."""
 
 
+class VlmNotReady(VlmError):
+    """The client cannot serve the request right now and nothing is wrong
+    with the request: retired, explicitly unloaded, not started, reload
+    backing off, or the GPU held by training. Queued work should wait."""
+
+
 class AdapterNotLoadedError(VlmError):
     """A request asked for a LoRA adapter this client's llama-server does not
     (and will not) load -- it was removed from ``lora_paths``."""
@@ -291,7 +297,7 @@ class VlmClient:
         coordinator and have other callers await the resulting state.
         """
         if self.retired:
-            raise VlmError("client retired")
+            raise VlmNotReady("client retired")
         with self._waiting_for_residency():
             await self._ensure_started(model_id, unless_stopped_since)
 
@@ -312,7 +318,7 @@ class VlmClient:
                 unless_stopped_since is not None
                 and self._explicit_stops != unless_stopped_since
             ):
-                raise VlmError("VLM was unloaded; not bringing it back")
+                raise VlmNotReady("VLM was unloaded; not bringing it back")
             await self.start(
                 model_id,
                 wait_ready=True,
@@ -331,7 +337,7 @@ class VlmClient:
         ``_explicit_stops`` value) makes a background re-ensure give up
         when an explicit shutdown landed after it began."""
         if self.retired:
-            raise VlmError("client retired")
+            raise VlmNotReady("client retired")
         if self._proc is not None and self._proc.poll() is None:
             if (
                 model_id == self._model_id
@@ -345,18 +351,18 @@ class VlmClient:
 
         if gpu_reserved():
             # Writer training holds the GPU: never load a model under it.
-            raise VlmError(GPU_BUSY_MESSAGE)
+            raise VlmNotReady(GPU_BUSY_MESSAGE)
         if self.before_spawn is not None:
             await self.before_spawn(self)
         if self.retired:
-            raise VlmError("client retired")
+            raise VlmNotReady("client retired")
         if gpu_reserved():
-            raise VlmError(GPU_BUSY_MESSAGE)
+            raise VlmNotReady(GPU_BUSY_MESSAGE)
         if (
             _unless_stopped_since is not None
             and self._explicit_stops != _unless_stopped_since
         ):
-            raise VlmError("VLM was unloaded; not bringing it back")
+            raise VlmNotReady("VLM was unloaded; not bringing it back")
 
         self._spec = get_spec(model_id)
         self._model_id = model_id
@@ -900,15 +906,15 @@ class VlmClient:
     async def _ensure_resident_locked(self, stops: int) -> None:
         await self._quiesced.wait()
         if self.retired:
-            raise VlmError("client retired")
+            raise VlmNotReady("client retired")
         async with self._start_lock:
             if self._is_resident():
                 return
             if self._explicit_stops != stops:
-                raise VlmError("VLM was unloaded; not bringing it back")
+                raise VlmNotReady("VLM was unloaded; not bringing it back")
             remaining = self._reload_backoff_remaining()
             if remaining > 0:
-                raise VlmError(
+                raise VlmNotReady(
                     f"VLM reload failed {self._reload_failures}x "
                     f"({self._last_error or 'no error reported'}); "
                     f"retry in {remaining:.0f}s"
@@ -1067,7 +1073,7 @@ class VlmClient:
         )
 
         if self._http is None or self._state != STATE_READY:
-            raise RuntimeError(
+            raise VlmNotReady(
                 f"VlmClient not ready (state={self._state}); "
                 "call ensure_started() first"
             )
@@ -1166,7 +1172,7 @@ class VlmClient:
         request body — to GBNF-constrain the response.
         """
         if self._http is None or self._state != STATE_READY:
-            raise VlmError(
+            raise VlmNotReady(
                 f"VlmClient not ready (state={self._state}); "
                 "call ensure_started() first"
             )
@@ -1211,7 +1217,7 @@ class VlmClient:
         # above awaited, and a restart may have happened meanwhile.
         http = self._http
         if http is None or self._state != STATE_READY:
-            raise VlmError(f"VlmClient not ready (state={self._state})")
+            raise VlmNotReady(f"VlmClient not ready (state={self._state})")
         if lora_path is not None:
             lora_id = self.lora_position(lora_path)
             if lora_id is None:
@@ -1270,7 +1276,7 @@ class VlmClient:
         their exact request shape.
         """
         if self._http is None or self._state != STATE_READY:
-            raise VlmError(
+            raise VlmNotReady(
                 f"VlmClient not ready (state={self._state}); "
                 "call ensure_started() first"
             )
