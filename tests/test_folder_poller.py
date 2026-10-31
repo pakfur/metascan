@@ -17,9 +17,9 @@ def _is_media(path):
     return path.lower().endswith((".png", ".jpg", ".mp4"))
 
 
-def _poller(tmp_path, skip=(), sub=True, folders=None):
+def _poller(tmp_path, sub=True, folders=None):
     specs = folders or [FolderSpec(str(tmp_path), sub)]
-    return FolderPoller(specs, _probe, list(skip), _is_media)
+    return FolderPoller(specs, _probe, _is_media)
 
 
 def _write(path: Path, data=b"x" * 10):
@@ -75,14 +75,6 @@ def test_ignored_and_partial_names_skipped(tmp_path):
     p = _poller(tmp_path)
     p.poll()
     assert p.poll().settled_new == [good]
-
-
-def test_paths_under_skip_roots_skipped(tmp_path):
-    _write(tmp_path / "lib" / "a.png")
-    other = _write(tmp_path / "library" / "b.png")
-    p = _poller(tmp_path, skip=[str(tmp_path / "lib")])
-    p.poll()
-    assert p.poll().settled_new == [other]
 
 
 def test_seed_reports_unknown_disk_files_as_new(tmp_path):
@@ -162,7 +154,7 @@ def test_vanished_while_settling_is_dropped_silently(tmp_path):
 
 
 def test_interval_scales_with_a_slow_walk():
-    p = FolderPoller([], _probe, [], _is_media)
+    p = FolderPoller([], _probe, _is_media)
     assert p.next_interval() == folder_poller.WATCH_INTERVAL_S
     p._last_walk_s = 2.0
     assert p.next_interval() == 40.0
@@ -195,11 +187,10 @@ def test_mixed_spellings_key_equal_on_posix(tmp_path, monkeypatch):
     assert f  # file is the same one the messy spelling names
 
 
-def test_relative_folder_and_skip_root(tmp_path, monkeypatch):
+def test_relative_folder(tmp_path, monkeypatch):
     _write(tmp_path / "in" / "a.png")
-    _write(tmp_path / "in" / "skip" / "b.png")
     monkeypatch.chdir(tmp_path)
-    p = FolderPoller([FolderSpec("in", True)], _probe, ["in/skip/"], _is_media)
+    p = FolderPoller([FolderSpec("in", True)], _probe, _is_media)
     p.poll()
     assert p.poll().settled_new == [str(tmp_path / "in" / "a.png")]
 
@@ -213,7 +204,6 @@ def test_windows_spellings_key_equal():
     p = FolderPoller(
         [FolderSpec("D:/Media/", True)],
         _probe,
-        ["D:/Media/skip"],
         _is_media,
         normalize=win,
         sep="\\",
@@ -222,8 +212,6 @@ def test_windows_spellings_key_equal():
     spec = p._folders[0]
     assert p._covers(spec, p._key("D:/Media/sub/a.png"))
     assert not p._covers(spec, p._key("D:\\MediaX\\a.png"))
-    assert p._skipped("D:\\Media\\skip\\b.png")
-    assert not p._skipped("D:\\Media\\skipper\\b.png")
 
 
 def test_jittering_mtime_does_not_report_changed_or_block_settling(tmp_path):

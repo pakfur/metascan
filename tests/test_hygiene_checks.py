@@ -587,7 +587,7 @@ async def test_new_files_go_through_imports_path_not_a_second_one(db, tmp_path):
     assert not _has(db, old)  # hygiene ingests nothing itself
 
 
-async def test_new_files_under_an_output_root_are_skipped(db, tmp_path):
+async def test_new_files_under_an_output_root_go_to_import(db, tmp_path):
     folder = tmp_path / "lib"
     folder.mkdir()
     out = folder / "out" / "t2i"
@@ -599,7 +599,7 @@ async def test_new_files_under_an_output_root_are_skipped(db, tmp_path):
     await NewFiles().run(
         _ctx(db, [folder], tmp_path, imp=imp, t2i={"output_root": str(out)})
     )
-    assert imp.enqueued == []
+    assert imp.enqueued == [str(f)]
 
 
 async def test_import_enqueue_unknown_and_is_settling(tmp_path):

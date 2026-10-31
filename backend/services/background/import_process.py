@@ -6,7 +6,10 @@ Two jobs behind one panel row.
 what settles with ``Scanner.ingest_file`` one file at a time on a thread,
 recognises moved and renamed files (``move_detector``) and re-keys their rows
 with everything attached (``move_media_batch_applied``), then kicks Embedding
-(debounced) so new files are embedded and tagged. It only reports ``running``
+(debounced) so new files are embedded and tagged. Generated-output roots are
+watched like any folder: they usually sit inside the scan folder, files are
+dropped there by hand, and ComfyClient's own ingest has written its row by the
+time a file settles (``_ingest_one`` then skips it). It only reports ``running``
 while it ingests, moves or settles files; polling alone is ``idle``. It is off
 when ``watch_directories`` is false, suspended while a scan or Full clean runs
 (the scan owns the library then, and the pending snapshot file), and
@@ -88,7 +91,6 @@ class ImportProcess:
         get_config: Optional[Callable[[], Dict[str, Any]]] = None,
         make_scanner: Optional[Callable[[], Any]] = None,
         probe: Optional[Callable[[str], str]] = None,
-        output_roots: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
         broadcast: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         kick_embedding: Optional[Callable[[], Awaitable[Any]]] = None,
         after_move: Optional[Callable[[], Awaitable[Any]]] = None,
@@ -105,7 +107,6 @@ class ImportProcess:
         self._get_config = get_config
         self._make_scanner = make_scanner
         self._probe = probe
-        self._output_roots = output_roots
         self._broadcast = broadcast
         self._kick_embedding = kick_embedding
         self._after_move = after_move
@@ -118,7 +119,7 @@ class ImportProcess:
         # watcher state (the event loop's; read by report() from any thread)
         self._watch_on: Optional[bool] = None  # None until the first pass
         self._poller: Optional[FolderPoller] = None
-        self._signature: Optional[Tuple[Any, ...]] = None
+        self._signature: Optional[Tuple[FolderSpec, ...]] = None
         self._folder_count = 0
         self._unavailable: List[str] = []
         self._resync = True
@@ -534,8 +535,7 @@ class ImportProcess:
         folders = [
             FolderSpec(d.filepath, d.search_subfolders) for d in get_directories(config)
         ]
-        roots = self._roots(config)
-        signature = (tuple(folders), tuple(roots))
+        signature = tuple(folders)
         if (
             self._poller is not None
             and signature == self._signature
@@ -550,7 +550,6 @@ class ImportProcess:
         poller = FolderPoller(
             folders,
             probe,
-            roots,
             lambda p: Path(p).suffix.lower() in supported,
         )
         # The database holds POSIX spellings; the walk reports native ones.
@@ -562,13 +561,6 @@ class ImportProcess:
         self._resync = False
         # What the old poller had half-settled is found again by the new one.
         self._held.clear()
-
-    def _roots(self, config: Dict[str, Any]) -> List[str]:
-        if self._output_roots is not None:
-            return list(self._output_roots(config))
-        from backend.api.scan import _generated_output_roots
-
-        return _generated_output_roots(config)
 
     def _track_settling(self, poller: FolderPoller) -> None:
         now = self._clock()

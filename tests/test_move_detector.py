@@ -90,7 +90,6 @@ def test_case_only_rename_keeps_the_item_on_windows_and_macos(tmp_path, monkeypa
     poller = fp.FolderPoller(
         [fp.FolderSpec(str(folder), True)],
         lambda p: fp.PROBE_PRESENT,
-        [],
         lambda p: p.endswith(".png"),
     )
     poller.seed([str(folder / "Pic.png")])
@@ -111,7 +110,6 @@ def test_unicode_normalisation_alone_is_not_a_respelling(tmp_path, monkeypatch):
     poller = fp.FolderPoller(
         [fp.FolderSpec(str(folder), True)],
         lambda p: fp.PROBE_PRESENT,
-        [],
         lambda p: True,
     )
     poller.seed([str(folder / "é.png")])

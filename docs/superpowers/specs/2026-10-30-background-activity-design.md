@@ -313,8 +313,11 @@ thousand-file drop ingests steadily and never blocks the UI.
 
 - Each failed file is retried once on the next scan of it, then counted in
   `warnings_count`. Import does not fail for one bad file.
-- A path under a generated output root (`_generated_output_roots`) is left to its
-  owner, since ComfyClient ingests it with lineage. Hygiene is the safety net.
+- A path under a generated output root (`_generated_output_roots`) is watched like
+  any other. ComfyClient ingests its own output with lineage, and Import skips a path
+  that already has a row. (Amended 2026-10-31: the roots were skipped at first, which
+  hid every file under them from Import and hygiene alike when a root sits inside a
+  scan folder.)
 - A configured folder that is unavailable (`_probe_folder`) sets Import to `waiting`
   and nothing in it is touched.
 

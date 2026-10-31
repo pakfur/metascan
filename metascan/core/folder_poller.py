@@ -14,7 +14,7 @@ fewer files than expected can still report many vanished at once, so the
 consumer must guard mass vanishes (hygiene's mass-removal guard does).
 
 Paths are normalised (``abspath`` + ``normpath``) at the boundary (seed,
-folders, skip roots, walk), then keyed by ``path_key``: the database holds
+folders, walk), then keyed by ``path_key``: the database holds
 POSIX spellings, the walk native ones, and they must key equal.
 """
 
@@ -102,7 +102,6 @@ class FolderPoller:
         self,
         folders: Sequence[FolderSpec],
         probe: Callable[[str], str],
-        skip_roots: Sequence[str],
         is_media: Callable[[str], bool],
         normalize: Callable[[str], str] = _normalize_path,
         sep: str = os.sep,
@@ -112,7 +111,6 @@ class FolderPoller:
         self._sep = sep
         self._folders = list(folders)
         self._probe = probe
-        self._skip = [self._prefix(r) for r in skip_roots]
         # key -> candidate stamp of a known file that is changing.
         self._changing: Dict[str, FileStamp] = {}
         self._is_media = is_media
@@ -142,10 +140,6 @@ class FolderPoller:
 
     # -- walking ---------------------------------------------------------
 
-    def _skipped(self, path: str) -> bool:
-        key = self._key(path) + self._sep
-        return any(_under(s, key) for s in self._skip)
-
     def _walk(self, spec: FolderSpec) -> Dict[str, tuple]:
         found: Dict[str, tuple] = {}
         stack = [self._normalize(spec.filepath)]
@@ -160,12 +154,10 @@ class FolderPoller:
                             continue
                         path = os.path.join(directory, name)
                         if entry.is_dir(follow_symlinks=False):
-                            if spec.search_subfolders and not self._skipped(path):
+                            if spec.search_subfolders:
                                 stack.append(path)
                             continue
                         if is_partial_download(name) or not self._is_media(path):
-                            continue
-                        if self._skipped(path):
                             continue
                         try:
                             st = entry.stat()
@@ -185,8 +177,8 @@ class FolderPoller:
         return found
 
     def walk_folder(self, spec: FolderSpec) -> Optional[List[str]]:
-        """The media files under one folder as the poll sees them (skip
-        roots, partial downloads and ignored names left out), or None when
+        """The media files under one folder as the poll sees them (partial
+        downloads and ignored names left out), or None when
         the folder could not be listed completely."""
         try:
             return [path for path, _ in self._walk(spec).values()]
@@ -275,7 +267,7 @@ class FolderPoller:
 
         # Vanished: known, covered by an available folder, none unavailable.
         for key in list(self._known):
-            if key in disk or self._skipped_key(key):
+            if key in disk:
                 continue
             if not any(self._covers(s, key) for s in available):
                 continue
@@ -298,7 +290,3 @@ class FolderPoller:
     def pending_paths(self) -> List[str]:
         """New files still settling (the consumer's "settling" activity)."""
         return [p for p, _ in self._pending.values()]
-
-    def _skipped_key(self, key: str) -> bool:
-        k = key + self._sep
-        return any(_under(s, k) for s in self._skip)

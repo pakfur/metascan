@@ -66,7 +66,6 @@ class Rig:
             get_config=lambda: self.config,
             make_scanner=lambda: scanner,
             probe=scan_api._probe_folder,
-            output_roots=lambda c: [],
             broadcast=lambda ch, ev, data: self.events.append((ch, ev, data)),
             kick_embedding=kick,
             after_move=after_move,
@@ -115,6 +114,43 @@ def test_dropped_file_ingests_and_broadcasts(rig):
     assert pic.as_posix() in rig.rows()
     assert ("library", "media_added", {"count": 1}) in rig.events
     assert rig.db.candidate_for(pic.as_posix()).phash
+
+
+def test_a_file_dropped_under_an_output_root_in_the_folder_ingests(rig):
+    """Output roots usually sit inside the scan folder (`<scan>/images`), and
+    files arrive there by hand as well as from ComfyUI."""
+    rig.config["t2i"] = {"output_root": str(rig.lib / "images")}
+
+    async def go():
+        await rig.passes(1)
+        pic = rig.image("dropped.png", 1, folder=rig.lib / "images" / "2026-10-31")
+        await rig.passes(3)
+        return pic
+
+    pic = run(go())
+    assert pic.as_posix() in rig.rows()
+    assert ("library", "media_added", {"count": 1}) in rig.events
+
+
+def test_a_generated_file_comfyclient_ingested_is_left_alone(rig):
+    rig.config["t2i"] = {"output_root": str(rig.lib / "images")}
+    calls = []
+    scanner = Scanner(rig.db, None)
+    real = scanner.ingest_file
+    scanner.ingest_file = lambda p: calls.append(p) or real(p)
+
+    async def go():
+        proc = rig.make(scanner=scanner)
+        await proc.run_pass()
+        pic = rig.image("t2i_1.png", 1, folder=rig.lib / "images" / "2026-10-31")
+        Scanner(rig.db, None).ingest_file(pic)  # ComfyClient, with lineage
+        await rig.passes(3, proc=proc)
+        await asyncio.sleep(0.2)
+
+    run(go())
+    assert calls == []
+    assert not [e for e in rig.events if e[1] == "media_added"]
+    assert rig.kicks == 0
 
 
 def test_embedding_is_kicked_once_after_the_last_ingest(rig):
@@ -609,7 +645,6 @@ def test_a_windows_seed_keys_equal_to_the_walk(monkeypatch):
     poller = fp.FolderPoller(
         [fp.FolderSpec("C:\\Media", True)],
         lambda p: fp.PROBE_PRESENT,
-        [],
         lambda p: True,
         normalize=lambda p: ntpath.normpath(p),
         sep="\\",
