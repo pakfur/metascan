@@ -164,7 +164,7 @@ class EmbeddingProcess:
             await self._registry.command(self.id, "resume")
         elif state == State.HELD:
             # Waits for the release, then runs as asked.
-            self._queued = (rebuild, allow_vlm_tagging)
+            self._queue(rebuild, allow_vlm_tagging)
             self._notify()
             return {"status": "queued"}
         return await self._run_build(rebuild, allow_vlm_tagging, raise_busy=owner)
@@ -209,6 +209,8 @@ class EmbeddingProcess:
     async def _run_build(
         self, rebuild: bool, allow_vlm: bool, *, raise_busy: bool = False
     ) -> Dict[str, Any]:
+        if self._closed:
+            return {"status": "refused"}
         self._cancel_retry()
         if gpu_reserved():
             return self._wait_for_gpu(rebuild, allow_vlm)
@@ -230,10 +232,19 @@ class EmbeddingProcess:
         self._notify()
         return result
 
+    def _queue(self, rebuild: bool, allow_vlm: bool) -> None:
+        """Keep the strongest queued request: a weaker one (Import's kick)
+        must not overwrite the owner's rebuild or VLM tagging."""
+        old = self._queued
+        if old is not None:
+            rebuild = old[0] or rebuild
+            allow_vlm = old[1] and allow_vlm
+        self._queued = (rebuild, allow_vlm)
+
     def _wait_for_gpu(self, rebuild: bool, allow_vlm: bool) -> Dict[str, Any]:
         """The GPU is reserved: not an error. Keep the request and try again."""
         self._waiting = True
-        self._queued = (rebuild, allow_vlm)
+        self._queue(rebuild, allow_vlm)
         self._arm_retry()
         self._notify()
         return {"status": "waiting"}
@@ -241,6 +252,8 @@ class EmbeddingProcess:
     async def _resume_work(self) -> None:
         """After a release or a resume: run what was asked for while held, else
         continue an interrupted run when files remain, else stay idle."""
+        if self._closed:
+            return
         queued, self._queued = self._queued, None
         if queued is not None:
             await self._run_build(*queued)

@@ -314,7 +314,7 @@ class ImportProcess:
         hand, ingest, ``library`` event, embedding kick), not a second ingest
         path. Nothing is taken while Import is paused, stopped or not
         watching. Event loop only. Returns how many were handed over."""
-        if not self.accepts_unknown():
+        if self._closed or not self.accepts_unknown():
             return 0
         known = set(self._todo) | set(self._held) | set(self._retry_next)
         fresh = [p for p in paths if p not in known and not self.gave_up_on(p)]
@@ -332,6 +332,8 @@ class ImportProcess:
         gate, then the pending snapshot, the FAISS rows and the grid, exactly
         as the watcher's own moves. Whatever Import's state: a move keeps
         ratings, it is not an ingest. None when a scan runs."""
+        if self._closed:
+            return None
         return await self._apply_moves(list(pairs))
 
     # lifecycle -----------------------------------------------------------
@@ -414,6 +416,10 @@ class ImportProcess:
             self._scan_seen_running = False
             self._resync = True
             self._wake_loop()
+
+    def owner_halted(self) -> bool:
+        """The owner has paused or stopped Import (the watch setting aside)."""
+        return self._halted()
 
     def _halted(self) -> bool:
         return self._registry.intent(self.id) != "none"

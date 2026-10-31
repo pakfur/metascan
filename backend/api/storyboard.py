@@ -23,7 +23,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config
-from backend.dependencies import get_db, get_generation_process
+from backend.dependencies import (
+    get_db,
+    get_generation_process,
+    interactive_vlm_hold,
+)
 from backend.ws.manager import ws_manager
 from backend.services.comfy_service import ComfyService
 from backend.services.storyboard_service import (
@@ -562,7 +566,8 @@ async def parse_storyboard(storyboard_id: int, body: ParseRequest) -> Dict[str, 
         # `template_problems`/`template_warnings`/`outline_stale` and the
         # outline rail / compose dialog dereferencing undefined.
         # annotate_tree is the single exit for a full tree.
-        result = await runner.parse(storyboard_id, body.text, confirm=body.confirm)
+        with interactive_vlm_hold("Storyboard parse"):
+            result = await runner.parse(storyboard_id, body.text, confirm=body.confirm)
         return shot_templates.annotate_tree(result)
     except ConfirmRequiredError as exc:
         # Must be caught before StoryboardError -- it's a subclass.
@@ -654,6 +659,7 @@ async def generate_storyboard(
     storyboard_id: int, body: GenerateRequest
 ) -> Dict[str, Any]:
     runner = _require_runner()
+    await _notify_process()
     try:
         job_ids = await runner.generate(
             storyboard_id,
@@ -679,6 +685,7 @@ async def generate_storyboard_video(
     {"jobs": [...], "skipped": [...]} verbatim.
     """
     runner = _require_runner()
+    await _notify_process()
     try:
         result = await runner.generate_video(
             storyboard_id, panel_ids=body.panel_ids, only_failed=body.only_failed
@@ -846,16 +853,17 @@ async def describe_subject(subject_id: int) -> Dict[str, Any]:
     except VlmSelectError as e:
         raise HTTPException(status_code=503, detail=str(e))
     try:
-        await vlm.ensure_started(model_id)
-        raw = await vlm.generate_text(
-            system_prompt=rd.REF_DESCRIBE_SUBJECT_SYSTEM,
-            user_prompt=rd.SUBJECT_USER_PROMPT,
-            image_paths=[Path(to_native_path(p)) for p in refs],
-            grammar=rd.SUBJECT_DESCRIBE_GRAMMAR,
-            temperature=0.3,
-            max_tokens=400,
-            timeout=180.0,
-        )
+        with interactive_vlm_hold("Subject describe"):
+            await vlm.ensure_started(model_id)
+            raw = await vlm.generate_text(
+                system_prompt=rd.REF_DESCRIBE_SUBJECT_SYSTEM,
+                user_prompt=rd.SUBJECT_USER_PROMPT,
+                image_paths=[Path(to_native_path(p)) for p in refs],
+                grammar=rd.SUBJECT_DESCRIBE_GRAMMAR,
+                temperature=0.3,
+                max_tokens=400,
+                timeout=180.0,
+            )
         return rd.validate_subject_describe(raw)
     except (VlmError, TimeoutError, RuntimeError) as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -961,16 +969,17 @@ async def describe_scene(scene_id: int) -> Dict[str, Any]:
     except VlmSelectError as e:
         raise HTTPException(status_code=503, detail=str(e))
     try:
-        await vlm.ensure_started(model_id)
-        raw = await vlm.generate_text(
-            system_prompt=rd.REF_DESCRIBE_SETTING_SYSTEM,
-            user_prompt=rd.SETTING_USER_PROMPT,
-            image_paths=[Path(to_native_path(ref))],
-            grammar=rd.SETTING_DESCRIBE_GRAMMAR,
-            temperature=0.3,
-            max_tokens=400,
-            timeout=180.0,
-        )
+        with interactive_vlm_hold("Scene describe"):
+            await vlm.ensure_started(model_id)
+            raw = await vlm.generate_text(
+                system_prompt=rd.REF_DESCRIBE_SETTING_SYSTEM,
+                user_prompt=rd.SETTING_USER_PROMPT,
+                image_paths=[Path(to_native_path(ref))],
+                grammar=rd.SETTING_DESCRIBE_GRAMMAR,
+                temperature=0.3,
+                max_tokens=400,
+                timeout=180.0,
+            )
         return rd.validate_setting_describe(raw)
     except (VlmError, TimeoutError, RuntimeError) as e:
         raise HTTPException(status_code=502, detail=str(e))

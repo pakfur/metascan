@@ -94,8 +94,11 @@ class WriterTrainingProcess:
     # protocol ----------------------------------------------------------
     def capabilities(self) -> Capabilities:
         # Play resumes a paused run, or clears a stop (and stays idle).
+        # A failed run too: Play clears the red "Run failed".
         can_start = (
-            self._paused_run is not None or self._registry.intent(self.id) == "stopped"
+            self._paused_run is not None
+            or self._error is not None
+            or self._registry.intent(self.id) == "stopped"
         )
         # Only a run can pause: briefs and the scorecard have no pause, and an
         # idle writer training has nothing to pause. Refuse it rather than
@@ -163,6 +166,7 @@ class WriterTrainingProcess:
 
     async def start(self) -> None:
         """Play resumes the paused run (a new run needs the window's form)."""
+        self._error = None
         if self._clearing:
             return  # the owner's own start / resume runs it
         await self._resume_paused()
@@ -181,6 +185,8 @@ class WriterTrainingProcess:
         self._notify()
 
     async def resume(self) -> None:
+        if self._clearing:
+            return  # the owner's own start / resume runs it
         await self._resume_paused()
 
     async def stop(self) -> None:
@@ -212,12 +218,15 @@ class WriterTrainingProcess:
     # entry points ------------------------------------------------------
     async def owner_run_starting(self) -> None:
         """The owner starts or resumes a run, or renders a scorecard: that
-        clears a stop."""
+        clears a stop or a pause."""
         try:
-            if self._registry.status(self.id).state == State.STOPPED:
+            intent = self._registry.intent(self.id)
+            if intent in ("stopped", "paused"):
                 self._clearing = True
                 try:
-                    await self._registry.command(self.id, "start")
+                    await self._registry.command(
+                        self.id, "start" if intent == "stopped" else "resume"
+                    )
                 finally:
                     self._clearing = False
         except CommandRefused as exc:
@@ -285,11 +294,14 @@ class WriterTrainingProcess:
     async def _poll(self) -> None:
         while True:
             await asyncio.sleep(self._poll_s)
-            sig = self._signature()
-            if sig != self._sig:
-                self._sig = sig
-                await self.refresh()
-                self._notify()
+            try:
+                sig = self._signature()
+                if sig != self._sig:
+                    self._sig = sig
+                    await self.refresh()
+                    self._notify()
+            except Exception:
+                logger.debug("training poll failed", exc_info=True)
 
     def _notify(self) -> None:
         try:

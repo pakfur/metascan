@@ -146,10 +146,13 @@ class TasteProcess:
     async def _poll(self) -> None:
         while True:
             await asyncio.sleep(self._poll_s)
-            sig = self._signature()
-            if sig != self._sig:
-                self._sig = sig
-                self._notify()
+            try:
+                sig = self._signature()
+                if sig != self._sig:
+                    self._sig = sig
+                    self._notify()
+            except Exception:
+                logger.debug("taste poll failed", exc_info=True)
 
     def _notify(self) -> None:
         try:

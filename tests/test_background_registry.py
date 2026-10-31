@@ -347,3 +347,24 @@ async def test_an_owner_pause_still_shows_paused_during_a_resume_elsewhere(tmp_p
     reg, _ = make(tmp_path, p)
     await reg.command("slow", "pause")
     assert reg.status("slow").state == State.PAUSED
+
+
+async def test_begin_shutdown_queues_no_pause_or_resume(tmp_path):
+    reg = ProcessRegistry(tmp_path / "bg.json", lambda st: None)
+    holder = FakeProcess("holder", order=1)
+    target = FakeProcess("target", order=2)
+    reg.register(holder)
+    reg.register(target)
+    holder.holds = ("target",)
+    reg.notify("holder")
+    await reg.settle()
+    assert "pause" in target.calls
+    target.calls.clear()
+    reg.begin_shutdown()
+    holder.state = State.IDLE  # the holder ends while the server closes
+    reg.notify("holder")
+    await reg.settle()
+    assert target.calls == []  # no resume is queued
+    assert reg.status("target") is not None  # status reads keep working
+    await reg.aclose()
+    assert target.calls == []

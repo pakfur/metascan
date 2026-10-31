@@ -419,3 +419,66 @@ async def test_stop_mid_index_keeps_tagging_held_until_the_worker_exits(env):
     queue.finish()
     await until(lambda: state(registry) == State.STOPPED)
     await until(lambda: tag.calls == ["resume"])
+
+
+async def test_a_queued_owner_rebuild_survives_a_weaker_kick(env):
+    proc, registry, queue, db, builds, *_ = env
+    with registry.hold(["embedding"], by="x"):
+        await registry.settle()
+        assert (await proc.request_build(True, True, owner=True))["status"] == "queued"
+        # Import's follow-up kick: incremental, no VLM tagging.
+        assert (await proc.request_build(False, False, owner=False))[
+            "status"
+        ] == "queued"
+    await registry.settle()
+    await until(lambda: builds == [(True, False)])
+
+
+async def test_a_closed_process_starts_no_build(env):
+    proc, registry, queue, db, builds, *_ = env
+    await proc.aclose()
+    assert (await proc.request_build(False, True, owner=False))["status"] == "refused"
+    proc._queued = (False, True)
+    await proc._resume_work()
+    assert builds == []
+
+
+class _Trainer:
+    id = "trainer"
+    label = "Trainer"
+    order = 100
+    holds = ("embedding",)
+
+    def __init__(self):
+        self.running = True
+
+    def capabilities(self):
+        from backend.services.background.protocol import Capabilities
+
+        return Capabilities(False, True, True)
+
+    def report(self):
+        from backend.services.background.protocol import ProcessReport
+
+        return ProcessReport(State.RUNNING if self.running else State.IDLE, None, "x")
+
+    async def start(self): ...
+    async def pause(self): ...
+    async def resume(self): ...
+    async def stop(self): ...
+
+
+async def test_shutdown_with_a_training_run_starts_no_build(env):
+    proc, registry, queue, db, builds, *_ = env
+    trainer = _Trainer()
+    registry.register(trainer)
+    await registry.settle()
+    assert state(registry) == State.HELD
+    proc._interrupted = True  # a run the hold cut short: resume would restart it
+    registry.begin_shutdown()
+    trainer.running = False  # shutdown pauses the training worker
+    registry.notify("trainer")
+    await registry.settle()
+    await registry.aclose()
+    await asyncio.sleep(0.05)
+    assert builds == []

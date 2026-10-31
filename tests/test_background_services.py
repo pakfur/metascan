@@ -507,6 +507,64 @@ async def test_training_activity_never_carries_examples(tr):
     assert "SECRET" not in reg.status("training").activity
 
 
+async def test_owner_run_starting_clears_a_pause(tr):
+    proc, reg, mgr, db, *_ = tr
+    mgr.run, mgr.state = a_run(), "running"
+    await reg.command("training", "pause")
+    mgr.run, mgr.state = None, "idle"
+    db.paused = []
+    assert reg.intent("training") == "paused"
+    await proc.owner_run_starting()
+    assert reg.intent("training") == "none"
+    assert mgr.log == ["pause"]  # nothing resumed: the owner's own run starts
+
+
+async def test_play_on_a_failed_run_clears_the_error(tr):
+    proc, reg, mgr, *_ = tr
+    proc.record_event("run_failed", {"run_id": 1, "error": "boom"})
+    st = reg.status("training")
+    assert st.state == State.FAILED and st.capabilities.can_start
+    st = await reg.command("training", "start")
+    assert st.state == State.IDLE and st.error is None and mgr.log == []
+
+
+async def test_a_raising_signature_does_not_end_the_polls(tmp_path):
+    reg = registry_for(tmp_path)
+    svc = taste_service()
+    proc = TasteProcess(reg, svc, poll_s=0.01)
+    reg.register(proc)
+    calls = {"n": 0}
+
+    def sig():
+        calls["n"] += 1
+        raise RuntimeError("no")
+
+    proc._signature = sig
+    await until(lambda: calls["n"] >= 3)
+    assert not proc._task.done()
+    await proc.aclose()
+    await reg.aclose()
+
+
+async def test_a_raising_training_signature_does_not_end_the_polls(tmp_path):
+    reg = registry_for(tmp_path)
+    proc = WriterTrainingProcess(
+        reg, FakeManager, FakeDb, Job, lambda: None, poll_s=0.01
+    )
+    reg.register(proc)
+    calls = {"n": 0}
+
+    def sig():
+        calls["n"] += 1
+        raise RuntimeError("no")
+
+    proc._signature = sig
+    await until(lambda: calls["n"] >= 3)
+    assert not proc._task.done()
+    await proc.aclose()
+    await reg.aclose()
+
+
 # ---- the GPU lock waits for the embedding hold ---------------------------------
 
 

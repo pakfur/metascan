@@ -59,6 +59,10 @@ Library hygiene is the housekeeping panel. It runs by itself when the server is 
 3. **Changed files.** A file edited in place is read again.
 4. **Missing derived data.** Missing thumbnails and perceptual hashes are made, and unembedded or untagged images are queued for Embedding and Tagging. Generated images are not tagged after the fact, and an image the vision model gave up on is left alone until you retag it.
 
+A mount point below a configured scan folder is not detected: if a drive mounted inside a scan folder is away, its rows look like deleted files. With automatic cleanup they can be cleaned after the grace time unless the mass-removal guard trips; their ratings are kept as tombstones.
+
+The first start after upgrading queues untagged images for Tagging and regenerates missing thumbnails and perceptual hashes, when the server is idle.
+
 The panel says "In sync" with the time of the last pass and how many files it cleaned.
 
 ### The red "press play to confirm" panel
@@ -69,7 +73,7 @@ Play on Hygiene means "as soon as nothing else is running": it skips the quiet-t
 
 ## Pausing and stopping Import
 
-Pause or stop Import and nothing is picked up, moved or imported: drop a file and nothing happens. Press play and Import catches up on every file added, moved or removed meanwhile, so nothing is missed. Hygiene does not import new files while Import is paused or stopped either, but it still keeps moved files' ratings and removes the rows of deleted files.
+Pause or stop Import and nothing is picked up, moved or imported: drop a file and nothing happens. Press play and Import catches up on every file added, moved or removed meanwhile, so nothing is missed. Hygiene does not import new files while Import is paused or stopped either, but it still keeps moved files' ratings. It deletes no rows of missing files while Import is paused or stopped, since reorganising files is a plausible reason to pause Import; play resumes the cleaning. (With the "watch directories" setting off, cleaning still runs.)
 
 ## Full clean & rescan
 

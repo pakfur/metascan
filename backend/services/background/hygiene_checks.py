@@ -217,6 +217,13 @@ class MissingFiles:
             return CheckResult()
         if not gone:
             return CheckResult()
+        # The owner paused or stopped Import (maybe to reorganise files): no row
+        # is deleted meanwhile. Moves were rescued above. With the watch off,
+        # cleaning still runs.
+        imp = ctx.import_process
+        halted = getattr(imp, "owner_halted", None)
+        if halted is not None and halted():
+            return CheckResult()
         moved_posix = {to_posix_path(o) for o in moved}
         native = [p for p in native if to_posix_path(p) not in moved_posix]
         eligible = set(str(Path(p)) for p in self._past_grace(ctx, gone, started))

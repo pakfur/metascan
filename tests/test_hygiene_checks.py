@@ -63,6 +63,10 @@ class FakeImport:
         self.enqueued = []
         self.settling = set()
         self.bad = set()
+        self.halted = False  # the owner paused or stopped Import
+
+    def owner_halted(self):
+        return self.halted
 
     def vanished_since(self, path):
         return self.vanished_at
@@ -153,6 +157,35 @@ async def test_missing_file_is_tombstoned_with_its_grade(db, tmp_path):
     assert result.cleaned == 1
     assert not _has(db, gone)
     assert _tombstone_grade(db, gone) == "pass"
+
+
+async def test_nothing_is_deleted_while_the_owner_has_import_halted(db, tmp_path):
+    folder = tmp_path / "lib"
+    [gone] = _rows(db, folder, present=3, missing=1)
+    imp = FakeImport()
+    imp.halted = True
+    result = await MissingFiles().run(_ctx(db, [folder], tmp_path, imp=imp))
+    assert result.cleaned == 0 and _has(db, gone)
+    imp.halted = False  # Play: the next pass cleans as before
+    result = await MissingFiles().run(_ctx(db, [folder], tmp_path, imp=imp))
+    assert result.cleaned == 1 and not _has(db, gone)
+
+
+async def test_real_import_stopped_by_the_owner_deletes_nothing_until_play(
+    db, tmp_path
+):
+    folder = tmp_path / "lib"
+    [gone] = _rows(db, folder, present=3, missing=1)
+    imp, registry = _real_import(tmp_path, db)
+    try:
+        registry._intent["import"] = "stopped"
+        assert imp.owner_halted()
+        ctx = _ctx(db, [folder], tmp_path, imp=imp)
+        assert (await MissingFiles().run(ctx)).cleaned == 0 and _has(db, gone)
+        registry._intent["import"] = "none"  # Play
+        assert not imp.owner_halted()
+    finally:
+        await registry.aclose()
 
 
 async def test_vanished_within_move_grace_is_not_cleaned(db, tmp_path):

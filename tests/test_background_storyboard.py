@@ -362,3 +362,25 @@ async def test_the_lock_is_freed_when_the_last_call_ends_during_a_pause(db, tmp_
     finally:
         await proc.aclose()
         await registry.aclose()
+
+
+async def test_generate_routes_notify_the_process(monkeypatch):
+    from backend.api import storyboard as api
+
+    calls = []
+
+    async def notify():
+        calls.append("n")
+
+    class Runner:
+        async def generate(self, *a, **k):
+            return [1]
+
+        async def generate_video(self, *a, **k):
+            return {"jobs": [], "skipped": []}
+
+    monkeypatch.setattr(api, "_notify_process", notify)
+    monkeypatch.setattr(api, "_require_runner", lambda: Runner())
+    assert await api.generate_storyboard(1, api.GenerateRequest()) == {"jobs": [1]}
+    await api.generate_storyboard_video(1, api.GenerateVideoRequest())
+    assert calls == ["n", "n"]

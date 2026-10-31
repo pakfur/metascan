@@ -889,6 +889,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await tagging.kick_if_queued()
     # The watcher polls the scan folders from here on (spec 9).
     import_process.start_loop()
+    # A slow start-up must not count as idle: the quiet clock starts now.
+    idle_tracker.note_request()
     hygiene_process.start_loop()
 
     try:
@@ -899,6 +901,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
+        # No hold is reconciled from here on: pausing training below must
+        # not restart Tagging or Embedding.
+        background_registry.begin_shutdown()
         # The re-embedder before training lets go of the GPU lock: its
         # pending retry must not start CLIP in the middle of the shutdown.
         await _close_reembedder(reembedder, taste_service)
@@ -919,7 +924,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             set_import_process,
         ):
             set_proc(None)
-        for proc in bg_processes:
+        # Hygiene before Import: it reads and moves through Import.
+        for proc in (
+            hygiene_process,
+            *(q for q in bg_processes if q is not hygiene_process),
+        ):
             await proc.aclose()
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
@@ -972,6 +981,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await background_registry.aclose()
         except Exception:
             logger.exception("Background registry shutdown raised")
+        set_registry(None)
         try:
             await comfy_client.shutdown()
         except Exception:

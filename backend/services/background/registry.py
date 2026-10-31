@@ -80,6 +80,7 @@ class ProcessRegistry:
         self._ticker: Optional[asyncio.Task] = None
         self._drain_lock: Optional[asyncio.Lock] = None
         self._closed = False
+        self._shutting_down = False
         self._settle_tasks: set = set()
         # Processes whose resume is queued or running: until it has returned,
         # a process still reporting PAUSED is on its way back, not paused.
@@ -286,6 +287,8 @@ class ProcessRegistry:
 
     def _reconcile(self, computed: Dict[str, Tuple[State, List[str]]]) -> None:
         """Queue the pause/resume calls the new state implies. Needs the lock."""
+        if self._shutting_down:
+            return  # no pause or resume is queued once the server is closing
         for pid in self._procs:
             intent = self._intent.get(pid, "none")
             if intent == "stopped":
@@ -503,6 +506,11 @@ class ProcessRegistry:
                     await getattr(p, action)()
                     if action == "resume":
                         self._resumed(pid)
+                    elif action == "start":
+                        # An error shown before this start (the notify ran
+                        # first) is cleared by it; a new failure sets it again.
+                        with self._lock:
+                            self._sticky_error.pop(pid, None)
                 except Exception as exc:
                     if action == "resume":
                         self._resumed(pid)
@@ -556,8 +564,17 @@ class ProcessRegistry:
         self._settle_tasks.add(task)
         task.add_done_callback(self._settle_tasks.discard)
 
+    def begin_shutdown(self) -> None:
+        """The server is closing: reconcile no more holds and queue no more
+        pause/resume calls (pausing training must not restart Tagging or
+        Embedding). Status reads and the owner's routes keep working."""
+        with self._lock:
+            self._shutting_down = True
+            self._pending = []
+
     async def aclose(self) -> None:
         self._closed = True
+        self._shutting_down = True
         if self._ticker is not None:
             self._ticker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -567,4 +584,4 @@ class ProcessRegistry:
             for _, targets, by in self._graces:
                 self._drop(targets, by)
             self._graces = []
-        await self.settle()
+            self._pending = []  # a queued resume must not restart work now
