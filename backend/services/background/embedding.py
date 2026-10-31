@@ -66,6 +66,7 @@ class EmbeddingProcess:
         except RuntimeError:
             self._loop = None
         self._suspended = False  # told to pause (by the owner or a hold)
+        self._stopping = False
         self._error: Optional[str] = None
         self._waiting = False  # the GPU is reserved
         self._current_vlm = False  # allow_vlm_tagging of the build in flight
@@ -82,17 +83,17 @@ class EmbeddingProcess:
 
     def report(self) -> ProcessReport:
         indexing = self._indexing()
-        if indexing and self._suspended:
-            return ProcessReport(
-                State.RUNNING,
-                self._progress(),
-                "Saving, then pausing",
-                winding_down=True,
-            )
         if indexing:
+            # Always winding_down: a pause, hold or stop that has not reached
+            # pause()/stop() yet must not drop the process's holds early.
             p = self._progress()
-            text = f"Embedding {p.done} of {p.total} files" if p else "Embedding"
-            return ProcessReport(State.RUNNING, p, text)
+            if self._stopping:
+                text = "Saving, then stopping"
+            elif self._suspended:
+                text = "Saving, then pausing"
+            else:
+                text = f"Embedding {p.done} of {p.total} files" if p else "Embedding"
+            return ProcessReport(State.RUNNING, p, text, winding_down=True)
         if self._error:
             return ProcessReport(State.FAILED, None, "Embedding failed", self._error)
         if self._waiting:
@@ -103,6 +104,7 @@ class EmbeddingProcess:
         # The owner's own build clears a stop and runs itself (request_build).
         owner_build, self._owner_start = self._owner_start, False
         self._suspended = False
+        self._stopping = False
         if owner_build:
             return
         await self._run_build(False, True)
@@ -128,6 +130,7 @@ class EmbeddingProcess:
         self._notify()
 
     async def stop(self) -> None:
+        self._stopping = True
         self._interrupted = None
         self._queued = None
         self._waiting = False

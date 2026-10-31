@@ -333,3 +333,89 @@ async def test_scan_followup_is_a_non_owner_build(env, monkeypatch):
     await sim.build_index(rebuild=False)  # the owner's POST clears the stop
     assert builds == [(False, True)]
     assert state(registry) == State.RUNNING
+
+
+class TagStub:
+    id, label, order, holds = "tagging", "Tagging", 30, ()
+
+    def __init__(self):
+        self.calls = []
+
+    def capabilities(self):
+        from backend.services.background.protocol import Capabilities
+
+        return Capabilities(True, True, False)
+
+    def report(self):
+        from backend.services.background.protocol import ProcessReport
+
+        return ProcessReport(State.IDLE, None, "x")
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def pause(self):
+        self.calls.append("pause")
+
+    async def resume(self):
+        self.calls.append("resume")
+
+    async def stop(self):
+        self.calls.append("stop")
+
+
+async def test_pause_mid_index_keeps_tagging_held_until_the_worker_exits(env):
+    proc, registry, queue, *_ = env
+    tag = TagStub()
+    registry.register(tag)
+    await proc.kick(False)
+    await registry.settle()
+    tag.calls.clear()
+    await registry.command("embedding", "pause")
+    await asyncio.sleep(0.05)
+    assert tag.calls == []  # no resume while CLIP is still saving
+    assert registry.status("tagging").state == State.HELD
+    queue.finish()
+    await until(lambda: state(registry) == State.PAUSED)
+    await until(lambda: tag.calls == ["resume"])
+    await registry.command("embedding", "resume")  # owner play: builds again
+    await until(lambda: registry.status("tagging").state == State.HELD)
+    await registry.settle()
+    assert tag.calls == ["resume", "pause"]
+
+
+async def test_hold_mid_index_keeps_tagging_held_until_the_worker_exits(env):
+    proc, registry, queue, *_ = env
+    tag = TagStub()
+    registry.register(tag)
+    await proc.kick(False)
+    await registry.settle()
+    tag.calls.clear()
+    with registry.hold(["embedding", "tagging"], by="Text to image"):
+        await registry.settle()
+        tag.calls[:] = [c for c in tag.calls if c != "pause"]
+        await asyncio.sleep(0.05)
+        assert tag.calls == []
+        queue.finish()
+        await until(lambda: state(registry) == State.HELD)
+        await registry.settle()
+        assert tag.calls == []  # still held by the render itself
+    await registry.settle()
+    await until(lambda: tag.calls.count("resume") == 1)
+
+
+async def test_stop_mid_index_keeps_tagging_held_until_the_worker_exits(env):
+    proc, registry, queue, *_ = env
+    tag = TagStub()
+    registry.register(tag)
+    await proc.kick(False)
+    await registry.settle()
+    tag.calls.clear()
+    await registry.command("embedding", "stop")
+    await asyncio.sleep(0.05)
+    assert tag.calls == []
+    assert state(registry) == State.RUNNING
+    assert registry.status("embedding").activity == "Saving, then stopping"
+    queue.finish()
+    await until(lambda: state(registry) == State.STOPPED)
+    await until(lambda: tag.calls == ["resume"])
