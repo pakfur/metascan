@@ -821,16 +821,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     storyboard_process = StoryboardProcess(
         background_registry, storyboard_runner, comfy_client
     )
+
+    def _poke_on_job_update(process: Any) -> Callable[[str, Dict[str, Any]], None]:
+        def handler(event: str, payload: Dict[str, Any]) -> None:
+            if event == "job_update":
+                process.poke()
+
+        return handler
+
     for process in (t2i_process, i2v_process, storyboard_process):
         background_registry.register(process)
         set_generation_process(process.id, process)
         # Batch and job events move the panel (progress, ends, jobs leaving
         # ComfyUI while a pause winds down).
-        comfy_client.on_job_event(
-            lambda event, payload, p=process: (
-                p.poke() if event == "job_update" else None
-            )
-        )
+        comfy_client.on_job_event(_poke_on_job_update(process))
     t2i_runner.on_event(lambda channel, event, data: t2i_process.poke())
     i2v_runner.on_event(lambda channel, event, data: i2v_process.poke())
 
