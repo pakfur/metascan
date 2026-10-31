@@ -126,6 +126,26 @@ class PresetNotFoundError(ComfyError):
     """
 
 
+# Job sources a submission gate can hold back (Background activity, spec 6.3).
+GATE_SOURCES = ("t2i", "i2v", "storyboard")
+
+
+def job_source(
+    t2i_batch_id: Optional[str] = None,
+    i2v_source_path: Optional[str] = None,
+    panel_id: Optional[int] = None,
+    beat_id: Optional[int] = None,
+) -> Optional[str]:
+    """Which feature a job belongs to; None for any other job (never gated)."""
+    if t2i_batch_id:
+        return "t2i"
+    if i2v_source_path:
+        return "i2v"
+    if panel_id is not None or beat_id is not None:
+        return "storyboard"
+    return None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -234,6 +254,12 @@ class ComfyClient:
         self._running: "set[int]" = set()
         self._pump_wake = asyncio.Event()
         self._pump_task: Optional[asyncio.Task] = None
+        # Submission gate: a gated source's queued jobs stay in _queue (their
+        # order kept) while everything else dispatches. Running jobs are never
+        # interrupted. _job_source remembers each live job's source so the
+        # pump classifies without touching SQLite; dropped when the job ends.
+        self._gated: "set[str]" = set()
+        self._job_source: Dict[int, Optional[str]] = {}
         # Job ids cancel()/cancel_all() have flagged before _dispatch could
         # get them fully into ComfyUI. Added synchronously (no await before
         # the add) so a concurrently-running _dispatch, which checks this
@@ -536,6 +562,47 @@ class ComfyClient:
         inside ComfyUI (every feature: T2I, I2V, storyboards)."""
         return bool(self._queue) or bool(self._running) or self._submits_in_flight > 0
 
+    def has_active_jobs(self) -> bool:
+        """Like has_pending_jobs, but a queued job of a gated source is not
+        activity: a paused batch must not keep Tagging and AutoIndex waiting."""
+        if self._running or self._submits_in_flight > 0:
+            return True
+        return any(not self._is_gated(j) for j in self._queue)
+
+    def set_source_paused(self, source: str, paused: bool) -> None:
+        """Hold back (or release) the queued jobs of one source. Synchronous
+        and safe before the pump loop starts."""
+        if source not in GATE_SOURCES:
+            raise ValueError(f"unknown job source: {source}")
+        if paused:
+            self._gated.add(source)
+        else:
+            self._gated.discard(source)
+            self._pump_wake.set()
+
+    def is_source_paused(self, source: str) -> bool:
+        return source in self._gated
+
+    def source_in_flight(self, source: str) -> int:
+        """Jobs of ``source`` handed to the pump's running set (popped from the
+        queue, being posted or running in ComfyUI)."""
+        return sum(1 for j in self._running if self._job_source.get(j) == source)
+
+    def _is_gated(self, job_id: int) -> bool:
+        source = self._job_source.get(job_id)
+        return source is not None and source in self._gated
+
+    def _pop_dispatchable(self) -> Optional[int]:
+        """Remove and return the first queued job whose source is not gated,
+        leaving every other job where it was. Synchronous: no await."""
+        if not self._gated:
+            return self._queue.popleft() if self._queue else None
+        for job_id in self._queue:
+            if not self._is_gated(job_id):
+                self._queue.remove(job_id)
+                return job_id
+        return None
+
     async def submit(
         self,
         preset_id: int,
@@ -599,6 +666,9 @@ class ComfyClient:
                 t2i_batch_id,
             )
         )
+        self._job_source[job_id] = job_source(
+            t2i_batch_id, i2v_source_path, panel_id, beat_id
+        )
         # Re-checked with no await before the append: the lock may have been
         # taken while the preset loaded / the row was written.
         if gpu_reserved():
@@ -608,6 +678,7 @@ class ComfyClient:
                 state="failed",
                 error=GPU_BUSY_MESSAGE,
             )
+            self._job_source.pop(job_id, None)
             raise GpuBusyError()
         if priority:
             self._queue.appendleft(job_id)
@@ -629,7 +700,9 @@ class ComfyClient:
                     and len(self._running) < self.in_flight
                     and not gpu_reserved()
                 ):
-                    job_id = self._queue.popleft()
+                    job_id = self._pop_dispatchable()
+                    if job_id is None:
+                        break  # everything queued belongs to a gated source
                     # Added to _running in the same synchronous step as the
                     # popleft above -- no await between them -- so a job id
                     # is never observably absent from *both* _queue and
@@ -641,6 +714,7 @@ class ComfyClient:
                     job = await asyncio.to_thread(self.db.get_generation_job, job_id)
                     if job is None or job["state"] != "queued":
                         self._running.discard(job_id)
+                        self._job_source.pop(job_id, None)
                         continue  # cancelled while waiting
                     await self._dispatch(job_id, job)
                 self._pump_wake.clear()
@@ -1075,6 +1149,12 @@ class ComfyClient:
             job_id = int(row["id"])
             if job_id in self._queue or job_id in self._running:
                 continue
+            self._job_source[job_id] = job_source(
+                row.get("t2i_batch_id"),
+                row.get("i2v_source_path"),
+                row.get("panel_id"),
+                row.get("beat_id"),
+            )
             self._queue.append(job_id)
             requeued += 1
         if requeued:
@@ -1435,6 +1515,7 @@ class ComfyClient:
         # terminal, regardless of which caller (executed/error event,
         # cancel, cancel_all, or a dispatch failure) got it here.
         self._running.discard(job_id)
+        self._job_source.pop(job_id, None)
         # The real anti-resurrection guard: a job already in a terminal
         # state never moves to a different one. Without this, a stale
         # completion -- e.g. a _complete_job task that was already

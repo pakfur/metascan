@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     Any,
+    Awaitable,
     Callable,
     ContextManager,
     Dict,
@@ -132,6 +133,10 @@ SEED_MAX = 2**31 - 1
 
 # How many ended runs stay known, so a late cancel answers "over", not 404.
 _FINISHED_KEEP = 50
+
+
+async def _nothing_to_wait_for() -> None:
+    return None
 
 
 def _no_hold(by: str) -> ContextManager[None]:
@@ -281,6 +286,11 @@ class I2vRunner:
         # True while the other runner (T2I) is writing prompts with the
         # shared VLM; wired in lifespan. Keeps this run from unloading it.
         self.prompting_elsewhere: Callable[[], bool] = lambda: False
+        # Awaited before each prompt the run writes; the I2V background process
+        # blocks it while the owner has paused I2V (wired in lifespan).
+        self.wait_unpaused: Callable[[], Awaitable[None]] = _nothing_to_wait_for
+        # Prompt steps mid-call to the writer right now (a pause waits them out).
+        self._writing = 0
         self._batches: Dict[str, _I2vBatch] = {}
         # Ids of runs that ended (oldest first, bounded).
         self._finished: Dict[str, None] = {}
@@ -652,6 +662,18 @@ class I2vRunner:
         """True while any batch run is still writing prompts with the VLM."""
         return any(b.prompting for b in self._batches.values())
 
+    def is_writing(self) -> bool:
+        """True while a prompt step is mid-call to the writer VLM."""
+        return self._writing > 0
+
+    def progress_counts(self) -> Tuple[int, int, str]:
+        """(videos ended, videos planned, phase) summed over the active runs;
+        the phase is "writing" while any run still writes prompts."""
+        ended = sum(b.submitted - len(b.pending) for b in self._batches.values())
+        total = sum(b.total_videos for b in self._batches.values())
+        phase = "writing" if self.is_prompting() else "rendering"
+        return ended, total, phase
+
     def active_batches(self) -> List[Dict[str, Any]]:
         return [self._row(b) for b in self._batches.values()]
 
@@ -719,9 +741,14 @@ class I2vRunner:
                 "draft_prompt": req.draft_prompt,
                 "writer_model": req.writer_model,
             }
-        text, warnings, model = await self.write_prompt(
-            req.source_path, req.idea, req.duration_s, req.template_id, req.writer
-        )
+        await self.wait_unpaused()  # a pause stops the writing between steps
+        self._writing += 1
+        try:
+            text, warnings, model = await self.write_prompt(
+                req.source_path, req.idea, req.duration_s, req.template_id, req.writer
+            )
+        finally:
+            self._writing -= 1
         b.warnings.extend(w for w in warnings if w not in b.warnings)
         self._progress(b)
         return text, {

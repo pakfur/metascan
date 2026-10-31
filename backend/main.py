@@ -50,11 +50,13 @@ from backend.dependencies import (
     get_db,
     get_thumbnail_cache,
     interactive_vlm_hold,
+    set_generation_process,
     set_registry,
     set_embedding_process,
     set_tagging_process,
 )
 from backend.services.background.embedding import EmbeddingProcess
+from backend.services.background.generation import I2vProcess, T2iProcess
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
 from backend.services.judgments_service import faiss_embedding_lookup
@@ -554,6 +556,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lambda event, payload: ws_manager.broadcast_sync("comfy", event, payload)
     )
     set_comfy_client(comfy_client)
+    # An owner pause from the last run holds its queued jobs from the first
+    # pump pass; the process re-applies it through pause() once registered.
+    for _source in ("t2i", "i2v"):
+        if background_registry.persisted_intent(_source) == "paused":
+            comfy_client.set_source_paused(_source, True)
     # start() never blocks on an unreachable ComfyUI — the reader loop
     # retries with backoff, so a server that is not running yet simply
     # connects later.
@@ -778,6 +785,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     background_registry.register(embedding)
     set_embedding_process(embedding)
 
+    t2i_process = T2iProcess(background_registry, t2i_runner, comfy_client)
+    i2v_process = I2vProcess(background_registry, i2v_runner, comfy_client)
+    for process in (t2i_process, i2v_process):
+        background_registry.register(process)
+        set_generation_process(process.id, process)
+        # Batch and job events move the panel (progress, ends, jobs leaving
+        # ComfyUI while a pause winds down).
+        comfy_client.on_job_event(
+            lambda event, payload, p=process: (
+                p.poke() if event == "job_update" else None
+            )
+        )
+    t2i_runner.on_event(lambda channel, event, data: t2i_process.poke())
+    i2v_runner.on_event(lambda channel, event, data: i2v_process.poke())
+
     # The tag queue outlives the process: Tagging resumes what remains once
     # everything it waits on is wired (a persisted owner pause keeps it paused).
     tagging = TaggingProcess(
@@ -819,6 +841,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
+        for process in (t2i_process, i2v_process):
+            set_generation_process(process.id, None)
+            await process.aclose()
         await tagging.aclose()  # cancels any VLM drain
         set_tagging_process(None)
         await embedding.aclose()

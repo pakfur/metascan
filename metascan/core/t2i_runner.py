@@ -152,6 +152,10 @@ def _no_hold(by: str) -> ContextManager[None]:
     return contextlib.nullcontext()
 
 
+async def _nothing_to_wait_for() -> None:
+    return None
+
+
 # How long POST /batches waits for a busy writer to load a new adapter
 # before refusing the Random batch (409 adapter_loading).
 _ADAPTER_PREPARE_WAIT_S = 15.0
@@ -753,6 +757,15 @@ class T2iRunner:
         # True while the I2V runner is writing prompts with the shared VLM;
         # wired in lifespan. Keeps a render here from unloading it.
         self.prompting_elsewhere: Callable[[], bool] = lambda: False
+        # Awaited between prompt steps of a Random batch; the T2I background
+        # process blocks it while the owner has paused T2I (wired in lifespan).
+        self.wait_unpaused: Callable[[], Awaitable[None]] = _nothing_to_wait_for
+        # Prompt steps mid-call to the writer right now (a pause waits them out).
+        self._writing = 0
+
+    def is_writing(self) -> bool:
+        """True while a prompt step is mid-call to the writer VLM."""
+        return self._writing > 0
 
     def is_prompting(self) -> bool:
         """True while any Random batch is still writing prompts."""
@@ -1862,9 +1875,15 @@ class T2iRunner:
                     if step.draft is not None and step.categories is None:
                         step.categories = list(batch.category_names)
                 else:
+                    # A pause stops the writing between steps, never inside one.
+                    await self.wait_unpaused()
                     if context is None or context.index != caption:
                         context = await self._caption_context(batch, index)
-                    step = await self._random_step(batch, context, index, variant)
+                    self._writing += 1
+                    try:
+                        step = await self._random_step(batch, context, index, variant)
+                    finally:
+                        self._writing -= 1
                 self._announce_step(batch, step)
                 await queue.put(step)
         finally:

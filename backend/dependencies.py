@@ -2,7 +2,7 @@
 
 import contextlib
 from threading import Lock
-from typing import TYPE_CHECKING, ContextManager, Optional
+from typing import TYPE_CHECKING, Any, ContextManager, Dict, Optional
 
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.core.database_sqlite import DatabaseManager
@@ -113,3 +113,18 @@ def set_embedding_process(process: Optional["EmbeddingProcess"]) -> None:
 
 def get_embedding_process() -> Optional["EmbeddingProcess"]:
     return _embedding_singleton
+
+
+_generation_singletons: Dict[str, Any] = {}
+
+
+def set_generation_process(process_id: str, process: Optional[Any]) -> None:
+    """Install (or, with None, remove) the T2I or I2V process (FastAPI lifespan)."""
+    if process is None:
+        _generation_singletons.pop(process_id, None)
+    else:
+        _generation_singletons[process_id] = process
+
+
+def get_generation_process(process_id: str) -> Optional[Any]:
+    return _generation_singletons.get(process_id)

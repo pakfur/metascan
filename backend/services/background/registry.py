@@ -110,6 +110,11 @@ class ProcessRegistry:
         except OSError:
             logger.exception("could not save background state")
 
+    def persisted_intent(self, pid: str) -> str:
+        """The owner intent saved by an earlier run ('paused', 'stopped' or
+        'none'), readable before the process registers."""
+        return self._persisted.get(pid, "none")
+
     # registration ------------------------------------------------------
     def register(self, p: BackgroundProcess) -> None:
         with self._lock:

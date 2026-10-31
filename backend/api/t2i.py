@@ -23,7 +23,7 @@ from pydantic import AfterValidator, BaseModel, Field
 from backend.config import get_comfy_config, get_t2i_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.api.errors import trash_failed_error
-from backend.dependencies import get_db
+from backend.dependencies import get_db, get_generation_process
 from backend.services.t2i_service import T2iService
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError
@@ -371,6 +371,14 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
     }
 
 
+async def _notify_process() -> None:
+    """The owner started a batch: that clears a stop, and the panel updates now."""
+    process = get_generation_process("t2i")
+    if process is not None:
+        await process.owner_batch_starting()
+        process.poke()
+
+
 @router.post("/batches", dependencies=GPU_FREE)
 async def start_batch(body: BatchBody) -> Dict[str, Any]:
     runner = _require_runner()
@@ -407,6 +415,7 @@ async def start_batch(body: BatchBody) -> Dict[str, Any]:
         if mapped is None:
             raise
         raise mapped from exc
+    await _notify_process()
     return {
         "batch_id": started.batch_id,
         "total_images": started.total_images,
