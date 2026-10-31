@@ -124,6 +124,14 @@ def isolated_app_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "_db_singleton", None)
     monkeypatch.setattr(deps, "_thumbnail_cache_singleton", None)
+    # The FAISS reload counters are monotonic process state: a test that
+    # calls ``_rebuild_faiss_manager(1)`` directly leaves ``_faiss_installed_seq``
+    # at 1, and a later test's first real reload (seq 1) is then dropped as
+    # stale -- the index is never swapped in.
+    from backend.api import similarity
+
+    monkeypatch.setattr(similarity, "_faiss_reload_seq", 0)
+    monkeypatch.setattr(similarity, "_faiss_installed_seq", 0)
     _reset_prompt_state(base)
     before = _snapshot_real_state()
     yield base
