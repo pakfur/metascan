@@ -309,3 +309,56 @@ async def test_resume_after_an_unload_keeps_the_remaining_beats_on_the_llm(env):
     counts = await asyncio.wait_for(task, 2)
     assert vlm.ensures >= 2  # re-ensured after the pause
     assert counts == {"synthesized": 12, "fallback": 0, "skipped_locked": 0}
+
+
+class StepVlm(BlockingVlm):
+    """Each call waits on its own gate; ``auto`` lets new calls straight through."""
+
+    def __init__(self):
+        super().__init__()
+        self.gates = []
+        self.auto = False
+
+    async def generate_text(self, **kw):
+        self.started += 1
+        if not self.auto:
+            gate = asyncio.Event()
+            self.gates.append(gate)
+            await gate.wait()
+        return "a prompt"
+
+
+async def test_the_lock_is_freed_when_the_last_call_ends_during_a_pause(db, tmp_path):
+    from metascan.core.vlm_models import REGISTRY
+
+    slots = REGISTRY["qwen3vl-4b"].parallel_slots
+    assert slots >= 2
+    vlm = StepVlm()
+    runner, events = make(db, tmp_path, vlm)
+    registry = ProcessRegistry(tmp_path / "bg.json", lambda st: None)
+    registry.register(Stub("tagging"))
+    registry.register(Stub("embedding"))
+    proc = StoryboardProcess(registry, runner, Comfy(), wind_down_poll_s=0.01)
+    registry.register(proc)
+    try:
+        sb = board_with_beats(db, slots + 1)
+        task = asyncio.create_task(runner.synthesize(sb))
+        await until(lambda: len(vlm.gates) == slots)
+        await registry.command("storyboard", "pause")
+        for gate in vlm.gates[:-1]:
+            gate.set()  # the waiting beats reach a checkpoint, one call still runs
+        await asyncio.sleep(0.1)
+        assert runner._synth_lock.locked()  # a call of the run is in flight
+        vlm.gates[-1].set()
+        await asyncio.sleep(0.1)
+        # generate() takes this lock around its VLM unload.
+        await asyncio.wait_for(runner._synth_lock.acquire(), 1)
+        runner._synth_lock.release()
+        vlm.auto = True
+        await registry.command("storyboard", "resume")
+        counts = await asyncio.wait_for(task, 2)
+        assert counts["synthesized"] == slots + 1
+        assert not runner._synth_lock.locked()
+    finally:
+        await proc.aclose()
+        await registry.aclose()

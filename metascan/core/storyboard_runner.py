@@ -287,23 +287,33 @@ class StoryboardRunner:
         (a resume may have unloaded it)."""
         if run.cancelled:
             raise RunCancelled()
-        if not self.is_paused():
-            await self.wait_unpaused()
-            if run.cancelled:
-                raise RunCancelled()
-            return
-        if run.holds_lock and run.calls == 0:
-            self._synth_lock.release()
-            run.holds_lock = False
+        paused = self.is_paused()
+        self._release_if_idle(run)
         await self.wait_unpaused()
+        retaken = False
         async with run.relock:
             if not run.holds_lock:
                 await self._synth_lock.acquire()
                 run.holds_lock = True
+                retaken = True
         if run.cancelled:
             raise RunCancelled()
-        if run.reensure is not None:
+        if (paused or retaken) and run.reensure is not None:
             await run.reensure()
+
+    def _release_if_idle(self, run: _Run) -> None:
+        """While paused, let go of _synth_lock once no call of the run is in
+        flight. The flag flips beside the release, with no await between."""
+        if self.is_paused() and run.holds_lock and run.calls == 0:
+            self._synth_lock.release()
+            run.holds_lock = False
+
+    def _call_done(self, run: _Run) -> None:
+        """A VLM call ended. A run that paused around it and has nobody left
+        mid-call frees the lock now: its waiters may never reach another
+        checkpoint (the last beats), and generate() must not hang on them."""
+        run.calls -= 1
+        self._release_if_idle(run)
 
     @contextlib.asynccontextmanager
     async def _run_guard(self, run: _Run) -> Any:
@@ -693,7 +703,7 @@ class StoryboardRunner:
             try:
                 return await _validated(unit, validate, lint, gen_kwargs)
             finally:
-                run.calls -= 1
+                self._call_done(run)
 
         async def _validated(
             unit: str, validate: Any, lint: Optional[Any], gen_kwargs: Dict[str, Any]
@@ -870,7 +880,7 @@ class StoryboardRunner:
                                 tree, scene, template, vlm, purge
                             )
                         finally:
-                            run.calls -= 1
+                            self._call_done(run)
                     await asyncio.to_thread(
                         self.db.update_scene,
                         scene["id"],
@@ -1343,7 +1353,7 @@ class StoryboardRunner:
                                     deterministic_only,
                                 )
                             finally:
-                                run.calls -= 1
+                                self._call_done(run)
                     else:
                         doc, issues = await self._compile_panel(
                             vlm, tree, scene, panel, subjects, mode, deterministic_only
@@ -1664,7 +1674,7 @@ class StoryboardRunner:
                             text = brief
                             source = "brief"
                         finally:
-                            run.calls -= 1
+                            self._call_done(run)
                 prompt = finalize_prompt(text, tree.get("style_block"))
                 await asyncio.to_thread(
                     self.db.update_beat,
