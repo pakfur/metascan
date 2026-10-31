@@ -115,6 +115,13 @@ class ProcessRegistry:
         'none'), readable before the process registers."""
         return self._persisted.get(pid, "none")
 
+    def intent(self, pid: str) -> str:
+        """The owner's current intent ('none', 'paused' or 'stopped'). No
+        report or capability is evaluated, so adapters may call it from
+        ``capabilities()``."""
+        with self._lock:
+            return self._intent.get(pid, "none")
+
     # registration ------------------------------------------------------
     def register(self, p: BackgroundProcess) -> None:
         with self._lock:

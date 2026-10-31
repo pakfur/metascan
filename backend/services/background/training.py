@@ -11,7 +11,7 @@ the run (active or paused) if one exists, else the briefs job, else the
 scorecard; it deletes checkpoints, so ``confirm_stop``.
 
 ``can_start`` is true only while a paused run can be resumed: play resumes it.
-Starting a new run needs a form (scope, effort) and stays with the window.
+Starting a new run needs a form (scope, effort) and stays with the window. Play on a stopped panel clears the stop and stays idle.
 
 Activity carries counts and stage words only, never examples or briefs. The
 manager, the briefs job and the scorecard have no common event, so a
@@ -93,9 +93,20 @@ class WriterTrainingProcess:
 
     # protocol ----------------------------------------------------------
     def capabilities(self) -> Capabilities:
-        resumable = self._paused_run is not None
+        # Play resumes a paused run, or clears a stop (and stays idle).
+        can_start = (
+            self._paused_run is not None or self._registry.intent(self.id) == "stopped"
+        )
+        # Briefs and the scorecard have no pause: refuse it rather than store
+        # an intent that pauses nothing.
+        only_side_jobs = self._manager_status().get("run") is None and (
+            self._briefs() is not None or self._scorecard() is not None
+        )
         return Capabilities(
-            can_start=resumable, can_pause=True, can_stop=True, confirm_stop=True
+            can_start=can_start,
+            can_pause=not only_side_jobs,
+            can_stop=True,
+            confirm_stop=True,
         )
 
     def report(self) -> ProcessReport:
@@ -163,7 +174,10 @@ class WriterTrainingProcess:
         try:
             await self._get_manager().pause()
         except TrainingError as exc:
-            # No run to pause (briefs and scorecard have no pause).
+            # Idle (a race with the run ending): nothing to pause. Briefs and
+            # the scorecard are refused earlier, by can_pause.
+            if self._briefs() is not None or self._scorecard() is not None:
+                raise
             logger.debug("training pause: %s", exc.code)
         self._notify()
 

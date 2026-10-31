@@ -300,7 +300,7 @@ def _build_training_manager(
     inference_client: Any,
     vlm_roles: Any,
     on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
-    hold_embedding: Optional[Callable[[], Any]] = None,
+    hold_background: Optional[Callable[[], Any]] = None,
 ) -> TrainingManager:
     """Wire the writer training manager to the live services.
     ``on_completed(adapter_id, render_scorecard)`` runs after a completed
@@ -394,7 +394,7 @@ def _build_training_manager(
         ),
         on_gpu_released=on_gpu_released,
         on_completed=on_completed,
-        hold_embedding=hold_embedding,
+        hold_background=hold_background,
     )
     manager.add_close_hook(on_close)
     return manager
@@ -674,8 +674,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         inference_client=client,
         vlm_roles=vlm_roles,
         on_completed=scorecard_service.on_training_completed,
-        hold_embedding=lambda: background_registry.hold(
-            ["embedding"], by="Writer training"
+        hold_background=lambda: background_registry.hold(
+            ["tagging", "embedding"], by="Writer training"
         ),
     )
     await _install_training(training_manager)

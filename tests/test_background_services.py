@@ -474,6 +474,33 @@ async def test_a_failed_run_sticks_until_the_next(tr):
     assert reg.status("training").state == State.IDLE
 
 
+async def test_pause_during_briefs_or_scorecard_is_refused(tr):
+    from backend.services.background.registry import CommandRefused
+
+    proc, reg, mgr, db, job, card = tr
+    job.st = {"running": True, "done": 1, "total": 5}
+    assert not reg.status("training").capabilities.can_pause
+    with pytest.raises(CommandRefused) as exc:
+        await reg.command("training", "pause")
+    assert exc.value.code == "not_pausable"
+    assert reg.intent("training") == "none"
+    st = reg.status("training")
+    assert st.state == State.RUNNING and mgr.log == []
+    card["v"], job.st["running"] = {"phase": "rendering", "done": 0, "total": 2}, False
+    assert not reg.status("training").capabilities.can_pause
+    mgr.run, mgr.state = a_run(), "running"  # a real run can be paused
+    assert reg.status("training").capabilities.can_pause
+
+
+async def test_stopped_training_with_nothing_to_resume_can_be_started(tr):
+    proc, reg, mgr, *_ = tr
+    await reg.command("training", "stop")
+    st = reg.status("training")
+    assert st.state == State.STOPPED and st.capabilities.can_start
+    st = await reg.command("training", "start")
+    assert st.state == State.IDLE and mgr.log == []
+
+
 async def test_training_activity_never_carries_examples(tr):
     proc, reg, mgr, db, job, card = tr
     mgr.run, mgr.state = a_run(stage="SECRET prompt"), "running"
@@ -498,7 +525,7 @@ def make_manager(tmp_path, busy, hold, wait_s):
         paths=lambda: None,
         gate=lambda p: None,
         backend="fake",
-        hold_embedding=hold,
+        hold_background=hold,
         index_wait_s=wait_s,
     )
 
@@ -521,7 +548,8 @@ async def test_index_build_stops_being_a_refusal_once_the_hold_lands(tmp_path):
         return ["index_build"]
 
     m = make_manager(tmp_path, busy, hold, 5.0)
-    await m._take_gpu()
+    with m._background_hold():
+        await m._take_gpu()
     assert m.gpu_locked() and not state["held"]  # the run's own hold takes over
 
 
@@ -549,5 +577,6 @@ async def test_another_busy_reason_is_refused_at_once(tmp_path):
 
     m = make_manager(tmp_path, lambda: ["index_build", "comfy_jobs"], hold, 30.0)
     with pytest.raises(TrainingError) as exc:
-        await m._take_gpu()
+        with m._background_hold():
+            await m._take_gpu()
     assert exc.value.extra["reasons"] == ["index_build", "comfy_jobs"]

@@ -59,6 +59,7 @@ from typing import (
     ContextManager,
     Deque,
     Dict,
+    Iterator,
     List,
     Optional,
     Set,
@@ -485,7 +486,7 @@ class TrainingManager:
         now: Optional[Callable[[], datetime]] = None,
         summary_ttl_s: float = 30.0,
         vram_cap: Optional[Callable[[], Any]] = None,
-        hold_embedding: Optional[Callable[[], ContextManager[None]]] = None,
+        hold_background: Optional[Callable[[], ContextManager[None]]] = None,
         index_wait_s: float = 30.0,
     ) -> None:
         self.db = db
@@ -525,10 +526,13 @@ class TrainingManager:
         self._summary_generation = 0
         # models.writer_train_vram_cap_gb (raw; validated per run).
         self._vram_cap = vram_cap or (lambda: None)
-        # A context that pauses Embedding (the registry's hold) while start
-        # checks the GPU: an index build then stops being a refusal once the
-        # worker has exited. The run's own declared hold takes over after.
-        self._hold_embedding = hold_embedding
+        # A context that pauses Tagging and Embedding (the registry's hold)
+        # from before the first gpu_busy() until the run's own declared hold
+        # is in force (start / resume) or the start failed: an index build
+        # then stops being a refusal once its worker has exited, and nothing
+        # resumes in the gap before the process reports running.
+        self._hold_background = hold_background
+        self._holding = False
         self.index_wait_s = float(index_wait_s)
 
     # ---- GPU lock -------------------------------------------------------
@@ -543,17 +547,14 @@ class TrainingManager:
         admitted just before the lock may have registered work meanwhile)."""
         self._gpu_held = True
         try:
-            with contextlib.ExitStack() as stack:
-                if self._hold_embedding is not None:
-                    stack.enter_context(self._hold_embedding())
-                busy = await self._busy_after_embedding_hold()
-                if busy:
-                    raise TrainingError(409, "gpu_busy", reasons=busy)
-                self._released = True
-                await self._release_gpu()
-                busy = self._gpu_busy()
-                if busy:
-                    raise TrainingError(409, "gpu_busy", reasons=busy)
+            busy = await self._busy_after_embedding_hold()
+            if busy:
+                raise TrainingError(409, "gpu_busy", reasons=busy)
+            self._released = True
+            await self._release_gpu()
+            busy = self._gpu_busy()
+            if busy:
+                raise TrainingError(409, "gpu_busy", reasons=busy)
         except BaseException:
             self._drop_lock()
             raise
@@ -564,13 +565,25 @@ class TrainingManager:
         exits). Any other reason, or a build that outlasts the wait, is
         refused as before."""
         busy = self._gpu_busy()
-        if busy != ["index_build"] or self._hold_embedding is None:
+        if busy != ["index_build"] or not self._holding:
             return busy  # nothing to wait for, or a refusal that will stand
         deadline = time.monotonic() + self.index_wait_s
         while busy == ["index_build"] and time.monotonic() < deadline:
             await asyncio.sleep(0.25)
             busy = self._gpu_busy()
         return busy
+
+    @contextlib.contextmanager
+    def _background_hold(self) -> Iterator[None]:
+        if self._hold_background is None:
+            yield
+            return
+        with self._hold_background():
+            self._holding = True
+            try:
+                yield
+            finally:
+                self._holding = False
 
     def _drop_lock(self) -> None:
         """Release the GPU (completion, failure, pause, cancel or a refused
@@ -919,24 +932,25 @@ class TrainingManager:
             built = await asyncio.to_thread(self._build, norm)
             if not built.readiness["trainable"]:
                 raise TrainingError(409, "not_ready", readiness=built.readiness)
-            await self._take_gpu()
-            try:
-                active = await asyncio.to_thread(
-                    self._create_run,
-                    built,
-                    hyperparams,
-                    effort,
-                    init_dir,
-                    start_from,
-                    render_scorecard,
-                    cap,
-                )
-                self._active = active
-                self.invalidate_dataset_summary()
-                await self._spawn(active)
-            except BaseException:
-                await self._abort_start()
-                raise
+            with self._background_hold():
+                await self._take_gpu()
+                try:
+                    active = await asyncio.to_thread(
+                        self._create_run,
+                        built,
+                        hyperparams,
+                        effort,
+                        init_dir,
+                        start_from,
+                        render_scorecard,
+                        cap,
+                    )
+                    self._active = active
+                    self.invalidate_dataset_summary()
+                    await self._spawn(active)
+                except BaseException:
+                    await self._abort_start()
+                    raise
             logger.info(
                 "writer training run %d started (adapter %d, scope %s, effort %s)",
                 active.run_id,
@@ -982,45 +996,46 @@ class TrainingManager:
                     ),
                 )
             await self._require_gate()
-            await self._take_gpu()
-            # Re-read after the await-heavy GPU take: a delete may have
-            # discarded the run (or its adapter) meanwhile.
-            run = await asyncio.to_thread(self.db.get_training_run, int(run_id))
-            adapter = await asyncio.to_thread(
-                self.db.get_writer_adapter, int(run["adapter_id"]) if run else 0
-            )
-            if (
-                run is None
-                or run["status"] not in RESUMABLE_RUN_STATUSES
-                or adapter is None
-                or adapter["deleted_at"] is not None
-            ):
-                self._drop_lock()
-                raise TrainingError(409, "run_discarded")
-            active = _Active(
-                run_id=int(run["id"]),
-                adapter_id=int(run["adapter_id"]),
-                name=str(adapter["name"]),
-                scope=str(adapter["scope"]),
-                run_dir=run_dir,
-                resumed=True,
-            )
-            try:
-                await asyncio.to_thread(self._prepare_resume, active, task_path)
-                self._active = active
-                await self._spawn(active)
-            except BaseException:
-                try:
-                    await self._stop_spawned(active)
-                except Exception:
-                    logger.exception(
-                        "Stopping the training worker of a failed resume raised"
-                    )
-                self._drop_lock()
-                await asyncio.to_thread(
-                    self._set_states, active, run["status"], adapter["status"]
+            with self._background_hold():
+                await self._take_gpu()
+                # Re-read after the await-heavy GPU take: a delete may have
+                # discarded the run (or its adapter) meanwhile.
+                run = await asyncio.to_thread(self.db.get_training_run, int(run_id))
+                adapter = await asyncio.to_thread(
+                    self.db.get_writer_adapter, int(run["adapter_id"]) if run else 0
                 )
-                raise
+                if (
+                    run is None
+                    or run["status"] not in RESUMABLE_RUN_STATUSES
+                    or adapter is None
+                    or adapter["deleted_at"] is not None
+                ):
+                    self._drop_lock()
+                    raise TrainingError(409, "run_discarded")
+                active = _Active(
+                    run_id=int(run["id"]),
+                    adapter_id=int(run["adapter_id"]),
+                    name=str(adapter["name"]),
+                    scope=str(adapter["scope"]),
+                    run_dir=run_dir,
+                    resumed=True,
+                )
+                try:
+                    await asyncio.to_thread(self._prepare_resume, active, task_path)
+                    self._active = active
+                    await self._spawn(active)
+                except BaseException:
+                    try:
+                        await self._stop_spawned(active)
+                    except Exception:
+                        logger.exception(
+                            "Stopping the training worker of a failed resume raised"
+                        )
+                    self._drop_lock()
+                    await asyncio.to_thread(
+                        self._set_states, active, run["status"], adapter["status"]
+                    )
+                    raise
             logger.info("writer training run %d resumed", active.run_id)
             self._emit("adapters_changed", {})
             return active.run_id
