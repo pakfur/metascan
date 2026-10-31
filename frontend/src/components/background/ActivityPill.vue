@@ -7,12 +7,18 @@ const store = useBackgroundStore()
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 const pillBtn = ref<HTMLButtonElement | null>(null)
+const drop = ref<HTMLElement | null>(null)
 // Fixed, not absolute: the library's centre column clips overflow, and at
 // 768-900 px it is narrower than the grid. Placed under the pill, clamped to
 // the viewport. Below 768 px the stylesheet's full-width rule applies.
 const dropStyle = ref<Record<string, string>>({})
 function place() {
   const r = pillBtn.value?.getBoundingClientRect()
+  // The pill scrolled out of view: nothing left to hang the dropdown on.
+  if (r && (r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth)) {
+    open.value = false
+    return
+  }
   if (!r || window.innerWidth < 768) {
     dropStyle.value = {}
     return
@@ -22,6 +28,11 @@ function place() {
   dropStyle.value = { left: `${left}px`, top: `${r.bottom + 6}px`, width: `${width}px` }
 }
 
+// Scrolling inside the dropdown itself must not re-place it.
+function onScroll(e: Event) {
+  if (drop.value && e.target instanceof Node && drop.value.contains(e.target)) return
+  place()
+}
 function onDocPointer(e: Event) {
   if (root.value && !root.value.contains(e.target as Node)) open.value = false
 }
@@ -35,16 +46,19 @@ watch(open, (v) => {
   if (v) {
     place()
     window.addEventListener('resize', place)
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true })
     document.addEventListener('pointerdown', onDocPointer)
     document.addEventListener('keydown', onKey)
   } else {
     window.removeEventListener('resize', place)
+    window.removeEventListener('scroll', onScroll, true)
     document.removeEventListener('pointerdown', onDocPointer)
     document.removeEventListener('keydown', onKey)
   }
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', place)
+  window.removeEventListener('scroll', onScroll, true)
   document.removeEventListener('pointerdown', onDocPointer)
   document.removeEventListener('keydown', onKey)
 })
@@ -68,7 +82,7 @@ onBeforeUnmount(() => {
       <span v-if="store.summary.spinning" class="count">{{ store.runningCount }}</span>
       <span v-if="store.anyFailed" class="faildot" aria-label="A process failed" />
     </button>
-    <div v-if="open" class="drop" :style="dropStyle" role="region" aria-label="Background processes">
+    <div v-if="open" ref="drop" class="drop" :style="dropStyle" role="region" aria-label="Background processes">
       <ActivityGrid />
     </div>
   </div>
